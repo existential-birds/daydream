@@ -1,12 +1,4 @@
-"""Neon terminal UI components for review_fix_loop.py.
-
-Implements a 1980s neon terminal aesthetic using the Rich library,
-with a Dracula-based color theme and animated elements.
-
-This package is a re-exporting facade over focused submodules; callers
-continue to ``from daydream.ui import X`` exactly as they did when this was
-a single ``ui.py`` module.
-"""
+"""Neon Rich UI: console, messages, stream rendering, panels, and summaries."""
 
 from daydream.ui.agent_text import AgentTextRenderer
 from daydream.ui.console import (

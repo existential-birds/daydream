@@ -15,9 +15,6 @@ from daydream.backends._subprocess import (
 )
 from daydream.backends._transport import (
     CliTransport,
-    StderrPolicy,
-    StdinMode,
-    TransportExitError,
 )
 from tests.harness.processes import GROUP_HOLDER_CLI, wait_for_process_group_gone
 
@@ -44,7 +41,7 @@ async def test_transport_writes_stdin_then_closes() -> None:
         'print(json.dumps({"echo": data}))\n'
         "raise SystemExit(0)\n"
     ).replace("import sys\n", "import json, sys\n", 1)
-    t = CliTransport(limit=LIMIT, cli="fake", argv=[sys.executable, "-c", child], stdin_mode=StdinMode.PIPE,
+    t = CliTransport(limit=LIMIT, cli="fake", argv=[sys.executable, "-c", child],
         stdin_data=b"prompt\n",
     )
     await t.start()
@@ -53,22 +50,20 @@ async def test_transport_writes_stdin_then_closes() -> None:
     assert await t.wait() == 0
     assert t.stdin_closed is True
 
-async def test_transport_nonzero_exit_raises_exit_error() -> None:
+async def test_transport_nonzero_exit_returns_status() -> None:
     t = CliTransport(limit=LIMIT, cli="fake", argv=[sys.executable, "-c", emit_lines("not json", exit_code=3)],)
     await t.start()
     seen: list[str] = []
     async for line in t.lines(timeout_for_line=lambda: 5.0):
         seen.append(line)
     assert seen == ["not json"]
-    with pytest.raises(TransportExitError) as excinfo:
-        await t.wait()
-    assert excinfo.value.returncode == 3
+    assert await t.wait() == 3
     assert t.returncode == 3
 
 async def test_transport_stderr_drain_task_feeds_sink() -> None:
     diagnostics: list[str] = []
     t = CliTransport(limit=LIMIT, cli="fake", argv=[sys.executable, "-c", emit_lines('{"a":1}', to_stderr="boom")],
-        stderr_policy=StderrPolicy.DRAIN_TASK, stderr_sink=diagnostics.append,
+        stderr_sink=diagnostics.append,
     )
     await t.start()
     events = [json.loads(line) async for line in t.lines(timeout_for_line=lambda: 5.0)]

@@ -15,6 +15,7 @@ from daydream.remote_ci.evidence import (
     RemoteCITarget,
     RemoteCIVerdict,
     RequiredContext,
+    RequiredPolicy,
     _is_finite_number,
     _is_positive_int,
     _required_text,
@@ -170,55 +171,62 @@ def evaluate_remote_ci(
 
     evidence = partition_required_observations(snapshot.policy.contexts, observations)
 
-    def make(status: RemoteCIStatus, reason: str) -> RemoteCIVerdict:
-        return _verdict(
-            snapshot,
-            status=status,
-            reason=reason,
-            evidence_sha=evidence_sha,
-            required_observations=evidence.required,
-            advisory_observations=evidence.advisory,
-            failing=evidence.failing,
-            pending=evidence.pending,
-            missing=evidence.missing,
-            stable_polls=stable_polls,
-            elapsed=elapsed,
-        )
+    status, reason = observed_ci_outcome(
+        snapshot.policy, evidence, active_workflow_count=len(snapshot.active_workflows),
+        elapsed=elapsed, stable_polls=stable_polls, limits=limits,
+    )
+    return _verdict(
+        snapshot, status=status, reason=reason, evidence_sha=evidence_sha,
+        required_observations=evidence.required, advisory_observations=evidence.advisory,
+        failing=evidence.failing, pending=evidence.pending, missing=evidence.missing,
+        stable_polls=stable_polls, elapsed=elapsed,
+    )
 
+
+def observed_ci_outcome(
+    policy: RequiredPolicy,
+    evidence: RequiredEvidence,
+    *,
+    active_workflow_count: int,
+    elapsed: float,
+    stable_polls: int,
+    limits: RemoteCILimits,
+) -> tuple[RemoteCIStatus, str]:
+    """Apply one outcome policy to live observations and persisted terminal receipts."""
     if evidence.failing:
-        return make("failed", "a required CI producer failed")
+        return ("failed", "a required CI producer failed")
     if evidence.pending:
         if elapsed >= limits.completion_seconds:
-            return make("timed_out", "required CI remained pending")
-        return make("pending", "required CI is pending")
+            return ("timed_out", "required CI remained pending")
+        return ("pending", "required CI is pending")
     if evidence.missing:
         if elapsed >= limits.discovery_seconds:
-            return make("missing", "required CI was not reported")
-        return make("pending", "waiting for required CI")
+            return ("missing", "required CI was not reported")
+        return ("pending", "waiting for required CI")
 
-    if snapshot.policy.contexts:
+    if policy.contexts:
         if stable_polls < limits.stable_polls:
-            return make("pending", "required CI identity is stabilizing")
-        return make("passed", "all required CI passed")
+            return ("pending", "required CI identity is stabilizing")
+        return ("passed", "all required CI passed")
 
-    if observations:
-        if any(item.state == "pending" for item in observations):
+    if evidence.advisory:
+        if any(item.state == "pending" for item in evidence.advisory):
             if elapsed >= limits.completion_seconds:
-                return make("timed_out", "reported CI remained pending")
-            return make("pending", "reported CI is pending")
+                return ("timed_out", "reported CI remained pending")
+            return ("pending", "reported CI is pending")
         if stable_polls < limits.stable_polls:
-            return make("pending", "reported CI identity is stabilizing")
-        return make("passed", "all reported CI reached a terminal state")
+            return ("pending", "reported CI identity is stabilizing")
+        return ("passed", "all reported CI reached a terminal state")
 
-    if snapshot.active_workflows:
+    if active_workflow_count:
         if elapsed >= limits.discovery_seconds:
-            return make("missing", "active workflows reported no CI for the pushed commit")
-        return make("pending", "waiting for active workflows")
+            return ("missing", "active workflows reported no CI for the pushed commit")
+        return ("pending", "waiting for active workflows")
     if elapsed < limits.discovery_seconds:
-        return make("pending", "discovering remote CI")
+        return ("pending", "discovering remote CI")
     if stable_polls < limits.stable_polls:
-        return make("pending", "empty CI identity is stabilizing")
-    return make("no_ci", "no remote CI is configured")
+        return ("pending", "empty CI identity is stabilizing")
+    return ("no_ci", "no remote CI is configured")
 
 
 

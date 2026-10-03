@@ -15,20 +15,21 @@ from jsonschema import Draft202012Validator
 
 import daydream.git_ops as git_ops
 from daydream.archive import hydrate, hydrate_rules, license_enrich, sanitize
-from daydream.archive.hydrate import admission_summary_buckets
-from daydream.archive.hydrate_client import FakeHub
+from daydream.archive.hydrate_admission import _session_identity, admission_summary_buckets
 from daydream.archive.hydrate_rules import (
     EXCLUSION_CODES,
     REASON_CODE_REPO_COMMIT_UNRESOLVED,
     derive_curation_id,
     derive_pre_identity_curation_id,
 )
+from daydream.archive.hydrate_stage import _discovered_session_ids, _download_discovery_block
 from daydream.archive.index import query_runs
 from daydream.archive.manifest import Manifest
 from daydream.archive.provenance import ExecutableProvenance
 from daydream.archive.scan import scan_run_dir
 from daydream.training.corpus_projection.license import load_license_policy, resolve_repo_decision
 from tests.fixtures.training.build_hub_snapshot import SNAPSHOT_REVISION, build_snapshot
+from tests.harness.hub import FakeHub
 
 
 def _write_policy(tmp_path: Path) -> str:
@@ -478,8 +479,8 @@ class TestDownloadSnapshot:
         manifest_dir = stage / "downloads" / revision
         manifest_dir.mkdir(parents=True)
         (manifest_dir / "_download_manifest.json").write_text(json.dumps({"artifacts": []}))
-        assert hydrate._download_discovery_block(stage, revision) == {}
-        assert hydrate._discovered_session_ids(stage, revision) is None
+        assert _download_discovery_block(stage, revision) == {}
+        assert _discovered_session_ids(stage, revision) is None
 
     def test_resume_skips_verified_artifacts(self, tmp_path: Path) -> None:
         hub = make_fake_hub(tmp_path)
@@ -603,9 +604,9 @@ def test_enriched_evidence_matches_declared_evidence_contract(tmp_path: Path) ->
     )
     assert rejected == []
 
-    row_declared_t: tuple[str | None, dict[str, str] | None] = hydrate._session_identity(
+    row_declared_t: tuple[str | None, dict[str, str] | None] = _session_identity(
         stage, "sess-declared", "a" * 40, root="runs", collision=False)
-    row_enriched_t: tuple[str | None, dict[str, str] | None] = hydrate._session_identity(
+    row_enriched_t: tuple[str | None, dict[str, str] | None] = _session_identity(
         stage, "sess-enriched", "a" * 40, root="runs", collision=False)
     assert row_declared_t == ("acme/widget", {"spdx_id": "MIT", "source": "producer"})
     assert row_enriched_t == ("acme/widget", {"spdx_id": "MIT", "source": "fake:acme/widget"})

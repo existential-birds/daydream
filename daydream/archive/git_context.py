@@ -10,11 +10,7 @@ from daydream.git_ops import BranchNotFoundError, GitError
 
 @dataclass
 class GitContext:
-    """Credential-free repository identity at archive time.
-
-    Unresolved merge bases are None; changed_files is empty when the merge base
-    or diff is unavailable.
-    """
+    """Credential-free repository identity at archive time."""
 
     remote_url: str | None = None
     repo_slug: str | None = None
@@ -26,11 +22,7 @@ class GitContext:
 
 
 def capture_git_context(target_dir: Path) -> GitContext:
-    """Capture current git state from *target_dir*.
-
-    Each field is captured independently — a failure in one does not
-    prevent the others from being populated.
-    """
+    """Capture current git state from *target_dir*."""
     ctx = GitContext()
 
     raw_remote = git_ops.remote_url(target_dir)

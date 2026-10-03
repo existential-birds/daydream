@@ -1628,6 +1628,25 @@ def test_current_session_test_push_and_remote_success_are_distinct(tmp_path: Pat
     assert states["remote_ci"]["status"] == "succeeded"
     assert pipeline.derive_pipeline_status("complete", None, states, runs_test=True,) == "succeeded"
 
+@pytest.mark.parametrize("remote_status", ["passed", "no_ci", "failed"])
+def test_remote_receipts_support_relative_archive_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote_status: str,
+) -> None:
+    target = tmp_path / "target"
+    _write_push_verdict(target)
+    _write_remote_verdict(target, status=remote_status)
+    monkeypatch.chdir(tmp_path)
+    state = _derive_push_remote_states(Path("target"))["remote_ci"]
+    assert state["status"] == ("failed" if remote_status == "failed" else "succeeded")
+
+@pytest.mark.parametrize("url", ["not a URL", "https://github.com/example/project/pull/42?token=secret"])
+def test_remote_receipt_identity_is_not_repaired_during_admission(tmp_path: Path, url: str) -> None:
+    artifact, payload = _current_ci_artifact(tmp_path)
+    payload["target"]["pr_url"] = payload["binding"]["pr_url"] = url
+    artifact.write_text(json.dumps(payload), encoding="utf-8")
+    assert _derive_push_remote_states(tmp_path)["remote_ci"]["status"] == "partial"
+
+
 def test_current_session_remote_required_failure_fails_pipeline(tmp_path: Path) -> None:
     _write_deep(tmp_path, "test-verdict.json", {"session_id": "current", "passed": True})
     _write_push_verdict(tmp_path)

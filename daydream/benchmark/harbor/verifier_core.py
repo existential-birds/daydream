@@ -180,31 +180,16 @@ def parse_finding_content(raw: object) -> dict[str, object]:
     }
 
 
-def _finding_kwargs(
-    raw: dict[str, object], *, side: str, id_key: str
-) -> dict[str, object]:
-    """Validate a raw finding dict and return its model constructor kwargs."""
-    validate_exact_keys(
-        raw,
-        CANDIDATE_FINDING_KEYS if side == "candidate" else GOLD_FINDING_KEYS,
-        f"{side} finding",
-    )
-    ident = _validate_hex64(raw[id_key], id_key)
-    fields = parse_finding_content(
-        {field: raw[field] for field in _FINDING_CONTENT_KEYS}
-    )
-    fields[id_key] = ident
-    return fields
-
-
 def parse_gold_finding(raw: dict[str, object]) -> GoldFinding:
-    """Validate a raw gold-finding dict and return a GoldFinding."""
-    return GoldFinding(**_finding_kwargs(raw, side="gold", id_key="finding_id"))  # type: ignore[arg-type]
+    """Require the closed gold shape; GoldFinding owns id and content validation."""
+    validate_exact_keys(raw, GOLD_FINDING_KEYS, "gold finding")
+    return GoldFinding(**raw)  # type: ignore[arg-type]
 
 
 def parse_candidate_finding(raw: dict[str, object]) -> CandidateFinding:
-    """Validate a raw candidate-finding dict and return a CandidateFinding."""
-    return CandidateFinding(**_finding_kwargs(raw, side="candidate", id_key="candidate_id"))  # type: ignore[arg-type]
+    """Require the closed candidate shape; CandidateFinding owns id and content validation."""
+    validate_exact_keys(raw, CANDIDATE_FINDING_KEYS, "candidate finding")
+    return CandidateFinding(**raw)  # type: ignore[arg-type]
 
 
 # deterministic candidate-ID derivation
@@ -249,13 +234,9 @@ def assign_candidate_id(
 
 
 def _canonical_tuple(finding: object) -> tuple[object, ...]:
-    return (
-        str(_finding_component(finding, "title") or ""),
-        str(_finding_component(finding, "body") or ""),
-        str(_finding_component(finding, "severity") or ""),
-        str(_finding_component(finding, "path") or ""),
-        str(_finding_component(finding, "start_line") or ""),
-        str(_finding_component(finding, "end_line") or ""),
+    return tuple(
+        str(_finding_component(finding, name) or "")
+        for name in ("title", "body", "severity", "path", "start_line", "end_line")
     )
 
 
@@ -606,35 +587,32 @@ def score_review(
         candidates = validate_candidate_artifact(candidate_artifact)
     except VerifierError:
         return Reward(reward=0.0, gold_count=gold_count, verifier_error=0)
+    return score_findings(gold, candidates, verdicts)[0]
+
+
+def score_findings(
+    gold: list[GoldFinding],
+    candidates: list[CandidateFinding],
+    verdicts: list[Verdict],
+) -> tuple[Reward, set[tuple[str, str]]]:
+    """Score validated findings once, returning the matching used by reward details.
+    Empty sides ignore verdicts; no judge result can turn a clean task into a match.
+    """
+    gold_count = len(gold)
     candidate_count = len(candidates)
-
-    if gold_count == 0 and candidate_count == 0:
-        return Reward(
-            reward=1.0, precision=1.0, recall=1.0, f1=1.0,
-            clean_task=1, clean_pass=1,
-        )
-    if gold_count == 0:
-        return Reward(
-            fp=candidate_count, recall=1.0,
-            candidate_count=candidate_count, clean_task=1,
-        )
-    if candidate_count == 0:
-        return Reward(
-            fn=gold_count, precision=1.0, gold_count=gold_count,
-        )
-
-    gold_ids = [_finding_id(g) for g in gold]
-    cand_ids = [c.candidate_id for c in candidates]
-    retained = retained_edges(verdicts, gold_ids, cand_ids)
-    matches = maximum_matching(retained, gold_ids, cand_ids)
+    matches: set[tuple[str, str]] = set()
+    if gold and candidates:
+        gold_ids = [_finding_id(g) for g in gold]
+        cand_ids = [c.candidate_id for c in candidates]
+        matches = maximum_matching(retained_edges(verdicts, gold_ids, cand_ids), gold_ids, cand_ids)
     tp = len(matches)
     fp = candidate_count - tp
     fn = gold_count - tp
     precision = tp / (tp + fp) if (tp + fp) else 1.0
     recall = tp / (tp + fn) if (tp + fn) else 1.0
-    f1 = 0.0 if tp == 0 else _f1(precision, recall)
+    f1 = _f1(precision, recall) if tp or not (gold or candidates) else 0.0
     return replace(
-        _score_axes(gold, candidates, matches),
+        _score_axes(gold, candidates, matches) if gold and candidates else Reward(),
         reward=f1,
         tp=tp,
         fp=fp,
@@ -644,7 +622,9 @@ def score_review(
         f1=f1,
         gold_count=gold_count,
         candidate_count=candidate_count,
-    )
+        clean_task=int(not gold),
+        clean_pass=int(not gold and not candidates),
+    ), matches
 
 
 # reward / reward-details serialization
@@ -665,25 +645,15 @@ def reward_details(
     verdicts: list[Verdict],
     matches: set[tuple[str, str]],
 ) -> dict[str, object]:
-    """Capture verdicts, selected matches, and unmatched gold/candidates.
-
-    Never embeds finding title/body/path content, source, or diffs — only ids
-    and verdict reasoning.
-    """
+    """Capture verdicts, selected matches, and unmatched gold/candidates."""
     matched_gold = {g for g, _ in matches}
     matched_candidates = {c for _, c in matches}
     gold_ids = [_finding_id(g) for g in gold]
     cand_ids = [_candidate_id(c) for c in candidates]
     return {
         "verdicts": [
-            {
-                "gold_id": v.gold_id,
-                "candidate_id": v.candidate_id,
-                "match": v.match,
-                "confidence": v.confidence,
-                "reasoning": v.reasoning,
-            }
-            for v in verdicts
+            {name: getattr(verdict, name) for name in ("gold_id", "candidate_id", "match", "confidence", "reasoning")}
+            for verdict in verdicts
         ],
         "matches": [
             {"gold_id": g, "candidate_id": c} for g, c in sorted(matches)
@@ -795,21 +765,16 @@ def _axis_aggregates(
     """
     n_loc = location_pairs
     n_sev = severity_pairs
+    tiers = {tier: loc_tiers[tier] for tier in ("exact", "near", "file", "miss")}
     return {
-        "location_exact": loc_tiers["exact"],
-        "location_near": loc_tiers["near"],
-        "location_file": loc_tiers["file"],
-        "location_miss": loc_tiers["miss"],
-        "location_exact_rate": loc_tiers["exact"] / n_loc if n_loc else 0.0,
-        "location_near_rate": loc_tiers["near"] / n_loc if n_loc else 0.0,
-        "location_file_rate": loc_tiers["file"] / n_loc if n_loc else 0.0,
-        "location_miss_rate": loc_tiers["miss"] / n_loc if n_loc else 0.0,
+        **{f"location_{tier}": count for tier, count in tiers.items()},
+        **{
+            f"location_{tier}_rate": count / n_loc if n_loc else 0.0
+            for tier, count in tiers.items()
+        },
         "location_credit": loc_credit_sum / n_loc if n_loc else 0.0,
         "location_pairs_scored": n_loc,
-        "total_location_exact": loc_tiers["exact"],
-        "total_location_near": loc_tiers["near"],
-        "total_location_file": loc_tiers["file"],
-        "total_location_miss": loc_tiers["miss"],
+        **{f"total_location_{tier}": count for tier, count in tiers.items()},
         "severity_exact": sev_exact,
         "severity_within_1": sev_within_1,
         "severity_exact_rate": sev_exact / n_sev if n_sev else 0.0,

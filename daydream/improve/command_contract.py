@@ -12,7 +12,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
-from daydream.output_schema import strict_object
+from daydream.output_schema import array_schema, strict_object, text_schema
 from daydream.repository_paths import (
     DIRECTORY_SCOPE_SCHEMA,
     REPOSITORY_FILE_PATH_MAX_LENGTH,
@@ -24,62 +24,44 @@ from daydream.repository_paths import (
     valid_repository_file_path,
 )
 
-WORKING_DIRECTORY_SCHEMA: dict[str, Any] = {
-    "type": "string",
-    "minLength": 1,
-    "maxLength": REPOSITORY_FILE_PATH_MAX_LENGTH,
-    # Three spellings: ".", a relative path (optionally ./-prefixed), or an
-    # absolute in-repo path. The anchor-free segment core is embedded directly
-    # (no \A/\Z slicing); the ./-prefix stays out of the absolute alternative
-    # so "/./foo" is not schema-legal.
-    "pattern": rf"^(?:\.|(?:\./)?{REPOSITORY_FILE_PATH_SEGMENTS}|/{REPOSITORY_FILE_PATH_SEGMENTS})$",
-}
+WORKING_DIRECTORY_SCHEMA: dict[str, Any] = text_schema(
+    min_length=1,
+    max_length=REPOSITORY_FILE_PATH_MAX_LENGTH,
+    pattern=rf"^(?:\.|(?:\./)?{REPOSITORY_FILE_PATH_SEGMENTS}|/{REPOSITORY_FILE_PATH_SEGMENTS})$",
+)
 LINE_ANCHOR_SCHEMA: dict[str, Any] = strict_object({
     "start_line": {"type": "integer", "minimum": 1},
     "end_line": {"type": "integer", "minimum": 1},
 })
-EXPECTED_SUCCESS_SCHEMA: dict[str, Any] = strict_object({
-    "exit_code": {"type": "integer", "enum": [0]},
-    "observable_result": {
-        "type": "string",
-        "minLength": 15,
-        "maxLength": 500,
-    },
-})
+EXPECTED_SUCCESS_SCHEMA: dict[str, Any] = strict_object(
+    {
+        "exit_code": {"type": "integer", "enum": [0]},
+        "observable_result": text_schema(min_length=15, max_length=500),
+    }
+)
 
 WHOLE_REPOSITORY_SCOPE_SCHEMA: dict[str, Any] = strict_object({
     "kind": {"type": "string", "enum": ["whole-repository"]},
 })
-IN_SCOPE_PATHS_SCOPE_SCHEMA: dict[str, Any] = strict_object({
-    "kind": {"type": "string", "enum": ["in-scope-paths"]},
-    "paths": {
-        "type": "array",
-        "minItems": 1,
-        "items": DIRECTORY_SCOPE_SCHEMA,
-    },
-})
+IN_SCOPE_PATHS_SCOPE_SCHEMA: dict[str, Any] = strict_object(
+    {
+        "kind": {"type": "string", "enum": ["in-scope-paths"]},
+        "paths": array_schema(DIRECTORY_SCOPE_SCHEMA, minItems=1),
+    }
+)
 SCOPE_SCHEMA: dict[str, Any] = {
     "anyOf": [
         WHOLE_REPOSITORY_SCOPE_SCHEMA,
         IN_SCOPE_PATHS_SCOPE_SCHEMA,
     ],
 }
-APPLICABILITY_SCHEMA: dict[str, Any] = strict_object({
-    "scope": SCOPE_SCHEMA,
-    "preconditions": {
-        "type": "array",
-        "items": {
-            "type": "string",
-            "minLength": 5,
-            "maxLength": 300,
-        },
-    },
-    "rationale": {
-        "type": "string",
-        "minLength": 20,
-        "maxLength": 500,
-    },
-})
+APPLICABILITY_SCHEMA: dict[str, Any] = strict_object(
+    {
+        "scope": SCOPE_SCHEMA,
+        "preconditions": array_schema(text_schema(min_length=5, max_length=300)),
+        "rationale": text_schema(min_length=20, max_length=500),
+    }
+)
 
 _EVIDENCE_PROPERTIES: dict[str, Any] = {
     "kind": {"type": "string", "enum": ["literal-command"]},
@@ -108,12 +90,7 @@ HOST_EVIDENCE_SCHEMA: dict[str, Any] = {
 
 _COMMAND_PROPERTIES: dict[str, Any] = {
     "purpose": {"type": "string", "minLength": 10, "maxLength": 200},
-    "command": {
-        "type": "string",
-        "minLength": 3,
-        "maxLength": 1000,
-        "pattern": r"^[^\x00-\x1f\x7f]+$",
-    },
+    "command": text_schema(min_length=3, max_length=1000, pattern=r"^[^\x00-\x1f\x7f]+$"),
     "working_directory": WORKING_DIRECTORY_SCHEMA,
     "expected_success": EXPECTED_SUCCESS_SCHEMA,
     "applicability": APPLICABILITY_SCHEMA,
@@ -128,16 +105,13 @@ _OPTIONAL_COMMAND_REF_SCHEMA: dict[str, Any] = {
     **COMMAND_REF_SCHEMA,
     "type": ["object", "null"],
 }
-RECON_COMMAND_SCHEMA: dict[str, Any] = strict_object({
-    "id": {
-        "type": "string",
-        "minLength": 3,
-        "maxLength": 80,
-        "pattern": r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
-    },
-    **_COMMAND_PROPERTIES,
-    "evidence": EVIDENCE_SCHEMA,
-})
+RECON_COMMAND_SCHEMA: dict[str, Any] = strict_object(
+    {
+        "id": text_schema(min_length=3, max_length=80, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$"),
+        **_COMMAND_PROPERTIES,
+        "evidence": EVIDENCE_SCHEMA,
+    }
+)
 HOST_RECON_COMMAND_SCHEMA: dict[str, Any] = {
     **RECON_COMMAND_SCHEMA,
     "properties": {
@@ -166,7 +140,6 @@ class ContractRejection:
 
     def render(self, prefix: str) -> str:
         return f"{self.code}@{prefix}{self.pointer}"
-
 
 
 def json_pointer(parts: Sequence[object], *, root: str = "") -> str:

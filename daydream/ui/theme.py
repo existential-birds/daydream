@@ -1,10 +1,4 @@
-"""Theme primitives for the neon terminal UI.
-
-Dracula-based color theme, reusable Style constants, size caps, tool-arg
-classification frozensets, mystical action terms, phase subtitles, gradient
-palettes, and the status configuration — plus the ``pill`` primitive shared
-across UI clusters.
-"""
+"""Neon palette, styles, rendering caps, tool classifications, phase labels, and badges."""
 
 import random
 
@@ -213,20 +207,7 @@ ASCII_GRADIENT_COLORS = [
 
 
 def pill(text: str, bg_color: str, fg_color: str) -> Text:
-    """Create a pill-shaped badge with the given colors.
-
-    Uses the pattern: [bg]foreground[/bg] to create a badge effect
-    with half-block characters on the edges.
-
-    Args:
-        text: The text to display inside the pill.
-        bg_color: Background color hex code.
-        fg_color: Foreground (text) color hex code.
-
-    Returns:
-        Rich Text object containing the styled pill.
-
-    """
+    """Render a Rich badge using foreground/background colors and half-block edges."""
     result = Text()
     bg_style = Style(color=bg_color)
     result.append("▌", style=bg_style)

@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from daydream.pr_review import finding_marker
+from daydream.reviews.identity import finding_marker
 from tests.harness import github_schema
 
 

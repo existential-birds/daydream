@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import importlib.util
 import json
 import os
 import sys
@@ -24,52 +23,17 @@ from daydream.benchmark.manifest import load_benchmark_manifest
 _HARBOR = Path(__file__).parent
 _TEMPLATES = _HARBOR / "templates"
 _CALIBRATION_DIR = _HARBOR / "calibration"
-_TEMPLATE_CACHE: dict[str, Any] = {}
-
-
-def _load_template_asset(path: Path, name: str) -> Any:
-    """Load/cache a template with its canonical sibling import, preserving class identity.
-    Restore sys.modules registrations afterward so later bare imports cannot silently
-    resolve to the template copy.
-    """
-    cached = _TEMPLATE_CACHE.get(name)
-    if cached is not None:
-        return cached
-    # Satisfy the asset's bare `import verifier_core` from the canonical host
-    # module (issue #1004): the template twin no longer exists.
-    import daydream.benchmark.harbor.verifier_core as _canonical_vc
-    prior_modules: dict[str, Any] = dict(sys.modules)
-
-    if "verifier_core" not in prior_modules:
-        sys.modules["verifier_core"] = _canonical_vc
-    try:
-        spec = importlib.util.spec_from_file_location(name, path)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[name] = module
-        spec.loader.exec_module(module)
-        _TEMPLATE_CACHE[name] = module
-        return module
-    finally:
-        for key in list(sys.modules):
-            if key in prior_modules:
-                if sys.modules[key] is not prior_modules[key]:
-                    sys.modules[key] = prior_modules[key]
-            else:
-                sys.modules.pop(key, None)
 
 
 def _load_judge_template() -> Any:
-    """Load the packaged ``score_review.py`` judge template as ``score_review``."""
-    return _load_template_asset(_TEMPLATES / "tests" / "score_review.py", "score_review")
+    """Use the packaged judge without altering unrelated module registrations."""
+    from daydream.benchmark.harbor.templates.tests import score_review
+
+    return score_review
 
 
 def _load_fixture_document() -> dict[str, Any]:
-    """Read and return the full calibration fixture document.
-
-    The fixture is a top-level object with a ``schema_version``, a
-    machine-readable ``provenance`` block, and the ``pairs`` array.
-    """
+    """Read and return the full calibration fixture document."""
     path = _CALIBRATION_DIR / "pairs.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -147,12 +111,7 @@ def _judge_host_from_env(env: dict[str, Any]) -> str:
 
 
 def _load_workspace_allowlist(workspace: Path) -> list[str]:
-    """Read ``<workspace>/benchmark.yaml`` and return its judge allowlist.
-
-    Validates the manifest strictly via ``BenchmarkManifest.model_validate``;
-    a malformed or missing manifest raises the project's existing workspace
-    error (``WorkspaceCorrupt``) — never a silent default.
-    """
+    """Read ``<workspace>/benchmark.yaml`` and return its judge allowlist."""
     manifest = load_benchmark_manifest(workspace)
     return list(manifest.privacy.judge_allowed_hosts)
 
@@ -208,22 +167,12 @@ def _per_pair_stable(verdicts: list[Any], threshold: float) -> bool:
 def _confusion_matrix(
     gold_labels: list[Any], majority_labels: list[bool]
 ) -> dict[str, int]:
-    """Standard 2x2 confusion counts for a match/nonmatch label set.
-
-    Gold labels may be booleans (``True`` = match) or the strings
-    ``"match"`` / ``"nonmatch"``.
-    """
+    """Standard 2x2 confusion counts for a match/nonmatch label set."""
     counts = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
     for truth, pred in zip(gold_labels, majority_labels):
         actual = truth is True or truth == "match"
-        if actual and pred:
-            counts["tp"] += 1
-        elif not actual and pred:
-            counts["fp"] += 1
-        elif not actual and not pred:
-            counts["tn"] += 1
-        else:
-            counts["fn"] += 1
+        outcome = ("tp" if actual else "fp") if pred else ("fn" if actual else "tn")
+        counts[outcome] += 1
     return counts
 
 
@@ -303,10 +252,7 @@ def _invalidation_inputs(
         "attempts": 3,
         "request_timeout": sr._REQUEST_TIMEOUT,
     }
-    # Candidate review-profile digest (issue #885/R12): a change of candidate
-    # invalidates the calibration receipt (per-candidate attribution). Omitted
-    # when absent so the legacy receipt contract stays byte-stable for default
-    # runs.
+    # Candidate changes invalidate diagnostic receipts; absence preserves legacy bytes.
     digest = env.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST")
     if digest:
         inputs["profile_digest"] = str(digest)
@@ -323,11 +269,7 @@ def _build_receipt(
     confusion: dict[str, int],
     disagreements: list[Any],
 ) -> dict[str, Any]:
-    """Build the private deterministic calibration receipt document.
-
-    The receipt mirrors the fixture's machine-readable provenance, so a future
-    re-verification of the fixture is visible in every receipt built from it.
-    """
+    """Build the private deterministic calibration receipt document."""
     return {
         "schema_version": 1,
         "type": "judge-calibration",

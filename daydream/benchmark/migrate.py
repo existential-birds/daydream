@@ -33,12 +33,7 @@ class UpgradeReport:
 
 
 def _backfill_requested_base_sha(doc: dict[str, Any]) -> bool:
-    """Preserve the sole base candidate on an imported snapshot that lacks it.
-
-    Imported snapshots have no frozen trees with which to prove a merge base,
-    so the legacy value remains the requested tip until materialization.
-    Ready snapshots use :func:`_repair_ready_base_provenance` instead.
-    """
+    """Preserve the sole base candidate on an imported snapshot that lacks it."""
     snapshot = doc.get("snapshot")
     if not isinstance(snapshot, dict):
         return False
@@ -52,12 +47,7 @@ def _backfill_requested_base_sha(doc: dict[str, Any]) -> bool:
 
 
 def _repair_ready_base_provenance(root: Path, doc: dict[str, Any]) -> bool:
-    """Verify and atomically repair one unmarked ready snapshot.
-
-    ``False`` means only that the snapshot is not ready or is already marked.
-    Once an unmarked ready snapshot is found, every inability to prove the
-    recorded source trees raises and is surfaced as a per-case migration error.
-    """
+    """Verify and atomically repair one unmarked ready snapshot."""
     raw_snapshot = doc.get("snapshot")
     if not isinstance(raw_snapshot, dict) or raw_snapshot.get("status") != "ready":
         return False
@@ -118,12 +108,7 @@ def _repair_legacy_unreplayable_curation(doc: dict[str, Any]) -> bool:
 
 
 def _upgrade_case(raw: dict[str, Any], case_id: str) -> tuple[dict[str, Any], int]:
-    """Return a copy of *raw* with case-scoped finding ids and schema_version 2.
-
-    Only ``finding_id`` values, ``schema_version`` and imported-snapshot base
-    backfill are mutated here; ready provenance is repaired separately after
-    the v1 projection and before validation.
-    """
+    """Return a copy of *raw* with case-scoped finding ids and schema_version 2."""
     doc = dict(raw)
     _backfill_requested_base_sha(doc)
     findings = doc.get("curation", {}).get("findings") or []
@@ -171,10 +156,7 @@ def _migrate_workspace_unlocked(root: Path, *, dry_run: bool) -> UpgradeReport:
             current = raw.get("schema_version")
             changed = True
             if current == 2:
-                # v2 repair pass: preserve an imported snapshot's sole base
-                # candidate, prove an unmarked ready snapshot, or repair the
-                # one legacy producer state pairing. A current valid v2 case
-                # stays byte-unchanged and is not reported.
+                # Repair legacy v2 base provenance/state pairings; valid v2 bytes stay untouched.
                 new_raw = dict(raw)
                 recomputed = 0
                 changed = _backfill_requested_base_sha(new_raw)

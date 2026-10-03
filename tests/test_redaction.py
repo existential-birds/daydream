@@ -508,6 +508,19 @@ def test_redactor_linear_scan_separatorless_large_text_unchanged() -> None:
     out = redact_structured_text(text)
     assert out == text
 
+@pytest.mark.parametrize("pair", [
+    "authorization__tail: opaque",
+    "api.Key=opaque",
+    "secretAccessKeyTail=opaque",
+    'apikey: ["opaque"]',
+])
+def test_embedded_sensitive_suffix_preserves_nonsensitive_key_prefix(pair: str) -> None:
+    output = redact_structured_text("prefix" + pair)
+    assert output.startswith("prefix")
+    assert "opaque" not in output
+    assert "[REDACTED_CREDENTIAL]" in output
+
+
 def test_redactor_sensitive_suffix_scan_is_linear() -> None:
     """Bound a long nonsensitive run while still redacting its trailing sensitive pair.
 

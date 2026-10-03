@@ -19,7 +19,7 @@ from daydream.improve.command_contract import (
     valid_directory_scope_lexical as _valid_directory_scope,
     valid_repository_file_path as _valid_repository_file_path,
 )
-from daydream.improve.prompts import PLAN_AUTHOR_SCHEMA
+from daydream.improve.schemas import PLAN_AUTHOR_SCHEMA
 from daydream.repository_paths import is_test_path
 
 _PLACEHOLDER_ARG_TOKENS = {"...", "todo", "tbd", "${todo}"}

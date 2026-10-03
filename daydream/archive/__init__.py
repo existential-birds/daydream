@@ -45,10 +45,7 @@ class ArchiveFinalizationError(RuntimeError):
 
 
 def get_archive_dir() -> Path:
-    """Create the archive root and runs directory.
-
-    Use ``DAYDREAM_ARCHIVE_DIR`` when set, otherwise ``~/.daydream/archive``.
-    """
+    """Create the archive root and runs directory."""
     env = os.environ.get("DAYDREAM_ARCHIVE_DIR")
     if env:
         archive_dir = Path(env)
@@ -74,11 +71,7 @@ def _copy_snapshot_bundle(
     artifact_provenance: ArtifactEvidenceProvenance,
     run_dir: Path,
 ) -> None:
-    """Assemble an archive only from frozen tree and immutable document bytes.
-
-    The registered findings destination is relocated from its live write path
-    into the frozen tree; public output paths are never reconstructed.
-    """
+    """Assemble an archive only from frozen tree and immutable document bytes."""
     from daydream.artifact_visibility import OutputLabel
 
     recorder_provenance = run.recorder_provenance
@@ -113,13 +106,7 @@ def _manifest_state(
     run: ArchiveRunSnapshot,
     frozen_extra: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Derive the status, fix, and pipeline manifest fields for one run tree.
-
-    Derivation is gated to the phases this registered flow can execute, and
-    every sidecar read is session-bound, so a non-deep or interrupted run never
-    adopts prior state. The ``derive_*`` helpers never raise on absent or
-    malformed artifacts, so this can never abort an archive.
-    """
+    """Derive the status, fix, and pipeline manifest fields for one run tree."""
     from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
     from daydream.retry_policy import derive_retry_summary
 
@@ -327,10 +314,7 @@ def _read_json_artifact(path: Path, expected_type: type) -> Any | None:
 
 
 def _read_fix_failures(target_dir: Path) -> dict[str, str] | None:
-    """Read the deep fix phase's ``{file_group: reason}`` map via `_read_json_artifact`.
-
-    No recorded failures leaves run status unchanged.
-    """
+    """Read the deep fix phase's ``{file_group: reason}`` map via `_read_json_artifact`."""
     # Keep deep imports lazy for non-deep runs.
     from daydream.deep.artifacts import DeepArtifact
 
@@ -353,12 +337,7 @@ def _read_fix_leftover_untracked(target_dir: Path) -> list[str] | None:
 def _read_session_bound_json_artifact(
     target_dir: Path, session_id: str | None, resolver: Callable[[Path], Path]
 ) -> dict[str, Any] | None:
-    """Read a deep sidecar only when its ``session_id`` matches this run.
-
-    Return ``None`` for absent, empty, malformed, unbound, or stale artifacts,
-    or when this run has no session ID. Prior runs' sidecars cannot be attributed
-    to the current run. ``resolver`` receives ``<target_dir>/.daydream/deep``.
-    """
+    """Read a deep sidecar only when its ``session_id`` matches this run."""
     if session_id is None:
         return None
     data: dict[str, Any] | None = _read_json_artifact(
@@ -370,20 +349,14 @@ def _read_session_bound_json_artifact(
 
 
 def _read_fix_quality_gate(target_dir: Path, session_id: str | None) -> dict[str, Any] | None:
-    """Read session-bound fix quality rounds through `_read_session_bound_json_artifact`.
-
-    The ``{enabled, session_id, rounds}`` payload holds per-file erosion and verbosity deltas.
-    """
+    """Read session-bound fix quality rounds through `_read_session_bound_json_artifact`."""
     from daydream.deep.artifacts import DeepArtifact
 
     return _read_session_bound_json_artifact(target_dir, session_id, DeepArtifact.FIX_QUALITY_GATE.at)
 
 
 def _read_recommended_capture(target_dir: Path, session_id: str | None) -> dict[str, Any] | None:
-    """Read session-bound post-test capture provenance through `_read_session_bound_json_artifact`.
-
-    Its ``capture_point`` identifies which tree produced ``recommended.patch``.
-    """
+    """Read session-bound post-test capture provenance through `_read_session_bound_json_artifact`."""
     from daydream.deep.artifacts import DeepArtifact
 
     return _read_session_bound_json_artifact(target_dir, session_id, DeepArtifact.RECOMMENDED_CAPTURE.at)
@@ -395,10 +368,7 @@ def _project_documents(
     *,
     session_id: str,
 ) -> None:
-    """Project the exact frozen trajectory bytes into one archive bundle.
-
-    ``session_id`` additionally binds every document to the archived run.
-    """
+    """Project the exact frozen trajectory bytes into one archive bundle."""
     root_path = run_document_path(run_dir)
     root_path.unlink(missing_ok=True)
     shutil.rmtree(siblings_directory(run_dir), ignore_errors=True)
@@ -432,13 +402,7 @@ def _copy_run_artifacts(
     diagram_only: bool,
     findings_src: Path | None,
 ) -> None:
-    """Copy one run's non-trajectory artifacts to the archive run directory.
-
-    Diagram-only runs retain prior deep-review state in the tree, so they
-    archive only ``diagram.json`` and ``diagram.md`` from that directory, and
-    neither the review output nor the recommended patch. Missing files are
-    silently skipped.
-    """
+    """Copy one run's non-trajectory artifacts to the archive run directory."""
     daydream_dir = target_dir / ".daydream"
     deep_dir = daydream_dir / "deep"
     if diagram_only:

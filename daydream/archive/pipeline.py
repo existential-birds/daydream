@@ -7,19 +7,11 @@ Bad or incomplete evidence never turns a phase green.
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, TypeGuard, cast
+from typing import Any
 
 from daydream.archive import _read_json_artifact
-from daydream.remote_ci import (
-    CIObservation,
-    RemoteCILimits,
-    RequiredContext,
-    RequiredPolicy,
-)
-from daydream.remote_ci.evaluation import partition_required_observations
+from daydream.remote_ci.artifacts import read_terminal_remote_ci_verdict
 from daydream.remote_ci.evidence import (
-    _is_finite_number,
-    _is_positive_int,
     _normalize_repository as _normalize_remote_repository,
     _require_sha as _require_remote_sha,
     _required_text,
@@ -187,12 +179,7 @@ def _fix_state(
     *,
     stabilization_failed: bool,
 ) -> dict[str, Any]:
-    """Derive fix state from stabilization/fix failures and phase events.
-
-    A current-session stabilization failure wins because the retained fix was
-    deliberately rejected.  Otherwise non-empty group failures are partial and
-    a FIX phase start is successful.
-    """
+    """Derive fix state from stabilization/fix failures and phase events."""
     if stabilization_failed:
         return {"ran": True, "status": _FAILED}
     fix_failures = _read_json_artifact(_deep_dir(target_dir) / "fix-failures.json", dict)
@@ -212,11 +199,7 @@ def _test_state(
     *,
     stabilization_failed: bool,
 ) -> dict[str, Any]:
-    """Derive test state from final stabilization and ``test-verdict.json``.
-
-    The pre-finalization verdict is not sufficient when a matching terminal
-    stabilization artifact rejects that evidence.
-    """
+    """Derive test state from final stabilization and ``test-verdict.json``."""
     if stabilization_failed:
         return {"ran": True, "status": _FAILED}
     verdict = _read_json_artifact(_deep_dir(target_dir) / "test-verdict.json", dict)
@@ -319,144 +302,6 @@ def _push_state(
     return {"ran": True, "status": _SUCCEEDED}, payload
 
 
-def _identity_mapping(value: object) -> dict[str, Any] | None:
-    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
-        return None
-    return value
-
-
-def _nonnegative_number(value: object) -> TypeGuard[int | float]:
-    return _is_finite_number(value) and isinstance(value, (int, float)) and value >= 0
-
-
-def _string_list(value: object) -> bool:
-    return isinstance(value, list) and all(_bounded_text(item) is not None for item in value)
-
-
-def _remote_evidence_consistent(payload: dict[str, Any]) -> bool:
-    """Decode normalized evidence and recheck the producer's policy partition."""
-    policy = payload["policy"]
-    contexts = tuple(RequiredContext(item["context"], item.get("app_id")) for item in policy["contexts"])
-    RequiredPolicy(contexts, policy["strict"])
-    if len(set(contexts)) != len(contexts):
-        return False
-
-    def observations(key: str) -> tuple[CIObservation, ...]:
-        rows = payload[key]
-        if not isinstance(rows, list):
-            raise ValueError("CI observations must be an array")
-        return tuple(
-            CIObservation(
-                source=item["source"], context=item["context"], app_id=item.get("app_id"),
-                state=item["state"], raw_state=item["raw_state"], url=item.get("url"),
-                diagnostic=item.get("diagnostic"),
-            )
-            for item in rows
-        )
-
-    required = observations("required_observations")
-    advisory = observations("advisory_observations")
-    all_observations = (*required, *advisory)
-    producer_keys = {
-        (item.source, item.context.casefold() if item.source == "status" else item.context, item.app_id)
-        for item in all_observations
-    }
-    if len(producer_keys) != len(all_observations):
-        return False
-    evidence = partition_required_observations(contexts, all_observations)
-    return (
-        set(evidence.required) == set(required)
-        and evidence.advisory == advisory
-        and list(evidence.failing) == payload["failing_contexts"]
-        and list(evidence.pending) == payload["pending_contexts"]
-        and list(evidence.missing) == payload["missing_contexts"]
-    )
-
-
-def _terminal_remote_shape(payload: dict[str, Any], status: str) -> bool:
-    """Validate normalized verdict facts without trusting ``archive_state``."""
-    polling = _identity_mapping(payload.get("polling"))
-    policy = _identity_mapping(payload.get("policy"))
-    if polling is None or policy is None:
-        return False
-    poll_count = polling.get("poll_count")
-    stable_polls = polling.get("stable_polls")
-    required_stable_polls = polling.get("required_stable_polls")
-    discovery_seconds = polling.get("discovery_seconds")
-    completion_seconds = polling.get("completion_seconds")
-    active_count = payload.get("active_workflow_count")
-    contexts = policy.get("contexts")
-    if (
-        type(payload.get("schema_version")) is not int
-        or payload.get("schema_version") != 1
-        or _bounded_text(payload.get("reason")) is None
-        or not _is_positive_int(poll_count)
-        or not _is_positive_int(stable_polls)
-        or stable_polls > poll_count
-        or not _is_positive_int(required_stable_polls)
-        or _bounded_text(polling.get("started_at")) is None
-        or _bounded_text(polling.get("updated_at")) is None
-        or not _nonnegative_number(polling.get("elapsed_seconds"))
-        or not _nonnegative_number(polling.get("discovery_deadline"))
-        or not _nonnegative_number(polling.get("completion_deadline"))
-        or not isinstance(policy.get("strict"), bool)
-        or not isinstance(contexts, list)
-        or not isinstance(active_count, int)
-        or isinstance(active_count, bool)
-        or active_count < 0
-        or not _string_list(payload.get("failing_contexts"))
-        or not _string_list(payload.get("pending_contexts"))
-        or not _string_list(payload.get("missing_contexts"))
-        or not _string_list(payload.get("urls"))
-        or not _string_list(payload.get("limitations"))
-        or (
-            payload.get("diagnostic") is not None
-            and _bounded_text(payload.get("diagnostic")) is None
-        )
-    ):
-        return False
-    try:
-        RemoteCILimits(
-            discovery_seconds=cast(float, discovery_seconds), completion_seconds=cast(float, completion_seconds),
-            stable_polls=required_stable_polls,
-        )
-        if not _remote_evidence_consistent(payload):
-            return False
-    except (ValueError, TypeError, KeyError, AttributeError):
-        return False
-    if status in {"passed", "no_ci"} and stable_polls < required_stable_polls:
-        return False
-    if status == "no_ci":
-        return (
-            contexts == []
-            and polling["elapsed_seconds"] >= discovery_seconds
-            and active_count == 0
-            and payload["required_observations"] == []
-            and payload["advisory_observations"] == []
-            and payload["failing_contexts"] == []
-            and payload["pending_contexts"] == []
-            and payload["missing_contexts"] == []
-            and payload["urls"] == []
-            and payload["diagnostic"] is None
-        )
-    required = payload["required_observations"]
-    advisory = payload["advisory_observations"]
-    if status == "passed":
-        return (
-            payload["failing_contexts"] == []
-            and payload["pending_contexts"] == []
-            and payload["missing_contexts"] == []
-            and all(item["state"] == "pass" for item in required)
-            and (
-                bool(contexts)
-                or (bool(advisory) and all(item["state"] != "pending" for item in advisory))
-            )
-        )
-    return bool(payload["failing_contexts"]) and any(
-        item["state"] == "fail" for item in required
-    )
-
-
 def _remote_details(payload: dict[str, Any]) -> dict[str, Any]:
     observations = payload.get("advisory_observations")
     failures: list[str] = []
@@ -468,56 +313,6 @@ def _remote_details(payload: dict[str, Any]) -> dict[str, Any]:
             if context is not None:
                 failures.append(context)
     return {"advisory_failures": failures}
-
-
-def _remote_identity_matches(
-    payload: dict[str, Any],
-    push: dict[str, Any],
-    *,
-    pr_repo: str | None,
-    pr_number: int | None,
-) -> bool:
-    target = _identity_mapping(payload.get("target"))
-    binding = _identity_mapping(payload.get("binding"))
-    if target is None or binding is None:
-        return False
-
-    pushed_repository = _repository(push.get("pushed_repository"))
-    if pushed_repository is None:
-        return False
-    for identity in (target, binding):
-        if (
-            not _is_positive_int(identity.get("pr_number"))
-            or any(_repository(identity.get(key)) is None for key in ("base_repository", "head_repository"))
-            or any(_bounded_text(identity.get(key)) is None for key in ("pr_url", "base_ref", "head_ref"))
-        ):
-            return False
-    if any(_sha(value) is None for value in (
-        target.get("pushed_sha"), binding.get("head_sha"), payload.get("head_sha"), payload.get("evidence_sha"),
-    )):
-        return False
-    merge_sha = binding.get("merge_sha")
-    payload_merge = payload.get("merge_sha")
-    if any(value is not None and _sha(value) is None for value in (merge_sha, payload_merge)):
-        return False
-    identities_match = (
-        binding.get("state") == "open"
-        and target["base_repository"] == binding["base_repository"]
-        and target["head_repository"] == binding["head_repository"] == pushed_repository
-        and target["base_ref"] == binding["base_ref"]
-        and target["head_ref"] == binding["head_ref"] == push["branch"]
-        and target["pr_number"] == binding["pr_number"]
-        and target["pr_url"] == binding["pr_url"]
-        and target.get("remote") == push["remote"]
-        and target["pushed_sha"] == binding["head_sha"] == payload["head_sha"] == push["pushed_sha"]
-        and payload_merge == merge_sha
-        and payload["evidence_sha"] in {target["pushed_sha"], merge_sha}
-    )
-    if not identities_match:
-        return False
-    if pr_repo is not None and _configured_repository(pr_repo) != target["base_repository"]:
-        return False
-    return pr_number is None or pr_number == target["pr_number"]
 
 
 def _remote_ci_state(
@@ -547,12 +342,17 @@ def _remote_ci_state(
             "status": _PARTIAL,
             "details": _remote_details(payload),
         }
+    try:
+        verdict = read_terminal_remote_ci_verdict(payload, target_dir=target_dir)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return {"ran": True, "status": _PARTIAL}
+    target = verdict.target
     if (
-        status not in {"passed", "no_ci", "failed"}
-        or not _terminal_remote_shape(payload, status)
-        or not _remote_identity_matches(
-            payload, push, pr_repo=pr_repo, pr_number=pr_number
-        )
+        target is None or target.head_repository != push.get("pushed_repository")
+        or target.head_ref != push["branch"] or target.remote != push["remote"]
+        or target.pushed_sha != push["pushed_sha"]
+        or (pr_repo is not None and _configured_repository(pr_repo) != target.base_repository)
+        or (pr_number is not None and pr_number != target.pr_number)
     ):
         return {"ran": True, "status": _PARTIAL}
     return {
@@ -575,24 +375,7 @@ def derive_phase_states(
     pr_repo: str | None = None,
     pr_number: int | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Return terminal states for merge, fix, test, push, and remote CI.
-
-    Each entry is ``{"ran": bool, "status": str}`` with status one of
-    ``succeeded``/``failed``/``partial``/``absent``/``unknown``. Pure
-    derivation over on-disk deep artifacts + frozen phase events; absent or
-    malformed evidence degrades to ``absent`` or ``unknown`` rather than
-    raising.
-
-    Most deep artifacts are repository-local rather than run-qualified.
-    ``test-verdict.json`` and ``stabilization-failed.json`` therefore carry a
-    ``session_id`` and are accepted only when they match this archive session;
-    stale or unbound evidence reads as absent. The two remote artifacts carry
-    the same session plus exact pushed/PR identities. All five ``runs_*`` flags
-    gate reads to phases the current flow executes, so a skipped phase remains
-    neutral regardless of artifacts left by prior runs.
-    Merge requires one valid current-session event pair; absent run identity
-    cannot inherit a result from on-disk artifacts.
-    """
+    """Return terminal states for merge, fix, test, push, and remote CI."""
     stabilization_failed = _matching_stabilization_failure(target_dir, session_id)
     push_state, push = (
         _push_state(target_dir, phase_events, session_id)
@@ -653,21 +436,7 @@ def derive_pipeline_status(
     runs_fix: bool = False,
     runs_test: bool = False,
 ) -> str:
-    """Aggregate pipeline outcome from the archive state + per-phase states.
-
-    Precedence:
-    1. ``cancelled`` when the archive is ``partial`` with no fix failures
-       (``write_partial`` signal flush — the run stopped early, nothing failed).
-    2. ``failed`` when any local, push, or remote phase reports failed.
-    3. ``partial`` when ``fix_failures`` are present.
-    4. ``partial`` when a required local phase never ran or an attempted push/
-       remote phase is incomplete.
-    5. ``succeeded`` when every phase is succeeded or absent AND at least one
-       phase actually ran (a flow that runs none of these phases surfaces no
-       derivable phase signal, so an early-aborted/failed run must not be
-       archived as unqualified success).
-    6. else ``unknown``.
-    """
+    """Aggregate pipeline outcome from the archive state + per-phase states."""
     if archive_status == "partial" and not fix_failures:
         return "cancelled"
     phase_names = ("merge", "fix", "test", "push", "remote_ci")

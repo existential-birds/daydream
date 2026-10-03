@@ -1,8 +1,4 @@
-"""Operator-only tracing settings and the exporter factory contract.
-
-Destination credentials and transport settings stay in the operator environment;
-this immutable value contains no secrets and never reads reviewed repository files.
-"""
+"""Immutable operator tracing settings; secrets stay in the environment, never reviewed repository files."""
 
 from __future__ import annotations
 
@@ -11,6 +7,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     from opentelemetry.sdk.trace.export import SpanExporter
@@ -20,6 +17,32 @@ _DESTINATION_NAME = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z")
 
 class ObservabilityError(ValueError):
     """An invalid operator tracing setting, reported before agent work."""
+
+
+def validate_endpoint(endpoint: str, setting: str, *, grpc: bool = False) -> str:
+    """Validate URLs without including their potentially sensitive contents in errors."""
+    try:
+        parsed = urlsplit("//" + endpoint if grpc and "://" not in endpoint else endpoint)
+        valid = (
+            bool(parsed.hostname)
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.query
+            and not parsed.fragment
+            and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in endpoint)
+            and (parsed.scheme in ("http", "https") or (grpc and not parsed.scheme))
+            and (not grpc or parsed.path in ("", "/"))
+        )
+        # Accessing .port validates malformed and out-of-range ports too.
+        parsed.port
+    except (ValueError, AttributeError):
+        valid = False
+    if not valid:
+        raise ObservabilityError(
+            f"{setting} must be a valid {'HTTP(S) URL or host:port' if grpc else 'HTTP(S) URL'} "
+            "without credentials, query, fragment or whitespace"
+        )
+    return endpoint.rstrip("/")
 
 
 def validate_destination_name(name: str) -> None:
@@ -55,10 +78,8 @@ class ObservabilityConfig:
 
 
 class TraceExporterFactory(Protocol):
-    """Build an owned synchronous OTel exporter when a selected run starts.
-
-    Registration and ``ext validate`` never invoke factories. The runtime owns
-    exporter flushing and shutdown, including cleanup after partial setup failure.
+    """Build an owned exporter only at run start; runtime flushes/closes even partial setup.
+    Registration and ext validate never call factories.
     """
 
     def __call__(self, config: ObservabilityConfig) -> SpanExporter: ...

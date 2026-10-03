@@ -18,7 +18,8 @@ from daydream.config import (
     EffortTier,
 )
 from daydream.extensions.api import Stop
-from daydream.improve import artifacts
+from daydream.fanout import run_fanout
+from daydream.improve import artifacts, audit_scope
 from daydream.improve.context import _audit_repo
 from daydream.improve.partition import (
     Partition,
@@ -34,11 +35,13 @@ from daydream.improve.prioritize import (
     aggregate_cross_service,
     order_by_leverage,
 )
-from daydream.improve.prompts import (
+from daydream.improve.redaction import redact_model_value
+from daydream.improve.reporting import _findings_table
+from daydream.improve.schemas import (
     AUDIT_FINDINGS_SCHEMA,
     VET_SCHEMA,
 )
-from daydream.improve.redaction import redact_model_value
+from daydream.output_schema import enum_schema
 from daydream.services import (
     Service,
 )
@@ -46,12 +49,6 @@ from daydream.ui import print_error
 
 if TYPE_CHECKING:
     from daydream.flows.engine import FlowContext
-
-
-from daydream.improve import audit_scope
-from daydream.improve.reporting import (
-    _findings_table,
-)
 
 _PROVENANCE_VALUES = {"introduced", "inherited"}
 
@@ -92,13 +89,8 @@ def _schema_with_provenance(
     extended = json.loads(json.dumps(schema))
     if not isinstance(extended, dict):
         raise RuntimeError("computed provenance schema is not an object")
-    items = extended["properties"][
-        "findings" if "findings" in extended["properties"] else "verdicts"
-    ]["items"]
-    items["properties"]["provenance"] = {
-        "type": "string",
-        "enum": sorted(_PROVENANCE_VALUES),
-    }
+    items = extended["properties"]["findings" if "findings" in extended["properties"] else "verdicts"]["items"]
+    items["properties"]["provenance"] = enum_schema(sorted(_PROVENANCE_VALUES))
     items["required"].append("provenance")
     return extended
 
@@ -120,88 +112,87 @@ async def _run_audit_assignments(
     tier: EffortTier = ctx.data["effort_tier"]
     results: dict[str, tuple[_AuditAssignment, list[dict[str, Any]]]] = {}
     failures: dict[str, str] = {}
-    async with anyio.create_task_group() as task_group:
-        for assignment in assignments:
-            scope_note = (
-                f"Audit the {assignment.group.stack} stack in this group."
-                if assignment.group.stack
-                else "Audit this group's surface."
+    jobs: list[tuple[_AuditAssignment, str]] = []
+    for assignment in assignments:
+        scope_note = (
+            f"Audit the {assignment.group.stack} stack in this group."
+            if assignment.group.stack
+            else "Audit this group's surface."
+        )
+        if ctx.config.improve_scope:
+            scope_note += (
+                f"\nService scope slice: `{ctx.config.improve_scope}`. "
+                "The slice bounds where the audit searches. Slicing bounds "
+                "where you search, never what you may read; cross-service "
+                "boundary findings (traffic and data flow between services) "
+                "remain in scope."
             )
-            if ctx.config.improve_scope:
-                scope_note += (
-                    f"\nService scope slice: `{ctx.config.improve_scope}`. "
-                    "The slice bounds where the audit searches. Slicing bounds "
-                    "where you search, never what you may read; cross-service "
-                    "boundary findings (traffic and data flow between services) "
-                    "remain in scope."
-                )
-            if branch_focus:
-                scope_note += (
-                    "\nThis is a branch-focused audit. Limit findings to the "
-                    "changed-file scope above. Tag every finding with "
-                    '`provenance: "introduced"` when the supplied diff is '
-                    "evidence that the branch introduced it; otherwise tag it "
-                    '`provenance: "inherited"`.\n'
-                    "Merge-base diff:\n```diff\n"
-                    f"{ctx.data['branch_diff']}\n```"
-                )
-            prompt = ctx.registry.prompt("audit")(
-                category=assignment.category,
-                strategy=ctx.strategy(f"improve.audit.{assignment.category}"),
-                group=audit_scope._group_dict(assignment.group),
-                scope_note=scope_note,
-                recon_summary=json.dumps(ctx.data["recon"], sort_keys=True),
-                cwd=_audit_repo(ctx),
-                tier=tier,
+        if branch_focus:
+            scope_note += (
+                "\nThis is a branch-focused audit. Limit findings to the "
+                "changed-file scope above. Tag every finding with "
+                '`provenance: "introduced"` when the supplied diff is '
+                "evidence that the branch introduced it; otherwise tag it "
+                '`provenance: "inherited"`.\n'
+                "Merge-base diff:\n```diff\n"
+                f"{ctx.data['branch_diff']}\n```"
             )
-            if branch_focus:
-                prompt += (
-                    "\nFor this branch-focused audit, the structured-output "
-                    "schema additionally requires each finding to include "
-                    '`provenance` as either `"introduced"` or `"inherited"`.'
-                )
+        prompt = ctx.registry.prompt("audit")(
+            category=assignment.category,
+            strategy=ctx.strategy(f"improve.audit.{assignment.category}"),
+            group=audit_scope._group_dict(assignment.group),
+            scope_note=scope_note,
+            recon_summary=json.dumps(ctx.data["recon"], sort_keys=True),
+            cwd=_audit_repo(ctx),
+            tier=tier,
+        )
+        if branch_focus:
+            prompt += (
+                "\nFor this branch-focused audit, the structured-output "
+                "schema additionally requires each finding to include "
+                '`provenance` as either `"introduced"` or `"inherited"`.'
+            )
 
-            async def _task(
-                current: _AuditAssignment = assignment,
-                task_prompt: str = prompt,
-            ) -> None:
-                descriptor = f"audit-{current.category}-{current.group.name}"
-                async with limiter:
-                    async with trajectory.maybe_fork(
-                        recorder, descriptor, dispatch=dispatch
-                    ):
-                        try:
-                            output, _, _ = await run_agent(
-                                backend,
-                                _audit_repo(ctx),
-                                task_prompt,
-                                phase=trajectory.DaydreamPhase.AUDIT,
-                                output_schema=(
-                                    _schema_with_provenance(AUDIT_FINDINGS_SCHEMA)
-                                    if branch_focus
-                                    else AUDIT_FINDINGS_SCHEMA
-                                ),
-                                read_only=True,
-                                persist_session=False,
-                                run_context=ctx.run_context,
-                            )
-                            raw_findings = (
-                                output.get("findings", [])
-                                if isinstance(output, dict)
-                                else []
-                            )
-                            findings = [
-                                redact_model_value(finding)
-                                for finding in raw_findings
-                                if isinstance(finding, dict)
-                            ]
-                            results[current.key] = (current, findings)
-                        except Exception as exc:  # noqa: BLE001
-                            failures[current.key] = trajectory.redact_text(
-                                f"{type(exc).__name__}: {exc}"
-                            )
+        jobs.append((assignment, prompt))
 
-            task_group.start_soon(_task)
+    async def audit(job: tuple[_AuditAssignment, str]) -> None:
+        current, task_prompt = job
+        try:
+            output, _, _ = await run_agent(
+                backend,
+                _audit_repo(ctx),
+                task_prompt,
+                phase=trajectory.DaydreamPhase.AUDIT,
+                output_schema=(
+                    _schema_with_provenance(AUDIT_FINDINGS_SCHEMA)
+                    if branch_focus
+                    else AUDIT_FINDINGS_SCHEMA
+                ),
+                read_only=True,
+                persist_session=False,
+                run_context=ctx.run_context,
+            )
+            raw_findings = (
+                output.get("findings", [])
+                if isinstance(output, dict)
+                else []
+            )
+            findings = [
+                redact_model_value(finding)
+                for finding in raw_findings
+                if isinstance(finding, dict)
+            ]
+            results[current.key] = (current, findings)
+        except Exception as exc:  # noqa: BLE001
+            failures[current.key] = trajectory.redact_text(
+                f"{type(exc).__name__}: {exc}"
+            )
+
+
+    await run_fanout(
+        jobs, audit, limiter=limiter, recorder=recorder, dispatch=dispatch,
+        descriptor=lambda job: f"audit-{job[0].category}-{job[0].group.name}",
+    )
     return results, failures
 
 
@@ -501,84 +492,82 @@ async def _step_vet(ctx: FlowContext) -> None:
         async with trajectory.dispatch_scope(
             recorder, phase=trajectory.DaydreamPhase.VET, descriptors=descriptors
         ) as dispatch:
-            async with anyio.create_task_group() as task_group:
-                for index, (category, batch) in enumerate(batches):
-                    indexed = [
-                        {**finding, "vet_id": vet_id}
-                        for vet_id, finding in enumerate(batch, start=1)
-                    ]
-                    prompt = ctx.registry.prompt("vet")(
-                        strategy=ctx.strategy("improve.vetting"),
-                        findings=indexed,
-                        cwd=_audit_repo(ctx),
+            jobs: list[tuple[int, str, list[dict[str, Any]], str]] = []
+            for index, (category, batch) in enumerate(batches):
+                indexed = [
+                    {**finding, "vet_id": vet_id}
+                    for vet_id, finding in enumerate(batch, start=1)
+                ]
+                prompt = ctx.registry.prompt("vet")(
+                    strategy=ctx.strategy("improve.vetting"),
+                    findings=indexed,
+                    cwd=_audit_repo(ctx),
+                )
+                if branch_focus:
+                    prompt += (
+                        "\nConfirm each candidate's branch provenance against this "
+                        "merge-base diff. Return `provenance` as `introduced` only "
+                        "when the diff supports that conclusion; otherwise return "
+                        "`inherited`.\n```diff\n"
+                        f"{ctx.data['branch_diff']}\n```"
                     )
-                    if branch_focus:
-                        prompt += (
-                            "\nConfirm each candidate's branch provenance against this "
-                            "merge-base diff. Return `provenance` as `introduced` only "
-                            "when the diff supports that conclusion; otherwise return "
-                            "`inherited`.\n```diff\n"
-                            f"{ctx.data['branch_diff']}\n```"
-                        )
 
-                    async def _task(
-                        slot: int = index,
-                        descriptor: str = f"vet-{category}-{index:02d}",
-                        batch_findings: list[dict[str, Any]] = batch,
-                        task_prompt: str = prompt,
-                    ) -> None:
-                        async with limiter:
-                            async with trajectory.maybe_fork(
-                                recorder, descriptor, dispatch=dispatch
-                            ):
-                                try:
-                                    output, _, _ = await run_agent(
-                                        backend,
-                                        _audit_repo(ctx),
-                                        task_prompt,
-                                        phase=trajectory.DaydreamPhase.VET,
-                                        output_schema=(
-                                            _schema_with_provenance(VET_SCHEMA)
-                                            if branch_focus
-                                            else VET_SCHEMA
-                                        ),
-                                        read_only=True,
-                                        persist_session=False,
-                                        run_context=ctx.run_context,
-                                    )
-                                except Exception:  # noqa: BLE001 - no verdict fails closed
-                                    output = {}
-                                    failed_slots.add(slot)
-                                safe_output = redact_model_value(output)
-                                verdicts = (
-                                    safe_output.get("verdicts", [])
-                                    if isinstance(safe_output, dict)
-                                    and isinstance(safe_output.get("verdicts"), list)
-                                    else []
-                                )
-                                verdict_ids = {
-                                    verdict.get("vet_id")
-                                    for verdict in verdicts
-                                    if isinstance(verdict, dict)
-                                    and type(verdict.get("vet_id")) is int
-                                }
-                                if verdict_ids != set(
-                                    range(1, len(batch_findings) + 1)
-                                ):
-                                    failed_slots.add(slot)
-                                results[slot] = _apply_vet_verdicts(
-                                    batch_findings,
-                                    verdicts,
-                                    rejected_at_sha=ctx.work.head_sha,
-                                    repo=_audit_repo(ctx),
-                                    default_provenance=(
-                                        "inherited" if branch_focus else None
-                                    ),
-                                    services=ctx.data["services"],
-                                    partitions=ctx.data["partitions"],
-                                )
+                jobs.append((index, category, batch, prompt))
 
-                    task_group.start_soon(_task)
+            async def vet(job: tuple[int, str, list[dict[str, Any]], str]) -> None:
+                slot, _, batch_findings, task_prompt = job
+                try:
+                    output, _, _ = await run_agent(
+                        backend,
+                        _audit_repo(ctx),
+                        task_prompt,
+                        phase=trajectory.DaydreamPhase.VET,
+                        output_schema=(
+                            _schema_with_provenance(VET_SCHEMA)
+                            if branch_focus
+                            else VET_SCHEMA
+                        ),
+                        read_only=True,
+                        persist_session=False,
+                        run_context=ctx.run_context,
+                    )
+                except Exception:  # noqa: BLE001 - no verdict fails closed
+                    output = {}
+                    failed_slots.add(slot)
+                safe_output = redact_model_value(output)
+                verdicts = (
+                    safe_output.get("verdicts", [])
+                    if isinstance(safe_output, dict)
+                    and isinstance(safe_output.get("verdicts"), list)
+                    else []
+                )
+                verdict_ids = {
+                    verdict.get("vet_id")
+                    for verdict in verdicts
+                    if isinstance(verdict, dict)
+                    and type(verdict.get("vet_id")) is int
+                }
+                if verdict_ids != set(
+                    range(1, len(batch_findings) + 1)
+                ):
+                    failed_slots.add(slot)
+                results[slot] = _apply_vet_verdicts(
+                    batch_findings,
+                    verdicts,
+                    rejected_at_sha=ctx.work.head_sha,
+                    repo=_audit_repo(ctx),
+                    default_provenance=(
+                        "inherited" if branch_focus else None
+                    ),
+                    services=ctx.data["services"],
+                    partitions=ctx.data["partitions"],
+                )
+
+
+            await run_fanout(
+                jobs, vet, limiter=limiter, recorder=recorder, dispatch=dispatch,
+                descriptor=lambda job: f"vet-{job[1]}-{job[0]:02d}",
+            )
             if failed_slots:
                 _finish_fanout(
                     phase, dispatch, failed=len(failed_slots), total=len(batches)

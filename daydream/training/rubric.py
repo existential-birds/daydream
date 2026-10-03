@@ -94,12 +94,7 @@ def derive_outcome_label(rubric: Rubric) -> str:
             raise RuntimeError(
                 "Extractor invariant violated: posterior_source='local_branch' but local_commit_applied is None"
             )
-        verdict = rubric.local_commit_applied.verdict
-        if verdict == "applied":
-            return "accepted"
-        if verdict == "rejected":
-            return "rejected"
-        return "unknown"
+        return {"applied": "accepted", "rejected": "rejected"}.get(rubric.local_commit_applied.verdict, "unknown")
     return "unknown"
 
 

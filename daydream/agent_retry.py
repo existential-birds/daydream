@@ -65,12 +65,9 @@ def _allowance_source(backend: Backend, policy: Any, explicit: float | None) -> 
 def _resolve_retry_settings(
     backend: Backend, retry_recovery_allowance_s: float | None
 ) -> _ResolvedRetrySettings:
-    """Resolve limits before dispatch, rejecting contradictory declarations.
-
-    Allowance precedence: policy, backend attribute, explicit argument, ambient
-    Pi environment, default. A declared policy suppresses ambient reads. An invalid
-    single allowance warns and uses the default; inverted delays or an explicit
-    nonzero allowance with disabled retries raise ValueError.
+    """Resolve allowance precedence: policy > backend > argument > ambient Pi env > default.
+    Policies suppress ambient reads. Invalid allowances warn/fall back; inverted delays or
+    explicit nonzero allowance with disabled retries raise ValueError before dispatch.
     """
     retry_policy = getattr(backend, "retry_policy", None)
     if retry_policy is not None:
@@ -148,13 +145,9 @@ def _plan_retry_delay(
     deadline_remaining_s: float | None,
     hint: float | None,
 ) -> tuple[float, str | None]:
-    """Return a bounded hint/jitter delay, or retry_hint_exceeds_budget.
+    """Honor full server hints within recovery/deadline bounds; otherwise stop recovery.
 
-    A server hint is evaluated against the remaining recovery allowance and
-    deadline only; an admitted hint is waited in full and never shortened by the
-    exponential cap or configured maximum jitter delay. A hint longer than
-    either budget stops the ladder with ``retry_hint_exceeds_budget``. The
-    exponential cap and maximum delay bound the fallback jitter path only.
+    Exponential growth and maximum delay cap fallback jitter only.
     """
     bounds = [
         bound
@@ -180,11 +173,8 @@ def _plan_retry_delay(
 
 @dataclass
 class _RetryTelemetry:
-    """Account for dispatched attempts separately from retry overhead.
-
-    The opening useful-work attempt contributes to backend_s only. Recovery
-    charges retry_backend_s and backoff_s; cleanup is excluded from backend time.
-    This keeps backend_s + backoff_s within elapsed invocation time.
+    """Initial useful work charges backend_s; retries also charge retry_backend_s and backoff_s.
+    Cleanup is excluded so backend_s + backoff_s stays within elapsed invocation time.
     """
 
     attempts_dispatched: int = 0
@@ -231,11 +221,7 @@ class _RetryTelemetry:
 
 
 def _coerce_retry_recovery_allowance(raw: Any, source: str) -> float | None:
-    """Decode a declared allowance and warn on malformed values.
-
-    Zero disables recovery; invalid input falls back to the default. The shared
-    decoder owns admission for config, environment, and backend attributes.
-    """
+    """Decode shared config/env/backend allowance; zero disables recovery, invalid input warns/falls back."""
     value = decode_retry_recovery_allowance(raw)
     if value is None:
         _logger.warning(
@@ -247,10 +233,8 @@ def _coerce_retry_recovery_allowance(raw: Any, source: str) -> float | None:
 
 
 def _retry_hint(exc: BaseException) -> float | None:
-    """Read a finite nonnegative retry_after attribute, else parse the message token.
-
-    A present malformed attribute suppresses message fallback and uses jitter; zero
-    is valid. Never raises.
+    """Read finite nonnegative retry_after (zero allowed), or parse the message when absent.
+    Malformed present attributes suppress fallback and use jitter; never raises.
     """
     attribute = getattr(exc, "retry_after", None)
     if attribute is None:

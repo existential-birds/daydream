@@ -18,8 +18,9 @@ from daydream.improve.plan_contract import AssemblyIssue, render_issue
 from daydream.improve.plan_diagnostics import (
     _attempt_diagnostic,
 )
-from daydream.improve.prompts import PLAN_AUTHOR_SCHEMA, build_plan_writer_repair_prompt
+from daydream.improve.prompts import build_plan_writer_repair_prompt
 from daydream.improve.redaction import redact_model_value
+from daydream.improve.schemas import PLAN_AUTHOR_SCHEMA
 from daydream.trajectory import DaydreamPhase, phase_scope
 
 

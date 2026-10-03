@@ -16,17 +16,13 @@ import pytest
 
 import daydream.improve.prompts as improve_prompts
 import daydream.phases as phases
+import daydream.reviews.models as review_models
+import daydream.reviews.submission as review_submission
 import daydream.severity as severity
 from daydream import pr_comment_renderer
 from daydream.benchmark.harbor import verifier_core
-from daydream.pr_review import (
-    ClassifiedIssues,
-    ParsedIssue,
-    ReviewRenderers,
-    build_payload,
-    default_render_finding,
-    default_render_summary,
-)
+from daydream.pr_review import ClassifiedIssues, ParsedIssue, ReviewRenderers
+from daydream.reviews.rendering import build_payload_for_event, default_render_finding, default_render_summary
 from tests.harness.review_profile import sample_pr
 
 REPO = Path(__file__).resolve().parents[1]
@@ -183,9 +179,12 @@ def test_pr_review_severity_breakdown_follows_the_declaration(monkeypatch: pytes
             ParsedIssue(path="a.py", line=12, title="t2", body="b", confidence="LOW", severity="low"),
         ]
     )
-    body = build_payload(
-        sample_pr(), classified, renderers=ReviewRenderers(default_render_finding, default_render_summary),
-        run_info=pr_comment_renderer._render_fallback(),
+    body = review_submission._review_payload_dict(
+        build_payload_for_event(sample_pr(), classified,
+            event=review_models.ReviewEvent.COMMENT,
+            renderers=ReviewRenderers(default_render_finding, default_render_summary),
+            run_info=pr_comment_renderer._render_fallback(),
+        )
     )["body"]
     assert "- **Severity:** 1 low, 1 high" in body
 

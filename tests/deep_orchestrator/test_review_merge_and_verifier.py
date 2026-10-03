@@ -375,6 +375,21 @@ async def test_resume_merge_errors_on_missing_stack_records(multi_stack_target: 
     merge_calls = [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
     assert merge_calls == []
 
+@pytest.mark.parametrize("payload", [[], {"issues": None}, "{bad json", {"issues": []}])
+async def test_resume_merge_rejects_unadmitted_reviewer_artifacts(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, payload: object,
+) -> None:
+    """Malformed and unbound persisted evidence never becomes a trusted pool."""
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    deep = _prime_merge_resume(multi_stack_target, python=[_record(description="py issue")],
+        react=[], generic=[], structure=[])
+    per_stack_records_path(deep, "python").write_text(
+        payload if isinstance(payload, str) else json.dumps(payload))
+    assert await _run_deep(multi_stack_target, start_at="merge") == 1
+    assert not any("cross-stack merge agent" in call["prompt"].lower() for call in stub.calls)
+
+
 async def test_resume_merge_allows_missing_records_for_failed_stacks(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

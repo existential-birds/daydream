@@ -18,7 +18,7 @@ import pytest
 
 from daydream import git_ops
 from daydream.findings import write_findings_artifact
-from daydream.pr_review import parse_finding_markers
+from daydream.reviews.identity import parse_finding_markers
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from daydream.training.labeler_signals import (

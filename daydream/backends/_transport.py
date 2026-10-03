@@ -1,14 +1,10 @@
-"""Shared subprocess lifecycle for Codex, Pi, and Osprey.
-
-Own spawning, stdin, idle reads, stderr drains, exit handling, and shielded
-teardown. Adapters own protocol interpretation and error wording; this layer
-yields decoded lines and exit codes without protocol fallbacks.
+"""Own CLI spawning, stdin, idle reads, stderr drains, exit handling, and shielded teardown.
+Adapters interpret protocols/errors; transport exposes decoded lines and exit codes without fallbacks.
 """
 
 from __future__ import annotations
 
 import asyncio
-import enum
 import json
 import tempfile
 from collections.abc import AsyncIterator, Callable
@@ -24,62 +20,24 @@ from daydream.backends._subprocess import (
 )
 
 
-class StdinMode(enum.Enum):
-    """How the child's stdin is wired at spawn."""
-
-    DEVNULL = enum.auto()
-    PIPE = enum.auto()
-
-
-class StderrPolicy(enum.Enum):
-    """Merge stderr into JSONL, or drain it separately through a bounded sink.
-
-    DRAIN_TASK callers await drain_finished after wait/terminate so it cannot
-    outlive the transport.
-    """
-
-    MERGE_INTO_STDOUT = enum.auto()
-    DRAIN_TASK = enum.auto()
-
-
-class TransportExitError(Exception):
-    """The child exited non-zero.
-
-    The backend formats its own user-visible message from the exit code.
-    """
-
-    def __init__(self, cli: str, returncode: int) -> None:
-        self.cli = cli
-        self.returncode = returncode
-
-
 class CliTransport:
-    """Spawn and stream decoded stdout; propagate stall, oversized-line, and spawn errors.
-
-    Each backend maps transport failures into its own error contract.
-    """
+    """Spawn/stream decoded stdout; propagate stalls, oversized lines, and spawn errors for adapter handling."""
 
     def __init__(
         self,
         cli: str,
         argv: list[str],
         *,
-        stdin_mode: StdinMode = StdinMode.DEVNULL,
         stdin_data: bytes | None = None,
-        stderr_policy: StderrPolicy = StderrPolicy.MERGE_INTO_STDOUT,
         stderr_sink: Callable[[str], None] | None = None,
         decode_errors: str = "strict",
         limit: int,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
     ) -> None:
-        if stdin_mode is StdinMode.PIPE and stdin_data is None:
-            raise ValueError("stdin_mode=PIPE requires stdin_data")
         self._cli = cli
         self._argv = argv
-        self._stdin_mode = stdin_mode
         self._stdin_data = stdin_data
-        self._stderr_policy = stderr_policy
         self._stderr_sink = stderr_sink
         # Backend decode policy: codex/pi were strict pre-transport; osprey
         # decoded with errors="replace" and must keep doing so (see the
@@ -99,12 +57,12 @@ class CliTransport:
         """Spawn the child, write+close stdin when piped, start stderr drain."""
         stdin = (
             asyncio.subprocess.PIPE
-            if self._stdin_mode is StdinMode.PIPE
+            if self._stdin_data is not None
             else asyncio.subprocess.DEVNULL
         )
         stderr = (
             asyncio.subprocess.STDOUT
-            if self._stderr_policy is StderrPolicy.MERGE_INTO_STDOUT
+            if self._stderr_sink is None
             else asyncio.subprocess.PIPE
         )
         # Spawn OSError propagates: the caller maps it to its backend error type.
@@ -119,15 +77,15 @@ class CliTransport:
         self._proc = proc
         self.processes.append(proc)
 
-        if self._stdin_mode is StdinMode.PIPE:
+        if self._stdin_data is not None:
             stdin_writer = proc.stdin
             if stdin_writer is None:  # pragma: no cover - PIPE guarantees stdin
-                raise OSError("child stdin is not writable despite StdinMode.PIPE")
+                raise OSError("child stdin is not writable despite piped input")
             stdin_writer.write(self._stdin_data or b"")
             stdin_writer.close()
             self.stdin_closed = True
 
-        if self._stderr_policy is StderrPolicy.DRAIN_TASK and proc.stderr is not None:
+        if proc.stderr is not None:
             self._drain_task = asyncio.create_task(self._drain_stderr(proc.stderr))
 
     async def _drain_stderr(self, stderr: asyncio.StreamReader) -> None:
@@ -157,11 +115,8 @@ class CliTransport:
     async def lines(
         self, timeout_for_line: Callable[[], float | None]
     ) -> AsyncIterator[str]:
-        """Yield decoded, stripped lines under per-line idle windows.
-
-        Re-evaluate the timeout for each line to support response/tool-active windows.
-        Propagate StreamStalledError and oversized-line ValueError; decoding is strict
-        unless the adapter requests replacement.
+        """Read stripped lines with a fresh response/tool-active idle window per line. Propagate stalls
+        and oversized-line ValueError; decoding stays strict unless the adapter requests replacement.
         """
         if self._proc is None:
             raise RuntimeError("transport not started; call start() first")
@@ -177,13 +132,12 @@ class CliTransport:
             yield raw.decode(errors=self._decode_errors).strip()
 
     async def wait(self) -> int:
-        """Wait for exit; raise TransportExitError carrying any nonzero returncode."""
+        """Reap the child and return its actual status; adapters interpret failures."""
         if self._proc is None:
             raise RuntimeError("transport not started; call start() first")
-        returncode = await self._proc.wait()
-        if returncode != 0:
-            raise TransportExitError(self._cli, returncode)
-        return returncode
+        await self._proc.wait()
+        assert self._proc.returncode is not None
+        return self._proc.returncode
 
     async def drain_finished(self) -> None:
         """Shield and join the stderr task without masking the caller's primary error."""
@@ -217,35 +171,6 @@ class CliTransport:
 PROCESS_EXIT_EXCERPT_MAX_LINES = 10
 
 
-async def reap(transport: CliTransport) -> int | None:
-    """Return the actual exit code, suppressing TransportExitError.
-
-    Adapters may emit diagnostics/terminal events before checking the code.
-    """
-    try:
-        await transport.wait()
-    except TransportExitError:
-        pass
-    return transport.returncode
-
-
-def raise_for_exit(
-    returncode: int | None,
-    *,
-    error_type: Callable[..., Exception],
-    category: str,
-    build_message: Callable[[int], str],
-    retryable: bool | None = None,
-) -> None:
-    """Raise the adapter's error for nonzero exits, forwarding retryable only when supplied."""
-    if returncode is None or returncode == 0:
-        return
-    kwargs: dict[str, object] = {"category": category}
-    if retryable is not None:
-        kwargs["retryable"] = retryable
-    raise error_type(build_message(returncode), **kwargs)
-
-
 async def teardown(transport: CliTransport, transports: list[CliTransport]) -> None:
     """Shielded, idempotent terminate/drain/remove for a tracked transport.
 
@@ -274,10 +199,7 @@ def process_exit_message(*, display: str, returncode: int, lines: list[str]) -> 
 
 
 def write_temp_json_schema(schema: dict[str, Any], *, prefix: str) -> str:
-    """Write a schema file for the CLI; the caller unlinks it after child exit.
-
-    Remove the temporary file here if serialization fails.
-    """
+    """Write a caller-owned temporary schema; unlink on serialization failure, otherwise after child exit."""
     handle = tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", suffix=".json", prefix=prefix, delete=False
     )

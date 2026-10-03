@@ -34,11 +34,7 @@ def archive_recorder_provenance_from_snapshot(
     write_snapshot: RunWriteSnapshot,
     run_flow: DaydreamRunFlow,
 ) -> ArchiveRecorderProvenance:
-    """Validate and retain archive identity from the exact frozen root bytes.
-
-    The session id is a path segment in the archive, so an empty, dot, or
-    separator-bearing value is refused rather than resolved.
-    """
+    """Validate and retain archive identity from the exact frozen root bytes."""
     session_id = write_snapshot.root_trajectory_id
     if not session_id or session_id in (".", "..") or set(session_id) & set("/\\\0"):
         raise ValueError("snapshot session_id is malformed")
@@ -77,24 +73,7 @@ def _omit_falsy(**fields: Any) -> dict[str, Any]:
 
 @dataclass
 class Manifest:
-    """Archive metadata with separate executable, repository, and workflow provenance.
-
-    ``backend`` is the general default. ``review_backend`` records an override
-    marker, which a CLI default may mask; fix/test fields record effective
-    backends only for executed phases. Per-stack backend/model identify the
-    actual review tier, including the Pi default, and are absent for flows
-    without per-stack review.
-
-    Missing metrics mean uncomputed or undefined, never an imputed zero.
-    ``location_in_hunk_rate`` scores the originally cited line before snapping;
-    ``shipped_duplicate_pairs`` counts surviving near-duplicate findings.
-    ``composite_reward`` caches the winning label observation.
-
-    Fix failures and surviving untracked paths retain evidence of partial
-    work; the latter cannot be attributed to an individual parallel group.
-    ``phase_timings`` maps phases to wall seconds and occurrence counts.
-    Optional profile and provenance blocks are omitted on legacy manifests.
-    """
+    """Archive metadata with separate executable, repository, and workflow provenance."""
 
     schema_version: str = MANIFEST_SCHEMA_VERSION
     # Missing recommended.patch means no recommendation when supported; only legacy
@@ -181,83 +160,51 @@ class Manifest:
     archive_path: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serializable dict."""
+        """Project flat fields into the portable manifest's named sections."""
+        def project(*names: str, omit_falsy: bool = False) -> dict[str, Any]:
+            values = {name: getattr(self, name) for name in names}
+            return _omit_falsy(**values) if omit_falsy else values
+
         return {
-            "schema_version": self.schema_version,
-            "recommended_patch_supported": self.recommended_patch_supported,
-            **_omit_falsy(recommended_patch_capture=self.recommended_patch_capture),
-            "session_id": self.session_id,
-            "archived_at": self.archived_at,
-            "status": self.status,
-            "archive_status": self.archive_status,
-            "pipeline_status": self.pipeline_status,
-            **_omit_falsy(
-                profile_schema_version=self.profile_schema_version,
-                profile_name=self.profile_name,
-                profile_source_kind=self.profile_source_kind,
-                profile_digest=self.profile_digest,
+            **project("schema_version", "recommended_patch_supported"),
+            **project("recommended_patch_capture", omit_falsy=True),
+            **project("session_id", "archived_at", "status", "archive_status", "pipeline_status"),
+            **project(
+                "profile_schema_version", "profile_name", "profile_source_kind", "profile_digest",
+                omit_falsy=True,
             ),
-            **_omit_falsy(
-                daydream=self.daydream.to_dict() if self.daydream is not None else None,
-                phase_states=self.phase_states,
-                retry_summary=self.retry_summary,
-            ),
+            **_omit_falsy(daydream=self.daydream.to_dict() if self.daydream is not None else None),
+            **project("phase_states", "retry_summary", omit_falsy=True),
             "run": {
                 "flow": self.run_flow,
-                "skill": self.skill,
-                "model": self.model,
-                "backend": self.backend,
-                **_omit_falsy(
-                    review_backend=self.review_backend,
-                    fix_backend=self.fix_backend,
-                    test_backend=self.test_backend,
-                    per_stack_review_backend=self.per_stack_review_backend,
-                    per_stack_review_model=self.per_stack_review_model,
+                **project("skill", "model", "backend"),
+                **project(
+                    "review_backend", "fix_backend", "test_backend", "per_stack_review_backend",
+                    "per_stack_review_model", omit_falsy=True,
                 ),
-                "review_only": self.review_only,
-                "deep": self.deep,
+                **project("review_only", "deep"),
             },
-            "fix_failures": self.fix_failures,
-            "fix_leftover_untracked": self.fix_leftover_untracked,
-            "fix_quality_gate": self.fix_quality_gate,
-            "git": {
-                "source_path": self.source_path,
-                "remote_url": self.remote_url,
-                "repo_slug": self.repo_slug,
-                "branch": self.branch,
-                "base_branch": self.base_branch,
-                "head_sha": self.head_sha,
-            },
+            **project("fix_failures", "fix_leftover_untracked", "fix_quality_gate"),
+            "git": project("source_path", "remote_url", "repo_slug", "branch", "base_branch", "head_sha"),
             "code_context": {
-                "head_sha": self.head_sha,
-                "base_branch": self.base_branch,
-                "branch": self.branch,
-                "base_sha": self.base_sha,
+                **project("head_sha", "base_branch", "branch", "base_sha"),
                 "changed_files": list(self.changed_files),
             },
-            "pr": {
-                "number": self.pr_number,
-                "repo": self.pr_repo,
-            },
+            "pr": {"number": self.pr_number, "repo": self.pr_repo},
             "metrics": {
-                "total_cost_usd": self.total_cost_usd,
-                "total_prompt_tokens": self.total_prompt_tokens,
-                "total_completion_tokens": self.total_completion_tokens,
-                "total_cached_tokens": self.total_cached_tokens,
-                "wall_clock_seconds": self.wall_clock_seconds,
-                "phase_timings": self.phase_timings,
-                **_omit_falsy(timing_coverage=self.timing_coverage),
-                "total_findings": self.total_findings,
-                "cost_per_finding_usd": self.cost_per_finding_usd,
-                "erosion": self.erosion,
-                "verbosity": self.verbosity,
-                "location_in_hunk_rate": self.location_in_hunk_rate,
-                "shipped_duplicate_pairs": self.shipped_duplicate_pairs,
+                **project(
+                    "total_cost_usd", "total_prompt_tokens", "total_completion_tokens", "total_cached_tokens",
+                    "wall_clock_seconds", "phase_timings",
+                ),
+                **project("timing_coverage", omit_falsy=True),
+                **project(
+                    "total_findings", "cost_per_finding_usd", "erosion", "verbosity",
+                    "location_in_hunk_rate", "shipped_duplicate_pairs",
+                ),
             },
             "outcome": {
                 "labels": json.loads(self.outcome_labels),
-                "labeled_at": self.labeled_at,
-                "composite_reward": self.composite_reward,
+                **project("labeled_at", "composite_reward"),
             },
             "archive_path": self.archive_path,
         }

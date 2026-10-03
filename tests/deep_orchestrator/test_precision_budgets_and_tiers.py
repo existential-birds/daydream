@@ -287,7 +287,8 @@ async def test_run_caps_runaway_file_group_serial_fixes(
                 pr_number=no_ci_remote.pr_number, pr_repo=no_ci_remote.base_repository,
             )
         )
-    assert exit_code == 0
+    ci_verdict = multi_stack_target / ".daydream" / "deep" / "remote-ci-verdict.json"
+    assert exit_code == 0, ci_verdict.read_text() if ci_verdict.is_file() else "remote CI verdict was not written"
     assert retained_marker in (multi_stack_target / "api.py").read_text()
     assert stub.test_suite_calls >= 1
     head_after = _git(multi_stack_target, "rev-parse", "HEAD")

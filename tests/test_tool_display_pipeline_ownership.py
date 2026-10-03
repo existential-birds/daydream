@@ -17,12 +17,14 @@ _PACKAGE_ROOT = _REPO_ROOT / "daydream"
 _FORBIDDEN_NAME = "display_shell_command"
 _DISPLAY_OWNER_MODULE = "daydream/ui/tools.py"
 _DISPLAY_OWNER_FUNCTION = "_redacted_bash_command"
-_BACKEND_MODULE = "daydream/backends/codex.py"
+_BACKEND_MODULE = "daydream/backends/_codex_events.py"
+_BACKEND_FACADE = "daydream/backends/codex.py"
 
 #: The only modules permitted to reference the Codex display-variant strip step.
 _PERMITTED_CALLERS = frozenset({
         "daydream/ui/tools.py",  # the display-pipeline owner: _redacted_bash_command
-        "daydream/backends/codex.py",  # the strip definition + strip-only supervisor entry point
+        "daydream/backends/codex.py",  # compatibility re-export
+        "daydream/backends/_codex_events.py",  # strip definition + supervisor entry point
     }
 )
 
@@ -129,7 +131,15 @@ def _command_pipeline_violations(source: str, module: str) -> list[int]:
     if module == _BACKEND_MODULE:
         strip_lines: list[int] = []
     else:
-        strip_lines = [line for line in _strip_reference_lines(source) if not within_owner(line)]
+        reexports = {
+            node.lineno for node in tree.body
+            if module == _BACKEND_FACADE and isinstance(node, ast.ImportFrom)
+            and node.module == "daydream.backends._codex_events"
+        }
+        strip_lines = [
+            line for line in _strip_reference_lines(source)
+            if not within_owner(line) and line not in reexports
+        ]
         strip_lines += [node.lineno for node in ast.walk(tree)
             if isinstance(node, ast.Name)
             and node.id == "_CD_PREFIX_RE"
@@ -215,3 +225,12 @@ def test_unrelated_redaction_and_strip_only_supervisor_are_outside_guard() -> No
         "    return supervisor_shell_command(command)\n"
     )
     assert _command_pipeline_violations(source, "daydream/agent.py") == []
+
+
+def test_backend_facade_allows_only_strip_reexport() -> None:
+    source = (
+        "from daydream.backends._codex_events import display_shell_command\n"
+        "def render(command):\n"
+        "    return display_shell_command(command)\n"
+    )
+    assert _command_pipeline_violations(source, _BACKEND_FACADE) == [3]

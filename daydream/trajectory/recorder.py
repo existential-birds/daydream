@@ -1,9 +1,6 @@
-"""ATIF v1.7 run recorder: model construction, scope ownership, and durable writes.
-
-runner binds one recorder through a ContextVar; agent opens an Invocation per
-call. Invocations buffer backend events into steps and flush on scope exit.
-Child recorders support parallel tasks; persistence redacts sensitive values.
-Snapshots, timing, and generation billing live in their own modules."""
+"""ATIF v1.7 persistence and ContextVar scope ownership. Invocation buffers events; lifecycle, timing,
+and generation billing have separate owners.
+"""
 
 from __future__ import annotations
 
@@ -221,9 +218,7 @@ class _SignalFlushRegistry:
         )
 
 
-# Independently nested roots temporarily select their own run registry. The
-# registries themselves hold sibling membership; sibling entry order never
-# chooses which recorder a signal flushes.
+# Nested roots own separate registries; sibling entry order never determines signal flush ownership.
 _ACTIVE_SIGNAL_RUNS: list[_SignalFlushRegistry] = []
 
 
@@ -235,16 +230,12 @@ def flush_active_signal_recorders() -> None:
 
 @dataclass
 class TrajectoryRecorder:
-    """Own one run's ATIF trajectory, child recorders, and durable snapshots.
+    """Own ATIF steps, child recorders, and redacted durable snapshots.
 
-    An async context binds the recorder, writes on exit, and restores the parent
-    context. Steps receive monotonic IDs and are serialized in ID order. Model
-    names begin as backend labels and upgrade when native metadata arrives.
-
-    The caller supplies the session identity, output path, and resolved backend
-    labels. Non-empty review/fix/test labels are persisted in trajectory extra;
-    flows that omit those stages leave the corresponding labels empty. Sensitive
-    values are redacted before persistence, with explicit failure markers."""
+    The async scope restores its parent and writes on exit. Steps have ordered monotonic
+    IDs; backend labels upgrade to native models. Callers supply identities, paths, and
+    review/fix/test labels; omitted stages retain empty labels.
+    """
 
     path: Path
     run_flow: DaydreamRunFlow
@@ -271,21 +262,14 @@ class TrajectoryRecorder:
     _final_totals: dict[str, Any] = field(default_factory=lambda: _INITIAL_TOTALS.copy())
     _folded_fork_totals: bool = False
     _previous_token: Any = None
-    # Active invocations whose in-flight steps haven't been flushed yet.
-    # write_partial reads this so SIGINT mid-run_agent() captures partial
-    # work rather than dropping it.
+    # Active buffers preserve work in partial snapshots during interrupted agent calls.
     _active_invocations: list[Invocation] = field(default_factory=list)
-    # Explicit phase-boundary events (phase_start/phase_end) emitted by
-    # phase_scope/host_phase_scope. Serialized into
-    # Trajectory.extra["phase_events"] when non-empty (issue #203).
+    # Identified phase boundaries serialize into extra.phase_events when present.
     _phase_events: list[PhaseEvent] = field(default_factory=list)
     # Completed invocation timing summaries registered at scope exit.
     # Serialized into Trajectory.extra["subtrajectories"] when non-empty.
     _subtrajectories: list[dict[str, Any]] = field(default_factory=list)
-    # Resolved review-profile provenance (issue #885, R12): schema version,
-    # name, source kind, and canonical digest of the profile this run executed
-    # under, recorded via ``record_profile`` by the runner composition root.
-    # Serialized into Trajectory.extra["profile_*"] when set (new runs).
+    # Runner supplies executed profile schema/name/source/digest; persist profile_* only when set.
     _profile: dict[str, Any] | None = None
     _aborted: bool = False
     on_write: TrajectoryWriteCallback | None = None
@@ -406,9 +390,7 @@ class TrajectoryRecorder:
         }
         if elapsed_s is not None:
             metadata["elapsed_s"] = elapsed_s
-        self._emit_phase_event(
-            DaydreamPhase.FIX, "file_group_budget_exceeded", **metadata
-        )
+        self._emit_phase_event(DaydreamPhase.FIX, "file_group_budget_exceeded", **metadata)
 
     def emit_agent_budget_stop(
         self,
@@ -425,11 +407,10 @@ class TrajectoryRecorder:
         retry_recovery_spent_s: float | None = None,
         partial_edit_handling: str | None = None,
     ) -> None:
-        """Record an invocation stop once, using durations instead of monotonic deadlines.
+        """Record one stop using durations, excluding initial useful work from retry spend.
 
-        Retry stops carry retry-only attempts, backend time, backoff, reason, circuit
-        state, and recovery spend. Initial useful work is excluded. Partial edits are
-        kept for an interrupted attempt and discarded when stopping before dispatch."""
+        Retain interrupted-attempt edits; discard partial edits when stopping before dispatch.
+        """
         self._emit_phase_event(
             phase,
             "agent_budget_stop",
@@ -592,10 +573,7 @@ class TrajectoryRecorder:
         descriptor: str,
         identity: ForkIdentity | None = None,
     ) -> Path:
-        """Keep sibling files in the parent run directory.
-
-        Legacy forks use <slug>.json; identified forks append a unique identity digest
-        to prevent repeated semantic descriptors overwriting each other."""
+        """Keep siblings in the parent run; identified forks append a digest to prevent slug collisions."""
         slug = _safe_descriptor(descriptor)
         if identity is not None:
             identity_digest = hashlib.sha256(identity.fork_id.encode("utf-8")).hexdigest()
@@ -677,9 +655,7 @@ class TrajectoryRecorder:
         version = daydream.__version__
         final_metrics_extra: dict[str, Any] | None = None
         if self._folded_fork_totals:
-            # Token and cost totals include successful fork trajectories, but
-            # total_steps remains scoped to this document's own step list.
-            # Cached tokens remain a subset of prompt tokens, not an addition.
+            # Successful forks contribute usage, but steps stay document-local and cache tokens stay a prompt subset.
             final_metrics_extra = {
                 "daydream_metric_scope": "whole_run_including_forks",
                 "total_steps_scope": "local_trajectory",
@@ -701,12 +677,7 @@ class TrajectoryRecorder:
         elif self._run_ended_at:
             extra["run_ended_at"] = self._run_ended_at
         if self.backend_name:
-            # Backend identity mirrors archive/manifest.py's record: a
-            # representative ``backend`` (resolved via the phase that governs the
-            # deep flow's review fan-out) plus per-phase keys, each serialized
-            # only when set — a flow that never runs a phase (improve never runs
-            # fix/test) omits that phase's key entirely. Empty ``backend_name``
-            # (direct construction outside the factory) serializes no backend keys.
+            # Persist representative and set per-phase backend labels like the manifest; omitted phases have no keys.
             extra["backend"] = self.backend_name
             if self.review_backend_name:
                 extra["review_backend"] = self.review_backend_name
@@ -726,10 +697,7 @@ class TrajectoryRecorder:
             summaries = redact_value([dict(s) for s in self._subtrajectories])
             if isinstance(summaries, list):
                 extra["subtrajectories"] = summaries
-        # trajectory_id is the per-document identifier (distinct from the
-        # run-scoped session_id): the root uses session_id directly; a fork
-        # qualifies it with its descriptor so sibling documents stay unique
-        # within the run (ATIF v1.7).
+        # Document IDs qualify root session identity with fork descriptors, keeping sibling trajectories unique.
         return Trajectory(
             schema_version="ATIF-v1.7",
             session_id=self.session_id,
@@ -796,11 +764,8 @@ class TrajectoryRecorder:
         if not steps:
             if self.parent is not None or not allow_empty_root:
                 return None
-            # ATIF requires at least one Step. An early signal can arrive while
-            # child agents are already running -- or a whole run can end host-only --
-            # before the root emitted a dispatch or agent Step. Represent the real
-            # host event as a system Step in the immutable document only; do not
-            # mutate the live recorder or fabricate an agent invocation.
+            # ATIF needs a step: early signals/host-only runs get an immutable system event, never a
+            # fabricated invocation or live mutation.
             partial = status == "partial"
             steps = [
                 Step(
@@ -836,10 +801,7 @@ class TrajectoryRecorder:
         )
 
     def _snapshot_in_flight_steps(self) -> list[Step]:
-        """Merge flushed and active-invocation steps by step_id without mutation.
-
-        An active invocation may predate a completed one; partial snapshots must retain
-        ATIF’s sequential-id invariant just as final writes do."""
+        """Merge active/flushed steps by ID without mutation, preserving sequential ATIF IDs."""
         if not self._active_invocations:
             return list(self.steps)
         snapshot = list(self.steps)

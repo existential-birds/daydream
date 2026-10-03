@@ -12,9 +12,8 @@ import pytest
 from daydream.archive.index import _get_connection, label_observation_history
 from daydream.training.adjudication.canonical import AnnotationDriftError, run_canonical_harvest
 from daydream.training.adjudication.materialize import run_materialize
-from daydream.training.adjudication.snapshot import record_evidence_digest
+from daydream.training.adjudication.snapshot import FindingRecord, record_evidence_digest
 from daydream.training.corpus_projection.identity import record_id
-from daydream.training.corpus_projection.projector import project_findings
 from tests.harness.adjudication import make_hydrated_sqlite_index, seed_index_dispositions, write_sessions_jsonl
 
 _PIN = {"curation_id": "cur-1", "sanitized_hub_commit": "a" * 40,
@@ -415,7 +414,7 @@ def test_conflicted_session_never_projects_gold(tmp_path: Path) -> None:
     session = {"session_id": "s1", "trajectory_id": "s1", "segment_id": "s1",
         "resolutions": [row for row in rows if row.get("session_id") == "s1"],
     }
-    records = project_findings(session)
+    records = [finding.project() for finding in FindingRecord.from_session(session)]
     assert records  # the finding is still projected -- provenance preserved
     assert all(r["tier"] != "gold" for r in records)
     assert all(r["outcome_label"] is None for r in records)

@@ -393,6 +393,9 @@ def test_run_verifier_writes_reward_and_details_atomically(sr_module: Any, tmp_p
     details = json.loads((out_dir / "reward-details.json").read_text())
     assert details["provider"] == "anthropic" and details["model"] == "m"
     assert "request_counts" in details and "errors" in details
+    assert len(details["matches"]) == rj["tp"] == 2
+    assert len(details["unmatched_gold"]) == rj["fn"] == 0
+    assert len(details["unmatched_candidates"]) == rj["fp"] == 0
     assert "src/" not in json.dumps(details)  # never source/diffs
     assert reward.location_present == 1 and reward.location_exact == 2  # gold == candidate locations
     assert reward.severity_present == 1 and reward.severity_exact == 2

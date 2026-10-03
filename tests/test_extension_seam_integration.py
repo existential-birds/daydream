@@ -11,6 +11,8 @@ from typing import Any, cast
 
 import pytest
 
+import daydream.reviews.identity as review_identity
+import daydream.reviews.rendering as review_rendering
 from daydream import git_ops, pr_review, runner
 from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolStartEvent
 from daydream.config_file import load_file_config
@@ -157,8 +159,8 @@ def register(r):
 def _post_context(*, dd: Path, items_file: Path) -> FlowContext:
     """Build the smallest context needed by the post-review step."""
     registry = Registry()
-    registry.override_renderer("finding", pr_review.default_render_finding)
-    registry.override_renderer("summary", pr_review.default_render_summary)
+    registry.override_renderer("finding", review_rendering.default_render_finding)
+    registry.override_renderer("summary", review_rendering.default_render_summary)
     coverage = review_coverage()
     for scope in coverage.scopes:
         coverage.record_scope(scope, "complete")
@@ -780,7 +782,7 @@ def test_ext_dir_renderer_override_reaches_pr_review(tmp_path: Path, monkeypatch
         )
     finally:
         set_registry(prev)
-    assert "EXT::inline::T" in body and pr_review.DAYDREAM_FOOTER in body
+    assert "EXT::inline::T" in body and review_identity.DAYDREAM_FOOTER in body
 
 def test_existing_extension_context_construction_keeps_auth_separate(
     tmp_path: Path, make_work: Callable[..., WorkContext],

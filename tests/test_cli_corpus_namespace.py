@@ -11,7 +11,7 @@ import pytest
 
 from daydream.commands import corpus as cli_corpus
 from daydream.training.adjudication import cli as adjudication_cli
-from daydream.training.adjudication.publish import publish_final_annotation_bundle
+from daydream.training.adjudication.publish import FinalAnnotationBundle, publish_final_annotation_bundle
 from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
 from tests.harness.adjudication import write_checkpoint_inputs
 from tests.harness.scripts import cli_main
@@ -27,17 +27,17 @@ from tests.test_training_adjudication_publish import _final_bundle
 ])
 def test_corpus_harvest_exit_code_maps_summary(monkeypatch: pytest.MonkeyPatch, summary: dict[str, Any], expected: int
 ) -> None:
-    async def _fake_run_harvest(_config: Any, **_: Any) -> dict[str, Any]:
+    async def _fake_run_harvest(_pass: Any, **_: Any) -> dict[str, Any]:
         return summary
-    monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
+    monkeypatch.setattr("daydream.training.harvest.HarvestPass.run", _fake_run_harvest)
     assert cli_main(["corpus", "harvest", "--dry-run"]) == expected
 
 def test_corpus_harvest_routes(monkeypatch: pytest.MonkeyPatch) -> None:
     called = {}
-    async def _fake_run_harvest(_config: Any, **_: Any) -> dict[str, Any]:
+    async def _fake_run_harvest(_pass: Any, **_: Any) -> dict[str, Any]:
         called["hit"] = True
         return {"errors": 0, "annotated": 0, "skipped": 0, "total": 0}
-    monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
+    monkeypatch.setattr("daydream.training.harvest.HarvestPass.run", _fake_run_harvest)
     assert cli_main(["corpus", "harvest", "--dry-run"]) == 0
     assert called["hit"]
 
@@ -81,7 +81,9 @@ def test_adjudicate_publication_commands_run_through_main(tmp_path: Path, monkey
     assert (destination / "preview-manifest.json").read_bytes() == manifest.read_bytes()
 
     bundle, curation_id = _final_bundle(tmp_path)
-    published = publish_final_annotation_bundle(hub, bundle)
+    published = publish_final_annotation_bundle(
+        hub, FinalAnnotationBundle.read(bundle), staging_parent=bundle.parent.resolve(),
+    )
     final_destination = tmp_path / "downloaded-final"
     assert cli_main(["corpus", "adjudicate", "download-final", "--curation-id", curation_id,
         "--snapshot-id", published["final_snapshot_id"], "--revision", published["hub_commit_sha"],

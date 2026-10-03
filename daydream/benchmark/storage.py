@@ -35,11 +35,7 @@ class LockContentionError(WorkspaceError):
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
-    """A :class:`yaml.SafeLoader` that rejects documents with duplicate keys.
-
-    Duplicate mapping keys in a manifest or case file are almost always a
-    mistake (or a smuggling attempt) — they are treated as corruption.
-    """
+    """A :class:`yaml.SafeLoader` that rejects documents with duplicate keys."""
 
 
 def _construct_mapping(loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False) -> dict[str, Any]:
@@ -60,10 +56,7 @@ _UniqueKeyLoader.add_constructor(
 
 
 def load_yaml_strict(path: Path) -> dict[str, Any]:
-    """Load a mapping or raise ``WorkspaceCorrupt`` for unreadable, invalid, or empty YAML.
-
-    Duplicate keys, non-mapping roots, and unsafe tags are rejected.
-    """
+    """Load a mapping or raise ``WorkspaceCorrupt`` for unreadable, invalid, or empty YAML."""
     try:
         data = yaml.load(Path(path).read_bytes(), Loader=_UniqueKeyLoader)
     except WorkspaceCorrupt:
@@ -91,12 +84,7 @@ def load_json_strict(path: Path) -> dict[str, Any]:
 
 
 def _atomic_write(path: Path, content: bytes, *, mode: int) -> None:
-    """Atomically write ``content`` to ``path`` via the shared primitive.
-
-    Delegates to :func:`daydream.json_utils.atomic_write_bytes` with the same
-    hardening this module always had (strict final file mode, private 0700
-    parent chains, file fsync before the rename).
-    """
+    """Atomically write ``content`` to ``path`` via the shared primitive."""
     ensure_private_dir(path.parent)
     atomic_write_bytes(path, content, mode=mode, fsync=True)
 
@@ -191,19 +179,10 @@ class WorkspaceLock:
         return False
 
 
-# Transaction journal (prepared | committing | complete) + startup recovery
-#
-# A transaction persists a same-filesystem journal under
-# ``<root>/transactions/<op_id>/journal.json`` describing the exact ordered
-# replacement of a set of workspace files. ``benchmark.yaml`` is always
-# replaced last. On startup, ``recover_startup`` rolls a ``prepared`` journal
-# forward-away (targets were never touched), rolls a ``committing`` journal
-# back in reverse from backups/absent-markers, and verifies + cleans a
-# ``complete`` journal. Because the journal lives on the same filesystem as
-# the targets and every phase is fsynced before the next begins, a crash at
-# any boundary restores either the whole before-state or the whole after-state
-# — never a checksum-drifted partial. Recovery is mode-safe: verified targets
-# keep ``0600``, and scaffold dirs kept by ``_remove_created_dirs`` stay ``0700``.
+# Same-filesystem journal: replacements are ordered, with benchmark.yaml last.
+# Recovery discards prepared transactions, restores committing transactions in reverse,
+# and verifies complete transactions. Fsync at each boundary preserves whole before/
+# after states; recovered files remain 0600 and retained scaffold directories 0700.
 
 
 @dataclass
@@ -230,8 +209,6 @@ class Transaction:
         self._dir = self._root / "transactions" / self._op_id
         ensure_private_dir(self._dir)
         self._states: dict[str, _TargetState] = {}
-        self._order: list[str] = []
-        self._replacement_order: list[str] = []
         self._applied_count = 0
         self._state: str = "open"
         self._created_dirs: list[str] = []
@@ -243,8 +220,7 @@ class Transaction:
 
     def _build_document(self) -> dict[str, Any]:
         targets = []
-        for rel in self._order:
-            st = self._states[rel]
+        for rel, st in self._states.items():
             targets.append(
                 {
                     "rel": rel,
@@ -260,7 +236,7 @@ class Transaction:
             "op_id": self._op_id,
             "kind": self._kind,
             "state": self._state,
-            "replacement_order": self._replacement_order,
+            "replacement_order": self._replacement_order(),
             "applied_count": self._applied_count,
             "created_dirs": self._created_dirs,
             "targets": targets,
@@ -282,18 +258,13 @@ class Transaction:
             self._created_dirs.append(rel)
 
     def stage(self, target_rel: str | Path, content: bytes) -> None:
-        """Stage ``content`` for an atomic replace of ``target_rel``.
-
-        Writes a staged file + a backup of any prior target under
-        ``transactions/<op_id>/`` and records before/after digests. The real
-        target is not touched here.
-        """
+        """Stage ``content`` for an atomic replace of ``target_rel``."""
         rel = _resolve_target(self._root, target_rel)
         if rel in self._states:
             raise WorkspaceCorrupt(f"{self._root}: duplicate staged target {rel!r}")
         target = self._root / rel
         ensure_private_dir(target.parent)
-        index = len(self._order)
+        index = len(self._states)
         stage_path = self._dir / f"stage-{index:04d}.bin"
         _atomic_write(stage_path, content, mode=0o600)
         after_digest = sha256_file(stage_path)
@@ -316,12 +287,6 @@ class Transaction:
             before_digest=before_digest,
             after_digest=after_digest,
         )
-        self._order.append(rel)
-        # benchmark.yaml is always last in the ordered replacement list.
-        if rel == "benchmark.yaml":
-            self._replacement_order = self._order.copy()
-        else:
-            self._replacement_order = [r for r in self._replacement_order if r != "benchmark.yaml"] + [rel]
 
     def retire(self, target_rel: str | Path, *, expected_sha256: str) -> None:
         """Stage exact-digest file retirement with a backup. Interrupted commits restore
@@ -341,7 +306,7 @@ class Transaction:
                 f"{self._root}: retirement target {rel!r} digest mismatch "
                 f"(expected {expected_sha256}, got {actual})"
             )
-        index = len(self._order)
+        index = len(self._states)
         backup_path = self._dir / f"backup-{index:04d}.bin"
         shutil.copyfile(target, backup_path)
         _fsync_file(backup_path)
@@ -354,10 +319,10 @@ class Transaction:
             before_digest=actual,
             after_digest=None,
         )
-        self._order.append(rel)
-        self._replacement_order = [
-            r for r in self._replacement_order if r != "benchmark.yaml"
-        ] + [rel]
+
+    def _replacement_order(self) -> list[str]:
+        """Derive stable journal order from the target owner; publish its manifest last."""
+        return sorted(self._states, key=lambda rel: rel == "benchmark.yaml")
 
     def prepare(self) -> None:
         """Persist the ``prepared`` journal (fsync'd) for startup recovery."""
@@ -367,12 +332,7 @@ class Transaction:
         _fsync_file(self._journal_path())
 
     def _begin_committing(self) -> None:
-        """Transition the journal to ``committing`` with nothing applied.
-
-        A transaction enters ``committing`` by rewriting the journal with
-        ``state == committing`` and ``applied_count == 0`` before any target
-        is replaced.
-        """
+        """Transition the journal to ``committing`` with nothing applied."""
         self._state = "committing"
         self._applied_count = 0
         self._write_journal()
@@ -391,7 +351,7 @@ class Transaction:
         """Replace in declared order, fsyncing each file and parent before applying the
         next target.
         """
-        for rel in self._replacement_order:
+        for rel in self._replacement_order():
             self._apply_replacement(rel)
 
     def _apply_replacement(self, rel: str) -> None:
@@ -420,34 +380,14 @@ class Transaction:
         self._state = "complete"
         self._write_journal()
         _fsync_file(self._journal_path())
-        for st in self._states.values():
-            if st.operation == "retire":
-                if (self._root / st.rel).exists():
-                    raise WorkspaceCorrupt(
-                        f"{self._root}: commit verify retired target {st.rel} still exists"
-                    )
-                continue
-            if st.after_digest is None:
-                raise WorkspaceCorrupt(
-                    f"{self._root}: commit verify replacement {st.rel} lacks after digest"
-                )
-            actual = sha256_file(self._root / st.rel)
-            if actual != st.after_digest:
-                raise WorkspaceCorrupt(
-                    f"{self._root}: commit verify {st.rel} expected {st.after_digest} got {actual}"
-                )
+        _verify_complete(self._root, self._dir, self._build_document(), retire=False)
 
     def commit(self) -> None:
-        """Run the full pipeline to ``complete`` and remove the journal."""
+        """Run the full pipeline; normal and recovered completion share verification."""
         self.prepare()
         self.begin_commit()
         self._complete_commit()
-        self._cleanup()
-
-    def _cleanup(self) -> None:
-        """Remove the journal + staging dir, leaving an empty ``transactions/`` root."""
-        if self._dir.exists():
-            shutil.rmtree(self._dir, ignore_errors=True)
+        shutil.rmtree(self._dir, ignore_errors=True)
 
     def __enter__(self) -> "Transaction":
         return self
@@ -715,15 +655,6 @@ def _targets_from_doc(doc: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _rollback_prepared(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
     # Staged files only — no real target was replaced, so nothing to restore.
-    for t in _targets_from_doc(doc):
-        stage = t.get("stage")
-        if stage:
-            with suppress(OSError):
-                (op_dir / stage).unlink()
-        backup = t.get("backup")
-        if backup:
-            with suppress(OSError):
-                (op_dir / backup).unlink()
     if op_dir.exists():
         shutil.rmtree(op_dir, ignore_errors=True)
     _remove_created_dirs(root, doc)
@@ -757,13 +688,8 @@ def _rollback_committing(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
     _remove_created_dirs(root, doc)
 
 
-
 def _remove_created_dirs(root: Path, doc: dict[str, Any]) -> None:
-    """Remove scaffold subdirs created by an interrupted transaction.
-
-    Only empty directories are removed, deepest first — a subdir that already
-    holds real user content is preserved for the caller to adjudicate.
-    """
+    """Remove scaffold subdirs created by an interrupted transaction."""
     created = doc.get("created_dirs") or []
     for rel in sorted(created, key=len, reverse=True):
         rel = _resolve_target(root, rel)
@@ -771,7 +697,7 @@ def _remove_created_dirs(root: Path, doc: dict[str, Any]) -> None:
             (root / rel).rmdir()
 
 
-def _verify_complete(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
+def _verify_complete(root: Path, op_dir: Path, doc: dict[str, Any], *, retire: bool = True) -> None:
     for t in _targets_from_doc(doc):
         rel = _resolve_target(root, t["rel"])
         target = root / rel
@@ -790,7 +716,7 @@ def _verify_complete(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
             )
         # Recovery never widens a private target's mode, even if it drifted.
         os.chmod(target, 0o600)
-    if op_dir.exists():
+    if retire and op_dir.exists():
         shutil.rmtree(op_dir, ignore_errors=True)
 
 

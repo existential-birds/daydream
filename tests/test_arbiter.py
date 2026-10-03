@@ -7,10 +7,14 @@ spellings from creating a false contest.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from typing import Any
+
 import pytest
 
 from daydream.deep.arbiter import select_arbiter_targets, select_suppression_targets
 from daydream.deep.records import stack_name_from_records_source
+from daydream.review_profile import Arbitration, Suppression
 
 
 def _rec(file: str, line: int, severity: str, uid: str | None = None) -> dict[str, object]:
@@ -29,10 +33,13 @@ def _rec_conf(file: str, line: int, severity: str, confidence: str) -> dict[str,
     rec["confidence"] = confidence
     return rec
 
-def _selected(records: list[dict[str, object]], scopes: list[str], **options: object) -> list[int]:
+def _selected(
+    records: list[dict[str, object]], scopes: list[str], *,
+    policy: Arbitration | None = None, contested_only: Iterable[int] = (),
+) -> list[int]:
     for ordinal, (record, scope) in enumerate(zip(records, scopes, strict=True), 1):
         record.setdefault("uid", f"{stack_name_from_records_source(scope)}:{ordinal}")
-    return select_arbiter_targets(records, **options)  # type: ignore[arg-type]
+    return select_arbiter_targets(records, policy or Arbitration(), contested_only=contested_only)
 
 
 def test_select_arbiter_targets_honors_min_severity_knob() -> None:
@@ -43,7 +50,7 @@ def test_select_arbiter_targets_honors_min_severity_knob() -> None:
     # Default unchanged: only the high record is selected.
     assert _selected(records, sources) == [1]
     # Knob lowered: medium is now arbitrated too.
-    assert _selected(records, sources, min_severity="medium") == [0, 1]
+    assert _selected(records, sources, policy=Arbitration(min_severity="medium")) == [0, 1]
 
 def test_mixed_severity_multi_stack_collision_selects_high_and_contested() -> None:
     # Index map:
@@ -87,7 +94,7 @@ def test_missing_severity_only_selectable_via_contested() -> None:
 
 def test_missing_scope_uid_raises() -> None:
     with pytest.raises(ValueError, match="scope UIDs"):
-        select_arbiter_targets([_rec("a.py", 1, "high")])
+        select_arbiter_targets([_rec("a.py", 1, "high")], Arbitration())
 
 
 # Suppression selects borderline severity/confidence outside arbiter exclusions.
@@ -100,7 +107,7 @@ def test_suppression_selects_low_confidence_and_low_severity_uncontested() -> No
     records = [_rec_conf("a.py", 1, "low", "MEDIUM"), _rec_conf("b.py", 2, "medium", "LOW"),
         _rec_conf("c.py", 3, "medium", "MEDIUM"),
     ]
-    assert select_suppression_targets(records) == [0, 1]
+    assert select_suppression_targets(records, Suppression()) == [0, 1]
 
 def test_suppression_excludes_arbiter_targets() -> None:
     # A high finding + a LOW-confidence uncontested finding. The arbiter takes the
@@ -109,7 +116,7 @@ def test_suppression_excludes_arbiter_targets() -> None:
     sources = ["python", "react"]
     arbiter_targets = _selected(records, sources)
     assert arbiter_targets == [0]
-    assert select_suppression_targets(records, arbiter_targets) == [1]
+    assert select_suppression_targets(records, Suppression(), arbiter_targets) == [1]
 
 def test_suppression_excludes_contested_low_finding() -> None:
     # Contested low-severity records belong to arbitration, not suppression.
@@ -121,25 +128,25 @@ def test_suppression_excludes_contested_low_finding() -> None:
     sources = ["python", "react", "go"]
     arbiter_targets = _selected(records, sources)
     assert arbiter_targets == [0, 1]
-    assert select_suppression_targets(records, arbiter_targets) == [2]
+    assert select_suppression_targets(records, Suppression(), arbiter_targets) == [2]
 
 def test_suppression_selects_nothing_when_all_medium_uncontested() -> None:
     records = [_rec_conf("a.py", 1, "medium", "MEDIUM"), _rec_conf("b.py", 2, "medium", "HIGH")]
-    assert select_suppression_targets(records) == []
+    assert select_suppression_targets(records, Suppression()) == []
 
 def test_suppression_default_exclude_is_empty() -> None:
     # Called without an exclude set, every borderline record is selected.
     records = [_rec_conf("a.py", 1, "low", "LOW")]
-    assert select_suppression_targets(records) == [0]
+    assert select_suppression_targets(records, Suppression()) == [0]
 
 def test_select_suppression_targets_honors_severity_classes_knob() -> None:
     records = [{"severity": "low", "file": "a.py", "line": 1}, {"severity": "medium", "file": "b.py", "line": 2},
         {"severity": "low", "confidence": "LOW", "file": "c.py", "line": 3},
     ]
     # Default ("low",): low-severity records selected; medium not; LOW-confidence still selected.
-    assert select_suppression_targets(records) == [0, 2]
+    assert select_suppression_targets(records, Suppression()) == [0, 2]
     # Knob widened to include medium.
-    assert select_suppression_targets(records, severity_classes=("low", "medium")) == [0, 1, 2]
+    assert select_suppression_targets(records, Suppression(severity_classes=("low", "medium"))) == [0, 1, 2]
 
 def test_select_suppression_targets_honors_confidence_classes_knob() -> None:
     """The profile's ``Suppression.confidence_classes`` governs the confidence branch live, not a hardcoded LOW
@@ -150,18 +157,19 @@ def test_select_suppression_targets_honors_confidence_classes_knob() -> None:
         {"severity": "medium", "confidence": "HIGH", "file": "c.py", "line": 3},
     ]
     # Default ("LOW",): LOW-confidence selected; MEDIUM- and HIGH-confidence not.
-    assert select_suppression_targets(records) == [0]
+    assert select_suppression_targets(records, Suppression()) == [0]
     # Widened to include MEDIUM: now selects LOW- and MEDIUM-confidence.
-    assert select_suppression_targets(records, confidence_classes=("LOW", "MEDIUM")) == [0, 1]
+    assert select_suppression_targets(records, Suppression(confidence_classes=("LOW", "MEDIUM"))) == [0, 1]
     # Narrowed to HIGH (or any other non-LOW selection) must NOT silently fall
     # back to the old LOW-only branch -- the knob is live in both directions.
-    assert select_suppression_targets(records, confidence_classes=("HIGH",)) == [2]
+    assert select_suppression_targets(records, Suppression(confidence_classes=("HIGH",))) == [2]
 
 def test_suppression_rejects_unknown_confidence_class() -> None:
 
     records = [_rec_conf("a.py", 1, "low", "LOW")]
     with pytest.raises(ValueError):
-        select_suppression_targets(records, confidence_classes=("LOW", "GUESSED"))
+        invalid_input: dict[str, Any] = {"confidence_classes": ("LOW", "GUESSED")}
+        select_suppression_targets(records, Suppression(**invalid_input))
 
 def test_contested_only_records_skip_the_severity_branch() -> None:
     """Structural records marked contested_only require a contest even at high severity."""
@@ -208,10 +216,10 @@ def test_select_arbiter_targets_honors_contested_location_knob() -> None:
     # Default on: the medium finding is contested with the high one and is selected.
     assert _selected(records, sources) == [0, 1]
     # Knob off: only the severity branch selects; the contested medium drops out.
-    assert _selected(records, sources, contested_location=False) == [0]
+    assert _selected(records, sources, policy=Arbitration(contested_location=False)) == [0]
     # Severity branch still fully live when the contested branch is disabled:
     # lowering min_severity to medium pulls the medium finding back in.
-    assert _selected(records, sources, min_severity="medium", contested_location=False) == [0, 1]
+    assert _selected(records, sources, policy=Arbitration(min_severity="medium", contested_location=False)) == [0, 1]
 
 
 # Stack identity comes solely from the host UID; fixture labels cannot change it.
@@ -233,9 +241,9 @@ def test_uid_less_contests_are_rejected() -> None:
     for records in ([_rec("api.py", 10, "medium"), _rec("api.py", 10, "low")], []):
         if records:
             with pytest.raises(ValueError, match="scope UIDs"):
-                select_arbiter_targets(records)
+                select_arbiter_targets(records, Arbitration())
         else:
-            assert select_arbiter_targets(records) == []
+            assert select_arbiter_targets(records, Arbitration()) == []
 
 
 def test_uid_outranks_the_source_tag() -> None:

@@ -1,213 +1,123 @@
 # Contributing to Daydream
 
-Thanks for contributing! This guide walks you from a fresh clone to a signed,
-gate-green pull request: prerequisites, one-time setup, the commands that make
-up the local quality gate, and the conventions reviewers will hold your change
-to. Daydream is developed with coding agents in the loop, so
-[CLAUDE.md](CLAUDE.md) is the agent-facing counterpart of this document — it
-carries the architecture and testing rules the agent must follow. This guide
-links to it rather than duplicating it: if you are changing behavior that
-CLAUDE.md describes, update both.
+This guide covers setup and contribution checks. [CLAUDE.md](CLAUDE.md) owns the
+architecture and behavior contracts; update it when those contracts change.
 
 ## Prerequisites
 
-Required for any contribution:
+Use Python ≥3.12.13, [uv](https://docs.astral.sh/uv/), and the Claude Code CLI
+(the default backend, also exercised by tests). Install `gh` for PR feedback;
+Codex, Pi, and Osprey CLIs are needed only for their backends.
 
-- **Python ≥ 3.12.13**
-- **[`uv`](https://docs.astral.sh/uv/)** — installs and manages the virtualenv and runs every gate tool
-- **Claude Code CLI** ([claude.ai/code](https://claude.ai/code)) — the default review backend; the test suite exercises it
-
-Backend CLIs are optional and only needed when you work on that backend:
-
-- **`gh`** (GitHub CLI) — the `--comment` PR-comment mode and `reconcile.py`
-- **Codex CLI**, **Pi CLI**, **Osprey CLI** — only for their respective backends in `daydream/backends/`
-
-Docker is optional: `make actionlint` runs the workflow-YAML checks in a
-pinned container, but when no Docker daemon is available that target is
-skipped with a note (`actionlint skipped: Docker daemon is not available`)
-and exits 0 — so `make check` still passes locally. CI always runs
-actionlint, so a workflow error a local run skipped will still fail your PR.
+Docker runs the pinned actionlint container. A missing daemon skips that local
+check with a note; CI always runs it. `ACTIONLINT_REQUIRE_DOCKER=1` makes the
+local check require Docker too.
 
 ## Setup
 
-One-time, from the repo root:
-
 ```bash
-make install
+make install # uv sync --all-extras, including Harbor for benchmark tests
 make hooks
 ```
 
-`make install` runs `uv sync --all-extras`. All extras are installed on
-purpose so the full gate suite runs — the benchmark objective tests need the
-`benchmark` extra's harbor package. Note that, like `uv sync`, this does
-**not** put a `daydream` command on your `PATH`; for the runnable CLI, see
-[Quick start](README.md#quick-start) in the README.
+For the runnable CLI, see [Quick start](README.md#quick-start): `uv sync` alone
+does not put `daydream` on your PATH.
 
-`make hooks` symlinks two git hooks:
-
-- `scripts/hooks/pre-commit` — a fast commit-time gate that runs ruff on the
-  staged Python files (scoped to `daydream/`, `tests/`, and
-  `rl/daydream_review/`, linted from the index, not the working tree).
-- `scripts/hooks/pre-push` — verifies every pushed commit carries a valid
-  signature (SSH or GPG), then delegates to `make check`, the full local CI gate.
+The pre-commit hook lints staged Python blobs in `daydream/`, `tests/`, and
+`rl/daydream_review/`. The pre-push hook verifies every pushed commit's
+signature, then runs `make check`. Never bypass either hook.
 
 ### SSH signing
 
-The pre-push hook **rejects unsigned commits** and accepts any valid signature
-(SSH or GPG). Make sure your commits are signed, e.g. with your SSH key:
+The push hook accepts valid SSH or GPG signatures. For SSH:
 
-1. Configure git to sign with your SSH key, then enable commit signing:
+```bash
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/<your-key>.pub
+git config --global commit.gpgsign true
+ssh-add ~/.ssh/<your-key>
+```
 
-   ```bash
-   git config --global gpg.format ssh
-   git config --global user.signingkey ~/.ssh/<your-key>.pub
-   git config --global commit.gpgsign true
-   ```
-
-2. Have your SSH key loaded — `ssh-add -l` must list a key. If it lists
-   nothing, run `ssh-add ~/.ssh/<your-key>`.
-
-If you already made commits without signing, re-sign them:
+Check the loaded key with `ssh-add -l`. To re-sign unsigned commits:
 
 ```bash
 git rebase --exec 'git commit --amend --no-edit -S' HEAD~N
 ```
 
-where `N` is the number of commits to re-sign.
-
 ## Everyday commands and the required gate
 
-The focused targets, all run from the repo root:
-
-| Command | What it does |
-|---|---|
-| `make lint` | Ruff over `daydream tests` (120 cols, `E F I W`, py312; `daydream/atif/**` is lint-exempt as vendored code) |
-| `make typecheck` | mypy over `daydream tests` |
-| `make test` | `pytest -n auto` with coverage; the branch-coverage floor (`fail_under` in `pyproject.toml`) is enforced here, not in global addopts — a bare or targeted `pytest` run stays plain |
-| `make deadcode` | vulture dead-code scan over the root project and the RL package |
-| `make coverage-report` | checks that `coverage.xml` exists after `make test`; the measurement + ratchet procedure is in [docs/coverage.md](docs/coverage.md) |
-| `make actionlint` | Docker-pinned actionlint over `.github/workflows/*.yml` plus the packaged workflow templates; without `ACTIONLINT_REQUIRE_DOCKER`, a missing daemon skips with a note (exit 0); with it set, a missing daemon fails |
-| `make lockcheck` | `uv lock --check` — fails if `uv.lock` is out of sync with `pyproject.toml` |
-| `make check-naming` | naming-convention check over the repo (`scripts/check-naming.sh`) |
-| `make rl-check` | the RL project's own lockcheck + ruff + mypy + pytest suite, run with a scoped git identity as process env. **This is explicitly not part of `make check`** — it mirrors `ci.yml`, where RL is a separate job (its e2e test drives the `claude` CLI that CI's `check` job never installs). Run it by hand whenever you change `rl/daydream_review`. |
-
-The required gate:
-
-```bash
-make check
-```
-
+Run `make check` before pushing. The [Makefile](Makefile) defines the gate,
 which runs, in order:
 
 ```text
 lockcheck install lint deadcode typecheck test actionlint coverage-report check-naming
 ```
 
-This is the same set of steps the `check` job in `.github/workflows/ci.yml` runs —
-`rl-check` is the only CI job the gate deliberately omits. One scope difference:
-`make deadcode` also runs vulture over `rl/daydream_review/`, which CI's `check`
-job does not include — that scan happens in the separate `rl-check` job — so the
-local gate is the stricter one. The pre-push hook runs `make check` after
-verifying signatures, so a green local `make check` is what keeps your push from
-being rejected.
+Each is also a focused `make` target.
+
+- `make test` runs parallel pytest with branch coverage and the configured
+  coverage floor. Bare or targeted pytest runs do not measure coverage.
+- `make deadcode` scans both the root project and the standalone RL package.
+- `make coverage-report` checks the report produced by tests; see
+  [coverage policy](docs/coverage.md) for measurement and ratcheting.
+- Run `make rl-check` whenever changing `rl/daydream_review`. It has its own
+  lock, lint, types, tests, and real-Claude e2e test, and is a separate CI job;
+  it is deliberately outside the root gate.
 
 ## Testing policy
 
-For the [terminal findings contract](README.md#terminal-review-findings-contract), exercise the production runner with real Git/public outputs, stub provider/GitHub seams, and inject filesystem faults at actual read/write/install operations.
+Every user-visible behavior needs a **real-path test** entering through
+`runner.run` or the CLI with a real temporary Git worktree, filesystem, and
+event loop. Stub only external network/provider seams (`Backend` /
+`create_backend`), and assert observable outcomes: exit status, files,
+retained or declined fixes, and transcripts. Unit tests supplement that path.
+For [terminal findings](README.md#terminal-review-findings-contract), test real
+Git/public outputs and inject filesystem faults at actual operations.
 
-Every user-visible behavior must have at least one **real-path test**: a test
-that enters from the production entrypoint (`runner.run` / the CLI) with real
-dependencies — a real temp git worktree, a real filesystem, a real event loop —
-mocking only the external network/API backend, via the `Backend` protocol /
-`create_backend` seam. Tests must assert observable outcomes (exit code, files
-written, fixes applied or declined, transcript state), never that a function was
-merely called. Unit tests are supplementary, not a substitute.
-
-This is the standard reviewers hold PRs to, and the one the agent-facing
-[CLAUDE.md](CLAUDE.md) §Testing standard states as mandatory.
+Work is completed and proven, or explicitly in progress. Do not substitute
+smoke tests for coverage or defer required checks.
 
 ## Exemplars
 
-Read these before writing your first test — they are the reference
-implementations of the real-path standard:
-
-- `tests/deep_orchestrator/test_fix_gate_cleanup_and_precision.py`:
-  `test_apply_fixes_gate_non_interactive_takes_safe_default` and
-  `test_apply_fixes_gate_eof_declines_cleanly_no_crash` — the non-interactive /
-  EOF gate tests, exercising `runner.run` against a real worktree with only the
-  backend stubbed.
-- Secondary stub-backend-seam examples: `tests/test_cli.py` and
-  `tests/test_integration.py`, which reuse the `_install_stub_backend` and
-  `_silence` helpers imported from `tests/test_deep_orchestrator.py`.
+Start with the non-interactive and EOF fix-gate tests in
+[tests/deep_orchestrator/test_fix_gate_cleanup_and_precision.py](tests/deep_orchestrator/test_fix_gate_cleanup_and_precision.py).
+[tests/test_cli.py](tests/test_cli.py) and
+[tests/test_integration.py](tests/test_integration.py) also use the shared stub
+backend seam from `tests/test_deep_orchestrator.py`.
 
 ## Conventions
 
-- **Ruff** — 120 columns, rule set `E F I W`, target Python 3.12.
-  `daydream/atif/**` is lint-exempt as vendored Harbor code (see
-  [daydream/atif/NOTICE](daydream/atif/NOTICE)); make only mechanical edits
-  there.
-- **mypy** — configured in `pyproject.toml`, run over `daydream tests`;
-  hand-written stubs live in `mypy_stubs/`.
-- **Dependencies** — declared in `pyproject.toml`; keep `uv.lock` in sync (`uv
-  lock`) or `make check` fails at its first step (`lockcheck`).
-- **Commit messages** — Conventional Commits, e.g. `feat(backends): ...`.
-- **Staging** — stage explicitly (`git add <path>`), never `git add -A`.
-- **Documentation** — update it when your change makes it stale, including
-  [CLAUDE.md](CLAUDE.md) when the agent-facing contract changes.
-- **Pull requests** — must include a **Test Plan** section per the
-  [PR template](.github/PULL_REQUEST_TEMPLATE.md).
-- **Never** bypass the pre-push hook, skip tests, or push with
-  `git push --no-verify`.
-- **No caveats** — work is completed and proven, or explicitly in progress.
-  No deferred items, no "optional" follow-ups, no smoke tests substituted for
-  real coverage.
+- Ruff: 120 columns, `E F I W`, Python 3.12. Mypy checks `daydream tests`;
+  handwritten stubs live in `mypy_stubs/`.
+- Vendored `daydream/atif/` is lint-exempt. Follow its NOTICE and re-vendor
+  policy; do not introduce local patches.
+- Declare dependencies in `pyproject.toml`; update `uv.lock` with `uv lock`.
+- Use Conventional Commits, explicit staging (`git add <path>`), and linear
+  history (rebase rather than merge). Never use `git add -A`.
+- Update stale documentation, including agent contracts in CLAUDE.md.
+- PRs need a **Test Plan** and the [template checklist](.github/PULL_REQUEST_TEMPLATE.md).
+- Commit and push with hooks enabled. Fix failures on the branch or report
+  the blocker; never skip verification or claim unverified success.
 
 ## Where to look deeper
 
-This guide links rather than duplicates; these documents carry the detail:
-
-- [CLAUDE.md](CLAUDE.md) §Architecture — the module responsibility map and
-  pipeline walkthrough.
-- [docs/extensions.md](docs/extensions.md) — the versioned extension API for
-  forks (`daydream_ext`).
-- [docs/coverage.md](docs/coverage.md) — the coverage gate and ratchet
-  procedure.
-
-By task:
-
-- Benchmarks → [docs/benchmark.md](docs/benchmark.md)
-- Tracing / observability → [docs/observability.md](docs/observability.md)
-- Corpus / training launches → [docs/training-launch.md](docs/training-launch.md)
-- RL package work → [rl/daydream_review/README.md](rl/daydream_review/README.md)
-  (and run `make rl-check` — see the commands table above)
+Architecture: [CLAUDE.md](CLAUDE.md). Extension API:
+[docs/extensions.md](docs/extensions.md). Benchmarks:
+[docs/benchmark.md](docs/benchmark.md). Tracing:
+[docs/observability.md](docs/observability.md). Training launches:
+[docs/training-launch.md](docs/training-launch.md). RL:
+[rl/daydream_review/README.md](rl/daydream_review/README.md).
 
 ## Your first PR
 
-A compact walkthrough; each step links back to the section that explains it:
-
-1. Branch from a clean, up-to-date main:
-   `git checkout -b <your-branch>`. (Daydream uses a linear history — rebase
-   rather than merge.)
-2. `make install && make hooks` — once per clone ([Setup](#setup)), including
-   SSH signing so the pre-push hook accepts your commits.
-3. Develop with a real-path test per the [testing policy](#testing-policy);
-   the [exemplars](#exemplars) show the shape.
-4. Run the focused targets for what you touched (`make lint`, `make
-   typecheck`, `make test`) — see the [commands table](#everyday-commands-and-the-required-gate).
-   If you changed `rl/daydream_review`, also run `make rl-check`.
-5. Run the full gate: `make check`.
-6. Commit with a Conventional Commits message and explicit staging
-   ([Conventions](#conventions)).
-7. Push (`git push -u origin <your-branch>`) — the hook re-runs `make check`
-   after verifying signatures.
-8. Open a PR with a **Test Plan** section per the
-   [PR template](.github/PULL_REQUEST_TEMPLATE.md).
+1. Branch from an up-to-date main; install dependencies and hooks.
+2. Implement the change and its real-path tests; run focused checks.
+3. Run `make check`, plus `make rl-check` for RL changes.
+4. Explicitly stage and create a signed Conventional Commit.
+5. Push normally; the hook repeats the full gate.
+6. Open a PR with the Test Plan and completed checklist.
 
 ## Where the agent guidance lives
 
-Daydream is developed with coding agents in the loop. Everything agent-facing —
-architecture invariants, backend protocol, budgets, artifact boundaries — lives
-in [CLAUDE.md](CLAUDE.md), which this guide deliberately links instead of
-duplicating. If your PR changes any contract described there, update it in the
-same PR. Before opening the PR, run through the checklist at the bottom of the
-[PR template](.github/PULL_REQUEST_TEMPLATE.md).
+[CLAUDE.md](CLAUDE.md) owns architecture, backend, budget, identity, and artifact
+contracts. Keep it current in the same PR as any contract change.

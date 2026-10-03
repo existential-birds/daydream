@@ -1,5 +1,6 @@
 """Tests for the strict review-profile model and stage schema."""
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -113,4 +114,52 @@ def test_suppression_severity_classes_default_narrowed() -> None:
     assert rp.Suppression.severity_classes == ("low",)
 
 def test_review_profile_severity_levels_derive_from_severity_module() -> None:
-    assert rp._SEVERITY_LEVELS == frozenset(severity.CANONICAL_LEVELS)
+    for level in severity.CANONICAL_LEVELS:
+        assert _profile(f'[pipeline]\narbitration_min_severity = "{level}"').pipeline.arbitration.min_severity == level
+        suppression = _profile(f'[pipeline]\nsuppression_severity_classes = ["{level}"]').pipeline.suppression
+        assert suppression.severity_classes == (level,)
+
+
+
+@pytest.mark.parametrize(("owner", "values"), [
+    (rp.Pipeline, {"structural_enabled": 1}),
+    (rp.Pipeline, {"review_wall_budget_s": True}),
+    (rp.Pipeline, {"review_wall_budget_s": -1}),
+    (rp.Arbitration, {"min_severity": "HIGH"}),
+    (rp.Suppression, {"enabled": True, "confidence_classes": ()}),
+    (rp.Suppression, {"severity_classes": {"low"}}),
+    (rp.Strategy, {"content": 1}),
+    (rp.ReviewProfile, {"schema_version": True}),
+    (rp.ReviewProfile, {"schema_version": 2}),
+])
+def test_domain_owner_rejects_invalid_policy_before_use(owner: Any, values: dict[str, Any]) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        owner(**values)
+
+
+def test_admitted_policy_retains_dataclass_replacement_and_frozen_semantics() -> None:
+    from dataclasses import FrozenInstanceError, asdict, replace
+
+    arbitration_input: dict[str, Any] = {"min_severity": None}
+    suppression_input: dict[str, Any] = {"severity_classes": ["medium", "low"], "confidence_classes": ["HIGH", "LOW"]}
+    pipeline = rp.Pipeline(
+        arbitration=rp.Arbitration(**arbitration_input), suppression=rp.Suppression(**suppression_input),
+    )
+    assert pipeline.arbitration.min_severity == "high"
+    assert pipeline.suppression.severity_classes == ("medium", "low")
+    assert pipeline.suppression.confidence_classes == ("HIGH", "LOW")
+    changed = replace(pipeline, structural_enabled=False)
+    assert changed.structural_enabled is False and pipeline.structural_enabled is True
+    assert asdict(changed)["arbitration"] == {"enabled": True, "min_severity": "high", "contested_location": True}
+    with pytest.raises(FrozenInstanceError):
+        setattr(changed, "structural_enabled", True)
+
+
+@pytest.mark.parametrize("scope", ["", "strategies.intent"])
+def test_host_policy_denial_precedes_unknown_policy_fields(scope: str) -> None:
+    text = (f"[{scope}]\n" if scope else "") + 'backend = "private"\nfuture = "x"'
+    with pytest.raises(rp.ProfileError, match="host-owned.*backend.*profile") as error:
+        rp.parse_profile(text, source="owner.toml")
+    assert error.value.source == "owner.toml"

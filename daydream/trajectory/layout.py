@@ -1,4 +1,5 @@
 """Canonical paths shared by live, archived, and hydrated trajectories."""
+
 from pathlib import Path
 
 # Run-document layout: this module is the sole declaration of
@@ -24,21 +25,12 @@ _DAYDREAM_DIRNAME = ".daydream"
 
 
 def run_directory(root: Path, session_id: str) -> Path:
-    """Return the per-run directory under the layout *root*.
-
-    *root* is any layout root (the live ``<target>/.daydream``, the public live
-    root, the archive root, or the hydrated index root); this helper composes no
-    ``.daydream`` segment and validates no session identity -- callers own both.
-    """
+    """Compose runs/<session_id> under any layout root; callers validate identity."""
     return root / RUNS_DIRNAME / session_id
 
 
 def run_document_path(run_dir: Path) -> Path:
-    """Return the run's root trajectory document within *run_dir*.
-
-    Takes the run directory, not ``(root, session_id)``: three callers hold one
-    and no root. It performs no existence or identity validation.
-    """
+    """Compose the root document path from an existing run directory; no validation."""
     return run_dir / RUN_DOCUMENT_NAME
 
 
@@ -48,29 +40,15 @@ def siblings_directory(run_dir: Path) -> Path:
 
 
 def sibling_document_path(run_dir: Path, name: str) -> Path:
-    """Return a named sibling document path within *run_dir*.
-
-    *name* is the full file name (e.g. ``"deep-python.json"``); the helper adds
-    the siblings directory and nothing else. It validates no duplicate or
-    descriptor identity.
-    """
+    """Compose a sibling path from its complete filename; no identity validation."""
     return siblings_directory(run_dir) / name
 
 
 def partial_document_path(document: Path) -> Path:
-    """Return the partial-write variant of *document*.
-
-    The ``.partial`` suffix is appended after the existing suffix, so dotted names
-    are preserved (``a.b.json`` -> ``a.b.json.partial``). The helper only composes
-    the path; the caller owns deciding when a document is partial.
-    """
+    """Append .partial after the existing suffix, preserving dotted filenames."""
     return document.with_suffix(document.suffix + PARTIAL_SUFFIX)
 
 
 def default_trajectory_path(target_dir: Path, session_id: str) -> Path:
-    """Return the default trajectory path under ``<target>/.daydream/runs/<session_id>/``.
-
-    The session_id segment guarantees uniqueness per run; the recorder
-    creates the directory before its first write.
-    """
+    """Compose <target>/.daydream/runs/<session_id>/trajectory.json."""
     return run_document_path(run_directory(target_dir / _DAYDREAM_DIRNAME, session_id))

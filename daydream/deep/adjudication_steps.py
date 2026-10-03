@@ -53,8 +53,9 @@ from daydream.deep.review_reuse import ReviewReuseUnit, _loop_grounding, _record
 from daydream.deep.routing_record import write_routing_record
 from daydream.deep.settings import _resolve_opt_in
 from daydream.deep.state import DeepState
+from daydream.fanout import run_fanout
 from daydream.flows.engine import FlowContext
-from daydream.output_schema import strict_object
+from daydream.output_schema import record_array_schema, strict_object
 from daydream.phases import (
     phase_arbiter_review,
     phase_suppression_review,
@@ -67,7 +68,6 @@ from daydream.trajectory import (
     DaydreamPhase,
     dispatch_scope,
     get_current_recorder,
-    maybe_fork,
     phase_scope,
 )
 from daydream.ui import print_warning
@@ -308,14 +308,22 @@ def _arbiter_plan_component(ctx: FlowContext, state: DeepState, plan: ArbiterPla
         for group in plan.groups]}
 
 
-_PLAN_PROOF_SCHEMA = strict_object({'sharded': {'type': 'boolean'}, 'groups': {'type': 'array',
-    'minItems': 1, 'maxItems': 10000, 'items': strict_object({
-        'group_id': {'type': 'string', 'pattern': r'^arbiter-group-\d+$'},
-        'target_uids': {'type': 'array', 'minItems': 1, 'uniqueItems': True,
-                        'items': {'type': 'string', 'pattern': r'^.+:[1-9][0-9]*$'}},
-        'effort': {'enum': ['medium', 'high', 'xhigh']},
-        'contract': {'type': 'string', 'pattern': r'^[0-9a-f]{64}$'},
-    })}})
+_PLAN_PROOF_SCHEMA = strict_object(
+    {
+        "sharded": {"type": "boolean"},
+        "groups": record_array_schema({
+                    "group_id": {"type": "string", "pattern": r"^arbiter-group-\d+$"},
+                    "target_uids": {
+                        "type": "array",
+                        "minItems": 1,
+                        "uniqueItems": True,
+                        "items": {"type": "string", "pattern": r"^.+:[1-9][0-9]*$"},
+                    },
+                    "effort": {"enum": ["medium", "high", "xhigh"]},
+                    "contract": {"type": "string", "pattern": r"^[0-9a-f]{64}$"},
+                }, minItems=1, maxItems=10000),
+    }
+)
 
 
 def _completed_adjudication(ctx: FlowContext, state: DeepState, contract: dict[str, Any]) -> bool:
@@ -426,54 +434,46 @@ async def _run_arbiter(
             async with dispatch_scope(
                 recorder, phase=DaydreamPhase.DEEP, descriptors=descriptors
             ) as dispatch:
-                async with anyio.create_task_group() as tg:
-                    for group in pending:
+                def record_failure(planned: PlannedGroup, exc: Exception) -> None:
+                    failed_groups.append(planned.group_id)
+                    deep_state.review_coverage.record_phase(planned.group_id, "failed",
+                                                           reasons=(reason_for_exception(exc),))
+                    reused[planned.group_id] = False
+                    print_warning(
+                        console,
+                        f"Arbiter group {planned.group_id} failed "
+                        f"({type(exc).__name__}: {exc}); its findings "
+                        "remain unadjudicated.",
+                    )
 
-                        async def _arbitrate_one(
-                            planned: PlannedGroup = group,
-                        ) -> None:
-                            async with limiter:
-                                try:
-                                    async with maybe_fork(
-                                        recorder,
-                                        f"deep-{planned.group_id}",
-                                        dispatch=dispatch,
-                                    ):
-                                        group_verdicts_call = await invoke(planned)
-                                except Exception as exc:  # noqa: BLE001 -- per-group isolation; fail-open
-                                    failed_groups.append(planned.group_id)
-                                    deep_state.review_coverage.record_phase(planned.group_id, "failed",
-                                                                           reasons=(reason_for_exception(exc),))
-                                    reused[planned.group_id] = False
-                                    print_warning(
-                                        console,
-                                        f"Arbiter group {planned.group_id} failed "
-                                        f"({type(exc).__name__}: {exc}); its findings "
-                                        "remain unadjudicated.",
-                                    )
-                                    return
-                                if not _record_verdict_coverage(deep_state.review_coverage, planned.group_id,
-                                        len(targets_by_group[planned.group_id]), group_verdicts_call):
-                                    failed_groups.append(planned.group_id)
-                                    if not isinstance(group_verdicts_call, IncompleteVerdicts):
-                                        group_verdicts[planned.group_id] = group_verdicts_call
-                                    return
-                                try:
-                                    _persist_group_verdicts(dd, planned, group_verdicts_call,
-                                        contract=contracts[planned.group_id],
-                                        records_digest=records_digests[planned.group_id])
-                                except (OSError, ValueError) as exc:
-                                    failed_groups.append(planned.group_id)
-                                    deep_state.review_coverage.record_phase(planned.group_id, "failed",
-                                                                           reasons=(ReasonCode.MALFORMED_ARTIFACT,))
-                                    print_warning(console,
-                                                  f"Arbiter group {planned.group_id} could not persist its verdicts "
-                                                  f"({type(exc).__name__}); its findings remain unadjudicated.")
-                                    return
-                                group_verdicts[planned.group_id] = group_verdicts_call
-                                reused[planned.group_id] = False
+                def save_verdicts(planned: PlannedGroup, group_verdicts_call: dict[int, dict[str, Any]]) -> None:
+                    if not _record_verdict_coverage(deep_state.review_coverage, planned.group_id,
+                            len(targets_by_group[planned.group_id]), group_verdicts_call):
+                        failed_groups.append(planned.group_id)
+                        if not isinstance(group_verdicts_call, IncompleteVerdicts):
+                            group_verdicts[planned.group_id] = group_verdicts_call
+                        return
+                    try:
+                        _persist_group_verdicts(dd, planned, group_verdicts_call,
+                            contract=contracts[planned.group_id],
+                            records_digest=records_digests[planned.group_id])
+                    except (OSError, ValueError) as exc:
+                        failed_groups.append(planned.group_id)
+                        deep_state.review_coverage.record_phase(planned.group_id, "failed",
+                                                               reasons=(ReasonCode.MALFORMED_ARTIFACT,))
+                        print_warning(console,
+                                      f"Arbiter group {planned.group_id} could not persist its verdicts "
+                                      f"({type(exc).__name__}); its findings remain unadjudicated.")
+                        return
+                    group_verdicts[planned.group_id] = group_verdicts_call
+                    reused[planned.group_id] = False
 
-                        tg.start_soon(_arbitrate_one)
+
+                await run_fanout(
+                    pending, invoke, limiter=limiter, recorder=recorder, dispatch=dispatch,
+                    descriptor=lambda group: f"deep-{group.group_id}",
+                    completed=save_verdicts, failed=record_failure,
+                )
 
     return (
         _merge_group_verdicts(plan, arbiter_targets, group_verdicts, targets_by_group),
@@ -603,8 +603,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
 
             arbiter_targets = select_arbiter_targets(
                 adjudicated,
-                min_severity=ctx.pipeline().arbitration.min_severity,
-                contested_location=ctx.pipeline().arbitration.contested_location,
+                ctx.pipeline().arbitration,
                 contested_only=structural_range,
             )
             # Suppression exclusions use durable UIDs; indices shift and locations can collide.
@@ -733,9 +732,8 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                 ]
                 suppression_targets = select_suppression_targets(
                     adjudicated,
+                    ctx.pipeline().suppression,
                     suppression_exclude,
-                    severity_classes=ctx.pipeline().suppression.severity_classes,
-                    confidence_classes=ctx.pipeline().suppression.confidence_classes,
                 )
                 if suppression_targets:
                     async with phase_scope(DaydreamPhase.DEEP, stage="suppression"):

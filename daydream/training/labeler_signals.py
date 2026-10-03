@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, cast, get_args
 
 from daydream.hunk_index import parse_hunks
-from daydream.pr_review import parse_finding_markers
+from daydream.reviews.identity import parse_finding_markers
 from daydream.training._immutable_json import thaw_json
 from daydream.training.labeler_versions import reply_evidence_digest
 from daydream.training.reply_classifier import (

@@ -14,6 +14,7 @@ from daydream.archive.hydrate_rules import (
 )
 from daydream.archive.sanitize import _derivative_digest
 from daydream.commands.corpus import _CORPUS_SUBVERBS
+from daydream.training.adjudication.snapshot import FindingRecord
 from daydream.training.corpus_projection.bundle import (
     BundleBatch,
     BundleError,
@@ -24,7 +25,6 @@ from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.projector import (
     BuildFrozenCorpusConfig,
     build_frozen_corpus,
-    project_findings,
 )
 from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.corpus_projection.segments import segment
@@ -440,8 +440,11 @@ def test_native_profile_run_without_legacy_skill_validates() -> None:
     # skill only when a value exists, never for an explicit null (and honors
     # the record's own stack override).
     assert "skill" not in prov
-    assert prov["profile"] == {"profile_schema_version": None, "profile_name": None,
-                               "profile_source_kind": None, "profile_digest": None}
+    assert prov["profile"] == v2_record["profile"]
+    assert extract_provenance({**v2_record, "profile_name": "flat"})["profile"] == {
+        "profile_schema_version": None, "profile_name": "flat",
+        "profile_source_kind": None, "profile_digest": None,
+    }
 
 def test_legacy_skill_carried_as_provenance_never_required() -> None:
     prov = extract_provenance({"skill": "beagle-python:review-python", "profile_schema_version": None,
@@ -466,7 +469,7 @@ def _res(fp: str, disposition: str) -> dict[str, object]:
 def test_mixed_session_yields_two_distinct_gold_records() -> None:
     session = {"session_id": "s1", "trajectory_id": "s1:root", "segment_id": "seg-0",
                "resolutions": [_res("a1" * 32, "accepted"), _res("b2" * 32, "rejected")]}
-    records = project_findings(session)
+    records = [finding.project() for finding in FindingRecord.from_session(session)]
     gold = [r for r in records if r["tier"] == "gold"]
     assert len(gold) == 2
     assert {r["finding_fingerprint"] for r in gold} == {"a1" * 32, "b2" * 32}
@@ -475,23 +478,28 @@ def test_mixed_session_yields_two_distinct_gold_records() -> None:
 
 def test_reply_existence_never_constitutes_acceptance() -> None:
     # ambiguous: a reply exists but the classifier did not map accepted/rejected
-    records = list(project_findings({"session_id": "s1", "trajectory_id": "s1:root",
-                                     "segment_id": "seg-0", "resolutions": [_res("c3" * 32, "ambiguous")]}))
+    session = {"session_id": "s1", "trajectory_id": "s1:root", "segment_id": "seg-0",
+        "resolutions": [_res("c3" * 32, "ambiguous")],
+    }
+    records = [finding.project() for finding in FindingRecord.from_session(session)]
     assert all(r["tier"] != "gold" for r in records)
 
 def test_non_decisive_findings_route_to_adjudication() -> None:
     session = {"session_id": "s1", "trajectory_id": "s1:root", "segment_id": "seg-0",
                "resolutions": [_res("d4" * 32, "ambiguous"), _res("e5" * 32, "missing")]}
-    records, adjudication = project_findings(session, return_adjudication=True)
+    findings = list(FindingRecord.from_session(session))
+    records = [finding.project() for finding in findings]
+    adjudication = [finding.adjudication() for finding in findings if finding.tier == "task-only"]
     assert {r["finding_fingerprint"] for r in records if r["tier"] == "gold"} == set()
     assert {a["fingerprint"] for a in adjudication} == {"d4" * 32, "e5" * 32}
     assert all(a["evidence"] == [] for a in adjudication)  # evidence carried for the human pass
 
 def test_run_level_contested_aggregate_never_erases_split() -> None:
     # v1 collapse: outcome_label="contested". v2 must never produce that shape.
-    records = list(project_findings({"session_id": "s1", "trajectory_id": "s1:root",
-                                     "segment_id": "seg-0",
-                                     "resolutions": [_res("a1" * 32, "accepted"), _res("b2" * 32, "rejected")]}))
+    session = {"session_id": "s1", "trajectory_id": "s1:root", "segment_id": "seg-0",
+        "resolutions": [_res("a1" * 32, "accepted"), _res("b2" * 32, "rejected")],
+    }
+    records = [finding.project() for finding in FindingRecord.from_session(session)]
     assert all(r["outcome_label"] != "contested" for r in records)
     assert sorted(str(r["disposition"]) for r in records) == ["accepted", "rejected"]
 

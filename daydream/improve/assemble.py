@@ -77,51 +77,44 @@ def _boilerplate_stop_conditions(
     scope = normalized["scope"]
     existing_paths = contract._entry_paths(scope["existing_paths"])
     in_scope_paths = [*existing_paths, *contract._entry_paths(scope["new_paths"])]
+    specifications = [
+        (
+            "drift",
+            "Before editing a file, read the exact line range quoted for "
+            "it in the Current state section and compare it to the quoted "
+            "text. It does not match character for character.",
+            "Report the mismatched file, the quoted excerpt, and the "
+            "current repository content.",
+            existing_paths,
+        ),
+        (
+            "repeated-verification-failure",
+            "A verification in this plan fails, you make exactly one "
+            "correction, and it fails again — two failures total for the "
+            "same verification. Do not attempt a third time.",
+            "Report both failing command outputs and the correction that "
+            "was attempted.",
+            [],
+        ),
+        (
+            "out-of-scope-change",
+            "Completing a step requires editing a path that is not "
+            "declared in this plan's scope.",
+            "Report the required path and why the declared scope "
+            "boundary is insufficient.",
+            in_scope_paths,
+        ),
+    ]
     conditions = [
         {
-            "kind": "drift",
-            "condition": (
-                "Before editing a file, read the exact line range quoted for "
-                "it in the Current state section and compare it to the quoted "
-                "text. It does not match character for character."
-            ),
+            "kind": kind,
+            "condition": condition,
             "required_action": STOP_REQUIRED_ACTION,
-            "evidence_to_report": (
-                "Report the mismatched file, the quoted excerpt, and the "
-                "current repository content."
-            ),
-            "related_paths": existing_paths,
+            "evidence_to_report": evidence,
+            "related_paths": paths,
             "related_step_ids": [],
-        },
-        {
-            "kind": "repeated-verification-failure",
-            "condition": (
-                "A verification in this plan fails, you make exactly one "
-                "correction, and it fails again — two failures total for the "
-                "same verification. Do not attempt a third time."
-            ),
-            "required_action": STOP_REQUIRED_ACTION,
-            "evidence_to_report": (
-                "Report both failing command outputs and the correction that "
-                "was attempted."
-            ),
-            "related_paths": [],
-            "related_step_ids": [],
-        },
-        {
-            "kind": "out-of-scope-change",
-            "condition": (
-                "Completing a step requires editing a path that is not "
-                "declared in this plan's scope."
-            ),
-            "required_action": STOP_REQUIRED_ACTION,
-            "evidence_to_report": (
-                "Report the required path and why the declared scope "
-                "boundary is insufficient."
-            ),
-            "related_paths": in_scope_paths,
-            "related_step_ids": [],
-        },
+        }
+        for kind, condition, evidence, paths in specifications
     ]
 
     def mapped(kind: str, condition: dict[str, Any]) -> dict[str, Any]:
@@ -241,7 +234,7 @@ def assemble_plan(
         return None, tuple(issues)
 
     commands = _expand_commands(normalized, recon_by_id=recon_by_id)
-    current_state_excerpts = [
+    normalized["current_state_excerpts"] = [
         {
             "path": entry["path"],
             "line_anchor": {
@@ -255,38 +248,22 @@ def assemble_plan(
         }
         for entry in normalized["context_excerpts"]
     ]
-    assembled = {
-        "title": normalized["title"],
-        "covered_fingerprints": list(normalized["covered_fingerprints"]),
-        "why_this_matters": dict(normalized["why_this_matters"]),
-        "current_state_excerpts": current_state_excerpts,
-        "commands_you_will_need": commands,
-        "scope": normalized["scope"],
-        "git_workflow": {
-            "branch_name": f"improve/{plan_slug(normalized['title'])}",
-            "branch_basis": GIT_BRANCH_BASIS,
-            "commit_boundaries": normalized["git_workflow"]["commit_boundaries"],
-            "commit_message_example": (
-                normalized["git_workflow"]["commit_message_example"]
-            ),
-            "push_policy": GIT_PUSH_POLICY,
-            "pull_request_policy": GIT_PULL_REQUEST_POLICY,
-        },
-        "steps": [
-            {
-                "id": f"step-{index}",
-                "order": index,
-                **step,
-            }
-            for index, step in enumerate(normalized["steps"], start=1)
-        ],
-        "test_plan": normalized["test_plan"],
-        "done_criteria": _injected_done_criteria(normalized),
-        "stop_conditions": _boilerplate_stop_conditions(
-            normalized, len(normalized["steps"])
-        ),
-    }
-    return assembled, ()
+    # Normalization already owns a detached copy. Enrich that one plan rather
+    # than projecting its validated fields through another parallel shape.
+    normalized["commands_you_will_need"] = commands
+    normalized["git_workflow"].update(
+        branch_name=f"improve/{plan_slug(normalized['title'])}",
+        branch_basis=GIT_BRANCH_BASIS,
+        push_policy=GIT_PUSH_POLICY,
+        pull_request_policy=GIT_PULL_REQUEST_POLICY,
+    )
+    for index, step in enumerate(normalized["steps"], start=1):
+        step.update(id=f"step-{index}", order=index)
+    normalized["done_criteria"] = _injected_done_criteria(normalized)
+    normalized["stop_conditions"] = _boilerplate_stop_conditions(normalized, len(normalized["steps"]))
+    for authored_only in ("context_excerpts", "false_assumption", "additional_command_refs"):
+        del normalized[authored_only]
+    return normalized, ()
 
 
 __all__ = [

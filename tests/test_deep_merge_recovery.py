@@ -246,7 +246,7 @@ def _write_merge_inputs(tmp_path: Path) -> dict[str, Path]:
     inputs["intent"].write_text("# Intent\n")
     inputs["alts"].write_text("{\"alternatives\": []}\n")
     inputs["dedup"].write_text('{"record_alt_pairs": [], "record_duplicate_pairs": []}\n')
-    inputs["records"].write_text(json.dumps([_salvage_record()]))
+    inputs["records"].write_text(json.dumps({"issues": [_salvage_record()]}))
     return inputs
 
 @pytest.mark.parametrize('diagnostics', [None, [], {'scopes': {}, 'phases': {'extra': 'failure'}},
@@ -290,7 +290,8 @@ async def test_merge_salvage_applies_dedup_prefilter(
 def _merge_args(tmp_path: Path) -> dict[str, Any]:
     """Common keyword args for a ``phase_cross_stack_merge`` call."""
     inputs = _write_merge_inputs(tmp_path)
-    return {"per_stack_records_paths": [inputs["records"]], "intent_path": inputs["intent"],
+    return {"record_pool": record_pool(tmp_path, json.loads(inputs["records"].read_text())["issues"],
+            paths=[inputs["records"]]), "intent_path": inputs["intent"],
         "alternatives_path": inputs["alts"], "dedup_candidates_path": inputs["dedup"], "allow_standalone": True,
     }
 

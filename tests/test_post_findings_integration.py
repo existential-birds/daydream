@@ -14,7 +14,8 @@ from typing import Any
 import pytest
 
 from daydream.findings import write_findings_artifact
-from daydream.pr_review import parse_finding_markers, validate_diagram_payload
+from daydream.pr_review import validate_diagram_payload
+from daydream.reviews.identity import parse_finding_markers
 from tests.harness.console import collapse_panel_text as _console_text
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git, init_repo

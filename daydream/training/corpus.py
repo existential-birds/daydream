@@ -64,13 +64,15 @@ def _is_admitted_outcome_gold(
     labeler_policy_version: str | None,
     decisive_mix: bool,
     decisive_only: bool,
+    *,
+    allowed_labels: frozenset[str] = _OUTCOME_GOLD_LABELS,
 ) -> bool:
-    """Require accepted, posterior-backed, decisive-only evidence with a known classifier policy.
+    """Admit selected labels only with posterior, policy and decisive-only evidence.
 
-    Missing policy versions and contested/non-decisive mixes never qualify."""
+    The corpus defaults to accepted labels; outcome training also admits rejected labels."""
     return (
         label is not None
-        and label in _OUTCOME_GOLD_LABELS
+        and label in allowed_labels
         and has_posterior
         and labeler_policy_version is not None
         and not decisive_mix

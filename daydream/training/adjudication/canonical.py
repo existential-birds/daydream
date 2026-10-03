@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +18,6 @@ from daydream.archive.index import append_label_observation
 from daydream.json_utils import atomic_write_bytes, canonical_json as _canonical, umask_derived_mode
 from daydream.training.adjudication.materialize import (
     _ANNOTATIONS_FILENAME,
-    _CONFLICTED_DISPOSITION,
     _MANIFEST_FILENAME,
     _SESSIONS_OUT_FILENAME,
     index_sessions,
@@ -31,30 +28,12 @@ from daydream.training.adjudication.observations import (
 )
 from daydream.training.adjudication.precedence import (
     DECISIVE_DISPOSITIONS,
-    HUMAN_ROLES,
-    effective_adjudication,
 )
 from daydream.training.adjudication.queue import build_queue
-from daydream.training.adjudication.snapshot import record_evidence_digest
+from daydream.training.adjudication.snapshot import FindingRecord, record_evidence_digest
 from daydream.training.labeler_versions import REPLY_CLASSIFIER_VERSION
 
 __all__ = ["AnnotationDriftError", "run_canonical_harvest"]
-
-
-def _evidence_after_as_of(record: Mapping[str, Any], as_of: str | None) -> bool:
-    """Flag evidence created after the pin, retaining it but excluding gold.
-
-    Parse timestamps like the projector so Z and +00:00 compare identically."""
-    if not as_of:
-        return False
-    pin_dt = datetime.fromisoformat(as_of)
-    for entry in record.get("evidence") or []:
-        if not isinstance(entry, Mapping):
-            continue
-        created_at = entry.get("created_at")
-        if created_at and datetime.fromisoformat(str(created_at)) > pin_dt:
-            return True
-    return False
 
 
 class AnnotationDriftError(ValueError):
@@ -198,60 +177,19 @@ def run_canonical_harvest(
 
     human_adjudicated = 0
     flagged_after_as_of: list[str] = []
-    merged_records: list[dict[str, Any]] = []
+    findings: list[FindingRecord] = []
     for record in materialized:
-        record = dict(record)
-        record_id = str(record["record_id"])
-        if str(record.get("session_id")) in fresh_conflicting_sessions:
-            # Freshly re-derived conflict verdict (never trusted from the
-            # materialized snapshot's merge state): decisive dispositions from
-            # a session that became conflicting after materialize must not
-            # feed the ``finding-*`` labels or the annotations projection.
-            record["conflicting"] = True
-        if record_id in grouped:
-            resolved = effective_adjudication(grouped[record_id])
-            if resolved["evidence_digest"] == str(record["evidence_digest"]):
-                if resolved["conflict"]:
-                    record["conflicting"] = True
-                if resolved["review_required"] and resolved["role"] in HUMAN_ROLES:
-                    record["review_required"] = True
-                    record["disposition"] = _CONFLICTED_DISPOSITION
-            if (
-                resolved["role"] in HUMAN_ROLES
-                and resolved["evidence_digest"] == str(record["evidence_digest"])
-                and resolved["disposition"] in DECISIVE_DISPOSITIONS
-                and not resolved["conflict"]
-                and not resolved["review_required"]
-            ):
-                record["disposition"] = resolved["disposition"]
-                record["human_labeler"] = resolved["labeler"]
-                record["human_role"] = resolved["role"]
-                # A decisive human adjudication resolves the session conflict:
-                # the operator's judgment overrides the disagreeing
-                # generations, so the flag is cleared -- the resolution must
-                # not be suppressed to non-gold.
-                if record.get("conflicting"):
-                    record["conflicting"] = False
-                human_adjudicated += 1
-        if record.get("conflicting"):
-            # The materializer neutralizes a conflicted record's disposition
-            # (``_CONFLICTED_DISPOSITION``) so the operator queue routes it to
-            # task-only adjudication and the bundle carries one disposition;
-            # restore the real decisive disposition here for the archive
-            # ``rubric_json`` provenance, from the fresh complete queue that
-            # the drift gate just verified against this record's evidence.
-            fresh = fresh_by_record_id.get(record_id)
-            if fresh is not None:
-                record["disposition"] = str(fresh["disposition"])
-        record["evidence_after_as_of"] = _evidence_after_as_of(record, pin.get("as_of"))
-        record["resolutions"] = [
-            {**resolution, "disposition": record["disposition"]}
-            for resolution in record.get("resolutions") or []
-        ]
-        if record["evidence_after_as_of"]:
-            flagged_after_as_of.append(record_id)
-        merged_records.append(record)
-    merged_records.sort(key=lambda r: str(r["record_id"]))
+        finding, human = FindingRecord.from_annotation(record).adjudicate(
+            grouped.get(str(record["record_id"]), []), fresh_by_record_id.get(str(record["record_id"])),
+            conflicting=str(record.get("session_id")) in fresh_conflicting_sessions,
+            as_of=pin.get("as_of"),
+        )
+        human_adjudicated += int(human)
+        if finding.metadata["evidence_after_as_of"]:
+            flagged_after_as_of.append(str(record["record_id"]))
+        findings.append(finding)
+    findings.sort(key=lambda finding: str(finding.metadata["record_id"]))
+    merged_records = [finding.canonical() for finding in findings]
 
     # One AnnotationPayload-shaped row per session, appended exactly once.
     by_session: dict[str, list[dict[str, Any]]] = {}
@@ -321,30 +259,10 @@ def run_canonical_harvest(
         else:
             skipped_sessions += 1
 
-    # annotations.jsonl from the same in-memory merged records — no second shape.
-    # The projected-corpus gold gate (``tiers.classify_tier``) reads only
-    # disposition/evidence/evidence_after_as_of, never the ``conflicting``
-    # flag, so a conflicted record must not carry its decisive disposition
-    # here or it would project gold with ``outcome_label`` set. Emit the
-    # record (``conflicting`` rides through; provenance preserved in the
-    # archive rubric_json above) with the disposition neutralized to
-    # ``_CONFLICTED_DISPOSITION`` so the projection routes it to task-only
-    # adjudication, never gold.
-    def _annotation_row(record: dict[str, Any]) -> dict[str, Any]:
-        if record.get("conflicting"):
-            row = dict(record)
-            row["disposition"] = _CONFLICTED_DISPOSITION
-            row["resolutions"] = [
-                {**resolution, "disposition": _CONFLICTED_DISPOSITION}
-                for resolution in record.get("resolutions") or []
-            ]
-            return row
-        return record
-
     records_path = materialize_dir / _ANNOTATIONS_FILENAME
     atomic_write_bytes(
         records_path,
-        "".join(_canonical(_annotation_row(record)) + "\n" for record in merged_records).encode("utf-8"),
+        "".join(_canonical(finding.canonical(project_conflict=True)) + "\n" for finding in findings).encode("utf-8"),
         fsync=False,
         dir_fsync=False,
         mode=umask_derived_mode(),

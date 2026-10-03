@@ -1,8 +1,4 @@
-"""Output colorization for tool results.
-
-File/git/shell regex patterns, shell-syntax detection, and per-line neon
-colorization.
-"""
+"""File/git/shell detection and neon tool-result colorization."""
 
 import re
 
@@ -62,11 +58,7 @@ _SHELL_DETECT_COMMAND_PATTERN = re.compile(
 
 
 def render_segments(source: str, segments: list[tuple[int, int, str, Style]], base_style: Style) -> Text:
-    """Resolve styled segments over ``source`` into Text, skipping overlaps.
-
-    Segments are applied sorted by start (longest-first on ties, so wider
-    matches win overlaps); gaps between them are filled with ``base_style``.
-    """
+    """Style nonoverlapping source spans sorted by start, longest-first on ties; fill gaps with base_style."""
     result = Text()
 
     segments = sorted(segments, key=lambda x: (x[0], -(x[1] - x[0])))

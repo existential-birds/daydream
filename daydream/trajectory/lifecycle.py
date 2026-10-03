@@ -41,12 +41,7 @@ def maybe_fork(
 
 @dataclass
 class PhaseEvent:
-    """Phase boundary or host event used for explicit per-phase timing.
-
-    Identified events pair start and terminal records with a run-scoped
-    ``session_id`` and unique ``scope_id``. Optional metadata carries stage
-    detail without inferring phase membership from step timestamps.
-    """
+    """Identified phase start/terminal evidence, paired by session_id and scope_id with optional stage metadata."""
 
     phase: DaydreamPhase
     event: str
@@ -201,13 +196,7 @@ def _emit_phase_end(
 
 @asynccontextmanager
 async def phase_scope(phase: DaydreamPhase, **metadata: Any) -> AsyncIterator[PhaseScopeHandle]:
-    """Async context manager that emits ``phase_start``/``phase_end`` events.
-
-    Reads the active recorder via :func:`get_current_recorder`; a no-op when no
-    recorder is active (e.g. direct phase invocation outside a run). Used by
-    ``runner.py`` and ``deep/orchestrator.py`` to bracket phase boundaries so
-    the trajectory JSON carries explicit timing events (issue #203).
-    """
+    """Bracket a phase with identified timing events; no-op without an active recorder."""
     recorder = get_current_recorder()
     safe_metadata = _phase_scope_metadata(metadata)
     handle = PhaseScopeHandle(scope_id=recorder._next_phase_scope_id() if recorder is not None else "")
@@ -226,25 +215,14 @@ async def phase_scope(phase: DaydreamPhase, **metadata: Any) -> AsyncIterator[Ph
 
 @dataclass
 class HostPhaseHandle:
-    """Mutable stop-reason handle yielded by :func:`host_phase_scope`.
-
-    Defaults to ``"completed"``; the body sets ``"timed_out"`` / ``"failed"``
-    (or any domain reason) before returning/raising so the closing phase_end
-    event records why the host-side operation ended.
-    """
+    """Host stop reason; defaults to completed and may be replaced by the body."""
 
     stop_reason: str = "completed"
 
 
 @asynccontextmanager
 async def host_phase_scope(phase: DaydreamPhase, **metadata: Any) -> AsyncIterator[HostPhaseHandle]:
-    """Bracket a host-side (non-agent) operation with phase events.
-
-    Like :func:`phase_scope`, but the closing ``phase_end`` event always
-    carries ``duration_ms`` (wall clock of the scope) and ``stop_reason``
-    (from the yielded :class:`HostPhaseHandle`, "failed" when the body
-    raised). A no-op when no recorder is active.
-    """
+    """Bracket host work with duration and stop reason; escaping exceptions record failure."""
     handle = HostPhaseHandle()
     started = time.monotonic()
     async with phase_scope(phase, **metadata) as lifecycle:

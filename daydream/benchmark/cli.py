@@ -24,11 +24,7 @@ def _fail(message: str) -> int:
 
 
 def _build_benchmark_parser() -> argparse.ArgumentParser:
-    """Build the ``daydream benchmark`` subcommand parser.
-
-    Sub-verbs: ``init``, ``status``, ``validate``, ``build-harbor``, ``upgrade``, ``import-prs``,
-    ``curate``, ``calibrate-judge``, ``run``, ``clean``, ``objective``, ``aggregate``.
-    """
+    """Build the ``daydream benchmark`` subcommand parser."""
     parser = argparse.ArgumentParser(
         prog="daydream benchmark",
         description=(
@@ -188,11 +184,7 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
 
 
 def _handle_benchmark_import_prs(args: argparse.Namespace) -> int:
-    """Import explicit private PRs: parse targets, preflight, then run the import.
-
-    Expected errors (mis-tokenized targets, preflight failure) print a message
-    to stderr and return exit ``1`` — never a bare traceback.
-    """
+    """Import explicit private PRs: parse targets, preflight, then run the import."""
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.workspace import WorkspaceCorrupt
 
@@ -334,20 +326,14 @@ def _handle_benchmark_calibrate(args: argparse.Namespace) -> int:
             "DAYDREAM_JUDGE_API_KEY",
             "DAYDREAM_JUDGE_BASE_URL",
             "DAYDREAM_JUDGE_ALLOWED_HOSTS",
-            # Claude judge credentials (issue #966 symmetry): threaded so the
-            # packaged judge's fail-closed presence gate admits the claude-cli
-            # provider — the spawned CLI subprocess authenticates via the
-            # ambient OAuth token (score_review copies os.environ for it), not
-            # through this env dict — same gap the run handler closed for the
-            # claude reviewer.
+            # Thread Claude judge credentials through its presence gate; the CLI itself
+            # inherits the ambient OAuth token from os.environ.
             "CLAUDE_CODE_OAUTH_TOKEN",
         )
     }
 
-    # Issue #885/R12: thread the control-plane candidate profile digest so a
-    # candidate-scoped diagnostic receipt can be produced (its invalidation
-    # inputs fold the digest). Fail-closed on an invalid candidate. None for
-    # default runs. The receipt is diagnostic-only — it is not read by run.py.
+    # Bind diagnostic receipts to the candidate; reject invalid profiles.
+    # None preserves default identity. The run gate never reads this diagnostic receipt.
     env["DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST"] = _candidate_profile_digest()
 
     return calibrate.run_calibration(
@@ -370,10 +356,7 @@ def _handle_benchmark_run(args: argparse.Namespace) -> int:
             "DAYDREAM_REVIEW_API_KEY",
             "DAYDREAM_REVIEW_BASE_URL",
             "DAYDREAM_REVIEW_EFFORT",
-            # Claude reviewer credentials (issue #966): threaded so the
-            # supervisor can resolve ANTHROPIC_BASE_URL host-side for the
-            # claude backend (the run gate env snapshot is the only channel
-            # into run.py's preflight).
+            # Thread Claude credentials so host-side preflight can resolve its base URL.
             "ANTHROPIC_API_KEY",
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_BASE_URL",
@@ -384,13 +367,8 @@ def _handle_benchmark_run(args: argparse.Namespace) -> int:
         )
     }
 
-    # Issue #885/R12: thread the control-plane candidate profile digest into
-    # the supervisor env so run.py's ledger/receipt provenance can attribute
-    # the run to exactly the tested candidate. run.py reads
-    # DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST from this env dict; the in-container
-    # entrypoint cannot set it (different process, runs after the ledger row).
-    # Fail-closed: an invalid candidate raises ProfileError here, before any
-    # paid run -- matching the entrypoint's own fail-closed validation.
+    # Bind the tested profile digest before the supervisor writes its ledger.
+    # Invalid candidates fail before a paid run; containers cannot supply provenance.
     env["DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST"] = _candidate_profile_digest()
 
     return run_mod.run_run(args.dir, oracle=args.oracle, yes=args.yes, env=env)

@@ -117,11 +117,7 @@ def _reviewer_host_from_env(env: dict[str, Any]) -> str:
 
 
 def _compiled_job_config(workspace: Path) -> dict[str, Any]:
-    """Read the compiled ``harbor/harbor-job.yaml`` config as a dict.
-
-    Fallible: ``OSError``/``YAML`` errors surface a ``RunError`` (a malformed
-    config is a block, not a best-effort summary).
-    """
+    """Read the compiled ``harbor/harbor-job.yaml`` config as a dict."""
     path = workspace / "harbor" / "harbor-job.yaml"
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -148,12 +144,7 @@ def _compiled_cases(workspace: Path) -> list[dict[str, Any]]:
 
 
 def _pre_run_summary(workspace: Path, *, env: dict[str, Any]) -> str:
-    """Human-readable pre-run spend summary over validated inputs only.
-
-    Pure string-building (never reads Harbor output / never makes a network
-    call). Missing env values render as ``unset``; a broken lock/config raises
-    ``RunError``.
-    """
+    """Human-readable pre-run spend summary over validated inputs only."""
     config = _compiled_job_config(workspace)
     cases = _compiled_cases(workspace)
 
@@ -226,12 +217,7 @@ def _ledger_path(workspace: Path) -> Path:
 
 
 def _load_ledger(workspace: Path) -> dict[str, Any]:
-    """Read ``runtime/harbor.json``; initialise a fresh ledger when absent.
-
-    A malformed existing entry (bad JSON / missing keys / unsupported backend /
-    environment ref without an exact ``image_id``) raises ``RunError`` —
-    corruption is never silently dropped or broadened.
-    """
+    """Read ``runtime/harbor.json``; initialise a fresh ledger when absent."""
     path = _ledger_path(workspace)
     if not path.is_file():
         return {"schema_version": 1, "runs": []}
@@ -351,14 +337,7 @@ def _preflight(
     env: dict[str, Any],
     docker_ok: Callable[[], Any] | None = None,
 ) -> list[str]:
-    """Fail-closed preflight: collect every blocking failure (empty = pass).
-
-    Checks, in order, without stopping at the first failure:
-      1. same-interpreter Harbor resolution + compiled-tree presence
-      2. judge/reviewer egress hosts vs the compiled network policy
-      3. telemetry/upload rejection (archive + uploads must be ``disabled``)
-      4. Docker allowlist support (no public-networking fallback)
-    """
+    """Fail-closed preflight: collect every blocking failure (empty = pass)."""
     failures: list[str] = []
 
     try:
@@ -429,12 +408,7 @@ def _preflight(
 
 
 def _iter_trial_dirs(job_dir: Path) -> Iterator[Path]:
-    """Yield the sorted trial subdirectories of a Harbor job dir.
-
-    Non-directory siblings (lockfiles, READMEs) are skipped. Shared by
-    ``_parse_job_results`` (oracle path) and ``objective._parse_task_rows`` so
-    the trial-dir traversal skeleton lives in one place (issue #888 anti-slop).
-    """
+    """Yield the sorted trial subdirectories of a Harbor job dir."""
     for trial in sorted(job_dir.iterdir()):
         if trial.is_dir():
             yield trial
@@ -453,10 +427,8 @@ def _parse_job_results(job_dir: Path) -> tuple[bool, list[dict[str, Any]]]:
     for trial in _iter_trial_dirs(job_dir):
         verifier = trial / "verifier"
         reward_path = verifier / "reward.json"
-        # Resolve the trial environment even when the trial carries no claimable
-        # score evidence, so a failed/aborted run still records the Docker
-        # images it spawned: ``clean --jobs`` can address them rather than
-        # deleting the job dir and permanently stranding the images.
+        # Record Docker images even for failed/unscored trials so clean --jobs can
+        # remove them before deleting the job directory.
         if not reward_path.is_file():
             return (False, [*environments, _environment_from_trial(trial)])
         env = _environment_from_trial(trial)
@@ -512,11 +484,7 @@ def _environment_from_trial(trial: Path) -> dict[str, Any]:
 def _current_state_mapping(
     workspace: Path, *, compiled_lock_sha256: str, env: dict[str, Any],
 ) -> dict[str, Any]:
-    """The current Oracle/Harbor state an oracle receipt must match.
-
-    Shared verbatim by the receipt document (``_oracle_receipt_document``) and
-    the default-run gate (``_default_run_gate``) so the two cannot drift.
-    """
+    """The current Oracle/Harbor state an oracle receipt must match."""
     version = importlib.metadata.version("harbor")
     major_minor = ".".join(str(version).split(".")[:2])
     sr = calibrate._load_judge_template()
@@ -534,25 +502,15 @@ def _current_state_mapping(
         "threshold": verifier_core.CONFIDENCE_THRESHOLD,
         "attempts": config.get("n_attempts", 1),
     }
-    # Daydream wheel provenance (issue #888): bind the exact compiled wheel
-    # digest/version the run was built under from the authoritative lock. An
-    # absent/malformed block raises ``RunError`` naming the lock path — never a
-    # default.
+    # Bind exact wheel version/digest from the lock; malformed provenance is fatal.
     wheel_version, wheel_sha = _compiled_daydream_wheel(workspace)
     mapping["daydream_version"] = wheel_version
     mapping["daydream_wheel_sha256"] = wheel_sha
-    # Candidate review-profile digest (issue #885/R12): fold it into the shared
-    # oracle state so both the oracle-receipt document and the default-run gate
-    # compare the tested candidate. Omitted when no candidate is set so legacy
-    # oracle receipts stay byte-stable.
+    # Bind receipt and gate to the tested profile; absence preserves legacy bytes.
     digest = env.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST")
     if digest:
         mapping["profile_digest"] = str(digest)
-    # Reviewer reasoning-effort (issue #888): the control plane threads the
-    # reviewer effort under which this run executes into the shared state via
-    # the env, so both the oracle-receipt document and the default-run gate
-    # compare the identical effort. Always present (``""`` when unset) so a
-    # reviewer-less run's receipt and gate agree.
+    # Bind receipt and run gate to identical effort; unset effort is an empty string.
     mapping["reviewer_effort"] = env.get("DAYDREAM_REVIEW_EFFORT") or ""
     return mapping
 
@@ -629,12 +587,7 @@ def _default_confirm(prompt: str) -> bool:
 
 
 def _default_docker_ok() -> package.DockerNetworkPolicyCapability:
-    """Probe Harbor's real Docker allowlist backend before any run starts.
-
-    The live probe builds Harbor's exact sidecar image and loads its nftables
-    rules in a disposable container.  Unsupported kernels and broken Docker
-    daemons therefore fail preflight instead of becoming public networking.
-    """
+    """Probe Harbor's real Docker allowlist backend before any run starts."""
     return package.docker_network_policy_capability()
 
 
@@ -645,12 +598,7 @@ def _default_spawn(cmd: list[str], *, cwd: Path, env: dict[str, Any]) -> dict[st
 
 
 def _ledger_job_dir(workspace: Path, run_id: str) -> Path:
-    """The job dir recorded for ``run_id`` (the ledger, not an mtime guess).
-
-    Selecting by the ledger rather than the newest-mtime ``jobs/`` dir means a
-    spawn that wrote nothing cannot cause a prior run's job dir to be attested
-    by this run's oracle receipt.
-    """
+    """The job dir recorded for ``run_id`` (the ledger, not an mtime guess)."""
     doc = _load_ledger(workspace)
     for run in doc["runs"]:
         if run.get("run_id") == run_id:
@@ -759,10 +707,8 @@ def run_run(
             ledger_mark(workspace, run_id, state="complete",
                         environments=environments)
             return write_code or returncode
-        # Default real run: preserve Harbor's exact exit code. Failing and
-        # successful runs persist the same resolved trial environments;
-        # ``_parse_job_results`` already returns ``(False, [])`` for a missing
-        # job dir, so no is_dir() pre-check is needed.
+        # Persist trial environments for every outcome and preserve Harbor's exit code.
+        # Missing job directories already produce (False, []) from the result parser.
         _, environments = _parse_job_results(actual_dir)
         ledger_mark(
             workspace, run_id,

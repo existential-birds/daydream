@@ -39,7 +39,7 @@ from daydream.improve.command_contract import (
 from daydream.improve.plan_index import (
     PLAN_INDEX_FILENAME,
     PlanIndexEntry,
-    _entry_fingerprints,
+    _entry_member_coverage,
     _is_retryable,
     _merged_index,
     load_rejections,
@@ -579,10 +579,10 @@ def _advance_head(repo: Path, text: str = "# Catalog service\n\nConcurrent branc
 def _read_sidecar(root: Path) -> dict[str, Any]:
     return cast(dict[str, Any], json.loads((root / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")))
 
-def _planned_fingerprints(plans_dir: Path) -> set[str]:
-    """Package identities and aliases with durable plan status (test-side view)."""
+def _planned_member_coverage(plans_dir: Path) -> set[str]:
+    """Member coverage used by reservation policy for durable plans."""
     entries = _merged_index(plans_dir).values()
-    return {fp for e in entries if not _is_retryable(plans_dir, e) for fp in _entry_fingerprints(e)}
+    return {fp for e in entries if not _is_retryable(plans_dir, e) for fp in _entry_member_coverage(e)}
 
 def _write_single_plan(repo: Path, assembled: dict[str, Any], planned_at: str,) -> dict[str, list[dict[str, Any]]]:
     """Write one assembled plan for ``repo`` through the production API."""
@@ -1098,7 +1098,7 @@ def test_reanchored_main_index_is_written_before_finish(repo: Path, head_sha: st
     assert len(reanchored) == 1
     assert reanchored[0]["status"].startswith("REANCHORED")
     assert "001-batch-catalog-queries.md" in reanchored[0]["status"]
-    assert "fp-fix-n-plus-one" in _planned_fingerprints(repo / "daydream_plans")
+    assert "fp-fix-n-plus-one" in _planned_member_coverage(repo / "daydream_plans")
 
     session.finish()
     assert "REANCHORED" in (repo / "daydream_plans" / "README.md").read_text(encoding="utf-8")
@@ -1363,7 +1363,7 @@ def test_valid_linked_plan_is_preserved_for_every_executor_status(repo: Path, he
 
     assert result["written"] == []
     assert len(result["skipped"]) == 1
-    assert _planned_fingerprints(plans_dir) == {"fp-fix-n-plus-one"}
+    assert _planned_member_coverage(plans_dir) == {"fp-fix-n-plus-one"}
     assert [path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")] == ["001-batch-catalog-queries.md"]
     index = index_path.read_text()
     assert index.count("fingerprint:fp-fix-n-plus-one") == 1
@@ -1378,7 +1378,7 @@ def test_hand_edited_status_on_a_blocked_row_stops_the_retry(repo: Path, head_sh
     invalid = _authored_plan()
     invalid["test_plan"]["cases"] = []
     _write_plans(plans_dir, [_authoring_failure_selection(_issues(repo, invalid))], planned_at=head_sha,)
-    assert _planned_fingerprints(plans_dir) == set()
+    assert _planned_member_coverage(plans_dir) == set()
 
     index_path = plans_dir / "README.md"
     blocked_status = "BLOCKED (PLAN_VALIDATION_FAILED: AUTHOR_SCHEMA_INVALID)"
@@ -1386,7 +1386,7 @@ def test_hand_edited_status_on_a_blocked_row_stops_the_retry(repo: Path, head_sh
     index_path.write_text(
         index_path.read_text(encoding="utf-8").replace(f"| {blocked_status} |", "| DONE |"), encoding="utf-8",
     )
-    assert _planned_fingerprints(plans_dir) == {"fp-fix-n-plus-one"}
+    assert _planned_member_coverage(plans_dir) == {"fp-fix-n-plus-one"}
 
     result = _write_plans(plans_dir, [_selection(repo)], planned_at=head_sha)
 
@@ -1403,7 +1403,7 @@ def test_deleted_sidecar_is_rebuilt_from_the_rendered_index(repo: Path, head_sha
     selections = [_plan_selection(repo, title) for title in _CONCURRENT_TITLES]
     _write_plans(plans_dir, selections, planned_at=head_sha)
     (plans_dir / PLAN_INDEX_FILENAME).unlink()
-    assert _planned_fingerprints(plans_dir) == {f"fp-{plan_slug(title)}" for title in _CONCURRENT_TITLES}
+    assert _planned_member_coverage(plans_dir) == {f"fp-{plan_slug(title)}" for title in _CONCURRENT_TITLES}
     result = _write_plans(plans_dir, selections, planned_at=head_sha)
     assert result["written"] == []
     assert len(result["skipped"]) == 3
@@ -1493,7 +1493,7 @@ def test_host_blocked_attempt_reuses_reserved_number_when_retry_succeeds(repo: P
     expected_failure_status = ("PLAN_WRITER_FAILED" if failure_kind == "transport" else "PLAN_VALIDATION_FAILED")
     assert expected_failure_status in failed_index
     assert failed_index.count("fingerprint:fp-fix-n-plus-one") == 1
-    assert _planned_fingerprints(plans_dir) == set()
+    assert _planned_member_coverage(plans_dir) == set()
     assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
 
     retried = _write_single_plan(repo, _assembled(repo), head_sha)
@@ -2358,8 +2358,8 @@ def test_plan_index_persists_package_aliases_and_maintenance_metadata(repo: Path
     assert entry["maintenance_signals"] == ["dead_code", "reuse_existing"]
     assert entry["change_shape"] == "reuse"
     assert entry["reuse_target"] == "repo:src/http.py#parse_headers"
-    assert _planned_fingerprints(plans_dir) == {
-        "pkg-parser-cleanup", "fp-local-parser", "fp-parser-tests", "member:local", "member:tests",
+    assert _planned_member_coverage(plans_dir) == {
+        "fp-local-parser", "fp-parser-tests", "member:local", "member:tests",
     }
 
 def test_partial_member_overlap_does_not_suppress_uncovered_work(repo: Path, head_sha: str,) -> None:
@@ -2432,7 +2432,7 @@ def test_legacy_singleton_index_entry_recovers_as_its_own_package(repo: Path, he
     ):
         sidecar["plans"][0].pop(key)
     sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
-    assert _planned_fingerprints(plans_dir) == {"fp-fix-n-plus-one"}
+    assert _planned_member_coverage(plans_dir) == {"fp-fix-n-plus-one"}
     result = _write_plans(plans_dir, [_selection(repo)], planned_at=head_sha,)
     assert result["written"] == []
     assert result["skipped"][0]["path"] == "001-batch-catalog-queries.md"

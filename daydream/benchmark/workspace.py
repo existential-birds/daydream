@@ -51,12 +51,7 @@ class InitError(Exception):
 
 
 def _is_nonempty(root: Path) -> bool:
-    """True if ``root`` holds real user content (ignore internal crash residue).
-
-    The workspace lock file and empty managed scaffold dirs (``cases/``,
-    ``transactions/``, and the other layout subdirs) are internal residue left
-    by an interrupted ``init``; they must not block a clean re-init.
-    """
+    """True if ``root`` holds real user content (ignore internal crash residue)."""
     if not root.exists():
         return False
     for entry in root.iterdir():
@@ -192,11 +187,7 @@ def workspace_status(root: Path) -> WorkspaceStatus:
 
 
 def _last_preflight_verified_at(root: Path) -> str | None:
-    """Return the ledger timestamp of the last successful repository verification, or None.
-
-    A missing or malformed ledger reads as absent (status is read-only and must
-    never fail the workspace over the mode-0600 ``runtime/preflight.json``).
-    """
+    """Return the ledger timestamp of the last successful repository verification, or None."""
     path = root / "runtime" / "preflight.json"
     if not path.exists():
         return None
@@ -283,12 +274,8 @@ def _derived_state(
         pull_requests=pr_dicts,
         cases=_case_curation_states(root, manifest, docs),
     )
-    # Model-validate every fetched import exactly once per call; the checksum
-    # and cross-document verifiers share this set instead of each re-reading
-    # and re-model-validating the same documents. The authoring index is
-    # likewise resolved (and existence-checked) exactly once per call, shared
-    # by the checksum + duplicate-inode verifiers instead of each verifier
-    # re-resolving the same files.
+    # Load/validate each import and resolve authoring paths once, sharing the results
+    # across checksum, cross-document, and duplicate-inode checks.
     imports = _import_documents(root, manifest)
     paths = _resolved_authoring_paths(root, manifest, docs)
     _verify_import_checksums(root, manifest, paths)
@@ -378,13 +365,9 @@ def _verify_snapshot_checksums(
                 f"{root}: case {case.case_id} snapshot bundle checksum mismatch "
                 f"(expected {expected}, got {actual})"
             )
-        # Authoritative offline-clone fidelity: the recorded sha256 alone cannot
-        # prove the bundle is the frozen base->head snapshot (a restamped
-        # tampered bundle matches), so run the full fidelity contract (exact
-        # refs, two synthetic commits, root base, head-parented-on-base, tree
-        # IDs, canonical diff digest) on a disposable network-disabled clone of
-        # the bundle under ``cache/``. A fidelity failure is corruption — never
-        # swallowed, never a fallback.
+        # A restamped checksum cannot prove fidelity. Validate exact refs, synthetic
+        # commit topology, trees, and canonical diff in a network-disabled scratch clone.
+        # Any failure is corruption; never fall back.
         try:
             snapshot_mod.validate_offline_clone(
                 bundle_path,

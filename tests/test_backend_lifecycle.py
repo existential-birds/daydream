@@ -1,4 +1,4 @@
-"""#1221: one shared reap / exit-check / teardown across the CLI backends."""
+"""#1221: shared subprocess ownership and provider-owned failure checks across the CLI backends."""
 
 from __future__ import annotations
 
@@ -16,17 +16,14 @@ from daydream.backends._transport import (
     PROCESS_EXIT_EXCERPT_MAX_LINES,
     CliTransport,
     process_exit_message,
-    raise_for_exit,
-    reap,
     teardown,
 )
 from daydream.backends.codex import CodexBackend, CodexError
-from daydream.backends.osprey import OspreyBackend, OspreyError
+from daydream.backends.osprey import OspreyBackend, OspreyConfig, OspreyError
 from daydream.backends.pi import (
     _PI_DEFAULT_RETRY_ATTEMPTS,
     PiBackend,
     PiError,
-    _pi_retry_attempts,
 )
 from tests.harness.fake_cli_process import FakeCliProcess
 from tests.harness.osprey_jsonl import osprey_session
@@ -38,36 +35,15 @@ def _transport(monkeypatch: pytest.MonkeyPatch, proc: FakeCliProcess) -> CliTran
     monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", AsyncMock(return_value=proc))
     return CliTransport("codex", ["codex"], limit=1024)
 
-class _Recorder(Exception):
-    """Captures the kwargs the shared raise path used to construct the adapter error."""
-
-    def __init__(self, message: str, **kwargs: object) -> None:
-        super().__init__(message)
-        self.kwargs = kwargs
-
 @pytest.mark.parametrize(("returncode", "expected"), [(0, 0), (1, 1), (-15, -15)])
-async def test_reap_suppresses_transport_exit_and_returns_the_code(
+async def test_wait_returns_actual_process_status(
     monkeypatch: pytest.MonkeyPatch, returncode: int, expected: int
 ) -> None:
     proc = FakeCliProcess([], exit_code=returncode)
     transport = _transport(monkeypatch, proc)
     await transport.start()
-    assert await reap(transport) == expected  # a non-zero exit must not escape as TransportExitError
+    assert await transport.wait() == expected
     assert proc.reaped
-
-def test_raise_for_exit_kwarg_shape_is_per_adapter() -> None:
-    built: list[dict[str, object]] = []
-    def build_message(returncode: int) -> str:
-        return f"exited {returncode}"
-    raise_for_exit(0, error_type=_Recorder, category="PROCESS_EXIT", build_message=build_message)
-    assert built == []  # nothing raised, no error constructed
-    for kwargs, retryable in (({}, None), ({"retryable": True}, True)):
-        with pytest.raises(_Recorder, match="exited 1") as exc_info:
-            raise_for_exit(
-                1, error_type=_Recorder, category="PROCESS_EXIT", build_message=build_message, retryable=retryable,
-            )
-        built.append(exc_info.value.kwargs)
-    assert built == [{"category": "PROCESS_EXIT"}, {"category": "PROCESS_EXIT", "retryable": True}]
 
 async def test_teardown_is_idempotent_and_drops_the_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     proc = FakeCliProcess([], hang=True)  # returncode stays None until the teardown signals it
@@ -145,13 +121,13 @@ def test_shared_nonnegative_float_parser(
      ("", _PI_DEFAULT_RETRY_ATTEMPTS), ("-1", _PI_DEFAULT_RETRY_ATTEMPTS)],
     ids=["default", "override", "empty-warns", "negative-warns"],
 )
-def test_pi_facades_delegate_to_the_shared_parsers(
+def test_pi_constructor_uses_shared_retry_admission(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, env_value: str | None, expected: int
 ) -> None:
     if env_value is not None:
         monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", env_value)
     with caplog.at_level(logging.WARNING):
-        assert _pi_retry_attempts() == expected
+        assert PiBackend().retry_attempts == expected
     if env_value not in (None, "5"):
         assert f"DAYDREAM_PI_RETRY_ATTEMPTS={env_value!r}" in caplog.text   # the warning still names the knob
 
@@ -207,7 +183,7 @@ async def test_pi_process_exit_retryable_for_oom_exit_code() -> None:
 async def test_osprey_process_exit_message_anchor_and_count() -> None:
     with pytest.raises(OspreyError) as exc_info:
         await _drive(
-            OspreyBackend(osprey_binary="fake"),
+            OspreyBackend(OspreyConfig(osprey_binary="fake")),
             _osprey_stream(),  # valid protocol/session_start/…/session_end JSONL
             exit_code=1,
             stderr_lines=DIAG,  # 25 drained stderr lines; the sink caps at 10
@@ -229,128 +205,45 @@ async def test_pi_clean_exit_lifecycle() -> None:
     _assert_clean_lifecycle(backend, proc)
 
 async def test_osprey_clean_exit_lifecycle() -> None:
-    backend = OspreyBackend(osprey_binary="fake")
+    backend = OspreyBackend(OspreyConfig(osprey_binary="fake"))
     _events, proc = await _drive(backend, _osprey_stream())
     _assert_clean_lifecycle(backend, proc)
 
-# The finalization sequence belongs in one module. Synthetic offenders prove each structural
-# detector works, so a broken scan cannot pass empty.
+# Providers interpret statuses; only the transport may spawn, read, or reap children.
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _BACKENDS_DIR = _REPO_ROOT / "daydream" / "backends"
-_OWNER = "daydream/backends/_transport.py"
-_OWNER_SURFACE = frozenset({"reap", "raise_for_exit", "teardown"})
 
-def _is_transport_exit_error(node: ast.expr | None) -> bool:
-    if isinstance(node, ast.Name):
-        return node.id == "TransportExitError"
-    if isinstance(node, ast.Attribute):
-        return node.attr == "TransportExitError"
-    if isinstance(node, ast.Tuple):
-        return any(_is_transport_exit_error(element) for element in node.elts)
-    return False
 
-def _names_cli_transport(annotation: ast.expr | None) -> bool:
-    if isinstance(annotation, ast.Name):
-        return annotation.id == "CliTransport"
-    if isinstance(annotation, ast.Attribute):
-        return annotation.attr == "CliTransport"
-    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
-        return _names_cli_transport(annotation.left) or _names_cli_transport(annotation.right)
-    return False
-
-def _constructs_cli_transport(value: ast.expr | None) -> bool:
-    return (
-        isinstance(value, ast.Call)
-        and isinstance(value.func, ast.Name)
-        and value.func.id == "CliTransport"
-    )
-
-def _transport_bound_names(tree: ast.AST) -> set[str]:
-    """Names bound to a ``CliTransport`` so a renamed receiver cannot evade the scan."""
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            args = [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
-            names.update(arg.arg for arg in args if _names_cli_transport(arg.annotation))
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            if _names_cli_transport(node.annotation) or _constructs_cli_transport(node.value):
-                names.add(node.target.id)
-        elif isinstance(node, ast.Assign) and _constructs_cli_transport(node.value):
-            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
-    return names
-
-def _forbidden_sites(source: str) -> list[tuple[str, int]]:
-    """(label, lineno) for every reap/raise shape that must live only in the owner."""
+def _native_process_calls(source: str) -> list[tuple[str, int]]:
     tree = ast.parse(source)
-    transport_names = _transport_bound_names(tree)
-    found: list[tuple[str, int]] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Await) and isinstance(node.value, ast.Call):
-            func = node.value.func
-            if (
-                isinstance(func, ast.Attribute)
-                and func.attr == "wait"
-                and isinstance(func.value, ast.Name)
-                and (func.value.id == "transport" or func.value.id in transport_names)
-            ):
-                found.append(("awaits transport.wait()", node.lineno))
-        if isinstance(node, ast.ExceptHandler) and _is_transport_exit_error(node.type):
-            found.append(("except TransportExitError", node.lineno))
-        if (
-            isinstance(node, ast.Raise)
-            and isinstance(node.exc, ast.Call)
-            and any(
-                kw.arg == "category"
-                and isinstance(kw.value, ast.Constant)
-                and kw.value.value == "PROCESS_EXIT"
-                for kw in node.exc.keywords
-            )
-        ):
-            found.append(('raise with category="PROCESS_EXIT"', node.lineno))
-    return found
-
-@pytest.mark.parametrize(
-    ("source", "label"),
-    [
-        ("async def f(transport):\n    await transport.wait()\n", "awaits transport.wait()"),
-        ("async def f():\n    t = CliTransport(...)\n    await t.wait()\n", "awaits transport.wait()"),
-        ("async def f(t: CliTransport):\n    await t.wait()\n", "awaits transport.wait()"),
-        ("try:\n    pass\nexcept TransportExitError:\n    pass\n", "except TransportExitError"),
-        ("try:\n    pass\nexcept (TransportExitError, ValueError):\n    pass\n", "except TransportExitError"),
-        ("try:\n    pass\nexcept _transport.TransportExitError:\n    pass\n", "except TransportExitError"),
-        ('raise AdapterError("x", category="PROCESS_EXIT")\n', 'raise with category="PROCESS_EXIT"'),
-    ],
-)
-def test_the_guard_detects_each_forbidden_shape(source: str, label: str) -> None:
-    """Liveness: an empty scan can never pass silently — each detector is proven to fire."""
-    assert label in [found for found, _line in _forbidden_sites(source)]
-
-def test_no_adapter_owns_the_reap_or_the_process_exit_raise() -> None:
-    offenders: dict[str, list[tuple[str, int]]] = {}
-    modules = sorted(_BACKENDS_DIR.glob("*.py"))
-    assert modules, "the scan found no production modules"  # liveness: mis-rooted scan fails
-    for path in modules:
-        relative = path.relative_to(_REPO_ROOT).as_posix()
-        if relative == _OWNER:
-            continue
-        sites = _forbidden_sites(path.read_text(encoding="utf-8"))
-        if sites:
-            offenders[relative] = sites
-    assert not offenders, f"the reap / PROCESS_EXIT raise must live in {_OWNER}: {offenders}"
-
-def test_the_owner_still_carries_the_shared_surface() -> None:
-    """Liveness: the exemption is a property of the owner's contents, not of its filename."""
-    tree = ast.parse((_REPO_ROOT / _OWNER).read_text(encoding="utf-8"))
-    defined = {
-        node.name
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    assert _OWNER_SURFACE <= defined, f"{_OWNER} no longer defines {sorted(_OWNER_SURFACE - defined)}"
-    assert any(
-        isinstance(node, ast.ExceptHandler)
-        and isinstance(node.type, ast.Name)
-        and node.type.id == "TransportExitError"
+    return [
+        (node.func.attr, node.lineno)
         for node in ast.walk(tree)
-    ), "the suppression handler must live in _OWNER"
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and (
+            node.func.attr == "create_subprocess_exec"
+            or node.func.attr in {"readline", "wait"}
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in {"proc", "stdout", "stderr"}
+        )
+    ]
+
+
+@pytest.mark.parametrize("source", [
+    "asyncio.create_subprocess_exec('cli')",
+    "proc.wait()",
+    "stdout.readline()",
+    "stderr.readline()",
+])
+def test_process_ownership_guard_detects_native_operations(source: str) -> None:
+    assert _native_process_calls(source)
+
+
+def test_adapters_delegate_native_process_operations_to_transport() -> None:
+    adapters = [_BACKENDS_DIR / f"{name}.py" for name in ("codex", "pi", "osprey")]
+    assert all(path.is_file() for path in adapters)
+    assert not {
+        path.name: calls for path in adapters
+        if (calls := _native_process_calls(path.read_text(encoding="utf-8")))
+    }

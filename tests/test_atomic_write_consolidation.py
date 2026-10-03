@@ -16,7 +16,7 @@ _SCOPE_ROOTS = ("daydream/training", "daydream/benchmark")
 
 #: Files allowed to call os.replace(): the primitive lives outside the scanned roots.
 _PERMITTED_OS_REPLACE_FILES = frozenset({
-    "daydream/training/adjudication/publish.py",                  # directory promotion (own fsync + identity re-check)
+    "daydream/training/adjudication/publication_files.py",  # directory promotion (own fsync + identity re-check)
     "daydream/benchmark/harbor/build.py",                         # staged harbor tree promotion
     "daydream/benchmark/storage.py",                              # transactional commit + crash-recovery restore
     "daydream/benchmark/harbor/templates/metric.py",              # stdlib-only, shipped into the container

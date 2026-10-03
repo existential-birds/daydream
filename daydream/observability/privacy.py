@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import re
-import string
 import traceback
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -31,7 +30,7 @@ _FLAG_VALUE_TOKENS = frozenset(
 #: every key-shaped name such as ``unicode.key``.
 _RESOURCE_SECRET_KEY = re.compile(r"api[_-]?key|auth|token|secret|passw(or)?d|credential|bearer|private[_-]?key", re.I)
 
-_HEX_DIGITS = frozenset(string.hexdigits)
+_INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9a-fA-F]{2})")
 
 #: Fixed diagnostic for a rejected operator resource variable. It never echoes
 #: a pair, key, or value fragment.
@@ -47,22 +46,12 @@ class ResourceParseError(ValueError):
 
 def _percent_decode(text: str) -> str:
     """Decode OTel-style percent escapes strictly as UTF-8; no lenient fallback."""
-    raw = bytearray()
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if char == "%":
-            escape = text[index + 1 : index + 3]
-            if len(escape) != 2 or any(item not in _HEX_DIGITS for item in escape):
-                raise ResourceParseError()
-            raw.append(int(escape, 16))
-            index += 3
-        else:
-            raw.extend(char.encode("utf-8"))
-            index += 1
+    if _INVALID_PERCENT_ESCAPE.search(text):
+        raise ResourceParseError()
     try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:
+        text.encode("utf-8")  # Reject undecodable environment surrogates as well as malformed escaped bytes.
+        return unquote(text, encoding="utf-8", errors="strict")
+    except UnicodeError:
         raise ResourceParseError() from None
 
 

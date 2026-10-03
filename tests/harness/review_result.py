@@ -38,12 +38,13 @@ def findings_artifact(
     return artifact
 
 
-async def review_scopes(backend: Any, work: Any, stacks: list[StackAssignment], **options: Any) -> Any:
+async def review_scopes(backend: Any, work: Any, stacks: list[StackAssignment], **options: Any) -> ReviewCoverage:
     """Exercise the real provider phase with an explicit planned execution inventory."""
     from daydream.phases.review import phase_per_stack_reviews
     coverage = ReviewCoverage("scope-test", AnalyzedRevision("h" * 40, "b" * 40, "diff-1"),
                               [PlannedScope(s.stack_name, s.stack_name, tuple(s.files)) for s in stacks], ())
-    return await phase_per_stack_reviews(backend, work, stacks, coverage=coverage, **options)
+    await phase_per_stack_reviews(backend, work, stacks, coverage=coverage, **options)
+    return coverage
 
 
 def merge_result(items: Iterable[dict[str, Any]]) -> dict[str, Any]:

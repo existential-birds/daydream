@@ -1,7 +1,5 @@
-"""Destination factories and native compatibility attributes over bounded OTLP transports.
-
-Presets isolate authentication/TLS from generic settings; generic OTLP honors
-signal-specific/shared settings. Each runtime owns its exporter and delivery ledger.
+"""Owned OTLP destinations and native aliases. Presets isolate auth/TLS; generic OTLP honors signal-
+over-shared settings. Each runtime owns delivery state.
 """
 
 from __future__ import annotations
@@ -20,8 +18,7 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.util.types import AttributeValue
 
-from daydream.observability import otlp_compat
-from daydream.observability.config import ObservabilityConfig, ObservabilityError
+from daydream.observability.config import ObservabilityConfig, ObservabilityError, validate_endpoint
 from daydream.observability.otlp_compat import (
     DeliveryLedger,
     GrpcBridge,
@@ -32,32 +29,6 @@ from daydream.observability.privacy import PrivacyPolicy, diagnostic_scope
 
 _PRESET_TIMEOUT_SECONDS = 5.0
 _HTTP_COMPRESSIONS = {"none": None, "gzip": True}
-
-
-def _validated_endpoint(endpoint: str, setting: str, *, grpc: bool = False) -> str:
-    """Validate URLs without including their potentially sensitive contents in errors."""
-    try:
-        parsed = urlsplit("//" + endpoint if grpc and "://" not in endpoint else endpoint)
-        valid = (
-            bool(parsed.hostname)
-            and parsed.username is None
-            and parsed.password is None
-            and not parsed.query
-            and not parsed.fragment
-            and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in endpoint)
-            and (parsed.scheme in ("http", "https") or (grpc and not parsed.scheme))
-            and (not grpc or parsed.path in ("", "/"))
-        )
-        # Accessing .port validates malformed and out-of-range ports too.
-        parsed.port
-    except ValueError:
-        valid = False
-    if not valid:
-        raise ObservabilityError(
-            f"{setting} must be a valid {'HTTP(S) URL or host:port' if grpc else 'HTTP(S) URL'} "
-            "without credentials, query, fragment or whitespace"
-        )
-    return endpoint.rstrip("/")
 
 
 def _header_value(setting: str, *, default: str | None = None, required: bool = True) -> str | None:
@@ -134,7 +105,7 @@ def langsmith_exporter(config: ObservabilityConfig) -> SpanExporter:
     key = _header_value("LANGSMITH_API_KEY")
     project = _header_value("LANGSMITH_PROJECT", default="daydream")
     workspace = _header_value("LANGSMITH_WORKSPACE_ID", required=False)
-    endpoint = _validated_endpoint(
+    endpoint = validate_endpoint(
         os.environ.get("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com"), "LANGSMITH_ENDPOINT"
     )
     assert key is not None and project is not None
@@ -150,7 +121,7 @@ def honeyhive_exporter(config: ObservabilityConfig) -> SpanExporter:
     base = os.environ.get("HH_API_URL", "")
     if not base:
         raise ObservabilityError("HH_API_URL is required; use your HoneyHive deployment's API base URL")
-    endpoint = _validated_endpoint(base, "HH_API_URL")
+    endpoint = validate_endpoint(base, "HH_API_URL")
     return HoneyHiveExporter(
         _preset_transport(endpoint + "/opentelemetry/v1/traces", {"Authorization": f"Bearer {key}"})
     )
@@ -217,7 +188,7 @@ def otlp_exporter(config: ObservabilityConfig) -> SpanExporter:
     endpoint_setting = _traces_or_shared_endpoint_setting()
     endpoint = os.environ.get(endpoint_setting)
     if endpoint is not None:
-        _validated_endpoint(endpoint, endpoint_setting, grpc=protocol == "grpc")
+        validate_endpoint(endpoint, endpoint_setting, grpc=protocol == "grpc")
     timeout = _resolve_otlp_timeout("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "OTEL_EXPORTER_OTLP_TIMEOUT")
     if protocol == "grpc":
         return _grpc_generic_exporter(timeout, config)
@@ -269,7 +240,7 @@ def _grpc_generic_exporter(timeout: float, config: ObservabilityConfig) -> SpanE
     endpoint_setting = _traces_or_shared_endpoint_setting()
     endpoint = os.environ.get(endpoint_setting)
     if endpoint is not None:
-        _validated_endpoint(endpoint, endpoint_setting, grpc=True)
+        validate_endpoint(endpoint, endpoint_setting, grpc=True)
         parsed = urlsplit(endpoint if "://" in endpoint else "//" + endpoint)
         if parsed.scheme == "http":
             insecure = True
@@ -280,9 +251,7 @@ def _grpc_generic_exporter(timeout: float, config: ObservabilityConfig) -> SpanE
     else:
         parsed = urlsplit("http://localhost:4317")
         insecure = None
-    compression = (
-        grpc.Compression.Gzip if _otlp_compression_setting() == "gzip" else grpc.Compression.NoCompression
-    )
+    compression = grpc.Compression.Gzip if _otlp_compression_setting() == "gzip" else grpc.Compression.NoCompression
     from opentelemetry.metrics import NoOpMeterProvider
 
     ledger = DeliveryLedger()
@@ -295,14 +264,7 @@ def _grpc_generic_exporter(timeout: float, config: ObservabilityConfig) -> SpanE
             meter_provider=NoOpMeterProvider(),
         )
         bridge = GrpcBridge(delegate, ledger)
-    return GrpcCompatExporter(bridge, ledger, timeout_s=timeout)
-
-
-class GrpcCompatExporter(CompatSpanExporter):
-    """SpanExporter facade over the pinned gRPC bridge."""
-
-    def __init__(self, bridge: otlp_compat.GrpcBridge, ledger: DeliveryLedger, *, timeout_s: float) -> None:
-        super().__init__(bridge, ledger, timeout_s=timeout_s)
+    return CompatSpanExporter(bridge, ledger, timeout_s=timeout)
 
 
 def _langsmith_usage(attributes: Mapping[str, AttributeValue]) -> dict[str, Any]:
@@ -332,11 +294,7 @@ def _langsmith_usage(attributes: Mapping[str, AttributeValue]) -> dict[str, Any]
 
 
 def _copy_span(span: ReadableSpan, attributes: Mapping[str, AttributeValue]) -> ReadableSpan:
-    """Clone identity and attributes while preserving bounded event/link containers.
-
-    Their public tuple views lose dropped counts. Adapters share the untouched
-    containers and retain exact event/link ordering.
-    """
+    """Copy spans while sharing untouched event/link containers, preserving ordering and dropped counts."""
     return ReadableSpan(
         name=span.name,
         context=span.context,
@@ -356,11 +314,7 @@ def _copy_span(span: ReadableSpan, attributes: Mapping[str, AttributeValue]) -> 
 def _preserved_attributes(
     span: ReadableSpan, additions: Mapping[str, AttributeValue]
 ) -> BoundedAttributes | dict[str, AttributeValue]:
-    """Add vendor attributes with enough capacity to retain every existing/additional key.
-
-    Copy original bounded dropped counts verbatim. Plain dict inputs retain the
-    SDK's zero dropped-count behavior.
-    """
+    """Add keys without dropping existing attributes; preserve original bounded dropped counts."""
     original = getattr(span, "_attributes", None)
     if isinstance(original, BoundedAttributes):
         capacity = max(original.maxlen or 0, len(original) + len(additions))

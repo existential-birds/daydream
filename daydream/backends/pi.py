@@ -1,10 +1,7 @@
 # daydream/backends/pi.py
-"""Translate pi --mode json (@earendil-works/pi-coding-agent) into AgentEvent.
-
-Respect Pi's project/global defaultModel. Without one, use DEFAULT_PI_MODEL
-with the nous provider; explicit model and PI_PROVIDER/API_KEY/THINKING
-remain overrides. Provider endpoints and credentials belong to Pi's registry
-and auth files under ~/.pi/agent; Daydream never writes a models.json override.
+"""Translate pi --mode json using project/global defaultModel, then DEFAULT_PI_MODEL/nous.
+Explicit model and PI_PROVIDER/API_KEY/THINKING override defaults. Endpoints/credentials
+belong to Pi registry/auth files; Daydream never writes models.json overrides.
 """
 
 from __future__ import annotations
@@ -18,7 +15,6 @@ import time
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import ExitStack
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +37,6 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
-    _admit_json_value,
     _admit_native_unix_ms,
     _new_generation_id,
     _parsed_nonnegative_float,
@@ -56,11 +51,7 @@ from daydream.backends._subprocess import (
 )
 from daydream.backends._transport import (
     CliTransport,
-    StderrPolicy,
-    StdinMode,
     process_exit_message,
-    raise_for_exit,
-    reap,
     teardown,
 )
 from daydream.config import DEFAULT_PI_MODEL
@@ -70,23 +61,6 @@ from daydream.retry_policy import classify_failure, parse_message_retry_hint
 # Mirror Codex's generous stdout cap so large JSONL events (big file reads,
 # patch payloads) do not trip asyncio's "chunk is longer than limit" guard.
 _PI_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
-
-# Known AgentSessionEvent types. Used to decide whether the first
-# stdout line — the session header — also carries a dispatchable event type.
-_PI_EVENT_TYPES: frozenset[str] = frozenset(
-    {
-        "agent_start",
-        "agent_end",
-        "turn_start",
-        "turn_end",
-        "message_start",
-        "message_update",
-        "message_end",
-        "tool_execution_start",
-        "tool_execution_update",
-        "tool_execution_end",
-    }
-)
 
 # Read-only tool subset. Excludes the mutating edit/bash/write tools.
 _PI_READ_ONLY_TOOLS = "read,find,ls,grep"
@@ -195,14 +169,10 @@ STREAM_DROP_SIGNATURES = (
 
 logger = logging.getLogger(__name__)
 
-# The provider half of the daydream-supplied default pairing (the model half
-# is ``DEFAULT_PI_MODEL``). Single source of truth so the argv fallback
-# branches, the migration warnings, and the module docs cannot drift.
+# Keep the default provider paired with DEFAULT_PI_MODEL across argv fallback and migration warnings.
 _PI_DEFAULT_PROVIDER = "nous"
 
-# One-shot migration-warning guard: ``execute`` runs once per phase,
-# invocation, and retry attempt, so a stale pre-migration configuration would
-# otherwise re-log the identical warning for every call. Keys are per-mismatch.
+# Warn once per migration mismatch across phases/invocations/retries.
 _warned_migration_mismatches: set[str] = set()
 
 
@@ -212,24 +182,6 @@ def _warn_migration_mismatch_once(key: str, message: str, *args: object) -> None
         return
     _warned_migration_mismatches.add(key)
     logger.warning(message, *args)
-
-
-def _pi_retry_attempts() -> int:
-    return _parsed_nonnegative_int(
-        os.environ, "DAYDREAM_PI_RETRY_ATTEMPTS", _PI_DEFAULT_RETRY_ATTEMPTS
-    )
-
-
-def _pi_retry_base_delay() -> float:
-    return _parsed_nonnegative_float(
-        os.environ, "DAYDREAM_PI_RETRY_BASE_DELAY_S", _PI_DEFAULT_RETRY_BASE_DELAY
-    )
-
-
-def _pi_retry_max_delay() -> float:
-    return _parsed_nonnegative_float(
-        os.environ, "DAYDREAM_PI_RETRY_MAX_DELAY_S", _PI_DEFAULT_RETRY_MAX_DELAY
-    )
 
 
 # Permanent conditions precede transient matches. Bare "provider" is too
@@ -252,10 +204,7 @@ _SERVER_ERROR_TOKENS = (
     "service unavailable",
     "server error",
 )
-# Ambiguous overload/throttle wording. Unlike the high-precision literals above,
-# these need positive overload/capacity meaning and an explicit rejection of
-# negated or planning contexts: "not overloaded" and "capacity planning" are
-# healthy messages that must not be read as transient failures.
+# Only positive overload/throttle/capacity failures are transient; negation and capacity planning are healthy.
 _NEGATED_OVERLOAD_RE = re.compile(r"\bnot\s+overloaded\b|\bcapacity\s+planning\b")
 _OVERLOAD_RE = re.compile(r"\boverloaded?\b|\boverload(?:ed|ing)?\b")
 _CAPACITY_RE = re.compile(
@@ -288,10 +237,7 @@ def _is_retryable_exit_code(code: int | None) -> bool:
 
 
 def _pi_error_category(message: str) -> str:
-    """Classify failures with permanent conditions taking precedence over transient tokens.
-
-    For example, model not found with HTTP 503 remains AUTH_CONFIG.
-    """
+    """Permanent conditions win over transient tokens: model-not-found with HTTP 503 remains AUTH_CONFIG."""
     lower = message.casefold()
     if any(token in lower for token in _PERMANENT_TOKENS):
         return "AUTH_CONFIG"
@@ -314,19 +260,6 @@ def _pi_error_category(message: str) -> str:
     return "UNKNOWN"
 
 
-class _PiFailureFacts(Exception):
-    """Classifier probe carrying Pi's category + message and no opt-in flag."""
-
-    def __init__(self, message: str, category: str) -> None:
-        super().__init__(message)
-        self.category = category
-
-
-def _pi_retryable_for(*, category: str, message: str) -> bool:
-    """Use run_agent's shared failure classifier to keep retryability consistent."""
-    return classify_failure(_PiFailureFacts(message, category)).retries_allowed
-
-
 class PiError(Exception):
     """Raised when a Pi turn fails (e.g. ``stopReason == "error"``)."""
 
@@ -334,13 +267,13 @@ class PiError(Exception):
         self,
         message: str,
         *,
-        retryable: bool = False,
+        retryable: bool | None = None,
         category: str = "UNKNOWN",
         retry_after: float | None = None,
     ):
         super().__init__(message)
-        self.retryable = retryable
         self.category = category
+        self.retryable = classify_failure(self).retries_allowed if retryable is None else retryable
         self.retry_after = retry_after
 
 
@@ -362,23 +295,6 @@ def _render_tool_result(result: Any) -> str:
         return content
     # Last resort — preserve the payload rather than dropping the observation.
     return json.dumps(result, ensure_ascii=False) if result else ""
-
-
-def _extract_usage(message: dict[str, Any]) -> dict[str, Any]:
-    """Pull token + cost fields out of a Pi ``AssistantMessage``.
-
-    Returns ``input``, ``output``, ``cacheRead``, ``cacheWrite`` (ints or None)
-    and ``cost_total`` (float or None). Never raises — every field is optional.
-    """
-    usage = message.get("usage") or {}
-    cost = usage.get("cost") or {}
-    return {
-        "input": usage.get("input"),
-        "output": usage.get("output"),
-        "cacheRead": usage.get("cacheRead"),
-        "cacheWrite": usage.get("cacheWrite"),
-        "cost_total": cost.get("total"),
-    }
 
 
 def _schema_instruction(schema: dict[str, Any]) -> str:
@@ -421,9 +337,7 @@ class PiBackend:
         self._model_override = model
         self.reasoning_effort = reasoning_effort
         self._execution_input = execution_input
-        # ``.model`` must be resolved at construction (runner/recorder read it
-        # before execute); cache the settings lookup so execute() need not
-        # re-read settings.json for the same workspace.
+        # Resolve .model for pre-execution runner/recorder reads; cache same-workspace settings lookup.
         self._configured_cache: tuple[Path, str | None] | None = None
         configured: str | None = None
         if model is None and cwd is not None:
@@ -447,9 +361,15 @@ class PiBackend:
             self.fanout_concurrency = resolve_fanout_concurrency(
                 "DAYDREAM_PI_FANOUT_CONCURRENCY", _PI_DEFAULT_FANOUT_CONCURRENCY
             )
-            self.retry_attempts = _pi_retry_attempts()
-            self.retry_base_delay_s = _pi_retry_base_delay()
-            self.retry_max_delay_s = _pi_retry_max_delay()
+            self.retry_attempts = _parsed_nonnegative_int(
+                os.environ, "DAYDREAM_PI_RETRY_ATTEMPTS", _PI_DEFAULT_RETRY_ATTEMPTS,
+            )
+            self.retry_base_delay_s = _parsed_nonnegative_float(
+                os.environ, "DAYDREAM_PI_RETRY_BASE_DELAY_S", _PI_DEFAULT_RETRY_BASE_DELAY,
+            )
+            self.retry_max_delay_s = _parsed_nonnegative_float(
+                os.environ, "DAYDREAM_PI_RETRY_MAX_DELAY_S", _PI_DEFAULT_RETRY_MAX_DELAY,
+            )
         self._transports: list[CliTransport] = []
 
     async def execute(
@@ -466,18 +386,13 @@ class PiBackend:
         review_instructions: str | None = None,
         tools_disabled: bool = False,
     ) -> AsyncGenerator[AgentEvent, None]:
-        """Yield Pi events; a turn error raises PiError and nonempty agents are unsupported.
-
-        Schemas are appended to the prompt and final assistant text is parsed at
-        agent_end. Pi tokens resume via --session-id when persistence is enabled;
-        persist_session=False uses --no-session and suppresses continuation.
-
-        read_only allows read/find/ls/grep. finalization disables tools, substitutes
-        serialization instructions, and caps thinking at low while preserving lower
-        settings. tools_disabled keeps normal instructions/thinking and uses stdin.
-        Pi cannot enforce max_turns: callers must enforce an absolute deadline.
-        Stdout silence raises retryable StreamStalledError; run_agent starts a fresh
-        subprocess for each retry.
+        """Yield Pi events; turn errors raise PiError and nonempty agents are unsupported. Schemas are
+        prompt-emulated and parsed from final assistant text. Persisted Pi tokens resume via session id;
+        persist_session=False uses --no-session without continuation. read_only limits tools to
+        read/find/ls/grep. Finalization disables tools, substitutes serialization instructions, and
+        caps thinking at low. tools_disabled retains normal reasoning/instructions with stdin.
+        Callers enforce max_turns through deadlines; stdout stalls raise retryable StreamStalledError
+        and each retry starts a fresh subprocess.
         """
         if agents:
             raise NotImplementedError(
@@ -570,9 +485,7 @@ class PiBackend:
             else:
                 child_env[native_key_name] = api_key
 
-        # Pi's built-in system prompt is minimal; append the daydream preamble
-        # so the default DeepSeek model gets the same tool-efficiency / budget-awareness
-        # guidance that Claude Code and Codex inject natively via their CLIs.
+        # Append Daydream tool-efficiency/budget guidance to Pi's minimal system prompt.
         system_prompt = _PI_FINALIZATION_PREAMBLE if finalization else _PI_SYSTEM_PREAMBLE
         if review_instructions and not finalization:
             system_prompt += (
@@ -613,9 +526,7 @@ class PiBackend:
         if output_schema:
             full_prompt = prompt + _schema_instruction(output_schema)
 
-        # P18 Task 1: generation lifecycle correlation state (Pi only —
-        # native_generation_interval class). One open generation per
-        # assistant message; user/tool-result lifecycle never creates one.
+        # One generation per assistant message; user/tool-result lifecycles never open generations.
         open_generation_id: str | None = None
         # Host receipt of assistant message_start (Unix ns, host clock).
         generation_start_ns: int | None = None
@@ -668,10 +579,7 @@ class PiBackend:
                 ),
             )
 
-        # P18 Task 1: closed typed effective-config admission from the exact
-        # argv built above. max_turns is accepted-but-not-enforced by Pi (no
-        # native flag) so it stays None; output_schema is emulated by prompt
-        # appendix (schema_emulated=True whenever a schema was supplied).
+        # Record exact argv controls; Pi cannot enforce max_turns and prompt-emulates output schemas.
         yield RequestEvent(
             prompt=full_prompt,
             system_prompt=system_prompt,
@@ -704,17 +612,13 @@ class PiBackend:
             if not tools_disabled:
                 args.append(f"@{_write_prompt_attachment(full_prompt, attachments)}")
             if review_instructions and not finalization:
-                # Pi resolves existing system-prompt paths directly (without @).
-                # Review instructions are caller-controlled and need the same
-                # size-independent transport as the user prompt.
+                # Pi system-prompt file paths omit @; caller-controlled review text needs size-independent transport.
                 index = args.index("--append-system-prompt") + 1
                 args[index] = str(_write_prompt_attachment(system_prompt, attachments))
             transport = CliTransport(
                 "pi",
                 args,
-                stdin_mode=StdinMode.PIPE if tools_disabled else StdinMode.DEVNULL,
                 stdin_data=full_prompt.encode("utf-8") if tools_disabled else None,
-                stderr_policy=StderrPolicy.MERGE_INTO_STDOUT,
                 limit=_PI_STDOUT_LIMIT_BYTES,
                 env=child_env,
                 cwd=str(cwd),
@@ -744,29 +648,22 @@ class PiBackend:
                 try:
                     event = json.loads(raw_line)
                 except json.JSONDecodeError:
-                    # Capture non-JSON lines — these are stderr merged into
-                    # stdout (pi diagnostics, login prompts, errors). Kept for
-                    # error reporting when the process exits non-zero.
+                    # Retain bounded merged stderr/diagnostic lines for nonzero process-exit errors.
                     if len(stderr_lines) < 20:
                         stderr_lines.append(raw_line)
                     continue
 
                 if is_first_line:
                     is_first_line = False
-                    # Session header — capture the session id for the
-                    # continuation token. Header field name is not stable across
-                    # Pi builds, so probe the common keys.
+                    # Probe common Pi header spellings for the continuation session id.
                     for key in ("id", "sessionId", "session_id", "session"):
                         val = event.get(key)
                         if isinstance(val, str) and val:
                             session_id = val
                             break
-                    # If the header also carries a dispatchable event type, fall
-                    # through; otherwise it is a pure header — skip.
-                    if event.get("type") not in _PI_EVENT_TYPES:
-                        continue
-
                 event_type = event.get("type", "")
+                if event_type is not None and not isinstance(event_type, str):
+                    raise PiError("Pi event type must be a string", category="PROTOCOL")
 
                 if event_type == "agent_start":
                     pass  # Lifecycle marker; nothing to emit.
@@ -778,10 +675,8 @@ class PiBackend:
                 elif event_type == "message_start":
                     msg = event.get("message") or {}
                     if msg.get("role") == "assistant" and open_generation_id is None:
-                        # P18: host receipt of the assistant generation start.
-                        # Host-observed only — never relabeled as provider
-                        # request start; the native start comes from the
-                        # completed message's Unix-ms timestamp at message_end.
+                        # This is host receipt, never provider request start; completed messages may expose native
+                        # Unix-ms start.
                         open_generation_id = _new_generation_id()
                         generation_start_ns = time.time_ns()
                         assert generation_start_ns is not None  # just assigned
@@ -814,29 +709,20 @@ class PiBackend:
                                     yield ThinkingEvent(text=thinking_text)
                                     choice_parts.append(ReasoningChoicePart(text=thinking_text))
                             elif btype == "toolCall":
-                                # P18: the provider choice already carries the
-                                # exact call ID/name/arguments at message_end;
-                                # the later tool execution links by this call ID
-                                # and never authors or duplicates the choice part.
+                                # Seal provider tool id/name/arguments at message_end; execution links by call id
+                                # without duplicating choices.
                                 call_id = block.get("id")
                                 call_name = block.get("name")
                                 if isinstance(call_id, str) and call_id and isinstance(call_name, str) and call_name:
-                                    arguments_admitted, _arguments_diag = _admit_json_value(block.get("arguments"))
-                                    if arguments_admitted is not None or block.get("arguments") is None:
-                                        try:
-                                            choice_parts.append(
-                                                ToolCallChoicePart(
-                                                    call_id=call_id,
-                                                    name=call_name,
-                                                    arguments=(
-                                                        arguments_admitted if arguments_admitted is not None else {}
-                                                    ),
-                                                )
-                                            )
-                                        except ValueError:
-                                            # Unsafe tool identity never enters the
-                                            # provider choice (fixed admission policy).
-                                            pass
+                                    try:
+                                        choice_parts.append(ToolCallChoicePart(
+                                            call_id=call_id,
+                                            name=call_name,
+                                            arguments={} if block.get("arguments") is None else block["arguments"],
+                                        ))
+                                    except ValueError:
+                                        # ToolCallChoicePart owns identity and argument admission.
+                                        pass
                         if text_parts:
                             last_assistant_text = "".join(text_parts)
                         # P18: seal the generation exactly once at the matching
@@ -844,9 +730,7 @@ class PiBackend:
                         if open_generation_id is not None:
                             ended_at_ns = time.time_ns()
                             native_start_ms, _start_diag = _admit_native_unix_ms(msg.get("timestamp"))
-                            # Chronology: a native start after the host end
-                            # receipt is an explicit incomplete boundary, never
-                            # clamped or reordered.
+                            # Reject native starts later than host start receipt; never clamp or reorder timestamps.
                             if (
                                 native_start_ms is not None
                                 and generation_start_ns is not None
@@ -897,12 +781,12 @@ class PiBackend:
                     if stop_reason is not None:
                         saw_finish_reason = True
                         finish_reason = stop_reason
-                    usage = _extract_usage(msg)
-                    inp = usage["input"]
-                    outp = usage["output"]
-                    cached = usage["cacheRead"]
-                    created = usage["cacheWrite"]
-                    cost = usage["cost_total"]
+                    usage = msg.get("usage") or {}
+                    cost = (usage.get("cost") or {}).get("total")
+                    inp = usage.get("input")
+                    outp = usage.get("output")
+                    cached = usage.get("cacheRead")
+                    created = usage.get("cacheWrite")
                     if isinstance(inp, int):
                         inp += (cached if isinstance(cached, int) else 0) + (created if isinstance(created, int) else 0)
                         total_input = (total_input or 0) + inp
@@ -943,42 +827,32 @@ class PiBackend:
                         category = _pi_error_category(error_msg)
                         raise PiError(
                             error_msg,
-                            retryable=_pi_retryable_for(category=category, message=error_msg),
                             category=category,
                             retry_after=parse_message_retry_hint(error_msg),
                         )
 
                 elif event_type == "agent_end":
-                    # No inline finalization — Cost/Result are emitted once from
-                    # the single post-loop path below. The loop keeps
-                    # draining to EOF so the stdout pipe cannot fill mid-run.
+                    # Emit terminal Cost/Result once after draining EOF so stdout cannot fill during normal
+                    # finalization.
                     pass
 
-                # turn_start / message_start / message_update /
-                # tool_execution_update are streaming-only; the full content is
-                # already captured at message_end / tool_execution_end.
+                # Streaming-only updates are captured by complete message/tool-end events.
 
-            # Reap the child, then yield its terminal events before the shared
-            # exit check formats the backend-specific message from the code and
-            # captured stderr lines (the events must stay between the two).
-            returncode = await reap(transport)
+            # Reap, yield terminal events, then format/check backend-specific process exits.
+            returncode = await transport.wait()
 
             if output_schema and last_assistant_text:
                 structured_result = extract_json(last_assistant_text)
             for terminal in terminal_events():
                 yield terminal
 
-            # Fail fast on non-zero exit: if pi crashed without emitting a
-            # turn_end error event, surface the failure with diagnostic output
-            # instead of reporting a successful completion with empty/partial
-            # output.
-            raise_for_exit(
-                returncode,
-                error_type=PiError,
-                category="PROCESS_EXIT",
-                build_message=partial(_pi_process_exit_message, stderr_lines),
-                retryable=_is_retryable_exit_code(returncode),
-            )
+            # Report nonzero exits even without turn_end errors; empty/partial output is not success.
+            if returncode != 0:
+                raise PiError(
+                    _pi_process_exit_message(stderr_lines, returncode),
+                    category="PROCESS_EXIT",
+                    retryable=_is_retryable_exit_code(returncode),
+                )
 
             if saw_turn_start and not saw_finish_reason:
                 raise PiError(

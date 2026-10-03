@@ -32,13 +32,13 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Mapping
-from urllib.parse import urlsplit
+from typing import Any, Literal, Mapping
 
 import anyio
 import httpx
 
 from daydream.json_utils import atomic_write_json
+from daydream.observability.config import ObservabilityError, validate_endpoint
 
 # ---------------------------------------------------------------------------
 # Frozen fixed dispositions (never include URLs/headers/bodies/exception text)
@@ -120,28 +120,11 @@ def validate_receipt(receipt: Mapping[str, Any]) -> None:
 
 
 def validate_base_url(raw: str, setting: str) -> str:
-    """Apply the exporter's HTTP(S) URL policy without importing its OTLP transport.
-
-    Require hostname/valid port; reject credentials, query, fragment, whitespace,
-    and controls.
-    """
+    """Use the exporter endpoint contract without loading OTLP transport machinery."""
     try:
-        parsed = urlsplit(raw)
-        valid = (
-            bool(parsed.hostname)
-            and parsed.username is None
-            and parsed.password is None
-            and not parsed.query
-            and not parsed.fragment
-            and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in raw)
-            and parsed.scheme in ("http", "https")
-        )
-        parsed.port  # noqa: B018 - validates malformed/out-of-range ports
-    except (ValueError, AttributeError):
-        valid = False
-    if not valid:
-        raise ReadbackError(f"{setting} must be a valid HTTP(S) URL without credentials, query, fragment or whitespace")
-    return raw.rstrip("/")
+        return validate_endpoint(raw, setting)
+    except ObservabilityError as exc:
+        raise ReadbackError(str(exc)) from None
 
 
 def _split_path(path: str) -> list[str]:
@@ -212,20 +195,23 @@ class ReadbackClient:
             }
         )
 
-    async def _request(
+    async def request_json(
         self,
         client: httpx.AsyncClient,
-        method: str,
+        method: Literal["GET", "POST"],
         *,
         destination: str,
         url: str,
-        request_kwargs: Mapping[str, Any],
         headers: Mapping[str, str],
         op: str,
         key: str,
-        accept: type[Any] | tuple[type[Any], ...],
+        payload: Mapping[str, Any] | None = None,
+        params: Mapping[str, Any] | None = None,
     ) -> tuple[str, int, Any, bytes]:
         """One bounded request under the shared immutable deadline."""
+        request_kwargs: dict[str, Any] = (
+            {"json": dict(payload or {})} if method == "POST" else {"params": dict(params or {})}
+        )
         left = self.remaining()
         if left <= 0:
             return (DISPOSITION_TIMEOUT, 0, {}, b"")
@@ -259,57 +245,9 @@ class ReadbackClient:
             parsed = json.loads(bytes(raw).decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             return (DISPOSITION_MALFORMED, status, {}, bytes(raw))
-        if not isinstance(parsed, accept):
+        if not isinstance(parsed, dict if method == "POST" else (dict, list)):
             return (DISPOSITION_MALFORMED, status, {}, bytes(raw))
         return (DISPOSITION_PASS, status, parsed, bytes(raw))
-
-    async def post_json(
-        self,
-        client: httpx.AsyncClient,
-        *,
-        destination: str,
-        url: str,
-        payload: Mapping[str, Any],
-        headers: Mapping[str, str],
-        op: str,
-        key: str,
-    ) -> tuple[str, int, dict[str, Any], bytes]:
-        """One bounded POST under the shared immutable deadline."""
-        return await self._request(
-            client,
-            "POST",
-            destination=destination,
-            url=url,
-            request_kwargs={"json": dict(payload)},
-            headers=headers,
-            op=op,
-            key=key,
-            accept=dict,
-        )
-
-    async def get_json(
-        self,
-        client: httpx.AsyncClient,
-        *,
-        destination: str,
-        url: str,
-        params: Mapping[str, Any],
-        headers: Mapping[str, str],
-        op: str,
-        key: str,
-    ) -> tuple[str, int, Any, bytes]:
-        """One bounded GET under the shared immutable deadline."""
-        return await self._request(
-            client,
-            "GET",
-            destination=destination,
-            url=url,
-            request_kwargs={"params": dict(params)},
-            headers=headers,
-            op=op,
-            key=key,
-            accept=(dict, list),
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -353,8 +291,9 @@ async def read_honeyhive(
                 "limit": limit,
                 "page": page,
             }
-            disposition, status, parsed, _raw = await client_ctx.post_json(
+            disposition, status, parsed, _raw = await client_ctx.request_json(
                 client,
+                "POST",
                 destination="honeyhive",
                 url=url,
                 payload=payload,
@@ -391,25 +330,23 @@ async def read_honeyhive(
                 return {"error": DISPOSITION_SHAPE, "detail": "rows/count reconciliation failed"}
             page += 1
 
-    def _snapshot(read: dict[str, Any]) -> tuple[str, str]:
-        """(ordered-ids hash, ordered id list) for one complete read."""
+    def _snapshot(read: dict[str, Any]) -> str:
+        """Fingerprint the admitted identities of one complete read."""
         ids = [event.get("id", event.get("event_id")) for event in read["rows"]]
         ordered = sorted(identity for identity in ids if isinstance(identity, str))
-        return stable_hash({"session": session_id, "count": read["count"], "ids": ordered}), ",".join(ordered)
+        return stable_hash({"session": session_id, "count": read["count"], "ids": ordered})
 
     # Two stable complete post-shutdown snapshots are required (the same
     # stability contract as the LangSmith exact-ID tree).
     first = await _read_complete()
     if "error" in first:
         return {"disposition": first["error"], "detail": first["detail"]}
-    first_hash, first_ids = _snapshot(first)
+    first_hash = _snapshot(first)
 
     second = await _read_complete()
     if "error" in second:
         return {"disposition": second["error"], "detail": second["detail"]}
-    second_hash, _second_ids = _snapshot(second)
-
-    stable = second if second_hash == first_hash else None
+    stable = second if _snapshot(second) == first_hash else None
     if stable is None:
         # One bounded stable re-check after a short sleep inside the deadline.
         if client_ctx.remaining() <= 0:
@@ -418,19 +355,19 @@ async def read_honeyhive(
         third = await _read_complete()
         if "error" in third:
             return {"disposition": third["error"], "detail": third["detail"]}
-        third_hash, _third_ids = _snapshot(third)
-        if third_hash != first_hash:
+        if _snapshot(third) != first_hash:
             return {"disposition": DISPOSITION_UNSTABLE, "detail": "two equal complete snapshots not reached"}
         stable = third
 
+    ids = [event.get("id", event.get("event_id")) for event in stable["rows"]]
     return {
         "disposition": DISPOSITION_PASS,
         "destination": "honeyhive",
         "session_id": session_id,
         "count": stable["count"],
-        "ids": [event.get("id", event.get("event_id")) for event in stable["rows"]],
+        "ids": ids,
         "snapshot_hash": first_hash,
-        "ids_hash": first_ids,
+        "ids_hash": ",".join(sorted(identity for identity in ids if isinstance(identity, str))),
         "rows": stable["rows"],
         "detail": f"expected run {expected_run_id}; two stable complete snapshots",
     }
@@ -465,8 +402,9 @@ async def read_langsmith(
 
     # Bounded project-name -> vendor-session-id resolution. The lookup is by
     # exact name; zero or ambiguous matches fail closed.
-    disposition_sessions, _status, parsed_sessions, _raw = await client_ctx.get_json(
+    disposition_sessions, _status, parsed_sessions, _raw = await client_ctx.request_json(
         client,
+        "GET",
         destination="langsmith",
         url=f"{base_url}/api/v1/sessions",
         params={"name": project, "limit": 5},
@@ -494,8 +432,9 @@ async def read_langsmith(
         "limit": 100,
         "start_time": started_at,
     }
-    disposition, status, parsed, _raw = await client_ctx.post_json(
+    disposition, status, parsed, _raw = await client_ctx.request_json(
         client,
+        "POST",
         destination="langsmith",
         url=url,
         payload=discovery_payload,
@@ -511,10 +450,7 @@ async def read_langsmith(
     if not isinstance(runs, list):
         return {"disposition": DISPOSITION_SHAPE, "detail": "expected {runs: [...]}"}
     if not runs:
-        # Zero runs is an honest absence (e.g. the sanitized replay's pinned
-        # historical span times land outside LangSmith's ~24h OTLP ingest
-        # window — vendor-reality note in readback-matrix.json), not a root
-        # ambiguity: the exact run id discovered nothing at all.
+        # Zero exact-ID matches are honest absence, including historical spans outside vendor ingest windows.
         return {"disposition": DISPOSITION_NOT_FOUND, "detail": "no trace found for the exact run id"}
     roots = [run for run in runs if isinstance(run, dict) and not run.get("parent_run_id")]
     # The exact-session filtered discovery must identify exactly one trace.
@@ -528,8 +464,9 @@ async def read_langsmith(
 
     # Exact-ID read: documented semantics — providing the returned run ID
     # ignores all other filtering arguments and reads that exact record.
-    disposition_root, _status, parsed_root, _raw = await client_ctx.post_json(
+    disposition_root, _status, parsed_root, _raw = await client_ctx.request_json(
         client,
+        "POST",
         destination="langsmith",
         url=url,
         payload={"session": [session_id], "id": [root_id]},
@@ -546,8 +483,9 @@ async def read_langsmith(
         return {"disposition": DISPOSITION_SHAPE, "detail": "exact root-ID read did not return the frozen root"}
 
     async def _tree_read() -> dict[str, Any]:
-        disposition_tree, _status, parsed_tree, _raw_tree = await client_ctx.post_json(
+        disposition_tree, _status, parsed_tree, _raw_tree = await client_ctx.request_json(
             client,
+            "POST",
             destination="langsmith",
             url=url,
             payload={"session": [session_id], "filter": f"eq(trace_id, '{trace_id}')", "limit": 100},
@@ -565,22 +503,20 @@ async def read_langsmith(
     first = await _tree_read()
     if first["disposition"] != DISPOSITION_PASS:
         return first
-    second = await _tree_read()
-    if second["disposition"] != DISPOSITION_PASS:
-        return second
-    first_runs = first["runs"]
-    second_runs = second["runs"]
-    first_hash = stable_hash([_run_identity(r) for r in first_runs])
-    second_hash = stable_hash([_run_identity(r) for r in second_runs])
-    if first_hash != second_hash:
+    stable = await _tree_read()
+    if stable["disposition"] != DISPOSITION_PASS:
+        return stable
+    first_hash = stable_hash([_run_identity(r) for r in first["runs"]])
+    if stable_hash([_run_identity(r) for r in stable["runs"]]) != first_hash:
         # One bounded stable re-check after a short sleep inside the deadline.
         if client_ctx.remaining() <= 0:
             return {"disposition": DISPOSITION_UNSTABLE, "detail": "tree snapshots disagreed and deadline elapsed"}
         await anyio.sleep(min(0.5, client_ctx.remaining()))
-        third = await _tree_read()
-        if third["disposition"] != DISPOSITION_PASS or stable_hash(
-            [_run_identity(r) for r in third["runs"]]
-        ) != first_hash:
+        stable = await _tree_read()
+        if (
+            stable["disposition"] != DISPOSITION_PASS
+            or stable_hash([_run_identity(r) for r in stable["runs"]]) != first_hash
+        ):
             return {"disposition": DISPOSITION_UNSTABLE, "detail": "two equal complete snapshots not reached"}
     return {
         "disposition": DISPOSITION_PASS,
@@ -589,8 +525,8 @@ async def read_langsmith(
         "run_id": run_id,
         "root_id": root_id,
         "trace_id": trace_id,
-        "count": len(second_runs),
-        "runs": second_runs,
+        "count": len(stable["runs"]),
+        "runs": stable["runs"],
         "snapshot_hash": first_hash,
         "detail": "exact-ID tree reached two equal snapshots",
     }
@@ -729,10 +665,7 @@ def compare_stored(
         _reconcile_replay(hh, ls, expected_shape, _fail)
 
     if expected_shape is not None and acceptance_kind == "representative_real_run":
-        # Structural minimums on the stored trees: one root/one session is
-        # already enforced by the exact-session/exact-trace reads, so the
-        # remaining expectations are the descendant minimums. A tree without
-        # a generation child or a tool sibling is not a complete agent tree.
+        # Exact reads enforce one root/session; require generation/tool descendants for a complete agent tree.
         minimums = (int(expected_shape.get("generations_min", 0)), int(expected_shape.get("tools_min", 0)))
         for container, rows_key, type_key, prefix, checks in (
             (ls, "runs", "run_type", "langsmith.tree", (("llm", "generations"), ("tool", "tools"))),
@@ -782,12 +715,8 @@ def _reconcile_replay(
         for row_index, row in enumerate(rows):
             metadata: dict[str, Any] = {}
             if isinstance(row, dict):
-                # The vendor stores the OpenLLMetry association properties at
-                # ``extra.metadata``; top-level ``metadata``/``config`` are
-                # the legacy canonical mappings the verifier still accepts on
-                # equal footing (only for lookup — storage shape is checked by
-                # compare_stored). The first-seen key wins, so the vendor-actual
-                # location takes precedence.
+                # Prefer vendor extra.metadata over legacy metadata/config; first-seen keys win.
+                # compare_stored validates storage shape.
                 for candidate_name in ("extra.metadata", "metadata", "config"):
                     candidate: Any = row
                     ok = True
@@ -824,11 +753,7 @@ def _reconcile_replay(
                     fail(DISPOSITION_SHAPE, f"{destination}.rows[{row_index}].{key}", mismatch)
             if usage_seen:
                 billed_by_destination[destination] = billed_by_destination.get(destination, 0) + 1
-                # The billable owner also carries the exact response identity.
-                # Absent keys are tolerated (the vendor does not always project
-                # the response-model key — e.g. HoneyHive stores the configured
-                # request model at config.model), identical to how the provider
-                # key below is treated; a PRESENT wrong value still fails.
+                # Absent response-model/provider keys are tolerated; present wrong identities fail.
                 stored_model = walk_metadata(metadata, "gen_ai.response.model")
                 if model is not None and stored_model not in (None, model):
                     fail(
@@ -849,10 +774,7 @@ def _reconcile_replay(
                         f"{destination}.rows[{row_index}].gen_ai.response.id",
                         "stored response id is not one of the pinned replay responses",
                     )
-            # Generation timing provenance (replay identity). The manifest pins
-            # the FIRST generation's exact historical interval; later
-            # generations in the same fixture have their own distinct
-            # native/sealed times and must not be compared to the first's pins.
+            # Only the first generation uses pinned historical times; later generations validate their own intervals.
             stored_native_ms = walk_metadata(metadata, "daydream.generation.native_started_at_unix_ms")
             is_pinned_generation = (
                 stored_native_ms is not None and start_ms is not None and stored_native_ms == start_ms
@@ -875,9 +797,7 @@ def _reconcile_replay(
                         "duration mismatch",
                     )
             elif stored_native_ms is not None:
-                # A later generation in the same fixture: never compared to the
-                # first generation's pins; only itself-consistency between its
-                # own stored native start, sealed end and duration is checked.
+                # Later generations must satisfy their own native-start/sealed-end/duration relationship.
                 if isinstance(sealed, int) and isinstance(stored_native_ms, int):
                     own_duration = sealed - stored_native_ms * 1_000_000
                     if elapsed is not None and elapsed != own_duration:
@@ -1027,8 +947,18 @@ def run_verify(receipt_path: Path, result_path: Path, *, budget_s: float, matrix
         {
             key: value
             for key, value in result.items()
-            if key in ("schema_version", "terminal", "dispositions", "request_log", "enabled_destinations",
-                       "matrix_rows", "ui_inspected", "stored_contract_passed", "detail")
+            if key
+            in (
+                "schema_version",
+                "terminal",
+                "dispositions",
+                "request_log",
+                "enabled_destinations",
+                "matrix_rows",
+                "ui_inspected",
+                "stored_contract_passed",
+                "detail",
+            )
         }
         | {"destinations": destination_summaries},
     )

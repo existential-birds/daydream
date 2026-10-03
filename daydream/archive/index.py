@@ -78,12 +78,7 @@ def canonical_utc_iso(ts: str) -> str:
 
 
 def normalize_as_of(value: str) -> str:
-    """Canonicalize a reproducibility pin at its entry boundary.
-
-    Accept only aware UTC input (``Z`` or zero offset); reject other offsets
-    instead of silently shifting an operator's pin. Downstream lexical cutoffs
-    assume this canonical spelling.
-    """
+    """Canonicalize a reproducibility pin at its entry boundary."""
     try:
         dt = datetime.fromisoformat(value)
     except ValueError:
@@ -205,28 +200,7 @@ def append_label_observation(
     legacy: str = "auto",
     observed_at: str | None = None,
 ) -> bool:
-    """Append an immutable observation and refresh the run cache in one transaction.
-
-    The session must exist. Timestamps must be aware ISO-8601; supplied
-    ``observed_at`` preserves source transaction time, otherwise use now.
-    ``valid_at`` is canonicalized and defaults to the observation time.
-
-    Automated rows dedupe against the latest auto row on
-    ``(evidence_sha, labeler_policy_version, reply_evidence_digest, labels,
-    has_posterior, reward_version)``. Missing digests remain distinct from
-    present values. Human rows bypass evidence dedupe. An identical row at the
-    same primary key is a no-op; distinct rows sharing a timestamp advance by
-    a microsecond. Return whether a row was inserted.
-
-    The cache always reflects the human-first, then newest winner, so later
-    automation cannot replace a human override. ``has_posterior`` identifies
-    rows with a scored PR outcome; reviewer logins identify the human accounts
-    that supplied it. Missing reviewers/reward data remain NULL.
-
-    An omitted policy version inherits ``labeler_version``. ``STALE_LEGACY``
-    becomes NULL policy plus ``legacy='legacy'``, which excludes gold admission.
-    Malformed timestamps and unknown sessions raise ValueError.
-    """
+    """Append an immutable observation and refresh the run cache in one transaction."""
     if valid_at is not None:
         valid_at = canonical_utc_iso(valid_at)
     if observed_at is not None:
@@ -353,10 +327,7 @@ def latest_label_observation(
     *,
     as_of: str | None = None,
 ) -> dict[str, Any] | None:
-    """Return the human-first, then newest observation within the optional cutoff.
-
-    ``as_of`` must already have the canonical UTC spelling from ``normalize_as_of``.
-    """
+    """Return the human-first, then newest observation within the optional cutoff."""
     cutoff = "AND observed_at <= ? " if as_of is not None else ""
     params: tuple[Any, ...] = (session_id,) if as_of is None else (session_id, as_of)
     with _connection(archive_dir) as conn:
@@ -378,14 +349,7 @@ def reviewer_set_penalty_prior(
     repo_slug: str | None = None,
     readonly: bool = False,
 ) -> tuple[float | None, int]:
-    """Return (mean penalty, count) over prior sessions sharing a reviewer.
-
-    Exclude the current session and require ``valid_at < before_valid_at``
-    (canonicalized here). An optional repo slug confines the pool to that repo.
-    Use the latest observation per session and map its first label through
-    ``FP_PENALTY_MAP``. Malformed reviewer/label JSON warns and skips the row.
-    An empty pool returns ``(None, 0)``; callers own sufficiency and fallback.
-    """
+    """Return (mean penalty, count) over prior sessions sharing a reviewer."""
     if not logins:
         return None, 0
     # Canonical spelling makes the SQL time cutoff chronological.
@@ -467,11 +431,7 @@ def label_observation_history(archive_dir: Path, session_id: str) -> list[dict[s
 
 
 def update_labels(archive_dir: Path, session_id: str, labels: list[str]) -> bool:
-    """Append a human override for an exact or uniquely prefixed session id.
-
-    Return False if absent; raise ValueError for an ambiguous prefix. Human
-    observations retain precedence over automation and bypass evidence dedupe.
-    """
+    """Append a human override for an exact or uniquely prefixed session id."""
     with _connection(archive_dir) as conn:
         cursor = conn.execute(
             "SELECT session_id FROM runs WHERE session_id LIKE ? || '%'",
@@ -501,10 +461,7 @@ def update_labels(archive_dir: Path, session_id: str, labels: list[str]) -> bool
 
 
 def set_run_pr_link(archive_dir: Path, session_id: str, pr_number: int, pr_repo: str) -> None:
-    """Backfill only PR linkage, leaving observations and caches untouched.
-
-    This retains a PR discovered after the run was frozen. Unknown sessions are a no-op.
-    """
+    """Backfill only PR linkage, leaving observations and caches untouched."""
     with _connection(archive_dir) as conn:
         conn.execute(
             "UPDATE runs SET pr_number = ?, pr_repo = ? WHERE session_id = ?",

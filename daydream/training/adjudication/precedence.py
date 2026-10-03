@@ -75,22 +75,14 @@ def effective_adjudication(observations: Sequence[Mapping[str, Any]]) -> dict[st
         msg = "effective_adjudication called with empty observation list for record_id"
         raise ValueError(msg)
 
-    record_id = _required(observations[0], "record_id")
+    _required(observations[0], "record_id")
     ordered = _sorted_by_recency(observations)
 
     adjudicators = [o for o in ordered if o.get("role") == "adjudicator"]
     human_raters = [o for o in ordered if o.get("role") == "rater"]
     automatic = [o for o in ordered if not _is_human(o)]
 
-    if adjudicators:
-        effective = adjudicators[-1]
-    elif human_raters:
-        effective = human_raters[-1]
-    elif automatic:
-        effective = automatic[-1]
-    else:  # pragma: no cover - role sets above are exhaustive over HUMAN_ROLES
-        msg = f"no resolvable observation for record_id {record_id!r}"
-        raise ValueError(msg)
+    effective = (adjudicators or human_raters or automatic)[-1]
 
     disposition = str(_required(effective, "disposition"))
     evidence_digest = str(_required(effective, "evidence_digest"))

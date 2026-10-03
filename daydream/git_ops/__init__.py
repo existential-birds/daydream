@@ -81,15 +81,12 @@ from daydream.git_ops.mutations import (
 from daydream.git_ops.process import GH_CREDENTIAL_HELPER as GH_CREDENTIAL_HELPER
 from daydream.git_ops.queries import (
     assert_is_worktree as assert_is_worktree,
-    branch_exists as branch_exists,
     changed_files as changed_files,
     changed_files_against as changed_files_against,
     changed_paths_z as changed_paths_z,
     check_ignore as check_ignore,
-    commit_exists as commit_exists,
     current_branch as current_branch,
     daydream_commits as daydream_commits,
-    default_branch as default_branch,
     diff as diff,
     diff_name_only as diff_name_only,
     diff_name_only_strict as diff_name_only_strict,
@@ -103,7 +100,6 @@ from daydream.git_ops.queries import (
     has_executable_pre_push_hook as has_executable_pre_push_hook,
     head_sha as head_sha,
     init_repository as init_repository,
-    is_ancestor as is_ancestor,
     is_inside_worktree as is_inside_worktree,
     is_unborn_head as is_unborn_head,
     list_local_branches as list_local_branches,
@@ -114,14 +110,10 @@ from daydream.git_ops.queries import (
     log_shas_since as log_shas_since,
     ls_files as ls_files,
     ls_tree_files as ls_tree_files,
-    merge_base as merge_base,
     object_alternates as object_alternates,
-    ref_exists as ref_exists,
     remote_contains_commit as remote_contains_commit,
     remote_url as remote_url,
     remote_urls as remote_urls,
-    resolve_diff_merge_base as resolve_diff_merge_base,
-    resolve_pr_merge_base as resolve_pr_merge_base,
     show as show,
     split_owner_repo as split_owner_repo,
     staged_patch as staged_patch,
@@ -130,8 +122,18 @@ from daydream.git_ops.queries import (
     symbolic_head as symbolic_head,
     tracked_artifact_collisions as tracked_artifact_collisions,
     tracked_path_collisions as tracked_path_collisions,
-    upstream_ahead_count as upstream_ahead_count,
     validate_branch_name as validate_branch_name,
+)
+from daydream.git_ops.references import (
+    branch_exists as branch_exists,
+    commit_exists as commit_exists,
+    default_branch as default_branch,
+    is_ancestor as is_ancestor,
+    merge_base as merge_base,
+    ref_exists as ref_exists,
+    resolve_diff_merge_base as resolve_diff_merge_base,
+    resolve_pr_merge_base as resolve_pr_merge_base,
+    upstream_ahead_count as upstream_ahead_count,
 )
 from daydream.git_ops.snapshot import prepare_independent_snapshot as prepare_independent_snapshot
 from daydream.git_ops.state import (

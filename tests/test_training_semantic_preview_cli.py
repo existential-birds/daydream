@@ -12,14 +12,14 @@ import pytest
 
 from daydream import cli, git_ops
 from daydream.archive import hydrate, license_enrich
-from daydream.archive.hydrate_client import FakeHub
 from daydream.archive.index import append_label_observation, label_observation_history, upsert_run
-from daydream.pr_review import DAYDREAM_FOOTER, finding_marker
+from daydream.reviews.identity import DAYDREAM_FOOTER, finding_marker
 from daydream.training.adjudication.observations import load_observations
 from daydream.training.labeler_versions import ADJUDICATION_LABELER_VERSION, REPLY_CLASSIFIER_VERSION
 from tests.fixtures.training.build_archive import _MINIMAL_TRAJECTORY
 from tests.fixtures.training.build_hub_snapshot import PINNED_POLICY_FIXTURE
 from tests.harness.git_helpers import git
+from tests.harness.hub import FakeHub
 from tests.harness.trajectory import make_manifest
 
 

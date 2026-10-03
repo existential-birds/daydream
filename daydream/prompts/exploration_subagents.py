@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from daydream.output_schema import result_array_schema, strict_object
+from daydream.output_schema import array_schema, enum_schema, record_array_schema, result_array_schema, strict_object
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget
 from daydream.prompts.grounding import (
     CWD_GROUNDING_INSTRUCTION,
@@ -23,45 +23,31 @@ if TYPE_CHECKING:
 
 
 # JSON Schemas (mirror style of FEEDBACK_SCHEMA in daydream/phases.py)
-PATTERN_SCANNER_SCHEMA: dict[str, Any] = strict_object({
-    "conventions": {
-        "type": "array",
-        "items": strict_object({
-            "name": {"type": "string"},
-            "description": {"type": "string"},
-            "source": {"type": "string"},
-        }),
-    },
-    "guidelines": {
-        "type": "array",
-        "items": {"type": "string"},
-    },
-})
+PATTERN_SCANNER_SCHEMA: dict[str, Any] = strict_object(
+    {
+        "conventions": record_array_schema({
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "source": {"type": "string"},
+                }),
+        "guidelines": array_schema({"type": "string"}),
+    }
+)
 
-DEPENDENCY_TRACER_SCHEMA: dict[str, Any] = strict_object({
-    "affected_files": {
-        "type": "array",
-        "items": strict_object({
-            "path": {"type": "string"},
-            "role": {
-                "type": "string",
-                "enum": ["modified", "imported_by", "imports", "test"],
-            },
-            "summary": {"type": "string"},
-        }),
-    },
-    "dependencies": {
-        "type": "array",
-        "items": strict_object({
-            "source": {"type": "string"},
-            "target": {"type": "string"},
-            "relationship": {
-                "type": "string",
-                "enum": ["imports", "calls", "extends", "tests"],
-            },
-        }),
-    },
-})
+DEPENDENCY_TRACER_SCHEMA: dict[str, Any] = strict_object(
+    {
+        "affected_files": record_array_schema({
+                    "path": {"type": "string"},
+                    "role": enum_schema(["modified", "imported_by", "imports", "test"]),
+                    "summary": {"type": "string"},
+                }),
+        "dependencies": record_array_schema({
+                    "source": {"type": "string"},
+                    "target": {"type": "string"},
+                    "relationship": enum_schema(["imports", "calls", "extends", "tests"]),
+                }),
+    }
+)
 
 TEST_MAPPER_SCHEMA: dict[str, Any] = result_array_schema("affected_files", {
     "path": {"type": "string"},

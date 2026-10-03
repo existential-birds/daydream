@@ -26,12 +26,7 @@ class Column(NamedTuple):
 
 
 class RunColumn(Column):
-    """A runs column in canonical fresh-database order.
-
-    The declaration generates CREATE, additive migration, and UPSERT SQL.
-    Upgraded column order is unconstrained: migrations and reads use names.
-    Label-observation writers own columns excluded from run upserts.
-    """
+    """A runs column in canonical fresh-database order."""
 
 
 RUNS_COLUMNS: tuple[RunColumn, ...] = (
@@ -140,33 +135,13 @@ def _upsert_sql(columns: Iterable[RunColumn]) -> str:
 
 _CREATE_TABLE = _create_table_sql(RUNS_COLUMNS)
 
-# Append-only bitemporal annotation history. ``observed_at`` is transaction
-# time (when the annotation was recorded); ``valid_at`` is valid time (when the
-# outcome the annotation describes became true, e.g. a PR merge timestamp). The
-# reward columns (``reward_version``, ``reward_json``, ``composite_reward``)
-# carry the full ``RewardBreakdown`` plus its cached composite scalar so a
-# corpus re-projection has every axis and each annotation generation is
-# self-describing (the ``runs.composite_reward`` mirror remains the SQL-threshold
-# cache). ``reviewer_logins`` is a JSON array of the human GitHub accounts whose
-# review/reply outcomes seeded the posterior axis (empty/``None`` for non-PR
-# runs); ``has_posterior`` is the population discriminator (1 when the row
-# carries a ``PosteriorBreakdown``, mirrored onto ``runs`` so SQL consumers can
-# split labeled/unlabeled populations without parsing ``reward_json``). See spec
-# ``corpus-pipeline-architecture`` (silver layer) and ``reward-posterior-corrections`` (C3).
-# ``source`` is the precedence marker (``'auto'`` for automated rubric labels,
-# ``'human'`` for maintainer overrides) — human-sourced rows win in the "latest
-# label" projections regardless of recency. Pre-existing rows default to ``'auto'``
-# via the additive ``_migrate_label_observations_schema`` ALTER-ADD migration.
-# ``labeler_policy_version`` mirrors ``labeler_version`` so the policy axis is an
-# explicit column; ``reply_classifier_version`` / ``reply_evidence_digest`` carry
-# the reply-classifier version and a stable digest over the combined reply
-# evidence — together with ``evidence_sha`` they form the auto-dedup key
-# ``(evidence_sha, labeler_policy_version, reply_evidence_digest, labels,
-# has_posterior)``, replacing the older ``(evidence_sha, reward_version)`` key.
-# ``legacy`` marks provenance generation: new rows default ``'auto'``
-# (current-generation); the additive migration stamps every pre-existing row
-# (``labeler_policy_version IS NULL``) ``'legacy'`` exactly once, never touching
-# its labels/observed_at/rubric_json.
+# Append-only history: observed_at is transaction time; valid_at is outcome time.
+# Reward JSON retains every axis; runs.composite_reward caches the winning score.
+# reviewer_logins names posterior contributors; has_posterior separates populations.
+# Human observations outrank auto regardless of recency. Auto dedup binds evidence,
+# labeler/reply policy, reply digest, labels, and population membership.
+# Additive migrations default old source to auto and mark missing-policy rows legacy
+# once, without rewriting their labels, timestamps, or rubric.
 LABEL_OBSERVATION_COLUMNS: tuple[Column, ...] = (
     Column("session_id", "TEXT NOT NULL"),
     Column("observed_at", "TEXT NOT NULL"),
@@ -223,10 +198,7 @@ def _alter_add_missing(
 
 
 def _migration_entries(columns: Iterable[Column]) -> list[tuple[str, str]]:
-    """Select additive columns for ALTER ADD in declaration order.
-
-    Required legacy columns without defaults cannot be added to populated tables.
-    """
+    """Select additive columns for ALTER ADD in declaration order."""
     return [(col.name, col.definition) for col in columns if col.additive]
 
 
@@ -236,11 +208,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
 
 
 def _recreate_label_observations_if_stale(conn: sqlite3.Connection) -> None:
-    """Recreate observations missing structural valid_at or has_posterior columns.
-
-    This intentionally discards obsolete development observations for re-harvest;
-    the runs table is untouched. Later migrations preserve observation rows.
-    """
+    """Recreate observations missing structural valid_at or has_posterior columns."""
     existing = {row[1] for row in conn.execute("PRAGMA table_info(label_observations)").fetchall()}
     if existing and ("valid_at" not in existing or "has_posterior" not in existing):
         warnings.warn(
@@ -259,13 +227,8 @@ def _migrate_label_observations_schema(conn: sqlite3.Connection) -> None:
         "label_observations",
         _migration_entries(LABEL_OBSERVATION_COLUMNS),
     )
-    # Stamp history exactly once (M17): rows written before the reply-label
-    # columns existed have ``labeler_policy_version IS NULL``. The additional
-    # ``legacy = 'auto'`` condition is the actual idempotency guard — once a
-    # row is marked ``legacy`` it stops matching, so later connection opens do
-    # not re-execute the UPDATE (or rewrite matched rows into the WAL) even
-    # though ``labeler_policy_version`` stays NULL. No row's labels/observed_at/
-    # rubric_json is ever written here.
+    # Only missing-policy rows still marked auto become legacy; this guard prevents
+    # repeat WAL writes and preserves labels, observed_at, and rubric_json.
     conn.execute(
         "UPDATE label_observations SET legacy = 'legacy' "
         "WHERE labeler_policy_version IS NULL AND legacy = 'auto'"

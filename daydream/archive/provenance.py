@@ -16,11 +16,7 @@ from daydream.git_ops import GitError
 
 @dataclass
 class ExecutableProvenance:
-    """Executable version, install source, commit, dirty state, and optional image digest.
-
-    Install source is editable, git, package, or unknown. Unresolved commit or
-    dirty state is ``unknown``; image digest comes only from DAYDREAM_IMAGE_DIGEST.
-    """
+    """Executable version, install source, commit, dirty state, and optional image digest."""
 
     version: str
     install_source: str
@@ -34,10 +30,7 @@ class ExecutableProvenance:
 
 
 def _resolve_install_source() -> str:
-    """Resolve the package install source from ``importlib.metadata``.
-
-    Returns ``"unknown"`` on any lookup failure — never raises.
-    """
+    """Resolve the package install source from ``importlib.metadata``."""
     try:
         from importlib.metadata import distribution
 

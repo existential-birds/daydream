@@ -5,13 +5,13 @@ under the shared serializer and retaining native profile/stack fields.
 
 from __future__ import annotations
 
-from daydream.archive.hydrate_client import FakeHub
 from tests.fixtures.training.build_hub_snapshot import (
     REPO_ID,
     SNAPSHOT_REVISION,
     _snapshot_files,
     _snapshot_trajectory,
 )
+from tests.harness.hub import FakeHub
 
 __all__ = ["REPO_ID", "SNAPSHOT_REVISION", "build_snapshot_decisive"]
 

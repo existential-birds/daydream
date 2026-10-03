@@ -43,6 +43,7 @@ from daydream.phases import (
 from daydream.phases.findings import (
     _write_single_stack_merged_items,
 )
+from daydream.phases.merge import merge_is_host_noop
 from daydream.review_budget import (
     render_review_warnings,
     review_warnings,
@@ -81,19 +82,6 @@ def _merge_contributing_records(deep_state: DeepState) -> dict[str, bytes | None
     if structural is not None:
         paths.append(structural)
     return _records_bytes_by_basename(paths)
-
-
-def _merge_is_host_noop(ctx: FlowContext, deep_state: DeepState) -> bool:
-    """Mirror the packaged phase's proof of an eligible empty synthesis."""
-    from daydream.deep.prompts import build_merge_prompt
-    from daydream.phases.merge import _empty_merge_inputs
-    from daydream.review_profile import build_default_profile
-
-    strategy = ctx.strategy("merge")
-    default = build_default_profile().strategies["merge"].content
-    return (ctx.registry.prompt("merge") is build_merge_prompt
-            and (strategy is None or strategy == default)
-            and _empty_merge_inputs(deep_state.record_pool.language_paths, deep_state.alts_path))
 
 
 def _merge_store_payload(dd: Path) -> dict[str, bytes] | None:
@@ -163,7 +151,10 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
         all_records: list[dict[str, Any]] = deep_state.record_pool.language
         failed_stacks: dict[str, str] = deep_state.unfinished_scopes
         coverage = deep_state.review_coverage
-        host_noop = _merge_is_host_noop(ctx, deep_state)
+        host_noop = merge_is_host_noop(
+            deep_state.record_pool, deep_state.alts_path,
+            builder=ctx.registry.prompt("merge"), strategy=ctx.strategy("merge"),
+        )
 
         async with phase_scope(
             DaydreamPhase.MERGE, stage="cross-stack-agent"
@@ -226,13 +217,12 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
                 await phase_cross_stack_merge(
                     ctx.backend_for("merge"),
                     ctx.work,
-                    per_stack_records_paths=deep_state.record_pool.language_paths,
+                    record_pool=deep_state.record_pool,
                     intent_path=deep_state.intent_path,
                     alternatives_path=alts_p,
                     dedup_candidates_path=dedup_p,
                     exploration_dir=deep_state.exploration_dir,
                     failed_stacks=failed_stacks or None,
-                    structural_records_path=deep_state.record_pool.structural_path,
                     intent_authoritative=deep_state.intent_authoritative,
                     continuation=deep_state.arbiter_continuation,
                     strategy=ctx.strategy("merge"),
@@ -278,8 +268,8 @@ def _salvage_merge_failure(ctx: FlowContext, exc: CrossStackMergeError) -> None:
     _write_single_stack_merged_items(
         ctx.work.repo,
         dd,
-        records,
-        deep_state.record_pool.structural_path,
+        deep_state.record_pool,
+        records=records,
         failed_stacks=deep_state.unfinished_scopes or None,
         artifact_session=ctx.artifacts,
         allow_standalone=ctx.allow_standalone_artifacts,
@@ -304,8 +294,7 @@ async def _step_single_stack_merge(ctx: FlowContext) -> None:
         _write_single_stack_merged_items(
             ctx.work.repo,
             deep_state.dd,
-            deep_state.record_pool.language,
-            deep_state.record_pool.structural_path,
+            deep_state.record_pool,
             failed_stacks=failed_stacks or None,
             artifact_session=ctx.artifacts,
             allow_standalone=ctx.allow_standalone_artifacts,

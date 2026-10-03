@@ -20,33 +20,35 @@ from daydream.phases import phase_cross_stack_merge
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.review_profile import default_strategy as _default_strategy
-from tests.harness.review_result import merge_result
+from tests.harness.review_result import merge_result, record_pool
 
 
-@pytest.mark.parametrize("payload", [[], {"issues": []}])
-async def test_empty_merge_host_noop_requires_current_record_envelope(
+@pytest.mark.parametrize("payload", [[], {"issues": []}, {"issues": None}, "{bad json", None])
+async def test_empty_merge_uses_admitted_pool_after_persisted_view_changes(
     tmp_path: Path, make_work: Callable[..., WorkContext], payload: object,
 ) -> None:
     dd = deep_dir(tmp_path, allow_standalone=True)
     records = dd / "stack-python-records.json"
-    records.write_text(json.dumps(payload))
+    admitted = record_pool(dd, paths=[records])
+    if payload is not None:
+        records.write_text(payload if isinstance(payload, str) else json.dumps(payload))
     alternatives = dd / "alternatives.json"
     alternatives.write_text("[]")
     backend = ScriptedBackend(events=[ResultEvent(structured_output={"items": []}, continuation=None)])
 
     report = await phase_cross_stack_merge(
-        backend, make_work(tmp_path), per_stack_records_paths=[records], intent_path=dd / "intent.md",
+        backend, make_work(tmp_path), record_pool=admitted, intent_path=dd / "intent.md",
         alternatives_path=alternatives, dedup_candidates_path=dd / "dedup-candidates.json", allow_standalone=True,
     )
 
-    assert backend.call_count == int(isinstance(payload, list))
+    assert backend.call_count == 0
     assert json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text()) == {"items": []}
     assert report.read_text() == DeepArtifact.MERGED_REPORT.at(dd).read_text()
 
 
 @pytest.mark.parametrize("input_kind", [
-    "nonempty-records", "nonempty-alternatives", "missing-records", "missing-alternatives",
-    "malformed-records", "malformed-alternatives", "wrong-records-shape", "wrong-alternatives-shape",
+    "nonempty-records", "nonempty-alternatives", "missing-alternatives",
+    "malformed-alternatives", "wrong-alternatives-shape",
     "envelope-alternatives", "no-record-paths", "custom-strategy", "custom-builder",
 ])
 async def test_empty_merge_requires_completed_inputs_and_builtin_contract(
@@ -58,6 +60,7 @@ async def test_empty_merge_requires_completed_inputs_and_builtin_contract(
     alternatives = dd / "alternatives.json"
     alternatives.write_text("[]")
     strategy: str | None = None
+    admitted_records = [{"id": 1, "description": "review finding"}] if input_kind == "nonempty-records" else []
     if input_kind == "nonempty-records":
         records.write_text('[{"id": 1, "description": "review finding"}]')
     elif input_kind == "nonempty-alternatives":
@@ -79,7 +82,8 @@ async def test_empty_merge_requires_completed_inputs_and_builtin_contract(
     backend = ScriptedBackend(events=[ResultEvent(structured_output={"items": []}, continuation=None)])
 
     await phase_cross_stack_merge(
-        backend, make_work(tmp_path), per_stack_records_paths=[] if input_kind == "no-record-paths" else [records],
+        backend, make_work(tmp_path),
+        record_pool=record_pool(dd, admitted_records, paths=[] if input_kind == "no-record-paths" else [records]),
         intent_path=dd / "intent.md", alternatives_path=alternatives,
         dedup_candidates_path=dd / "dedup-candidates.json", strategy=strategy, allow_standalone=True,
     )
@@ -108,9 +112,11 @@ async def test_empty_merge_keeps_structural_findings_and_clears_stale_outputs(
     backend = ScriptedBackend(events=[AssertionError("empty language merge must not dispatch")])
 
     await phase_cross_stack_merge(
-        backend, make_work(tmp_path), per_stack_records_paths=[records], intent_path=dd / "intent.md",
+        backend, make_work(tmp_path), record_pool=record_pool(dd,
+            structural=json.loads(structural.read_text())["issues"],
+            paths=[records], structural_path=structural), intent_path=dd / "intent.md",
         alternatives_path=alternatives, dedup_candidates_path=dd / "dedup-candidates.json",
-        structural_records_path=structural, strategy=_default_strategy("merge"), allow_standalone=True,
+        strategy=_default_strategy("merge"), allow_standalone=True,
     )
 
     assert backend.call_count == 0
@@ -128,6 +134,33 @@ async def test_empty_merge_keeps_structural_findings_and_clears_stale_outputs(
     assert "stale result" not in (tmp_path / REVIEW_OUTPUT_FILE).read_text()
 
 
+async def test_merge_provenance_uses_admitted_identities_not_rewritten_disk(
+    tmp_path: Path, make_work: Callable[..., WorkContext], capsys: pytest.CaptureFixture[str],
+) -> None:
+    dd = deep_dir(tmp_path, allow_standalone=True)
+    records = dd / "stack-python-records.json"
+    source = {"id": 1, "uid": "python:1", "file": "api.py", "line": 1, "description": "known defect",
+              "severity": "low", "confidence": "MEDIUM", "rationale": "r", "evidence": "api.py:1"}
+    admitted = record_pool(dd, [source], paths=[records])
+    records.write_text(json.dumps({"issues": [{**source, "uid": "python:invented"}]}))
+    alternatives = dd / "alternatives.json"
+    alternatives.write_text("[]")
+    backend = ScriptedBackend(events=[ResultEvent(structured_output=merge_result([{
+        **{key: value for key, value in source.items() if key != "uid"},
+        "lens": "per-stack", "source_uids": ["python:1", "python:invented", "python:1"],
+    }]), continuation=None)])
+
+    await phase_cross_stack_merge(
+        backend, make_work(tmp_path), record_pool=admitted, intent_path=dd / "intent.md",
+        alternatives_path=alternatives, dedup_candidates_path=dd / "dedup-candidates.json", allow_standalone=True,
+    )
+
+    items = json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text())["items"]
+    assert len(items) == 1 and items[0]["source_uids"] == ["python:1"]
+    assert "python:invented" in capsys.readouterr().out
+    assert admitted.language == [source]
+
+
 async def test_empty_merge_exposes_failed_stack_coverage(
     tmp_path: Path, make_work: Callable[..., WorkContext], capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -139,7 +172,7 @@ async def test_empty_merge_exposes_failed_stack_coverage(
     backend = ScriptedBackend(events=[AssertionError("empty merge must not dispatch")])
 
     await phase_cross_stack_merge(
-        backend, make_work(tmp_path), per_stack_records_paths=[records], intent_path=dd / "intent.md",
+        backend, make_work(tmp_path), record_pool=record_pool(dd, paths=[records]), intent_path=dd / "intent.md",
         alternatives_path=alternatives, dedup_candidates_path=dd / "dedup-candidates.json",
         failed_stacks={"react": "review budget exhausted"}, allow_standalone=True,
     )
@@ -186,7 +219,8 @@ async def test_phase_cross_stack_merge_returns_output_path(tmp_path: Path, make_
 ) -> None:
     backend = ScriptedBackend(events=_MERGE_TURN)
     result = await phase_cross_stack_merge(
-        backend, make_work(tmp_path), per_stack_records_paths=[tmp_path / "r.json"], intent_path=tmp_path / "i.md",
+        backend, make_work(tmp_path), record_pool=record_pool(tmp_path, paths=[tmp_path / "r.json"]),
+        intent_path=tmp_path / "i.md",
         alternatives_path=tmp_path / "a.json", dedup_candidates_path=tmp_path / "d.json", allow_standalone=True,
     )
     assert result == tmp_path / REVIEW_OUTPUT_FILE
@@ -195,7 +229,8 @@ async def test_phase_cross_stack_merge_no_agents_kwarg(tmp_path: Path, make_work
     """D-38: no agents= kwarg (Codex compatibility)."""
     backend = ScriptedBackend(events=_MERGE_TURN)
     await phase_cross_stack_merge(
-        backend, make_work(tmp_path), per_stack_records_paths=[tmp_path / "r.json"], intent_path=tmp_path / "i.md",
+        backend, make_work(tmp_path), record_pool=record_pool(tmp_path, paths=[tmp_path / "r.json"]),
+        intent_path=tmp_path / "i.md",
         alternatives_path=tmp_path / "a.json", dedup_candidates_path=tmp_path / "d.json", allow_standalone=True,
     )
     assert all(c["agents"] is None for c in backend.calls)

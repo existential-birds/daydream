@@ -6,8 +6,12 @@ from typing import Any
 
 import pytest
 
+import daydream.reviews.rendering as review_rendering
 from daydream import pr_review
-from daydream.pr_review import DAYDREAM_FOOTER, PRInfo, build_payload, finding_marker
+from daydream.pr_review import PRInfo
+from daydream.reviews.identity import DAYDREAM_FOOTER, finding_marker
+from daydream.reviews.rendering import build_payload_for_event
+from daydream.reviews.submission import _review_payload_dict
 from daydream.training import labeler_signals
 from daydream.training.labeler_signals import (
     CommentResolutionSignal,
@@ -47,9 +51,16 @@ def test_reviewed_commit_line_does_not_break_daydream_footer_detection() -> None
     pr = PRInfo(number=1, head_sha="f" * 40, base_sha="0" * 40, base_ref="main", head_ref="feature", owner="acme",
         repo="widgets", url="https://github.com/acme/widgets/pull/1",
     )
-    payload = build_payload(pr, pr_review.ClassifiedIssues(),
-        renderers=pr_review.ReviewRenderers(pr_review.default_render_finding, pr_review.default_render_summary),
-        run_info="Fixture run info",
+    payload = _review_payload_dict(
+        build_payload_for_event(
+            pr,
+            pr_review.ClassifiedIssues(),
+            event=pr_review.ReviewEvent.COMMENT,
+            renderers=pr_review.ReviewRenderers(
+                review_rendering.default_render_finding, review_rendering.default_render_summary,
+            ),
+            run_info="Fixture run info",
+        )
     )
     body = payload["body"]
     assert "- **Reviewed commit:**" in body  # precondition: new line present

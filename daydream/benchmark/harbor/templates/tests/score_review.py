@@ -16,10 +16,15 @@ import re
 import sys
 import urllib.parse
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
-import verifier_core
+
+if TYPE_CHECKING or __package__:
+    from daydream.benchmark.harbor import verifier_core
+else:
+    # Compiled tasks execute this asset alongside the standalone scoring core.
+    import verifier_core
 
 
 class _AsyncHttpClient(Protocol):
@@ -50,80 +55,52 @@ def _terminate_proc(proc: Any) -> None:
 
 
 async def _claude_cli_stdout(proc: Any) -> str:
-    """Collect a CLI subprocess's stdout as text, byte- and time-bounded.
-
-    Real ``asyncio`` processes expose ``proc.stdout`` as an incremental
-    ``StreamReader``; the injected test seam may instead expose the captured
-    stdout directly (as text or bytes). Either way the collected output is
-    size-capped at ``_RESPONSE_CAP_BYTES`` and rejected -- never truncated-and-
-    accepted, matching the HTTP clients' ``_parse_json_response`` posture -- and
-    total collection time is bounded by ``_REQUEST_TIMEOUT`` with the child
-    killed on timeout so a hung ``claude`` cannot accumulate across the retry
-    loop and the concurrency-10 fan-out.
+    """Read bounded stdout and settle the child within one deadline; kill on timeout or
+    overflow. Seam fakes may provide captured text/bytes or communicate() instead.
     """
-    stream = getattr(proc, "stdout", None)
-    if stream is None:
-        communicate = getattr(proc, "communicate", None)
-        if communicate is None:
+    try:
+        stream = getattr(proc, "stdout", None)
+        if stream is None:
+            communicate = getattr(proc, "communicate", None)
+            if communicate is None:
+                return ""
+            stream, _stderr = await asyncio.wait_for(communicate(), timeout=_REQUEST_TIMEOUT)
+        if isinstance(stream, (str, bytes)):
+            raw = stream.encode("utf-8") if isinstance(stream, str) else stream
+            if len(raw) > _RESPONSE_CAP_BYTES:
+                raise VerifierError(
+                    f"claude-cli judge output exceeds {_RESPONSE_CAP_BYTES // 1024} KiB"
+                )
+            return stream if isinstance(stream, str) else raw.decode("utf-8", errors="replace")
+        read = getattr(stream, "read", None)
+        if read is None:
             return ""
-        try:
-            stream, _stderr_b = await asyncio.wait_for(
-                communicate(), timeout=_REQUEST_TIMEOUT
-            )
-        except (asyncio.TimeoutError, TimeoutError):
-            _terminate_proc(proc)
-            raise
-    if isinstance(stream, (str, bytes)):
-        raw = stream.encode("utf-8") if isinstance(stream, str) else stream
-        if len(raw) > _RESPONSE_CAP_BYTES:
-            _terminate_proc(proc)
-            raise VerifierError(
-                f"claude-cli judge output exceeds {_RESPONSE_CAP_BYTES // 1024} KiB"
-            )
-        return stream if isinstance(stream, str) else raw.decode("utf-8", errors="replace")
-    read = getattr(stream, "read", None)
-    if read is None:
-        return ""
-    # Real asyncio subprocess: read incrementally so memory stays bounded by
-    # _RESPONSE_CAP_BYTES even while the child is still streaming, and keep the
-    # whole collection inside the shared _REQUEST_TIMEOUT budget.
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + _REQUEST_TIMEOUT
-    parts: list[bytes] = []
-    total = 0
-    while True:
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            _terminate_proc(proc)
-            raise asyncio.TimeoutError
-        try:
-            chunk = await asyncio.wait_for(read(_STDOUT_CHUNK_BYTES), timeout=remaining)
-        except (asyncio.TimeoutError, TimeoutError):
-            _terminate_proc(proc)
-            raise
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > _RESPONSE_CAP_BYTES:
-            _terminate_proc(proc)
-            raise VerifierError(
-                f"claude-cli judge output exceeds {_RESPONSE_CAP_BYTES // 1024} KiB"
-            )
-        parts.append(chunk)
-    # stdout EOF does not imply the child has exited; wait so the caller's
-    # exit-code check sees a settled process, still inside the same budget.
-    wait = getattr(proc, "wait", None)
-    if wait is not None:
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            _terminate_proc(proc)
-            raise asyncio.TimeoutError
-        try:
-            await asyncio.wait_for(wait(), timeout=remaining)
-        except (asyncio.TimeoutError, TimeoutError):
-            _terminate_proc(proc)
-            raise
-    return b"".join(parts).decode("utf-8", errors="replace")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _REQUEST_TIMEOUT
+        raw_output = bytearray()
+        async with asyncio.timeout_at(deadline):
+            while True:
+                # Buffered reads may not yield: retain the explicit wall-clock check.
+                if loop.time() >= deadline:
+                    raise TimeoutError
+                chunk = await read(_STDOUT_CHUNK_BYTES)
+                if not chunk:
+                    break
+                raw_output.extend(chunk)
+                if len(raw_output) > _RESPONSE_CAP_BYTES:
+                    raise VerifierError(
+                        f"claude-cli judge output exceeds {_RESPONSE_CAP_BYTES // 1024} KiB"
+                    )
+            # EOF can precede exit; include child settlement in the same deadline.
+            wait = getattr(proc, "wait", None)
+            if wait is not None:
+                if loop.time() >= deadline:
+                    raise TimeoutError
+                await wait()
+        return raw_output.decode("utf-8", errors="replace")
+    except (TimeoutError, VerifierError):
+        _terminate_proc(proc)
+        raise
 
 
 class _InputFileNotFound(verifier_core.VerifierError):
@@ -140,9 +117,7 @@ _PROMPT_CAP_BYTES = 24 * 1024
 _MAX_RETRIES = 3
 _REQUEST_TIMEOUT = 60.0
 
-# Hardening caps: response/reasoning payloads are rejected -- never truncated
-# and accepted -- above these sizes; redirects are bounded; diagnostics are
-# bounded and redacted before they reach any artifact or log.
+# Reject oversized payloads whole; bound redirects and sanitize diagnostics.
 _RESPONSE_CAP_BYTES = 256 * 1024
 # Incremental read chunk for _claude_cli_stdout: verifier memory stays bounded
 # by _RESPONSE_CAP_BYTES even while a still-streaming child is mid-output.
@@ -159,9 +134,7 @@ _ESCAPED_FINDING_TAGS = {
     "</candidate_finding>": "&lt;/candidate_finding&gt;",
 }
 
-# Fixed marker rendered for each null location component of a locationless
-# finding so the judge sees an explicit all-null location rather than empty,
-# shape-ambiguous values. Reused across all six location fields.
+# Explicit null-location markers distinguish absent locations from empty values.
 _LOCATIONLESS_MARKER = "<none>"
 
 
@@ -302,20 +275,13 @@ def _render_filled(
             text = str(value or "")
         return _escape_finding_delimiters(text) if escape else text
 
-    return template.format(
-        gold_title=_field(gold.get("title")),
-        gold_severity=_field(gold.get("severity")),
-        gold_path=_field(gold.get("path"), _LOCATIONLESS_MARKER),
-        gold_start_line=_field(gold.get("start_line"), _LOCATIONLESS_MARKER),
-        gold_end_line=_field(gold.get("end_line"), _LOCATIONLESS_MARKER),
-        gold_body=_field(gold_body),
-        candidate_title=_field(candidate.get("title")),
-        candidate_severity=_field(candidate.get("severity")),
-        candidate_path=_field(candidate.get("path"), _LOCATIONLESS_MARKER),
-        candidate_start_line=_field(candidate.get("start_line"), _LOCATIONLESS_MARKER),
-        candidate_end_line=_field(candidate.get("end_line"), _LOCATIONLESS_MARKER),
-        candidate_body=_field(candidate_body),
-    )
+    values = {}
+    for side, finding, body in (("gold", gold, gold_body), ("candidate", candidate, candidate_body)):
+        for name in ("title", "severity", "path", "start_line", "end_line", "body"):
+            value = body if name == "body" else finding.get(name)
+            marker = _LOCATIONLESS_MARKER if name in ("path", "start_line", "end_line") else ""
+            values[f"{side}_{name}"] = _field(value, marker)
+    return template.format(**values)
 
 
 def render_pair_prompt(gold: dict[str, Any], candidate: dict[str, Any], *, template: str) -> str:
@@ -325,12 +291,7 @@ def render_pair_prompt(gold: dict[str, Any], candidate: dict[str, Any], *, templ
     """
     gold_body = gold.get("body", "") or ""
     candidate_body = candidate.get("body", "") or ""
-    # Budget against the raw, pre-escape payload. verifier_core binds each field
-    # in raw bytes, and the escaping pass is a delimiter-fence that can only
-    # inflate. Measuring the escaped pair makes a validator-legal pair (two dense
-    # 8 KiB bodies) trip the cap and fail the whole task -- a budget incoherence.
-    # Fencing inflates only when delimiters are present; such a pair is judged,
-    # never voided. Truly oversized raw input still fails deterministically.
+    # Measure raw bytes before delimiter escaping, which can inflate valid findings.
     raw = _render_filled(
         template,
         gold,
@@ -436,10 +397,7 @@ def _parse_json_response(response: Any, *, content: Any) -> dict[str, Any]:
             error_code = -1
         message = _bounded_error(error.get("message") or "upstream judge error")
         if error_code == 429 or error_code >= 500:
-            # OpenRouter can wrap an upstream 429/5xx in an HTTP-200 JSON
-            # envelope. Treat that envelope like the corresponding transport
-            # failure so transient free-provider overloads use the shared retry
-            # budget instead of aborting the whole calibration.
+            # OpenRouter HTTP-200 envelopes can contain retryable upstream 429/5xx errors.
             raise _Retryable(f"Judge upstream error {error_code}: {message}")
         raise VerifierError(f"Judge response error {error_code}: {message}")
     text = content(parsed_body)
@@ -463,19 +421,9 @@ async def _complete_json_with_http(
     content: Any,
     allowlist: set[str],
 ) -> dict[str, Any]:
-    """Single retry/redirect/timeout policy shared by both judge clients.
-
-    - Up to 3 attempts. Transport exceptions (including timeout) and HTTP
-      429/5xx retry with exponential backoff (`2 ** attempt`); a terminal 4xx
-      (non-429) and a malformed-JSON parse are not retried.
-    - 3xx responses: bounded credential-preserving redirects. At most
-      ``_MAX_REDIRECTS`` hops per call; each next target is resolved against the
-      request URL first (relative ``Location``) and must be inside the judge-host
-      ``allowlist``. Configured auth headers are preserved across the hop and
-      server-provided response headers are never replayed. A redirect-target
-      rejection or an exhausted hop count is a terminal ``VerifierError``,
-      never retried.
-    - After 3 failed attempts, raise ``VerifierError`` — never a partial result.
+    """Retry transport/429/5xx three times with exponential backoff; other failures are
+    terminal. Bound redirects, validate each resolved target, and preserve configured
+    auth headers. Exhaustion raises without partial output.
     """
     current_url = url
     hop = 0
@@ -496,11 +444,7 @@ async def _complete_json_with_http(
                     location = response_headers.get("location")
                     if not location:
                         raise VerifierError("judge request redirected without a Location")
-                    # Resolve relative Location against the request URL and
-                    # fail closed on cross-host/out-of-allowlist targets. The
-                    # configured ``headers`` are intentionally NOT replaced by
-                    # the response headers, so auth survives the hop and server
-                    # headers are never replayed.
+                    # Resolve allowlisted redirects; retain configured auth and discard server headers.
                     current_url = _resolve_redirect(current_url, location, allowlist)
                     hop += 1
                     continue
@@ -608,11 +552,7 @@ class ClaudeCliJudgeClient:
             *argv,
             env=env,
             stdout=asyncio.subprocess.PIPE,
-            # stderr is never surfaced (the contract keeps it out of every
-            # artifact), so route it to DEVNULL: a PIPE that goes undrained
-            # would let a child writing more than the ~64 KiB pipe buffer block
-            # on the stderr write, starving stdout EOF and burning the whole
-            # _REQUEST_TIMEOUT on every call before being killed and retried.
+            # DEVNULL keeps stderr private and prevents an undrained pipe from blocking stdout.
             stderr=asyncio.subprocess.DEVNULL,
         )
 
@@ -628,11 +568,7 @@ class ClaudeCliJudgeClient:
             self.model,
             "--max-turns",
             "1",
-            # Tool-scope lockdown: the spawned CLI is a tool-capable agent
-            # running with the OAuth credential in its env, so it must not be
-            # able to read/execute/exfiltrate via tools -- especially under a
-            # prompt influenced by untrusted candidate finding text. Deny every
-            # tool explicitly and keep the session read-only.
+            # Untrusted findings reach a credentialed CLI: deny all tools and keep plan mode.
             "--permission-mode",
             "plan",
             "--allowedTools",
@@ -643,10 +579,7 @@ class ClaudeCliJudgeClient:
         argv.append(user)
         env = dict(os.environ)
         env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
-        # The CLI exposes no --max-tokens flag; print-mode output is capped via
-        # CLAUDE_CODE_MAX_OUTPUT_TOKENS so the 512-token budget the HTTP clients
-        # send in the request body is honored here too (cost symmetry), and an
-        # overlong verdict is rejected downstream, never truncated-and-accepted.
+        # CLI output tokens use an environment cap; byte/verdict caps reject rather than truncate.
         env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_tokens)
         last_error = "claude-cli judge failed (unknown)"
         for attempt in range(_MAX_RETRIES):
@@ -658,12 +591,7 @@ class ClaudeCliJudgeClient:
                 )
                 stdout = await _claude_cli_stdout(proc)
                 rc = getattr(proc, "returncode", getattr(proc, "rc", 0))
-                # Terminal failure classes raise on the first attempt, mirroring
-                # the HTTP clients (a non-429 4xx and a malformed-JSON parse are
-                # never retried): a non-zero exit (expired/revoked OAuth token,
-                # refused auth), empty stdout, malformed output, a cli-reported
-                # error, and a missing result will not resolve with retries --
-                # only the timeout class below is transient.
+                # Only timeouts retry; exit, empty/malformed output, and CLI errors are terminal.
                 if rc != 0:
                     raise VerifierError(f"claude-cli judge failed (exit {rc})")
                 if not stdout:
@@ -685,20 +613,11 @@ class ClaudeCliJudgeClient:
                 parse_verdict(parsed)
                 return parsed
             except (asyncio.TimeoutError, TimeoutError):
-                # A hung child must not outlive this attempt: kill it (here, as
-                # the backstop, and inside _claude_cli_stdout) so the retry loop
-                # and the concurrency-10 fan-out never accumulate living claude
-                # processes consuming quota and egress. A spawn timeout leaves
-                # no proc handle to kill.
+                # Kill timed-out children before retrying; spawn timeouts may have no child handle.
                 _terminate_proc(proc)
                 last_error = "claude-cli judge failed (timeout)"
             except ValueError:
-                # json.loads(result) rejected the CLI result string (a
-                # JSONDecodeError, a ValueError subclass): terminal, not
-                # retryable. A well-formed CLI result whose content is not a
-                # valid verdict is rejected by parse_verdict raising
-                # VerifierError directly, which propagates raw -- both outcomes
-                # fail closed through the shared verdict contract.
+                # Invalid JSON is terminal; malformed verdicts propagate their own VerifierError.
                 raise VerifierError("claude-cli judge failed (invalid verdict)") from None
             if attempt < _MAX_RETRIES - 1:
                 await asyncio.sleep(2**attempt)
@@ -780,9 +699,7 @@ class OpenAIJudgeClient:
                 {"role": "user", "content": user},
             ],
         }
-        # Keep reasoning enabled because some OpenRouter models require it,
-        # but exclude it from the response so it cannot consume the bounded
-        # judge output budget. Generic OpenAI-compatible endpoints are unchanged.
+        # OpenRouter models may require reasoning; exclude it from the bounded response.
         if (urllib.parse.urlsplit(self.base_url).hostname or "").lower() == "openrouter.ai":
             payload["reasoning"] = {"exclude": True}
             payload["response_format"] = {
@@ -912,10 +829,7 @@ def _read_artifact_bytes(path: str | Path) -> dict[str, Any]:
     except FileNotFoundError:
         raise _InputFileNotFound(f"input file not found: {Path(path)}") from None
     except OSError as exc:
-        # An unreadable candidate-artifact file is the same infrastructure
-        # problem as a missing one (wrong DAYDREAM_JUDGE_ARTIFACT_PATH, a
-        # broken mount, bad permissions) -- unscored infra zone, never a
-        # scored-zero agent failure.
+        # Missing and unreadable artifacts are unscored infrastructure failures.
         raise _InputFileNotFound(f"could not read {Path(path)}: {exc}") from exc
     if len(raw) > verifier_core.MAX_ARTIFACT_BYTES:
         raise VerifierError("candidate artifact exceeds 1 MiB (raw bytes)")
@@ -1019,33 +933,6 @@ def _write_reward_artifacts(
     return reward
 
 
-def _error_reward(
-    exc: Exception,
-    *,
-    out_dir: str | Path,
-    provider: str,
-    model: str,
-    request_counts: dict[str, int],
-    errors: list[str],
-    verifier_error: int,
-) -> verifier_core.Reward:
-    """Prepend a bounded diagnostic and write the zero-reward artifacts.
-
-    ``verifier_error`` selects the scored (0) or unscored (1) treatment; see
-    :func:`_write_reward_artifacts`.
-    """
-    errors.insert(0, _bounded_error(str(exc)))
-    return _write_reward_artifacts(
-        out_dir,
-        provider,
-        model,
-        request_counts,
-        errors,
-        gold_count=0,
-        verifier_error=verifier_error,
-    )
-
-
 def run_verifier(
     gold_path: str | Path,
     artifact_path: str | Path,
@@ -1070,30 +957,22 @@ def run_verifier(
     gold_parsed: list[verifier_core.GoldFinding] = []
     detail_prefix = {"provider": provider, "model": model, "request_counts": request_counts, "errors": errors}
 
+    def fail(error: Exception | str, *, verifier_error: int = 1, gold_count: int = 0) -> verifier_core.Reward:
+        errors.insert(0, _bounded_error(str(error)))
+        return _write_reward_artifacts(
+            out_dir, provider, model, request_counts, errors, gold_count,
+            verifier_error=verifier_error,
+        )
+
     try:
         if client is None:
             raise VerifierError("no judge client configured (missing DAYDREAM_JUDGE_*)")
         try:
             artifact_raw = _read_artifact_bytes(artifact_path)
             candidates = verifier_core.validate_candidate_artifact(artifact_raw)
-        except _InputFileNotFound as exc:
-            # Infra zone: a missing or unreadable candidate-artifact file
-            # (wrong DAYDREAM_JUDGE_ARTIFACT_PATH, missing mount reaching the
-            # entrypoint that skips test.sh's existence pre-check, EACCES/
-            # EISDIR/ENOTDIR) is infrastructure trouble, not the agent's
-            # output -- unscored (reward-details only), never a scored-zero
-            # that drags down the mean with no infra_error_task_count signal.
-            return _error_reward(
-                exc, out_dir=out_dir, provider=provider, model=model,
-                request_counts=request_counts, errors=errors, verifier_error=1,
-            )
         except VerifierError as exc:
-            # Candidate zone: reading/validating the agent's own artifact is a
-            # scored outcome -- a scored-zero reward, never an infra error.
-            return _error_reward(
-                exc, out_dir=out_dir, provider=provider, model=model,
-                request_counts=request_counts, errors=errors, verifier_error=0,
-            )
+            # Missing/unreadable files are infrastructure; malformed agent output scores zero.
+            return fail(exc, verifier_error=int(isinstance(exc, _InputFileNotFound)))
 
         metadata = _load_verifier_metadata(Path(gold_path))
 
@@ -1106,10 +985,7 @@ def run_verifier(
         except VerifierError as exc:
             # Binding zone: a candidate pointing at the wrong task is still the
             # agent's own output -- scored zero, not unscored.
-            return _error_reward(
-                exc, out_dir=out_dir, provider=provider, model=model,
-                request_counts=request_counts, errors=errors, verifier_error=0,
-            )
+            return fail(exc, verifier_error=0)
 
         gold_raw = _read_gold_bytes(Path(gold_path), metadata["gold_sha256"])
         gold_parsed = verifier_core.validate_gold_set(
@@ -1117,43 +993,24 @@ def run_verifier(
         )
 
         verdicts: list[verifier_core.Verdict] = []
-        matches: set[tuple[str, str]] = set()
         counting: _CountingClient | None = None
 
         if gold_parsed and artifact_raw.get("findings"):
             counting = _CountingClient(client)
             verdicts = asyncio.run(judge_pairs(gold_raw, artifact_raw["findings"], client=counting))
-            cand_ids = [
-                c.get("candidate_id", "") for c in artifact_raw["findings"]
-            ]
-            gold_ids = [g.finding_id for g in gold_parsed]
-            retained = verifier_core.retained_edges(verdicts, gold_ids, cand_ids)
-            matches = verifier_core.maximum_matching(retained, gold_ids, cand_ids)
             request_counts["requests"] = counting.requests
             if counting.errors:
                 errors.extend(_bounded_error(str(e)) for e in counting.errors)
 
-        reward = verifier_core.score_review(gold_parsed, artifact_raw, verdicts)
+        reward, matches = verifier_core.score_findings(gold_parsed, candidates, verdicts)
         inner = verifier_core.reward_details(gold_parsed, candidates, verdicts, matches)
         details = {**inner, **detail_prefix}
         _atomic_write(out_dir, "reward.json", verifier_core.reward_to_json(reward))
         _atomic_write(out_dir, "reward-details.json", json.dumps(details))
         return reward
-    except VerifierError as exc:
-        errors.insert(0, _bounded_error(str(exc)))
-        return _write_reward_artifacts(
-            out_dir, provider, model, request_counts, errors, len(gold_parsed),
-            verifier_error=1,
-        )
     except Exception as exc:
-        # Unexpected runtime failures must not escape to a bare exit: they
-        # become a typed bounded diagnostic -- infra zone, written unscored
-        # (reward-details.json only, no numeric reward).
-        errors.insert(0, _bounded_error(f"unexpected verifier failure: {exc}"))
-        return _write_reward_artifacts(
-            out_dir, provider, model, request_counts, errors, len(gold_parsed),
-            verifier_error=1,
-        )
+        error = exc if isinstance(exc, VerifierError) else f"unexpected verifier failure: {exc}"
+        return fail(error, gold_count=len(gold_parsed))
 
 
 def _build_client(env: dict[str, Any]) -> Any:
@@ -1165,13 +1022,7 @@ def _build_client(env: dict[str, Any]) -> Any:
     model = env.get(_ENV_MODEL)
     api_key = env.get(_ENV_API_KEY)
     if provider == "claude-cli":
-        # OAuth-token auth via the Claude Code CLI: no API key, no base URL.
-        # Egress is still bounded: the CLI's judge host resolves to
-        # api.anthropic.com (the same host _judge_host_from_env and the run
-        # preflight allowlist-check), so it is validated against the effective
-        # allowlist at build time -- a container allowlist that omits it fails
-        # closed before any trial instead of at the first out-of-allowlist CLI
-        # call mid-trial.
+        # OAuth CLI judging uses the allowlisted Anthropic host, checked before any trial.
         oauth_token = env.get(_ENV_OAUTH_TOKEN)
         if not model:
             raise VerifierError("missing DAYDREAM_JUDGE_MODEL")
@@ -1192,10 +1043,7 @@ def _build_client(env: dict[str, Any]) -> Any:
         )
     if provider == "anthropic":
         allowlist = _effective_allowlist(_ANTHROPIC_MESSAGES_URL, env)
-        # Fail-closed at build time, matching the openai-compatible branch: the
-        # initial Messages URL is validated against the effective allowlist
-        # before any request can be issued, so both providers share identical
-        # validation timing.
+        # Validate the initial host before any request, as for OpenAI-compatible judging.
         _validate_base_url(_ANTHROPIC_MESSAGES_URL, allowlist)
         return AnthropicJudgeClient(
             api_key,
@@ -1251,10 +1099,7 @@ def main() -> int:
     except VerifierError as exc:
         provider = env.get(_ENV_PROVIDER) or _DEFAULT_PROVIDER
         if env.get(_ENV_MODEL) and (env.get(_ENV_API_KEY) or provider == "claude-cli"):
-            # Fail-closed provider/host rejection: a typed bounded diagnostic
-            # artifact naming only the rejected form -- never a barren exit.
-            # claude-cli has no API key; its typed diagnostic is the OAuth
-            # token check, so the provider branch suffices for it.
+            # Provider/host/OAuth rejection emits bounded unscored diagnostics; CLI needs no API key.
             model = env.get(_ENV_MODEL) or ""
             reward = _write_reward_artifacts(
                 out_dir, provider, model, {"requests": 0}, [_bounded_error(str(exc))], 0,

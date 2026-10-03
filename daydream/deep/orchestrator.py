@@ -144,6 +144,17 @@ def _deep_shard_max_files(config: RunConfig) -> int:
 
 
 
+def _combined_stack(
+    stacks: list[StackAssignment], *, fallback_files: list[str] | None = None, explicit_stack: str | None = None,
+) -> StackAssignment:
+    """Preserve a sole language; combine multiple languages under the generic reviewer."""
+    languages = [stack for stack in stacks if stack.stack_name not in (STRUCTURE_STACK_NAME, GENERIC_STACK)]
+    inferred = languages[0].stack_name if len(languages) == 1 else GENERIC_STACK
+    name = explicit_stack if explicit_stack is not None else inferred
+    files = sorted({path for stack in stacks for path in stack.files}) or fallback_files or []
+    return StackAssignment(stack_name=name, files=files, is_docs_only=False)
+
+
 def _collapse_stacks_for_tiny_diff(
     stacks: list[StackAssignment],
     changed_files: list[str],
@@ -164,15 +175,7 @@ def _collapse_stacks_for_tiny_diff(
 
     # Absorb generic files into a sole language; multiple languages collapse to generic.
     if len(non_structural) >= 2:
-        combined_files = sorted({f for s in non_structural for f in s.files})
-        real_language = [s for s in non_structural if s.stack_name != GENERIC_STACK]
-        stack_name = real_language[0].stack_name if len(real_language) == 1 else GENERIC_STACK
-        combined = StackAssignment(
-            stack_name=stack_name,
-            files=combined_files,
-            is_docs_only=False,
-        )
-        return [*structural, combined], True
+        return [*structural, _combined_stack(non_structural)], True
 
     # 0 or 1 non-structural stacks: nothing to collapse (lever 1 is a no-op), but
     # the gate is still active so the caller applies lever 2 (skip merge+arbiter).
@@ -417,27 +420,7 @@ def _collapse_stacks_for_shallow(
     Return the assignments and True for single-stack mode.
     """
     structural = [s for s in stacks if s.stack_name == STRUCTURE_STACK_NAME]
-    combined_files = sorted({f for s in stacks for f in s.files}) or changed_files
-
-    real_language = [s for s in stacks if s.stack_name not in (STRUCTURE_STACK_NAME, GENERIC_STACK)]
-
-    if config.stack is not None:
-        stack_name = config.stack
-    elif len(real_language) == 1:
-        # Scope preservation: a sole real-language stack survives unchanged,
-        # absorbing any generic/docs files.
-        stack_name = real_language[0].stack_name
-    else:
-        # Multiple real-language stacks (one agent cannot cover two per-language
-        # scopes) or no real language at all: the combined assignment uses the
-        # native generic-fallback scope.
-        stack_name = GENERIC_STACK
-    combined = StackAssignment(
-        stack_name=stack_name,
-        files=combined_files,
-        is_docs_only=False,
-    )
-    return [*structural, combined], True
+    return [*structural, _combined_stack(stacks, fallback_files=changed_files, explicit_stack=config.stack)], True
 
 
 def _prepare_review_stacks(
@@ -523,8 +506,9 @@ async def _run_review_spine(
     target_dir = work.repo
 
     # Findings export is commit-bound. Capture target once and diff explicit SHA endpoints.
-    from daydream.pr_review import capture_pr_base_tip, find_open_pr, find_pr_by_number
+    from daydream.pr_review import find_open_pr, find_pr_by_number
     from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
+    from daydream.reviews.lookup import capture_pr_base_tip
 
     captured_pr = None
     pr_base_sha = None

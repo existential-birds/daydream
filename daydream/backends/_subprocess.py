@@ -26,11 +26,7 @@ TERMINATE_GRACE_S = 5.0
 
 
 class StreamStalledError(Exception):
-    """Raised when a backend CLI produces no stdout for the idle window.
-
-    A stalled request may be a transient provider/network failure, so the
-    normal bounded backend retry loop gets a chance to re-arm the subprocess.
-    """
+    """Stdout idle timeout; bounded backend retries may re-arm a stalled provider/network request."""
 
     retryable = True
     max_retries = 1
@@ -48,10 +44,7 @@ class StreamStalledError(Exception):
 def stream_idle_timeout_s(
     *, default: float = DEFAULT_STREAM_IDLE_TIMEOUT_S
 ) -> float | None:
-    """Read DAYDREAM_STREAM_IDLE_TIMEOUT_S; zero disables detection.
-
-    Malformed, nonfinite, or negative values warn and use the default.
-    """
+    """Read DAYDREAM_STREAM_IDLE_TIMEOUT_S; zero disables detection, invalid values warn/use the default."""
     raw = os.environ.get(STREAM_IDLE_TIMEOUT_ENV)
     if raw:
         try:
@@ -82,10 +75,7 @@ def stream_idle_timeout_s(
 async def readline_with_idle_timeout(
     stdout: asyncio.StreamReader, *, cli: str, timeout_s: float | None
 ) -> bytes:
-    """Read one line, restarting the idle window after each completed line.
-
-    Raise StreamStalledError on timeout; the caller terminates its child in finally.
-    """
+    """Restart the idle window per completed line; timeouts raise StreamStalledError for caller cleanup."""
     if timeout_s is None:
         return await stdout.readline()
     try:

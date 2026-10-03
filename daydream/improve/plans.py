@@ -381,69 +381,9 @@ class PlanWriteSession:
             current_head = git_ops.head_sha(self._repo)
         except git_ops.GitError:
             current_head = None
-        if current_head != self._planned_at:
-            return self._reanchor_and_write(
-                reservation,
-                selection,
-                plan_result,
-                number=number,
-                title=title,
-                slug=slug,
-            )
-
-        filename = f"{number:03d}-{slug}.md"
-        try:
-            text = render_plan(
-                finding,
-                plan=plan_result,
-                planned_at=self._planned_at,
-                number=number,
-                planned_on=self._planned_on,
-                run_session_id=self._run_session_id,
-            )
-        except Exception:  # noqa: BLE001 - persist a safe render disposition
-            return self._block(
-                reservation,
-                selection,
-                stage="render",
-                errors=("RENDER_FAILED",),
-                received=plan_result,
-            )
-        (self._plans_dir / filename).write_text(text, encoding="utf-8")
-        self._entries[number] = plan_index._index_entry(
-            number=number,
-            slug=slug,
-            title=selection.get("title") or title,
-            fingerprint=reservation.fingerprint,
-            finding=finding,
-            planned_at=self._planned_at,
-            status="TODO",
-        )
-        outcome = self._record_written(
-            reservation,
-            selection,
-            path=filename,
-            artifact={"path": filename, "status": "TODO"},
-        )
-        self._write_index()
-        return outcome
-
-    def _reanchor_and_write(
-        self,
-        reservation: PlanReservation,
-        selection: dict[str, Any],
-        plan_result: dict[str, Any],
-        *,
-        number: int,
-        title: str,
-        slug: str,
-    ) -> PlanOutcome:
-        """Land a finished plan at current HEAD and retain a durable main copy.
-
-        Return the worktree path, but index the surviving main copy before return.
-        Any failure records PLAN_REANCHOR_FAILED and releases the worktree.
-        """
-        finding = selection["finding"]
+        reanchored = current_head != self._planned_at
+        planned_at = self._planned_at
+        plans_dir = self._plans_dir
         filename = f"{number:03d}-{slug}.md"
 
         def _reanchor_failed() -> PlanOutcome:
@@ -463,71 +403,96 @@ class PlanWriteSession:
                 received=plan_result,
             )
 
+        if reanchored:
+            try:
+                planned_at = git_ops.head_sha(self._repo)
+            except git_ops.GitError:
+                return _reanchor_failed()
         try:
-            new_head = git_ops.head_sha(self._repo)
-        except git_ops.GitError:
-            return _reanchor_failed()
-        try:
-            worktree = self._reanchor_worktree
-            if worktree is None:
-                run_id = self._run_session_id or f"run-{self._planned_at[:12]}"
-                if _SAFE_DIRNAME.fullmatch(run_id) is None:
-                    run_id = f"run-{self._planned_at[:12]}"
-                worktree = self._worktrees_root / f"{run_id}{_REANCHOR_DIR_SUFFIX}"
-                # Add already locked so concurrent pruning has no live-worktree race.
-                git_ops.worktree_add(
-                    self._repo,
-                    worktree,
-                    new_head,
-                    detach=True,
-                    lock_reason=run_id,
+            if reanchored:
+                worktree = self._reanchor_worktree
+                if worktree is None:
+                    run_id = self._run_session_id or f"run-{self._planned_at[:12]}"
+                    if _SAFE_DIRNAME.fullmatch(run_id) is None:
+                        run_id = f"run-{self._planned_at[:12]}"
+                    worktree = self._worktrees_root / f"{run_id}{_REANCHOR_DIR_SUFFIX}"
+                    # Add already locked so concurrent pruning has no live-worktree race.
+                    git_ops.worktree_add(
+                        self._repo,
+                        worktree,
+                        planned_at,
+                        detach=True,
+                        lock_reason=run_id,
+                    )
+                    self._reanchor_worktree = worktree
+                plans_dir = worktree / "daydream_plans"
+            try:
+                text = render_plan(
+                    finding,
+                    plan=plan_result,
+                    planned_at=planned_at,
+                    number=number,
+                    planned_on=self._planned_on,
+                    run_session_id=self._run_session_id,
                 )
-                self._reanchor_worktree = worktree
-            text = render_plan(
-                finding,
-                plan=plan_result,
-                planned_at=new_head,
-                number=number,
-                planned_on=self._planned_on,
-                run_session_id=self._run_session_id,
-            )
-            plans_dir = worktree / "daydream_plans"
-            plans_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:  # noqa: BLE001 - retain distinct render and re-anchor diagnostics
+                if reanchored:
+                    raise
+                return self._block(
+                    reservation,
+                    selection,
+                    stage="render",
+                    errors=("RENDER_FAILED",),
+                    received=plan_result,
+                )
+            if reanchored:
+                plans_dir.mkdir(parents=True, exist_ok=True)
             (plans_dir / filename).write_text(text, encoding="utf-8")
-            # The plan text is worktree-independent: land the durable copy in the
-            # main index too, so it survives the next run's worktree pruning.
-            (self._plans_dir / filename).write_text(text, encoding="utf-8")
+            if reanchored:
+                # Keep a durable main copy that survives worktree pruning.
+                (self._plans_dir / filename).write_text(text, encoding="utf-8")
             entry = plan_index._index_entry(
                 number=number,
                 slug=slug,
                 title=selection.get("title") or title,
                 fingerprint=reservation.fingerprint,
                 finding=finding,
-                planned_at=new_head,
+                planned_at=planned_at,
                 status="TODO",
             )
-            self._reanchored[number] = entry
-            entries = dict(self._entries)
-            entries.update(self._reanchored)
-            self._write_index_files(
-                plans_dir,
-                [entries[index] for index in sorted(entries)],
-                check_links=True,
-            )
-            # Status points at the main copy, which survives worktree pruning.
-            landed_rel = (
-                (self._plans_dir / filename).relative_to(self._repo).as_posix()
-            )
-            self._entries[number] = replace(
-                entry,
-                status=f"{plan_index.REANCHORED_STATUS_PREFIX} (landed at {landed_rel})",
-            )
+            if reanchored:
+                self._reanchored[number] = entry
+                entries = dict(self._entries)
+                entries.update(self._reanchored)
+                self._write_index_files(
+                    plans_dir,
+                    [entries[index] for index in sorted(entries)],
+                    check_links=True,
+                )
+                landed_rel = (
+                    (self._plans_dir / filename).relative_to(self._repo).as_posix()
+                )
+                entry = replace(
+                    entry,
+                    status=f"{plan_index.REANCHORED_STATUS_PREFIX} (landed at {landed_rel})",
+                )
+            self._entries[number] = entry
+            if not reanchored:
+                outcome = self._record_written(
+                    reservation,
+                    selection,
+                    path=filename,
+                    artifact={"path": filename, "status": "TODO"},
+                )
             # Index before returning so interruption cannot cause silent re-planning.
             self._write_index()
         except Exception:  # noqa: BLE001 - persist a safe re-anchor disposition
+            if not reanchored:
+                raise
             return _reanchor_failed()
-
-        landed_path = (worktree / "daydream_plans" / filename).as_posix()
+        if not reanchored:
+            return outcome
+        landed_path = (plans_dir / filename).as_posix()
         return self._record_written(
             reservation,
             selection,
@@ -536,7 +501,7 @@ class PlanWriteSession:
                 "path": landed_path,
                 "status": "TODO",
                 "reanchored": True,
-                "planned_at": new_head,
+                "planned_at": planned_at,
             },
         )
 

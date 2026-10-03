@@ -146,12 +146,7 @@ class CompatibilityIdentity:
 
 @dataclass(frozen=True)
 class SuiteEntry:
-    """One exact completion referenced by a suite manifest.
-
-    ``workspace`` is the repository workspace path the run was recorded against
-    and ``run_id`` resolves the exact ledgered completion within it. Instances
-    are immutable and preserve manifest order.
-    """
+    """One exact completion referenced by a suite manifest."""
 
     workspace: Path
     run_id: str
@@ -277,7 +272,6 @@ def objective_to_json(run: CompletedRun) -> dict[str, object]:
     }
 
 
-
 def _canonical_suite_manifest(entries: list[SuiteEntry]) -> dict[str, object]:
     """Canonical, reorder-stable projection of a validated suite manifest."""
     return {
@@ -292,11 +286,7 @@ def _canonical_suite_manifest(entries: list[SuiteEntry]) -> dict[str, object]:
 def _suite_experiment_id(
     entries: list[SuiteEntry], identity: CompatibilityIdentity
 ) -> str:
-    """Stable SHA-256 over the canonicalized manifest plus the shared identity.
-
-    Canonicalizing (sorting unique entries) means reordering identical unique
-    entries yields the same id; duplicates are rejected before this runs.
-    """
+    """Stable SHA-256 over the canonicalized manifest plus the shared identity."""
     payload = {
         "manifest": _canonical_suite_manifest(entries),
         "identity": identity_to_dict(identity),
@@ -578,12 +568,7 @@ def _is_int(value: object) -> TypeGuard[int]:
 
 
 def _row_int(row: dict[str, object], key: str) -> int:
-    """Read an integer-valued row field, defaulting to 0 when absent.
-
-    Only the scored count keys are validated strictly at parse time; auxiliary
-    reporting keys (``candidate_count``/``gold_count``/``verifier_error``) are
-    read here with a non-integer value falling back to 0 rather than crashing.
-    """
+    """Read an integer-valued row field, defaulting to 0 when absent."""
     value = row.get(key)
     return value if _is_int(value) else 0
 

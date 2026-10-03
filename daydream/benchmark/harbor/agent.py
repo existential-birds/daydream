@@ -64,11 +64,7 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
         return __version__
 
     async def setup(self, environment: Any) -> None:
-        """Without network access, probe the exact Daydream release and selected backend.
-
-        Validate the shared backend allowlist before probing Pi CLI or Claude SDK presence.
-        A missing probe or nonzero container probe result raises ``AgentError``.
-        """
+        """Without network access, probe the exact Daydream release and selected backend."""
         backend = _supported_backend(self.extra_env)
         # An allowlisted backend still needs its own probe; reject incomplete additions.
         backend_probe = {
@@ -95,11 +91,7 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
         environment: Any,
         context: Any,
     ) -> None:
-        """Review the frozen snapshot through the controlled container entrypoint.
-
-        Validate the backend before exec and pass only the allowlisted child environment.
-        Do not install tools or widen network access; nonzero exit raises ``AgentError``.
-        """
+        """Review the frozen snapshot through the controlled container entrypoint."""
         if not _HARBOR:
             raise AgentError("Harbor is not installed; install 'daydream[benchmark]'")
         backend = _supported_backend(self.extra_env)

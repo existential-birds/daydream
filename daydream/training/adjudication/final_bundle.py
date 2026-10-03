@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +20,6 @@ from daydream.archive.index import label_observation_history
 from daydream.archive.sanitize import _derivative_digest
 from daydream.json_utils import atomic_write_bytes, canonical_json as _canonical, umask_derived_mode
 from daydream.training.adjudication.canonical import (
-    _evidence_after_as_of,
     _load_materialized_records as _load_sessions_records,
     _read_manifest,
     read_jsonl,
@@ -32,14 +31,11 @@ from daydream.training.adjudication.materialize import (
     index_sessions,
 )
 from daydream.training.adjudication.observations import (
-    group_observations_by_record,
     load_observations,
 )
-from daydream.training.adjudication.precedence import effective_adjudication
 from daydream.training.adjudication.queue import build_queue
-from daydream.training.adjudication.report import build_report
+from daydream.training.adjudication.report import adjudicated_items, build_report
 from daydream.training.corpus_projection.bundle import load_curated_bundle
-from daydream.training.corpus_projection.tiers import classify_tier
 from daydream.training.dispositions import (
     DECISIVE_DISPOSITIONS,
     NON_DECISIVE_DISPOSITIONS,
@@ -122,12 +118,18 @@ def final_snapshot_id(bundle_dir: Path) -> tuple[str, dict[str, str]]:
         raise ValueError(
             f"final bundle identity file set mismatch: missing={missing}, foreign={foreign}"
         )
-    digests: dict[str, str] = {}
+    payloads: dict[str, bytes] = {}
     for name in FINAL_IDENTITY_FILES:
         path = root / name
         if path.is_symlink() or not path.is_file():
             raise ValueError(f"final bundle identity input {name!r} must be a regular file")
-        digests[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        payloads[name] = path.read_bytes()
+    return semantic_identity(payloads)
+
+
+def semantic_identity(payloads: Mapping[str, bytes]) -> tuple[str, dict[str, str]]:
+    """Bind the seven-file identity and digest map to one captured byteset."""
+    digests = {name: hashlib.sha256(payloads[name]).hexdigest() for name in FINAL_IDENTITY_FILES}
     identity = _canonical(digests).encode("utf-8") + b"\n"
     return hashlib.sha256(identity).hexdigest(), dict(sorted(digests.items()))
 
@@ -264,70 +266,6 @@ def _validated_policy_binding(
     return raw
 
 
-def _enrich_report_items(
-    items: Sequence[Mapping[str, Any]],
-    observations: Sequence[Mapping[str, Any]],
-    *,
-    as_of: str | None = None,
-) -> list[dict[str, Any]]:
-    """Apply the same observation, precedence, and tier rules to CLI and final coverage reports.
-
-    Stamp temporal eligibility before tier classification. Only decisive human
-    judgments matching the fresh evidence digest count toward gold; automatic
-    or stale-evidence decisions remain task-only. Unknown observation record_ids
-    raise ValueError rather than disappearing from the admission denominator.
-    """
-    queue_ids = {str(item["record_id"]) for item in items}
-    grouped = group_observations_by_record(observations, queue_ids, "report")
-
-    enriched: list[dict[str, Any]] = []
-    for item in items:
-        enriched_item = dict(item)
-        record_obs = grouped.get(str(item["record_id"]), [])
-        enriched_item["observations"] = record_obs
-        gold_eligible = False
-        if record_obs:
-            resolved = effective_adjudication(record_obs)
-            # A human judgment made against different evidence is never
-            # silently reused (the queue's digest-drift rule); gold
-            # eligibility therefore holds only when the effective
-            # observation's evidence_digest equals the item's fresh digest —
-            # mirroring the disposition override two lines below and the
-            # canonical merge's digest-match guard (canonical.py).
-            fresh_match = resolved["evidence_digest"] == str(item["evidence_digest"])
-            if fresh_match:
-                gold_eligible = resolved["gold_eligible"]
-            if (
-                fresh_match
-                and resolved["role"] in ("rater", "adjudicator")
-                and resolved["disposition"] in DECISIVE_DISPOSITIONS
-            ):
-                enriched_item["disposition"] = resolved["disposition"]
-        # Stamp the temporal axis FIRST so classify_tier sees it, matching the
-        # canonical serializer and the corpus projection (tiers.py C5/M9): an
-        # evidence-after-as_of record must classify "silver" here exactly as it
-        # does on the canonical record — never gold/posterior_eligible.
-        enriched_item["evidence_after_as_of"] = _evidence_after_as_of(enriched_item, as_of)
-        # The gold gate has one implementation (classify_tier); gold-eligibility
-        # comes from the human-observation resolution (conflict/review-required
-        # decisive judgments stay out of the gold tier). A classifier failure
-        # fail-closes naming the record, never a silent skip.
-        try:
-            tier = classify_tier(enriched_item)
-        except Exception as exc:
-            raise ValueError(
-                f"cannot classify tier for record_id {str(item['record_id'])!r}: {exc}"
-            ) from exc
-        if tier == "gold" and not gold_eligible:
-            tier = "task-only"
-        enriched_item["tier"] = tier
-        enriched_item["posterior_eligible"] = tier == "gold" and str(
-            enriched_item["profile"]
-        ) == "pr_review"
-        enriched.append(enriched_item)
-    return enriched
-
-
 def build_final_bundle(
     *,
     index_root: Path,
@@ -341,7 +279,7 @@ def build_final_bundle(
 
     Copy annotations.jsonl to both annotations.jsonl and sessions.jsonl. Flatten
     archive observation history in observed_at order. Build coverage from the
-    complete queue and _enrich_report_items so only fresh, human-adjudicated,
+    complete queue and adjudicated_items so only fresh, human-adjudicated,
     outcome-bearing records count toward the 80% gate. Missing observations_path
     means an empty human store. Derive lineage from preview pins and the verified
     curation bundle's actual file-set digest; never invent defaults.
@@ -390,12 +328,9 @@ def build_final_bundle(
 
     # 1. Both consumer views use the canonical merged records. Copying preview
     #    sessions here would discard imported/human decisions for projection.
-    _write_bundle_file(
-        out_dir, _ANNOTATIONS_FILENAME, (materialize_dir / _ANNOTATIONS_FILENAME).read_bytes()
-    )
-    _write_bundle_file(
-        out_dir, _SESSIONS_OUT_FILENAME, (materialize_dir / _ANNOTATIONS_FILENAME).read_bytes()
-    )
+    annotation_bytes = (materialize_dir / _ANNOTATIONS_FILENAME).read_bytes()
+    for name in (_ANNOTATIONS_FILENAME, _SESSIONS_OUT_FILENAME):
+        _write_bundle_file(out_dir, name, annotation_bytes)
     _write_bundle_file(out_dir, _MANIFEST_FILENAME, manifest_path.read_bytes())
     _write_bundle_file(out_dir, _POLICY_BINDING_FILENAME, policy_binding)
 
@@ -415,14 +350,14 @@ def build_final_bundle(
 
     # 3. coverage-report.json over the fresh complete queue, enriched exactly
     #    like the CLI report twin (``cli._report_items`` -> shared
-    #    ``_enrich_report_items``): observations attached per record, three-tier
+    #    ``adjudicated_items``): observations attached per record, three-tier
     #    effective adjudication applied, and gold records without a human
     #    decision demoted to task-only, so the published 80% admission gate
     #    sees real human adjudication state instead of counting every automatic
     #    decisive record as adjudicated. ``as_of`` comes from the preview
     #    manifest (empty when unpinned).
     observations = load_observations(observations_path) if observations_path is not None else []
-    report_items = _enrich_report_items(
+    report_items = adjudicated_items(
         build_queue(index_sessions(index_root)[0], include_decisive=True),
         observations,
         as_of=manifest.get("as_of"),

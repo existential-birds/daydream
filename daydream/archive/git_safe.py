@@ -44,14 +44,7 @@ def _split_path(path: str) -> tuple[str, str] | None:
 def normalize_remote_url(
     raw: str, *, allowed_hosts: frozenset[str] = _DEFAULT_HOSTS
 ) -> tuple[str | None, str | None]:
-    """Normalize a Git remote URL to (identity, credential-free canonical URL).
-
-    Returns (owner/repo, https://host/owner/repo). Identity and URL are None
-    when the input is unparseable; identity alone is None when the host is
-    not on the allowlist (URL is still returned, credential-stripped).
-    Percent-decodes userinfo before classification; never decodes the path.
-    Never raises on malformed input.
-    """
+    """Normalize a Git remote URL to (identity, credential-free canonical URL)."""
     if not raw or not raw.strip():
         return None, None
 
@@ -81,10 +74,7 @@ def normalize_remote_url(
 
 
 def classify_remote_url(raw: str) -> list[str]:
-    """Return triage categories for credential exposure in a remote URL.
-
-    Labels among "userinfo" and "query". Empty list for benign URLs.
-    """
+    """Return triage categories for credential exposure in a remote URL."""
     if not raw or not raw.strip():
         return []
     categories: list[str] = []

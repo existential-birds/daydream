@@ -11,7 +11,6 @@ import pytest
 
 from daydream import cli
 from daydream.archive import hydrate, license_enrich
-from daydream.archive.hydrate_client import FakeHub
 from daydream.archive.license_enrich import EnrichedEvidence
 from daydream.commands import hydrate as cli_hydrate
 from daydream.training.corpus_projection.license import load_license_policy, resolve_repo_decision
@@ -21,6 +20,7 @@ from tests.fixtures.training.build_hub_snapshot import (
     _snapshot_trajectory,
     build_snapshot,
 )
+from tests.harness.hub import FakeHub
 
 
 @dataclass

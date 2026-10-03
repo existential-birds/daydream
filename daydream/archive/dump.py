@@ -13,24 +13,15 @@ from daydream.archive.sanitize import sanitize_bundle_files
 
 
 def _refuse_dump(dump_path: Path, session_id: str, reason: str) -> bool:
-    # The caller owns this empty private finalization stage, never the public
-    # destination. Absence tells artifact routing to preserve its prior baseline;
-    # an empty directory would instead publish an empty new dump. rmdir refuses
-    # unexpected content rather than deleting evidence we do not own.
+    # Remove only the empty private stage: absence preserves prior dump contents.
+    # rmdir refuses unexpected evidence; an empty staged directory would replace the dump.
     dump_path.rmdir()
     warn(f"Withholding the dump for {session_id}: {reason}; preserving the completed run")
     return False
 
 
 def publish_dump(assembly_dir: Path, dump_path: Path, session_id: str) -> bool:
-    """Copy accepted bytes into an empty private stage, returning whether ready.
-
-    Clean/advisory bundles retain their exact bytes. Blocking bundles get a
-    separate sanitized derivative and a second publication scan. Sanitizer or
-    scanner failures withhold the dump without invalidating the original run.
-    Copy/publication and staging-integrity errors propagate to strict archive
-    finalization. The caller handles rollback of any partially copied stage.
-    """
+    """Copy accepted bytes into an empty private stage, returning whether ready."""
     try:
         source_scan = scan.scan_run_dir(assembly_dir)
     except Exception as exc:  # noqa: BLE001 - optional diagnostics fail closed

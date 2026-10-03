@@ -13,6 +13,7 @@ root intentionally fails the schema and cannot ground as a real function.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
 from daydream.deep.diagram_types import (
@@ -21,7 +22,7 @@ from daydream.deep.diagram_types import (
     NODE_KINDS,
     PARTICIPANT_KINDS,
 )
-from daydream.output_schema import strict_object
+from daydream.output_schema import array_schema, record_array_schema, strict_object
 from daydream.repository_paths import (
     REPOSITORY_FILE_PATH_SCHEMA as _REPOSITORY_FILE_PATH_SCHEMA,
     valid_repository_file_path,
@@ -32,92 +33,95 @@ from daydream.repository_paths import (
 _LINE_SCHEMA: dict[str, Any] = {"type": "integer", "minimum": 1}
 
 # Branch/loop evidence: a location only, no symbol to check.
-_EVIDENCE_SCHEMA: dict[str, Any] = strict_object({
-    "file": _REPOSITORY_FILE_PATH_SCHEMA,
-    "line": _LINE_SCHEMA,
-})
+_EVIDENCE_SCHEMA: dict[str, Any] = strict_object(
+    {
+        "file": _REPOSITORY_FILE_PATH_SCHEMA,
+        "line": _LINE_SCHEMA,
+    }
+)
 
 # Sequence-message evidence: ``symbol`` is the callee (call), the enclosing
 # function (reply) or the client method token (external call), and is always
 # required -- SYMBOL_NOT_ON_LINE is the check that makes a message verifiable.
-_SYMBOL_EVIDENCE_SCHEMA: dict[str, Any] = strict_object({
-    "file": _REPOSITORY_FILE_PATH_SCHEMA,
-    "line": _LINE_SCHEMA,
-    "symbol": {"type": "string"},
-})
+_SYMBOL_EVIDENCE_SCHEMA: dict[str, Any] = strict_object(
+    {
+        "file": _REPOSITORY_FILE_PATH_SCHEMA,
+        "line": _LINE_SCHEMA,
+        "symbol": {"type": "string"},
+    }
+)
 
 # Flowchart-node evidence: only a ``subroutine`` node names a symbol, so the
 # field is nullable rather than absent (strict mode has no optional keys).
-_OPTIONAL_SYMBOL_EVIDENCE_SCHEMA: dict[str, Any] = strict_object({
-    "file": _REPOSITORY_FILE_PATH_SCHEMA,
-    "line": _LINE_SCHEMA,
-    "symbol": {"type": ["string", "null"]},
-})
-
-SEQUENCE_SPEC_SCHEMA: dict[str, Any] = strict_object({
-    "participants": {
-        "type": "array",
-        "items": strict_object({
-            "name": {"type": "string"},
-            "kind": {"type": "string", "enum": list(PARTICIPANT_KINDS)},
-            "files": {"type": "array", "items": _REPOSITORY_FILE_PATH_SCHEMA},
-            "service": {"type": ["string", "null"]},
-        }),
-    },
-    "messages": {
-        "type": "array",
-        "items": strict_object({
-            "from": {"type": "string"},
-            "to": {"type": "string"},
-            "label": {"type": "string"},
-            "kind": {"type": "string", "enum": list(MESSAGE_KINDS)},
-            "changed": {"type": "boolean"},
-            "evidence": _SYMBOL_EVIDENCE_SCHEMA,
-        }),
-    },
-    "blocks": {
-        "type": "array",
-        "items": strict_object({
-            "kind": {"type": "string", "enum": list(BLOCK_KINDS)},
-            "branches": {
-                "type": "array",
-                "items": strict_object({
-                    "condition": {"type": "string"},
-                    "evidence": _EVIDENCE_SCHEMA,
-                    "messages": {
-                        "type": "array",
-                        "items": {"type": "integer", "minimum": 0},
-                    },
-                }),
-            },
-        }),
-    },
-})
-
-FLOWCHART_SPEC_SCHEMA: dict[str, Any] = strict_object({
-    "root": strict_object({
+_OPTIONAL_SYMBOL_EVIDENCE_SCHEMA: dict[str, Any] = strict_object(
+    {
         "file": _REPOSITORY_FILE_PATH_SCHEMA,
-        "name": {"type": "string"},
         "line": _LINE_SCHEMA,
-    }),
-    "nodes": {
-        "type": "array",
-        "items": strict_object({
-            "id": {"type": "string"},
-            "kind": {"type": "string", "enum": list(NODE_KINDS)},
-            "label": {"type": "string"},
-            "evidence": _OPTIONAL_SYMBOL_EVIDENCE_SCHEMA,
-        }),
-    },
-    "edges": {
-        "type": "array",
-        "items": strict_object({
-            "from": {"type": "string"},
-            "to": {"type": "string"},
-            "label": {"type": ["string", "null"]},
-        }),
-    },
-})
+        "symbol": {"type": ["string", "null"]},
+    }
+)
+
+SEQUENCE_SPEC_SCHEMA: dict[str, Any] = strict_object(
+    {
+        "participants": record_array_schema(
+            {
+                "name": {"type": "string"},
+                "kind": {"type": "string", "enum": list(PARTICIPANT_KINDS)},
+                "files": {"type": "array", "items": _REPOSITORY_FILE_PATH_SCHEMA},
+                "service": {"type": ["string", "null"]},
+            }
+        ),
+        "messages": record_array_schema(
+            {
+                "from": {"type": "string"},
+                "to": {"type": "string"},
+                "label": {"type": "string"},
+                "kind": {"type": "string", "enum": list(MESSAGE_KINDS)},
+                "changed": {"type": "boolean"},
+                "evidence": _SYMBOL_EVIDENCE_SCHEMA,
+            }
+        ),
+        "blocks": record_array_schema(
+            {
+                "kind": {"type": "string", "enum": list(BLOCK_KINDS)},
+                "branches": record_array_schema(
+                    {
+                        "condition": {"type": "string"},
+                        "evidence": _EVIDENCE_SCHEMA,
+                        "messages": array_schema({"type": "integer", "minimum": 0}),
+                    }
+                ),
+            }
+        ),
+    }
+)
+
+FLOWCHART_SPEC_SCHEMA: dict[str, Any] = strict_object(
+    {
+        "root": strict_object(
+            {
+                "file": _REPOSITORY_FILE_PATH_SCHEMA,
+                "name": {"type": "string"},
+                "line": _LINE_SCHEMA,
+            }
+        ),
+        "nodes": record_array_schema(
+            {
+                "id": {"type": "string"},
+                "kind": {"type": "string", "enum": list(NODE_KINDS)},
+                "label": {"type": "string"},
+                "evidence": _OPTIONAL_SYMBOL_EVIDENCE_SCHEMA,
+            }
+        ),
+        "edges": record_array_schema(
+            {
+                "from": {"type": "string"},
+                "to": {"type": "string"},
+                "label": {"type": ["string", "null"]},
+            }
+        ),
+    }
+)
 
 
 def _empty_sequence_spec() -> dict[str, Any]:
@@ -195,58 +199,73 @@ def _evidence(value: Any, *, symbol: Literal["required", "optional", "absent"]) 
     return evidence
 
 
-def _coerce_participants(value: Any) -> list[dict[str, Any]]:
-    """Coerce the participant list, dropping malformed and duplicate entries."""
-    if not isinstance(value, list):
-        return []
+def _record(
+    value: Any,
+    fields: Mapping[str, Callable[[Any], Any]],
+    *,
+    required: tuple[str, ...],
+) -> dict[str, Any] | None:
+    """Coerce one record; nullable fields stay present and required None fields reject it."""
+    if not isinstance(value, dict):
+        return None
+    record = {name: coerce(value.get(name)) for name, coerce in fields.items()}
+    return record if all(record[name] is not None for name in required) else None
+
+
+def _records(
+    value: Any,
+    fields: Mapping[str, Callable[[Any], Any]],
+    *,
+    required: tuple[str, ...],
+    unique: str | None = None,
+) -> list[dict[str, Any]]:
+    """Drop malformed entries and later duplicates while preserving source order."""
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for entry in value:
-        if not isinstance(entry, dict):
+    for entry in value if isinstance(value, list) else []:
+        record = _record(entry, fields, required=required)
+        if record is None or (unique is not None and record[unique] in seen):
             continue
-        name = _text(entry.get("name"))
-        kind = _choice(entry.get("kind"), PARTICIPANT_KINDS)
-        if name is None or kind is None or name in seen:
-            continue
-        seen.add(name)
-        out.append(
-            {
-                "name": name,
-                "kind": kind,
-                "files": _paths(entry.get("files")),
-                "service": _text(entry.get("service")),
-            }
-        )
+        if unique is not None:
+            seen.add(record[unique])
+        out.append(record)
     return out
 
 
+def _coerce_participants(value: Any) -> list[dict[str, Any]]:
+    return _records(
+        value,
+        {
+            "name": _text,
+            "kind": lambda value: _choice(value, PARTICIPANT_KINDS),
+            "files": _paths,
+            "service": _text,
+        },
+        required=("name", "kind"),
+        unique="name",
+    )
+
+
 def _coerce_messages(value: Any) -> tuple[list[dict[str, Any]], dict[int, int]]:
-    """Return surviving messages and old-to-new positions for branch-index remapping."""
-    if not isinstance(value, list):
-        return [], {}
+    """Keep original positions for branch-index remapping after invalid messages drop."""
     out: list[dict[str, Any]] = []
     remap: dict[int, int] = {}
-    for position, entry in enumerate(value):
-        if not isinstance(entry, dict):
-            continue
-        source = _text(entry.get("from"))
-        target = _text(entry.get("to"))
-        label = _text(entry.get("label"))
-        kind = _choice(entry.get("kind"), MESSAGE_KINDS)
-        evidence = _evidence(entry.get("evidence"), symbol="required")
-        if source is None or target is None or label is None or kind is None or evidence is None:
-            continue
-        remap[position] = len(out)
-        out.append(
+    for position, entry in enumerate(value if isinstance(value, list) else []):
+        message = _record(
+            entry,
             {
-                "from": source,
-                "to": target,
-                "label": label,
-                "kind": kind,
-                "changed": bool(entry.get("changed")),
-                "evidence": evidence,
-            }
+                "from": _text,
+                "to": _text,
+                "label": _text,
+                "kind": lambda value: _choice(value, MESSAGE_KINDS),
+                "changed": bool,
+                "evidence": lambda value: _evidence(value, symbol="required"),
+            },
+            required=("from", "to", "label", "kind", "evidence"),
         )
+        if message is not None:
+            remap[position] = len(out)
+            out.append(message)
     return out, remap
 
 
@@ -308,53 +327,42 @@ def coerce_sequence_spec(value: Any) -> dict[str, Any]:
 
 
 def _coerce_root(value: Any) -> dict[str, Any] | None:
-    """Coerce the flowchart root, or return None when it is unusable."""
-    if not isinstance(value, dict):
-        return None
-    file = _path(value.get("file"))
-    name = _text(value.get("name"))
-    line = _index(value.get("line"), minimum=1)
-    if file is None or name is None or line is None:
-        return None
-    return {"file": file, "name": name, "line": line}
+    return _record(
+        value,
+        {
+            "file": _path,
+            "name": _text,
+            "line": lambda value: _index(value, minimum=1),
+        },
+        required=("file", "name", "line"),
+    )
 
 
 def _coerce_nodes(value: Any) -> list[dict[str, Any]]:
-    """Drop malformed nodes and duplicate IDs so downstream identity joins stay unambiguous."""
-    if not isinstance(value, list):
-        return []
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for entry in value:
-        if not isinstance(entry, dict):
-            continue
-        node_id = _text(entry.get("id"))
-        kind = _choice(entry.get("kind"), NODE_KINDS)
-        label = _text(entry.get("label"))
-        evidence = _evidence(entry.get("evidence"), symbol="optional")
-        if node_id is None or kind is None or label is None or evidence is None:
-            continue
-        if node_id in seen:
-            continue
-        seen.add(node_id)
-        out.append({"id": node_id, "kind": kind, "label": label, "evidence": evidence})
-    return out
+    return _records(
+        value,
+        {
+            "id": _text,
+            "kind": lambda value: _choice(value, NODE_KINDS),
+            "label": _text,
+            "evidence": lambda value: _evidence(value, symbol="optional"),
+        },
+        required=("id", "kind", "label", "evidence"),
+        unique="id",
+    )
 
 
 def _coerce_edges(value: Any) -> list[dict[str, Any]]:
-    """Drop missing endpoints; keep unknown node references for grounding to report."""
-    if not isinstance(value, list):
-        return []
-    out: list[dict[str, Any]] = []
-    for entry in value:
-        if not isinstance(entry, dict):
-            continue
-        source = _text(entry.get("from"))
-        target = _text(entry.get("to"))
-        if source is None or target is None:
-            continue
-        out.append({"from": source, "to": target, "label": _text(entry.get("label"))})
-    return out
+    """Keep unknown node references for grounding to report."""
+    return _records(
+        value,
+        {
+            "from": _text,
+            "to": _text,
+            "label": _text,
+        },
+        required=("from", "to"),
+    )
 
 
 def coerce_flowchart_spec(value: Any) -> dict[str, Any]:

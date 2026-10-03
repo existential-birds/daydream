@@ -6,20 +6,19 @@ from collections.abc import Sequence
 
 import pytest
 
+import daydream.reviews.rendering as review_rendering
 from daydream import pr_review
 from daydream.pr_review import (
     ClassifiedReviewPlan,
-    FileCommentPayload,
     InlineReviewComment,
     ParsedIssue,
     PRInfo,
     ReviewEvent,
-    ReviewPayload,
-    ReviewPostResult,
     SubmissionStatus,
-    parse_finding_markers,
     post_classified_review,
 )
+from daydream.reviews.identity import parse_finding_markers
+from daydream.reviews.models import FileCommentPayload, ReviewPayload, ReviewPostResult
 from tests.harness.review_profile import sample_pr
 
 
@@ -43,7 +42,9 @@ def _plan(*, inline: list[InlineReviewComment] | None = None, inline_issues: lis
     )
     return ClassifiedReviewPlan.from_classified(
         sample_pr(), classified, event=event, run_info="Run information from the authorized caller.",
-        renderers=pr_review.ReviewRenderers(pr_review.default_render_finding, pr_review.default_render_summary,),
+        renderers=pr_review.ReviewRenderers(
+            review_rendering.default_render_finding, review_rendering.default_render_summary,
+        ),
     )
 
 

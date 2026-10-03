@@ -17,11 +17,12 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
 
-from daydream.pr_review import FINDING_MARKER_RE
+from daydream.reviews.identity import FINDING_MARKER_RE
 from daydream.severity import SeverityLevel
 
 
@@ -127,12 +128,7 @@ SourceId = Annotated[str, AfterValidator(_canonical_source_id)]
 
 
 def normalize_hostname(raw: str) -> str:
-    """Normalize a DNS hostname, stripping scheme/credentials/port/query path.
-
-    Lowers the host, drops ``<scheme>://``, ``user:pass@``, ``:port`` and a
-    trailing ``/path``. Rejects empty strings, wildcards, embedded whitespace,
-    and a result with no dot-bearing host segment.
-    """
+    """Normalize a DNS hostname, stripping scheme/credentials/port/query path."""
     if not isinstance(raw, str):
         raise ValueError(f"hostname must be a string, got {raw!r}")
     host = raw
@@ -211,15 +207,10 @@ class Privacy(_StrictModel):
     archive: Literal["disabled"]
     uploads: Literal["disabled"]
 
-    @field_validator("reviewer_allowed_hosts")
+    @field_validator("reviewer_allowed_hosts", "judge_allowed_hosts")
     @classmethod
-    def _reviewer_hosts(cls, v: list[str]) -> list[str]:
-        return _normalize_host_list(v, "reviewer_allowed_hosts")
-
-    @field_validator("judge_allowed_hosts")
-    @classmethod
-    def _judge_hosts(cls, v: list[str]) -> list[str]:
-        return _normalize_host_list(v, "judge_allowed_hosts")
+    def _allowed_hosts(cls, value: list[str], info: ValidationInfo) -> list[str]:
+        return _normalize_host_list(value, str(info.field_name))
 
 
 class PullRequestEntry(_StrictModel):
@@ -707,27 +698,19 @@ class Finding(_StrictModel):
             raise ValueError(f"finding_id must be 64-hex, got {v!r}")
         return v
 
-    @field_validator("title")
+    @field_validator("title", "body")
     @classmethod
-    def _title_limit(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("title must not be blank")
-        if "\x00" in v:
-            raise ValueError("title must not contain NUL")
-        if len(v) > 500:
+    def _text_limits(cls, value: str, info: ValidationInfo) -> str:
+        field = info.field_name
+        if not value.strip():
+            raise ValueError(f"{field} must not be blank")
+        if "\x00" in value:
+            raise ValueError(f"{field} must not contain NUL")
+        if field == "title" and len(value) > 500:
             raise ValueError("title exceeds 500 characters")
-        return v
-
-    @field_validator("body")
-    @classmethod
-    def _body_limit(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("body must not be blank")
-        if "\x00" in v:
-            raise ValueError("body must not contain NUL")
-        if len(v.encode("utf-8")) > 8 * 1024:
+        if field == "body" and len(value.encode("utf-8")) > 8 * 1024:
             raise ValueError("body exceeds 8 KiB")
-        return v
+        return value
 
     @model_validator(mode="after")
     def _historical_marker(self) -> "Finding":
@@ -750,11 +733,7 @@ _EVIDENCE_REASON = Literal[
 
 
 class _NoteForOther(_StrictModel):
-    """Require a note on an exclusion model when ``reason == "other"``.
-
-    ``reason`` / ``note`` are declared here so the shared validator typechecks;
-    concrete subclasses narrow ``reason`` to their own Literal.
-    """
+    """Require a note on an exclusion model when ``reason == "other"``."""
 
     _exclusion_noun: ClassVar[str] = "exclusion"
 
@@ -809,11 +788,7 @@ class PrioritizationCandidate(_StrictModel):
 
 
 class PrioritizationFacts(_StrictModel):
-    """Additive per-case prioritization facts (schema_version stays 2).
-
-    Written once at case materialization/refresh; all new data stays out of
-    every hash surface.
-    """
+    """Additive per-case prioritization facts (schema_version stays 2)."""
 
     extraction_version: int
     head_sha: Sha40
@@ -892,14 +867,11 @@ class CaseDocument(_StrictModel):
     prioritization: PrioritizationFacts | None = None
 
     @model_validator(mode="after")
-    def _unique_candidates(self) -> "CaseDocument":
+    def _consistent(self) -> "CaseDocument":
+        """Validate cross-document invariants in stable failure order."""
         ids = [c.source_id for c in self.candidates]
         if len(set(ids)) != len(ids):
             raise ValueError("case contains duplicate candidate source_ids")
-        return self
-
-    @model_validator(mode="after")
-    def _case_id_matches(self) -> "CaseDocument":
         pr_number = self.pull_request.number
         head = self.snapshot.original_head_sha
         if head is None:
@@ -907,27 +879,15 @@ class CaseDocument(_StrictModel):
         expected = case_id_for(pr_number, head)
         if self.case_id != expected:
             raise ValueError(f"case_id {self.case_id!r} mismatches {expected!r}")
-        return self
-
-    @model_validator(mode="after")
-    def _canonical_finding_ids(self) -> "CaseDocument":
         if self.schema_version == 2:
             for i, f in enumerate(self.curation.findings):
                 if f.finding_id != derive_finding_id(f, case_id=self.case_id):
                     raise ValueError(
                         f"finding[{i}] finding_id is not the canonical sha256 for case {self.case_id}"
                     )
-        return self
-
-    @model_validator(mode="after")
-    def _unique_findings(self) -> "CaseDocument":
         ids = [f.finding_id for f in self.curation.findings]
         if len(set(ids)) != len(ids):
             raise ValueError("case contains duplicate canonical findings")
-        return self
-
-    @model_validator(mode="after")
-    def _unreplayable_coupling(self) -> "CaseDocument":
         explicitly_excluded = (
             self.curation.state == "excluded" and self.curation.case_exclusion is not None
         )
@@ -938,10 +898,6 @@ class CaseDocument(_StrictModel):
             raise ValueError(
                 "unreplayable snapshot and curation states must match unless explicitly excluded"
             )
-        return self
-
-    @model_validator(mode="after")
-    def _requested_base_matches_pr(self) -> "CaseDocument":
         requested = self.snapshot.requested_base_sha
         if requested is not None and requested != self.pull_request.base.sha:
             raise ValueError("snapshot requested_base_sha must match pull_request.base.sha")
@@ -997,10 +953,8 @@ class PreflightLedger(_StrictModel):
 _PR_TRANSITIONS: dict[str, set[str]] = {
     "pending": {"fetched", "fetch_failed"},
     "fetch_failed": {"fetched", "fetch_failed"},
-    # A fetched PR never goes to bare fetch_failed: a failed refresh preserves
-    # its last-good linkage and records the attempt in ``latest_error`` instead
-    # of wiping it (issue #813). Only a first-import failure (pending/fetch_failed
-    # with no linkage) stages a plain fetch_failed.
+    # Failed refresh retains fetched linkage and writes latest_error. Only first-import
+    # failures with no linkage transition to fetch_failed.
     "fetched": {"fetched"},
 }
 
@@ -1036,44 +990,21 @@ def derive_workspace_state(
     """Prioritize collecting, curating, stale, ready, then empty from ledger and cases.
     Callers classify corruption separately through classify_validation.
     """
-    pull_requests = pull_requests or []
-    cases = cases or []
-    any_collecting = False
-    any_stale = False
-    any_ready = False
-    any_draft_or_unreplayable = False
-
-    for pr in pull_requests:
-        state = pr.get("import_state")
-        if state in ("pending", "fetch_failed"):
-            any_collecting = True
-
-    for c in cases:
-        cs = c.get("curation_state")
-        if cs in ("draft", "unreplayable"):
-            any_draft_or_unreplayable = True
-        elif cs == "stale":
-            any_stale = True
-        elif cs == "ready":
-            any_ready = True
-
-    if any_collecting:
-        return "collecting"
-    if any_draft_or_unreplayable:
-        return "curating"
-    if any_stale:
-        return "stale"
-    if any_ready:
-        return "ready"
+    pr_states = [pr.get("import_state") for pr in pull_requests or []]
+    case_states = [case.get("curation_state") for case in cases or []]
+    for present, result in (
+        (any(state in ("pending", "fetch_failed") for state in pr_states), "collecting"),
+        (any(state in ("draft", "unreplayable") for state in case_states), "curating"),
+        ("stale" in case_states, "stale"),
+        ("ready" in case_states, "ready"),
+    ):
+        if present:
+            return result
     return "empty"
 
 
 def classify_validation(*, ready: bool, corrupt: bool) -> int:
-    """Map readiness to a ``0``/``2``/``1`` validation exit code.
-
-    ``0`` ready; ``2`` structurally valid but incomplete; ``1`` corrupt.
-    ``corrupt`` takes precedence over an incomplete workspace.
-    """
+    """Map readiness to a ``0``/``2``/``1`` validation exit code."""
     if corrupt:
         return 1
     if ready:

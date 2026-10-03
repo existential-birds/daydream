@@ -10,8 +10,7 @@ import logging
 import math
 import os
 from collections.abc import AsyncGenerator, Callable, Iterable
-from dataclasses import dataclass, field
-from functools import partial
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -33,10 +32,6 @@ from daydream.backends import (
 from daydream.backends._subprocess import stream_idle_timeout_s
 from daydream.backends._transport import (
     CliTransport,
-    StderrPolicy,
-    StdinMode,
-    raise_for_exit,
-    reap,
     teardown,
     write_temp_json_schema,
 )
@@ -246,107 +241,59 @@ class _OspreyProtocolState:
         self.pending_tool_calls.discard(call_id)
 
 
-class OspreyBackend:
-    """Translate ``osprey agent --events-jsonl`` into daydream events."""
+@dataclass(frozen=True, kw_only=True, repr=False)
+class OspreyConfig(OspreyRequestConfig):
+    """Own native options; only a fresh exact-base request config crosses telemetry.
 
-    name = "osprey"
+    Field groups on OspreyRequestConfig declare scalar argv order once. Private
+    paths, labels and variables are invocation inputs, never request metadata.
+    """
 
-    def __init__(
-        self,
-        model: str | None = None,
-        *,
-        cwd: Path | None = None,
-        reasoning_effort: str | None = None,
-        osprey_binary: str | None = None,
-        persona: str | None = None,
-        toolset: str | None = None,
-        temperature: float | None = None,
-        approval: str | None = None,
-        sandbox: bool = False,
-        allowed_roots: Iterable[Path | str] = (),
-        atif_output: Path | None = None,
-        atif_system_prompt_plaintext: bool = False,
-        immutable_runtime_surface: bool = False,
-        turn_timeout: int | None = None,
-        stream_idle_timeout_secs: int | None = None,
-        streaming_timeout_secs: int | None = None,
-        empty_completion_threshold: int | None = None,
-        driver_max_retries: int | None = None,
-        compress_context: bool | None = None,
-        compress_min_bytes: int | None = None,
-        tool_result_cap: int | None = None,
-        tool_result_head: int | None = None,
-        tool_result_tail: int | None = None,
-        tool_result_max_lines: int | None = None,
-        tool_result_raw_dir: Path | None = None,
-        retry_failure_threshold: int | None = None,
-        no_progress_family_threshold: int | None = None,
-        no_progress_family_window: int | None = None,
-        no_progress_artifact_threshold: int | None = None,
-        no_progress_suppression_window: int | None = None,
-        vars: Iterable[tuple[str, str]] = (),
-        max_subagents: int | None = None,
-        llm_rpm: int | None = None,
-        effort: str | None = None,
-        ultracode: bool = False,
-        provider: str | None = None,
-        base_url: str | None = None,
-        osprey_home: Path | None = None,
-    ) -> None:
-        if provider is not None:
+    model: str | None = None
+    reasoning_effort: str | None = None
+    osprey_binary: str = ""
+    persona: str | None = None
+    toolset: str | None = None
+    sandbox: bool | None = False
+    immutable_surface: bool | None = False
+    ultracode: bool | None = False
+    allowed_roots: Iterable[Path | str] = ()
+    atif_output: Path | None = None
+    atif_system_prompt_plaintext: bool = False
+    tool_result_raw_dir: Path | None = None
+    vars: Iterable[tuple[str, str]] = ()
+    effort: str | None = None
+    provider: str | None = None
+    base_url: str | None = None
+    osprey_home: Path | None = None
+
+    def __post_init__(self) -> None:
+        if self.provider is not None:
             raise OspreyUnsupportedOption(
                 "provider",
                 "the current CLI resolves providers from Osprey configuration/environment; it has no provider flag",
             )
-        if base_url is not None:
+        if self.base_url is not None:
             raise OspreyUnsupportedOption(
                 "base_url",
                 "the current CLI resolves custom endpoints from Osprey "
                 "configuration/environment; it has no base-url flag",
             )
 
-        self._model_override = model
-        # An omitted model remains unknown until Osprey reports its configured choice.
-        self.model = model or "unknown"
-        self.reasoning_effort = reasoning_effort
-        self.osprey_binary = osprey_binary or os.environ.get("OSPREY_BINARY", "osprey")
-        self.cwd = cwd
-        self.persona = persona
-        self.toolset = toolset
-        self.temperature = temperature
-        self.approval = approval
-        self.sandbox = sandbox
-        self.allowed_roots = tuple(str(root) for root in allowed_roots)
-        self.atif_output = atif_output
-        self.atif_system_prompt_plaintext = atif_system_prompt_plaintext
-        self.immutable_runtime_surface = immutable_runtime_surface
-        self.turn_timeout = turn_timeout
-        self.stream_idle_timeout_secs = stream_idle_timeout_secs
-        self.streaming_timeout_secs = streaming_timeout_secs
-        self.empty_completion_threshold = empty_completion_threshold
-        self.driver_max_retries = driver_max_retries
-        self.compress_context = compress_context
-        self.compress_min_bytes = compress_min_bytes
-        self.tool_result_cap = tool_result_cap
-        self.tool_result_head = tool_result_head
-        self.tool_result_tail = tool_result_tail
-        self.tool_result_max_lines = tool_result_max_lines
-        self.tool_result_raw_dir = tool_result_raw_dir
-        self.retry_failure_threshold = retry_failure_threshold
-        self.no_progress_family_threshold = no_progress_family_threshold
-        self.no_progress_family_window = no_progress_family_window
-        self.no_progress_artifact_threshold = no_progress_artifact_threshold
-        self.no_progress_suppression_window = no_progress_suppression_window
-        self.vars = tuple(vars)
-        self.max_subagents = max_subagents
-        self.llm_rpm = llm_rpm
-        self.effort = effort
-        self.ultracode = ultracode
-        self.osprey_home = osprey_home
-        self.fanout_concurrency = resolve_fanout_concurrency("DAYDREAM_OSPREY_FANOUT_CONCURRENCY", 4)
-        self._transports: list[CliTransport] = []
+        if self.approval_mode is not None:
+            if self.approval_mode in {"on-request", "on-failure", "unless-trusted"}:
+                raise OspreyUnsupportedOption(
+                    "approval",
+                    f"{self.approval_mode!r} requires an interactive approver and headless mode rejects it",
+                )
+            if self.approval_mode != "deny-untrusted":
+                raise OspreyUnsupportedOption("approval", f"unsupported headless value {self.approval_mode!r}")
+        super().__post_init__()
+        object.__setattr__(self, "osprey_binary", self.osprey_binary or os.environ.get("OSPREY_BINARY", "osprey"))
+        object.__setattr__(self, "allowed_roots", tuple(str(root) for root in self.allowed_roots))
+        object.__setattr__(self, "vars", tuple(self.vars))
 
-    def build_command(
+    def prepare(
         self,
         prompt: str,
         *,
@@ -356,8 +303,8 @@ class OspreyBackend:
         read_only: bool = False,
         persist_session: bool = True,
         tool_search_mode: str | None = None,
-    ) -> list[str]:
-        """Build only flags verified against the current Osprey CLI source."""
+    ) -> tuple[list[str], OspreyRequestConfig]:
+        """Compile argv and immutable metadata from the same admitted call controls."""
         if tool_search_mode is not None:
             raise OspreyUnsupportedOption(
                 "tool_search_mode",
@@ -371,6 +318,33 @@ class OspreyBackend:
             )
         if continuation is not None and continuation.backend not in {"osprey", ""}:
             continuation = None
+        resume_id: str | None = None
+        mode = "fresh"
+        if continuation is not None:
+            resume_id = continuation.data.get("session_id")
+            if not isinstance(resume_id, str) or not resume_id:
+                raise OspreyProtocolError("osprey continuation token requires session_id")
+            mode = continuation.data.get("mode", "resume")
+            if mode not in ("resume", "fork"):
+                raise OspreyProtocolError(f"unknown osprey continuation mode {mode!r}")
+        variables = tuple(self.vars)
+        # Project the closed safe schema, never serialize this private subclass.
+        request = OspreyRequestConfig(**{
+            **{item.name: getattr(self, item.name) for item in fields(OspreyRequestConfig)},
+            "temperature": float(self.temperature) if self.temperature is not None else None,
+            "finalization": None,
+            "read_only": read_only,
+            "max_turns": max_turns,
+            "persist_session": None,
+            "continuation_mode": mode,
+            "model_mode": "single",
+            "persona_present": self.persona is not None,
+            "toolset_present": self.toolset is not None,
+            "observation_update_bytes": _OSPREY_OBSERVATION_UPDATE_BYTES,
+            "observation_inline_bytes": _OSPREY_OBSERVATION_INLINE_BYTES,
+            "observation_admission_bytes": _OSPREY_OBSERVATION_ADMISSION_BYTES,
+            "vars_count": len(variables) if variables else None,
+        })
 
         args = [
             self.osprey_binary,
@@ -388,77 +362,72 @@ class OspreyBackend:
             if value is not None:
                 args.extend([flag, str(value)])
 
+        def add_group(group: str) -> None:
+            for item in fields(request):
+                if item.metadata.get("osprey_group") == group:
+                    add_value("--" + item.name.replace("_", "-"), getattr(request, item.name))
+
         if self.persona:
             args.extend(["--persona", self.persona])
         if self.toolset:
             args.extend(["--toolset", self.toolset])
-        if self._model_override:
-            args.extend(["--model", self._model_override])
+        if self.model:
+            args.extend(["--model", self.model])
         add_value("--temperature", self.temperature)
         add_value("--atif-output", self.atif_output)
         if self.atif_system_prompt_plaintext:
             args.append("--atif-system-prompt-plaintext")
-        if self.immutable_runtime_surface:
+        if request.immutable_surface:
             args.append("--immutable-runtime-surface")
-        add_value("--max-turns", max_turns)
-        add_value("--turn-timeout", self.turn_timeout)
-        add_value("--stream-idle-timeout-secs", self.stream_idle_timeout_secs)
-        add_value("--streaming-timeout-secs", self.streaming_timeout_secs)
-        add_value("--empty-completion-threshold", self.empty_completion_threshold)
-        add_value("--driver-max-retries", self.driver_max_retries)
+        add_value("--max-turns", request.max_turns)
+        add_group("timeout")
 
-        if read_only:
+        if request.read_only:
             args.append("--read-only")
-        if self.approval is not None:
-            if self.approval in {"on-request", "on-failure", "unless-trusted"}:
-                raise OspreyUnsupportedOption(
-                    "approval",
-                    f"{self.approval!r} requires an interactive approver and headless mode rejects it",
-                )
-            if self.approval != "deny-untrusted":
-                raise OspreyUnsupportedOption("approval", f"unsupported headless value {self.approval!r}")
-            args.extend(["--approval", self.approval])
-        if self.sandbox:
+        if request.approval_mode is not None:
+            args.extend(["--approval", request.approval_mode])
+        if request.sandbox:
             args.append("--sandbox")
         for root in self.allowed_roots:
-            args.extend(["--allowed-root", root])
+            args.extend(["--allowed-root", str(root)])
 
-        if self.compress_context is not None:
-            args.append(f"--compress-context={str(self.compress_context).lower()}")
-        add_value("--compress-min-bytes", self.compress_min_bytes)
-        add_value("--tool-result-cap", self.tool_result_cap)
-        add_value("--tool-result-head", self.tool_result_head)
-        add_value("--tool-result-tail", self.tool_result_tail)
-        add_value("--tool-result-max-lines", self.tool_result_max_lines)
+        if request.compress_context is not None:
+            args.append(f"--compress-context={str(request.compress_context).lower()}")
+        add_group("result")
         add_value("--tool-result-raw-dir", self.tool_result_raw_dir)
-        add_value("--retry-failure-threshold", self.retry_failure_threshold)
-        add_value("--no-progress-family-threshold", self.no_progress_family_threshold)
-        add_value("--no-progress-family-window", self.no_progress_family_window)
-        add_value("--no-progress-artifact-threshold", self.no_progress_artifact_threshold)
-        add_value("--no-progress-suppression-window", self.no_progress_suppression_window)
-        for key, value in self.vars:
+        for key, value in variables:
             args.extend(["--var", f"{key}={value}"])
-        if continuation is not None:
-            data = continuation.data
-            session_id = data.get("session_id")
-            if not isinstance(session_id, str) or not session_id:
-                raise OspreyProtocolError("osprey continuation token requires session_id")
-            mode = data.get("mode", "resume")
-            if mode == "fork":
-                args.extend(["--fork-from", session_id])
-            elif mode == "resume":
-                args.extend(["--resume", session_id])
-            else:
-                raise OspreyProtocolError(f"unknown osprey continuation mode {mode!r}")
+        if resume_id is not None:
+            args.extend(["--fork-from" if request.continuation_mode == "fork" else "--resume", resume_id])
         if output_schema_path is not None:
             args.extend(["--output-schema", str(output_schema_path)])
-        add_value("--max-subagents", self.max_subagents)
-        add_value("--llm-rpm", self.llm_rpm)
+        add_group("limit")
         add_value("--effort", self.effort or self.reasoning_effort)
-        if self.ultracode:
+        if request.ultracode:
             args.append("--ultracode")
         args.append(prompt)
-        return args
+        return args, request
+
+
+class OspreyBackend:
+    """Translate ``osprey agent --events-jsonl`` into daydream events."""
+
+    name = "osprey"
+
+    def __init__(self, config: OspreyConfig | None = None) -> None:
+        self.config = config or OspreyConfig()
+        # Requested model stays in config; native session identity updates only this hint.
+        self.model = self.config.model or "unknown"
+        self.fanout_concurrency = resolve_fanout_concurrency("DAYDREAM_OSPREY_FANOUT_CONCURRENCY", 4)
+        self._transports: list[CliTransport] = []
+
+    @property
+    def reasoning_effort(self) -> str | None:
+        return self.config.reasoning_effort
+
+    @property
+    def sandbox(self) -> bool:
+        return bool(self.config.sandbox)
 
     async def execute(
         self,
@@ -476,6 +445,7 @@ class OspreyBackend:
             raise NotImplementedError(
                 "Osprey backend does not accept daydream exploration agents; use Osprey max-subagents instead"
             )
+        config = self.config
         schema_path: str | None = None
         if output_schema is not None:
             schema_path = write_temp_json_schema(output_schema, prefix="daydream-osprey-schema-")
@@ -500,7 +470,7 @@ class OspreyBackend:
         transport: CliTransport | None = None
 
         try:
-            command = self.build_command(
+            command, request_config = config.prepare(
                 prompt,
                 output_schema_path=schema_path,
                 continuation=continuation,
@@ -509,13 +479,11 @@ class OspreyBackend:
                 persist_session=persist_session,
             )
             child_env = os.environ.copy()
-            if self.osprey_home is not None:
-                child_env["OSPREY_HOME"] = str(self.osprey_home)
+            if config.osprey_home is not None:
+                child_env["OSPREY_HOME"] = str(config.osprey_home)
             transport = CliTransport(
                 "osprey",
                 command,
-                stdin_mode=StdinMode.DEVNULL,
-                stderr_policy=StderrPolicy.DRAIN_TASK,
                 stderr_sink=_stderr_diagnostic_sink(stderr_lines),
                 # Repair non-UTF-8 tool output inside valid JSON rather than aborting.
                 decode_errors="replace",
@@ -577,50 +545,10 @@ class OspreyBackend:
                         model_name=session_model,
                         provider_name=provider,
                         session_id=session_id,
-                        reasoning_effort=self.effort or self.reasoning_effort,
+                        reasoning_effort=config.effort or config.reasoning_effort,
                         output_schema=output_schema,
                         timestamp=started_at,
-                        config=OspreyRequestConfig(
-                            temperature=(float(self.temperature) if self.temperature is not None else None),
-                            read_only=read_only,
-                            continuation_mode=(
-                                "fork"
-                                if (continuation is not None and continuation.data.get("mode") == "fork")
-                                else "resume"
-                                if continuation is not None
-                                else "fresh"
-                            ),
-                            model_mode="single",
-                            persona_present=self.persona is not None,
-                            toolset_present=self.toolset is not None,
-                            approval_mode=("deny-untrusted" if self.approval == "deny-untrusted" else None),
-                            sandbox=self.sandbox,
-                            immutable_surface=self.immutable_runtime_surface,
-                            compress_context=self.compress_context,
-                            ultracode=self.ultracode,
-                            max_turns=max_turns,
-                            turn_timeout=self.turn_timeout,
-                            stream_idle_timeout_secs=self.stream_idle_timeout_secs,
-                            streaming_timeout_secs=self.streaming_timeout_secs,
-                            empty_completion_threshold=self.empty_completion_threshold,
-                            driver_max_retries=self.driver_max_retries,
-                            compress_min_bytes=self.compress_min_bytes,
-                            tool_result_cap=self.tool_result_cap,
-                            tool_result_head=self.tool_result_head,
-                            tool_result_tail=self.tool_result_tail,
-                            tool_result_max_lines=self.tool_result_max_lines,
-                            retry_failure_threshold=self.retry_failure_threshold,
-                            no_progress_family_threshold=self.no_progress_family_threshold,
-                            no_progress_family_window=self.no_progress_family_window,
-                            no_progress_artifact_threshold=self.no_progress_artifact_threshold,
-                            no_progress_suppression_window=self.no_progress_suppression_window,
-                            max_subagents=self.max_subagents,
-                            llm_rpm=self.llm_rpm,
-                            observation_update_bytes=_OSPREY_OBSERVATION_UPDATE_BYTES,
-                            observation_inline_bytes=_OSPREY_OBSERVATION_INLINE_BYTES,
-                            observation_admission_bytes=_OSPREY_OBSERVATION_ADMISSION_BYTES,
-                            vars_count=len(self.vars) if self.vars else None,
-                        ),
+                        config=request_config,
                         model_source="native",
                         provider_source="native",
                         session_source="native",
@@ -798,17 +726,13 @@ class OspreyBackend:
                 else:
                     raise OspreyProtocolError(f"unknown Osprey JSONL event {event_name!r}")
 
-            returncode = await reap(transport)
+            returncode = await transport.wait()
             # Close descendant-held stderr before joining its drain, or EOF may never
             # arrive. This also completes diagnostics; finally's teardown is idempotent.
             await teardown(transport, self._transports)
             # No retryable= kwarg: osprey's PROCESS_EXIT is not retryable.
-            raise_for_exit(
-                returncode,
-                error_type=OspreyError,
-                category="PROCESS_EXIT",
-                build_message=partial(_osprey_process_exit_message, stderr_lines),
-            )
+            if returncode != 0:
+                raise OspreyError(_osprey_process_exit_message(stderr_lines, returncode), category="PROCESS_EXIT")
             if not saw_header:
                 raise OspreyProtocolError("Osprey produced no protocol header")
             if not saw_session_start:

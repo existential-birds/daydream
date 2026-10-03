@@ -27,7 +27,7 @@ from daydream.backends import (
 )
 from daydream.backends.claude import ClaudeAgentError, ClaudeBackend
 from daydream.backends.codex import CodexBackend
-from daydream.backends.osprey import OspreyBackend, OspreyError
+from daydream.backends.osprey import OspreyBackend, OspreyConfig, OspreyError
 from daydream.backends.pi import PiBackend, PiError, _render_tool_result
 from daydream.trajectory import DaydreamPhase
 from tests.harness.claude_sdk import scripted_client
@@ -166,7 +166,7 @@ async def test_osprey_terminal_usage_and_native_tool_metadata(failed: bool) -> N
     events: list[Any] = []
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=proc):
         try:
-            async for event in OspreyBackend(osprey_binary="fake").execute(Path("/tmp"), "actual prompt"):
+            async for event in OspreyBackend(OspreyConfig(osprey_binary="fake")).execute(Path("/tmp"), "actual prompt"):
                 events.append(event)
         except OspreyError:
             assert failed
@@ -285,7 +285,7 @@ async def test_codex_and_osprey_emit_no_generation_events() -> None:
          "verification": None, "outcome": "completed", "exit_code": 0},
     ]
     osprey_lines = [json.dumps(line) for line in osprey_body]
-    osprey_backend = OspreyBackend(model="custom-model", osprey_binary="fake")
+    osprey_backend = OspreyBackend(OspreyConfig(model="custom-model", osprey_binary="fake"))
     with patch(
         "daydream.backends._transport.asyncio.create_subprocess_exec",
         side_effect=lambda *a, **k: FakeCliProcess(osprey_lines),

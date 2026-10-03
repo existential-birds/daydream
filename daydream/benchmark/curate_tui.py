@@ -126,11 +126,7 @@ def _view_binding(view: dict[str, Any]) -> _ViewBinding:
 
 
 def _resolve_number(number: int, binding: list[str]) -> str | None:
-    """Resolve a 1-based displayed *number* through the captured *binding*.
-
-    Returns the source_id the render displayed at that number, or ``None``
-    when out of range — never a fresh re-derivation.
-    """
+    """Resolve a 1-based displayed *number* through the captured *binding*."""
     index = number - 1
     if not (0 <= index < len(binding)):
         return None
@@ -178,11 +174,7 @@ def _entry_block(
     number: int,
     entry: dict[str, Any] | None,
 ) -> str:
-    """The numbered detail block for one evidence record.
-
-    *entry* is the prioritized projection entry (band/reasons/disposition) when
-    the case renders sectioned, else ``None`` for the canonical fallback.
-    """
+    """The numbered detail block for one evidence record."""
     cand = None
     cand_index = ev.get("candidate_index")
     if cand_index is not None and 0 <= cand_index < len(candidates):
@@ -356,10 +348,7 @@ def _editor_fragment_authored(source_ids: list[str]) -> str:
 
 
 def _parse_fragment(text: str) -> list[dict[str, Any]] | None:
-    """Parse edited YAML into a list of non-blank finding atoms, or ``None``.
-
-    Requires a dict with a non-empty ``findings`` list of atoms each carrying a
-    non-blank ``title``/``body`` string."""
+    """Parse edited YAML into a list of non-blank finding atoms, or ``None``."""
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError:
@@ -460,11 +449,7 @@ def _action_edit(
 def _select_evidence_indices(
     read_line: Callable[[str], str], binding: list[str]
 ) -> list[int] | None:
-    """Parse one evidence selector into binding indices, or None to continue.
-
-    ``None`` covers cancellation, an invalid fragment, and a selected entry
-    with no source_id; each path has already printed its diagnostic.
-    """
+    """Parse one evidence selector into binding indices, or None to continue."""
     text = _prompt(read_line, "evidence (number or range, 0 to cancel): ").strip()
     if text == "0":
         return None
@@ -696,7 +681,6 @@ def _run_action(
     return "continue"
 
 
-
 def _launch_pager(text: str) -> None:
     """Display *text* in the platform pager (default ``less -R``)."""
     try:
@@ -746,12 +730,6 @@ def _run_case(root: Path, case_id: str, read_line: Callable[[str], str]) -> str:
                 binding = _view_binding(view)
         except KeyboardInterrupt:
             print("interrupted \u2014 prior actions preserved")
-
-
-
-
-
-
 
 
 def run_curate_tui(

@@ -1,8 +1,4 @@
-"""Streaming agent-text rendering.
-
-Inline markdown/path/code highlighting, the vertical cyan-to-green gradient
-renderer, and the buffering ``AgentTextRenderer`` Live panel.
-"""
+"""Buffered Live narration with markdown/path/code highlighting and a cyan-to-green gradient."""
 
 import re
 

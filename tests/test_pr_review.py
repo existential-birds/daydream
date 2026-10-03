@@ -11,6 +11,11 @@ from typing import Any
 import pytest
 
 import daydream.hunk_index as hunk_index
+import daydream.reviews.diagrams as review_diagrams
+import daydream.reviews.identity as review_identity
+import daydream.reviews.lookup as review_lookup
+import daydream.reviews.models as review_models
+import daydream.reviews.submission as review_submission
 from daydream import git_ops, pr_comment_renderer, pr_review
 from daydream.deep.artifacts import DeepArtifact
 from daydream.extensions import Registry, SummaryContext
@@ -18,30 +23,27 @@ from daydream.extensions.builtins import register_builtins
 from daydream.findings import ArtifactFinding, load_findings_artifact
 from daydream.git_ops import GitError
 from daydream.pr_review import (
-    DAYDREAM_FOOTER,
     InlineReviewComment,
     ParsedIssue,
     PRInfo,
     ReviewRenderers,
     _parse_hunks,
-    build_payload,
     classify,
-    default_render_finding,
-    default_render_summary,
-    diagram_marker,
     extract_anchors,
-    parse_diagram_markers,
-    parse_finding_markers,
     parsed_issues_from_items,
     resolve_review_renderers,
     snap_to_hunk,
 )
 from daydream.reconcile import PriorDiagramComment
 from daydream.review_budget import review_warnings
+from daydream.reviews.identity import DAYDREAM_FOOTER, diagram_marker, parse_diagram_markers, parse_finding_markers
 from daydream.reviews.rendering import (
     _build_consolidated_prompt,
     _render_body_section,
     _summary_findings,
+    build_payload_for_event,
+    default_render_finding,
+    default_render_summary,
     format_comment_body,
 )
 from daydream.run_config import RunConfig
@@ -65,10 +67,10 @@ def _inline(path: str = "a.py", line: int = 10, body: str = "x") -> InlineReview
 
 
 def _recording_fake_submit(captured: dict[str, pr_review.ClassifiedReviewPlan],) -> Any:
-    def fake_submit(plan: pr_review.ClassifiedReviewPlan, *, transport: pr_review.ReviewTransport
-    ) -> pr_review.ClassifiedReviewResult:
+    def fake_submit(plan: pr_review.ClassifiedReviewPlan, *, transport: review_submission.ReviewTransport
+    ) -> review_models.ClassifiedReviewResult:
         captured["plan"] = plan
-        return pr_review.ClassifiedReviewResult(status=pr_review.SubmissionStatus.POSTED,
+        return review_models.ClassifiedReviewResult(status=pr_review.SubmissionStatus.POSTED,
             review_url="https://github.com/acme/widgets/pull/42#pullrequestreview-1",
             posted_file_level=(), folded_file_level=(), final_review_posted=True, safe_error=None,
         )
@@ -136,8 +138,12 @@ def test_custom_summary_renderer_can_build_collapsible_per_finding_list(pr: PRIn
     classified = pr_review.ClassifiedIssues(
         body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc", fingerprint="b" * 64)]
     )
-    payload = build_payload(pr, classified, renderers=resolve_review_renderers(reg),
-        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+    payload = review_submission._review_payload_dict(
+        build_payload_for_event(pr, classified,
+            event=review_models.ReviewEvent.COMMENT,
+            renderers=resolve_review_renderers(reg),
+            run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+        )
     )
     body = payload["body"]
     assert "**Custom Summary**" in body
@@ -153,8 +159,12 @@ def test_custom_finding_renderer_flows_into_summary_section(pr: PRInfo) -> None:
     classified = pr_review.ClassifiedIssues(
         body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc", fingerprint="b" * 64)]
     )
-    body = build_payload(pr, classified, renderers=resolve_review_renderers(reg),
-        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+    body = review_submission._review_payload_dict(
+        build_payload_for_event(pr, classified,
+            event=review_models.ReviewEvent.COMMENT,
+            renderers=resolve_review_renderers(reg),
+            run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+        )
     )["body"]
     assert "CUSTOM::summary::File note" in body
     assert parse_finding_markers(body) == ["b" * 64]
@@ -173,13 +183,21 @@ def test_summary_renderer_falls_back_and_warns_on_error(pr: PRInfo, caplog: pyte
             )
         ]
     )
-    default_body = build_payload(
-        pr, classified, renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer.render_run_info_block([_FIXTURE])
+    default_body = review_submission._review_payload_dict(
+        build_payload_for_event(pr, classified,
+            event=review_models.ReviewEvent.COMMENT,
+            renderers=BUILTIN_RENDERERS,
+            run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+        )
     )["body"]
     with caplog.at_level("WARNING"):
-        body = build_payload(pr, classified, renderers=resolve_review_renderers(reg),
+        body = review_submission._review_payload_dict(
+        build_payload_for_event(pr, classified,
+            event=review_models.ReviewEvent.COMMENT,
+            renderers=resolve_review_renderers(reg),
             run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
-        )["body"]
+        )
+    )["body"]
     assert body == default_body
     assert "summary" in caplog.text and "kaboom" in caplog.text
 
@@ -199,7 +217,7 @@ def test_inline_body_has_footer_and_tags() -> None:
     assert "severity: `high`" in body
     assert "confidence: `HIGH`" in body
     assert body.rstrip().endswith("</sub>")
-    assert pr_review.DAYDREAM_REPO_URL in body
+    assert review_identity.DAYDREAM_REPO_URL in body
     assert "⚠️" in body
     assert "🔮 Prompt for AI Agents" in body
     assert "<details>" in body
@@ -367,8 +385,12 @@ def test_build_payload_reviewed_commit_line_first_in_review_info(pr: PRInfo) -> 
     )
     # Feed the enriched renderer a real fixture trajectory so run-info
     # fields (Model/Cost/Tokens) render instead of the fallback stub.
-    payload = build_payload(
-        pr, classified, renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer.render_run_info_block([_FIXTURE])
+    payload = review_submission._review_payload_dict(
+        build_payload_for_event(pr, classified,
+            event=review_models.ReviewEvent.COMMENT,
+            renderers=BUILTIN_RENDERERS,
+            run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+        )
     )
     body = payload["body"]
 
@@ -382,8 +404,12 @@ def test_build_payload_reviewed_commit_line_first_in_review_info(pr: PRInfo) -> 
     assert body.index(expected) < body.index("- **Confidence:**")
 
 def test_build_payload_reviewed_commit_survives_run_info_fallback(pr: PRInfo) -> None:
-    payload = build_payload(
-        pr, pr_review.ClassifiedIssues(), renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer._render_fallback()
+    payload = review_submission._review_payload_dict(
+        build_payload_for_event(pr, pr_review.ClassifiedIssues(),
+            event=review_models.ReviewEvent.COMMENT,
+            renderers=BUILTIN_RENDERERS,
+            run_info=pr_comment_renderer._render_fallback(),
+        )
     )
     body = payload["body"]
     assert "*run details unavailable*" in body  # degraded run-info present
@@ -394,20 +420,26 @@ def test_build_payload_reviewed_commit_survives_run_info_fallback(pr: PRInfo) ->
 def test_build_payload_reviewed_commit_links_fork_for_fork_head_pr(pr: PRInfo,) -> None:
     """Link the fork commit while retaining the base repository as the POST target."""
     fork_pr = replace(pr, head_repo="forky/widgets")
-    payload = build_payload(
-        fork_pr, pr_review.ClassifiedIssues(), run_info="test run info", renderers=BUILTIN_RENDERERS
+    payload = review_submission._review_payload_dict(
+        build_payload_for_event(fork_pr, pr_review.ClassifiedIssues(),
+            event=review_models.ReviewEvent.COMMENT,
+            run_info="test run info",
+            renderers=BUILTIN_RENDERERS,
+        )
     )
     body = payload["body"]
     assert "- **Reviewed commit:** [`head123`](https://github.com/forky/widgets/commit/head123)" in body
     assert "https://github.com/acme/widgets/commit/head123" not in body
 
 def test_build_payload_blocks_forged_reviewed_commit_line(pr: PRInfo,) -> None:
-    payload = build_payload(pr, pr_review.ClassifiedIssues(),
-        run_info=(
-            "test run info\n"
+    payload = review_submission._review_payload_dict(
+        build_payload_for_event(pr, pr_review.ClassifiedIssues(),
+            event=review_models.ReviewEvent.COMMENT,
+            run_info="test run info\n"
             "- **Reviewed commit:** [`deadbee`](https://github.com/evil/widgets/commit/" + "e" * 40 + ")\n"
-            "*run details unavailable*"
-        ), renderers=BUILTIN_RENDERERS,
+            "*run details unavailable*",
+            renderers=BUILTIN_RENDERERS,
+        )
     )
     body = payload["body"]
     commit_lines = [line for line in body.splitlines() if line.startswith("- **Reviewed commit:**")]
@@ -423,8 +455,12 @@ def test_build_payload_shape(pr: PRInfo) -> None:
         ], inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", confidence="HIGH", severity="high",)],
     )
 
-    payload = build_payload(
-        pr, classified, renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer.render_run_info_block([_FIXTURE])
+    payload = review_submission._review_payload_dict(
+        build_payload_for_event(pr, classified,
+            event=review_models.ReviewEvent.COMMENT,
+            renderers=BUILTIN_RENDERERS,
+            run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+        )
     )
     assert payload["commit_id"] == "head123"
     assert payload["event"] == "COMMENT"
@@ -434,7 +470,7 @@ def test_build_payload_shape(pr: PRInfo) -> None:
     assert "- **Reviewed commit:** [`head123`](https://github.com/acme/widgets/commit/head123)" in body
     assert "**Code Review Summary**" in body
     assert "🧙 Posted by [daydream v" in body
-    assert pr_review.DAYDREAM_REPO_URL in body
+    assert review_identity.DAYDREAM_REPO_URL in body
     assert "**Mode:**" not in body
     assert "**Severity:**" in body and "1 high" in body and "1 low" in body
     assert "**Confidence:**" in body and "1 HIGH" in body and "1 MEDIUM" in body
@@ -465,8 +501,15 @@ def _classified_with_severity(severity: str, confidence: str, *, body_confidence
 
 
 def _approval_payload(pr: PRInfo, classified: pr_review.ClassifiedIssues) -> dict[str, Any]:
-    return build_payload(pr, classified, approve_on_clean=True, renderers=BUILTIN_RENDERERS,
-        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+    return review_submission._review_payload_dict(
+        build_payload_for_event(pr, classified,
+            event=(
+                review_models.ReviewEvent.APPROVE if pr_review._is_clean_review(classified, True)
+                else review_models.ReviewEvent.COMMENT
+            ),
+            renderers=BUILTIN_RENDERERS,
+            run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+        )
     )
 
 def test_build_payload_approves_when_clean_and_enabled(pr: PRInfo) -> None:
@@ -622,7 +665,7 @@ def test_pr_lookup_and_findings_export_accept_unavailable_head_slug(
 def test_head_slug_fallback_does_not_mask_invalid_present_value(value: Any) -> None:
     row = {"headRepository": {"name": "r", "nameWithOwner": value}, "headRepositoryOwner": {"login": "fork"}}
     with pytest.raises(GitError, match="invalid PR row"):
-        pr_review._head_repo_slug_from_row(row)
+        review_lookup._head_repo_slug_from_row(row)
 
 @pytest.mark.parametrize("component", ["name", "login"])
 @pytest.mark.parametrize("value", [None, False, 7, "", " ", "a/b", "a\nb"])
@@ -630,12 +673,12 @@ def test_head_slug_fallback_rejects_invalid_components(component: str, value: An
     row = {"headRepository": {"name": "r", "nameWithOwner": ""}, "headRepositoryOwner": {"login": "fork"}}
     row["headRepository" if component == "name" else "headRepositoryOwner"][component] = value
     with pytest.raises(GitError, match="invalid PR row"):
-        pr_review._head_repo_slug_from_row(row)
+        review_lookup._head_repo_slug_from_row(row)
 
 @pytest.mark.parametrize("slug", ["other/r", "fork/other"])
 def test_head_slug_rejects_contradictory_valid_identity(slug: str) -> None:
     with pytest.raises(GitError, match="contradictory head repository identity") as error:
-        pr_review._head_repo_slug_from_row({
+        review_lookup._head_repo_slug_from_row({
             "headRepository": {"name": "r", "nameWithOwner": slug, "id": "private-value"},
             "headRepositoryOwner": {"login": "fork"},
         })
@@ -643,7 +686,8 @@ def test_head_slug_rejects_contradictory_valid_identity(slug: str) -> None:
     assert slug not in str(error.value)
 
 def test_head_slug_allows_case_differences() -> None:
-    assert pr_review._head_repo_slug_from_row({"headRepository": {"name": "Widgets", "nameWithOwner": "FORK/widgets"},
+    assert review_lookup._head_repo_slug_from_row({
+        "headRepository": {"name": "Widgets", "nameWithOwner": "FORK/widgets"},
         "headRepositoryOwner": {"login": "fork"},
     }) == "FORK/widgets"
 
@@ -661,7 +705,7 @@ def test_pr_info_rejects_malformed_row_fields(monkeypatch: pytest.MonkeyPatch, g
     row[field] = value
     monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
     with pytest.raises(GitError, match="invalid PR row|base branch|exact PR head"):
-        pr_review._pr_info_from_row(git_repo, row)
+        review_lookup._pr_info_from_row(git_repo, row)
 
 @pytest.mark.parametrize("missing_field", ["headRepository", "headRepositoryOwner"])
 def test_pr_info_rejects_missing_requested_head_metadata(
@@ -671,7 +715,7 @@ def test_pr_info_rejects_missing_requested_head_metadata(
     del row[missing_field]
     monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
     with pytest.raises(GitError, match="invalid PR row"):
-        pr_review._pr_info_from_row(git_repo, row)
+        review_lookup._pr_info_from_row(git_repo, row)
 
 def test_pr_info_rejects_malformed_owner_even_with_null_head_repository(monkeypatch: pytest.MonkeyPatch, git_repo: Path,
 ) -> None:
@@ -680,7 +724,7 @@ def test_pr_info_rejects_malformed_owner_even_with_null_head_repository(monkeypa
     row["headRepositoryOwner"] = {"login": 7}
     monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
     with pytest.raises(GitError, match="invalid PR row"):
-        pr_review._pr_info_from_row(git_repo, row)
+        review_lookup._pr_info_from_row(git_repo, row)
 
 @pytest.mark.parametrize("head_owner", [None, {"login": "former-owner"}])
 def test_pr_info_accepts_null_same_repo_head_metadata(monkeypatch: pytest.MonkeyPatch, git_repo: Path, head_owner: Any,
@@ -690,7 +734,7 @@ def test_pr_info_accepts_null_same_repo_head_metadata(monkeypatch: pytest.Monkey
     row["headRepositoryOwner"] = head_owner
     monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
 
-    assert pr_review._pr_info_from_row(git_repo, row).head_repo is None
+    assert review_lookup._pr_info_from_row(git_repo, row).head_repo is None
 
 def test_find_open_pr_propagates_current_branch_failure(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
     def fail_branch(_repo: Path) -> str | None:
@@ -725,12 +769,12 @@ def test_pr_base_remote_matching_is_credential_safe(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("acme", "widgets"),)
 
     with pytest.raises(GitError) as excinfo:
-        pr_review._pr_info_from_row(git_repo, row)
+        review_lookup._pr_info_from_row(git_repo, row)
     assert "top-secret" not in str(excinfo.value)
     assert "token=private" not in str(excinfo.value)
 
     _git(git_repo, "remote", "set-url", "origin", "https://user:fork-secret@github.com/forky/widgets.git?token=fork",)
-    assert pr_review._pr_info_from_row(git_repo, row).base_sha == base
+    assert review_lookup._pr_info_from_row(git_repo, row).base_sha == base
 
 
 class _FakeConsole:
@@ -827,7 +871,7 @@ async def test_post_warns_with_preserved_payload_path_on_failure(
     )
     err = "GitHub review submission failed (request payload preserved at /tmp/x.json)"
     monkeypatch.setattr(pr_review, "post_classified_review",
-        lambda _plan, *, transport: pr_review.ClassifiedReviewResult(
+        lambda _plan, *, transport: review_models.ClassifiedReviewResult(
             status=pr_review.SubmissionStatus.FAILED, review_url=None, posted_file_level=(), folded_file_level=(),
             final_review_posted=False, safe_error=err,
         ),
@@ -859,7 +903,7 @@ def test_github_transport_surfaces_only_structured_preserved_payload_path(
     monkeypatch.setattr(git_ops, "gh_api", fail_gh)
 
     result = pr_review.GitHubReviewTransport(target_dir=tmp_path, auth=git_ops.INHERIT_GITHUB_AUTH,).post_review(pr,
-        pr_review.ReviewPayload(
+        review_models.ReviewPayload(
             event=pr_review.ReviewEvent.COMMENT, commit_id=pr.head_sha, body="review body", comments=(),
         ),
     )
@@ -876,11 +920,11 @@ async def test_post_skipped_when_user_declines(monkeypatch: pytest.MonkeyPatch, 
     )
     submit_called = False
 
-    def fake_submit(_plan: pr_review.ClassifiedReviewPlan, *, transport: pr_review.ReviewTransport
-    ) -> pr_review.ClassifiedReviewResult:
+    def fake_submit(_plan: pr_review.ClassifiedReviewPlan, *, transport: review_submission.ReviewTransport
+    ) -> review_models.ClassifiedReviewResult:
         nonlocal submit_called
         submit_called = True
-        return pr_review.ClassifiedReviewResult(
+        return review_models.ClassifiedReviewResult(
             status=pr_review.SubmissionStatus.POSTED, review_url="x", posted_file_level=(), folded_file_level=(),
             final_review_posted=True, safe_error=None,
         )
@@ -1206,9 +1250,16 @@ def test_demoted_low_finding_does_not_block_approval(pr: PRInfo) -> None:
                 )
             ],
         )
-        payload = build_payload(pr, classified, approve_on_clean=True, renderers=BUILTIN_RENDERERS,
+        payload = review_submission._review_payload_dict(
+        build_payload_for_event(pr, classified,
+            event=(
+                review_models.ReviewEvent.APPROVE if pr_review._is_clean_review(classified, True)
+                else review_models.ReviewEvent.COMMENT
+            ),
+            renderers=BUILTIN_RENDERERS,
             run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
         )
+    )
         assert payload["event"] == "APPROVE"
 
 def test_demoted_low_finding_approval_gate_does_not_block() -> None:
@@ -1279,8 +1330,8 @@ def test_diagram_marker_round_trip() -> None:
     )
     assert parse_diagram_markers(body) == [("sequence", "a" * 40), ("flowchart", "a" * 40)]
     # A finding marker is a different namespace and must not cross-parse.
-    assert parse_diagram_markers(pr_review.finding_marker("f" * 64)) == []
-    assert pr_review.parse_finding_markers(diagram_marker("sequence", "a" * 40)) == []
+    assert parse_diagram_markers(review_identity.finding_marker("f" * 64)) == []
+    assert review_identity.parse_finding_markers(diagram_marker("sequence", "a" * 40)) == []
 
 
 def _record_minimize(calls: list[tuple[str, str | None]]) -> Any:
@@ -1307,7 +1358,7 @@ def test_diagram_replacement_post_failure_keeps_prior_comment(
 
     monkeypatch.setattr(git_ops, "gh_api", fail_post)
 
-    result = pr_review.post_diagram_comment_to_pr(
+    result = review_diagrams.post_diagram_comment_to_pr(
         tmp_path, pr, body="diagram", kinds=["sequence"], bot_login="daydream",
     )
 
@@ -1333,7 +1384,7 @@ def test_diagram_replacement_posts_before_minimizing_matching_prior_comment(
 
     monkeypatch.setattr(git_ops, "gh_api", post)
 
-    result = pr_review.post_diagram_comment_to_pr(
+    result = review_diagrams.post_diagram_comment_to_pr(
         tmp_path, pr, body="diagram", kinds=["sequence"], bot_login="daydream",
     )
 
@@ -1346,15 +1397,24 @@ def test_build_payload_places_diagram_blocks_under_the_header(pr: PRInfo) -> Non
     )
     blocks = "<details><summary><h3>Sequence Diagram</h3></summary>\nX\n</details>"
 
-    payload = pr_review.build_payload(pr, classified, diagram_blocks=blocks, renderers=BUILTIN_RENDERERS,
-        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+    payload = review_submission._review_payload_dict(
+        build_payload_for_event(pr, classified,
+            event=review_models.ReviewEvent.COMMENT,
+            diagram_blocks=blocks,
+            renderers=BUILTIN_RENDERERS,
+            run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+        )
     )
     body = payload["body"]
     header = "**Code Review Summary**"
     assert body[body.index(header) + len(header) :].lstrip().startswith(blocks)
     # Absent (the default) is byte-identical to the pre-#1113 body.
-    assert pr_review.build_payload(
-        pr, classified, renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer.render_run_info_block([_FIXTURE])
+    assert review_submission._review_payload_dict(
+        build_payload_for_event(pr, classified,
+            event=review_models.ReviewEvent.COMMENT,
+            renderers=BUILTIN_RENDERERS,
+            run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+        )
     )["body"] == body.replace(f"{header}\n\n{blocks}", header)
 
 def test_custom_summary_renderer_receives_and_may_drop_diagrams(pr: PRInfo) -> None:
@@ -1376,9 +1436,14 @@ def test_custom_summary_renderer_receives_and_may_drop_diagrams(pr: PRInfo) -> N
         reg = Registry()
         register_builtins(reg)
         reg.override_renderer("summary", renderer)
-        body = pr_review.build_payload(pr, classified, diagram_blocks=blocks, renderers=resolve_review_renderers(reg),
+        body = review_submission._review_payload_dict(
+        build_payload_for_event(pr, classified,
+            event=review_models.ReviewEvent.COMMENT,
+            diagram_blocks=blocks,
+            renderers=resolve_review_renderers(reg),
             run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
-        )["body"]
+        )
+    )["body"]
         assert (blocks in body) is expect_present
     assert seen == [blocks, blocks]
 
@@ -1390,8 +1455,16 @@ def test_explicit_run_info_payload_is_byte_stable(pr: PRInfo) -> None:
             )
         ]
     )
-    payload = build_payload(pr, classified, run_info="Fixture run info", approve_on_clean=True,
-        diagram_blocks="<details>Fixture diagram</details>", renderers=BUILTIN_RENDERERS,
+    payload = review_submission._review_payload_dict(
+        build_payload_for_event(pr, classified,
+            event=(
+                review_models.ReviewEvent.APPROVE if pr_review._is_clean_review(classified, True)
+                else review_models.ReviewEvent.COMMENT
+            ),
+            run_info="Fixture run info",
+            diagram_blocks="<details>Fixture diagram</details>",
+            renderers=BUILTIN_RENDERERS,
+        )
     )
     payload["body"] = payload["body"].replace(DAYDREAM_FOOTER, "<DAYDREAM_FOOTER>")
     assert payload == json.loads((SNAP / "explicit_payload.json").read_text())
@@ -1422,8 +1495,20 @@ def test_payload_uses_only_explicit_renderers_and_run_info(pr: PRInfo, monkeypat
     monkeypatch.setattr(Path, "read_bytes", forbidden)
     monkeypatch.setattr("tempfile.TemporaryDirectory", forbidden)
     monkeypatch.setattr("daydream.trajectory.get_current_recorder", forbidden)
-    first = build_payload(pr, classified, run_info=run_info, renderers=renderers)
-    second = build_payload(pr, classified, run_info=run_info, renderers=renderers)
+    first = review_submission._review_payload_dict(
+        build_payload_for_event(pr, classified,
+            event=review_models.ReviewEvent.COMMENT,
+            run_info=run_info,
+            renderers=renderers,
+        )
+    )
+    second = review_submission._review_payload_dict(
+        build_payload_for_event(pr, classified,
+            event=review_models.ReviewEvent.COMMENT,
+            run_info=run_info,
+            renderers=renderers,
+        )
+    )
     assert first == second
     assert seen[0] == seen[1]
     assert seen[0].findings[0].finding.title == "Explicit finding"
@@ -1457,7 +1542,7 @@ def test_base_tip_api_read_rejects_advanced_pr(
         calls.append(endpoint)
         return {"head": {"sha": "d" * 40 if advanced else pr.head_sha}, "base": {"sha": tip}}
     monkeypatch.setattr(git_ops, "gh_api", api)
-    assert pr_review.capture_pr_base_tip(Path("."), pr) == (None if advanced else tip)
+    assert review_lookup.capture_pr_base_tip(Path("."), pr) == (None if advanced else tip)
     assert calls == [f"repos/{pr.owner}/{pr.repo}/pulls/{pr.number}"]
 
 

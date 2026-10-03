@@ -17,7 +17,7 @@ from daydream.training.adjudication.final_bundle import (
     final_snapshot_id,
 )
 from daydream.training.adjudication.materialize import run_materialize
-from daydream.training.adjudication.publish import publish_final_annotation_bundle
+from daydream.training.adjudication.publish import FinalAnnotationBundle, publish_final_annotation_bundle
 from daydream.training.corpus_projection.bundle import load_curated_bundle
 from daydream.training.corpus_projection.projector import _verify_annotation_bundle
 from daydream.training.labeler_versions import ANNOTATION_SNAPSHOT_SCHEMA_VERSION
@@ -103,6 +103,34 @@ def test_build_final_bundle_constructs_complete_staging_dir(tmp_path: Path) -> N
     counts = summary["disposition_counts"]
     assert set(counts) == {"accepted", "rejected", "ambiguous", "unanswered", "missing"}
 
+
+def test_final_bundle_copies_both_consumer_views_from_one_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
+    run_canonical_harvest(index_root, mat, archive_dir)
+    annotation_path = mat / "annotations.jsonl"
+    original = annotation_path.read_bytes()
+    replaced = False
+    read_bytes = Path.read_bytes
+
+    def read_and_replace(path: Path) -> bytes:
+        nonlocal replaced
+        data = read_bytes(path)
+        if path == annotation_path and not replaced:
+            path.write_bytes(original + b"\n")
+            replaced = True
+        return data
+
+    out = tmp_path / "final-bundle"
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_bytes", read_and_replace)
+        build_final_bundle(index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out)
+
+    assert replaced
+    assert (out / "annotations.jsonl").read_bytes() == original
+    assert (out / "sessions.jsonl").read_bytes() == original
+
 def test_build_final_bundle_gate_fails_without_human_adjudication(tmp_path: Path) -> None:
     """Automatic decisive labels must not count as human coverage toward the 80% gate."""
     _index_root, _mat, _archive_dir, out = _built_final_bundle(tmp_path)
@@ -146,7 +174,7 @@ def test_legacy_publish_stage_must_be_a_real_directory(kind: str, tmp_path: Path
 
     hub = AnnotationsHub(repo_id="org/private-annotations")
     with pytest.raises(ValueError, match="exactly the seven semantic files"):
-        publish_final_annotation_bundle(hub, out)
+        publish_final_annotation_bundle(hub, FinalAnnotationBundle.read(out), staging_parent=(out).parent.resolve())
     assert hub.commit_order == []
 
 def test_build_final_bundle_unpinned_as_of_emits_empty_not_none(tmp_path: Path) -> None:

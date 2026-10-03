@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from daydream import git_ops
 from daydream.bot_identity import bot_login_matches
 from daydream.git_ops import INHERIT_GITHUB_AUTH, GitError, GitHubAuth
-from daydream.pr_review import parse_diagram_markers, parse_finding_markers
+from daydream.reviews.identity import parse_diagram_markers, parse_finding_markers
 from daydream.ui import print_warning
 
 if TYPE_CHECKING:
