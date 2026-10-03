@@ -948,6 +948,51 @@ async def test_phase_test_and_heal_records_interrupted_repair_instead_of_discard
     assert backend.call_count == 2
 
 @pytest.mark.asyncio
+async def test_phase_test_and_heal_uses_repair_backend_for_the_repair_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
+    _quiet_phase_ui: None,
+) -> None:
+    """Requirement 7: repair runs on the FIX backend; tests stay on TEST."""
+
+    # One repair offer; every later offer aborts so the loop terminates.
+    choices = iter(["2"])
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "4"))
+    test_backend = ScriptedBackend(model="test-model", script=[_FAIL_TURN, _PASS_TURN])
+    fix_backend = ScriptedBackend(model="fix-model", script=[_FIX_TURN])
+
+    result = await phases.phase_test_and_heal(
+        test_backend, make_work(tmp_path), session_id="s1",
+        capture_tree_key=lambda: "tree-1", footprint=_footprint(tmp_path),
+        repair_backend=fix_backend, allow_standalone=True,
+    )
+
+    assert test_backend.call_count > 0, "the test turn must still run on TEST"
+    assert fix_backend.call_count > 0, "the repair turn must run on FIX"
+    assert not any(p.lower().startswith("the tests failed") for p in test_backend.prompts)
+    assert any(p.lower().startswith("the tests failed") for p in fix_backend.prompts)
+    # Requirement 8: the record names the instance that actually served the repair.
+    assert [r.model for r in result.repairs] == ["fix-model"]
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_reuses_the_test_backend_when_no_repair_backend_is_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
+    _quiet_phase_ui: None,
+) -> None:
+    """The defaulted parameter preserves the single-instance behaviour every other caller relies on."""
+    choices = iter(["2"])
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "4"))
+    backend = ScriptedBackend(model="test-model", script=[_FAIL_TURN, _FIX_TURN, _PASS_TURN])
+
+    result = await phases.phase_test_and_heal(
+        backend, make_work(tmp_path), session_id="s1",
+        capture_tree_key=lambda: "tree-1", footprint=_footprint(tmp_path), allow_standalone=True,
+    )
+
+    assert backend.call_count == 3
+    assert backend.prompts[1].lower().startswith("the tests failed")
+    assert [r.model for r in result.repairs] == ["test-model"]
+
+@pytest.mark.asyncio
 async def test_phase_test_and_heal_aborts_when_generated_restore_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
     _quiet_phase_ui: None,

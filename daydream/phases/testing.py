@@ -347,19 +347,32 @@ async def phase_test_and_heal(
     session_id: str | None = None,
     capture_tree_key: Callable[[], str] | None = None,
     footprint: AuthorizedFixFootprint | None = None,
+    repair_backend: Backend | None = None,
     artifact_session: ArtifactSession | None = None,
     allow_standalone: bool = False,
     recipe: TestRecipe | None = None,
     run_context: RunContext | None = None,
 ) -> TestAndHealResult:
-    """Run bound test attempts and offer a bounded authorized heal after failure."""
+    """Run bound test attempts and offer a bounded authorized heal after failure.
+
+    Two backends serve this phase, because a repair turn is a fix turn: test
+    execution and summarization run on ``backend`` (the TEST configuration) while
+    the heal turn runs on ``repair_backend`` (the FIX configuration). ``None``
+    reuses ``backend`` for both, which is the single-instance behaviour every
+    caller that predates the split relies on.
+    """
     run_context = resolve_run_context(run_context)
     if session_id is None or capture_tree_key is None or footprint is None:
         raise TypeError(
             "phase_test_and_heal requires session_id, capture_tree_key, and footprint"
         )
     ui.print_phase_hero(agent.console, "AWAKEN", ui.phase_subtitle("AWAKEN"))
+    # A repair turn is a fix turn, so it runs on the FIX-configured instance; the
+    # repair record names whichever instance actually served it.
+    repair_instance = repair_backend if repair_backend is not None else backend
     ui.print_dim(agent.console, f"Model: {backend.model}")
+    if repair_instance is not backend:
+        ui.print_dim(agent.console, f"Repair model: {repair_instance.model}")
 
     retries_used = 0
     attempts: list[TestAttemptEvidence] = []
@@ -390,7 +403,7 @@ async def phase_test_and_heal(
             snapshot_captured = False
         fix_prompt = get_registry().prompt("fix")(
             output, feedback_items, repo=work.repo,
-            concise_mode=_backend_concise_fix_prompts(backend),
+            concise_mode=_backend_concise_fix_prompts(repair_instance),
         )
         fix_prompt = append_extended_facts(fix_prompt, recipe)
         fix_prompt += _build_fix_scope_clause(
@@ -399,7 +412,7 @@ async def phase_test_and_heal(
         input_tree_key = capture_tree_key()
         started = time.monotonic()
         partial_output, continuation_token, abort_reason = await agent.run_agent(
-            backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX,
+            repair_instance, work.repo, fix_prompt, phase=DaydreamPhase.FIX,
             tool_call_budget=phase_config.DEFAULT_TOOL_CALL_BUDGET,
             wall_budget_s=phase_config.DEFAULT_WALL_BUDGET_S,
             run_context=run_context,
@@ -426,8 +439,8 @@ async def phase_test_and_heal(
             run_id=work.run_id,
             outcome=classify_repair_outcome(abort_reason, turn_output),
             abort_reason=abort_reason,
-            backend_name=type(backend).__name__.removesuffix("Backend").lower(),
-            model=backend.model,
+            backend_name=type(repair_instance).__name__.removesuffix("Backend").lower(),
+            model=repair_instance.model,
             execution_elapsed_s=time.monotonic() - started,
             job_elapsed_s=time.monotonic() - job_started,
             input_tree_key=input_tree_key,

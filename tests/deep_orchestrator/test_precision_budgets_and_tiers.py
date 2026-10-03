@@ -17,6 +17,7 @@ from daydream.backends import AgentEvent, ResultEvent, TextEvent
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.orchestrator import DEFAULT_SHALLOW_FANOUT_THRESHOLD, _shallow_fanout_threshold
 from daydream.deep.settings import _resolve_opt_in
+from daydream.phases import TestAndHealResult, phase_test_and_heal as _phase_test_and_heal
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
@@ -32,6 +33,7 @@ from tests.deep_orchestrator.support import (
 from tests.harness.git_helpers import git as _git
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.review_profile import independent_alternatives_profile
+from tests.harness.stub_backend import StubBackend as _StubBackend
 from tests.test_deep_orchestrator import (
     _CONFIDENCE_KNOB_STACKS,
     _PRECISION_STACKS,
@@ -454,6 +456,58 @@ async def test_environmental_failure_aborts_heal_loop(
     run_root = multi_stack_target / ".daydream"
     saw_test_step = "test" in _scan_trajectory_extra(run_root, traj, "daydream_phase")
     assert saw_test_step, "no TEST-phase trajectory step recorded -- heal phase not reached"
+
+async def test_repair_turn_uses_a_distinctly_configured_fix_backend(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Requirement 8: a distinct TEST/FIX configuration is provable from the run's own records."""
+    _silence(monkeypatch, prompts=False)
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
+    calls: list[dict[str, Any]] = []
+
+    def factory(_name: str, model: str | None = None, **_kw: object) -> _StubBackend:
+        instance = _StubBackend(multi_stack_target, model=model or "mock-model", shared_calls=calls)
+        # Only the TEST phase's instance fails its first run, so exactly one
+        # repair turn is driven and it must be served by the FIX instance.
+        instance.fail_first_test_run = instance.model == "test-model"
+        return instance
+
+    monkeypatch.setattr("daydream.runner.create_backend", factory)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
+    # The heal phase stays REAL so the repair record is produced by production code.
+    mute_side_effects(heal=False)
+
+    # The persisted repair-job record lands with the durable job record; until then
+    # the same typed evidence is read off the phase's own in-memory result.
+    results: list[TestAndHealResult] = []
+    real_phase = _phase_test_and_heal
+
+    async def _spy(*args: Any, **kwargs: Any) -> TestAndHealResult:
+        result = await real_phase(*args, **kwargs)
+        results.append(result)
+        return result
+
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_test_and_heal", _spy)
+
+    traj = tmp_path / "trajectory.json"
+    with anyio.fail_after(60):
+        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes",
+                output_mode="loop", test_model="test-model", fix_model="fix-model",
+        ))
+    assert exit_code == 0
+
+    # Test execution ran on the TEST configuration...
+    suite_models = {c["model"] for c in calls if "run the project's test suite" in c["prompt"].lower()}
+    assert suite_models == {"test-model"}, calls
+    # ...and the repair turn on the distinct FIX configuration.
+    repair_models = [c["model"] for c in calls if c["prompt"].lower().startswith("the tests failed")]
+    assert repair_models == ["fix-model"], repair_models
+    # The record agrees with the served instance, so the routing is readable
+    # after the fact rather than inferred from configuration.
+    heal_results = [r for r in results if r.repairs]
+    assert heal_results, "the heal loop recorded no repair at all"
+    assert [r.model for r in heal_results[0].repairs] == ["fix-model"]
 
 @pytest.mark.parametrize(("trajectory_mode", "response_kind"),
     [pytest.param("default", "clean", id="default-clean"),

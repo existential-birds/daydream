@@ -911,14 +911,21 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
     state = DeepState(ctx.data).fix_cycle_state
     async with phase_scope(DaydreamPhase.TEST):
         try:
+            # Two resolutions, deliberately: test execution and summarization run on
+            # the TEST backend, while the heal turn is a fix turn and runs on the FIX
+            # backend, so repair gets the fix configuration (and the repair record
+            # names the instance that actually served it).
+            test_backend = ctx.backend_for("test")
+            repair_backend = ctx.backend_for("fix")
             result = await phase_test_and_heal(
-                ctx.backend_for("test"),
+                test_backend,
                 ctx.work,
                 feedback_items=deep_state.items,
                 config=ctx.config,
                 session_id=state.session_id,
                 capture_tree_key=lambda: fix_state._capture_full_delta_key(ctx.work, state),
                 footprint=state.footprint,
+                repair_backend=repair_backend,
                 run_context=ctx.run_context,
                 artifact_session=ctx.artifacts,
                 allow_standalone=ctx.allow_standalone_artifacts,
