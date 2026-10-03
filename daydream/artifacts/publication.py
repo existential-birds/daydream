@@ -13,9 +13,9 @@ from pathlib import Path
 from daydream.artifacts import external, filesystem, transfer
 from daydream.artifacts.models import (
     _DAYDREAM,
-    _LEGACY_ANCHORS,
-    _LEGACY_DIRECTORY_ANCHORS,
     _OPERATIONAL_NAMES,
+    _PUBLIC_ANCHORS,
+    _PUBLIC_DIRECTORY_ANCHORS,
     _REVIEW_OUTPUT,
     _SCHEMA_VERSION,
     ArtifactManifestEntry,
@@ -42,11 +42,12 @@ def _validated_canonical_entries(
     return entries
 
 
-def _validate_legacy_public(
+def _validate_public_tree(
     source: Path,
     *,
     canonical_entries: tuple[ArtifactManifestEntry, ...] | None,
 ) -> tuple[ArtifactManifestEntry, ...]:
+    """Admit current public artifact roots, rejecting operational namespaces and unsafe entries."""
     daydream = source / _DAYDREAM
     if daydream.exists() or daydream.is_symlink():
         try:
@@ -56,38 +57,21 @@ def _validate_legacy_public(
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
             raise ArtifactVisibilityError("artifact roots accept only regular files and directories")
         children = {child.name for child in daydream.iterdir()}
-        anchor_children = set(children)
-        for name in sorted(children & _OPERATIONAL_NAMES):
-            # An emptied operational root is inert residue (the workspace
-            # retirement pass removes it); refusing it here would wedge every
-            # future run on the repository. Only a root that still holds
-            # entries blocks the detach — and residue roots are also excluded
-            # from the anchor check below so an emptied namespace cannot
-            # resurface as "no recognized artifact anchor".
-            operational = daydream / name
-            try:
-                operational_metadata = operational.lstat()
-                if not stat.S_ISLNK(operational_metadata.st_mode) and stat.S_ISDIR(operational_metadata.st_mode):
-                    occupied = any(True for _ in operational.iterdir())
-                else:
-                    occupied = True
-            except OSError as exc:
-                raise ArtifactVisibilityError("artifact root could not be inspected") from exc
-            if occupied:
-                raise ArtifactVisibilityError("legacy operational workspace blocks artifact detach")
-            anchor_children.discard(name)
-        for name in sorted(anchor_children & _LEGACY_ANCHORS):
+        if children & _OPERATIONAL_NAMES:
+            raise ArtifactVisibilityError("unsupported operational workspace blocks artifact detach")
+        anchor_children = children
+        for name in sorted(anchor_children & _PUBLIC_ANCHORS):
             anchor = daydream / name
             try:
                 anchor_metadata = anchor.lstat()
             except OSError as exc:
-                raise ArtifactVisibilityError("legacy artifact anchor could not be inspected") from exc
-            expected_directory = name in _LEGACY_DIRECTORY_ANCHORS
+                raise ArtifactVisibilityError("public artifact anchor could not be inspected") from exc
+            expected_directory = name in _PUBLIC_DIRECTORY_ANCHORS
             if stat.S_ISLNK(anchor_metadata.st_mode) or (
                 expected_directory != stat.S_ISDIR(anchor_metadata.st_mode)
                 or not (stat.S_ISDIR(anchor_metadata.st_mode) or stat.S_ISREG(anchor_metadata.st_mode))
             ):
-                raise ArtifactVisibilityError("legacy artifact anchor has the wrong filesystem type")
+                raise ArtifactVisibilityError("public artifact anchor has the wrong filesystem type")
     review = source / _REVIEW_OUTPUT
     if review.exists() or review.is_symlink():
         metadata = review.lstat()
@@ -106,18 +90,14 @@ def _validate_legacy_public(
         for entry in public_entries
         if entry.path.startswith(daydream_prefix) and "/" not in entry.path.removeprefix(daydream_prefix)
     }
-    for name in sorted(manifested_children.keys() & _OPERATIONAL_NAMES):
-        relative = f"{_DAYDREAM}/{name}"
-        if manifested_children[name].kind != "directory" or any(
-            entry.path.startswith(f"{relative}/") for entry in public_entries
-        ):
-            raise ArtifactVisibilityError("legacy operational workspace blocks artifact detach")
-    anchor_children = manifested_children.keys() - _OPERATIONAL_NAMES
-    for name in sorted(anchor_children & _LEGACY_ANCHORS):
-        expected_kind = "directory" if name in _LEGACY_DIRECTORY_ANCHORS else "file"
+    if manifested_children.keys() & _OPERATIONAL_NAMES:
+        raise ArtifactVisibilityError("unsupported operational workspace blocks artifact detach")
+    anchor_children = set(manifested_children)
+    for name in sorted(anchor_children & _PUBLIC_ANCHORS):
+        expected_kind = "directory" if name in _PUBLIC_DIRECTORY_ANCHORS else "file"
         if manifested_children[name].kind != expected_kind:
-            raise ArtifactVisibilityError("legacy artifact anchor has the wrong filesystem type")
-    nonstatic_children = anchor_children - _LEGACY_ANCHORS
+            raise ArtifactVisibilityError("public artifact anchor has the wrong filesystem type")
+    nonstatic_children = anchor_children - _PUBLIC_ANCHORS
     for name in sorted(nonstatic_children):
         relative = f"{_DAYDREAM}/{name}"
         prefix = f"{relative}/"
@@ -126,7 +106,7 @@ def _validate_legacy_public(
             entry for entry in canonical_entries or () if entry.path == relative or entry.path.startswith(prefix)
         )
         if not expected or actual != expected:
-            raise ArtifactVisibilityError("legacy .daydream tree contains an unregistered artifact anchor")
+            raise ArtifactVisibilityError("public .daydream tree contains an unregistered artifact anchor")
     return public_entries
 
 

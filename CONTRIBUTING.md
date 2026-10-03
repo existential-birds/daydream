@@ -113,6 +113,8 @@ being rejected.
 
 ## Testing policy
 
+For the [terminal findings contract](README.md#terminal-review-findings-contract), exercise the production runner with real Git/public outputs, stub provider/GitHub seams, and inject filesystem faults at actual read/write/install operations.
+
 Every user-visible behavior must have at least one **real-path test**: a test
 that enters from the production entrypoint (`runner.run` / the CLI) with real
 dependencies — a real temp git worktree, a real filesystem, a real event loop —

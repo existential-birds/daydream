@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
-import json
 import os
 import secrets
 import shutil
@@ -679,21 +678,12 @@ class ArtifactSession:
 
     def freeze(self, run_snapshot: RunWriteSnapshot) -> ArtifactTreeSnapshot:
         self._require_active()
-        if (
-            run_snapshot.status not in ("complete", "partial")
-            or not isinstance(run_snapshot.cutoff_at, str)
-            or not run_snapshot.cutoff_at
-        ):
-            raise ArtifactVisibilityError("run snapshot metadata is malformed")
-        if run_snapshot.root_trajectory_id != self.layout.session_id:
-            raise ArtifactVisibilityError("run snapshot root does not match artifact session")
-        seen_ids: set[str] = set()
+        try:
+            run_snapshot.validate(self.layout.session_id)
+        except (ValueError, UnicodeError) as exc:
+            raise ArtifactVisibilityError(f"run snapshot {exc}") from exc
         seen_paths: set[Path] = set()
-        root_seen = False
         for document in run_snapshot.documents:
-            if document.trajectory_id in seen_ids:
-                raise ArtifactVisibilityError("run snapshot contains duplicate document identity")
-            seen_ids.add(document.trajectory_id)
             path = document.path
             route = self._trajectory_route
             if route is not None and document.trajectory_id == self.layout.session_id:
@@ -723,23 +713,7 @@ class ArtifactSession:
                     metadata = cursor.lstat()
                     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
                         raise ArtifactVisibilityError("run snapshot path has unsafe ancestry")
-            if type(document.json_bytes) is not bytes:
-                raise ArtifactVisibilityError("run snapshot document bytes are malformed")
-            try:
-                payload = json.loads(document.json_bytes)
-            except (UnicodeError, json.JSONDecodeError) as exc:
-                raise ArtifactVisibilityError("run snapshot document JSON is malformed") from exc
-            if not isinstance(payload, dict):
-                raise ArtifactVisibilityError("run snapshot document JSON is malformed")
-            if (
-                payload.get("trajectory_id") != document.trajectory_id
-                or payload.get("session_id") != self.layout.session_id
-            ):
-                raise ArtifactVisibilityError("run snapshot document identity is malformed")
-            root_seen = root_seen or document.trajectory_id == self.layout.session_id
             filesystem._atomic_bytes(self.layout.live_root / relative, document.json_bytes)
-        if not root_seen:
-            raise ArtifactVisibilityError("run snapshot is missing its root document")
         entries = filesystem.manifest_tree(self.layout.live_root)
         frozen_root = self.layout.live_root.parent / "frozen"
         if frozen_root.exists() or frozen_root.is_symlink():
@@ -883,6 +857,7 @@ class ArtifactSession:
             ledger._write_destination_records(
                 transaction, publish_records, include_published=True, include_baseline=True
             )
+            external._inherit_external_capability_proofs(self._detach_transaction, transaction)
             mark(state=_Transition.PUBLISH_STAGED)
         except BaseException:
             if publication_stage is not None:
@@ -1153,7 +1128,7 @@ def _open_layout(work: WorkContext, session_id: str, owner: PrivateWorkspaceOwne
         try:
             transactions._recover_transactions(state_root, source)
             validated_canonical_entries = publication._validated_canonical_entries(state_root)
-            validated_public_entries = publication._validate_legacy_public(
+            validated_public_entries = publication._validate_public_tree(
                 source,
                 canonical_entries=validated_canonical_entries,
             )

@@ -120,7 +120,7 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
     deep = repo / ".daydream" / "deep"
     item = {
         "id": 1, "file": "api.py", "line": 1, "severity": "high", "description": "keep sibling fix and regression test",
-        "evidence": "api.py:1", "recommendation": "repair both values", "lens": "python",
+        "evidence": "api.py:1", "rationale": "repair both values", "confidence": "HIGH", "lens": "per-stack",
         "related_files": ["sibling.py", "tests/test_a.py"],
     }
     counter = tmp_path / "host-test-count"
@@ -186,13 +186,15 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
                 yield event
 
     backend = FootprintBackend(repo)
-    backend.parse_by_stack = {"python": {"severity": "high", "confidence": "HIGH", "issue": item}}
+    backend.parse_by_stack = {"python": {"severity": "high", "confidence": "HIGH"}}
+    backend.merge_items = [item]
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_a, **_k: backend)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *_a, **_k: "2")
     _silence(monkeypatch, prompts=False)
 
-    rc = await run(make_config(repo, assume="yes", archive=True, test_command=f"python tests/test_a.py {counter}",))
+    rc = await run(make_config(repo, assume="yes", archive=True, test_command=f"python tests/test_a.py {counter}",
+                              shallow_fanout_threshold=0))
     # The local bare remote deliberately has no GitHub identity. The retained
     # tree still stabilizes, commits, and pushes, but the new remote-CI phase
     # must fail closed with an explicit handoff rather than claim completion.

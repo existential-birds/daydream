@@ -10,17 +10,21 @@ import pytest
 
 from daydream.backends import ResultEvent, TextEvent
 from daydream.config import REVIEW_OUTPUT_FILE
-from daydream.deep.artifacts import deep_dir, merged_items_path, merged_report_path
+from daydream.deep.artifacts import (
+    DeepArtifact,
+    deep_dir,
+)
 from daydream.deep.prompts import build_merge_prompt
 from daydream.extensions import get_registry
 from daydream.phases import phase_cross_stack_merge
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.review_profile import default_strategy as _default_strategy
+from tests.harness.review_result import merge_result
 
 
 @pytest.mark.parametrize("payload", [[], {"issues": []}])
-async def test_empty_completed_merge_publishes_host_result_without_provider(
+async def test_empty_merge_host_noop_requires_current_record_envelope(
     tmp_path: Path, make_work: Callable[..., WorkContext], payload: object,
 ) -> None:
     dd = deep_dir(tmp_path, allow_standalone=True)
@@ -28,16 +32,16 @@ async def test_empty_completed_merge_publishes_host_result_without_provider(
     records.write_text(json.dumps(payload))
     alternatives = dd / "alternatives.json"
     alternatives.write_text("[]")
-    backend = ScriptedBackend(events=[AssertionError("empty merge must not dispatch")])
+    backend = ScriptedBackend(events=[ResultEvent(structured_output={"items": []}, continuation=None)])
 
     report = await phase_cross_stack_merge(
         backend, make_work(tmp_path), per_stack_records_paths=[records], intent_path=dd / "intent.md",
         alternatives_path=alternatives, dedup_candidates_path=dd / "dedup-candidates.json", allow_standalone=True,
     )
 
-    assert backend.call_count == 0
-    assert json.loads(merged_items_path(dd).read_text()) == {"items": []}
-    assert report.read_text() == merged_report_path(dd).read_text()
+    assert backend.call_count == int(isinstance(payload, list))
+    assert json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text()) == {"items": []}
+    assert report.read_text() == DeepArtifact.MERGED_REPORT.at(dd).read_text()
 
 
 @pytest.mark.parametrize("input_kind", [
@@ -50,7 +54,7 @@ async def test_empty_merge_requires_completed_inputs_and_builtin_contract(
 ) -> None:
     dd = deep_dir(tmp_path, allow_standalone=True)
     records = dd / "stack-python-records.json"
-    records.write_text("[]")
+    records.write_text('{"issues": []}')
     alternatives = dd / "alternatives.json"
     alternatives.write_text("[]")
     strategy: str | None = None
@@ -88,16 +92,17 @@ async def test_empty_merge_keeps_structural_findings_and_clears_stale_outputs(
 ) -> None:
     dd = deep_dir(tmp_path, allow_standalone=True)
     records = dd / "stack-python-records.json"
-    records.write_text("[]")
+    records.write_text('{"issues": []}')
     alternatives = dd / "alternatives.json"
     alternatives.write_text("[]")
     structural = dd / "stack-structure-records.json"
     structural.write_text(json.dumps({"issues": [{
         "id": 42, "uid": "structure:42", "item_uid": "stable-structural-item", "file": "design.py", "line": 0,
         "description": "concrete structural finding", "evidence": "Documented dependency contradicts contract",
+        "rationale": "The dependency must honor the documented boundary",
         "severity": "medium", "confidence": "MEDIUM",
     }]}))
-    for path in (merged_items_path(dd), merged_report_path(dd), tmp_path / REVIEW_OUTPUT_FILE,
+    for path in (DeepArtifact.MERGED_ITEMS.at(dd), DeepArtifact.MERGED_REPORT.at(dd), tmp_path / REVIEW_OUTPUT_FILE,
                  dd / "dropped-speculative.json", dd / "folded-structural.json"):
         path.write_text("stale result")
     backend = ScriptedBackend(events=[AssertionError("empty language merge must not dispatch")])
@@ -109,7 +114,7 @@ async def test_empty_merge_keeps_structural_findings_and_clears_stale_outputs(
     )
 
     assert backend.call_count == 0
-    items = json.loads(merged_items_path(dd).read_text())["items"]
+    items = json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text())["items"]
     assert len(items) == 1
     assert items[0]["id"] == 1
     assert items[0]["uid"] == "structure:42"
@@ -128,7 +133,7 @@ async def test_empty_merge_exposes_failed_stack_coverage(
 ) -> None:
     dd = deep_dir(tmp_path, allow_standalone=True)
     records = dd / "stack-python-records.json"
-    records.write_text("[]")
+    records.write_text('{"issues": []}')
     alternatives = dd / "alternatives.json"
     alternatives.write_text("[]")
     backend = ScriptedBackend(events=[AssertionError("empty merge must not dispatch")])
@@ -169,12 +174,11 @@ def test_merge_prompt_mentions_dedup_candidates(tmp_path: Path) -> None:
 
 # The merge agent returns a schema item list; the host renders the report.
 _MERGE_TURN: Turn = [TextEvent(text="merged"),
-    ResultEvent(structured_output={"items": [{
+    ResultEvent(structured_output=merge_result([{
                     "id": 1, "lens": "per-stack", "file": "api.py", "line": 1, "severity": "low",
                     "description": "issue", "confidence": "MEDIUM", "rationale": "r", "evidence": "api.py:1",
                 }
-            ]
-        }, continuation=None,
+            ]), continuation=None,
     ),
 ]
 

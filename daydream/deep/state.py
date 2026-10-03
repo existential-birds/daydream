@@ -6,6 +6,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
 
+from daydream.deep.records import RecordPool
+from daydream.review_result import ReviewCoverage
+
 if TYPE_CHECKING:
     from daydream.backends import ContinuationToken
     from daydream.deep.detection import StackAssignment
@@ -95,6 +98,8 @@ class DeepState:
         if value is None:
             return default
         return self._check(key, value, expected, expected_name)
+
+    review_coverage = _StateField[ReviewCoverage](ReviewCoverage)
 
     @property
     def mode(self) -> str:
@@ -218,14 +223,9 @@ class DeepState:
 
     branch = _StateField[str](str)
 
-    failed_stacks = _StateField[dict[str, str]](dict, writable=True)
-
     @property
-    def failed_stacks_or_none(self) -> dict[str, str] | None:
-        return cast(
-            dict[str, str] | None,
-            self._optional("failed_stacks", dict, "dict or None") or None,
-        )
+    def unfinished_scopes(self) -> dict[str, str]:
+        return self.review_coverage.unfinished_scopes
 
     intent_summary = _StateField[str](str, writable=True)
 
@@ -233,33 +233,7 @@ class DeepState:
         str, key='intent_summary', label='str or None', default=lambda: None
     )
 
-    records_paths = _StateField[list[Path]](list, writable=True)
-
-    records = _StateField[list[dict[str, Any]]](list, writable=True)
-
-    record_sources = _StateField[list[str]](list, writable=True)
-
-    @property
-    def structural_records_path(self) -> Path | None:
-        value: object | None = self._data["structural_records_path"]
-        if value is None:
-            return None
-        return cast(
-            Path,
-            self._check("structural_records_path", value, Path, "Path or None"),
-        )
-
-    @structural_records_path.setter
-    def structural_records_path(self, value: Path | None) -> None:
-        self._data["structural_records_path"] = value
-
-    structural_records_path_or_none = _StateField[Path | None](
-        Path, key='structural_records_path', label='Path or None', default=lambda: None
-    )
-
-    structural_records = _StateField[list[dict[str, Any]]](list, default=list, writable=True)
-
-    structural_record_sources = _StateField[list[str]](list, default=list, writable=True)
+    record_pool = _StateField[RecordPool](RecordPool, writable=True)
 
     @property
     def arbiter_continuation(self) -> ContinuationToken | None:

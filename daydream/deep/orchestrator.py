@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import shutil
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -24,12 +24,10 @@ from daydream.config import (
 from daydream.deep import review_steps
 from daydream.deep.adjudication_steps import _step_arbiter
 from daydream.deep.artifacts import (
-    alternatives_path as _alternatives_path,
+    DeepArtifact,
     check_deep_artifacts,
     deep_dir,
     diff_key,
-    diff_key_path,
-    intent_path as _intent_path,
     per_stack_records_path,
 )
 from daydream.deep.dependency import build_import_graph
@@ -524,13 +522,30 @@ async def _run_review_spine(
 
     target_dir = work.repo
 
-    # Preamble (mirrors runner._run_loop_shallow).
+    # Findings export is commit-bound. Capture target once and diff explicit SHA endpoints.
+    from daydream.pr_review import capture_pr_base_tip, find_open_pr, find_pr_by_number
+    from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
+
+    captured_pr = None
+    pr_base_sha = None
+    dirty_snapshot = False
     try:
-        diff = git_ops.diff(work.repo, work.base_branch, exclude=config.ignore_paths)
+        captured_head = git_ops.head_sha(target_dir)
+        captured_base = git_ops.resolve_diff_merge_base(target_dir, work.base_branch, captured_head)
+        if config.findings_out is not None and mode != "diagram":
+            captured_pr = (find_pr_by_number(target_dir, config.pr_number, auth=github_execution.auth)
+                           if config.pr_number is not None else find_open_pr(target_dir, auth=github_execution.auth))
+            if captured_pr is None or captured_pr.head_sha != captured_head:
+                print_error(console, "Findings Artifact", "Target PR does not match the analyzed checkout")
+                return 1
+            pr_base_sha = capture_pr_base_tip(target_dir, captured_pr, auth=github_execution.auth)
+            captured_pr = replace(captured_pr, base_sha=captured_base)
+            dirty_snapshot = _has_non_daydream_worktree_changes(git_ops.status_porcelain(target_dir))
+            paths = [".", *(f":(exclude){p.rstrip('/')}" for p in config.ignore_paths or [])]
+            diff = git_ops.diff_paths(target_dir, captured_base, captured_head, paths)
+        else:
+            diff = git_ops.diff(work.repo, work.base_branch, exclude=config.ignore_paths)
     except GitTimeoutError as exc:
-        # Transient host-load timeout that survived git_ops' bounded retries.
-        # Report it accurately instead of the misleading "Unable to determine
-        # base branch" message a genuine ref error would produce (issue #120).
         print_error(console, "Git Timeout", f"git timed out under load: {exc}")
         return 1
     except GitError:
@@ -541,7 +556,8 @@ async def _run_review_spine(
     if diff is None:
         print_error(console, "Git Error", "Unable to determine base branch for diff")
         return 1
-    if not diff.strip():
+    no_diff = not diff.strip()
+    if no_diff and mode == "diagram":
         subject = "diagram" if mode == "diagram" else "review"
         print_warning(console, f"No diff found -- nothing to {subject}")
         return 0
@@ -576,13 +592,13 @@ async def _run_review_spine(
         # against, or the staleness gate would self-heal and pass every time.
         shutil.rmtree(dd, ignore_errors=True)
         dd.mkdir(parents=True, exist_ok=True)
-        diff_key_path(dd).write_text(current_diff_sha, encoding="utf-8")
+        DeepArtifact.DIFF_KEY.at(dd).write_text(current_diff_sha, encoding="utf-8")
 
     async with _open_recorder(
         config=config, target_dir=target_dir, work=work, flow_kind=_flow_kind_for_mode(mode),
         run_artifacts=run_artifacts,
         allow_standalone=allow_standalone,
-    ):
+    ) as recorder:
         # Composition-root re-entry: resolution already happened in
         # ``_run_loop_deep`` before this recorder existed; this no-op resolve
         # records the profile onto the active recorder (R12).
@@ -600,6 +616,20 @@ async def _run_review_spine(
             config, changed_files, diff, target_dir, mode
         )
 
+        required_phases = ["no_diff"] if no_diff else ["intent", "alternatives", "merge"]
+        if not no_diff and _supervisor_mode(config) in {"rules", "llm"}:
+            required_phases.append("supervision")
+        coverage = None if mode == "diagram" else ReviewCoverage(
+            recorder.session_id,
+            AnalyzedRevision(captured_head, captured_base, current_diff_sha,
+                             pr_base_sha),
+            [PlannedScope(stack.stack_name, stack.stack_name.split("#", 1)[0],
+                          files=tuple(sorted(stack.files)),
+                          shard=int(stack.stack_name.split("#", 1)[1]) if "#" in stack.stack_name else None)
+             for stack in stacks] if not no_diff else [],
+            required_phases,
+        )
+
         # Resume gate (D-34, D-36, D-37) + diff-freshness gate.
         if config.start_at in ("per-stack", "merge", "fix"):
             try:
@@ -607,6 +637,9 @@ async def _run_review_spine(
                     config.start_at, dd, current_diff_sha=current_diff_sha,
                     record_paths=[per_stack_records_path(dd, stack.stack_name) for stack in stacks],
                 )
+                if coverage is not None:
+                    from daydream.deep.artifacts import restore_review_coverage
+                    coverage = restore_review_coverage(dd, coverage)
                 if _has_non_daydream_worktree_changes(git_ops.status_porcelain(target_dir)):
                     raise FileNotFoundError(
                         f"Cannot resume at stage '{config.start_at}' -- the worktree has changed "
@@ -614,7 +647,7 @@ async def _run_review_spine(
                         "Resuming would review stale findings against changed code.\n"
                         "Re-run without --start-at to regenerate them."
                     )
-            except FileNotFoundError as exc:
+            except (FileNotFoundError, ValueError) as exc:
                 print_error(console, "Unusable Deep Artifacts", str(exc))
                 return 1
         # Pre-flight notice (D-30). Agent count reflects the tiny-diff collapse
@@ -712,6 +745,9 @@ async def _run_review_spine(
             _backend_factory=backend_factory,
             data={
                 "mode": mode,
+                "review_coverage": coverage,
+                "analyzed_pr": captured_pr,
+                "snapshot_diff": diff,
                 "diff": bounded_diff,
                 # Carry reviewed origins for footprint enforcement; resumes can recover them
                 # from the diff. Canonical finding paths have independent authorization.
@@ -732,11 +768,10 @@ async def _run_review_spine(
                 # denies that rule; it never fails the run.
                 "import_graph": import_graph,
                 "single_stack_mode": single_stack_mode,
-                "intent_path": _intent_path(dd),
-                "alts_path": _alternatives_path(dd),
+                "intent_path": DeepArtifact.INTENT.at(dd),
+                "alts_path": DeepArtifact.ALTERNATIVES.at(dd),
                 "log": log,
                 "branch": branch,
-                "failed_stacks": {},
             },
             allow_standalone_artifacts=allow_standalone,
         )
@@ -760,15 +795,44 @@ async def _run_review_spine(
                 print_warning(console, f"Could not persist the resolved test recipe: {exc}")
             ctx.data["test_recipe"] = test_recipe
 
-        # Preserve exploration/deep artifacts for reuse and resumes. Cleanup is success-only;
-        # failed runs retain their evidence.
-        with review_deadline_scope(
-            ctx.pipeline().review_wall_budget_s,
-            diff=diff,
-            scale_deadline=config.review_profile is not None
-            and config.review_profile.source_kind == "default",
-        ):
-            exit_code = await run_flow(ctx.registry, _flow_name_for_mode(mode), ctx)
+        # Finalization stays inside the recorder so frozen public/archive evidence agrees.
+        from daydream.deep.review_terminal import finalize_review
+        from daydream.review_result import reason_for_exception
+
+        if dirty_snapshot and coverage is not None:
+            coverage.require_phase("snapshot")
+            coverage.record_phase("snapshot", "failed", reasons=["dirty_snapshot"])
+            finalize_review(ctx, "failed")
+            print_error(console, "Findings Artifact", "Commit-bound export requires a clean analyzed checkout")
+            return 1
+        if no_diff and coverage is not None:
+            coverage.record_phase("no_diff", "complete", noop=True)
+            return finalize_review(ctx, "completed", no_diff=True)
+        try:
+            with review_deadline_scope(
+                ctx.pipeline().review_wall_budget_s, diff=diff,
+                scale_deadline=config.review_profile is not None
+                and config.review_profile.source_kind == "default",
+            ):
+                exit_code = await run_flow(ctx.registry, _flow_name_for_mode(mode), ctx)
+        except Exception as exc:
+            if coverage is not None and not coverage.is_finalized:
+                coverage.require_phase("pipeline")
+                coverage.record_phase("pipeline", "failed", reasons=[reason_for_exception(exc)])
+                try:
+                    finalize_review(ctx, "failed")
+                except Exception as final_exc:
+                    exc.add_note(f"Terminal review finalization failed: {type(final_exc).__name__}")
+                    print_warning(console, f"Terminal review finalization failed: {type(final_exc).__name__}")
+            raise
+        if coverage is not None and not coverage.is_finalized:
+            try:
+                final_status = finalize_review(ctx, "completed" if exit_code == 0 else "failed")
+            except (OSError, ValueError) as exc:
+                print_error(console, "Findings Artifact", f"Terminal review finalization failed: {exc}")
+                return 1
+            if final_status:
+                return final_status
         if _cleanup_should_run(ctx, exit_code):
             await _perform_cleanup(ctx)
         return exit_code

@@ -14,7 +14,6 @@ from rich.console import Console
 
 from daydream import remote_ci
 from daydream.agent import run_agent
-from daydream.artifact_visibility import ArtifactSession
 from daydream.backends import (
     AgentEvent,
     CostEvent,
@@ -26,7 +25,6 @@ from daydream.backends import (
 )
 from daydream.backends.codex import CodexBackend
 from daydream.deep import fix_steps
-from daydream.deep.artifacts import deep_dir, per_stack_records_path
 from daydream.exploration import ExplorationContext
 from daydream.phases import phase_alternative_review
 from daydream.pr_review import PRInfo
@@ -175,14 +173,26 @@ async def test_fix_commit_includes_pre_gate_authorized_unstaged_edit(
         (repo / "scratch.py").write_text("PRIVATE_USER_DRAFT = 1\n")
     remote = bare_remote(tmp_path / "pre-gate-origin.git")
     no_ci_remote.connect(repo, remote)
-    issue = {
-        "id": 1, "description": "Update the related value", "file": "b.py", "line": 1,
-        "related_files": ["a.py", "scratch.py"] if protect_untracked_related else ["a.py"],
-    }
+    issue = {"id": 1, "description": "Update the related value", "file": "b.py", "line": 1}
+    related_files = ["a.py", "scratch.py"] if protect_untracked_related else ["a.py"]
+
     class RelatedOnlyBackend(PhaseDispatchBackend):
         async def execute(
             self, cwd: Any, prompt: str, *args: Any, **kwargs: Any,
         ) -> AsyncGenerator[AgentEvent, None]:
+            schema = args[0] if args else kwargs.get("output_schema")
+            fields = schema.get("properties", {}) if schema else {}
+            if "items" in fields:
+                yield ResultEvent(structured_output={"items": [{
+                    **issue, "severity": "medium", "confidence": "HIGH", "rationale": "Related values disagree",
+                    "evidence": "a.py:1 and b.py:1", "lens": "per-stack", "source_uids": ["python:1"],
+                    "related_files": related_files,
+                }]}, continuation=None)
+                return
+            if "issues" in fields and ("evaluate the implementation" in prompt.lower()
+                                       or "repository-wide interactions" in prompt.lower()):
+                yield ResultEvent(structured_output={"issues": []}, continuation=None)
+                return
             if prompt.startswith("Fix this issue") or prompt.startswith("Fix these"):
                 (Path(cwd) / "b.py").write_text("B = 2\n")
                 if protect_untracked_related:
@@ -192,7 +202,8 @@ async def test_fix_commit_includes_pre_gate_authorized_unstaged_edit(
     install_backend(RelatedOnlyBackend(parse_results=[[issue]]))
     exit_code = await run(
         make_config(
-            repo, stack="python", quiet=True, shallow=True, assume="yes", pr_number=no_ci_remote.pr_number,
+            repo, stack="python", quiet=True, latency_profile="forensic", assume="yes",
+            pr_number=no_ci_remote.pr_number,
             pr_repo=no_ci_remote.base_repository,
         )
     )
@@ -1124,26 +1135,17 @@ async def test_run_populates_exploration_context(
     _git(multi_stack_target, "add", ".")
     _commit(multi_stack_target, "add extra")
     _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target, enable_exploration=True)
-    captured: dict[str, Any] = {}
-    async def fake_per_stack_reviews(
-        backend: Any, work: Any, stacks: Any, *, artifact_session: ArtifactSession | None = None,
-        allow_standalone: bool = False, **kwargs: Any,
-    ) -> tuple[Any, ...]:
-        captured["exploration_dir"] = kwargs.get("exploration_dir")
-        # The real loader requires a PER_STACK_RECORD_SCHEMA records file.
-        dd = deep_dir(work.repo, session=artifact_session, allow_standalone=allow_standalone)
-        dd.mkdir(parents=True, exist_ok=True)
-        for s in stacks:
-            per_stack_records_path(dd, s.stack_name).write_text(json.dumps({"issues": []}))
-        return {s.stack_name: None for s in stacks}, {}
-    monkeypatch.setattr("daydream.deep.review_steps.phase_per_stack_reviews", fake_per_stack_reviews)
+    backend = _install_stub_backend(monkeypatch, multi_stack_target, enable_exploration=True)
     config = make_config(multi_stack_target, shallow=True)
     exit_code = await run(config)
     assert exit_code == 0
     assert isinstance(config.exploration_context, ExplorationContext)
-    assert "exploration_dir" in captured
-    assert captured["exploration_dir"] is not None
+    exploration = multi_stack_target / ".daydream" / "exploration"
+    assert exploration.is_dir()
+    review_prompts = [call["prompt"] for call in backend.calls if call.get("output_schema")
+                      and "you are reviewing the" in call["prompt"].lower()]
+    assert review_prompts
+    assert all("exploration/summary.md" in prompt for prompt in review_prompts)
 
 async def test_codex_backend_raises_on_agents(tmp_path: Path) -> None:
     """CodexBackend.execute() refuses agents= with NotImplementedError."""
@@ -1158,7 +1160,7 @@ async def test_alternative_review_surfaces_confidence_and_rationale(
     """Parsed alternative-review issues retain schema-enforced confidence and rationale."""
     enriched_trust_issue = {
         "id": 1, "title": "t", "description": "x", "recommendation": "y", "severity": "high", "files": ["a.py"],
-        "confidence": "HIGH", "rationale": "verified by Convention snake_case_modules",
+        "confidence": "HIGH", "rationale": "verified by Convention snake_case_modules", "evidence": "a.py:1",
     }
     def _issue_backend(payload: dict[str, Any]) -> ScriptedBackend:
         return ScriptedBackend(

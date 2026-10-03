@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import os
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -22,9 +21,10 @@ from daydream.config import (
     DIAGRAM_KINDS,
     DIAGRAM_MODES,
 )
-from daydream.deep.artifacts import diagram_markdown_path, diagram_path, merged_report_path
+from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.detection import detect_stacks
 from daydream.deep.diagram_grounding import RepoSymbols, ground_flowchart, ground_sequence
+from daydream.deep.diagram_prompts import build_diagram_repair_prompt
 from daydream.deep.diagram_render import render_diagram_blocks, render_flowchart_mermaid, render_sequence_mermaid
 from daydream.deep.diagram_schema import (
     FLOWCHART_SPEC_SCHEMA,
@@ -35,7 +35,6 @@ from daydream.deep.diagram_schema import (
 from daydream.deep.diagram_trigger import Eligibility, decide_eligibility
 from daydream.deep.diagram_types import DiagramResult, DiagramThresholds
 from daydream.deep.diff import _ttt_diff_text
-from daydream.deep.prompts import build_diagram_repair_prompt
 from daydream.deep.render import insert_diagrams_section
 from daydream.deep.settings import _resolve_config_value
 from daydream.deep.state import DeepState
@@ -226,21 +225,6 @@ def _scrub_inline_exploration_summary(
     return replace(prepared, inputs=scrubbed)
 
 
-def _prompt_builder_accepts_inline_kwargs(builder: Any) -> bool:
-    """Check extension support for the three inline kwargs without breaking older builders.
-
-    Legacy builders retain their documented arguments and receive no host-only
-    exploration path on INLINE transports.
-    """
-    try:
-        params = inspect.signature(builder).parameters
-    except (TypeError, ValueError):
-        return False
-    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
-        return True
-    return {"clone_mode", "inline_exploration", "inline_dependencies"} <= params.keys()
-
-
 _PRIVATE_ARTIFACT_PLACEHOLDER = "sanctioned artifact storage"
 
 
@@ -274,9 +258,8 @@ def _diagram_author_prompt(
     """Build a registry prompt using the resolved sanctioned-input transport.
 
     INLINE prompts carry the diff and suppress private artifact pointers; EXACT_PATHS
-    keeps pointers. Only compatible builders receive inline kwargs. Older extensions
-    retain documented arguments, receive exploration_dir=None on INLINE, and have
-    known private paths redacted before dispatch.
+    keeps pointers. Current extension builders accept the inline context arguments;
+    known private paths are redacted before INLINE dispatch.
     """
     deep_state = DeepState(ctx.data)
     diff_path: Path = deep_state.diff_path
@@ -292,21 +275,18 @@ def _diagram_author_prompt(
         "diagram_sequence" if kind == "sequence" else "diagram_flowchart"
     )
     inline_kwargs: dict[str, Any]
-    if inline and _prompt_builder_accepts_inline_kwargs(builder):
+    if inline:
         # A live artifact session routes the pre-scan through sanctioned inputs
         # instead of inlining it here.
-        legacy = _inline_exploration_text(exploration_dir) if ctx.artifacts is None else (None, None)
+        exploration = _inline_exploration_text(exploration_dir) if ctx.artifacts is None else (None, None)
         inline_kwargs = {
             "exploration_dir": None,
             "clone_mode": True,
-            "inline_exploration": legacy[0],
-            "inline_dependencies": legacy[1],
+            "inline_exploration": exploration[0],
+            "inline_dependencies": exploration[1],
         }
     else:
-        # A legacy override keeps its documented kwarg set, but an INLINE run
-        # must not name the host-only exploration_dir: the path dangles on the
-        # transport, so it arrives as ``None`` there and untouched otherwise.
-        inline_kwargs = {"exploration_dir": None if inline else exploration_dir}
+        inline_kwargs = {"exploration_dir": exploration_dir}
     kind_kwargs = (
         {"files_by_module": _files_by_module(eligibility), "schema": SEQUENCE_SPEC_SCHEMA}
         if kind == "sequence"
@@ -564,7 +544,7 @@ def _diagram_payload_without_mermaid(payload: dict[str, Any]) -> dict[str, Any]:
 def _apply_diagrams_to_report(ctx: FlowContext, blocks: str) -> None:
     """Idempotently insert diagrams into both reports, preserving supervision and coverage text."""
     deep_state = DeepState(ctx.data)
-    targets = [merged_report_path(deep_state.dd)]
+    targets = [DeepArtifact.MERGED_REPORT.at(deep_state.dd)]
     canonical = deep_state.merged_report_or_none
     if canonical is not None:
         targets.append(Path(canonical))
@@ -686,8 +666,8 @@ async def _run_diagram_step(
     ordered: dict[str, DiagramResult | None] = {kind: results.get(kind) for kind in DIAGRAM_KINDS}
     blocks = render_diagram_blocks(ordered)
     payload: dict[str, Any] = {"eligibility": eligibility.to_dict(), "results": ordered}
-    atomic_write_json(diagram_path(dd), payload)
-    diagram_markdown_path(dd).write_text(
+    atomic_write_json(DeepArtifact.DIAGRAM.at(dd), payload)
+    DeepArtifact.DIAGRAM_MARKDOWN.at(dd).write_text(
         f"{blocks}\n" if blocks else "", encoding="utf-8"
     )
     deep_state.diagrams = {

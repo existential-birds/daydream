@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
-from typing import Literal, Mapping, Sequence, cast
+from typing import Literal, Mapping, Sequence, TypeGuard, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from daydream.redaction import redact_structured_text
@@ -203,6 +203,10 @@ class CIObservation:
         if self.state not in {"pass", "pending", "fail"}:
             raise ValueError("unknown CI observation state")
         _required_text(self.raw_state, "raw observation state")
+        for name in ("url", "diagnostic"):
+            value = getattr(self, name)
+            if value is not None:
+                _required_text(value, f"observation {name}")
 
 
 @dataclass(frozen=True)
@@ -271,11 +275,11 @@ class RemoteCIVerdict:
         return "partial"
 
 
-def _is_finite_number(value: object) -> bool:
+def _is_finite_number(value: object) -> TypeGuard[int | float]:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value)
 
 
-def _is_positive_int(value: object) -> bool:
+def _is_positive_int(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 

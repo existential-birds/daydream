@@ -924,6 +924,24 @@ def _recorded_external_capability(transaction: Path, parent: Path) -> tuple[int,
     raise ArtifactVisibilityError("live external output has no durable capability proof")
 
 
+def _inherit_external_capability_proofs(origin: Path, destination: Path) -> None:
+    """Carry completed parent capability probes into the publication rollback journal.
+
+    Only retired successful probes are copied: active names and their recovery
+    ownership stay with the originating detach transaction. The parent identity
+    is checked again by live-external publication when a baseline is restored.
+    """
+    proofs = [record for record in _external_records(origin)
+              if record["purpose"] == _ExternalEntryPurpose.PROBE_EXCHANGE_A.value
+              and record["lifecycle"] == _ExternalEntryLifecycle.RETIRED.value
+              and record["failure_reason"] is None
+              and record["entry_dev"] is not None and record["entry_ino"] is not None]
+    if proofs:
+        _write_external_records(destination, [
+            {**record, "record_id": f"external-{index:04d}"} for index, record in enumerate(proofs)
+        ])
+
+
 def _external_target_identity_from_ledger(transaction: Path, destination: _DestinationRecord) -> tuple[int, int]:
     for record in reversed(_external_records(transaction)):
         if (

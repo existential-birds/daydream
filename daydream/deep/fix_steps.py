@@ -17,17 +17,7 @@ from daydream.config import (
     REVIEW_OUTPUT_FILE,
 )
 from daydream.deep import fix_state
-from daydream.deep.artifacts import (
-    fix_failures_path,
-    fix_footprint_path,
-    fix_leftover_untracked_path,
-    fix_outcomes_path,
-    generated_file_violations_path,
-    push_verdict_path,
-    recommended_capture_path,
-    stabilization_failed_path,
-    test_verdict_path,
-)
+from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.fix_state import EvidenceKey, FixCycleState
 from daydream.deep.quality_gate import QualityGateThresholds, _evaluate_quality_gate, capture_quality
 from daydream.deep.records import item_uid, stamp_item_uids
@@ -117,7 +107,7 @@ def _record_fix_preflight_rejection(dd: Path, items: list[dict[str, Any]]) -> No
         for item in items
     }
     try:
-        atomic_write_json(fix_failures_path(dd), failures, sort_keys=True)
+        atomic_write_json(DeepArtifact.FIX_FAILURES.at(dd), failures, sort_keys=True)
     except OSError as exc:
         print_error(console, "Fix preflight failure audit failed", str(exc))
 
@@ -159,14 +149,14 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     # patch, or policy audit may be inherited if this run later stops early.
     dd: Path = deep_state.dd
     stale_paths = (
-        fix_footprint_path(dd),
-        fix_outcomes_path(dd),
-        test_verdict_path(dd),
-        recommended_capture_path(dd),
-        generated_file_violations_path(dd),
-        fix_failures_path(dd),
-        fix_leftover_untracked_path(dd),
-        stabilization_failed_path(dd),
+        DeepArtifact.FIX_FOOTPRINT.at(dd),
+        DeepArtifact.FIX_OUTCOMES.at(dd),
+        DeepArtifact.TEST_VERDICT.at(dd),
+        DeepArtifact.RECOMMENDED_CAPTURE.at(dd),
+        DeepArtifact.GENERATED_FILE_VIOLATIONS.at(dd),
+        DeepArtifact.FIX_FAILURES.at(dd),
+        DeepArtifact.FIX_LEFTOVER_UNTRACKED.at(dd),
+        DeepArtifact.STABILIZATION_FAILED.at(dd),
         _artifact_dir(ctx) / "recommended.patch",
     )
     try:
@@ -300,9 +290,8 @@ def _verdict_buckets(
 ) -> tuple[list[int | None], list[int | None], list[int | None], list[int | None], list[int | None]]:
     """Partition every canonical item into matched, unmatched, skipped, structural or other.
 
-    Persisted selection decisions own the skip/lens split; absent or malformed
-    legacy decisions fall back to field-based accounting. Structural and wonder
-    lens exemptions both use the structural bucket, never operator skips.
+    Checked persisted selection decisions own the skip/lens split. Structural and
+    wonder exemptions both use the structural bucket, never operator skips.
     """
     decisions_by_uid = _selection_decisions(payload)
     matched: list[int | None] = []
@@ -313,15 +302,14 @@ def _verdict_buckets(
     for item in items:
         item_id = item.get("id")
         verdict = item.get("verifier_verdict")
-        decision = decisions_by_uid.get(item_uid(item))
-        # Older artifacts lack selection decisions; preserve their field-based split.
-        exempt = (
-            decision.get("reason_code") in ("exempt:structural", "exempt:wonder")
-            if decision is not None else item.get("lens") == "structural"
-        )
+        uid = item_uid(item)
+        if uid not in decisions_by_uid:
+            raise ValueError(f"Verifier selection omits canonical item {uid!r}")
+        decision = decisions_by_uid[uid]
+        exempt = decision["reason_code"] in ("exempt:structural", "exempt:wonder")
         if exempt:
             structural.append(item_id)
-        elif decision is not None and decision.get("selected") is False:
+        elif decision["selected"] is False:
             skipped.append(item_id)
         elif verdict is not None:
             matched.append(item_id)
@@ -333,22 +321,18 @@ def _verdict_buckets(
 
 
 def _selection_decisions(payload: object) -> dict[str, dict[str, Any]]:
-    """Return the artifact's selection decisions keyed by ``item_uid``.
-
-    An absent, non-dict, or malformed selection block yields ``{}`` so the
-    caller degrades to today's accounting instead of raising (Pattern B).
-    """
+    """Require current verifier selection decisions keyed by unique durable UID."""
     block = payload.get("selection") if isinstance(payload, dict) else None
     decisions = block.get("decisions") if isinstance(block, dict) else None
     if not isinstance(decisions, list):
-        return {}
+        raise ValueError("Verifier artifact requires selection decisions")
     out: dict[str, dict[str, Any]] = {}
     for decision in decisions:
-        if not isinstance(decision, dict):
-            continue
-        uid = decision.get("item_uid")
-        if isinstance(uid, str) and uid:
-            out[uid] = decision
+        if (not isinstance(decision, dict) or not isinstance(decision.get("item_uid"), str)
+                or not decision["item_uid"] or decision["item_uid"] in out
+                or type(decision.get("selected")) is not bool or not isinstance(decision.get("reason_code"), str)):
+            raise ValueError("Verifier artifact contains malformed or duplicate selection decisions")
+        out[decision["item_uid"]] = decision
     return out
 
 
@@ -528,7 +512,7 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         for path, reason in failures.items()
         if not reason.startswith(budget_prefix)
     }
-    failures_artifact = fix_failures_path(deep_state.dd)
+    failures_artifact = DeepArtifact.FIX_FAILURES.at(deep_state.dd)
     try:
         if failures:
             atomic_write_json(failures_artifact, failures, sort_keys=True)
@@ -554,7 +538,7 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
                 - set(state.preexisting_untracked)
             )
             if leftover:
-                atomic_write_json(fix_leftover_untracked_path(deep_state.dd), leftover)
+                atomic_write_json(DeepArtifact.FIX_LEFTOVER_UNTRACKED.at(deep_state.dd), leftover)
         except Exception as exc:
             artifact_errors.append(str(exc))
         print_warning(
@@ -653,7 +637,7 @@ def _persist_fix_outcomes_current(
 ) -> None:
     deep_state = DeepState(ctx.data)
     atomic_write_json(
-        fix_outcomes_path(deep_state.dd),
+        DeepArtifact.FIX_OUTCOMES.at(deep_state.dd),
         {
             "session_id": state.session_id,
             "evidence_key": fix_state._evidence_payload(key),
@@ -766,7 +750,7 @@ def _persist_test_verdict(
     from daydream.remote_ci import local_host_facts
 
     atomic_write_json(
-        test_verdict_path(deep_state.dd),
+        DeepArtifact.TEST_VERDICT.at(deep_state.dd),
         {
             "session_id": state.session_id,
             "passed": passed,
@@ -891,7 +875,7 @@ async def finalize_retained_tree_after_test(
             patch_path.parent.mkdir(parents=True, exist_ok=True)
             patch_path.write_bytes(snapshot.recommended_patch)
             atomic_write_json(
-                recommended_capture_path(deep_state.dd),
+                DeepArtifact.RECOMMENDED_CAPTURE.at(deep_state.dd),
                 {
                     "session_id": state.session_id,
                     "capture_point": "post_test",
@@ -981,7 +965,7 @@ def _persist_push_verdict(
     if diagnostic is not None:
         payload["diagnostic"] = redact_structured_text(diagnostic)[:2_000]
     atomic_write_json(
-        push_verdict_path(deep_state.dd),
+        DeepArtifact.PUSH_VERDICT.at(deep_state.dd),
         payload,
         indent=2,
         sort_keys=True,

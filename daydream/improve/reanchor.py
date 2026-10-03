@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,11 +17,36 @@ from daydream.artifact_visibility import (
     validate_private_directory,
     validate_private_workspace_owner,
 )
-from daydream.workspace_legacy import (
-    _OPERATIONAL_LOCK_STALE_AFTER_S,
-    _legacy_operational_root,
-    _prune_stale_locked_worktrees,
-)
+from daydream.workspace import reject_public_operational_storage
+
+_OPERATIONAL_LOCK_STALE_AFTER_S = 24 * 3600
+
+
+def _prune_stale_locked_worktrees(
+    repo: Path,
+    paths: Iterable[Path],
+    *,
+    stale_after_s: int,
+) -> int:
+    """Remove unlocked or stale-locked worktrees, tolerating individual Git failures.
+
+    Locks no older than stale_after_s belong to active runs and remain untouched.
+    Removal unlocks first; return the number successfully removed.
+    """
+    removed = 0
+    for path in paths:
+        try:
+            locked_at = git_ops.worktree_lock_mtime(path)
+            if locked_at is not None and time.time() - locked_at <= stale_after_s:
+                # Live worktree (lock age near zero): never unlock or remove
+                # it, so a concurrent run mid-write is not destroyed.
+                continue
+            git_ops.worktree_remove_unlocked(repo, path)
+        except git_ops.GitError:
+            continue
+        removed += 1
+    return removed
+
 
 # Re-anchor worktree directory names are built from the run session id, so only
 # a filesystem-safe run id may reach the path; anything else falls back to an
@@ -33,41 +59,28 @@ _SAFE_DIRNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 _REANCHOR_DIR_SUFFIX = "-reanchor"
 
 
-def _iter_reanchor_worktrees(roots: Iterable[Path]) -> list[Path]:
-    """Find real re-anchor directories; reject ambiguous names across roots and skip symlinks."""
-    found = (
-        path
-        for root in roots
-        for path in root.glob(f"*{_REANCHOR_DIR_SUFFIX}")
-        if not path.is_symlink() and path.is_dir()
-    )
-    paths = sorted(found, key=lambda path: (path.name, path.as_posix()))
-    if len({path.name for path in paths}) != len(paths):
-        raise git_ops.GitError("ambiguous re-anchor worktree name across storage roots")
-    return paths
+def _iter_reanchor_worktrees(root: Path) -> list[Path]:
+    """List real current re-anchor directories without following linked entries."""
+    return sorted(path for path in root.glob(f"*{_REANCHOR_DIR_SUFFIX}")
+                  if not path.is_symlink() and path.is_dir())
 
 
-def _public_reanchor_roots(repo: Path, owner: PrivateWorkspaceOwner | None) -> tuple[Path, Path]:
-    """Resolve the operational root once while retaining legacy discovery."""
+def _private_reanchor_root(repo: Path, owner: PrivateWorkspaceOwner | None) -> Path:
     if owner is None:
         owner = resolve_private_workspace_owner(repo, locations=private_root_locations())
     else:
         validate_private_workspace_owner(owner, source=owner.source, repo=repo)
-    operational = operational_worktree_path(owner)
-    legacy = _legacy_operational_root(owner.source, "worktrees", label="legacy re-anchor root")
-    validate_private_directory(operational, label="operational re-anchor root", allow_absent=True)
-    return operational, legacy
+    reject_public_operational_storage(owner.source)
+    root = operational_worktree_path(owner)
+    validate_private_directory(root, label="operational re-anchor root", allow_absent=True)
+    return root
 
 
 def prune_stale_reanchor_worktrees(repo: Path, *, private_workspace_owner: PrivateWorkspaceOwner | None = None) -> int:
-    """Prune private and legacy re-anchor worktrees with the shared lock policy.
-
-    Live locks survive; stale removals unlock first and tolerate individual Git
-    failures. Both namespaces remain discoverable.
-    """
+    """Prune current private re-anchors, preserving live locks and tolerating individual Git failures."""
     return _prune_stale_locked_worktrees(
         repo,
-        _iter_reanchor_worktrees(_public_reanchor_roots(repo, private_workspace_owner)),
+        _iter_reanchor_worktrees(_private_reanchor_root(repo, private_workspace_owner)),
         stale_after_s=_OPERATIONAL_LOCK_STALE_AFTER_S,
     )
 
@@ -92,21 +105,15 @@ class NamedPruneOutcome:
 def prune_named_reanchor_worktree(
     repo: Path, name: str, *, private_workspace_owner: PrivateWorkspaceOwner | None = None
 ) -> NamedPruneOutcome:
-    """Remove one safe re-anchor name from private or legacy storage.
-
-    Reject unsafe names before storage access and ambiguous roots before mutation.
-    Capture the Markdown count before removal for reporting, never as a gate.
-    """
+    """Remove a safely named private re-anchor and report its Markdown plan count."""
     if _SAFE_DIRNAME.fullmatch(name) is None:
         return NamedPruneOutcome(PRUNE_UNSAFE_NAME)
     if not name.endswith(_REANCHOR_DIR_SUFFIX):
         return NamedPruneOutcome(PRUNE_NOT_REANCHOR)
-    roots = _public_reanchor_roots(repo, private_workspace_owner)
-    found = [root / name for root in roots if (root / name).exists() or (root / name).is_symlink()]
-    if not found:
+    path = _private_reanchor_root(repo, private_workspace_owner) / name
+    if not path.exists() and not path.is_symlink():
         return NamedPruneOutcome(PRUNE_NOT_FOUND)
-    path = found[0]
-    if len(found) != 1 or path.is_symlink() or not path.is_dir():
+    if path.is_symlink() or not path.is_dir():
         return NamedPruneOutcome(PRUNE_GIT_FAILURE)
     plans = path / "daydream_plans"
     if plans.is_dir():
@@ -122,4 +129,4 @@ def prune_named_reanchor_worktree(
 
 def list_reanchor_worktrees(repo: Path, *, private_workspace_owner: PrivateWorkspaceOwner | None = None) -> list[Path]:
     """List the same real, unambiguous directories considered by automatic pruning."""
-    return _iter_reanchor_worktrees(_public_reanchor_roots(repo, private_workspace_owner))
+    return _iter_reanchor_worktrees(_private_reanchor_root(repo, private_workspace_owner))

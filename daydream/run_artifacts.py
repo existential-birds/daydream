@@ -1,6 +1,5 @@
 """Capture run identity, own recorder writes, and finalize immutable evidence."""
 
-import json
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,32 +62,7 @@ class _RunWriteCapture:
                 raise _RunSnapshotCaptureError("recorder session identity mismatch")
             if self.run_flow is not None and recorder.run_flow is not self.run_flow:
                 raise _RunSnapshotCaptureError("recorder run flow identity mismatch")
-            if snapshot.root_trajectory_id != self.session_id:
-                raise _RunSnapshotCaptureError("snapshot root identity mismatch")
-            if snapshot.status not in ("complete", "partial"):
-                raise _RunSnapshotCaptureError("snapshot write mode is malformed")
-            if type(snapshot.cutoff_at) is not str or not snapshot.cutoff_at:
-                raise _RunSnapshotCaptureError("snapshot cutoff is malformed")
-            roots = 0
-            identities: set[str] = set()
-            for document in snapshot.documents:
-                if (
-                    type(document.trajectory_id) is not str
-                    or not document.trajectory_id
-                    or type(document.json_bytes) is not bytes
-                    or document.trajectory_id in identities
-                ):
-                    raise _RunSnapshotCaptureError("snapshot document is malformed")
-                identities.add(document.trajectory_id)
-                roots += document.trajectory_id == self.session_id
-                payload = json.loads(document.json_bytes)
-                if not isinstance(payload, dict) or (
-                    payload.get("trajectory_id") != document.trajectory_id
-                    or payload.get("session_id") != self.session_id
-                ):
-                    raise _RunSnapshotCaptureError("snapshot document identity is malformed")
-            if roots != 1:
-                raise _RunSnapshotCaptureError("snapshot must contain exactly one root")
+            snapshot.validate(self.session_id)
             self.run_flow = recorder.run_flow
             if snapshot.status == "complete":
                 self.final = snapshot

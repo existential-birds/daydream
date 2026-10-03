@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 from daydream import clock
-from daydream.redaction import redact_text
 
 
 @dataclass(frozen=True)
@@ -96,45 +95,18 @@ class ReviewBudgetExceeded(RuntimeError):
         super().__init__(f"{phase} hit its budget: {reason}")
 
 
-def review_budget_path(deep_dir: Path) -> Path:
-    """Phase budget stops retained across a merge/fix resume."""
-    return deep_dir / "review-budget-stops.json"
-
-
-def record_review_budget_stop(deep_dir: Path, phase: str, reason: str) -> None:
-    """Record a non-stack budget stop; stack failures have their own artifact."""
-    path = review_budget_path(deep_dir)
-    stops = json.loads(path.read_text()) if path.exists() else {}
-    stops[phase] = reason
-    path.write_text(json.dumps(stops, indent=2, sort_keys=True))
-
-
-def clear_review_budget_stop(deep_dir: Path, phase: str) -> None:
-    """A completed rerun supersedes the earlier timeout for that phase."""
-    path = review_budget_path(deep_dir)
-    if path.exists():
-        stops = json.loads(path.read_text())
-        stops.pop(phase, None)
-        path.write_text(json.dumps(stops, indent=2, sort_keys=True))
-
-
 def review_warnings(deep_dir: Path) -> tuple[str, ...]:
-    """Collect incomplete phases and stacks for reports and posting."""
-    from daydream.deep.artifacts import (
-        MERGE_FAILURE_KEY,
-        _load_failures,
-        per_stack_failures_path,
-    )
+    """Render checked unfinished coverage; freeform diagnostics cannot establish status."""
+    from daydream.deep.artifacts import DeepArtifact
+    from daydream.review_result import ReviewCoverage
 
-    path = review_budget_path(deep_dir)
-    stops = json.loads(path.read_text()) if path.exists() else {}
-    warnings = [f"{phase}: {reason}" for phase, reason in sorted(stops.items())]
-    warnings.extend(
-        f"{stack}: {redact_text(reason)}"
-        for stack, reason in sorted(_load_failures(per_stack_failures_path(deep_dir)).items())
-        if isinstance(reason, str) and stack != MERGE_FAILURE_KEY
-    )
-    return tuple(warnings)
+    path = DeepArtifact.REVIEW_COVERAGE.at(deep_dir)
+    if not path.exists():
+        return ()
+    coverage = ReviewCoverage.from_dict(json.loads(path.read_text()))
+    return tuple(f"{key}: {coverage.diagnostics[kind].get(key, ', '.join(outcome['reason_codes']))}"
+                 for kind, outcomes in [('phases', coverage.phases), ('scopes', coverage.scopes)]
+                 for key, outcome in sorted(outcomes.items()) if outcome['status'] != 'complete')
 
 
 def render_review_warnings(warnings: tuple[str, ...]) -> str:

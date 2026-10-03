@@ -9,8 +9,10 @@ from daydream.backends import ContinuationToken
 from daydream.deep.detection import StackAssignment
 from daydream.deep.diff import DeepDiffBoundInfo
 from daydream.deep.fix_state import FixCycleState, RetainedTreeSnapshot
+from daydream.deep.records import RecordPool
 from daydream.deep.state import DeepState
 from daydream.phases import PushReceipt
+from tests.harness.review_result import review_coverage
 
 
 def test_state_is_a_live_view_over_the_original_mapping(tmp_path: Path) -> None:
@@ -39,14 +41,13 @@ def test_required_and_optional_accessors_preserve_missing_key_semantics() -> Non
     with pytest.raises(KeyError, match="merged_report"):
         _ = state.merged_report
     assert state.merged_report_or_none is None
-    with pytest.raises(KeyError, match="structural_records_path"):
-        _ = state.structural_records_path
-    assert state.structural_records_path_or_none is None
+    with pytest.raises(KeyError, match="record_pool"):
+        _ = state.record_pool
 
 def test_required_nullable_paths_accept_a_published_none() -> None:
-    state = DeepState({"exploration_dir": None, "structural_records_path": None})
+    state = DeepState({"exploration_dir": None, "record_pool": RecordPool({}, {})})
     assert state.exploration_dir is None
-    assert state.structural_records_path is None
+    assert state.record_pool.structural_path is None
 
 def test_documented_defaults_match_current_flow_reads() -> None:
     state = DeepState({})
@@ -63,9 +64,8 @@ def test_documented_defaults_match_current_flow_reads() -> None:
     assert state.fix_round_snapshot is None
     assert state.push_receipt is None
     assert state.items_or_empty == []
-    assert state.failed_stacks_or_none is None
-    assert state.structural_records == []
-    assert state.structural_record_sources == []
+    with pytest.raises(KeyError, match="review_coverage"):
+        _ = state.unfinished_scopes
 
     with pytest.raises(RuntimeError, match="fix cycle was not initialized at the accepted gate"):
         _ = state.fix_cycle_state
@@ -81,9 +81,8 @@ def test_mode_preserves_existing_string_conversion() -> None:
         ("items_file", "items_file", "items.json", "Path"), ("items", "items", {}, "list"),
         ("diagrams", "diagrams", [], "dict or None"), ("import_graph", "import_graph", [], "dict"),
         ("intent_authoritative", "intent_authoritative", 1, "bool"), ("changed_files", "changed_files", [], "set"),
-        ("stacks", "stacks", {}, "list"), ("failed_stacks", "failed_stacks", [], "dict"),
-        ("records_paths", "records_paths", {}, "list"), ("records", "records", {}, "list"),
-        ("record_sources", "record_sources", {}, "list"), ("iteration", "iteration", "1", "int or None"),
+        ("stacks", "stacks", {}, "list"), ("review_coverage", "unfinished_scopes", [], "ReviewCoverage"),
+        ("record_pool", "record_pool", {}, "RecordPool"), ("iteration", "iteration", "1", "int or None"),
         ("diff_truncation", "diff_truncation", {}, "DeepDiffBoundInfo or None",),
         ("arbiter_continuation", "arbiter_continuation", {}, "ContinuationToken or None",),
     ],
@@ -99,25 +98,15 @@ def test_accessors_reject_wrong_outer_types_at_access(key: str, property_name: s
 
 def test_valid_empty_mutable_containers_are_returned_by_reference() -> None:
     records: list[dict[str, Any]] = []
-    sources: list[str] = []
-    structural_records: list[dict[str, Any]] = []
-    structural_sources: list[str] = []
+    pool = RecordPool({"python": {"issues": records}}, {})
     import_graph: dict[str, set[str]] = {}
-    state = DeepState({"records": records, "record_sources": sources, "structural_records": structural_records,
-            "structural_record_sources": structural_sources, "import_graph": import_graph,
-        }
-    )
+    state = DeepState({"record_pool": pool, "import_graph": import_graph})
+    assert state.record_pool is pool and state.import_graph is import_graph
+    records.append({"uid": "python:1"})
+    assert state.record_pool.language == records
+    state.record_pool.replace([])
+    assert pool.language == []
 
-    assert state.records is records
-    assert state.record_sources is sources
-    assert state.structural_records is structural_records
-    assert state.structural_record_sources is structural_sources
-    assert state.import_graph is import_graph
-
-    state.records.append({"uid": "python:1"})
-    state.record_sources.append("python-records.json")
-    assert records == [{"uid": "python:1"}]
-    assert sources == ["python-records.json"]
 
 def test_concrete_value_types_are_checked_lazily(tmp_path: Path) -> None:
     stack = StackAssignment("python", ["app.py"])
@@ -155,18 +144,28 @@ def test_fix_dto_accessors_return_the_published_instances() -> None:
 def test_property_setters_publish_to_the_existing_keys(tmp_path: Path) -> None:
     original: dict[str, Any] = {}
     state = DeepState(original)
-    records = [{"uid": "python:1"}]
+    pool = RecordPool({}, {})
     outcomes = {"python:1": {"verdict": "fixed"}}
     snapshot: Any = object()
     cycle: Any = object()
 
     state.exploration_dir = tmp_path / "exploration"
     state.intent_authoritative = True
-    state.records = records
+    state.record_pool = pool
     state.fix_outcomes = outcomes
     state.fix_round_snapshot = snapshot
     state.fix_cycle_state = cycle
 
-    assert original == {"exploration_dir": tmp_path / "exploration", "intent_authoritative": True, "records": records,
+    assert original == {"exploration_dir": tmp_path / "exploration", "intent_authoritative": True, "record_pool": pool,
         "fix_outcomes": outcomes, "fix_round_snapshot": snapshot, "fix_cycle_state": cycle,
     }
+
+
+def test_unfinished_scopes_derive_from_live_checked_coverage() -> None:
+    coverage = review_coverage(scope_ids=('python',))
+    state = DeepState({'review_coverage': coverage})
+    assert state.unfinished_scopes == {'python': 'coverage_unknown'}
+    coverage.record_scope('python', 'failed', reasons=('backend_failure',), diagnostic='provider unavailable')
+    assert state.unfinished_scopes == {'python': 'provider unavailable'}
+    coverage.record_scope('python', 'complete')
+    assert state.unfinished_scopes == {}

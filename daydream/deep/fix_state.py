@@ -7,11 +7,7 @@ from typing import Any
 
 from daydream import git_ops
 from daydream.config import REVIEW_OUTPUT_FILE
-from daydream.deep.artifacts import (
-    fix_footprint_path,
-    generated_file_violations_path,
-    stabilization_failed_path,
-)
+from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.scope_issues import (
     ScopeEnforcementResult,
     enforce_authorized_fix_footprint,
@@ -111,7 +107,7 @@ def _evidence_payload(key: EvidenceKey) -> dict[str, Any]:
 def _write_footprint_audit(ctx: FlowContext, state: FixCycleState, key: EvidenceKey) -> None:
     deep_state = DeepState(ctx.data)
     atomic_write_json(
-        fix_footprint_path(deep_state.dd),
+        DeepArtifact.FIX_FOOTPRINT.at(deep_state.dd),
         state.footprint.audit_payload(state.session_id, evidence_key=_evidence_payload(key)),
     )
 
@@ -119,7 +115,7 @@ def _write_footprint_audit(ctx: FlowContext, state: FixCycleState, key: Evidence
 def _persist_stabilization_failure(ctx: FlowContext, state: FixCycleState, reason: str) -> None:
     deep_state = DeepState(ctx.data)
     atomic_write_json(
-        stabilization_failed_path(deep_state.dd),
+        DeepArtifact.STABILIZATION_FAILED.at(deep_state.dd),
         {"session_id": state.session_id, "reason": reason},
     )
 
@@ -209,7 +205,7 @@ def _strict_scope_and_scrub(
                 reason="restored an edit to existing generated output or its manifest",
             )
         atomic_write_json(
-            generated_file_violations_path(deep_state.dd),
+            DeepArtifact.GENERATED_FILE_VIOLATIONS.at(deep_state.dd),
             {
                 "session_id": state.session_id,
                 "violations": restore_paths,

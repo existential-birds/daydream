@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from daydream.deep.artifacts import verdicts_path
+from daydream.deep.artifacts import DeepArtifact
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.deep_orchestrator.support import _install_accept_gate_pipeline
@@ -47,7 +47,7 @@ async def test_start_at_fix_resume_reuses_unchanged_verdicts_and_reverifies_chan
     _mutate_item_evidence(multi_stack_target, item_uid="item:2", evidence="a.py:1 rewritten by hand")
     stub.calls.clear()
     assert await _run_deep(multi_stack_target, start_at="fix") == 0
-    second = json.loads(verdicts_path(multi_stack_target / ".daydream" / "deep").read_text())
+    second = json.loads(DeepArtifact.VERDICTS.at(multi_stack_target / ".daydream" / "deep").read_text())
     assert len([c for c in stub.calls if _is_verifier_prompt(c["prompt"])]) == len(verifier_calls_first)
     assert any(d["verdict_reused"] for d in second["selection"]["decisions"])
 
@@ -58,7 +58,7 @@ async def test_verify_all_reproduces_the_conservative_item_set(
     _install_accept_gate_pipeline(monkeypatch, multi_stack_target, mute_side_effects)
     exit_code = await _run_deep_with(multi_stack_target, verify_all=True)
     assert exit_code == 0
-    payload = json.loads(verdicts_path(multi_stack_target / ".daydream" / "deep").read_text())
+    payload = json.loads(DeepArtifact.VERDICTS.at(multi_stack_target / ".daydream" / "deep").read_text())
     assert payload["selection"]["mode"] == "verify_all"
     assert payload["selection"]["skipped"] == 0
     assert all(d["reason_code"] in {"verify_all", "exempt:structural", "exempt:wonder"}

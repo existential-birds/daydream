@@ -352,7 +352,7 @@ def build_default_profile() -> ReviewProfile:
                 "and decide whether its recommendation is consistent with trait/interface "
                 "specs and sibling implementations."
             ),
-            source="copied: daydream.deep.prompts.build_verification_prompt",
+            source="copied: daydream.deep.verification_prompts.build_verification_prompt",
         ),
     }
 

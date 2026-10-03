@@ -1009,14 +1009,10 @@ class TestUnwrapShellCommand:
     def test_unwrap_payload(self, command: str, expected: str) -> None:
         assert _unwrap_shell_command(command) == expected
 
-    async def test_pending_content_key_uses_raw_command(
+    async def test_duplicate_completion_does_not_reuse_consumed_start(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """A duplicate completion after FIFO exhaustion must match the raw-command key.
-
-        Stored commands are decoded, but registering/claiming by decoded text would
-        break this legacy fallback and emit an unmatched-result warning.
-        """
+        """Each idless start is consumed once, including wrapped shell commands."""
         raw = '/bin/zsh -lc "ls -la"'
         def line(event_type: str, item: dict[str, Any]) -> str:
             return json.dumps({"type": event_type, "item": item}, separators=(",", ":"))
@@ -1035,20 +1031,11 @@ class TestUnwrapShellCommand:
             events, _ = await replay_process(backend, mock_proc, Path("/tmp"), "M7 content key")
         starts = [e for e in events if isinstance(e, ToolStartEvent)]
         results = [e for e in events if isinstance(e, ToolResultEvent)]
-        # The parse site unwraps for the stored command but must NOT re-key by it.
         assert [s.input["command"] for s in starts] == ["echo one", "ls -la"]
-        # FIFO pairs the first two completions; the trailing duplicate must resolve
-        # via the content-key fallback keyed on the raw wrapped command.
         start_ids = [s.id for s in starts]
-        assert [r.id for r in results] == start_ids + [start_ids[1]], (
-            f"duplicate completion must resolve to its started item via the raw-command "
-            f"content key; starts={start_ids} results={[r.id for r in results]}"
-        )
+        assert [r.id for r in results] == start_ids + ["codex-unmatched-0"]
         warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-        assert not warnings, (
-            f"content-key fallback must key on the raw wrapped command, not the decoded "
-            f"payload; got warnings: {warnings}"
-        )
+        assert warnings == ["codex parser warning: unmatched tool result"]
 
     async def test_tool_supervisor_sees_cd_stripped_display_variant(self) -> None:
         """Supervisor ^make rules inspect decoded, cd-stripped commands.

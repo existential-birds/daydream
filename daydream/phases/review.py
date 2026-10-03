@@ -2,12 +2,13 @@
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 
 from daydream import agent, config as phase_config, git_ops, review_profile as _rp, ui
 from daydream.agent import (
+    StructuredOutputFailure,
     _validates_schema,
     resolve_gate,
 )
@@ -40,6 +41,7 @@ from daydream.deep.reuse_key import (
 )
 from daydream.deep.reuse_store import ReuseCache
 from daydream.deep.review_reuse import ReviewReuseUnit
+from daydream.diagnostics import exception_text
 from daydream.extensions import Registry, get_registry
 from daydream.hunk_index import load_hunk_index
 from daydream.phases.inputs import (
@@ -53,7 +55,6 @@ from daydream.phases.inputs import (
 from daydream.phases.schemas import ALTERNATIVE_REVIEW_SCHEMA, PER_STACK_RECORD_SCHEMA
 from daydream.prompt_budget import (
     INLINE_DIFF_BUDGET_BYTES,
-    PreparedSanctionedInputs,
     fits_inline_diff_budget,
     truncate_utf8_to_budget,
     uses_diff_reference,
@@ -67,6 +68,7 @@ from daydream.review_budget import (
     ReviewLimits,
 )
 from daydream.review_evidence import FinalizationContext
+from daydream.review_result import ReasonCode, ReviewCoverage, reason_for_budget, reason_for_exception
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.test_execution import (
     load_test_recipe,
@@ -183,7 +185,9 @@ async def phase_understand_intent(
         )
         if budget_reason is not None:
             raise ReviewBudgetExceeded("Intent analysis", budget_reason, output)
-        intent_text = output if isinstance(output, str) else str(output)
+        if not isinstance(output, str) or not output.strip():
+            raise ReviewOutputError(output)
+        intent_text = output
 
         agent.console.print()
         # Show the understanding the gate below asks about — the live transcript
@@ -298,6 +302,7 @@ async def phase_alternative_review(
         work.repo,
         prompt,
         output_schema=ALTERNATIVE_REVIEW_SCHEMA,
+        require_full_schema=True,
         phase=DaydreamPhase.ALTERNATIVES,
         review_limits=ReviewLimits(300, 90, 24),
         finalization_context=FinalizationContext(
@@ -318,15 +323,9 @@ async def phase_alternative_review(
     if budget_reason:
         raise ReviewBudgetExceeded("Alternatives", budget_reason, result)
 
-    if isinstance(result, dict) and "issues" in result:
-        issues = result["issues"]
-        if not isinstance(issues, list):
-            issues = []
-    else:
-        # Budget stops are handled by the orchestrator as incomplete coverage.
-        if not run_context.policy.quiet:
-            ui.print_warning(agent.console, f"TTT review returned unexpected result type: {type(result).__name__}")
-        issues = []
+    if not isinstance(result, dict) or not _validates_schema(result, ALTERNATIVE_REVIEW_SCHEMA):
+        raise ReviewOutputError(result)
+    issues = cast(list[dict[str, Any]], result["issues"])
 
     if issues:
         ui.print_info(agent.console, f"Found {len(issues)} issues")
@@ -335,6 +334,46 @@ async def phase_alternative_review(
         ui.print_info(agent.console, "No issues found — the implementation looks good")
 
     return issues
+
+
+def valid_record_artifact(
+    value: Any, *, scope_id: str, analyzed_revision: dict[str, Any],
+) -> bool:
+    """Validate persisted provider records, permitting only host identity metadata."""
+    if not isinstance(value, dict) or set(value) - {
+        "issues", "incomplete", "scope_id", "analyzed_revision", "originating_run_id",
+    }:
+        return False
+    if value.get("scope_id") != scope_id or value.get("analyzed_revision") != analyzed_revision:
+        return False
+    if not isinstance(value.get("originating_run_id"), str) or not value["originating_run_id"]:
+        return False
+    if "incomplete" in value and value["incomplete"] is not True:
+        return False
+    issues = value.get("issues")
+    if not isinstance(issues, list) or any(not isinstance(issue, dict) for issue in issues):
+        return False
+    for issue in issues:
+        uid = issue.get("uid")
+        if not isinstance(uid, str):
+            return False
+        scope, _, ordinal = uid.rpartition(':')
+        if scope != scope_id or not ordinal.isascii() or not ordinal.isdigit() or ordinal.startswith('0'):
+            return False
+    cleaned = [{key: field for key, field in issue.items() if key != "uid"} for issue in issues]
+    return _validates_schema({"issues": cleaned}, PER_STACK_RECORD_SCHEMA)
+
+
+class ReviewOutputError(RuntimeError):
+    """Invalid reviewer output with a typed validation reason."""
+
+    def __init__(self, output: Any) -> None:
+        self.reason_code = self.reason = ReasonCode(
+            output.reason if isinstance(output, StructuredOutputFailure)
+            else "missing_output" if output is None or isinstance(output, str) and not output.strip()
+            else "malformed_output"
+        )
+        super().__init__(f"{self.reason.value}: reviewer response did not satisfy its schema")
 
 
 # Deep-mode: per-stack fan-out
@@ -378,6 +417,7 @@ async def phase_per_stack_reviews(
     run_context: RunContext | None = None,
     reuse_cache: ReuseCache | None = None,
     phase_identity: PhaseIdentity | None = None,
+    coverage: ReviewCoverage,
 ) -> tuple[dict[str, Path], dict[str, str]]:
     """Run scoped per-stack reviews under the backend fan-out limit and record each result.
 
@@ -396,7 +436,6 @@ async def phase_per_stack_reviews(
             "discovery.per_stack", "discovery.structural", "discovery.generic_fallback",
         )}
     results: dict[str, Path] = {}
-    failures: dict[str, str] = {}
     limiter = anyio.CapacityLimiter(
         effective_fanout_concurrency(10, backend)
     )
@@ -410,17 +449,6 @@ async def phase_per_stack_reviews(
 
     hunk_index = load_hunk_index(deep_dir_path.parent)
 
-    prepared: dict[str, tuple[str | None, PreparedSanctionedInputs | None]] = {}
-    for stack in stacks:
-        inline_diff = (
-            _diff_blocks_for_files(diff_text, stack.files)
-            if not read_only and diff_text is not None and stack.stack_name != STRUCTURE_STACK_NAME else None
-        )
-        inputs = _prepare_existing_phase_inputs(
-            backend, work, common_inputs | ({} if inline_diff is not None else {"diff": diff_path}),
-            capture_without_session=True, exploration_dir=exploration_dir, read_only=read_only,
-        )
-        prepared[stack.stack_name] = (inline_diff, inputs)
     structural_records = per_stack_records_path(deep_dir_path, STRUCTURE_STACK_NAME)
     structural_output = per_stack_review_path(deep_dir_path, STRUCTURE_STACK_NAME)
     # A rerun supersedes structural output from any earlier attempt.
@@ -433,9 +461,16 @@ async def phase_per_stack_reviews(
         phase=DaydreamPhase.DEEP,
         descriptors=dispatch_descriptors,
     ) as dispatch:
-        async def _review_stack(stack: "StackAssignment") -> None:
+        async def _review_stack_impl(stack: "StackAssignment") -> None:
             output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
-            inline_diff, stack_sanctioned_inputs = prepared[stack.stack_name]
+            inline_diff = (
+                _diff_blocks_for_files(diff_text, stack.files)
+                if not read_only and diff_text is not None and stack.stack_name != STRUCTURE_STACK_NAME else None
+            )
+            stack_sanctioned_inputs = _prepare_existing_phase_inputs(
+                backend, work, common_inputs | ({} if inline_diff is not None else {"diff": diff_path}),
+                capture_without_session=True, exploration_dir=exploration_dir, read_only=read_only,
+            )
             reuse_unit: ReviewReuseUnit | None = None
             if reuse_cache is not None and phase_identity is not None:
                 stack_payload = shard_key_payload(
@@ -463,17 +498,25 @@ async def phase_per_stack_reviews(
                     components["hunk_slice"] = digest_text("")
                     components["assigned_blobs"] = blob_map_digest(work.repo, [])
                     components["frontier_blobs"] = blob_map_digest(work.repo, [])
-                reuse_unit = ReviewReuseUnit(
-                    reuse_cache, f"shard:{stack.stack_name}", phase_identity, stack_payload,
-                )
-                if reuse_unit.restore(
-                    deep_dir_path,
-                    on_restore_failure=lambda reason: ui.print_warning(
-                        agent.console, f"Reuse restore failed for {stack.stack_name}: {reason}"
-                    ),
-                ):
-                    results[stack.stack_name] = output_path
-                    return
+                reuse_unit = ReviewReuseUnit(reuse_cache, f"shard:{stack.stack_name}", phase_identity,
+                                             stack_payload, coverage)
+                hit = reuse_unit.lookup(deep_dir_path, on_restore_failure=lambda reason: ui.print_warning(
+                    agent.console, f"Reuse restore failed for {stack.stack_name}: {reason}"))
+                if hit is not None:
+                    try:
+                        restored = json.loads(per_stack_records_path(deep_dir_path, stack.stack_name).read_text())
+                        cache_valid = valid_record_artifact(
+                            restored, scope_id=stack.stack_name, analyzed_revision=coverage.revision.to_dict(),
+                        ) and restored.get("incomplete") is not True
+                    except (OSError, ValueError):
+                        cache_valid = False
+                    if cache_valid:
+                        reuse_unit.record_hit(hit)
+                        results[stack.stack_name] = output_path
+                        coverage.record_scope(stack.stack_name, "complete")
+                        return
+                    ui.print_warning(agent.console,
+                                     f"Cached records for {stack.stack_name} are invalid; rerunning review")
             per_stack_records_path(deep_dir_path, stack.stack_name).unlink(missing_ok=True)
             pointer_dir = _pointer_dir(stack_sanctioned_inputs, exploration_dir)
             prompt_name, strategy_name = {
@@ -530,6 +573,7 @@ async def phase_per_stack_reviews(
                             prompt,
                             phase=DaydreamPhase.DEEP,
                             output_schema=PER_STACK_RECORD_SCHEMA,
+                            require_full_schema=True,
                             review_limits=ReviewLimits(),
                             finalization_context=task_context,
                             tool_call_budget=phase_config.DEFAULT_TOOL_CALL_BUDGET,
@@ -539,47 +583,64 @@ async def phase_per_stack_reviews(
                             run_context=run_context,
                         )
                 except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
-                    failures[stack_name] = f"{type(e).__name__}: {e}"
+                    coverage.record_scope(stack_name, "failed",
+                        reasons=(reason_for_exception(e),),
+                        diagnostic=f"{type(e).__name__}: {exception_text(e) or '(unavailable)'}")
                     return
                 if budget_reason:
-                    # Report truncation under Uncovered stacks instead of claiming a complete review.
-                    failures[stack_name] = f"budget exhausted: {budget_reason}"
-                    if not _validates_schema(structured, PER_STACK_RECORD_SCHEMA):
-                        return
-                if not isinstance(structured, dict):
-                    failures[stack_name] = "no structured output produced"
+                    partial_valid = _validates_schema(structured, PER_STACK_RECORD_SCHEMA)
+                    status = ("uncovered" if budget_reason == "pipeline_budget_exceeded" and not partial_valid
+                              else "incomplete")
+                    coverage.record_scope(stack_name, status, reasons=(reason_for_budget(budget_reason),),
+                                          partial_evidence=partial_valid,
+                                          diagnostic=f"budget exhausted: {budget_reason}")
+                if not _validates_schema(structured, PER_STACK_RECORD_SCHEMA):
+                    if not budget_reason:
+                        error = ReviewOutputError(structured)
+                        coverage.record_scope(stack_name, "failed", reasons=(error.reason,), diagnostic=str(error))
                     return
-                raw_issues = structured.get("issues")
-                raw_issues = raw_issues if isinstance(raw_issues, list) else []
-                # Drop non-record entries before ordinal uid assignment. Copy
-                # records so host ids never mutate backend-owned trajectory data
-                # or leak between stack calls sharing the same result objects.
-                issues = [dict(issue) for issue in raw_issues if isinstance(issue, dict)]
+                issues = [dict(issue) for issue in structured["issues"]]
                 # Uids are host-only fields, added after strict model validation.
                 stamp_record_uids(issues, stack_name)
                 try:
                     per_stack_records_path(deep_dir_path, stack_name).write_text(
                         json.dumps({"issues": issues,
-                                    **({"incomplete": True} if budget_reason else {})}, indent=2)
+                                    **({"incomplete": True} if budget_reason else {}),
+                                    "scope_id": stack_name,
+                                        "analyzed_revision": coverage.revision.to_dict(),
+                                        "originating_run_id": coverage.run_id},
+                                   indent=2)
                     )
                     write_review_markdown(output_path, issues)
-                except OSError as exc:
-                    failures[stack_name] = f"{type(exc).__name__}: {exc}"
+                except (OSError, ValueError, TypeError) as exc:
+                    coverage.record_scope(stack_name, "failed",
+                        reasons=(*coverage.scopes[stack_name]["reason_codes"], ReasonCode.MALFORMED_ARTIFACT),
+                        diagnostic=f"{type(exc).__name__}: {exception_text(exc) or '(unavailable)'}")
                     return
                 results[stack_name] = output_path
+                if budget_reason is None:
+                    coverage.record_scope(stack_name, "complete")
                 if reuse_unit is not None and budget_reason is None:
                     records_path = per_stack_records_path(deep_dir_path, stack_name)
-                    reuse_unit.store(lambda: {
-                        records_path.name: records_path.read_bytes(),
-                        output_path.name: output_path.read_bytes(),
-                    })
+                    reuse_unit.store(lambda: {records_path.name: records_path.read_bytes(),
+                                             output_path.name: output_path.read_bytes()})
+
+        async def _review_stack(stack: "StackAssignment") -> None:
+            try:
+                await _review_stack_impl(stack)
+            except Exception as exc:  # noqa: BLE001 -- isolate ordinary sibling failures; cancellation propagates
+                reason = (ReasonCode.MALFORMED_ARTIFACT if isinstance(exc, (OSError, ValueError, TypeError))
+                          else ReasonCode.UNEXPECTED_ANALYSIS_FAILURE)
+                coverage.record_scope(stack.stack_name, "failed", reasons=(reason,),
+                                      diagnostic=f"{type(exc).__name__}: {exception_text(exc) or '(unavailable)'}")
 
         async with anyio.create_task_group() as tg:
             for stack in stacks:
                 tg.start_soon(_review_stack, stack)
-        if dispatch is not None and failures:
+        if dispatch is not None and coverage.unfinished_scopes:
             finish_partial_or_failed(dispatch, results)
 
+    failures = coverage.unfinished_scopes
     if failures:
         lines = "\n".join(f"  - {name}: {reason}" for name, reason in sorted(failures.items()))
         ui.print_warning(

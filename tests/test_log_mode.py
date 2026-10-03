@@ -119,7 +119,7 @@ def test_log_mode_rendering(
     forbidden: tuple[str, ...],
 ) -> None:
     """Render only the event fields appropriate to each log-mode scenario."""
-    install_backend(ScriptedBackend(events=events, retryable=False))
+    install_backend(ScriptedBackend(events=[*events, TextEvent("Update the changed code.")], retryable=False))
     config = make_config(tiny_diff_target, non_interactive=True, **config_overrides,)
     output = _capture_stdout_and_run(config, monkeypatch)
 
@@ -165,7 +165,8 @@ def test_log_mode_tool_event_redacts_credential_crossing_command_cap(
         command = cd_prefix + command
     event = ToolStartEvent(id="boundary-command", name=name, input={"command": command})
     install_backend(
-        ScriptedBackend(events=[event, ResultEvent(structured_output=None, continuation=None)], retryable=False)
+        ScriptedBackend(events=[event, TextEvent("Update the changed code."),
+                                ResultEvent(structured_output=None, continuation=None)], retryable=False)
     )
     config = make_config(tiny_diff_target, non_interactive=True, log_mode=True, quiet=True, output_mode="review")
 

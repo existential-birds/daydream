@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 import anyio
 import pytest
 
+from daydream.backends import AgentEvent, ResultEvent
 from daydream.deep.routing_record import read_routing_record, write_routing_record
 from daydream.eval.analyzer import analyze_routing
 from daydream.review_profile import ResolvedProfile
@@ -23,7 +25,7 @@ from tests.test_deep_orchestrator import MakeConfig, Mute
 #: is the one additive artifact issue #732 mandates (A12), so the gate subtracts it
 #: before comparing the two sides.
 _FORENSIC_BASELINE_DEEP_ARTIFACTS = frozenset({
-    "alternatives.json", "arbiter-complete.marker", "arbiter-input.json", "dedup-candidates.json", "diagram.json",
+    "alternatives.json", "adjudication-complete.marker", "arbiter-input.json", "dedup-candidates.json", "diagram.json",
     "diagram.md", "diff-key", "intent.md", "merged-items.json", "review-output.md", "stack-generic-records.json",
     "stack-generic-review.md", "stack-python-records.json", "stack-python-review.md", "stack-react-records.json",
     "stack-react-review.md", "stack-structure-records.json", "stack-structure-review.md",
@@ -36,7 +38,7 @@ _FORENSIC_BASELINE_DEEP_ARTIFACTS = frozenset({
 #: #1408 persists in the preamble. The gate subtracts all three before comparing
 #: against the baseline.
 _FORENSIC_ADDITIVE_DEEP_ARTIFACTS = frozenset(
-    {"latency-routing.json", "adjudication-provenance.json", "test-recipe.json"}
+    {"review-coverage.json","latency-routing.json", "adjudication-provenance.json", "test-recipe.json"}
 )
 
 #: The pre-#732 ``arbiter-input.json`` for the exact stub records below: the
@@ -128,7 +130,7 @@ async def test_forensic_reproduces_todays_wonder_and_arbiter_artifacts(
         monkeypatch, make_config, mute_side_effects, multi_stack_target, latency_profile="forensic",
         parse_severity="high",
     )
-    assert (deep / "arbiter-complete.marker").exists()
+    assert (deep / "adjudication-complete.marker").exists()
     assert not list(deep.glob("arbiter-group-*-input.json"))
     # A12: the profile work adds the routing record, and issue #735 adds the
     # adjudication provenance ledger; both are deliberate, so the gate subtracts
@@ -152,7 +154,7 @@ async def test_single_group_sharding_profile_matches_forensic_arbiter_artifacts(
         parse_severity="high",
     )
     assert json.loads((deep / "arbiter-input.json").read_text()) == _FORENSIC_BASELINE_ARBITER_INPUT
-    assert (deep / "arbiter-complete.marker").exists()
+    assert (deep / "adjudication-complete.marker").exists()
     assert not list(deep.glob("arbiter-group-*-input.json"))
     record = read_routing_record(deep)
     assert record["arbiter"]["sharded"] is False
@@ -161,7 +163,7 @@ async def test_single_group_sharding_profile_matches_forensic_arbiter_artifacts(
 async def test_forensic_resume_from_the_whole_block_marker_runs_no_arbiter_call(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """The documented `--start-at merge` contract still trusts arbiter-complete.marker."""
+    """The documented `--start-at merge` contract still trusts adjudication-complete.marker."""
     stub, _ = await _run_profile(
         monkeypatch, make_config, mute_side_effects, multi_stack_target, latency_profile="forensic",
         parse_severity="high",
@@ -187,7 +189,7 @@ async def test_multi_group_arbiter_applies_every_verdict_and_records_per_group_e
     groups = record["arbiter"]["groups"]
     assert len(groups) > 1
     assert all(group["effort"] in {"high", "xhigh"} for group in groups)
-    assert (deep / "arbiter-complete.marker").exists()
+    assert (deep / "adjudication-complete.marker").exists()
     # ARBITRATED is the stub arbiter's revised description prefix: its presence
     # proves `_apply_adjudication_verdicts` reconciled every group's verdicts
     # back onto the run-wide target ordinals after the fan-out.
@@ -211,7 +213,7 @@ async def test_resumed_run_reruns_only_incomplete_groups(
     # Simulate an interruption: the whole-block marker and one group's marker
     # are gone, the other groups' verdict artifacts survive on disk.
     rerun = groups[0]["group_id"]
-    (deep / "arbiter-complete.marker").unlink()
+    (deep / "adjudication-complete.marker").unlink()
     (deep / f"{rerun}-complete.marker").unlink()
 
     stub.calls.clear()
@@ -225,7 +227,7 @@ async def test_resumed_run_reruns_only_incomplete_groups(
     arbiter_calls = [call for call in stub.calls if "you are the arbiter" in call["prompt"].lower()]
     assert len(arbiter_calls) == 1
     assert f"{rerun}-input.json" in arbiter_calls[0]["prompt"]
-    assert (deep / "arbiter-complete.marker").exists()
+    assert (deep / "adjudication-complete.marker").exists()
     resumed_groups = {group["group_id"]: group for group in read_routing_record(deep)["arbiter"]["groups"]}
     assert resumed_groups[rerun]["reused"] is False
     for group in groups:
@@ -242,7 +244,7 @@ async def test_failed_group_fails_open_and_is_retried_on_resume(
     )
     groups = read_routing_record(deep)["arbiter"]["groups"]
     failed = groups[0]["group_id"]
-    (deep / "arbiter-complete.marker").unlink()
+    (deep / "adjudication-complete.marker").unlink()
     (deep / f"{failed}-complete.marker").unlink()
     stub.arbiter_fail_group = failed
     stub.calls.clear()
@@ -257,7 +259,7 @@ async def test_failed_group_fails_open_and_is_retried_on_resume(
     # The run continued (fail-open), but the block is not complete.
     failed_record = read_routing_record(deep)["arbiter"]
     assert failed_record["failed_groups"] == [failed]
-    assert not (deep / "arbiter-complete.marker").exists()
+    assert not (deep / "adjudication-complete.marker").exists()
 
     stub.arbiter_fail_group = None
     stub.calls.clear()
@@ -273,4 +275,56 @@ async def test_failed_group_fails_open_and_is_retried_on_resume(
     assert f"{failed}-input.json" in retry_calls[0]["prompt"]
     retried = read_routing_record(deep)["arbiter"]
     assert retried["failed_groups"] == []
-    assert (deep / "arbiter-complete.marker").exists()
+    assert (deep / "adjudication-complete.marker").exists()
+
+
+async def test_resume_retains_confirmed_demoted_findings_without_second_suppression(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
+) -> None:
+    silence(monkeypatch)
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.parse_severity, stub.merge_echo_records, stub.suppression_keep = 'high', True, False
+    execute = stub.execute
+
+    async def demote(cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+        async for event in execute(cwd, prompt, *args, **kwargs):
+            if 'you are the arbiter' in prompt.lower() and isinstance(event, ResultEvent):
+                assert isinstance(event.structured_output, dict)
+                payload = {'findings': [{**row, 'severity': 'low', 'confidence': 'HIGH'}
+                                       for row in event.structured_output['findings']]}
+                event = replace(event, structured_output=payload)
+            yield event
+
+    monkeypatch.setattr(stub, 'execute', demote)
+    mute_side_effects()
+    config = make_config(multi_stack_target, latency_profile='balanced', precision_mode=True,
+                         review_profile=independent_alternatives_profile())
+    assert await run(config) == 0
+    deep = multi_stack_target / '.daydream/deep'
+    first = _merged_items(deep)
+    demoted = [row for row in first if row['description'].startswith('ARBITRATED:')]
+    assert demoted and all(row['severity'] == 'low' for row in demoted)
+    stub.calls.clear()
+    assert await run(replace(config, start_at='merge')) == 0
+    assert not any('you are the arbiter' in call['prompt'].lower() or
+                   'you are the suppression reviewer' in call['prompt'].lower() for call in stub.calls)
+    assert _merged_items(deep) == first
+
+
+async def test_no_target_completion_reruns_when_selection_policy_changes(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
+) -> None:
+    base = independent_alternatives_profile()
+    pipeline = replace(base.profile.pipeline, arbitration=replace(
+        base.profile.pipeline.arbitration, min_severity='high', contested_location=False))
+    profile = replace(base, profile=replace(base.profile, pipeline=pipeline))
+    stub, deep = await _run_profile(monkeypatch, make_config, mute_side_effects, multi_stack_target,
+        latency_profile='balanced', review_profile=profile, parse_severity='medium')
+    assert not any('you are the arbiter' in call['prompt'].lower() for call in stub.calls)
+    assert json.loads((deep / 'adjudication-complete.marker').read_text())['plan'] is None
+    changed = replace(profile, profile=replace(profile.profile, pipeline=replace(
+        pipeline, arbitration=replace(pipeline.arbitration, min_severity='medium'))))
+    stub.calls.clear()
+    assert await run(make_config(multi_stack_target, start_at='merge', latency_profile='balanced',
+                                 review_profile=changed)) == 0
+    assert any('you are the arbiter' in call['prompt'].lower() for call in stub.calls)

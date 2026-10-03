@@ -7,8 +7,8 @@ import pytest
 
 from daydream.backends.pi import PiBackend
 from daydream.deep.detection import StackAssignment
-from daydream.phases import phase_per_stack_reviews
 from daydream.run_context import InteractionPolicy, RunContext
+from tests.harness.review_result import review_scopes
 
 
 async def test_small_pi_review_keeps_structural_dispatch(
@@ -36,7 +36,7 @@ async def test_small_pi_review_keeps_structural_dispatch(
         return {"issues": []}, None, None
 
     monkeypatch.setattr("daydream.agent.run_agent", review)
-    results, failures = await phase_per_stack_reviews(PiBackend(model="fixture"), make_work(tmp_path),
+    results, failures = await review_scopes(PiBackend(model="fixture"), make_work(tmp_path),
         [StackAssignment("python", ["app.py"]), StackAssignment("structure", ["app.py"])],
         diff_path=diff, diff_text=diff.read_text(), intent_path=intent,
         alternatives_path=tmp_path / "alternatives.json", allow_standalone=True,

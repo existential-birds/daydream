@@ -4,11 +4,15 @@ Real-path pipeline coverage lives in tests/deep_orchestrator/."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
+
+import pytest
 
 from daydream.deep.records import (
     ITEM_UID_KEY,
     RECORD_UID_KEY,
+    RecordPool,
     duplicate_record_uids,
     item_source_uids,
     item_uid,
@@ -21,6 +25,23 @@ from daydream.deep.records import (
     stamp_record_uids,
     union_source_uids,
 )
+from tests.harness.review_result import records_artifact, review_coverage
+
+
+def test_record_pool_retains_scope_order_and_metadata_through_adjudication(tmp_path: Path) -> None:
+    coverage = review_coverage(scope_ids=("structure", "python", "react"))
+    records = [{"uid": f"{scope}:1"} for scope in ("structure", "python", "react")]
+    paths = {scope: tmp_path / f"stack-{scope}-records.json" for scope in ("structure", "python", "react")}
+    pool = RecordPool({scope: records_artifact(coverage, scope, [record])
+                       for scope, record in zip(paths, records, strict=True)}, paths)
+    assert pool.records == [records[1], records[2], records[0]]
+    pool.replace([records[1], records[0]])
+    pool.save()
+    assert pool.language == [records[1]] and pool.structural == [records[0]]
+    assert pool.scopes["react"]["issues"] == []
+    assert all(value["originating_run_id"] == coverage.run_id for value in pool.scopes.values())
+    with pytest.raises(ValueError, match="scope"):
+        pool.replace([{"uid": "go:1"}])
 
 
 def test_uid_format_is_stack_name_and_one_based_ordinal() -> None:
@@ -108,8 +129,8 @@ def test_stamp_handles_an_empty_list() -> None:
     stamp_record_uids(records, "python")
     assert records == []
 
-def test_backfill_reproduces_the_uids_the_producing_run_minted() -> None:
-    """Deterministic stack/position identities backfill pre-UID artifacts."""
+def test_independent_producer_batches_mint_identical_record_uids() -> None:
+    """The same producer inventory deterministically mints the same identities."""
     at_birth: list[dict[str, Any]] = [{"id": 1}, {"id": 2}, {"id": 3}]
     stamp_record_uids(at_birth, "python")
     reloaded_without_uids: list[dict[str, Any]] = [{"id": 1}, {"id": 2}, {"id": 3}]

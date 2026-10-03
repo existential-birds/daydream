@@ -208,11 +208,6 @@ class TestAndHealResult:
     ignored: bool
     attempts: tuple[TestAttemptEvidence, ...]
 
-    def __iter__(self) -> Any:
-        """Keep tuple unpacking source-compatible while callers migrate."""
-        return iter((self.passed, self.retries, self.proceed))
-
-
 @bind_resolved_run_context
 async def phase_test_once(
     backend: Backend,

@@ -48,13 +48,11 @@ def archive_recorder_provenance_from_snapshot(
     if len(roots) != 1:
         raise ValueError("frozen root trajectory is missing")
     try:
-        payload = json.loads(roots[0].json_bytes)
+        payload = roots[0].validated_payload(session_id)
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("frozen root trajectory is malformed") from exc
-    if not isinstance(payload, dict) or (
-        payload.get("session_id") != session_id or payload.get("trajectory_id") != session_id
-    ):
-        raise ValueError("frozen root trajectory identity is malformed")
+    except ValueError as exc:
+        raise ValueError(f"frozen root trajectory {exc}") from exc
     extra = payload.get("extra", {})
     if not isinstance(extra, dict):
         raise ValueError("frozen root trajectory extra is malformed")

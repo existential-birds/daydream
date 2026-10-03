@@ -10,23 +10,18 @@ from typing import Any
 import anyio
 import pytest
 
-from daydream import git_ops, runner as _runner
+from daydream import runner as _runner
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep import dedup as _dedup, detection as _detection, prompts as _prompts
 from daydream.deep.artifacts import (
-    arbiter_input_path,
+    DeepArtifact,
     deep_dir,
-    merged_items_path,
-    merged_report_path,
     per_stack_records_path,
-    verdicts_path,
 )
 from daydream.deep.diff import _diff_changed_files
 from daydream.deep.prompts import build_merge_prompt
-from daydream.findings import build_findings_artifact, load_findings_artifact, write_findings_artifact
-from daydream.pr_review import PRInfo, parsed_issues_from_items
-from daydream.review_budget import review_warnings
+from daydream.findings import load_findings_artifact
 from daydream.run_config import RunConfig
 from daydream.runner import _resolve_backend
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
@@ -35,12 +30,14 @@ from tests.deep_orchestrator.support import (
     _install_post_recorder,
 )
 from tests.harness.review_profile import default_strategy as _default_strategy, independent_alternatives_profile
+from tests.harness.review_result import saved_coverage
 from tests.test_deep_orchestrator import (
     _TWIN_DESCRIPTION,
     Mute,
     _force_interactive,
     _install_model_capturing_stubs,
     _install_stub_backend,
+    _pin_findings_pr,
     _prime_merge_resume,
     _profile_with_pipeline,
     _record,
@@ -66,10 +63,10 @@ async def test_cold_empty_builtin_merge_uses_no_provider_and_writes_canonical_re
     deep = multi_stack_target / ".daydream" / "deep"
     payload = json.loads((deep / "merged-items.json").read_text())
     assert payload == {"items": [], "held": []}
-    assert merged_report_path(deep).is_file()
-    assert (multi_stack_target / REVIEW_OUTPUT_FILE).read_text() == merged_report_path(deep).read_text()
+    assert DeepArtifact.MERGED_REPORT.at(deep).is_file()
+    assert (multi_stack_target / REVIEW_OUTPUT_FILE).read_text() == DeepArtifact.MERGED_REPORT.at(deep).read_text()
     assert not (deep / "merge-failed.txt").exists()
-    assert not (deep / "per-stack-failures.json").exists()
+    assert not saved_coverage(deep).unfinished_scopes
     events = json.loads(trajectory.read_text())["extra"]["phase_events"]
     for phase, stage in (("merge", "cross-stack-agent"), ("deep", "supervise")):
         lifecycle = [event for event in events if event["phase"] == phase
@@ -93,7 +90,7 @@ async def test_cold_structural_only_merge_preserves_identity_and_supervises_find
     assert sum("supervisor adjudication" in call["prompt"].lower() for call in backend.calls) == 1
     deep = multi_stack_target / ".daydream" / "deep"
     records = json.loads(per_stack_records_path(deep, "structure").read_text())["issues"]
-    items = json.loads(merged_items_path(deep).read_text())["items"]
+    items = json.loads(DeepArtifact.MERGED_ITEMS.at(deep).read_text())["items"]
     assert len(items) == 1
     assert items[0]["description"] == structural["description"]
     assert items[0]["lens"] == "structural"
@@ -113,34 +110,33 @@ async def test_cold_empty_merge_preserves_failed_stack_diagnostics(
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
 
     policy = DaydreamFileConfig(supervisor="llm", tool_supervisor="rules", tool_bash_deny=["blocked-review-tool"])
-    config = empty_review_config(multi_stack_target, tmp_path / "trajectory.json", file_config=policy)
+    pr = _pin_findings_pr(monkeypatch, multi_stack_target)
+    output = tmp_path / "findings.json"
+    config = empty_review_config(multi_stack_target, tmp_path / "trajectory.json", file_config=policy,
+                                 findings_out=str(output), pr_number=pr.number)
     assert await _runner.run(config) == 0
 
     assert not any("cross-stack merge agent" in call["prompt"].lower() for call in backend.calls)
     assert not any("supervisor adjudication" in call["prompt"].lower() for call in backend.calls)
     deep = multi_stack_target / ".daydream" / "deep"
-    assert json.loads(merged_items_path(deep).read_text()) == {"items": [], "held": []}
-    failures = json.loads((deep / "per-stack-failures.json").read_text())
+    assert json.loads(DeepArtifact.MERGED_ITEMS.at(deep).read_text()) == {"items": [], "held": []}
+    failures = saved_coverage(deep).unfinished_scopes
     assert "python" in failures
     assert "python" in capsys.readouterr().out
     assert "Review incomplete" in (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
-    assert "python" in merged_report_path(deep).read_text()
-    # Exercise the same canonical loader and strict handoff schema as publication,
-    # with local Git objects providing the PR diff rather than another model call.
-    head = git_ops.head_sha(multi_stack_target)
-    base = git_ops.resolve_diff_merge_base(multi_stack_target, "main", head)
-    pr = PRInfo(number=7, head_sha=head, base_sha=base, base_ref="main", head_ref="feature",
-                owner="test", repo="fixture", url="https://github.com/test/fixture/pull/7")
-    items = json.loads(merged_items_path(deep).read_text())["items"]
-    warnings = review_warnings(deep)
-    artifact = build_findings_artifact(multi_stack_target, pr, parsed_issues_from_items(items),
-                                      run_info=None, review_warnings=warnings)
-    output = tmp_path / "findings.json"
-    write_findings_artifact(output, artifact)
-    loaded = load_findings_artifact(output, expected_repo="test/fixture", expected_pr_number=7, expected_head_sha=head)
+    assert "python" in DeepArtifact.MERGED_REPORT.at(deep).read_text()
+    loaded = load_findings_artifact(output, expected_repo="o/r", expected_pr_number=pr.number,
+                                    expected_head_sha=pr.head_sha)
     assert loaded.findings == []
-    assert loaded.review_warnings == warnings
     assert any("python" in warning for warning in loaded.review_warnings)
+    public = json.loads(output.read_text())
+    assert public["schema_version"] == 2
+    result = public["terminal_result"]
+    assert result["analysis_state"] == "incomplete"
+    assert result["pipeline_state"] == "completed"
+    assert set(result["completed_stacks"]) == {"generic", "react", "structure"}
+    failed_scope = next(row for row in result["stack_outcomes"] if row["scope_id"] == "python")
+    assert failed_scope["reason_codes"] == ["policy_veto" if budget_stop else "backend_failure"]
     if budget_stop:
         assert failures["python"].startswith("budget exhausted:")
     else:
@@ -159,7 +155,8 @@ async def test_cold_merge_with_model_owned_inputs_or_custom_strategy_dispatches(
         backend.merge_echo_records = True
     elif input_kind == "alternatives":
         backend.alternatives = [{"id": 1, "title": "Alternative design", "description": "Missing reusable boundary",
-                                 "recommendation": "Extract boundary", "severity": "low", "files": ["api.py"]}]
+                                 "recommendation": "Extract boundary", "severity": "low", "files": ["api.py"],
+                                 "confidence": "MEDIUM", "rationale": "Boundary is reused", "evidence": "api.py:1"}]
         config_overrides["review_profile"] = independent_alternatives_profile()
     else:
         resolved = _profile_with_pipeline()
@@ -173,10 +170,12 @@ async def test_cold_merge_with_model_owned_inputs_or_custom_strategy_dispatches(
 
     assert sum("cross-stack merge agent" in call["prompt"].lower() for call in backend.calls) == 1
     deep = multi_stack_target / ".daydream" / "deep"
-    assert merged_items_path(deep).is_file()
+    assert DeepArtifact.MERGED_ITEMS.at(deep).is_file()
     if input_kind == "language":
-        assert json.loads(merged_items_path(deep).read_text())["items"][0]["description"] == "Language defect"
-        assert sum("supervisor adjudication" in call["prompt"].lower() for call in backend.calls) == 1
+        items = json.loads(DeepArtifact.MERGED_ITEMS.at(deep).read_text())["items"]
+        assert items[0]["description"] == "Language defect"
+        supervisors = sum("supervisor adjudication" in call["prompt"].lower() for call in backend.calls)
+        assert supervisors == 1
     if input_kind == "alternatives":
         assert json.loads((deep / "alternatives.json").read_text()) == backend.alternatives
 
@@ -321,7 +320,7 @@ def test_merge_prompt_emits_related_files_instruction() -> None:
 async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A per-stack agent failure must: 1) persist to per-stack-failures.json under .daydream/deep/, 2) appear in
+    """A per-stack agent failure must: 1) persist to typed review coverage under .daydream/deep/, 2) appear in
     the merge prompt under an 'Uncovered stacks' block, so the merge agent can call it out instead of silently
     ignoring the gap."""
     _silence(monkeypatch)
@@ -353,9 +352,7 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
 
-    failures_p = multi_stack_target / ".daydream" / "deep" / "per-stack-failures.json"
-    assert failures_p.is_file(), "failures file should be persisted for merge-resume"
-    failures_payload = json.loads(failures_p.read_text())
+    failures_payload = saved_coverage(multi_stack_target / ".daydream/deep").unfinished_scopes
     assert "react" in failures_payload
     assert "simulated react failure" in failures_payload["react"]
 
@@ -388,7 +385,10 @@ async def test_resume_merge_allows_missing_records_for_failed_stacks(
     deep = _prime_merge_resume(multi_stack_target, python=[_record(description="py issue")],
         react=[_record(description="tsx issue", file="App.tsx")], structure=[_record(description="structural issue")],
     )
-    (deep / "per-stack-failures.json").write_text(json.dumps({"generic": "simulated generic failure"}))
+    coverage = saved_coverage(deep)
+    coverage.record_scope("generic", "failed", reasons=("backend_failure",),
+                          diagnostic="simulated generic failure")
+    (deep / "review-coverage.json").write_text(json.dumps(coverage.to_dict()))
 
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
     assert exit_code == 0
@@ -411,10 +411,10 @@ async def test_orchestrator_partitions_structural_records_from_merge(
 
     # The structural record carries a sentinel id so we can verify it never lands
     # in the dedup input lists.
-    _prime_merge_resume(multi_stack_target, python=[_record(id="py-1", description="py issue")],
-        react=[_record(id="react-1", description="tsx issue", file="App.tsx")],
-        generic=[_record(id="generic-1", description="docs issue", file="README.md")],
-        structure=[_record(id="structure-1", description="1000-line file budget violated")],
+    _prime_merge_resume(multi_stack_target, python=[_record(id=1, description="py issue")],
+        react=[_record(id=2, description="tsx issue", file="App.tsx")],
+        generic=[_record(id=3, description="docs issue", file="README.md")],
+        structure=[_record(id=4, description="1000-line file budget violated")],
     )
 
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
@@ -429,7 +429,7 @@ async def test_orchestrator_partitions_structural_records_from_merge(
 
     # (2) The structural sentinel record must NOT appear in either dedup input.
     def _has_structure(records: list[dict[str, Any]]) -> bool:
-        return any(str(r.get("id", "")).startswith("structure") for r in records)
+        return any(r.get("id") == 4 for r in records)
 
     assert not _has_structure(captured_dedup_records["records"]), (
         f"structural records leaked into build_dedup_candidates: {captured_dedup_records['records']}"
@@ -476,14 +476,14 @@ async def test_structural_language_twin_is_arbitrated_and_reported_once(
     assert await _run_deep(multi_stack_target) == 0
 
     deep = deep_dir(multi_stack_target, allow_standalone=True)
-    arbiter_input = json.loads(arbiter_input_path(deep).read_text())
+    arbiter_input = json.loads(DeepArtifact.ARBITER_INPUT.at(deep).read_text())
     observed = sorted((record["file"], record["line"], record["severity"]) for record in arbiter_input)
     expected = sorted([("api.py", 1, "medium"), ("api.py", structural_line, "high")])
     assert observed == expected, arbiter_input
     structural = json.loads(per_stack_records_path(deep, "structure").read_text())
     assert structural["issues"][0]["description"].startswith("ARBITRATED: ")
 
-    items = json.loads(merged_items_path(deep).read_text())["items"]
+    items = json.loads(DeepArtifact.MERGED_ITEMS.at(deep).read_text())["items"]
     twins = [item for item in items if item["file"] == "api.py" and _TWIN_DESCRIPTION in item["description"]]
     assert len(twins) == 1, twins
     assert twins[0]["severity"] == "high"
@@ -513,7 +513,8 @@ async def test_precision_mode_suppression_never_sees_structural_records(
 
     assert await _run_deep(multi_stack_target, precision_mode=True) == 0
 
-    items = json.loads(merged_items_path(deep_dir(multi_stack_target, allow_standalone=True)).read_text())["items"]
+    deep = deep_dir(multi_stack_target, allow_standalone=True)
+    items = json.loads(DeepArtifact.MERGED_ITEMS.at(deep).read_text())["items"]
     descriptions = [i["description"] for i in items]
     # The borderline LANGUAGE finding is suppressed (that is the pass working).
     assert not any("Borderline python nit" in d for d in descriptions), descriptions
@@ -552,11 +553,11 @@ async def test_distinct_structural_finding_survives_the_fold(multi_stack_target:
     stub.parse_by_stack = overrides
     assert await _run_deep(multi_stack_target) == 0
     dd = deep_dir(multi_stack_target, allow_standalone=True)
-    items = json.loads(merged_items_path(dd).read_text())["items"]
+    items = json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text())["items"]
     api_items = sorted(i["description"] for i in items if i["file"] == "api.py")
     assert len(api_items) == 2, f"a distinct structural finding was folded away: {api_items}"
     assert any(i["lens"] == "structural" for i in items)
-    assert "## Structural Review" in merged_report_path(dd).read_text()
+    assert "## Structural Review" in DeepArtifact.MERGED_REPORT.at(dd).read_text()
 
 async def test_resume_fix_skips_pr_post(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _silence(monkeypatch)
@@ -704,7 +705,7 @@ async def test_verifier_runs_after_merge_before_fix(
     )
 
     # Verdicts JSON lands on disk at the orchestrator-controlled path.
-    expected_path = verdicts_path(multi_stack_target / ".daydream" / "deep")
+    expected_path = DeepArtifact.VERDICTS.at(multi_stack_target / ".daydream" / "deep")
     assert expected_path == multi_stack_target / ".daydream" / "deep" / "recommendation-verdicts.json"
     assert expected_path.is_file(), f"verdicts file missing at {expected_path}"
 

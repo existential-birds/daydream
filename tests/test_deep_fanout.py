@@ -14,9 +14,9 @@ from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep import prompts as _prompts, sharding
 from daydream.deep.artifacts import deep_dir as _deep_dir, per_stack_records_path
 from daydream.deep.detection import StackAssignment, detect_stacks
-from daydream.phases import phase_per_stack_reviews
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
+from tests.harness.review_result import review_scopes
 from tests.harness.trajectory import (
     dispatch_descriptors as _dispatch_descriptors,
     dispatch_encloses_children as _dispatch_encloses_children,
@@ -55,7 +55,7 @@ async def _run_per_stack(
     stacks: list[StackAssignment],
 ) -> tuple[dict[str, Path], dict[str, str]]:
     diff, intent, alts = _mk_context_files(tmp_path)
-    return await phase_per_stack_reviews(
+    results, failures = await review_scopes(
         backend,
         make_work(tmp_path),
         stacks,
@@ -64,6 +64,7 @@ async def _run_per_stack(
         alternatives_path=alts,
         allow_standalone=True,
     )
+    return results, failures
 
 
 async def test_budget_checkpoint_is_persisted_with_incomplete_coverage(
@@ -74,7 +75,6 @@ async def test_budget_checkpoint_is_persisted_with_incomplete_coverage(
     async def checkpoint(*args: Any, **kwargs: Any) -> Any:
         return {"issues": [issue]}, None, "wall_budget_exceeded"
     monkeypatch.setattr("daydream.agent.run_agent", checkpoint)
-    diff, intent, alts = _mk_context_files(tmp_path)
     _, failures = await _run_per_stack(tmp_path, make_work, _review_backend(), _mk_stacks()[:1])
     assert "python" in failures
     saved = json.loads(per_stack_records_path(tmp_path / ".daydream/deep", "python").read_text())
@@ -133,11 +133,13 @@ async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work: Callable[..
     # the records artifact exists and carries the declared issues.
 
     deep_dir_path = _deep_dir(tmp_path, allow_standalone=True)
-    declared: dict[str, list[Any]] = {"issues": []}
     for name in results:
         records = per_stack_records_path(deep_dir_path, name)
         assert records.is_file(), f"missing {records.name} for {name}"
-        assert json.loads(records.read_text()) == declared
+        saved = json.loads(records.read_text())
+        assert saved["issues"] == []
+        assert saved["scope_id"] == name and saved["originating_run_id"] == "scope-test"
+        assert saved["analyzed_revision"]["head_sha"] == "h" * 40
     prompts = backend.prompts
     assert any("python" in p for p in prompts)
     assert any("react" in p for p in prompts)
