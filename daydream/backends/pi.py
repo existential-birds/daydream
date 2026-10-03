@@ -64,7 +64,7 @@ from daydream.backends._transport import (
     teardown,
 )
 from daydream.config import DEFAULT_PI_MODEL
-from daydream.json_utils import extract_json
+from daydream.json_utils import extract_json_by_schema, validates_schema
 from daydream.retry_policy import classify_failure, parse_message_retry_hint
 
 # Mirror Codex's generous stdout cap so large JSONL events (big file reads,
@@ -964,7 +964,12 @@ class PiBackend:
             returncode = await reap(transport)
 
             if output_schema and last_assistant_text:
-                structured_result = extract_json(last_assistant_text)
+                # Schema-aware selection: the last candidate the per-stack schema
+                # admits wins, so an incidental larger span cannot displace a valid
+                # (possibly empty) result.
+                structured_result = extract_json_by_schema(
+                    last_assistant_text, schema=output_schema, accept=validates_schema
+                ).value
             for terminal in terminal_events():
                 yield terminal
 
