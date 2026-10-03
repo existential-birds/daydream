@@ -132,12 +132,14 @@ def _judge_pairs(
     """
     per_pair: list[list[Any]] = []
     for pair in pairs:
+        gold = template.verifier_core.parse_gold_finding(pair["gold"])
+        candidate = template.verifier_core.parse_candidate_finding(pair["candidate"])
         runs: list[Any] = []
         for _ in range(attempts):
             verdicts = asyncio.run(
                 template.judge_pairs(
-                    gold=[pair["gold"]],
-                    candidates=[pair["candidate"]],
+                    gold=[gold],
+                    candidates=[candidate],
                     client=client,
                 )
             )

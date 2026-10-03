@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.training.gate import _evidence_digest as _evidence_digest
+from daydream.training.reward_model import OutcomeModel
 
 
 class Stage0GateRefused(ValueError):
@@ -43,8 +44,8 @@ def require_stage0_gate(gate_report_path: Path) -> dict[str, Any]:
     return report
 
 
-def require_outcome_model_bound(gate_report: dict[str, Any], outcome_model_path: Path) -> None:
-    """Require the exact OutcomeModel.state_dict checkpoint evaluated by the passed gate. Recompute
+def require_outcome_model_bound(gate_report: dict[str, Any], outcome_model_path: Path) -> OutcomeModel:
+    """Capture the OutcomeModel checkpoint bound to the passed gate. Recompute
     evidence_digest from checkpoint split_digest/model_fingerprint and report thresholds,
     held_out_rows, separation, calibration, and accepted_ratio.
 
@@ -95,3 +96,10 @@ def require_outcome_model_bound(gate_report: dict[str, Any], outcome_model_path:
             f"{gate_report.get('evidence_digest')!r}. The checkpoint is not the model the "
             "gate evaluated, so Stage-3 training is refused."
         )
+    try:
+        return OutcomeModel(**state)
+    except (TypeError, ValueError) as exc:
+        raise Stage0GateRefused(
+            f"Stage-0 outcome model at {outcome_model_path} has invalid checkpoint state: {exc}. "
+            "A malformed checkpoint cannot schedule scored rollouts."
+        ) from exc

@@ -83,8 +83,9 @@ def build_candidate_findings(items: list[dict[str, Any]], *, case_id: str) -> li
             raise CandidateError(
                 f"cannot build candidate finding: {exc}", kind="invalid_finding"
             ) from exc
-        entry["candidate_id"] = vc.assign_candidate_id(case_id, entry, groups)
-        findings.append(entry)
+        wire = entry.to_dict()
+        wire["candidate_id"] = vc.assign_candidate_id(case_id, entry, groups)
+        findings.append(wire)
     return findings
 
 

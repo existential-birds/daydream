@@ -8,8 +8,8 @@ import hashlib
 import json
 import re
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass, replace
-from typing import Final, cast
+from dataclasses import asdict, dataclass, fields, replace
+from typing import Final
 
 MAX_ARTIFACT_BYTES = 1_048_576
 MAX_CANDIDATE_FINDINGS = 100
@@ -108,7 +108,7 @@ def _validate_location(
 
 
 @dataclass(frozen=True)
-class _FindingContent:
+class FindingContent:
     """Content fields shared by gold and candidate findings."""
 
     title: str
@@ -125,8 +125,13 @@ class _FindingContent:
         _validate_location(self.path, self.start_line, self.end_line)
 
 
+    def to_dict(self) -> dict[str, object]:
+        """Serialize the closed content shape, excluding identity and subclass extras."""
+        return {field.name: getattr(self, field.name) for field in fields(FindingContent)}
+
+
 @dataclass(frozen=True)
-class GoldFinding(_FindingContent):
+class GoldFinding(FindingContent):
     """A hidden gold finding, validated with schema.py Finding limits."""
 
     finding_id: str
@@ -137,7 +142,7 @@ class GoldFinding(_FindingContent):
 
 
 @dataclass(frozen=True)
-class CandidateFinding(_FindingContent):
+class CandidateFinding(FindingContent):
     """A daydream candidate finding, validated with schema.py Finding limits."""
 
     candidate_id: str
@@ -161,23 +166,11 @@ def validate_exact_keys(raw: object, allowed: set[str], context: str) -> None:
         raise VerifierError(f"{context} contains unknown field(s): {', '.join(extra)}")
 
 
-def parse_finding_content(raw: object) -> dict[str, object]:
-    """Validate the six canonical content fields, including a required nullable severity
-    key. Shared by host builders and the copied verifier.
-    """
+def parse_finding_content(raw: object) -> FindingContent:
+    """Admit the closed content shape through its native validated owner."""
     validate_exact_keys(raw, _FINDING_CONTENT_KEYS, "finding content")
-    assert isinstance(raw, dict)  # established by validate_exact_keys
-    path, start_line, end_line = _validate_location(
-        raw["path"], raw["start_line"], raw["end_line"]
-    )
-    return {
-        "title": _validate_title(raw["title"]),
-        "body": _validate_body(raw["body"]),
-        "severity": _validate_severity(raw["severity"]),
-        "path": path,
-        "start_line": start_line,
-        "end_line": end_line,
-    }
+    assert isinstance(raw, dict)
+    return FindingContent(**raw)
 
 
 def parse_gold_finding(raw: dict[str, object]) -> GoldFinding:
@@ -195,19 +188,9 @@ def parse_candidate_finding(raw: dict[str, object]) -> CandidateFinding:
 # deterministic candidate-ID derivation
 
 
-def _finding_component(finding: object, name: str) -> object:
-    """Read a field from either a dataclass attribute or a dict key."""
-    if isinstance(finding, dict):
-        try:
-            return finding[name]
-        except KeyError as exc:
-            raise VerifierError(f"missing required field {name}") from exc
-    return getattr(finding, name)
-
-
 def derive_candidate_id(
     case_key: str,
-    finding: CandidateFinding | dict[str, object],
+    finding: FindingContent,
     ordinal: int,
 ) -> str:
     """Return the deterministic sha256 candidate id for a finding."""
@@ -218,7 +201,7 @@ def derive_candidate_id(
 
 def assign_candidate_id(
     case_key: str,
-    finding: CandidateFinding | dict[str, object],
+    finding: FindingContent,
     seen: dict[tuple[object, ...], int],
 ) -> str:
     """Derive an id and advance the per-identical-content ordinal in seen, matching
@@ -233,9 +216,9 @@ def assign_candidate_id(
 # candidate artifact + gold set validation
 
 
-def _canonical_tuple(finding: object) -> tuple[object, ...]:
+def _canonical_tuple(finding: FindingContent) -> tuple[object, ...]:
     return tuple(
-        str(_finding_component(finding, name) or "")
+        str(getattr(finding, name) or "")
         for name in ("title", "body", "severity", "path", "start_line", "end_line")
     )
 
@@ -502,18 +485,6 @@ def _f1(precision: float, recall: float) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
-def _read_id(finding: object, key: str, label: str) -> str:
-    value = _finding_component(finding, key)
-    if not isinstance(value, str):
-        raise VerifierError(f"{label} must be a string")
-    return value
-
-
-def _finding_id(finding: object) -> str:
-    """Read a gold finding's id from either a GoldFinding or a raw dict."""
-    return _read_id(finding, "finding_id", "gold finding_id")
-
-
 def _score_axes(
     gold: list[GoldFinding],
     candidates: list[CandidateFinding],
@@ -522,7 +493,7 @@ def _score_axes(
     """Score reported axes only when both matched findings carry that signal; invalid
     severity still raises.
     """
-    gold_by_id = {_finding_id(g): g for g in gold}
+    gold_by_id = {g.finding_id: g for g in gold}
     cand_by_id = {c.candidate_id: c for c in candidates}
 
     loc_tiers = {"exact": 0, "near": 0, "file": 0, "miss": 0}
@@ -536,20 +507,17 @@ def _score_axes(
         c = cand_by_id.get(cand_id)
         if g is None or c is None:
             raise VerifierError(f"matched pair missing finding: {gold_id!r}/{cand_id!r}")
-        g_path = _finding_component(g, "path")
-        g_start = _finding_component(g, "start_line")
-        g_end = _finding_component(g, "end_line")
-        if g_path is not None and c.path is not None \
-                and g_start is not None and c.start_line is not None \
-                and g_end is not None and c.end_line is not None:
+        if g.path is not None and c.path is not None \
+                and g.start_line is not None and c.start_line is not None \
+                and g.end_line is not None and c.end_line is not None:
             tier = location_tier(
-                cast("str", g_path), cast("int", g_start), cast("int", g_end),
+                g.path, g.start_line, g.end_line,
                 c.path, c.start_line, c.end_line,
                 LOCATION_TOLERANCE,
             )
             loc_tiers[tier] += 1
             loc_credits.append(1.0 if tier in ("exact", "near") else 0.0)
-        distance = severity_distance(cast("str | None", _finding_component(g, "severity")), c.severity)
+        distance = severity_distance(g.severity, c.severity)
         if distance is not None:
             if distance == 0:
                 sev_exact += 1
@@ -602,7 +570,7 @@ def score_findings(
     candidate_count = len(candidates)
     matches: set[tuple[str, str]] = set()
     if gold and candidates:
-        gold_ids = [_finding_id(g) for g in gold]
+        gold_ids = [g.finding_id for g in gold]
         cand_ids = [c.candidate_id for c in candidates]
         matches = maximum_matching(retained_edges(verdicts, gold_ids, cand_ids), gold_ids, cand_ids)
     tp = len(matches)
@@ -635,21 +603,17 @@ def reward_to_json(reward: Reward) -> str:
     return json.dumps(reward.to_dict())
 
 
-def _candidate_id(finding: object) -> str:
-    return _read_id(finding, "candidate_id", "candidate_id")
-
-
 def reward_details(
-    gold: Sequence[object],
-    candidates: Sequence[object],
+    gold: Sequence[GoldFinding],
+    candidates: Sequence[CandidateFinding],
     verdicts: list[Verdict],
     matches: set[tuple[str, str]],
 ) -> dict[str, object]:
     """Capture verdicts, selected matches, and unmatched gold/candidates."""
     matched_gold = {g for g, _ in matches}
     matched_candidates = {c for _, c in matches}
-    gold_ids = [_finding_id(g) for g in gold]
-    cand_ids = [_candidate_id(c) for c in candidates]
+    gold_ids = [g.finding_id for g in gold]
+    cand_ids = [c.candidate_id for c in candidates]
     return {
         "verdicts": [
             {name: getattr(verdict, name) for name in ("gold_id", "candidate_id", "match", "confidence", "reasoning")}

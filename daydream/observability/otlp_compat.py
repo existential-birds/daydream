@@ -26,7 +26,7 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
     ExportTraceServiceResponse,
 )
 from opentelemetry.sdk.trace import ReadableSpan
-from opentelemetry.sdk.trace.export import SpanExportResult
+from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import TraceFlags
 
 from daydream.observability.config import ObservabilityError
@@ -307,7 +307,7 @@ def resolve_ssl_context(
     return context
 
 
-class HttpxOtlpTransport:
+class HttpxOtlpTransport(SpanExporter):
     """Own portal/client with one export deadline covering send/read/backoff.
 
     Ambiguous post-send timeout is unverified, never retried; shutdown closes once.
@@ -354,8 +354,12 @@ class HttpxOtlpTransport:
     def state(self) -> str:
         return self._state
 
-    def export(self, request: ExportTraceServiceRequest, *, timeout_s: float) -> SpanExportResult:
-        """One owned export: encode/compress inside the budget, then attempt."""
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        """Encode and send one native batch inside the configured monotonic budget."""
+        if self._state != "OPEN":
+            return SpanExportResult.FAILURE
+        started = self._clock()
+        request = encode_batch(spans)
         if self._state != "OPEN":
             return SpanExportResult.FAILURE
         payload = request.SerializeToString()
@@ -363,7 +367,7 @@ class HttpxOtlpTransport:
             self._ledger.record_unverified("OTLP_ENCODE_BOUND_EXCEEDED")
             return SpanExportResult.FAILURE
         body = gzip.compress(payload) if self._config.compression == "gzip" else payload
-        remaining = timeout_s - (self._clock() - self._start)
+        remaining = self._config.timeout_s - (self._clock() - started)
         if remaining <= 0:
             self._ledger.record_unverified("OTLP_ENCODE_DEADLINE_EXHAUSTED")
             return SpanExportResult.FAILURE
@@ -373,13 +377,8 @@ class HttpxOtlpTransport:
         except anyio.WouldBlock:  # pragma: no cover - portal lifecycle guard
             return SpanExportResult.FAILURE
 
-    def export_batch(self, spans: Sequence[ReadableSpan], *, timeout_s: float) -> SpanExportResult:
-        """Encode within the monotonic budget, then run the HTTP attempt loop."""
-        if self._state != "OPEN":
-            return SpanExportResult.FAILURE
-        self._start = self._clock()
-        request = encode_batch(spans)
-        return self.export(request, timeout_s=timeout_s)
+    def delivery_snapshot(self) -> dict[str, Any]:
+        return self._ledger.snapshot()
 
     async def _attempt_loop(self, body: bytes, remaining: float) -> SpanExportResult:
         deadline = anyio.current_time() + remaining
@@ -534,7 +533,7 @@ def _grpc_retry_delay(exc: Any) -> float | None:
     return delay if delay >= 0 else None
 
 
-class GrpcBridge:
+class GrpcBridge(SpanExporter):
     """Own retries over pinned OTel 1.44 unary Export; surface/version drift fails setup. Delegate
     retry loops are bypassed.
     """
@@ -564,12 +563,12 @@ class GrpcBridge:
     def delegate(self) -> GrpcExporter:
         return self._delegate
 
-    def export_batch(self, spans: Sequence[ReadableSpan], *, timeout_s: float) -> SpanExportResult:
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         """Call unary Export with remaining time; only RESOURCE_EXHAUSTED plus RetryInfo earns one in-deadline retry."""
         if self._state != "OPEN" or getattr(self._delegate, "_shutdown", False):
             return SpanExportResult.FAILURE
         request = encode_batch(spans)
-        deadline = time.monotonic() + timeout_s
+        deadline = time.monotonic() + self._delegate._timeout
         attempt = 0
         while True:
             remaining = deadline - time.monotonic()
@@ -608,6 +607,9 @@ class GrpcBridge:
                 return _partial_ack_result(self._ledger, rejected)
             self._ledger.record_unverified("OTLP_GRPC_MALFORMED_ACK")
             return SpanExportResult.FAILURE
+
+    def delivery_snapshot(self) -> dict[str, Any]:
+        return self._ledger.snapshot()
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
         # Unary exports complete synchronously; no buffered work remains.

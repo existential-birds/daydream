@@ -30,7 +30,7 @@ from daydream.training.harvest import assemble_scoring_inputs
 from daydream.training.reward import score_trajectory
 from daydream.training.reward_model import OutcomeModel, score_comment as _score_outcome_comment
 from daydream.training.rubric import RubricV2Breakdown, score_review as _score_rubric_review
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 from verifiers.v1.errors import boundary
 
 from daydream_review.gate_refusal import (
@@ -76,41 +76,12 @@ class _OutcomeScorer:
         return float(_score_outcome_comment(self._model, text))
 
 
-_outcome_model_cache: dict[Path, _OutcomeScorer] = {}
-
-
-def _load_outcome_model(path: Path) -> _OutcomeScorer:
-    """Cache a Stage-0 checkpoint already bound to the passed gate report.
-
-    A missing or corrupt checkpoint still refuses scoring; never fall back to
-    intrinsic-only scoring after validation."""
-    cached = _outcome_model_cache.get(path)
-    if cached is not None:
-        return cached
-    if not path.is_file():
-        raise Stage0GateRefused(
-            f"Stage-0 outcome model missing at {path}: the load path validated this checkpoint "
-            "against the gate report, so a vanished file is a refusal, never a silent "
-            "intrinsic-only fallback."
-        )
-    try:
-        state = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise Stage0GateRefused(
-            f"Stage-0 outcome model at {path} is unreadable: {exc}. "
-            "A corrupt checkpoint is a refusal, never an implicit pass."
-        ) from exc
-    scorer = _OutcomeScorer(OutcomeModel(**state))
-    _outcome_model_cache[path] = scorer
-    return scorer
-
-
-def stage0_composite_terms(outcome_model_path: Path, run_dir: Path) -> dict[str, Any] | None:
+def stage0_composite_terms(outcome_scorer: _OutcomeScorer | None, run_dir: Path) -> dict[str, Any] | None:
     """Score merged finding descriptions with the validated Stage-0 rubric.
 
     No model or no described findings yields None. There is no live FP judge,
     so fp_count remains zero; the returned breakdown records the rubric terms."""
-    if outcome_model_path == Path(""):
+    if outcome_scorer is None:
         return None
     findings: list[dict[str, Any]] = [
         {"text": str(item["description"]), "verdict": None, "tools": []}
@@ -120,7 +91,7 @@ def stage0_composite_terms(outcome_model_path: Path, run_dir: Path) -> dict[str,
     if not findings:
         return None
     result = _score_rubric_review(
-        _load_outcome_model(outcome_model_path),
+        outcome_scorer,
         findings=findings,
         fp_count=0,
         total_findings=len(findings),
@@ -405,8 +376,8 @@ class DaydreamReviewTaskConfig(vf.TaskConfig):
 
     w_composite: float = 1.0
 
-    outcome_model_path: Path = Path("")
-    """Stage-0 outcome model checkpoint (M13); stamped from the taskset config at load."""
+    _outcome_scorer: _OutcomeScorer | None = PrivateAttr(default=None)
+    """Captured gate-bound model, kept outside the serialized per-task configuration."""
 
 
 class DaydreamReviewState(vf.State):
@@ -517,7 +488,7 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
         # M13: when a validated Stage-0 outcome model is configured, the reward
         # becomes the rubric composite (which itself carries the intrinsic
         # composite as a term — no double counting); otherwise intrinsic-only.
-        stage0 = stage0_composite_terms(self.config.outcome_model_path, run_dir)
+        stage0 = stage0_composite_terms(self.config._outcome_scorer, run_dir)
 
         reward_breakdown = breakdown.to_dict() | {
             "reward_version": ROLLOUT_REWARD_VERSION,
@@ -751,8 +722,12 @@ class DaydreamReviewTaskset(vf.Taskset[DaydreamReviewTask, DaydreamReviewConfig]
         # clear-text measurements) — any-checkpoint-plus-any-report must not
         # cross the Stage-3 boundary. Intrinsic-only runs (no model) have
         # nothing to bind and stay as designed.
+        task_config = config.task.model_copy()
+        task_config._outcome_scorer = None
         if config.outcome_model_path != Path(""):
-            require_outcome_model_bound(gate_report, config.outcome_model_path)
+            task_config._outcome_scorer = _OutcomeScorer(
+                require_outcome_model_bound(gate_report, config.outcome_model_path)
+            )
 
         manifest = load_manifest(config.manifest_path)
         prs = sorted(
@@ -806,9 +781,7 @@ class DaydreamReviewTaskset(vf.Taskset[DaydreamReviewTask, DaydreamReviewConfig]
             tasks.append(
                 DaydreamReviewTask(
                     data,
-                    # The Stage-0 outcome model is taskset-level; stamp it onto
-                    # the per-task config the reward functions actually read.
-                    config.task.model_copy(update={"outcome_model_path": config.outcome_model_path}),
+                    task_config.model_copy(),
                 )
             )
         return tasks

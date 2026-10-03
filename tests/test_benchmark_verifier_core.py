@@ -1,6 +1,7 @@
 """Tests for the stdlib-only harbor verifier core module."""
 import hashlib
 import json
+from dataclasses import FrozenInstanceError, dataclass
 from typing import Any
 
 import pytest
@@ -52,6 +53,28 @@ def test_gold_parses_valid() -> None:
     g = parse_gold_finding(_gold())
     assert isinstance(g, GoldFinding) and g.finding_id == "a" * 64
 
+
+def test_admitted_content_is_frozen_and_serializes_only_native_content() -> None:
+    raw = _gold()
+    admitted = parse_gold_finding(raw)
+    original = {key: value for key, value in raw.items() if key != "finding_id"}
+    raw["body"] = "Changed after admission"
+    assert admitted.to_dict() == original
+    with pytest.raises(FrozenInstanceError):
+        setattr(admitted, "body", "Changed native state")
+
+    class PrivateValue:
+        def __deepcopy__(self, _memo: object) -> object:
+            raise AssertionError("Private fields must never enter the wire projection")
+
+    @dataclass(frozen=True)
+    class PrivateGold(GoldFinding):
+        private: object
+
+    decorated = PrivateGold(**{**original, "finding_id": admitted.finding_id}, private=PrivateValue())
+    assert decorated.to_dict() == original
+    assert "finding_id" not in decorated.to_dict()
+
 @pytest.mark.parametrize(("field", "value"),
     [("severity", "critical"), ("title", "   "), ("body", ""), ("path", "../etc/passwd"), ("path", "/abs/path"),
         ("start_line", 5),
@@ -90,27 +113,33 @@ def test_harbor_package_imports_stdlib_only() -> None:
     assert issubclass(vc.VerifierError, Exception)
 
 def test_candidate_id_is_64_lower_hex() -> None:
-    cid = derive_candidate_id("case-x", _cand(), 0)
+    cid = derive_candidate_id("case-x", parse_candidate_finding(_cand()), 0)
     assert len(cid) == 64 and all(ch in "0123456789abcdef" for ch in cid)
 
 def test_candidate_id_scoped_by_case_key() -> None:
-    a = derive_candidate_id("case-x", _cand(), 0)
-    b = derive_candidate_id("case-y", _cand(), 0)
+    a = derive_candidate_id("case-x", parse_candidate_finding(_cand()), 0)
+    b = derive_candidate_id("case-y", parse_candidate_finding(_cand()), 0)
     assert a != b
 
 def test_duplicate_content_gets_distinct_ordinals_and_ids() -> None:
-    first = derive_candidate_id("case-x", _cand(), 0)
-    second = derive_candidate_id("case-x", _cand(), 1)
+    first = derive_candidate_id("case-x", parse_candidate_finding(_cand()), 0)
+    second = derive_candidate_id("case-x", parse_candidate_finding(_cand()), 1)
     assert first != second
 
 def test_same_content_same_key_same_ordinal_is_stable() -> None:
-    assert derive_candidate_id("case-x", _cand(), 0) == derive_candidate_id("case-x", _cand(), 0)
+    assert derive_candidate_id("case-x", parse_candidate_finding(_cand()), 0) == derive_candidate_id(
+        "case-x", parse_candidate_finding(_cand()), 0
+    )
 
-def test_null_fields_normalize_to_empty_string() -> None:
-    raw = _cand(title=None, body=None, severity=None)
-    cid = derive_candidate_id("case-x", raw, 0)
-    raw2 = _cand(title="", body="", severity=None)
-    assert cid == derive_candidate_id("case-x", raw2, 0)
+
+def test_identity_uses_admitted_nullable_fields_and_rejects_empty_content() -> None:
+    finding = parse_candidate_finding(_cand(severity=None, path=None, start_line=None, end_line=None))
+    assert (
+        derive_candidate_id("case-x", finding, 0) == "4bba4d82560c66193667028473db40f1a522af48ce2a82868afb4ee35059a57d"
+    )
+    for value in (None, ""):
+        with pytest.raises(VerifierError):
+            parse_candidate_finding(_cand(title=value, body=value, severity=None))
 
 
 def _artifact(findings: Any, **overrides: Any) -> Any:
@@ -127,7 +156,7 @@ def _valid_findings(n: Any=1, key: Any="case-x") -> Any:
         canon = (f"f{i}", f"body{i}", base.get("severity") or "", base["path"], base["start_line"], base["end_line"])
         ordinal = groups.get(canon, 0)
         groups[canon] = ordinal + 1
-        base["candidate_id"] = derive_candidate_id(key, base, ordinal)
+        base["candidate_id"] = derive_candidate_id(key, parse_candidate_finding(base), ordinal)
         out.append(base)
     return out
 
@@ -262,14 +291,14 @@ def test_score_clean_with_candidates() -> None:
 
 def test_score_gold_no_candidates() -> None:
     gold = [_gold(), _gold(finding_id="b" * 64, title="B")]
-    r = score_review(gold, _artifact([]), [])
+    r = score_review([parse_gold_finding(item) for item in gold], _artifact([]), [])
     assert (r.reward, r.fn) == (0.0, 2)
     assert r.fp == 0 and r.clean_task == 0
 
 def test_score_zero_match_reward_is_zero() -> None:
     gold = [_gold(), _gold(finding_id="b" * 64, title="B")]
     art = _artifact(_valid_findings(2))
-    r = score_review(gold, art, [])
+    r = score_review([parse_gold_finding(item) for item in gold], art, [])
     assert (r.tp, r.fp, r.fn) == (0, 2, 2)
     assert r.precision == 0.0 and r.recall == 0.0
     assert r.f1 == 0.0 and r.reward == 0.0
@@ -280,7 +309,7 @@ def test_score_f1_example() -> None:
     art = _artifact(cands)
     vs = [Verdict("a" * 64, cands[0]["candidate_id"], True, 0.9, "same"),
           Verdict("b" * 64, cands[1]["candidate_id"], True, 0.8, "same")]
-    r = score_review(gold, art, vs)
+    r = score_review([parse_gold_finding(item) for item in gold], art, vs)
     assert (r.tp, r.fp, r.fn) == (2, 0, 1)
     assert r.precision == 1.0
     assert abs(r.recall - 0.6666666667) < 1e-9
@@ -295,13 +324,19 @@ def test_score_malformed_artifact_is_scored_zero() -> None:
 def test_empty_side_resolves_with_zero_verdicts() -> None:
     r0 = score_review([], _artifact([]), [])
     assert r0.reward == 1.0
-    rn = score_review([_gold()], _artifact([]), [])
+    rn = score_review([parse_gold_finding(item) for item in [_gold()]], _artifact([]), [])
     assert rn.reward == 0.0 and rn.fn == 1
     # passing any verdict for an empty side must not change the result (ignored/not required)
-    assert score_review([], _artifact([]), [Verdict("g", "c", True, 0.9, "")]).reward == 1.0
+    assert (
+        score_review(
+            [], _artifact([]), [Verdict("g", "c", True, 0.9, "")]
+        ).reward
+        == 1.0
+    )
+
 
 def test_reward_dict_is_numeric_only_with_all_keys() -> None:
-    d = score_review([_gold()], _artifact(_valid_findings(1)), []).to_dict()
+    d = score_review([parse_gold_finding(item) for item in [_gold()]], _artifact(_valid_findings(1)), []).to_dict()
     assert set(d) == EXPECTED_24_KEYS
     for k, v in d.items():
         assert isinstance(v, (int, float)) and not isinstance(v, bool)
@@ -309,7 +344,11 @@ def test_reward_dict_is_numeric_only_with_all_keys() -> None:
 def test_reward_to_json_is_numeric_only() -> None:
     art = _artifact(_valid_findings(1))
     cand = _valid_findings(1)[0]
-    r = score_review([_gold()], art, [Verdict("a" * 64, cand["candidate_id"], True, 0.9, "same")])
+    r = score_review(
+        [parse_gold_finding(item) for item in [_gold()]],
+        art,
+        [Verdict("a" * 64, cand["candidate_id"], True, 0.9, "same")],
+    )
     d = json.loads(reward_to_json(r))
     assert all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in d.values())
 
@@ -320,7 +359,7 @@ def test_reward_details_shape_and_no_source_leak() -> None:
     ]
     vs = [Verdict("a" * 64, cands[0].candidate_id, True, 0.9, "same bug")]
     m = {("a" * 64, cands[0].candidate_id)}
-    details = reward_details(gold, cands, vs, m)
+    details = reward_details([parse_gold_finding(item) for item in gold], cands, vs, m)
     for key in ("verdicts", "matches", "unmatched_gold", "unmatched_candidates"):
         assert key in details
     assert details["unmatched_gold"] == ["b" * 64]
@@ -331,14 +370,12 @@ def test_reward_details_shape_and_no_source_leak() -> None:
     assert "f1" not in blob  # candidate content never leaks
 
 def test_gold_finding_id_rejects_non_string() -> None:
-    gold = [{"finding_id": 123}]
-    with pytest.raises(VerifierError, match="must be a string"):
-        reward_details(gold, [], [], set())
+    with pytest.raises(VerifierError, match="finding id"):
+        parse_gold_finding(_gold(finding_id=123))
 
 def test_candidate_id_rejects_non_string() -> None:
-    cands = [{"candidate_id": 456}]
-    with pytest.raises(VerifierError, match="must be a string"):
-        reward_details([_gold()], cands, [], set())
+    with pytest.raises(VerifierError, match="candidate id"):
+        parse_candidate_finding(_cand(candidate_id=456))
 
 def test_artifact_rejects_unknown_top_level_key() -> None:
     art = _artifact(_valid_findings(1))
@@ -379,10 +416,13 @@ def test_gold_set_rejects_duplicate_finding_ids() -> None:
     with pytest.raises(VerifierError):
         validate_gold_set([{**_gold(), "finding_id": fid}, {**_gold(), "finding_id": fid}], case_id="case-x")
 
-def test_null_location_normalizes_to_empty_in_canonical_tuple() -> None:
-    locless = _cand(path=None, start_line=None, end_line=None)
-    blank = _cand(path="", start_line=None, end_line=None)
-    assert derive_candidate_id("case-x", locless, 0) == derive_candidate_id("case-x", blank, 0)
+def test_identity_uses_admitted_locationless_content() -> None:
+    locless = parse_candidate_finding(_cand(path=None, start_line=None, end_line=None))
+    assert (
+        derive_candidate_id("case-x", locless, 0) == "c6b9c4c511a3e496280f97a0dd09104b9e05045ddb3f6f2f3ce451b89e18d792"
+    )
+    with pytest.raises(VerifierError):
+        parse_candidate_finding(_cand(path="", start_line=None, end_line=None))
 
 def test_locationless_canonical_digest_matches_schema_derive() -> None:
     raw = _gold(path=None, start_line=None, end_line=None)
@@ -397,7 +437,10 @@ def test_locationless_canonical_digest_matches_schema_derive() -> None:
 
 def test_duplicate_locationless_get_distinct_occurrence_ids() -> None:
     locless = _cand(path=None, start_line=None, end_line=None)
-    assert derive_candidate_id("case-x", locless, 0) != derive_candidate_id("case-x", locless, 1)
+    assert derive_candidate_id("case-x", parse_candidate_finding(locless), 0) != derive_candidate_id(
+        "case-x", parse_candidate_finding(locless), 1
+    )
+
 
 def test_locationless_gold_set_accepts_canonical_id() -> None:
     g = _gold(path=None, start_line=None, end_line=None)
@@ -428,9 +471,9 @@ def test_mixed_located_locationless_set_matching_is_id_keyed() -> None:
     gold = validate_gold_set([g_loc, g_non], case_id="case-x")
 
     c_loc = _cand(title="Located", path="src/a.py", start_line=1, end_line=1)
-    c_loc["candidate_id"] = derive_candidate_id("case-x", c_loc, 0)
+    c_loc["candidate_id"] = derive_candidate_id("case-x", parse_candidate_finding(c_loc), 0)
     c_non = _cand(title="Locationless", path=None, start_line=None, end_line=None)
-    c_non["candidate_id"] = derive_candidate_id("case-x", c_non, 0)
+    c_non["candidate_id"] = derive_candidate_id("case-x", parse_candidate_finding(c_non), 0)
     art = _artifact([c_loc, c_non])
 
     vs = [Verdict(g_loc["finding_id"], c_loc["candidate_id"], True, 0.9, "same"),
@@ -489,7 +532,7 @@ def _axis_gold(**overrides: Any) -> Any:
 def _axis_cand_id(**overrides: Any) -> Any:
     base = _cand()
     base.update(overrides)
-    base["candidate_id"] = derive_candidate_id("case-x", base, 0)
+    base["candidate_id"] = derive_candidate_id("case-x", parse_candidate_finding(base), 0)
     return base
 
 
@@ -530,7 +573,7 @@ def test_score_review_axes_reported_not_gating() -> None:
 def test_score_review_axis_absent_never_imputes() -> None:
     gold_raw = _gold(path=None, start_line=None, end_line=None, severity=None)
     cand_raw = _cand()
-    cand_raw["candidate_id"] = derive_candidate_id("case-x", cand_raw, 0)
+    cand_raw["candidate_id"] = derive_candidate_id("case-x", parse_candidate_finding(cand_raw), 0)
     reward = score_review(*_axis_pair(gold_raw, cand_raw))
     assert reward.tp == 1 and reward.location_present == 0
     assert reward.location_exact == 0 and reward.location_near == 0   # no counts, not imputed
@@ -541,7 +584,7 @@ def test_score_review_locationless_candidate_side_absent() -> None:
     # Missing candidate location leaves the severity axis independently scoreable.
     gold_raw = _axis_gold()
     cand_raw = _cand(path=None, start_line=None, end_line=None)
-    cand_raw["candidate_id"] = derive_candidate_id("case-x", cand_raw, 0)
+    cand_raw["candidate_id"] = derive_candidate_id("case-x", parse_candidate_finding(cand_raw), 0)
     reward = score_review(*_axis_pair(gold_raw, cand_raw))
     assert reward.tp == 1 and reward.location_present == 0 and reward.location_exact == 0
     assert reward.location_credit == 0.0

@@ -9,6 +9,7 @@ cannot be a bare scalar.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import re
@@ -17,7 +18,6 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from daydream.training.reward import RewardBreakdown, ScoringInputs, score_trajectory
-from daydream.training.stacks import _sha256_file
 
 __all__ = ["RftConfig", "RftWinner", "RftResult", "run_rft", "validate_full_sha"]
 
@@ -213,8 +213,8 @@ def run_rft(config: RftConfig) -> RftResult:
     Missing or malformed identity raises ValueError naming the record and field.
     """
     inputs_path = Path(config.inputs)
-    raw = inputs_path.read_text(encoding="utf-8")
-    records: list[dict[str, Any]] = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    raw = inputs_path.read_bytes()
+    records: list[dict[str, Any]] = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
 
     winners: list[RftWinner] = []
     for rec in sorted(records, key=lambda record: str(record.get("id", ""))):
@@ -226,7 +226,7 @@ def run_rft(config: RftConfig) -> RftResult:
 
     winners.sort(key=lambda w: (w.record_id, w.candidate_index))
 
-    inputs_sha256 = _sha256_file(inputs_path)
+    inputs_sha256 = hashlib.sha256(raw).hexdigest()
     payload: dict[str, Any] = {
         "header": {
             "model_id": config.model_id,

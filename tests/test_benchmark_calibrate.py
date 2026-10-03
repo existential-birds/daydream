@@ -88,7 +88,11 @@ def test_fixture_provenance_declares_unverified_llm_origin() -> None:
 def test_every_pair_renders_within_24kib() -> None:
     sr = _load_judge_template()
     for p in _load_fixture():
-        prompt = sr.render_pair_prompt(p["gold"], p["candidate"], template=sr.JUDGE_PROMPT_TEMPLATE)
+        prompt = sr.render_pair_prompt(
+            sr.verifier_core.parse_gold_finding(p["gold"]),
+            sr.verifier_core.parse_candidate_finding(p["candidate"]),
+            template=sr.JUDGE_PROMPT_TEMPLATE,
+        )
         assert len(prompt.encode("utf-8")) <= 24 * 1024
 
 def test_loader_resolves_sibling_verifier_core() -> None:

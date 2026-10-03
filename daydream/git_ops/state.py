@@ -143,7 +143,7 @@ def snapshot_untracked_paths(
     include_runtime_artifacts: bool = True,
 ) -> dict[str, GitPathState]:
     """Capture actual untracked content/type/mode, optionally omitting runtime output."""
-    paths = queries._list_untracked_z(repo)
+    paths = queries.list_untracked(repo, strict=True)
     return {
         path: _snapshot_worktree_path(repo, path, allow_leaf_symlink=True)
         for path in paths

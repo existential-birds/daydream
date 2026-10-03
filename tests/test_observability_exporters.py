@@ -20,12 +20,12 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from daydream.observability.config import ObservabilityConfig, ObservabilityError
 from daydream.observability.exporters import (
-    CompatSpanExporter,
     LangSmithExporter,
     honeyhive_exporter,
     langsmith_exporter,
     otlp_exporter,
 )
+from daydream.observability.otlp_compat import GrpcBridge
 from daydream.observability.privacy import PrivacyPolicy, diagnostic_scope
 from tests.harness.otlp import attributes, exporting_provider, grpc_trace_server, otlp_collector
 
@@ -243,7 +243,7 @@ def test_generic_grpc_exporter_uses_standard_environment(monkeypatch: pytest.Mon
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", f"http://127.0.0.1:{port}")
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "x-custom=grpc-credential")
         exporter = otlp_exporter(ObservabilityConfig())
-        assert isinstance(exporter, CompatSpanExporter)
+        assert isinstance(exporter, GrpcBridge)
         _emit(exporter)
         assert len(received) == 1
         span = received[0].resource_spans[0].scope_spans[0].spans[0]

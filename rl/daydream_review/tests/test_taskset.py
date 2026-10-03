@@ -323,7 +323,8 @@ def test_load_binds_outcome_model_to_gate_report(
     taskset = _taskset(fixture_manifest_path, stage0_gate_report, outcome_model_path=outcome_model_path)
     tasks = list(taskset.load())
     assert tasks
-    assert all(task.config.outcome_model_path == outcome_model_path for task in tasks)
+    assert all(task.config._outcome_scorer is not None for task in tasks)
+    assert all("_outcome_scorer" not in task.config.model_dump() for task in tasks)
 
 def test_load_requires_manifest_path_flag() -> None:
     taskset = DaydreamReviewTaskset(DaydreamReviewConfig(id="daydream-review"))

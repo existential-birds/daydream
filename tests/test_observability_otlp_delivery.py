@@ -5,8 +5,10 @@ patch clocks and external failure seams rather than production decisions."""
 
 from __future__ import annotations
 
+import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from email.utils import formatdate
 from typing import cast
@@ -26,7 +28,6 @@ from opentelemetry.trace import SpanContext
 
 from daydream.observability.config import ObservabilityConfig, ObservabilityError
 from daydream.observability.exporters import (
-    CompatSpanExporter,
     langsmith_exporter,
     otlp_exporter,
 )
@@ -87,7 +88,7 @@ def test_http_success_ack_is_delivered_once(
     content_types: list[str | None] = []
     with scripted_otlp_collector([response], capture_content_type=content_types) as receiver:
         _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        exporter = cast(HttpxOtlpTransport, otlp_exporter(ObservabilityConfig()))
         assert exporter.export(_spans()) == SpanExportResult.SUCCESS
         snapshot = exporter.delivery_snapshot()
         assert snapshot["delivered"] == 1
@@ -114,7 +115,7 @@ def test_http_terminal_ack_is_unverified_without_logging_body(
 ) -> None:
     with scripted_otlp_collector([response]) as receiver:
         _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        exporter = cast(HttpxOtlpTransport, otlp_exporter(ObservabilityConfig()))
         assert exporter.export(_spans()) == SpanExportResult.FAILURE
         exporter.shutdown()
         assert len(receiver.requests) == 1
@@ -130,7 +131,7 @@ def test_http_oversized_body_is_bounded_discard(monkeypatch: pytest.MonkeyPatch)
     big = b"\n\x02\x08\x03" + b"x" * (4 * 1024 * 1024)  # > 4 MiB decoded budget
     with scripted_otlp_collector([ScriptedResponse(body=big), ScriptedResponse()]) as receiver:
         _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        exporter = cast(HttpxOtlpTransport, otlp_exporter(ObservabilityConfig()))
         assert exporter.export(_spans()) == SpanExportResult.FAILURE
         exporter.shutdown()
         assert len(receiver.requests) == 1
@@ -141,7 +142,7 @@ def test_http_oversized_body_is_bounded_discard(monkeypatch: pytest.MonkeyPatch)
 def test_http_partial_success_positive_rejection_is_terminal_no_retry(monkeypatch: pytest.MonkeyPatch,) -> None:
     with scripted_otlp_collector([_partial_response(3), ScriptedResponse()]) as receiver:
         _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        exporter = cast(HttpxOtlpTransport, otlp_exporter(ObservabilityConfig()))
         assert exporter.export(_spans(count=5)) != SpanExportResult.SUCCESS
         exporter.shutdown()
         assert len(receiver.requests) == 1  # never retried
@@ -157,7 +158,7 @@ def test_http_partial_success_positive_rejection_is_terminal_no_retry(monkeypatc
 def test_http_retry_only_for_429_502_503_504(monkeypatch: pytest.MonkeyPatch, status: int, retryable: bool) -> None:
     with scripted_otlp_collector([ScriptedResponse(status=status), ScriptedResponse()]) as receiver:
         _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        exporter = cast(HttpxOtlpTransport, otlp_exporter(ObservabilityConfig()))
         result = exporter.export(_spans())
         assert result == (SpanExportResult.SUCCESS if retryable else SpanExportResult.FAILURE), status
         exporter.shutdown()
@@ -167,7 +168,7 @@ def test_http_retry_after_seconds_and_http_date(monkeypatch: pytest.MonkeyPatch)
     with scripted_otlp_collector([ScriptedResponse(status=429, headers={"Retry-After": "0"}), ScriptedResponse()]
     ) as receiver:
         _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        exporter = cast(HttpxOtlpTransport, otlp_exporter(ObservabilityConfig()))
         assert exporter.export(_spans()) == SpanExportResult.SUCCESS
         exporter.shutdown()
         assert len(receiver.requests) == 2
@@ -177,7 +178,7 @@ def test_http_retry_after_seconds_and_http_date(monkeypatch: pytest.MonkeyPatch)
         ]
     ) as receiver:
         _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        exporter = cast(HttpxOtlpTransport, otlp_exporter(ObservabilityConfig()))
         assert exporter.export(_spans()) == SpanExportResult.SUCCESS
         exporter.shutdown()
         assert len(receiver.requests) == 2
@@ -186,7 +187,7 @@ def test_http_one_deadline_covers_send_read_backoff(monkeypatch: pytest.MonkeyPa
     responses = [ScriptedResponse(status=429, headers={"Retry-After": "30"}) for _ in range(3)]
     with scripted_otlp_collector(responses) as receiver:
         _generic_http(monkeypatch, receiver.base_url, OTEL_EXPORTER_OTLP_TRACES_TIMEOUT="0.5")
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        exporter = cast(HttpxOtlpTransport, otlp_exporter(ObservabilityConfig()))
         start = time.monotonic()
         assert exporter.export(_spans()) == SpanExportResult.FAILURE
         elapsed = time.monotonic() - start
@@ -200,7 +201,7 @@ def test_http_trickle_overruns_inactivity_timeout_but_respects_whole_deadline(mo
     server = TrickleServer(gap_s=0.04)
     try:
         _generic_http(monkeypatch, server.base_url, OTEL_EXPORTER_OTLP_TRACES_TIMEOUT="0.15")
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        exporter = cast(HttpxOtlpTransport, otlp_exporter(ObservabilityConfig()))
         start = time.monotonic()
         result = exporter.export(_spans())
         elapsed = time.monotonic() - start
@@ -246,7 +247,7 @@ def test_http_preset_rejects_redirects(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_http_64mib_encode_bound_refuses_to_send(monkeypatch: pytest.MonkeyPatch) -> None:
     with otlp_collector() as receiver:
         _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        exporter = cast(HttpxOtlpTransport, otlp_exporter(ObservabilityConfig()))
         oversized = _spans(count=1)
         oversized[0] = ReadableSpan(name="huge", context=SpanContext(trace_id=1, span_id=1, is_remote=False),
             resource=Resource({"service.name": "daydream-test"}), attributes={"huge": "x" * (64 * 1024 * 1024 + 1024)},
@@ -288,14 +289,14 @@ def test_private_credential_provider_rejected_before_any_send(monkeypatch: pytes
 @contextmanager
 def _generic_grpc(
     monkeypatch: pytest.MonkeyPatch, receive: GrpcReceiver, **extra: str,
-) -> Iterator[CompatSpanExporter]:
+) -> Iterator[GrpcBridge]:
     with grpc_trace_server(receive) as port:
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc")
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", f"http://127.0.0.1:{port}")
         for key, value in extra.items():
             monkeypatch.setenv(key, value)
         exporter = otlp_exporter(ObservabilityConfig())
-        assert isinstance(exporter, CompatSpanExporter)
+        assert isinstance(exporter, GrpcBridge)
         try:
             yield exporter
         finally:
@@ -373,7 +374,7 @@ def test_noop_meter_provider_keeps_internal_metrics_inactive(monkeypatch: pytest
     with _generic_grpc(monkeypatch, receive) as exporter:
         # The delegate's meters are created against our explicit NoOpMeterProvider
         # (not the ambient global): recording on them is a no-op by construction.
-        bridge = exporter._transport
+        bridge = exporter
         assert isinstance(bridge, GrpcBridge)
         delegate_metrics = bridge._delegate._metrics
         inflight_metric = getattr(delegate_metrics, "_inflight", None)
@@ -384,7 +385,7 @@ def test_noop_meter_provider_keeps_internal_metrics_inactive(monkeypatch: pytest
 def test_exactly_once_shutdown_refuses_new_sends(monkeypatch: pytest.MonkeyPatch) -> None:
     with scripted_otlp_collector([ScriptedResponse()]) as receiver:
         _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        exporter = cast(HttpxOtlpTransport, otlp_exporter(ObservabilityConfig()))
         assert exporter.export(_spans()) == SpanExportResult.SUCCESS
         exporter.shutdown()
         exporter.shutdown()  # idempotent, no error
@@ -394,7 +395,7 @@ def test_exactly_once_shutdown_refuses_new_sends(monkeypatch: pytest.MonkeyPatch
 def test_delivery_snapshot_states_and_flush_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
     with scripted_otlp_collector([ScriptedResponse(status=503)]) as receiver:
         _generic_http(monkeypatch, receiver.base_url, OTEL_EXPORTER_OTLP_TRACES_TIMEOUT="0.3")
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        exporter = cast(HttpxOtlpTransport, otlp_exporter(ObservabilityConfig()))
         exporter.export(_spans())  # retryable status, no Retry-After, deadline exhausts
         snapshot = exporter.delivery_snapshot()
         assert snapshot["delivered"] == 0
@@ -405,7 +406,7 @@ def test_pre_send_deadline_exhaustion_records_unverified(monkeypatch: pytest.Mon
     """Both retry-backoff exhaustion and a later zero-budget send must retain exact ledger diagnostics."""
     with scripted_otlp_collector([ScriptedResponse(status=503)]) as receiver:
         _generic_http(monkeypatch, receiver.base_url, OTEL_EXPORTER_OTLP_TRACES_TIMEOUT="0.3")
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        exporter = cast(HttpxOtlpTransport, otlp_exporter(ObservabilityConfig()))
         exporter.export(_spans())
         snapshot = exporter.delivery_snapshot()
         assert snapshot["delivered"] == 0
@@ -420,7 +421,7 @@ def test_pre_send_deadline_exhaustion_records_unverified(monkeypatch: pytest.Mon
 def test_generic_shared_endpoint_with_path_appends_traces_path(monkeypatch: pytest.MonkeyPatch) -> None:
     with otlp_collector() as receiver:
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.base_url + "/otlp-prefix")
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        exporter = cast(HttpxOtlpTransport, otlp_exporter(ObservabilityConfig()))
         exporter.export(_spans())
         assert receiver.requests[-1]["path"] == "/otlp-prefix/v1/traces"
         exporter.shutdown()
@@ -428,7 +429,7 @@ def test_generic_shared_endpoint_with_path_appends_traces_path(monkeypatch: pyte
 def test_generic_signal_specific_endpoint_used_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
     with otlp_collector() as receiver:
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", receiver.base_url + "/custom/ingest")
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        exporter = cast(HttpxOtlpTransport, otlp_exporter(ObservabilityConfig()))
         exporter.export(_spans())
         assert receiver.requests[-1]["path"] == "/custom/ingest"
         exporter.shutdown()
@@ -436,11 +437,11 @@ def test_generic_signal_specific_endpoint_used_verbatim(monkeypatch: pytest.Monk
 def test_shutdown_closes_owned_http_client_via_portal(monkeypatch: pytest.MonkeyPatch) -> None:
     with otlp_collector() as receiver:
         _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
+        exporter = cast(HttpxOtlpTransport, otlp_exporter(ObservabilityConfig()))
         exporter.export(_spans())
         assert len(receiver.spans) == 1
         # Reach into the transport seam the shutdown contract owns.
-        transport = exporter._transport
+        transport = exporter
         assert isinstance(transport, HttpxOtlpTransport)
         client = transport._client
         assert client is not None
@@ -449,3 +450,78 @@ def test_shutdown_closes_owned_http_client_via_portal(monkeypatch: pytest.Monkey
         # Exactly-once shutdown stays exactly-once even when the client is gone.
         exporter.shutdown()
         assert transport._state == "CLOSED"
+
+
+def test_concurrent_http_exports_keep_their_own_encoding_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daydream.observability import otlp_compat
+
+    with otlp_collector() as receiver:
+        _generic_http(monkeypatch, receiver.base_url)
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "0.5")
+        exporter = otlp_exporter(ObservabilityConfig())
+        assert isinstance(exporter, HttpxOtlpTransport)
+        entered = threading.Event()
+        released = threading.Event()
+        local = threading.local()
+        encode = otlp_compat.encode_batch
+
+        def clock() -> float:
+            count = getattr(local, "calls", 0)
+            local.calls = count + 1
+            if getattr(local, "slow", False):
+                return 0.0 if count == 0 else 3.0
+            return 10.0
+
+        def capture(spans: Sequence[ReadableSpan]) -> ExportTraceServiceRequest:
+            if getattr(local, "slow", False):
+                entered.set()
+                assert released.wait(5)
+            return encode(spans)
+
+        def delayed_export() -> SpanExportResult:
+            local.slow = True
+            return exporter.export(_spans())
+
+        monkeypatch.setattr(exporter, "_clock", clock)
+        monkeypatch.setattr(otlp_compat, "encode_batch", capture)
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                slow = pool.submit(delayed_export)
+                assert entered.wait(5)
+                try:
+                    assert exporter.export(_spans()) == SpanExportResult.SUCCESS
+                finally:
+                    released.set()
+                assert slow.result(timeout=5) == SpanExportResult.FAILURE
+            assert len(receiver.requests) == 1
+            snapshot = exporter.delivery_snapshot()
+            assert snapshot["delivered"] == 1 and snapshot["unverified"] == 1
+            assert "OTLP_ENCODE_DEADLINE_EXHAUSTED" in snapshot["diagnostics"]
+        finally:
+            released.set()
+            exporter.shutdown()
+
+
+def test_http_shutdown_during_encoding_prevents_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daydream.observability import otlp_compat
+
+    with otlp_collector() as receiver:
+        _generic_http(monkeypatch, receiver.base_url)
+        exporter = otlp_exporter(ObservabilityConfig())
+        assert isinstance(exporter, HttpxOtlpTransport)
+        encode = otlp_compat.encode_batch
+
+        def shutdown_after_encode(spans: Sequence[ReadableSpan]) -> ExportTraceServiceRequest:
+            request = encode(spans)
+            exporter.shutdown()
+            return request
+
+        monkeypatch.setattr(otlp_compat, "encode_batch", shutdown_after_encode)
+        assert exporter.export(_spans()) == SpanExportResult.FAILURE
+        assert receiver.requests == []
+        assert exporter.state == "CLOSED"
+        exporter.shutdown()

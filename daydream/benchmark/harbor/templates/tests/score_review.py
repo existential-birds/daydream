@@ -218,8 +218,8 @@ def _bounded_repr(value: object) -> str:
 
 def _render_filled(
     template: str,
-    gold: dict[str, Any],
-    candidate: dict[str, Any],
+    gold: verifier_core.FindingContent,
+    candidate: verifier_core.FindingContent,
     *,
     gold_body: str,
     candidate_body: str,
@@ -243,19 +243,21 @@ def _render_filled(
     values = {}
     for side, finding, body in (("gold", gold, gold_body), ("candidate", candidate, candidate_body)):
         for name in ("title", "severity", "path", "start_line", "end_line", "body"):
-            value = body if name == "body" else finding.get(name)
+            value = body if name == "body" else getattr(finding, name)
             marker = _LOCATIONLESS_MARKER if name in ("path", "start_line", "end_line") else ""
             values[f"{side}_{name}"] = _field(value, marker)
     return template.format(**values)
 
 
-def render_pair_prompt(gold: dict[str, Any], candidate: dict[str, Any], *, template: str) -> str:
+def render_pair_prompt(
+    gold: verifier_core.FindingContent, candidate: verifier_core.FindingContent, *, template: str
+) -> str:
     """Render fenced findings after enforcing the 24 KiB raw, pre-escape budget. Escaping
     may inflate accepted content; oversize raw pairs fail without truncation or partial
     results.
     """
-    gold_body = gold.get("body", "") or ""
-    candidate_body = candidate.get("body", "") or ""
+    gold_body = gold.body
+    candidate_body = candidate.body
     # Measure raw bytes before delimiter escaping, which can inflate valid findings.
     raw = _render_filled(
         template,
@@ -713,8 +715,8 @@ _JUDGE_SYSTEM = (
 
 
 async def judge_pairs(
-    gold: list[dict[str, Any]],
-    candidates: list[dict[str, Any]],
+    gold: list[verifier_core.GoldFinding],
+    candidates: list[verifier_core.CandidateFinding],
     *,
     client: Any,
 ) -> list[verifier_core.Verdict]:
@@ -729,7 +731,7 @@ async def judge_pairs(
     pairs = [(g, c) for g in gold for c in candidates]
     semaphore = asyncio.Semaphore(_JUDGE_CONCURRENCY)
 
-    async def _judge(pair: tuple[dict[str, Any], dict[str, Any]]) -> verifier_core.Verdict:
+    async def _judge(pair: tuple[verifier_core.GoldFinding, verifier_core.CandidateFinding]) -> verifier_core.Verdict:
         g, c = pair
         async with semaphore:
             raw = await client.complete_json(
@@ -739,8 +741,8 @@ async def judge_pairs(
             )
         verdict = parse_verdict(raw)
         return verifier_core.Verdict(
-            gold_id=g.get("finding_id", ""),
-            candidate_id=c.get("candidate_id", ""),
+            gold_id=g.finding_id,
+            candidate_id=c.candidate_id,
             match=verdict.match,
             confidence=verdict.confidence,
             reasoning=verdict.reasoning,
@@ -961,9 +963,9 @@ def run_verifier(
         verdicts: list[verifier_core.Verdict] = []
         counting: _CountingClient | None = None
 
-        if gold_parsed and artifact_raw.get("findings"):
+        if gold_parsed and candidates:
             counting = _CountingClient(client)
-            verdicts = asyncio.run(judge_pairs(gold_raw, artifact_raw["findings"], client=counting))
+            verdicts = asyncio.run(judge_pairs(gold_parsed, candidates, client=counting))
             request_counts["requests"] = counting.requests
             if counting.errors:
                 errors.extend(_bounded_error(str(e)) for e in counting.errors)

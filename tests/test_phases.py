@@ -4338,3 +4338,14 @@ async def test_a_mismatch_record_names_the_component(
     assert gate["result"] == "identity-mismatch"
     assert gate["mismatched_components"] == ["tree_key"]
     assert any("tree_key" in line for line in reported), reported
+
+
+@pytest.mark.parametrize("name", ["café.py", "generated.py ", " generated.py", "line\nbreak.py"])
+def test_healing_guard_restores_exact_generated_path_names(
+    tmp_path: Path, _quiet_phase_ui: None, name: str,
+) -> None:
+    original = "# @generated\noriginal = 1\n"
+    generated, snapshot = _seed_healing_repo(tmp_path, name, original)
+    generated.write_text("# @generated\nchanged = 2\n")
+    assert _reject_violations(tmp_path, snapshot) == [name]
+    assert generated.read_text() == original

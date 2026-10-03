@@ -23,7 +23,7 @@ from daydream.training.gate import FrozenSplit, GateConfig, GateReport
 from daydream.training.lineage import ResumeAborted, RunIdentity, stage_digests, validate_resume
 from daydream.training.reward import DEFAULT_WEIGHTS, REWARD_VERSION
 from daydream.training.reward_model import OutcomeModel, train_outcome_model
-from daydream.training.rft import validate_full_sha
+from daydream.training.rft import _reconstruct_task
 from daydream.training.stacks import V2Projection, load_v2_projection
 
 __all__ = ["PipelineConfig", "run_pipeline"]
@@ -179,32 +179,17 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for rec in records:
         identity, lineage_obj = _record_views(rec)
-        rid = str(rec.get("session_id") or "")
-        repo_slug = identity.get("repo_slug") or lineage_obj.get("repo_slug")
-        base_sha = identity.get("base_sha")
-        head_sha = identity.get("head_sha")
-        diff = rec.get("diff")
-        missing = [
-            name
-            for name, value in (
-                ("repo_slug", repo_slug),
-                ("base_sha", base_sha),
-                ("head_sha", head_sha),
-                ("diff", diff),
-            )
-            if not value
-        ]
-        if missing:
-            raise RuntimeError(
-                f"stage2 refused: record {rid!r} lacks frozen task identity field(s) {missing}; "
-                "RFT rebuilds every task from repo/base/head/diff identity (M16) and never skips "
-                "a record silently"
-            )
-        for name, value in (("base_sha", base_sha), ("head_sha", head_sha)):
-            try:
-                validate_full_sha(rid, name, value)
-            except ValueError as exc:
-                raise RuntimeError(str(exc)) from exc
+        row = {
+            "id": str(rec.get("session_id") or ""),
+            "repo_slug": identity.get("repo_slug") or lineage_obj.get("repo_slug"),
+            "base_sha": identity.get("base_sha"),
+            "head_sha": identity.get("head_sha"),
+            "diff": rec.get("diff"),
+        }
+        try:
+            _reconstruct_task(row)
+        except ValueError as exc:
+            raise RuntimeError(f"stage2 refused: {exc}") from exc
         # Projection records carry no archived verifier-verdicts file; the
         # record's own adjudicated outcome is its capture-time judgment.
         # Map it onto the shared verdict vocabulary (the labels
@@ -228,19 +213,13 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         length = rec.get("length")
         if length is None:
             length = len(str(rec.get("finding_text") or ""))
-        rows.append(
-            {
-                "id": rid,
-                "repo_slug": repo_slug,
-                "base_sha": base_sha,
-                "head_sha": head_sha,
-                "diff": diff,
-                "findings": rec.get("findings", []),
-                "verifier_verdicts": verifier_verdicts,
-                "format_valid": format_valid,
-                "length": length,
-            }
+        row.update(
+            findings=rec.get("findings", []),
+            verifier_verdicts=verifier_verdicts,
+            format_valid=format_valid,
+            length=length,
         )
+        rows.append(row)
     return rows
 
 

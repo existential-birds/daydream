@@ -176,12 +176,9 @@ def diff_name_only(repo: Path, base: str, head: str = "HEAD") -> list[str]:
     failures return ``[]``.
     """
     try:
-        proc = process._run_git(repo, ["diff", "--name-only", f"{base}..{head}"], timeout=10)
+        return _path_names(repo, ["diff", "--name-only", "-z", f"{base}..{head}"], strict=False)
     except GitError:
         return []
-    if proc.returncode != 0:
-        return []
-    return [line for line in proc.stdout.splitlines() if line]
 
 
 def diff_paths(
@@ -415,11 +412,6 @@ def staged_patch(repo: Path) -> bytes:
     return proc.stdout
 
 
-def _ordered_unique_names(lines: list[str]) -> list[str]:
-    """Return *lines* stripped, with blanks and later duplicates removed."""
-    return list(dict.fromkeys(name for line in lines if (name := line.strip())))
-
-
 def changed_files(repo: Path, *, preexisting_untracked: set[str] | None = None) -> list[str]:
     """Combine tracked changes against HEAD with new untracked paths, in first-seen order.
 
@@ -427,12 +419,11 @@ def changed_files(repo: Path, *, preexisting_untracked: set[str] | None = None) 
     Daydream. Each failed subquery contributes no paths while the other still runs.
     """
     try:
-        proc = process._run_git(repo, ["diff", "--name-only", "HEAD"], timeout=10)
-        tracked = proc.stdout.splitlines() if proc.returncode == 0 else []
+        tracked = _path_names(repo, ["diff", "--name-only", "-z", "HEAD"], strict=True)
     except GitError:
         tracked = []
     untracked = _filter_preexisting_untracked(list_untracked(repo), preexisting_untracked)
-    return _ordered_unique_names([*tracked, *untracked])
+    return list(dict.fromkeys([*tracked, *untracked]))
 
 
 def changed_files_against(
@@ -441,25 +432,14 @@ def changed_files_against(
     *,
     preexisting_untracked: set[str] | None = None,
 ) -> list[str]:
-    """Return paths changed from *ref*, raising when they cannot be enumerated.
+    """Return exact changed paths and new untracked files, raising on query failure.
 
-    This is the strict counterpart to :func:`changed_files` for destructive
-    recovery guards, where treating a Git failure as an empty change set would
-    make the guard's safety decision unreliable.
+    Pre-existing user files are excluded without trimming or interpreting names.
+    Destructive recovery must not mistake an unknown query for no changes.
     """
-    proc = process._run_git(
-        repo, ["diff", "--name-only", ref], timeout=10, error_context=f"git diff --name-only {ref} failed in {repo}"
-    )
-    untracked_proc = process._run_git(
-        repo,
-        ["ls-files", "--others", "--exclude-standard"],
-        timeout=10,
-        error_context=f"git ls-files --others failed in {repo}",
-    )
-
-    untracked = [line.strip() for line in untracked_proc.stdout.splitlines() if line.strip()]
-    untracked = _filter_preexisting_untracked(untracked, preexisting_untracked)
-    return _ordered_unique_names([*proc.stdout.splitlines(), *untracked])
+    tracked = _path_names(repo, ["diff", "--name-only", "-z", ref], strict=True)
+    untracked = _filter_preexisting_untracked(list_untracked(repo, strict=True), preexisting_untracked)
+    return list(dict.fromkeys([*tracked, *untracked]))
 
 
 def diff_name_only_strict(repo: Path, from_ref: str, to_ref: str) -> list[str]:
@@ -468,32 +448,20 @@ def diff_name_only_strict(repo: Path, from_ref: str, to_ref: str) -> list[str]:
     Failure raises so destructive guards cannot mistake an unknown result for no
     changes. Filesystem decoding preserves names without trimming or Git quoting.
     """
-    proc = process._run_git(
-        repo,
-        ["diff", "--name-only", "-z", from_ref, to_ref],
-        timeout=10,
-        capture_bytes=True,
-        error_context=f"git diff --name-only -z {from_ref} {to_ref} failed in {repo}",
-    )
-    return _decode_nul_paths(proc.stdout)
+    return _path_names(repo, ["diff", "--name-only", "-z", from_ref, to_ref], strict=True)
 
 
 def list_untracked(repo: Path, *, strict: bool = False) -> list[str]:
-    """List untracked, non-ignored paths; Git errors return ``[]`` unless ``strict``.
+    """List exact untracked paths; best-effort calls return [] on query failure.
 
     Strict enumeration protects snapshots from silently omitting unknown content.
     """
     try:
-        proc = process._run_git(repo, ["ls-files", "--others", "--exclude-standard"], timeout=10)
+        return _path_names(repo, ["ls-files", "--others", "--exclude-standard", "-z"], strict=strict)
     except GitError:
         if strict:
             raise
         return []
-    if proc.returncode != 0:
-        if strict:
-            raise GitError(f"git ls-files --others --exclude-standard failed in {repo}: {proc.stderr.strip()}")
-        return []
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
 def _filter_preexisting_untracked(untracked: list[str], preexisting_untracked: set[str] | None) -> list[str]:
@@ -527,18 +495,6 @@ def _is_untracked_runtime_artifact(path: str) -> bool:
     return path.startswith(".daydream/") or path == REVIEW_OUTPUT_FILE
 
 
-def _list_untracked_z(repo: Path) -> list[str]:
-    """Return NUL-delimited untracked paths, raising on a git failure."""
-    proc = process._run_git(
-        repo,
-        ["ls-files", "--others", "--exclude-standard", "-z"],
-        timeout=10,
-        capture_bytes=True,
-        error_context=f"git ls-files --others -z failed in {repo}",
-    )
-    return _decode_nul_paths(proc.stdout)
-
-
 def changed_paths_z(
     repo: Path,
     ref: str,
@@ -551,15 +507,11 @@ def changed_paths_z(
     Fix evidence may exclude untracked runtime output. Tracked changes are
     always included, even inside the runtime namespace.
     """
-    proc = process._run_git(repo, ["diff", "--name-only", "-z", ref], timeout=10, capture_bytes=True)
-    if proc.returncode != 0:
-        stderr = os.fsdecode(proc.stderr)
-        raise GitError(f"git diff --name-only -z {ref} failed in {repo}: {stderr.strip()}")
-    paths = _decode_nul_paths(proc.stdout)
+    paths = _path_names(repo, ["diff", "--name-only", "-z", ref], strict=True)
     if include_untracked:
         paths.extend(
             path
-            for path in _list_untracked_z(repo)
+            for path in list_untracked(repo, strict=True)
             if include_runtime_artifacts or not _is_untracked_runtime_artifact(path)
         )
     unique = dict.fromkeys(paths)
@@ -710,21 +662,22 @@ def object_alternates(repo: Path, *, strict: bool = False) -> tuple[Path, ...]:
         return ()
 
 
-def _snapshot_path_names(repo: Path, args: list[str], *, strict: bool) -> list[str]:
-    proc = process._run_git(repo, args, capture_bytes=True)
+def _path_names(repo: Path, args: list[str], *, strict: bool, timeout: int = 10) -> list[str]:
+    """Own exact NUL-delimited Git names and strict enumeration failure admission."""
+    proc = process._run_git(repo, args, timeout=timeout, capture_bytes=True)
     if proc.returncode != 0:
         if strict:
-            raise GitError(f"cannot enumerate snapshot paths in {repo}")
+            raise GitError(f"cannot enumerate Git paths in {repo}: {os.fsdecode(proc.stderr).strip()}")
         return []
     raw = proc.stdout
     if raw and (not raw.endswith(b"\0") or b"\0\0" in raw):
-        raise GitError("malformed snapshot path enumeration")
-    return [os.fsdecode(entry) for entry in raw.split(b"\0") if entry]
+        raise GitError("malformed Git path enumeration")
+    return _decode_nul_paths(raw)
 
 
 def ls_tree_files(repo: Path, ref: str, *, strict: bool = False) -> list[str]:
     """List tree paths without quoting, trimming, or newline-splitting names."""
-    return _snapshot_path_names(repo, ["ls-tree", "-rz", "--name-only", ref], strict=strict)
+    return _path_names(repo, ["ls-tree", "-rz", "--name-only", ref], strict=strict, timeout=5)
 
 
 def _snapshot_remote_refs(repo: Path) -> list[str]:

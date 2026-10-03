@@ -455,7 +455,7 @@ def test_build_oracle_artifact_passes_validation_and_derives_candidate_ids() -> 
         canon = (f["title"], f["body"], f["severity"] or "", f["path"], f["start_line"], f["end_line"])
         ordinal = groups.get(canon, 0)
         groups[canon] = ordinal + 1
-        expected_ids.append(vc.derive_candidate_id(key, f, ordinal))
+        expected_ids.append(vc.derive_candidate_id(key, vc.parse_finding_content(f), ordinal))
     assert [f["candidate_id"] for f in art["findings"]] == expected_ids
     for entry in art["findings"]:
         assert set(entry) == {"candidate_id", "title", "body", "severity", "path", "start_line", "end_line"}

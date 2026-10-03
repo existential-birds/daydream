@@ -22,7 +22,6 @@ from daydream.observability.config import ObservabilityConfig, ObservabilityErro
 from daydream.observability.otlp_compat import (
     DeliveryLedger,
     GrpcBridge,
-    HttpxOtlpTransport,
     build_http_transport,
 )
 from daydream.observability.privacy import PrivacyPolicy, diagnostic_scope
@@ -40,27 +39,6 @@ def _header_value(setting: str, *, default: str | None = None, required: bool = 
     if value != value.strip() or any(ord(char) < 32 or ord(char) > 255 or ord(char) == 127 for char in value):
         raise ObservabilityError(f"{setting} must be a valid HTTP header value without control characters")
     return value
-
-
-class CompatSpanExporter(SpanExporter):
-    """Own one otlp_compat transport and expose the delivery snapshot."""
-
-    def __init__(self, transport: HttpxOtlpTransport | GrpcBridge, ledger: DeliveryLedger, *, timeout_s: float) -> None:
-        self._transport = transport
-        self._ledger = ledger
-        self._timeout_s = timeout_s
-
-    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
-        return self._transport.export_batch(spans, timeout_s=self._timeout_s)
-
-    def force_flush(self, timeout_millis: int = 30000) -> bool:
-        return bool(self._transport.force_flush(timeout_millis))
-
-    def shutdown(self) -> None:
-        self._transport.shutdown()
-
-    def delivery_snapshot(self) -> dict[str, Any]:
-        return self._ledger.snapshot()
 
 
 def _snapshot_of(exporter: Any) -> dict[str, Any]:
@@ -97,7 +75,7 @@ def _preset_transport(
         raise ObservabilityError(
             "Could not initialize trace destination HTTP transport; check its operator settings"
         ) from None
-    return CompatSpanExporter(transport, ledger, timeout_s=_PRESET_TIMEOUT_SECONDS)
+    return transport
 
 
 def langsmith_exporter(config: ObservabilityConfig) -> SpanExporter:
@@ -232,7 +210,7 @@ def _http_generic_exporter(timeout: float, config: ObservabilityConfig) -> SpanE
             environ=os.environ,
             ledger=ledger,
         )
-    return CompatSpanExporter(transport, ledger, timeout_s=timeout)
+    return transport
 
 
 def _grpc_generic_exporter(timeout: float, config: ObservabilityConfig) -> SpanExporter:
@@ -264,7 +242,7 @@ def _grpc_generic_exporter(timeout: float, config: ObservabilityConfig) -> SpanE
             meter_provider=NoOpMeterProvider(),
         )
         bridge = GrpcBridge(delegate, ledger)
-    return CompatSpanExporter(bridge, ledger, timeout_s=timeout)
+    return bridge
 
 
 def _langsmith_usage(attributes: Mapping[str, AttributeValue]) -> dict[str, Any]:

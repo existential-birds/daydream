@@ -270,7 +270,7 @@ def task_spec_approval(case_doc: dict[str, Any]) -> TaskSpecApproval:
     )
 
 
-def _flatten_finding(finding: dict[str, Any]) -> dict[str, Any]:
+def _flatten_finding(finding: dict[str, Any]) -> vc.FindingContent:
     """Project content/location through the verifier canonical finding parser. Locationless
     findings emit explicit nulls; partially populated locations raise CompileError.
     Provenance never enters the gold artifact.
@@ -312,7 +312,7 @@ def build_gold_list(findings: list[dict[str, Any]], *, key: str) -> list[dict[st
     """
     flat = [(_flatten_finding(f), _gold_finding_ids(key, f)) for f in findings]
     flat.sort(key=lambda item: item[1])
-    result = [{"finding_id": fid, **flattened} for flattened, fid in flat]
+    result = [{"finding_id": fid, **flattened.to_dict()} for flattened, fid in flat]
     try:
         vc.validate_gold_set(result, case_id=key)
     except vc.VerifierError as exc:
@@ -334,8 +334,8 @@ def build_oracle_artifact(opaque_key: str, findings: list[dict[str, Any]]) -> di
     groups: dict[tuple[object, ...], int] = {}
     entries = []
     for flattened, _ in flat:
-        entry = dict(flattened)
-        entry["candidate_id"] = vc.assign_candidate_id(opaque_key, entry, groups)
+        entry = flattened.to_dict()
+        entry["candidate_id"] = vc.assign_candidate_id(opaque_key, flattened, groups)
         entries.append(entry)
     result = {
         "schema_version": 1,

@@ -283,10 +283,11 @@ def prepare_independent_snapshot(
             raise SnapshotPreparationError("snapshot retains remote-tracking refs")
         if include_untracked:
             paths.extend(
-                queries._snapshot_path_names(
+                queries._path_names(
                     source,
                     ["ls-files", "--others", "--exclude-standard", "-z"],
                     strict=True,
+                    timeout=5,
                 )
             )
         unique_paths = sorted(set(paths))

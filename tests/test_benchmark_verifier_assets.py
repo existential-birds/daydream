@@ -55,7 +55,7 @@ def test_public_content_parser_preserves_valid_values(copied_verifier: ModuleTyp
     original = dict(raw)
     for module in (verifier_core, copied_verifier):
         parsed = module.parse_finding_content(raw)
-        assert parsed == original and parsed is not raw
+        assert parsed.to_dict() == original and parsed is not raw
         assert raw == original
 
 @pytest.mark.parametrize("changes",

@@ -125,16 +125,16 @@ def test_assembled_candidate_finding_rejects_verifier_invalid_content(field: str
     finding: dict[str, object] = {"candidate_id": "", "title": "Title", "body": "Body", "severity": "low",
         "path": "src/a.py", "start_line": 1, "end_line": 1,
     }
-    finding["candidate_id"] = vc.derive_candidate_id("case-key", finding, 0)
+    content = vc.parse_finding_content({key: value for key, value in finding.items() if key != "candidate_id"})
+    finding["candidate_id"] = vc.derive_candidate_id("case-key", content, 0)
     assert vc.validate_candidate_artifact({
         "schema_version": 1, "case_id": "case-key", "base_ref": "base", "head_ref": "head", "findings": [finding],
     })
     finding[field] = value
-    if field != "candidate_id":
-        finding["candidate_id"] = vc.derive_candidate_id("case-key", finding, 0)
     with pytest.raises(candidate.CandidateError) as rejected:
         candidate.build_candidate_artifact("case-key", [finding])
     assert rejected.value.kind == "invalid_finding"
+    assert "derived id" not in str(rejected.value)
 
 def test_artifact_write_failure_raises(tmp_path: Path) -> None:
     dest = tmp_path / "adir"                                # a directory -> replace fails

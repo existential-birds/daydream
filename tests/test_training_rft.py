@@ -4,9 +4,11 @@ thresholds; missing identity or invalid thresholds fail closed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -121,3 +123,33 @@ def test_sampled_findings_drive_breakdown_variance(tmp_path: Path) -> None:
     breakpoints = {(w.candidate_index, w.breakdown.composite, tuple(w.breakdown.correctness_per_finding or []))
                    for w in out_a.records}
     assert len(breakpoints) > 1
+
+
+def test_replay_header_binds_captured_input_when_file_is_replaced(
+    frozen_rft_inputs: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import daydream.training.rft as rft
+    from daydream.training.reward import score_trajectory
+
+    captured = frozen_rft_inputs.read_bytes()
+    score = score_trajectory
+    replaced = False
+
+    def score_after_replacement(*args: Any, **kwargs: Any) -> Any:
+        nonlocal replaced
+        if not replaced:
+            replacement = tmp_path / "replacement.jsonl"
+            replacement.write_text(json.dumps(_record("later-generation")) + "\n")
+            replacement.replace(frozen_rft_inputs)
+            replaced = True
+        return score(*args, **kwargs)
+
+    monkeypatch.setattr(rft, "score_trajectory", score_after_replacement)
+    result = run_rft(RftConfig(
+        inputs=frozen_rft_inputs, seed=11, rubric_version="current", output_dir=tmp_path / "bound",
+    ))
+    expected = hashlib.sha256(captured).hexdigest()
+    assert result.inputs_sha256 == expected
+    assert json.loads(result.winners_path.read_text())["header"]["inputs_sha256"] == expected
+    assert {winner.record_id for winner in result.records} == {"r1", "r2"}
+    assert hashlib.sha256(frozen_rft_inputs.read_bytes()).hexdigest() != expected

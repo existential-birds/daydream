@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from daydream.benchmark import storage
 from daydream.benchmark.cli import _build_benchmark_parser, _handle_benchmark_command
 from daydream.benchmark.harbor import package as _pkg, run as run_mod
 
@@ -254,60 +255,61 @@ def _reward_spawn(ws: Path, *, reward: float = 1.0, candidate_count: int = 1, ca
     return spawn
 
 
-def _seed_verifier_reward(ws: Path, *, job_dir_name: str = "run-1", reward: float = 1.0, trial_name: str = "case-abc",
-) -> Path:
-    """Write the scored ``reward.json`` a real trial leaves under its verifier."""
-    job_dir = ws / "harbor" / "jobs" / job_dir_name
-    verifier = job_dir / trial_name / "verifier"
-    verifier.mkdir(parents=True)
-    (verifier / "reward.json").write_text(json.dumps(_score(reward)))
-    return job_dir
-
-
-def _seed_passing_oracle_receipt(ws: Path, *, job_dir_name: str = "run-1",) -> tuple[Path, str]:
-    """Seed a matching compiled lock plus the receipt the gate accepts."""
-
+def _seed_passing_oracle_receipt(ws: Path) -> tuple[Path, str]:
+    """Run the actual Oracle supervisor to create the receipt the paid gate admits."""
     lock = {"schema_version": 1, "cases": {}, "daydream": _WHEEL}
     lock_sha = hashlib.sha256(json.dumps(lock).encode()).hexdigest()
     (ws / "harbor" / "benchmark.lock.json").write_text(json.dumps(lock))
-    job_dir = _seed_verifier_reward(ws, job_dir_name=job_dir_name)
-    assert run_mod._write_oracle_receipt(ws, job_dir=job_dir, compiled_lock_sha256=lock_sha, env=_env()) == 0
-    return job_dir, lock_sha
+    assert run_mod.run_run(
+        ws, oracle=True, yes=True, env=_env(), spawn=_reward_spawn(ws), docker_ok=_docker_ok,
+    ) == 0
+    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+    return Path(ledger["runs"][0]["job_dir"]), lock_sha
 
 
 def test_oracle_parse_success_writes_receipt(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
     (ws / "runtime" / "calibration-receipt.json").write_text(json.dumps({"inputs": {"cal": 1}}))
-    job_dir = _seed_verifier_reward(ws)
-    ok, _ = run_mod._parse_job_results(job_dir)
-    assert ok is True
-    code = run_mod._write_oracle_receipt(ws, job_dir=job_dir, compiled_lock_sha256="a" * 64, env=_env())
+    lock_sha = _compiled_lock_sha(ws)
+    code = run_mod.run_run(
+        ws, oracle=True, yes=True, env=_env(), spawn=_reward_spawn(ws), docker_ok=_docker_ok,
+    )
     assert code == 0
     receipt = json.loads((ws / "harbor" / "oracle-receipt.json").read_text())
     for key in ("compiled_lock_sha256", "harbor_version", "judge_provider", "judge_model",
                 "judge_host", "verifier_template_sha256", "threshold", "attempts",
                 "result_dir", "timestamp"):
         assert key in receipt, f"receipt missing {key}"
-    assert receipt["compiled_lock_sha256"] == "a" * 64
+    assert receipt["compiled_lock_sha256"] == lock_sha
+
 
 def test_oracle_no_receipt_on_reward_below_one(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
-    job_dir = _seed_verifier_reward(ws, reward=0.8)
-    ok, _ = run_mod._parse_job_results(job_dir)
-    assert ok is False
-    code = run_mod._write_oracle_receipt(ws, job_dir=job_dir, compiled_lock_sha256="a" * 64, env=_env())
+    code = run_mod.run_run(
+        ws, oracle=True, yes=True, env=_env(), spawn=_reward_spawn(ws, reward=0.8), docker_ok=_docker_ok,
+    )
     assert code == 1
     assert not (ws / "harbor" / "oracle-receipt.json").exists()
 
+
 def test_oracle_no_receipt_on_unscored_task(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
-    job_dir = ws / "harbor" / "jobs" / "run-1"
-    verifier = job_dir / "case-abc" / "verifier"
-    verifier.mkdir(parents=True)
-    # infra error path writes reward-details.json only -> unscored, blocks
-    (verifier / "reward-details.json").write_text("{}")
-    ok, _ = run_mod._parse_job_results(job_dir)
-    assert ok is False
+
+    def spawn(cmd: Any, *, cwd: Any, env: Any) -> dict[str, Any]:
+        ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+        verifier = Path(ledger["runs"][0]["job_dir"]) / "case-abc" / "verifier"
+        verifier.mkdir(parents=True)
+        # Infrastructure failure leaves details without numeric score evidence.
+        (verifier / "reward-details.json").write_text("{}")
+        return {"returncode": 0}
+
+    assert run_mod.run_run(
+        ws, oracle=True, yes=True, env=_env(), spawn=spawn, docker_ok=_docker_ok,
+    ) == 1
+    assert not (ws / "harbor" / "oracle-receipt.json").exists()
+    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+    assert ledger["runs"][0]["state"] == "cleanup_pending"
+    assert ledger["runs"][0]["environments"]
 
 def test_gate_blocks_on_compiled_lock_mismatch(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
@@ -346,6 +348,50 @@ def test_run_oracle_writes_receipt_and_running_to_complete(tmp_path: Path) -> No
     assert Path(ledger["runs"][0]["job_dir"]).name == ledger["runs"][0]["run_id"]
     assert ledger["runs"][0]["state"] == "complete"
 
+
+def test_oracle_receipt_and_ledger_use_the_same_admitted_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = _ws(tmp_path)
+    captured: list[tuple[bool, list[dict[str, Any]]]] = []
+    parse = run_mod._parse_job_results
+
+    def admit(job_dir: Path) -> tuple[bool, list[dict[str, Any]]]:
+        result = parse(job_dir)
+        captured.append(result)
+        return result
+
+    monkeypatch.setattr(run_mod, "_parse_job_results", admit)
+    assert run_mod.run_run(
+        ws, oracle=True, yes=True, env=_env(), spawn=_reward_spawn(ws), docker_ok=_docker_ok,
+    ) == 0
+    assert len(captured) == 1 and captured[0][0] is True
+    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+    assert ledger["runs"][0]["environments"] == captured[0][1]
+    receipt = json.loads((ws / "harbor" / "oracle-receipt.json").read_text())
+    assert receipt["result_dir"] == ledger["runs"][0]["job_dir"]
+
+
+def test_oracle_receipt_write_failure_preserves_cleanup_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = _ws(tmp_path)
+    write = storage.atomic_write_json
+
+    def fail_receipt(path: Path, value: Any, **kwargs: Any) -> None:
+        if path.name == "oracle-receipt.json":
+            raise OSError("Cannot persist receipt")
+        write(path, value, **kwargs)
+
+    monkeypatch.setattr(storage, "atomic_write_json", fail_receipt)
+    with pytest.raises(OSError, match="Cannot persist receipt"):
+        run_mod.run_run(
+            ws, oracle=True, yes=True, env=_env(), spawn=_reward_spawn(ws), docker_ok=_docker_ok,
+        )
+    assert not (ws / "harbor" / "oracle-receipt.json").exists()
+    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+    assert ledger["runs"][0]["state"] == "cleanup_pending"
+
 def test_run_oracle_from_unrelated_cwd_resolves_harbor_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ws = _ws(tmp_path)
     unrelated = tmp_path / "unrelated"
@@ -379,7 +425,7 @@ def test_oracle_fails_writes_no_receipt_and_ledger_cleanup_pending(tmp_path: Pat
 def test_default_run_propagates_harbor_exit_code(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
     # seed a matching oracle receipt the gate will accept
-    _seed_passing_oracle_receipt(ws, job_dir_name="x")
+    _seed_passing_oracle_receipt(ws)
 
     def spawn(cmd: Any, *, cwd: Any, env: Any) -> dict[str, Any]:
         return {"returncode": 3}
@@ -486,9 +532,10 @@ def test_oracle_receipt_has_no_calibration_state(tmp_path: Path) -> None:
 
 def test_oracle_writes_receipt_without_calibration_file(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
-    job_dir = _seed_verifier_reward(ws, job_dir_name="j1", trial_name="t1")
     lock_sha = _compiled_lock_sha(ws)
-    code = run_mod._write_oracle_receipt(ws, job_dir=job_dir, compiled_lock_sha256=lock_sha, env=_env())
+    code = run_mod.run_run(
+        ws, oracle=True, yes=True, env=_env(), spawn=_reward_spawn(ws), docker_ok=_docker_ok,
+    )
     assert code == 0
     receipt = json.loads((ws / "harbor" / "oracle-receipt.json").read_text())
     assert "calibration_receipt_sha256" not in receipt

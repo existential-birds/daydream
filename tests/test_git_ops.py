@@ -2381,3 +2381,23 @@ def test_remote_contains_commit_true_after_push_false_before(tmp_path: Path) -> 
     assert git_ops.remote_contains_commit(clone, "main", sha) is False
     subprocess.run(["git", "-C", str(clone), "push", "-u", "origin", "main"], check=True, capture_output=True)
     assert git_ops.remote_contains_commit(clone, "main", sha) is True
+
+
+@pytest.mark.parametrize("name", ["café.py", "trailing.py ", " leading.py", "line\nbreak.py", "tab\tname.py"])
+def test_native_changed_name_queries_preserve_user_files(tmp_path: Path, name: str) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    tracked = repo / name
+    tracked.write_text("tracked baseline\n")
+    _git(repo, "add", "--", name)
+    _commit(repo, "exact tracked name")
+    assert git_ops.diff_name_only(repo, "HEAD^", "HEAD") == [name]
+    assert git_ops.diff_name_only_strict(repo, "HEAD^", "HEAD") == [name]
+    tracked.write_text("tracked change\n")
+    user_name = "user-" + name
+    (repo / user_name).write_text("preexisting user bytes\n")
+    assert git_ops.list_untracked(repo) == [user_name]
+    assert git_ops.list_untracked(repo, strict=True) == [user_name]
+    assert git_ops.changed_files(repo, preexisting_untracked={user_name}) == [name]
+    assert git_ops.changed_files_against(repo, "HEAD", preexisting_untracked={user_name}) == [name]
+    assert git_ops.changed_paths_z(repo, "HEAD", include_untracked=False) == [name]
+    assert (repo / user_name).read_text() == "preexisting user bytes\n"
