@@ -107,6 +107,7 @@ from daydream.phases.test_evidence import (
     _test_command_wall_budget,
 )
 from daydream.phases.testing import (
+    _REPAIR_EXCERPT_MAX_CHARS,
     _build_fix_prompt,
     _reject_test_healing_generated_file_edits,
     _sanitize_suggested_command,
@@ -894,6 +895,57 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(
     assert "src/handler.py" in fix_prompt
     assert "src/utils.py" in fix_prompt
     assert "Analyze the failures and fix them" in fix_prompt
+
+
+def _footprint(repo: Path) -> AuthorizedFixFootprint:
+    """A no-edit-authority footprint: the repair record, not the prompt, carries scope."""
+    return AuthorizedFixFootprint(run_allowed_paths=frozenset(), policy_revision=1)
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_records_interrupted_repair_instead_of_discarding_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
+    _quiet_phase_ui: None,
+) -> None:
+    """Requirement 3: the abort reason reaches a named destination and changes the loop."""
+
+    monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
+
+    async def stall(**_kwargs: Any) -> AsyncIterator[TextEvent]:
+        while True:
+            yield TextEvent(text="PARTIAL-DIAGNOSIS-abc123")
+            await anyio.sleep(0)
+
+    backend = ScriptedBackend(responder=lambda cwd, prompt, *_: stall()
+                              if prompt.lower().startswith("the tests failed") else None)
+
+    # One repair attempt; any further offer answers "abort" so the case terminates.
+    choices = iter(["2"])
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: next(choices, "4"))
+
+    result = await phases.phase_test_and_heal(
+        backend, make_work(tmp_path), session_id="s1",
+        capture_tree_key=lambda: "tree-1", footprint=_footprint(tmp_path),
+        allow_standalone=True,
+    )
+
+    # The record survives the phase; the abort reason is not merely read.
+    assert len(result.repairs) == 1
+    repair = result.repairs[0]
+    assert repair.outcome is RepairOutcome.BUDGET_INTERRUPTED
+    assert repair.abort_reason == "wall_budget_exceeded"
+    assert repair.reason_code is ReasonCode.HOST_WALL_BUDGET_EXHAUSTION
+    # An interrupted repair is distinguishable from a completed one by the record alone.
+    assert repair.job_id and repair.execution_id != repair.job_id
+    # The security boundary: the record names a bounded, redacted excerpt of the
+    # turn's partial prose and never the raw unbounded stream itself.
+    payload = repair.payload()
+    assert "raw_output" not in payload
+    assert payload["focused_evidence"], "a stalled turn's partial diagnosis must still be recorded"
+    assert all(len(excerpt) <= _REPAIR_EXCERPT_MAX_CHARS for excerpt in payload["focused_evidence"])
+    # The interrupted tree is not verified, so the suite is not rerun against it.
+    assert (result.passed, result.proceed) == (False, False)
+    assert backend.call_count == 2
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_aborts_when_generated_restore_fails(
@@ -3711,7 +3763,9 @@ async def test_phase_test_and_heal_records_each_agent_attempt_and_heal_scope(
     footprint = AuthorizedFixFootprint.build(tmp_path, {"readme.md"}, feedback)
     backend = ScriptedBackend(script=[_FAIL_TURN, _FIX_TURN, _PASS_TURN])
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *args, **kwargs: "2")
-    keys = iter(["in-1", "out-1", "in-2", "out-2"])
+    # Two keys per test attempt plus one pair per repair turn, which records the
+    # tree the repair started from and the tree it left behind.
+    keys = iter(["in-1", "out-1", "fix-in-1", "fix-out-1", "in-2", "out-2",])
     result = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), feedback_items=feedback, session_id="session-2",
         capture_tree_key=lambda: next(keys), footprint=footprint, allow_standalone=True,
@@ -3719,8 +3773,9 @@ async def test_phase_test_and_heal_records_each_agent_attempt_and_heal_scope(
 
     assert result.passed is True
     assert result.ignored is False
-    assert [(a.input_tree_key, a.output_tree_key) for a in result.attempts] == [("in-1", "out-1"), ("in-2", "out-2"),]
+    assert [(a.input_tree_key, a.output_tree_key) for a in result.attempts] == [("in-1", "out-1"), ("in-2", "out-2",),]
     assert all(a.kind == "agent" and a.command is None for a in result.attempts)
+    assert [(r.input_tree_key, r.output_tree_key) for r in result.repairs] == [("fix-in-1", "fix-out-1"),]
     heal_prompt = backend.prompts[1]
     assert "Authorized edit scope" in heal_prompt
     assert "a.py" in heal_prompt and "readme.md" in heal_prompt

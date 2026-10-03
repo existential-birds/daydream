@@ -20,6 +20,7 @@ from daydream.deep.evidence_reuse import (
 from daydream.git_ops import GitError
 from daydream.phases.inputs import append_extended_facts
 from daydream.phases.repair_outcome import RepairOutcome, repair_reason_code
+from daydream.review_result import ReasonCode
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.test_execution import (
     MissingTestCommandError,
@@ -226,6 +227,17 @@ class RepairAttemptEvidence:
     checkpoint_ref: str | None = None
     focused_evidence: tuple[str, ...] = ()
     scope_request: Mapping[str, Any] | None = None
+    #: Opaque digest of the turn's continuation token, never the token itself:
+    #: a resumed context may carry opaque provider data.
+    continuation_ref: str | None = None
+    #: Named degradation of the host's own accounting (e.g. a Git read that
+    #: failed), never a swallowed failure.
+    diagnostics: tuple[str, ...] = ()
+
+    @property
+    def reason_code(self) -> ReasonCode | None:
+        """The converged public stop reason for this turn, or ``None`` if it ended on its own."""
+        return repair_reason_code(self.abort_reason)
 
     def payload(self) -> dict[str, Any]:
         """JSON-serializable form, naming the converged public reason for the stop.
@@ -250,6 +262,8 @@ class RepairAttemptEvidence:
             "checkpoint_ref": self.checkpoint_ref,
             "focused_evidence": list(self.focused_evidence),
             "scope_request": dict(self.scope_request) if self.scope_request is not None else None,
+            "continuation_ref": self.continuation_ref,
+            "diagnostics": list(self.diagnostics),
         }
 
 

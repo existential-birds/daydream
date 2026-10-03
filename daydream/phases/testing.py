@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import shlex
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,14 @@ from daydream.phases.fix import (
 )
 from daydream.phases.handoff import _emit_failure_handoff
 from daydream.phases.inputs import _render_bash_allowlist, _tail_test_output, append_extended_facts
-from daydream.phases.test_evidence import TestAndHealResult, TestAttemptEvidence, phase_test_once
+from daydream.phases.repair_outcome import classify_repair_outcome
+from daydream.phases.test_evidence import (
+    RepairAttemptEvidence,
+    TestAndHealResult,
+    TestAttemptEvidence,
+    phase_test_once,
+)
+from daydream.redaction import redact_text
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.test_execution import (
     TestRecipe,
@@ -54,6 +62,30 @@ from daydream.trajectory import (
 from daydream.workspace import WorkContext
 
 _logger = logging.getLogger(__name__)
+
+# A repair record outlives the process that wrote it, so it carries a bounded
+# excerpt of the turn's own partial output rather than the unbounded prose.
+_REPAIR_EXCERPT_MAX_CHARS = 2000
+
+
+def _repair_excerpt(text: str) -> tuple[str, ...]:
+    """Return at most one redacted, length-capped excerpt, or nothing for silent output."""
+    tail, _truncated = _tail_test_output(text)
+    if not tail.strip():
+        return ()
+    excerpt = redact_text(tail)
+    if len(excerpt) > _REPAIR_EXCERPT_MAX_CHARS:
+        excerpt = excerpt[-_REPAIR_EXCERPT_MAX_CHARS:]
+    return (excerpt,)
+
+
+def _continuation_ref(token: ContinuationToken | None) -> str | None:
+    """Name a continuation without recording it: tokens carry opaque provider data."""
+    if token is None:
+        return None
+    digest = hashlib.sha256(repr(token).encode("utf-8", errors="surrogateescape")).hexdigest()[:16]
+    return f"continuation:{digest}"
+
 
 def _build_fix_prompt(
     test_output: str,
@@ -331,7 +363,12 @@ async def phase_test_and_heal(
 
     retries_used = 0
     attempts: list[TestAttemptEvidence] = []
+    repairs: list[RepairAttemptEvidence] = []
+    job_started = time.monotonic()
     continuation: ContinuationToken | None = None
+    # The repair job is host-owned: one identity per heal loop, one execution
+    # per repair turn, so a resumed job can tell the two apart.
+    job_id = f"repair-{session_id}"
     # Feed redacted host-suite failures through the same environmental/healing
     # gate as agent-run failures on the next iteration.
     host_failure_output: str | None = None
@@ -359,13 +396,49 @@ async def phase_test_and_heal(
         fix_prompt += _build_fix_scope_clause(
             footprint.run_allowed_paths, footprint.run_allowed_paths
         )
-        await agent.run_agent(
+        input_tree_key = capture_tree_key()
+        started = time.monotonic()
+        partial_output, continuation_token, abort_reason = await agent.run_agent(
             backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX,
             tool_call_budget=phase_config.DEFAULT_TOOL_CALL_BUDGET,
             wall_budget_s=phase_config.DEFAULT_WALL_BUDGET_S,
             run_context=run_context,
         )
+        # The host, not the turn, decides what happened: the abort reason outranks
+        # whatever the partial prose claimed. `output` is the failing test output
+        # the turn worked from; `partial_output` is the turn's own unfinished text.
+        turn_output = partial_output if isinstance(partial_output, str) else ""
         retries_used += 1
+        diagnostics: list[str] = []
+        # Git-observed paths, never the feedback items' targets: only the tree
+        # itself says what the turn actually changed.
+        changed: tuple[str, ...] = ()
+        if snapshot is not None:
+            try:
+                changed = tuple(git_ops.changed_paths_z(work.repo, snapshot))
+            except (GitError, OSError) as exc:
+                # Never abort the repair over a degraded read, and never hide it:
+                # the record names the miss so the job can re-derive the paths.
+                diagnostics.append(f"changed_paths_unavailable: {exc}")
+        repairs.append(RepairAttemptEvidence(
+            job_id=job_id,
+            execution_id=f"{job_id}:execution:{retries_used}",
+            run_id=work.run_id,
+            outcome=classify_repair_outcome(abort_reason, turn_output),
+            abort_reason=abort_reason,
+            backend_name=type(backend).__name__.removesuffix("Backend").lower(),
+            model=backend.model,
+            execution_elapsed_s=time.monotonic() - started,
+            job_elapsed_s=time.monotonic() - job_started,
+            input_tree_key=input_tree_key,
+            output_tree_key=capture_tree_key(),
+            changed_paths=changed,
+            focused_evidence=_repair_excerpt(turn_output),
+            continuation_ref=_continuation_ref(continuation_token),
+            diagnostics=tuple(diagnostics),
+        ))
+        # Each repair turn still starts a fresh context; the token is recorded for
+        # a resuming job, never fed to the next turn of this loop.
         continuation = None
         guard_result = _reject_test_healing_generated_file_edits(
             work.repo,
@@ -376,6 +449,16 @@ async def phase_test_and_heal(
             artifact_session=artifact_session,
             allow_standalone=allow_standalone,
         )
+        if abort_reason is not None:
+            # An aborted turn left a tree the host cannot vouch for, exactly like a
+            # failed restoration: stop here rather than rerun the suite against it.
+            # The record above is what a resuming job reads.
+            ui.print_warning(
+                agent.console,
+                f"Test-healing repair turn aborted ({abort_reason}); not rerunning tests "
+                "against the unconverged tree.",
+            )
+            return False
         return guard_result is not None
 
     while True:
@@ -406,7 +489,7 @@ async def phase_test_and_heal(
 
         if test_passed:
             ui.print_success(agent.console, "Tests passed")
-            return TestAndHealResult(True, retries_used, True, False, tuple(attempts))
+            return TestAndHealResult(True, retries_used, True, False, tuple(attempts), tuple(repairs))
 
         ui.print_warning(agent.console, "Tests may have failed or result is unclear.")
 
@@ -418,7 +501,7 @@ async def phase_test_and_heal(
                 "Test failure looks environmental (infrastructure unavailable); "
                 "skipping heal loop.",
             )
-            return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
+            return TestAndHealResult(False, retries_used, False, False, tuple(attempts), tuple(repairs))
 
         # Unattended defaults abort without mutation. --yes allows one bounded
         # fix/retry, then aborts. Only interactive runs without an assumption show
@@ -441,13 +524,13 @@ async def phase_test_and_heal(
                 allow_standalone=allow_standalone,
                 run_context=run_context,
             )
-            return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
+            return TestAndHealResult(False, retries_used, False, False, tuple(attempts), tuple(repairs))
         if decision is True:
             # Bounded auto fix-and-retry: launch one fix attempt, then loop.
             agent.console.print()
             ui.print_info(agent.console, "Launching agent to fix test failures (auto)...")
             if not await _launch_fix(output):
-                return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
+                return TestAndHealResult(False, retries_used, False, False, tuple(attempts), tuple(repairs))
             continue
 
         ui.print_menu(agent.console, "What would you like to do?", [
@@ -530,7 +613,7 @@ async def phase_test_and_heal(
                         if evidence.passed:
                             ui.print_success(agent.console, "Tests passed")
                             return TestAndHealResult(
-                                True, retries_used, True, False, tuple(attempts)
+                                True, retries_used, True, False, tuple(attempts), tuple(repairs),
                             )
                         ui.print_warning(agent.console, "Approved test command failed.")
                         host_failure_output = alternate_output
@@ -543,12 +626,12 @@ async def phase_test_and_heal(
             agent.console.print()
             ui.print_info(agent.console, "Launching agent to fix test failures...")
             if not await _launch_fix(output):
-                return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
+                return TestAndHealResult(False, retries_used, False, False, tuple(attempts), tuple(repairs))
             continue
 
         elif choice == "3":
             ui.print_warning(agent.console, "Ignoring test failures, continuing...")
-            return TestAndHealResult(False, retries_used, True, True, tuple(attempts))
+            return TestAndHealResult(False, retries_used, True, True, tuple(attempts), tuple(repairs))
 
         elif choice == "4":
             ui.print_error(agent.console, "Aborted", "User requested abort")
@@ -561,8 +644,8 @@ async def phase_test_and_heal(
                 allow_standalone=allow_standalone,
                 run_context=run_context,
             )
-            return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
+            return TestAndHealResult(False, retries_used, False, False, tuple(attempts), tuple(repairs))
 
         else:
             ui.print_warning(agent.console, f"Invalid choice '{choice}', aborting")
-            return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
+            return TestAndHealResult(False, retries_used, False, False, tuple(attempts), tuple(repairs))
