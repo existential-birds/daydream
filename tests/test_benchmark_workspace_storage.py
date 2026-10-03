@@ -407,45 +407,33 @@ def _write_corrupt_journal(tmp_path: Path, op_id: Any, mutate: Any) -> None:
     atomic_write_json(jf, doc)
 
 
-def test_journal_invalid_state_fails_closed(tmp_path: Path) -> None:
-    _write_corrupt_journal(tmp_path, "op-1", lambda d: d.__setitem__("state", "bogus"))
+# One entry per journal validation in recover_startup; the mutation is the only per-case
+# input, and ``escaped_name`` marks the single case that must also leave the workspace parent
+# untouched (path confinement, not just fail-closed).
+@pytest.mark.parametrize(("op_id", "mutate", "escaped_name"), [
+    ("op-1", lambda d: d.__setitem__("state", "bogus"), None),
+    ("op-2", lambda d: d.__setitem__("op_id", "other-dir"), None),
+    ("op-3", lambda d: d["targets"][0].__setitem__("rel", "../../escaped-by-journal.bin"),
+     "escaped-by-journal.bin"),
+    ("op-4", lambda d: d["targets"][0].__setitem__("stage", "sub/stage-0000.bin"), None),
+    ("op-5", lambda d: d["targets"].append(dict(d["targets"][0])), None),
+    ("op-6", lambda d: d.__setitem__("applied_count", 99), None),
+    ("op-7", lambda d: d.__setitem__("replacement_order", ["not-a-target"]), None),
+], ids=["invalid_state", "opid_mismatch", "rel_escape", "stage_with_separator", "duplicate_target_rel",
+        "applied_count_out_of_bounds", "replacement_order_unknown_target"],
+)
+def test_journal_corruption_fails_closed(tmp_path: Path, op_id: str, mutate: Any,
+        escaped_name: str | None,
+) -> None:
+    outside = None if escaped_name is None else tmp_path.parent / escaped_name
+    if outside is not None:
+        outside.unlink(missing_ok=True)
+    _write_corrupt_journal(tmp_path, op_id, mutate)
     with pytest.raises(WorkspaceCorrupt):
         recover_startup(tmp_path)
     assert (tmp_path / "target.yaml").read_text() == "old"  # target untouched
-
-def test_journal_opid_mismatch_fails_closed(tmp_path: Path) -> None:
-    _write_corrupt_journal(tmp_path, "op-2", lambda d: d.__setitem__("op_id", "other-dir"))
-    with pytest.raises(WorkspaceCorrupt):
-        recover_startup(tmp_path)
-
-def test_journal_rel_escape_fails_closed(tmp_path: Path) -> None:
-    outside = tmp_path.parent / "escaped-by-journal.bin"
-    outside.unlink(missing_ok=True)
-    _write_corrupt_journal(tmp_path, "op-3",
-        lambda d: d["targets"][0].__setitem__("rel", "../../escaped-by-journal.bin"))
-    with pytest.raises(WorkspaceCorrupt):
-        recover_startup(tmp_path)
-    assert not outside.exists()  # no path outside the workspace changed
-
-def test_journal_stage_with_separator_fails_closed(tmp_path: Path) -> None:
-    _write_corrupt_journal(tmp_path, "op-4", lambda d: d["targets"][0].__setitem__("stage", "sub/stage-0000.bin"))
-    with pytest.raises(WorkspaceCorrupt):
-        recover_startup(tmp_path)
-
-def test_journal_duplicate_target_rel_fails_closed(tmp_path: Path) -> None:
-    _write_corrupt_journal(tmp_path, "op-5", lambda d: d["targets"].append(dict(d["targets"][0])))
-    with pytest.raises(WorkspaceCorrupt):
-        recover_startup(tmp_path)
-
-def test_journal_applied_count_out_of_bounds_fails_closed(tmp_path: Path) -> None:
-    _write_corrupt_journal(tmp_path, "op-6", lambda d: d.__setitem__("applied_count", 99))
-    with pytest.raises(WorkspaceCorrupt):
-        recover_startup(tmp_path)
-
-def test_journal_replacement_order_unknown_target_fails_closed(tmp_path: Path) -> None:
-    _write_corrupt_journal(tmp_path, "op-7", lambda d: d.__setitem__("replacement_order", ["not-a-target"]))
-    with pytest.raises(WorkspaceCorrupt):
-        recover_startup(tmp_path)
+    if outside is not None:
+        assert not outside.exists()  # no path outside the workspace changed
 
 def test_cross_transaction_target_conflict_is_corruption(tmp_path: Path) -> None:
     target = tmp_path / "target.yaml"

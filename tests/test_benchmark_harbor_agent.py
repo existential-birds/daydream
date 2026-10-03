@@ -18,7 +18,7 @@ from daydream.benchmark.harbor.agent import AgentError, DaydreamReviewAgent, bui
 from daydream.benchmark.harbor.package import render_job_config
 from daydream.config_file import DaydreamFileConfig
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
+from tests.harness.git_helpers import seed_feature_branch
 from tests.harness.stub_backend import install_stub_backend
 from tests.test_benchmark_harbor_build import _seed_ready_workspace, _stub_wheel
 
@@ -440,26 +440,42 @@ def test_validate_compiled_imports_agent_path_same_interpreter(
 _EXPECTED_TITLES = ["Sample issue", "Structural maintainability concern"]
 
 
+_HELLO = "def hello():\n    return 'world'\n"
+_UNIVERSE = "def hello():\n    return 'universe'\n"
+
+
 def _seed_defect_repo(tmp_path: Path) -> Path:
     """Build a real temp git repo with a ``base`` ref and a single-python diff.
 
-    Mirrors the deep-orchestrator's real-worktree fixtures, adding a ref literally
-    named ``base`` (what the entrypoint's ``RunConfig.base="base"`` resolves
-    against).
+    ``base_ref`` is the literal ref the entrypoint's ``RunConfig.base="base"`` resolves
+    against, which is the one thing the shared seeder needs spelled out here.
     """
-
     project = tmp_path / "fixture"
-    project.mkdir()
-    (project / "api.py").write_text("def hello():\n    return 'world'\n")
-    _init_repo(project)
-    _git(project, "add", ".")
-    _commit(project, "prime")
-    _git(project, "branch", "base")
-    _git(project, "checkout", "-b", "feature")
-    (project / "api.py").write_text("def hello():\n    return 'universe'\n")
-    _git(project, "add", ".")
-    _commit(project, "change")
+    seed_feature_branch(project, base={"api.py": _HELLO}, feature={"api.py": _UNIVERSE},
+        base_message="prime", feature_message="change", base_ref="base",
+    )
     return project
+
+
+def _assert_published_artifact(artifact: dict[str, Any], case_id: str) -> list[Any]:
+    """The published-artifact contract every host publish path must satisfy; returns the parsed candidates."""
+    parsed = vc.validate_candidate_artifact(artifact)
+    assert [p.candidate_id for p in parsed] == [f["candidate_id"] for f in artifact["findings"]]
+    assert [f["title"] for f in artifact["findings"]] == _EXPECTED_TITLES
+    assert artifact["case_id"] == case_id
+    assert artifact["base_ref"] == "base" and artifact["head_ref"] == "head"
+    return parsed
+
+
+def _assert_host_secrets_absent(child: dict[str, str], *, claude: bool) -> None:
+    """No host secret survives into the child env; ``claude`` exempts only its own credential."""
+    for banned in env_policy.HOST.banned_vars:
+        if not (claude and banned in env_policy.HOST.claude_exempt_vars):
+            assert banned not in child  # non-credential bans stay
+    for prefix in env_policy.HOST.banned_prefixes:
+        if claude and prefix == env_policy.HOST.claude_exempt_prefix:
+            continue  # exempted for backend="claude"
+        assert not any(k.startswith(prefix) for k in child)
 
 
 def _end_env(repo: Path, tmp: Path, case_id: str) -> dict[str, str]:
@@ -484,12 +500,8 @@ def test_end_to_end_findings_and_clean_review(tmp_path: Path, monkeypatch: pytes
     rc = asyncio.run(entrypoint.main(env))
     assert rc == 0
     artifact = json.loads((tmp_path / "logs" / "artifacts" / "review.json").read_text())
-    parsed = vc.validate_candidate_artifact(artifact)
-    assert [p.candidate_id for p in parsed] == [f["candidate_id"] for f in artifact["findings"]]
-    assert [f["title"] for f in artifact["findings"]] == _EXPECTED_TITLES
+    _assert_published_artifact(artifact, case_id)
     assert len({f["candidate_id"] for f in artifact["findings"]}) == len(artifact["findings"])
-    assert artifact["case_id"] == case_id
-    assert artifact["base_ref"] == "base" and artifact["head_ref"] == "head"
 
     # explicit empty review: a genuinely-empty deep review writes no merged output
     # (it fail-closes), so the clean-review contract is exercised through the very
@@ -574,20 +586,13 @@ def test_local_harbor_task_with_fake_backend(tmp_path: Path, fake_gh: FakeGh, mo
     assert set(executed.child) <= {"PATH", "HOME", "LANG"} | {
         k for k in executed.child if k.startswith("DAYDREAM_REVIEW_")
     }
-    for banned in env_policy.HOST.banned_vars:
-        assert banned not in executed.child  # fail-closed: host secrets never reach the child
-    for prefix in env_policy.HOST.banned_prefixes:
-        assert not any(k.startswith(prefix) for k in executed.child)
+    _assert_host_secrets_absent(executed.child, claude=False)  # fail-closed: host secrets never reach the child
 
     rc = asyncio.run(entrypoint.main(executed.child))
     assert rc == 0
 
     artifact = json.loads((tmp_path / "logs" / "artifacts" / "review.json").read_text())
-    parsed = vc.validate_candidate_artifact(artifact)
-    assert [p.candidate_id for p in parsed] == [f["candidate_id"] for f in artifact["findings"]]
-    assert [f["title"] for f in artifact["findings"]] == _EXPECTED_TITLES
-    assert artifact["case_id"] == key
-    assert artifact["base_ref"] == "base" and artifact["head_ref"] == "head"
+    parsed = _assert_published_artifact(artifact, key)
 
     # Validate both host-produced artifacts with the verifier copied into the
     # compiled task, exercising the actual deployment boundary.
@@ -655,23 +660,13 @@ def test_agent_run_accepts_claude_and_invokes_entrypoint(tmp_path: Path, monkeyp
     # strip it and the in-container claude branch would fail below).
     assert executed.child["ANTHROPIC_API_KEY"] == "sk-ant-live"
     assert executed.child["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
-    for banned in env_policy.HOST.banned_vars:
-        if banned not in env_policy.HOST.claude_exempt_vars:
-            assert banned not in executed.child  # non-credential bans stay
-    for prefix in env_policy.HOST.banned_prefixes:
-        if prefix == env_policy.HOST.claude_exempt_prefix:
-            continue  # exempted for backend="claude"
-        assert not any(k.startswith(prefix) for k in executed.child)
+    _assert_host_secrets_absent(executed.child, claude=True)
 
     rc = asyncio.run(entrypoint.main(executed.child))
     assert rc == 0
 
     artifact = json.loads((tmp_path / "logs" / "artifacts" / "review.json").read_text())
-    parsed = vc.validate_candidate_artifact(artifact)
-    assert [p.candidate_id for p in parsed] == [f["candidate_id"] for f in artifact["findings"]]
-    assert [f["title"] for f in artifact["findings"]] == _EXPECTED_TITLES
-    assert artifact["case_id"] == case_id
-    assert artifact["base_ref"] == "base" and artifact["head_ref"] == "head"
+    _assert_published_artifact(artifact, case_id)
 
 def test_agent_setup_refuses_unsupported_backend_before_probe(tmp_path: Path) -> None:
     pytest.importorskip("harbor")
