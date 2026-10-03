@@ -265,7 +265,6 @@ def test_arbiter_contract_binds_actual_execution(tmp_path: Path, make_config: An
 
     from daydream.deep.adjudication_steps import _arbiter_plan_component
     from daydream.deep.latency import ArbiterPlan
-    from daydream.deep.state import DeepState
     from daydream.extensions import get_registry
     from daydream.flows.engine import FlowContext
     from tests.harness.review_result import review_coverage
@@ -280,7 +279,7 @@ def test_arbiter_contract_binds_actual_execution(tmp_path: Path, make_config: An
     monkeypatch.setattr(ctx, 'backend_for_effort', lambda *_: backend)
     group = PlannedGroup('arbiter-group-0', ('python:1',), 'high', 'policy')
     plan = ArbiterPlan(True, (group,), 'policy')
-    before = _arbiter_plan_component(ctx, DeepState(ctx.data), plan, None)
+    before = _arbiter_plan_component(ctx, ctx.deep_data(), plan, None)
     if change == 'model':
         backend.model = 'second-model'
     elif change == 'effort':
@@ -288,7 +287,7 @@ def test_arbiter_contract_binds_actual_execution(tmp_path: Path, make_config: An
         backend.reasoning_effort = 'medium'
     else:
         monkeypatch.setattr('daydream.deep.adjudication_steps.ARBITER_SCHEMA', {'type': 'object'})
-    after = _arbiter_plan_component(ctx, DeepState(ctx.data), plan, None)
+    after = _arbiter_plan_component(ctx, ctx.deep_data(), plan, None)
     assert before['groups'][0]['target_uids'] == after['groups'][0]['target_uids']
     assert before['groups'][0]['contract'] != after['groups'][0]['contract']
 
@@ -299,17 +298,17 @@ def test_whole_adjudication_proof_requires_current_positive_stage(
 ) -> None:
     from daydream.deep.adjudication_steps import _completed_adjudication, _digest
     from daydream.deep.records import RecordPool
-    from daydream.deep.state import DeepState
     from tests.harness.review_result import review_coverage
 
     coverage = review_coverage(scope_ids=(), phases=('arbiter', 'suppression'))
     for stage in coverage.phases:
         coverage.record_phase(stage, 'complete', noop=True)
-    state = DeepState({'dd': tmp_path, 'record_pool': RecordPool({}, {}), 'review_coverage': coverage})
     from daydream.extensions import get_registry
     from daydream.flows.engine import FlowContext
 
-    ctx = FlowContext(make_config(tmp_path), make_work(tmp_path), get_registry())
+    ctx = FlowContext(make_config(tmp_path), make_work(tmp_path), get_registry(),
+                      data={'dd': tmp_path, 'record_pool': RecordPool({}, {}), 'review_coverage': coverage})
+    state = ctx.deep_data()
     contract = {'plan': None, 'precision_mode': True, 'suppression': 'execution-contract'}
     DeepArtifact.ADJUDICATION_COMPLETE.at(tmp_path).write_text(json.dumps({**contract, 'records': _digest([])}))
     assert _completed_adjudication(ctx, state, contract)

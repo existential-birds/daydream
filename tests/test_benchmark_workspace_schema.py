@@ -652,8 +652,10 @@ def test_malformed_task_spec_digest_is_corruption_not_staleness(digest: str) -> 
     prepared = schema._schema_ready(raw)
 
     assert prepared["curation"]["task_spec_sha256"] == digest
-    with pytest.raises(ValidationError, match="lowercase 64-hex"):
+    with pytest.raises(ValidationError) as error:
         CaseDocument.model_validate(prepared)
+    assert error.value.errors()[0]["loc"] == ("curation", "task_spec_sha256")
+    assert error.value.errors()[0]["type"] == "string_pattern_mismatch"
 
 def test_task_spec_approval_reports_nonready_current_and_stale() -> None:
     raw = _valid_case_dict()
@@ -803,3 +805,28 @@ def test_pull_request_entry_fetched_allows_latest_error_only() -> None:
     bad = dict(valid, error={"code": "fetch", "message": "x"})   # error still forbidden on fetched
     with pytest.raises(ValidationError):
         PullRequestEntry.model_validate(bad)
+
+@pytest.mark.parametrize(
+    "field",
+    ["original_base_sha", "requested_base_sha", "original_head_sha", "base_tree_sha", "head_tree_sha"],
+)
+def test_snapshot_sha_constraints_reject_trailing_newline(field: str) -> None:
+    raw = _valid_case_dict()
+    raw["snapshot"][field] += "\n"
+    with pytest.raises(ValidationError) as error:
+        CaseDocument.model_validate(raw)
+    assert any(field in item["loc"] for item in error.value.errors())
+
+
+@pytest.mark.parametrize("line", [0, -1, "0", "-1"])
+def test_evidence_line_constraints_reject_nonpositive_values(line: Any) -> None:
+    raw = _valid_case_dict()
+    raw["curation"]["findings"][0]["location"]["start_line"] = line
+    with pytest.raises(ValidationError) as error:
+        CaseDocument.model_validate(raw)
+    assert any("start_line" in item["loc"] for item in error.value.errors())
+
+
+def test_native_scalar_constraints_preserve_python_string_admission() -> None:
+    source = Source.model_validate({"provider": "github", "hostname": b"github.com", "repository": "OWNER/REPO"})
+    assert source.hostname == "github.com"

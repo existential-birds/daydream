@@ -22,7 +22,7 @@ from daydream.diagnostics import exception_text
 from daydream.json_utils import atomic_write_json
 
 if TYPE_CHECKING:
-    from daydream.deep.state import DeepState
+    from daydream.deep.state import DeepData
     from daydream.review_result import ReasonCode, ReviewCoverage
 
 
@@ -143,12 +143,12 @@ def persist_review_coverage(deep_dir_path: Path, coverage: ReviewCoverage, *, er
 
 
 @contextmanager
-def review_stage(state: DeepState, phase: str | Callable[[], str], *, persist: bool = False,
+def review_stage(state: DeepData, phase: str | Callable[[], str], *, persist: bool = False,
                  reasons: tuple[ReasonCode, ...] = ()) -> Iterator[None]:
     """Record a stage failure without replacing it with a secondary evidence-write error."""
     from daydream.review_result import reason_for_exception
 
-    coverage = state.review_coverage
+    coverage = state["review_coverage"]
     if isinstance(phase, str):
         coverage.require_phase(phase)
     try:
@@ -158,11 +158,11 @@ def review_stage(state: DeepState, phase: str | Callable[[], str], *, persist: b
                               reasons=(*reasons, reason_for_exception(exc)),
                               diagnostic=f"{type(exc).__name__}: {exception_text(exc) or '(unavailable)'}")
         if persist:
-            persist_review_coverage(state.dd, coverage, error=exc)
+            persist_review_coverage(state["dd"], coverage, error=exc)
         raise
     else:
         if persist:
-            persist_review_coverage(state.dd, coverage)
+            persist_review_coverage(state["dd"], coverage)
 
 
 def restore_review_coverage(deep_dir_path: Path, current: ReviewCoverage) -> ReviewCoverage:

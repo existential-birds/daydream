@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep import reuse_store
 from daydream.run_config import RunConfig
@@ -22,11 +24,11 @@ def _cache(tmp_path: Path, *, budget: reuse_store.ReuseBudget | None = None) -> 
 
 def _hit(store: reuse_store.ReuseCache, *, key: str, grounding: dict[str, str]) -> reuse_store.ReuseHit:
     """A verified hit-shaped manifest without writing an entry to the store."""
-    return reuse_store.ReuseHit(key, reuse_store.entry_dir(store.store_dir, key), {"grounding": grounding})
+    return reuse_store.ReuseHit(key, {}, {"grounding": grounding})
 
 
 def entry_dir(tmp_path: Path, key: str) -> Path:
-    return reuse_store.entry_dir(tmp_path / "review-cache", key)
+    return tmp_path / "review-cache" / "entries" / key
 
 
 def _seed_entry(store: reuse_store.ReuseCache, key: str, *, last_used_at: float) -> None:
@@ -55,7 +57,7 @@ def test_entry_is_a_hit_only_when_payload_and_marker_agree(tmp_path: Path) -> No
     miss = store.lookup("a" * 64)
     assert isinstance(miss, reuse_store.ReuseMiss) and "payload" in miss.reason
     payload_file.write_bytes(b"{}")
-    reuse_store.entry_marker_path(tmp_path / "review-cache", "a" * 64).unlink()
+    (tmp_path / "review-cache" / "entries" / ("a" * 64) / "complete.marker").unlink()
     miss = store.lookup("a" * 64)
     assert isinstance(miss, reuse_store.ReuseMiss) and "marker" in miss.reason
     assert isinstance(store.lookup("b" * 64), reuse_store.ReuseMiss)  # unknown key
@@ -66,7 +68,7 @@ def test_prune_evicts_oldest_last_used_and_spares_the_fresh_entry(tmp_path: Path
         _seed_entry(store, key, last_used_at=used)
     store.store("d" * 64, unit="shard:python#0", payload={"x.json": b"{}"}, components={},
                 identity=_identity(), grounding={}, grounding_status={})
-    live = {p.name for p in reuse_store.entries_dir(store.store_dir).iterdir()}
+    live = {p.name for p in (store.store_dir / "entries").iterdir()}
     assert "d" * 64 in live and "a" * 64 not in live
     assert isinstance(store.lookup("d" * 64), reuse_store.ReuseHit)
     # An entry evicted by age is a plain miss on the next run, never a truncated hit.
@@ -113,4 +115,62 @@ def test_provenance_records_the_grounding_delta_of_a_reused_unit(tmp_path: Path)
     assert record["store"]["entries"] == 0
     assert record["store"]["oldest_last_used_age_s"] is None
     # The record is durable inside the store, so it survives the deep-dir wipe (MH5).
-    assert reuse_store.provenance_path(store.store_dir, "s1").is_file()
+    assert (store.store_dir / "provenance" / "s1.json").is_file()
+
+
+def test_verified_hit_restores_captured_bytes_after_entry_eviction(tmp_path: Path) -> None:
+    import shutil
+
+    store = _cache(tmp_path)
+    _seed_entry(store, "a" * 64, last_used_at=1)
+    hit = store.lookup("a" * 64)
+    assert isinstance(hit, reuse_store.ReuseHit)
+    shutil.rmtree(entry_dir(tmp_path, "a" * 64))
+    destination = tmp_path / "restored"
+    destination.mkdir()
+    assert hit.restore(destination) is None
+    assert (destination / "x.json").read_bytes() == b"{}"
+    with pytest.raises(TypeError):
+        hit.payload["x.json"] = b"poison"  # type: ignore[index]
+
+
+def test_restore_uses_admitted_bytes_when_cache_changes_after_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _cache(tmp_path)
+    _seed_entry(store, "a" * 64, last_used_at=1)
+    original_lookup = store.lookup
+
+    def changed_after_admission(key: str) -> reuse_store.ReuseHit | reuse_store.ReuseMiss:
+        hit = original_lookup(key)
+        (entry_dir(tmp_path, key) / "x.json").write_bytes(b"unverified replacement")
+        return hit
+
+    monkeypatch.setattr(store, "lookup", changed_after_admission)
+    destination = tmp_path / "restored"
+    destination.mkdir()
+    assert reuse_store.lookup_reuse_entry(store, "merge", "a" * 64, destination) is not None
+    assert (destination / "x.json").read_bytes() == b"{}"
+
+
+def test_restore_partial_write_failure_records_miss_and_reports_reason(tmp_path: Path) -> None:
+    store = _cache(tmp_path)
+    _seed_entry(store, "a" * 64, last_used_at=1)
+    destination = tmp_path / "restored"
+    destination.mkdir()
+    (destination / "x.json").mkdir()
+    failures: list[str] = []
+    assert reuse_store.lookup_reuse_entry(
+        store, "merge", "a" * 64, destination, on_restore_failure=failures.append,
+    ) is None
+    assert failures and failures[0].startswith("IsADirectoryError:")
+    entry = store.provenance()["units"]["merge"]
+    assert entry["outcome"] == "miss"
+    assert entry["reason"] == "restore failed: " + failures[0]
+
+
+def test_successful_receipt_detaches_its_payload_mapping() -> None:
+    source = {"x.json": b"{}"}
+    hit = reuse_store.ReuseHit("a" * 64, source, {})
+    source["x.json"] = b"poison"
+    assert hit.payload == {"x.json": b"{}"}

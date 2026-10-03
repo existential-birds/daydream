@@ -10,7 +10,7 @@ from rich.markup import escape as escape_markup
 from daydream import git_ops
 from daydream.agent import console
 from daydream.deep.artifacts import DeepArtifact
-from daydream.deep.state import DeepState
+from daydream.deep.fix_state import FixCycleState
 from daydream.extensions.api import Stop
 from daydream.flows.engine import FlowContext
 from daydream.git_ops import GitError
@@ -110,7 +110,7 @@ def _print_remote_ci_result(verdict: RemoteCIVerdict) -> None:
 
 async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
     """Bind and wait for exact pushed-SHA GitHub CI, failing closed."""
-    deep_state = DeepState(ctx.data)
+    deep_data = ctx.deep_data()
     from daydream.remote_ci import (
         DEFAULT_LIMITS,
         GitHubRemoteCIFetcher,
@@ -121,10 +121,10 @@ async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
         write_remote_ci_verdict,
     )
 
-    receipt = deep_state.push_receipt
+    receipt = deep_data.get("push_receipt")
     if not isinstance(receipt, PushReceipt):
         return None
-    state = deep_state.fix_cycle_state
+    state = FixCycleState.require(ctx)
     limits = DEFAULT_LIMITS
     started_at = now_iso()
     monotonic_started = anyio.current_time()
@@ -135,7 +135,7 @@ async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
 
     def write_snapshot(snapshot: RemoteCIVerdict) -> None:
         write_remote_ci_verdict(
-            DeepArtifact.REMOTE_CI_VERDICT.at(deep_state.dd),
+            DeepArtifact.REMOTE_CI_VERDICT.at(deep_data["dd"]),
             snapshot,
             session_id=state.session_id,
             poll_count=poll_count,
@@ -177,7 +177,7 @@ async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
                 # The new target is durable before the previous attempt's
                 # guidance is retired. Do this before any CI request so a
                 # blocked or abruptly interrupted resume cannot expose it.
-                DeepArtifact.REMOTE_CI_HANDOFF.at(deep_state.dd).unlink(missing_ok=True)
+                DeepArtifact.REMOTE_CI_HANDOFF.at(deep_data["dd"]).unlink(missing_ok=True)
                 print_info(
                     console,
                     f"Verifying remote CI for {target.base_repository} PR "
@@ -210,7 +210,7 @@ async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
             try:
                 with anyio.CancelScope(shield=True):
                     write_remote_ci_handoff(
-                        DeepArtifact.REMOTE_CI_HANDOFF.at(deep_state.dd),
+                        DeepArtifact.REMOTE_CI_HANDOFF.at(deep_data["dd"]),
                         verdict,
                         session_id=state.session_id,
                     )
@@ -222,7 +222,7 @@ async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
         return Stop(1)
 
     _print_remote_ci_result(verdict)
-    handoff = DeepArtifact.REMOTE_CI_HANDOFF.at(deep_state.dd)
+    handoff = DeepArtifact.REMOTE_CI_HANDOFF.at(deep_data["dd"])
     if verdict.status in {"passed", "no_ci"}:
         try:
             handoff.unlink(missing_ok=True)

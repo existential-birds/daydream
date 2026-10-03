@@ -13,7 +13,6 @@ from daydream.deep.scope_issues import (
     enforce_authorized_fix_footprint,
 )
 from daydream.deep.settings import _resolve_opt_in
-from daydream.deep.state import DeepState
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.flows.engine import FlowContext
 from daydream.generated_files import is_generated_file, related_manifest_paths
@@ -58,6 +57,14 @@ class FixCycleState:
     latest_test_evidence: TestAttemptEvidence | None = None
     verifier_key: EvidenceKey | None = None
     last_fix_target_by_uid: dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def require(cls, ctx: FlowContext) -> FixCycleState:
+        """Consume only the capability published by an accepted fix gate."""
+        state = ctx.data.get("fix_cycle_state")
+        if not isinstance(state, cls):
+            raise RuntimeError("fix cycle was not initialized at the accepted gate")
+        return state
 
 
 def _capture_full_delta_key(work: WorkContext, state: FixCycleState) -> str:
@@ -105,17 +112,17 @@ def _evidence_payload(key: EvidenceKey) -> dict[str, Any]:
 
 
 def _write_footprint_audit(ctx: FlowContext, state: FixCycleState, key: EvidenceKey) -> None:
-    deep_state = DeepState(ctx.data)
+    deep_data = ctx.deep_data()
     atomic_write_json(
-        DeepArtifact.FIX_FOOTPRINT.at(deep_state.dd),
+        DeepArtifact.FIX_FOOTPRINT.at(deep_data["dd"]),
         state.footprint.audit_payload(state.session_id, evidence_key=_evidence_payload(key)),
     )
 
 
 def _persist_stabilization_failure(ctx: FlowContext, state: FixCycleState, reason: str) -> None:
-    deep_state = DeepState(ctx.data)
+    deep_data = ctx.deep_data()
     atomic_write_json(
-        DeepArtifact.STABILIZATION_FAILED.at(deep_state.dd),
+        DeepArtifact.STABILIZATION_FAILED.at(deep_data["dd"]),
         {"session_id": state.session_id, "reason": reason},
     )
 
@@ -163,7 +170,7 @@ def _strict_scope_and_scrub(
     round_number: int | None,
 ) -> bool:
     """Apply the run-wide guard and quote scrub, returning whether bytes changed."""
-    deep_state = DeepState(ctx.data)
+    deep_data = ctx.deep_data()
 
     before = _capture_full_delta_key(ctx.work, state)
     generated_restores: list[str] = []
@@ -205,7 +212,7 @@ def _strict_scope_and_scrub(
                 reason="restored an edit to existing generated output or its manifest",
             )
         atomic_write_json(
-            DeepArtifact.GENERATED_FILE_VIOLATIONS.at(deep_state.dd),
+            DeepArtifact.GENERATED_FILE_VIOLATIONS.at(deep_data["dd"]),
             {
                 "session_id": state.session_id,
                 "violations": restore_paths,

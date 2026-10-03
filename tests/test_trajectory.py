@@ -626,8 +626,8 @@ async def test_dispatch_exception_overrides_empty_child_write_failure(recorder: 
     assert step["extra"]["attempted_count"] == 1
     assert step["extra"]["completed_count"] == 0
 
-async def test_recursive_invocation_identity_has_no_fork_wrapper_call(recorder: TrajectoryRecorder,) -> None:
-    """A completed fork propagates every document-qualified nested invocation."""
+async def test_fork_documents_own_nested_invocation_identity(recorder: TrajectoryRecorder,) -> None:
+    """Native child receipts retain each actual call in its own immutable document."""
     assert hasattr(trajectory_module, "dispatch_scope")
     async with recorder:
         async with trajectory_module.dispatch_scope(recorder, phase=DaydreamPhase.REVIEW, descriptors=("outer",),
@@ -648,16 +648,36 @@ async def test_recursive_invocation_identity_has_no_fork_wrapper_call(recorder: 
 
     root = read_trajectory(recorder.path)
     outer_summary = root["extra"]["subtrajectories"][0]
-    invocations = outer_summary["invocations"]
+    child_payload = read_trajectory(child.path)
+    grandchild_payload = read_trajectory(grandchild.path)
+    documents = (child_payload, grandchild_payload)
+    invocations = [
+        invocation
+        for document in documents
+        for invocation in document["extra"]["subtrajectories"]
+        if "invocation_id" in invocation
+    ]
     identities = {(invocation["trajectory_id"], invocation["invocation_id"]) for invocation in invocations}
     assert len(invocations) == 3
     assert len(identities) == 3
-    assert "invocation_id" not in outer_summary
+    assert set(outer_summary) == {"trajectory_id", "sibling_trajectory_ref", "fork_id", "dispatch_id"}
+    assert outer_summary["trajectory_id"] == child_payload["trajectory_id"]
     assert outer_summary["dispatch_id"] == f"{recorder.session_id}:dispatch:1"
-    assert {event["trajectory_id"] for event in outer_summary["phase_events"]} == {
-        child.trajectory_id, grandchild.trajectory_id,
-    }
-    assert all(event["scope_id"] for event in outer_summary["phase_events"])
+    nested_receipt = next(
+        row for row in child_payload["extra"]["subtrajectories"] if "sibling_trajectory_ref" in row
+    )
+    assert nested_receipt["trajectory_id"] == grandchild_payload["trajectory_id"]
+    for document in documents:
+        assert atif_validate(document, validate_images=False)
+        assert all(
+            event["scope_id"].startswith(document["trajectory_id"])
+            for event in document["extra"]["phase_events"]
+        )
+        assert all(
+            invocation["trajectory_id"] == document["trajectory_id"]
+            for invocation in document["extra"]["subtrajectories"]
+            if "invocation_id" in invocation
+        )
 
 async def test_lifecycle_reason_redaction_omits_exception_details(recorder: TrajectoryRecorder,) -> None:
     """Lifecycle evidence stores closed codes, never backend exception text."""
@@ -761,7 +781,7 @@ async def test_fork_child_trajectory_id_distinct_from_root(tmp_path: Path) -> No
     assert ref["sibling_trajectory_ref"].startswith("runs/")
     # Resolve by the child's document trajectory_id; session_id identifies the shared run.
     assert ref["trajectory_id"] == child_traj["trajectory_id"]
-    assert ref["invocations"][0]["trajectory_id"] == child_traj["trajectory_id"]
+    assert child_traj["extra"]["subtrajectories"][0]["trajectory_id"] == child_traj["trajectory_id"]
     assert "invocation_id" not in ref
     assert (tmp_path / ".daydream" / ref["sibling_trajectory_ref"]) == child_path
 

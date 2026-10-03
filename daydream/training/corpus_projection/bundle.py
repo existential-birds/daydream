@@ -8,6 +8,7 @@ path/field — ingestion errors are never discarded or softened.
 
 import hashlib
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -66,7 +67,8 @@ def _gate(condition: bool, message: str) -> None:
         raise BundleError(message)
 
 
-def _verify_sha256sums(root: Path, prefix: str) -> None:
+def _verified_payloads(root: Path, prefix: str) -> Iterator[tuple[str, bytes]]:
+    """Admit every checksum-listed file, yielding its normalized name and exact bytes."""
     sums_path = root / _SUMS_NAME
     _gate(sums_path.is_file(), f"bundle {root}: missing {_SUMS_NAME}")
     # daydream.archive.hydrate writes SHA256SUMS relpaths relative to the
@@ -87,8 +89,10 @@ def _verify_sha256sums(root: Path, prefix: str) -> None:
         target = root / resolved
         if not target.is_file():
             raise BundleError(f"bundle {root}: missing artifact {relpath!r} listed in {_SUMS_NAME}")
-        actual = hashlib.sha256(target.read_bytes()).hexdigest()
+        payload = target.read_bytes()
+        actual = hashlib.sha256(payload).hexdigest()
         _gate(actual == digest, f"bundle {root}: digest mismatch for {relpath!r}")
+        yield Path(resolved).as_posix(), payload
 
 
 def _validate_relpath(root: Path, relpath: str, what: str) -> Path:
@@ -124,7 +128,8 @@ def load_curated_bundle(root: Path) -> CuratedBundle:
     # The manifest is the untrusted input; its canonical ``publication_prefix``
     # (schema-pinned ``curated/<curation-id>/``) is what SHA256SUMS relpaths
     # are written relative to, so checksum resolution must see it.
-    _verify_sha256sums(root, str(doc["publication_prefix"]))
+    for _name, _payload in _verified_payloads(root, str(doc["publication_prefix"])):
+        pass
 
     bundle = CuratedBundle(
         curation_id=doc["curation_id"],

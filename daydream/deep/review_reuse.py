@@ -18,7 +18,7 @@ from daydream.deep.reuse_store import (
 )
 
 if TYPE_CHECKING:
-    from daydream.deep.state import DeepState
+    from daydream.deep.state import DeepData
     from daydream.review_result import ReviewCoverage
 
 
@@ -118,20 +118,20 @@ def _records_bytes_by_basename(paths: list[Path]) -> dict[str, bytes | None]:
     return records
 
 
-def _loop_grounding(deep_state: DeepState) -> dict[str, Any]:
+def _loop_grounding(deep_data: DeepData) -> dict[str, Any]:
     """The loop-re-derived inputs shared by the arbiter and merge units (MH2/MH16).
 
     Intent and alternatives are read back as each prompt sees them (the restored
     artifact on a hit), and the pre-scan is digested by directory content so
     its ``cache-key`` bookkeeping can never move anything.
     """
-    alts_path = deep_state.alts_path
+    alts_path = deep_data["alts_path"]
     try:
         alternatives_text = alts_path.read_text(encoding="utf-8") if alts_path.is_file() else None
     except OSError:
         alternatives_text = None
     return {
-        "intent": digest_or_absent(deep_state.intent_summary_or_none),
+        "intent": digest_or_absent(deep_data.get("intent_summary")),
         "alternatives": digest_or_absent(alternatives_text),
-        "exploration": {"digest": exploration_digest(deep_state.exploration_dir)},
+        "exploration": {"digest": exploration_digest(deep_data["exploration_dir"])},
     }

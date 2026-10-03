@@ -546,7 +546,7 @@ async def test_unborn_commit_anchored_improve_modes_fail_before_backend(
     assert message in capsys.readouterr().out
     assert git_ops.is_unborn_head(repo)
 
-def test_audit_repo_requires_flow_context_boundary_identity(tmp_path: Path) -> None:
+def test_audit_repo_uses_only_the_native_workspace_capability(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
     audit = tmp_path / "audit"
@@ -555,6 +555,11 @@ def test_audit_repo_requires_flow_context_boundary_identity(tmp_path: Path) -> N
     context.data["audit_repo"] = audit
     assert _audit_repo(context) == audit
     context.data["audit_repo"] = tmp_path / "forged"
+    assert _audit_repo(context) == audit
+    audit.rmdir()
+    with pytest.raises(RuntimeError, match="invalid audit workspace"):
+        _audit_repo(context)
+    context.audit_workspace = None
     with pytest.raises(RuntimeError, match="audit workspace"):
         _audit_repo(context)
 
@@ -658,7 +663,7 @@ async def test_real_plan_phase_reanchor_reuses_ephemeral_source_owner(
             accepted, errors = validate_recon_commands({"commands": commands}, repo=work.repo,)
             assert errors == []
             assert len(accepted) == 2
-            context.data.update({"audit_repo": audit.repo, "improve_dir": improve_dir,
+            context.data.update({"improve_dir": improve_dir,
                     "recon": {"commands": accepted, "languages": [], "conventions": [], "intent_docs": [],},
                 }
             )

@@ -285,5 +285,6 @@ def test_complete_seven_file_bundle_passes_existing_public_consumer(tmp_path: Pa
     (out / "SHA256SUMS").write_text(sums, encoding="utf-8")
     (out / "_SUCCESS").write_text("complete\n", encoding="utf-8")
 
-    lineage = _verify_annotation_bundle(out, load_curated_bundle(index_root), index_root)
+    lineage, annotations = _verify_annotation_bundle(out, load_curated_bundle(index_root), index_root)
     assert lineage["curation_id"] == _CURATION_ID
+    assert annotations == (out / "annotations.jsonl").read_bytes()

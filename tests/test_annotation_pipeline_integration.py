@@ -22,7 +22,7 @@ from daydream.training.adjudication.publish import (
     publish_annotation_state,
     resume_annotation_state,
 )
-from daydream.training.corpus_projection.bundle import _verify_sha256sums
+from daydream.training.corpus_projection.bundle import _verified_payloads
 from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig, build_frozen_corpus
 from tests.fixtures.training.build_hub_snapshot import (
     build_publication_hubs,
@@ -116,7 +116,7 @@ def test_full_annotation_pipeline_survives_vm_loss(tmp_path: Path, monkeypatch: 
         "--revision", success_commit["sha"], "--destination", str(clean),
     ]) == 0
 
-    _verify_sha256sums(clean, "")  # raises on any corruption
+    tuple(_verified_payloads(clean, ""))  # consuming all files raises on any corruption
 
     # 8. projection: both automatic gold classes + the human-adjudicated record.
     # The human rater's decisive label is merged into the annotation row

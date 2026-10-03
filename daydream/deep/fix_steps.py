@@ -31,7 +31,6 @@ from daydream.deep.scope_issues import (
     _resolve_changed_files,
 )
 from daydream.deep.settings import _resolve_config_value, _resolve_opt_in
-from daydream.deep.state import DeepState
 from daydream.deep.verify_selection import SelectionConfig, resolve_selection_config
 from daydream.extensions.api import BreakLoop, Stop
 from daydream.fix_footprint import AuthorizedFixFootprint
@@ -95,7 +94,7 @@ def _artifact_dir(ctx: FlowContext) -> Path:
 
 async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     """Fix-apply gate; on accept, load and severity-sort the canonical items."""
-    deep_state = DeepState(ctx.data)
+    deep_data = ctx.deep_data()
     # Fix-apply gate across the two interaction axes. ``--yes`` auto-applies;
     # an unattended run with no assumption declines (safe_default=False) so a
     # piped/CI run never mutates without intent; otherwise prompt.
@@ -106,7 +105,7 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         console=console,
     )
     if not decision:
-        print_success(console, f"Report written to {deep_state.merged_report}. Exiting.")
+        print_success(console, f"Report written to {deep_data['merged_report']}. Exiting.")
         return Stop(0)
 
     # A rejected index preflight must preserve prior artifacts as well as
@@ -119,7 +118,7 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
 
     # An accepted gate starts a new evidence session. No prior run's success,
     # patch, or policy audit may be inherited if this run later stops early.
-    dd: Path = deep_state.dd
+    dd: Path = deep_data["dd"]
     stale_paths = (
         DeepArtifact.FIX_FOOTPRINT.at(dd),
         DeepArtifact.FIX_OUTCOMES.at(dd),
@@ -141,7 +140,7 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     # Read canonical merged items directly (validated above). Replaces an LLM
     # re-parse of the markdown, which silently dropped structural findings; here
     # they are ordinary tagged items that reach phase_fix like any other.
-    items_file: Path = deep_state.items_file
+    items_file: Path = deep_data["items_file"]
     items: list[dict[str, Any]] = json.loads(items_file.read_text())["items"]
     # Normalize legal ./ prefixes once to match Git-derived footprint paths.
     for _item in items:
@@ -182,7 +181,7 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         preexisting_gitlinks=preexisting_gitlinks,
         footprint=footprint,
     )
-    deep_state.fix_cycle_state = state
+    deep_data["fix_cycle_state"] = state
     try:
         initial_key = EvidenceKey(fix_state._capture_full_delta_key(ctx.work, state), footprint.policy_revision)
         fix_state._write_footprint_audit(ctx, state, initial_key)
@@ -193,15 +192,15 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
 
     # Severity-ordered (high before medium before low), stable within a
     # tier so equal-severity items keep their canonical merge order.
-    deep_state.items = severity_sorted(items)
+    deep_data["items"] = severity_sorted(items)
     return None
 
 
 async def _step_verify(ctx: FlowContext) -> None:
     """Recommendation verification (#83) + verdict join rendering."""
-    deep_state = DeepState(ctx.data)
-    dd = deep_state.dd
-    items: list[dict[str, Any]] = deep_state.items
+    deep_data = ctx.deep_data()
+    dd = deep_data["dd"]
+    items: list[dict[str, Any]] = deep_data["items"]
 
     # Accepted fresh and resumed fix gates verify recommendations; declined gates
     # produce neither a verifier call nor its artifact.
@@ -210,7 +209,7 @@ async def _step_verify(ctx: FlowContext) -> None:
         verdicts_file, verdicts_payload = await phase_verify_recommendations(
             ctx.backend_for("verify"),
             ctx.work,
-            merged_items_path=deep_state.items_file,
+            merged_items_path=deep_data["items_file"],
             deep_dir=dd,
             strategy=ctx.strategy("verification"),
             selection=selection,
@@ -220,7 +219,7 @@ async def _step_verify(ctx: FlowContext) -> None:
 
     # Attach verifier verdicts to items by `id` (advisory; phase_fix reads them).
     items = _attach_verdicts(items, verdicts_payload)
-    deep_state.items = items
+    deep_data["items"] = items
     matched_ids, unmatched_ids, skipped_ids, structural_ids, other_ids = _verdict_buckets(
         items, verdicts_payload
     )
@@ -316,9 +315,9 @@ def _stabilization_stop(
 
 async def _step_fix(ctx: FlowContext) -> Stop | None:
     """Run one policy-bound fix round using its own complete rollback point."""
-    state = DeepState(ctx.data).fix_cycle_state
-    deep_state = DeepState(ctx.data)
-    items = _round_dispatch_items(ctx, deep_state.items)
+    state = FixCycleState.require(ctx)
+    deep_data = ctx.deep_data()
+    items = _round_dispatch_items(ctx, deep_data["items"])
     if not items:
         return None
     try:
@@ -341,10 +340,10 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         )
     else:
         quality_before, quality_unavailable = None, None
-    exploration_dir = deep_state.exploration_dir_or_none
+    exploration_dir = deep_data.get("exploration_dir")
     exploration_dir = exploration_dir if isinstance(exploration_dir, Path) else None
     test_map_path = exploration_dir / "test-map.json" if exploration_dir else None
-    intent_p: Path = deep_state.intent_path
+    intent_p: Path = deep_data["intent_path"]
     grounded = config.start_at not in ("per-stack", "merge", "fix")
     async with phase_scope(DaydreamPhase.FIX):
         try:
@@ -377,27 +376,29 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
                 run_context=ctx.run_context,
             )
         except Exception as exc:
-            return _confinement_stop(ctx, state, "fix_failure", deep_state.iteration, "Fix failed", str(exc))
+            return _confinement_stop(ctx, state, "fix_failure", deep_data.get("iteration"), "Fix failed", str(exc))
     budget_prefix = "file_group_budget_exceeded:"
     exception_failures = {
         path: reason
         for path, reason in failures.items()
         if not reason.startswith(budget_prefix)
     }
-    failures_artifact = DeepArtifact.FIX_FAILURES.at(deep_state.dd)
+    failures_artifact = DeepArtifact.FIX_FAILURES.at(deep_data["dd"])
     try:
         if failures:
             atomic_write_json(failures_artifact, failures, sort_keys=True)
         else:
             failures_artifact.unlink(missing_ok=True)
     except Exception as exc:
-        return _confinement_stop(ctx, state, "fix_failure", deep_state.iteration, "Fix failure audit failed", str(exc))
+        return _confinement_stop(
+            ctx, state, "fix_failure", deep_data.get("iteration"), "Fix failure audit failed", str(exc)
+        )
     if exception_failures:
         confinement_error = fix_state._enforce_terminal_confinement(
             ctx,
             state,
             phase="fix_failure",
-            round_number=deep_state.iteration,
+            round_number=deep_data.get("iteration"),
         )
         artifact_errors: list[str] = []
         try:
@@ -410,7 +411,7 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
                 - set(state.preexisting_untracked)
             )
             if leftover:
-                atomic_write_json(DeepArtifact.FIX_LEFTOVER_UNTRACKED.at(deep_state.dd), leftover)
+                atomic_write_json(DeepArtifact.FIX_LEFTOVER_UNTRACKED.at(deep_data["dd"]), leftover)
         except Exception as exc:
             artifact_errors.append(str(exc))
         print_warning(
@@ -428,34 +429,34 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
             ctx,
             state,
             phase="fix",
-            round_number=deep_state.iteration,
+            round_number=deep_data.get("iteration"),
         )
         snapshot = fix_state.capture_retained_tree(ctx.work, state)
     except Exception as exc:
         return _confinement_stop(
-            ctx, state, "fix_failure", deep_state.iteration, "Fix scope enforcement failed", str(exc)
+            ctx, state, "fix_failure", deep_data.get("iteration"), "Fix scope enforcement failed", str(exc)
         )
-    deep_state.fix_round_snapshot = snapshot
+    deep_data["fix_round_snapshot"] = snapshot
     try:
         await _evaluate_quality_gate(
             enabled=quality_enabled,
             thresholds=QualityGateThresholds.from_config(config),
             daydream_dir=_artifact_dir(ctx),
             code_workspace=ctx.work.repo,
-            dd=deep_state.dd,
+            dd=deep_data["dd"],
             candidates={path for path in snapshot.paths if path.endswith(".py")}
             | {
                 str(item["file"])
-                for item in deep_state.items
+                for item in deep_data["items"]
                 if isinstance(item.get("file"), str) and str(item["file"]).endswith(".py")
             },
             before=quality_before,
             before_unavailable_reason=quality_unavailable,
-            iteration=deep_state.iteration,
+            iteration=deep_data.get("iteration"),
         )
     except Exception as exc:
         return _confinement_stop(
-            ctx, state, "fix_failure", deep_state.iteration, "Fix quality evaluation failed", str(exc)
+            ctx, state, "fix_failure", deep_data.get("iteration"), "Fix quality evaluation failed", str(exc)
         )
     return None
 
@@ -484,7 +485,7 @@ async def verify_retained_tree(
         for item in items
         if isinstance(item.get("id"), int) and isinstance(item.get("item_uid"), str)
     }
-    state = DeepState(ctx.data).fix_cycle_state
+    state = FixCycleState.require(ctx)
     outcomes: dict[str, dict[str, Any]] = {}
     for verdict in verdicts:
         item = by_id.get(verdict.get("issue_id"))
@@ -507,9 +508,9 @@ def _persist_fix_outcomes_current(
     key: EvidenceKey,
     outcomes: dict[str, dict[str, Any]],
 ) -> None:
-    deep_state = DeepState(ctx.data)
+    deep_data = ctx.deep_data()
     atomic_write_json(
-        DeepArtifact.FIX_OUTCOMES.at(deep_state.dd),
+        DeepArtifact.FIX_OUTCOMES.at(deep_data["dd"]),
         {
             "session_id": state.session_id,
             "evidence_key": fix_state._evidence_payload(key),
@@ -520,26 +521,27 @@ def _persist_fix_outcomes_current(
 
 
 async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | Stop | None:
-    state = DeepState(ctx.data).fix_cycle_state
-    deep_state = DeepState(ctx.data)
-    snapshot = deep_state.fix_round_snapshot
-    if snapshot is None:
+    state = FixCycleState.require(ctx)
+    deep_data = ctx.deep_data()
+    snapshot = deep_data.get("fix_round_snapshot")
+    if not isinstance(snapshot, fix_state.RetainedTreeSnapshot):
         try:
             snapshot = fix_state.capture_retained_tree(ctx.work, state)
         except Exception as exc:
             return _confinement_stop(
-                ctx, state, "fix_verify_failure", deep_state.iteration, "Fix verification capture failed", str(exc)
+                ctx, state, "fix_verify_failure", deep_data.get("iteration"),
+                "Fix verification capture failed", str(exc)
             )
-    iteration = deep_state.iteration
+    iteration = deep_data.get("iteration")
     round_number = iteration if isinstance(iteration, int) else 1
     try:
         outcomes = await verify_retained_tree(
-            ctx, snapshot, deep_state.items, pass_number=round_number
+            ctx, snapshot, deep_data["items"], pass_number=round_number
         )
         key = EvidenceKey(snapshot.tree_key, state.footprint.policy_revision)
         state.latest_retained = snapshot
         state.verifier_key = key
-        deep_state.fix_outcomes = outcomes
+        deep_data["fix_outcomes"] = outcomes
         _persist_fix_outcomes_current(ctx, state, key, outcomes)
         fix_state._write_footprint_audit(ctx, state, key)
     except Exception as exc:
@@ -547,7 +549,7 @@ async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | Stop | None:
     actionable = _actionable_verdicts(outcomes)
     if actionable and iteration not in (None, 3):
         return None
-    _render_fix_outcome_summary(deep_state.items, outcomes)
+    _render_fix_outcome_summary(deep_data["items"], outcomes)
     if "regressed" in actionable:
         print_error(
             console, "Fix verification failed",
@@ -618,11 +620,11 @@ def _persist_test_verdict(
     ignored: bool,
     attempts: list[TestAttemptEvidence],
 ) -> None:
-    deep_state = DeepState(ctx.data)
+    deep_data = ctx.deep_data()
     from daydream.remote_ci import local_host_facts
 
     atomic_write_json(
-        DeepArtifact.TEST_VERDICT.at(deep_state.dd),
+        DeepArtifact.TEST_VERDICT.at(deep_data["dd"]),
         {
             "session_id": state.session_id,
             "passed": passed,
@@ -653,8 +655,8 @@ async def finalize_retained_tree_after_test(
     ctx: FlowContext, result: TestAndHealResult
 ) -> Stop | None:
     """Strictly stabilize post-heal state in at most two guard passes."""
-    deep_state = DeepState(ctx.data)
-    state = DeepState(ctx.data).fix_cycle_state
+    deep_data = ctx.deep_data()
+    state = FixCycleState.require(ctx)
     attempts = list(result.attempts)
     if not attempts:
         return _stabilization_stop(
@@ -681,16 +683,16 @@ async def finalize_retained_tree_after_test(
             return _stop(f"guard/capture/audit failed: {exc}")
 
         if state.verifier_key != key:
-            prior_outcomes = deep_state.fix_outcomes or {}
+            prior_outcomes = deep_data.get("fix_outcomes", {}) or {}
             try:
                 outcomes = await verify_retained_tree(
-                    ctx, snapshot, deep_state.items, pass_number=pass_number
+                    ctx, snapshot, deep_data["items"], pass_number=pass_number
                 )
                 _persist_fix_outcomes_current(ctx, state, key, outcomes)
             except Exception as exc:
                 return _stop(f"final verifier failed: {exc}")
             state.verifier_key = key
-            deep_state.fix_outcomes = outcomes
+            deep_data["fix_outcomes"] = outcomes
             if any(
                 outcome.get("verdict") == "regressed"
                 or (
@@ -716,7 +718,7 @@ async def finalize_retained_tree_after_test(
                     config=ctx.config,
                     session_id=state.session_id,
                     capture_tree_key=lambda: fix_state._capture_full_delta_key(ctx.work, state),
-                    recipe=deep_state.test_recipe,
+                    recipe=deep_data.get("test_recipe"),
                     run_context=ctx.run_context,
                 )
             except Exception as exc:
@@ -747,7 +749,7 @@ async def finalize_retained_tree_after_test(
             patch_path.parent.mkdir(parents=True, exist_ok=True)
             patch_path.write_bytes(snapshot.recommended_patch)
             atomic_write_json(
-                DeepArtifact.RECOMMENDED_CAPTURE.at(deep_state.dd),
+                DeepArtifact.RECOMMENDED_CAPTURE.at(deep_data["dd"]),
                 {
                     "session_id": state.session_id,
                     "capture_point": "post_test",
@@ -779,14 +781,14 @@ async def finalize_retained_tree_after_test(
 
 async def _step_test(ctx: FlowContext) -> Stop | None:
     """Run typed, identity-bound tests and strictly finalize the retained tree."""
-    deep_state = DeepState(ctx.data)
-    state = DeepState(ctx.data).fix_cycle_state
+    deep_data = ctx.deep_data()
+    state = FixCycleState.require(ctx)
     async with phase_scope(DaydreamPhase.TEST):
         try:
             result = await phase_test_and_heal(
                 ctx.backend_for("test"),
                 ctx.work,
-                feedback_items=deep_state.items,
+                feedback_items=deep_data["items"],
                 config=ctx.config,
                 session_id=state.session_id,
                 capture_tree_key=lambda: fix_state._capture_full_delta_key(ctx.work, state),
@@ -794,7 +796,7 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
                 run_context=ctx.run_context,
                 artifact_session=ctx.artifacts,
                 allow_standalone=ctx.allow_standalone_artifacts,
-                recipe=deep_state.test_recipe,
+                recipe=deep_data.get("test_recipe"),
             )
             if not isinstance(result, TestAndHealResult):
                 raise TypeError("phase_test_and_heal returned an invalid evidence result")
@@ -821,8 +823,8 @@ def _persist_push_verdict(
     diagnostic: str | None = None,
 ) -> None:
     """Replace the current session's exact push-attempt outcome atomically."""
-    deep_state = DeepState(ctx.data)
-    state = DeepState(ctx.data).fix_cycle_state
+    deep_data = ctx.deep_data()
+    state = FixCycleState.require(ctx)
     payload: dict[str, object] = {
         "schema_version": 1,
         "session_id": state.session_id,
@@ -837,7 +839,7 @@ def _persist_push_verdict(
     if diagnostic is not None:
         payload["diagnostic"] = redact_structured_text(diagnostic)[:2_000]
     atomic_write_json(
-        DeepArtifact.PUSH_VERDICT.at(deep_state.dd),
+        DeepArtifact.PUSH_VERDICT.at(deep_data["dd"]),
         payload,
         indent=2,
         sort_keys=True,
@@ -847,8 +849,8 @@ def _persist_push_verdict(
 
 async def _step_commit(ctx: FlowContext) -> Stop | None:
     """Stage the finalized retained paths once, then commit and push them."""
-    deep_state = DeepState(ctx.data)
-    state = DeepState(ctx.data).fix_cycle_state
+    deep_data = ctx.deep_data()
+    state = FixCycleState.require(ctx)
     snapshot = state.latest_retained
     if snapshot is None:
         print_error(console, "Commit/Push Failed", "retained tree was not finalized")
@@ -875,14 +877,14 @@ async def _step_commit(ctx: FlowContext) -> Stop | None:
             ctx.work,
             config=ctx.config,
             items=[
-                item for item in deep_state.items_or_empty or []
-                if (deep_state.fix_outcomes or {}).get(item.get("item_uid", ""), {}).get("verdict")
+                item for item in deep_data.get("items", []) or []
+                if (deep_data.get("fix_outcomes", {}) or {}).get(item.get("item_uid", ""), {}).get("verdict")
                 == "resolved"
             ],
             retained_paths=snapshot.paths,
             retained_states=snapshot.states,
             initial_index=state.initial_index,
-            recipe=deep_state.test_recipe,
+            recipe=deep_data.get("test_recipe"),
             evidence=state.latest_test_evidence,
             retained_tree_key=snapshot.tree_key,
             run_context=ctx.run_context,
@@ -914,7 +916,7 @@ async def _step_commit(ctx: FlowContext) -> Stop | None:
         except Exception as exc:
             print_error(console, "Push verdict persistence failed", str(exc))
             return Stop(1)
-        deep_state.push_receipt = receipt
+        deep_data["push_receipt"] = receipt
     return None
 
 

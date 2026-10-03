@@ -467,50 +467,17 @@ class TrajectoryRecorder:
         """Register finalized invocation timing in trajectory.extra.subtrajectories."""
         self._subtrajectories.append(inv.summary())
 
-    def _recursive_invocation_summaries(self) -> list[dict[str, Any]]:
-        """Flatten document-qualified invocation evidence through nested forks."""
-        summaries: list[dict[str, Any]] = []
-        for summary in self._subtrajectories:
-            if isinstance(summary.get("invocation_id"), str):
-                summaries.append(dict(summary))
-            nested = summary.get("invocations")
-            if isinstance(nested, list):
-                summaries.extend(dict(item) for item in nested if isinstance(item, dict))
-        return summaries
-
-    def _recursive_phase_event_summaries(self) -> list[dict[str, Any]]:
-        """Flatten identified phase evidence while retaining document identity."""
-        summaries = [
-            {**event.to_dict(), "trajectory_id": self.trajectory_id}
-            for event in self._phase_events
-            if event.scope_id is not None
-        ]
-        for summary in self._subtrajectories:
-            nested = summary.get("phase_events")
-            if isinstance(nested, list):
-                summaries.extend(dict(item) for item in nested if isinstance(item, dict))
-        return summaries
-
     def _register_fork_subtrajectory(
         self,
         *,
         child: "TrajectoryRecorder",
-        phase: str,
         identity: ForkIdentity | None,
-        started_at: str,
-        ended_at: str,
         sibling_trajectory_ref: str,
     ) -> None:
-        """Register a per-fork timing summary on the parent trajectory."""
+        """Link written child evidence; its document owns phase and invocation records."""
         summary: dict[str, Any] = {
             "trajectory_id": child.trajectory_id,
-            "phase": phase,
-            "descriptor": child.descriptor,
-            "started_at": started_at,
-            "ended_at": ended_at,
             "sibling_trajectory_ref": sibling_trajectory_ref,
-            "phase_events": child._recursive_phase_event_summaries(),
-            "invocations": child._recursive_invocation_summaries(),
         }
         if identity is not None:
             summary["fork_id"] = identity.fork_id

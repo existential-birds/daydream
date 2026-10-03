@@ -71,7 +71,6 @@ from daydream.deep.settings import (
     fresh_ttt,
 )
 from daydream.deep.sharding import shard_stacks
-from daydream.deep.state import DeepState
 from daydream.extensions import get_registry
 from daydream.extensions.api import FlowStep
 from daydream.flows.engine import FlowContext, run_flow
@@ -217,8 +216,8 @@ def _has_non_daydream_worktree_changes(status: str) -> bool:
 
 def _remote_ci_enabled(ctx: FlowContext) -> bool:
     """Run remote verification only after this flow recorded a successful push."""
-    deep_state = DeepState(ctx.data)
-    return isinstance(deep_state.push_receipt, PushReceipt)
+    deep_data = ctx.deep_data()
+    return isinstance(deep_data.get("push_receipt"), PushReceipt)
 
 
 def _fresh_ttt(ctx: FlowContext) -> bool:
@@ -234,13 +233,13 @@ def _before_fix_resume(ctx: FlowContext) -> bool:
 
 
 def _multi_stack_merge_enabled(ctx: FlowContext) -> bool:
-    deep_state = DeepState(ctx.data)
-    return ctx.config.start_at != "fix" and not deep_state.single_stack_mode
+    deep_data = ctx.deep_data()
+    return ctx.config.start_at != "fix" and not deep_data["single_stack_mode"]
 
 
 def _single_stack_merge_enabled(ctx: FlowContext) -> bool:
-    deep_state = DeepState(ctx.data)
-    return ctx.config.start_at != "fix" and deep_state.single_stack_mode
+    deep_data = ctx.deep_data()
+    return ctx.config.start_at != "fix" and deep_data["single_stack_mode"]
 
 
 def _diagram_enabled(ctx: FlowContext) -> bool:
@@ -279,8 +278,8 @@ def _resolve_mode(config: RunConfig) -> str:
 
 def _mode_of(ctx: FlowContext) -> str:
     """The active mode, set by ``run_deep``'s dispatch preamble."""
-    deep_state = DeepState(ctx.data)
-    return str(deep_state.mode)
+    deep_data = ctx.deep_data()
+    return str(str(deep_data.get("mode", "loop")))
 
 
 def _fix_cycle_enabled(ctx: FlowContext) -> bool:

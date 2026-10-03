@@ -17,6 +17,7 @@ from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from daydream.config import (
@@ -69,24 +70,20 @@ class ReuseHit:
     """A complete, verified entry ready to be restored."""
 
     key: str
-    payload_dir: Path
+    payload: Mapping[str, bytes]
     manifest: dict[str, Any]
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "payload", MappingProxyType(dict(self.payload)))
 
-def restore_entry_payload(hit: ReuseHit, dest_dir: Path) -> str | None:
-    """Restore payload files; return an error reason on partial failure, else None.
-
-    A partial restore is a cache miss and the unit must recompute.
-    """
-    recorded = hit.manifest.get("payload")
-    if not isinstance(recorded, dict):
-        return "manifest payload unreadable"
-    try:
-        for name in recorded:
-            (dest_dir / str(name)).write_bytes((hit.payload_dir / str(name)).read_bytes())
-    except OSError as exc:
-        return f"{type(exc).__name__}: {exc}"
-    return None
+    def restore(self, dest_dir: Path) -> str | None:
+        """Restore the verified bytes; a partial write failure requires recomputation."""
+        try:
+            for name, raw in self.payload.items():
+                (dest_dir / name).write_bytes(raw)
+        except OSError as exc:
+            return f"{type(exc).__name__}: {exc}"
+        return None
 
 
 @dataclass(frozen=True)
@@ -167,7 +164,7 @@ def lookup_reuse_entry(
     if expected_coverage is not None and hit.manifest.get("coverage") != dict(expected_coverage):
         reuse.record(unit, outcome="miss", reason="complete coverage proof absent or mismatched", key=key)
         return None
-    restore_reason = restore_entry_payload(hit, dest_dir)
+    restore_reason = hit.restore(dest_dir)
     if restore_reason is None:
         return hit
     if on_restore_failure is not None:
@@ -215,7 +212,7 @@ def build_reuse_cache(ctx: FlowContext) -> ReuseCache:
         deep_dir_path = Path(str(deep_dir_path))
     session_id = None if ctx.artifacts is None else ctx.artifacts.layout.session_id
     store = ReuseCache(
-        review_cache_dir(deep_dir_path),
+        deep_dir_path.parent / REVIEW_CACHE_DIRNAME,
         budget=review_cache_budget(ctx.config),
         run_id=ctx.work.run_id,
         session_id=session_id,
@@ -233,41 +230,6 @@ def reuse_cache_for(ctx: FlowContext) -> ReuseCache | None:
     if not review_cache_enabled(ctx.config):
         return None
     return value
-
-
-# ---------------------------------------------------------------------------
-# Path surface
-# ---------------------------------------------------------------------------
-
-
-def review_cache_dir(deep_dir: str | Path) -> Path:
-    """The store directory, a sibling of the run's ``deep/`` output directory."""
-    return Path(deep_dir).parent / REVIEW_CACHE_DIRNAME
-
-
-def entries_dir(store_dir: str | Path) -> Path:
-    """The directory holding one subdirectory per content key."""
-    return Path(store_dir) / ENTRIES_DIRNAME
-
-
-def entry_dir(store_dir: str | Path, key: str) -> Path:
-    """The directory for one content key."""
-    return entries_dir(store_dir) / key
-
-
-def entry_manifest_path(store_dir: str | Path, key: str) -> Path:
-    """The manifest path for one content key."""
-    return entry_dir(store_dir, key) / MANIFEST_NAME
-
-
-def entry_marker_path(store_dir: str | Path, key: str) -> Path:
-    """The completion-marker path for one content key."""
-    return entry_dir(store_dir, key) / MARKER_NAME
-
-
-def provenance_path(store_dir: str | Path, run_id: str) -> Path:
-    """The per-run provenance record path under ``<store>/provenance/``."""
-    return Path(store_dir) / PROVENANCE_DIRNAME / f"{run_id}.json"
 
 
 def _ensure_private_dir(path: Path) -> None:
@@ -330,7 +292,7 @@ class ReuseCache:
         A failure before the marker propagates and leaves a directory that a
         later lookup reports as a miss, never a hit.
         """
-        entry = entry_dir(self.store_dir, key)
+        entry = self._entry_dir(key)
         _ensure_private_dir(entry)
 
         payload_digests: dict[str, str] = {}
@@ -364,13 +326,13 @@ class ReuseCache:
         if coverage is not None:
             manifest["coverage"] = dict(coverage)
         atomic_write_bytes(
-            entry_manifest_path(self.store_dir, key),
+            entry / MANIFEST_NAME,
             json.dumps(manifest, indent=2).encode("utf-8"),
             dir_fsync=True,
             mode=_PRIVATE_FILE_MODE,
         )
         atomic_write_bytes(
-            entry_marker_path(self.store_dir, key),
+            entry / MARKER_NAME,
             b"",
             dir_fsync=True,
             mode=_PRIVATE_FILE_MODE,
@@ -416,7 +378,7 @@ class ReuseCache:
         if self.budget is None:
             return
         now = time.time()
-        entries_path = entries_dir(self.store_dir)
+        entries_path = self.store_dir / ENTRIES_DIRNAME
         if not entries_path.is_dir():
             self._prune_provenance(now)
             return
@@ -444,7 +406,7 @@ class ReuseCache:
         """Age out per-run provenance records under the same age bound."""
         if self.budget is None:
             return
-        provenance_dir = Path(self.store_dir) / PROVENANCE_DIRNAME
+        provenance_dir = self.store_dir / PROVENANCE_DIRNAME
         if not provenance_dir.is_dir():
             return
         for record in provenance_dir.iterdir():
@@ -463,8 +425,8 @@ class ReuseCache:
 
         Never raises: the store's own read failures become miss reasons.
         """
-        entry = entry_dir(self.store_dir, key)
-        manifest_path = entry_manifest_path(self.store_dir, key)
+        entry = self._entry_dir(key)
+        manifest_path = entry / MANIFEST_NAME
         if not manifest_path.is_file():
             return ReuseMiss(key, "manifest absent")
         try:
@@ -486,6 +448,7 @@ class ReuseCache:
         recorded = manifest.get("payload")
         if not isinstance(recorded, dict):
             return ReuseMiss(key, "manifest unreadable")
+        payload: dict[str, bytes] = {}
         for name, expected in recorded.items():
             if not isinstance(name, str) or not isinstance(expected, str):
                 return ReuseMiss(key, "manifest payload unreadable")
@@ -494,13 +457,15 @@ class ReuseCache:
             except ValueError:
                 return ReuseMiss(key, "manifest payload name invalid")
             try:
-                actual = hashlib.sha256((entry / name).read_bytes()).hexdigest()
+                raw = (entry / name).read_bytes()
+                actual = hashlib.sha256(raw).hexdigest()
             except OSError:
                 return ReuseMiss(key, f"payload missing: {name}")
             if actual != expected:
                 return ReuseMiss(key, f"payload digest mismatch: {name}")
+            payload[name] = raw
 
-        if not entry_marker_path(self.store_dir, key).is_file():
+        if not (entry / MARKER_NAME).is_file():
             return ReuseMiss(key, "completion marker absent")
 
         # Refresh the eviction clock; bookkeeping never turns a hit into a miss
@@ -513,7 +478,7 @@ class ReuseCache:
                 dir_fsync=True,
                 mode=_PRIVATE_FILE_MODE,
             )
-        return ReuseHit(key, entry, manifest)
+        return ReuseHit(key, payload, manifest)
 
     # -- provenance --------------------------------------------------------
 
@@ -532,7 +497,7 @@ class ReuseCache:
         Other units survive. Read/write errors are best-effort: provenance is evidence,
         never an input to the work the cache stores.
         """
-        path = provenance_path(self.store_dir, self._provenance_run_id())
+        path = self._provenance_path()
         entry: dict[str, Any] = {"outcome": outcome, "reason": reason}
         if key is not None:
             entry["key"] = key
@@ -568,7 +533,7 @@ class ReuseCache:
 
         Records live in the cache so a fresh-run deep/ wipe preserves them.
         """
-        record = read_json_object(provenance_path(self.store_dir, self._provenance_run_id()))
+        record = read_json_object(self._provenance_path())
         record["run_id"] = self.run_id
         record["session_id"] = self.session_id
         record["enabled"] = self.enabled
@@ -589,12 +554,16 @@ class ReuseCache:
             result[name] = {"produced": was, "current": now, "moved": was != now}
         return result
 
-    def _provenance_run_id(self) -> str:
-        return self.run_id or self.session_id or "unknown"
+    def _entry_dir(self, key: str) -> Path:
+        return self.store_dir / ENTRIES_DIRNAME / key
+
+    def _provenance_path(self) -> Path:
+        run_id = self.run_id or self.session_id or "unknown"
+        return self.store_dir / PROVENANCE_DIRNAME / f"{run_id}.json"
 
     def _store_stats(self) -> dict[str, Any]:
         """Walk ``entries/`` for the provenance summary's store row (SH2)."""
-        entries_path = entries_dir(self.store_dir)
+        entries_path = self.store_dir / ENTRIES_DIRNAME
         count = 0
         total_bytes = 0
         oldest_age: float | None = None

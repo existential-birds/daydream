@@ -20,7 +20,7 @@ from daydream.training.adjudication.snapshot import FindingRecord
 from daydream.training.corpus import _is_posterior_leak, _trajectory_set_hash
 from daydream.training.corpus_projection.bundle import (
     CuratedBundle,
-    _verify_sha256sums,
+    _verified_payloads,
     load_curated_bundle,
 )
 from daydream.training.corpus_projection.license import load_license_policy, resolve_repo_decision
@@ -158,14 +158,14 @@ class BuildFrozenCorpusConfig:
             object.__setattr__(self, "as_of", normalize_as_of(self.as_of))
 
 
-def _load_snapshot(path: Path) -> dict[str, dict[str, Any]]:
+def _load_snapshot(path: Path, payload: bytes) -> dict[str, dict[str, Any]]:
     """Index canonical annotations.jsonl by record_id and fingerprint.
 
     Require fingerprints and reject duplicate values of either key.
     """
     rows: dict[str, dict[str, Any]] = {}
     seen_fingerprints: dict[str, int] = {}
-    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_no, line in enumerate(payload.decode("utf-8").splitlines(), start=1):
         if not line.strip():
             continue
         try:
@@ -247,7 +247,7 @@ _ANNOTATION_SCHEMA_PREFIX = "annotation-snapshot/"
 
 def _verify_annotation_bundle(
     annotation_bundle_dir: Path, bundle: CuratedBundle, bundle_dir: Path
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], bytes]:
     """Verify the annotation bundle before linking it to the curation bundle.
 
     Require _SUCCESS, validate its own SHA256SUMS, then match curation_id,
@@ -259,12 +259,18 @@ def _verify_annotation_bundle(
     root = Path(annotation_bundle_dir)
     if not (root / "_SUCCESS").is_file():
         raise ValueError(f"annotation bundle {root}: missing _SUCCESS marker")
-    _verify_sha256sums(root, "")
+    payloads = {
+        name: payload for name, payload in _verified_payloads(root, "")
+        if name in {"lineage.json", "annotations.jsonl"}
+    }
     lineage_path = root / "lineage.json"
     if not lineage_path.is_file():
         raise ValueError(f"annotation bundle {root}: missing lineage.json")
     try:
-        lineage = json.loads(lineage_path.read_text(encoding="utf-8"))
+        lineage_payload = payloads.get("lineage.json")
+        if lineage_payload is None:
+            lineage_payload = lineage_path.read_bytes()
+        lineage = json.loads(lineage_payload.decode("utf-8"))
     except json.JSONDecodeError as exc:
         raise ValueError(f"annotation bundle {root}: lineage.json is not valid JSON: {exc}") from exc
     if not isinstance(lineage, dict):
@@ -319,7 +325,10 @@ def _verify_annotation_bundle(
         "missing 'as_of' — the evidence pin must be recorded (empty/null "
         "allowed for the unpinned edge)",
     )
-    return lineage
+    snapshot_payload = payloads.get("annotations.jsonl")
+    if snapshot_payload is None:
+        snapshot_payload = (root / "annotations.jsonl").read_bytes()
+    return lineage, snapshot_payload
 
 
 def _read_trajectory_documents(bundle_dir: Path, artifact_relpath: str) -> list[dict[str, Any]]:
@@ -400,12 +409,12 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
             "decisions reached the projection boundary as (session_id, "
             f"reason_code) pairs {sorted(license_refusals)}; no output written"
         )
-    annotation_lineage = _verify_annotation_bundle(
+    annotation_lineage, snapshot_payload = _verify_annotation_bundle(
         config.annotation_bundle_dir, bundle, config.bundle_dir
     )
     snapshot_path = Path(config.annotation_bundle_dir) / "annotations.jsonl"
-    snapshot_rows = _load_snapshot(snapshot_path)
-    snapshot_digest = hashlib.sha256(snapshot_path.read_bytes()).hexdigest()
+    snapshot_rows = _load_snapshot(snapshot_path, snapshot_payload)
+    snapshot_digest = hashlib.sha256(snapshot_payload).hexdigest()
 
     records: list[Record] = []
     adjudication: list[Record] = []

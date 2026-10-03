@@ -16,7 +16,6 @@ import pytest
 import daydream
 from daydream import git_ops
 from daydream.config import STRUCTURE_STACK_NAME
-from daydream.deep import reuse_store
 from daydream.phases import build_commit_message
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
@@ -308,8 +307,7 @@ async def test_fix_loop_commit_recomputes_every_snapshot_bound_scope(
     assert len(_reviewed_stacks(stub.calls)) >= 2
     assert _count_arbiter_prompts(stub.calls) >= 1             # records changed -> arbiter recomputes
     assert _count_merge_prompts(stub.calls) >= 1               # merged set consumes records
-    provenance = json.loads(reuse_store.provenance_path(
-        shard_many_python_target / ".daydream" / "review-cache", _newest_provenance_path(deep).stem).read_text())
+    provenance = json.loads(_newest_provenance_path(deep).read_text())
     reused = [k for k, v in provenance["units"].items() if k.startswith("shard:") and v["outcome"] == "hit"]
     assert not reused, "previous-head completion claims cannot establish current coverage"
     assert all(value["outcome"] == "miss" for name, value in provenance["units"].items() if name.startswith("shard:"))

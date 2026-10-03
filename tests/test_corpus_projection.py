@@ -1182,3 +1182,71 @@ def test_native_collision_decision_does_not_require_unpublished_quarantine(
     assert collided[0].artifact_relpath == "quarantine/sess-a.conflict"
     assert not (bundle_dir / collided[0].artifact_relpath).exists()
     assert {batch.session_id for batch in bundle.admitted} == {"sess-b", "sess-c"}
+
+
+@pytest.mark.parametrize("checksum_names", ["canonical", "dot"])
+def test_projection_retains_checksum_admitted_annotation_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checksum_names: str,
+) -> None:
+    from collections.abc import Iterator
+
+    from daydream.training.corpus_projection import projector
+
+    bundle = _write_bundle(tmp_path)
+    _write_annotations_snapshot(bundle, dispositions=["accepted", "rejected"])
+    config = _config_for(bundle, tmp_path)
+    root = config.annotation_bundle_dir
+    assert root is not None
+    snapshot = root / "annotations.jsonl"
+    original = snapshot.read_bytes()
+    if checksum_names == "dot":
+        sums = root / "SHA256SUMS"
+        sums.write_text(sums.read_text().replace("  ", "  ./"), encoding="utf-8")
+    from daydream.training.corpus_projection.bundle import _verified_payloads
+
+    verify = _verified_payloads
+
+    def replace_after_admission(directory: Path, prefix: str) -> Iterator[tuple[str, bytes]]:
+        yield from verify(directory, prefix)
+        snapshot.write_bytes(original + b"\n")
+        lineage = json.loads((root / "lineage.json").read_text())
+        lineage["snapshot_id"] = "replacement-never-admitted"
+        (root / "lineage.json").write_text(json.dumps(lineage), encoding="utf-8")
+
+    monkeypatch.setattr(projector, "_verified_payloads", replace_after_admission)
+    build_frozen_corpus(config)
+    lineage = json.loads((config.out_dir / "lineage.json").read_text())
+    assert lineage["content_digests"]["annotations.jsonl"] == hashlib.sha256(original).hexdigest()
+    assert lineage["annotation_bundle"]["snapshot_id"] == root.name
+    assert len(_read_jsonl(config.out_dir / "corpus.jsonl")) == 2
+    assert snapshot.read_bytes() == original + b"\n"
+
+
+@pytest.mark.parametrize("checksum_omission", [False, True])
+def test_projection_rows_and_digest_share_one_annotation_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checksum_omission: bool,
+) -> None:
+    from daydream.training.corpus_projection import projector
+
+    bundle = _write_bundle(tmp_path)
+    _write_annotations_snapshot(bundle, dispositions=["accepted", "rejected"])
+    config = _config_for(bundle, tmp_path)
+    root = config.annotation_bundle_dir
+    assert root is not None
+    if checksum_omission:
+        _write_ann_sumsums(root, skip=frozenset({"SHA256SUMS", "lineage.json", "annotations.jsonl"}))
+    snapshot = root / "annotations.jsonl"
+    original = snapshot.read_bytes()
+    parse = projector._load_snapshot
+
+    def replace_after_parse(path: Path, payload: bytes) -> dict[str, dict[str, Any]]:
+        rows = parse(path, payload)
+        path.write_bytes(original + b"\n")
+        return rows
+
+    monkeypatch.setattr(projector, "_load_snapshot", replace_after_parse)
+    build_frozen_corpus(config)
+    lineage = json.loads((config.out_dir / "lineage.json").read_text())
+    assert lineage["content_digests"]["annotations.jsonl"] == hashlib.sha256(original).hexdigest()
+    assert lineage["annotation_bundle"]["annotations_digest"] == hashlib.sha256(original).hexdigest()
+    assert len(_read_jsonl(config.out_dir / "corpus.jsonl")) == 2

@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING
 
 from daydream import git_ops
 from daydream.agent import console
-from daydream.deep.state import DeepState
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.git_ops import INHERIT_GITHUB_AUTH, GitHubAuth, GitPathState
 from daydream.ui import print_warning
@@ -276,10 +275,10 @@ def _resolve_changed_files(ctx: FlowContext) -> set[str] | None:
     The footprint records reviewed origins; the quality gate uses their Python
     subset. Canonical finding paths are authorized independently.
     """
-    deep_state = DeepState(ctx.data)
+    deep_data = ctx.deep_data()
     from daydream.deep.diff import _diff_changed_files, _read_full_diff
 
-    changed_files: set[str] | None = deep_state.changed_files_or_none
+    changed_files: set[str] | None = deep_data.get("changed_files")
     if changed_files is None:
         # Issue #644 — ctx.data["diff"] is the gather-time BOUNDED diff; the
         # resume path must resolve provenance from the FULL diff.patch (via
@@ -288,7 +287,7 @@ def _resolve_changed_files(ctx: FlowContext) -> set[str] | None:
         try:
             diff_str = _read_full_diff(ctx) or ""
         except OSError:
-            diff_str = deep_state.diff_or_empty or ""
+            diff_str = (deep_data.get("diff") or "") or ""
         if diff_str:
             changed_files = set(_diff_changed_files(diff_str))
     return changed_files

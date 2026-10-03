@@ -13,7 +13,6 @@ import re
 import shutil
 from contextlib import suppress
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -399,37 +398,28 @@ class Transaction:
         return False
 
 
-@lru_cache(maxsize=None)
-def _resolve_cached(root_r: str, target: str) -> str:
-    """Memoize contained canonical paths under a resolved root; failures raise
-    WorkspaceCorrupt.
-    """
-    p = Path(target)
-    candidate = p if p.is_absolute() else Path(root_r) / p
-    try:
-        resolved = candidate.resolve()
-    except (OSError, RuntimeError) as exc:
-        raise WorkspaceCorrupt(
-            f"{root_r}: cannot resolve target {target!r}: {exc}"
-        ) from exc
-    try:
-        rel = resolved.relative_to(Path(root_r))
-    except ValueError:
-        raise WorkspaceCorrupt(
-            f"{root_r}: target resolves outside the workspace root: {target!r}"
-        ) from None
-    return rel.as_posix()
-
-
 def _resolve_target(root: Path, target: str | Path) -> str:
-    """Return a canonical POSIX path relative to root, rejecting resolved escapes. Absolute
-    paths inside root are allowed; parent symlinks cannot escape it.
+    """Resolve current containment; mutable symlink topology must never be cached.
+
+    Absolute paths inside root are allowed. Parent symlinks cannot escape it.
     """
     try:
         root_r = Path(root).resolve()
     except (OSError, RuntimeError) as exc:
         raise WorkspaceCorrupt(f"{root}: cannot resolve the workspace root: {exc}") from exc
-    return _resolve_cached(str(root_r), str(target))
+    p = Path(target)
+    candidate = p if p.is_absolute() else root_r / p
+    try:
+        resolved = candidate.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise WorkspaceCorrupt(f"{root_r}: cannot resolve target {str(target)!r}: {exc}") from exc
+    try:
+        rel = resolved.relative_to(root_r)
+    except ValueError:
+        raise WorkspaceCorrupt(
+            f"{root_r}: target resolves outside the workspace root: {str(target)!r}"
+        ) from None
+    return rel.as_posix()
 
 
 def resolve_authoring_path(root: Path, rel: str | Path) -> Path:

@@ -646,6 +646,7 @@ def verify_publication(
     if verify_dir.exists():
         shutil.rmtree(verify_dir)
     verify_dir.mkdir(parents=True)
+    payload_dir = verify_dir / "payloads"
 
     def _download(relpath: str) -> bytes:
         try:
@@ -660,15 +661,25 @@ def verify_publication(
             continue
         digest, _, relpath = line.partition("  ")
         relpath = relpath.removeprefix(prefix)
-        actual = hashlib.sha256(_download(relpath)).hexdigest()
+        try:
+            target = _validate_relpath(relpath, payload_dir)
+        except StageError as exc:
+            raise VerificationError(redact_text(f"verify: invalid checksum path: {exc}")) from exc
+        payload = _download(relpath)
+        actual = hashlib.sha256(payload).hexdigest()
         if actual != digest:
             raise VerificationError(redact_text(f"verify: checksum mismatch for {relpath!r}"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
 
     # 2. Curation manifest: schema-valid and consistent with the pinned inputs.
     from jsonschema import Draft202012Validator  # noqa: PLC0415  # lazy: verify-time only
 
     schema_path = Path(__file__).parent.parent / "training" / "schema" / "curation-manifest.json"
-    doc = json.loads(_download("curation-manifest.json").decode("utf-8"))
+    manifest_path = payload_dir / "curation-manifest.json"
+    # Legacy checksum lists may omit the manifest; observe that input once.
+    manifest_payload = manifest_path.read_bytes() if manifest_path.is_file() else _download("curation-manifest.json")
+    doc = json.loads(manifest_payload.decode("utf-8"))
     errors = sorted(Draft202012Validator(json.loads(schema_path.read_text())).iter_errors(doc), key=str)
     if errors:
         raise VerificationError(redact_text(f"verify: curation manifest invalid: {errors[0].message}"))
@@ -683,17 +694,7 @@ def verify_publication(
         if batch["status"] != "admitted":
             continue
         sid = batch["session_id"]
-        batch_dir = verify_dir / "batches" / sid
-        for line in sums_text.splitlines():
-            if not line.strip():
-                continue
-            _, _, relpath = line.partition("  ")
-            relpath = relpath.removeprefix(prefix)
-            if not relpath.startswith(f"batches/{sid}/"):
-                continue
-            target = batch_dir / relpath.removeprefix(f"batches/{sid}/")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(_download(relpath))
+        batch_dir = payload_dir / "batches" / sid
         scan = scan_run_dir(batch_dir)
         if scan.blocking:
             raise VerificationError(

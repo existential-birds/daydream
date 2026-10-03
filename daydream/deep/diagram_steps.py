@@ -37,7 +37,6 @@ from daydream.deep.diagram_types import DiagramResult, DiagramThresholds
 from daydream.deep.diff import _ttt_diff_text
 from daydream.deep.render import insert_diagrams_section
 from daydream.deep.settings import _resolve_config_value
-from daydream.deep.state import DeepState
 from daydream.extensions import get_registry
 from daydream.extensions.api import Stop
 from daydream.fanout import run_fanout
@@ -99,8 +98,8 @@ def _diagram_mode_for(config: RunConfig, mode: str) -> str:
 
 def _resolved_diagram_mode(ctx: FlowContext) -> str:
     """Resolve the active mode from the flow state."""
-    deep_state = DeepState(ctx.data)
-    return _diagram_mode_for(ctx.config, deep_state.mode)
+    deep_data = ctx.deep_data()
+    return _diagram_mode_for(ctx.config, str(deep_data.get("mode", "loop")))
 
 
 def _diagram_settings(ctx: FlowContext) -> DiagramSettings:
@@ -262,10 +261,10 @@ def _diagram_author_prompt(
     keeps pointers. Current extension builders accept the inline context arguments;
     known private paths are redacted before INLINE dispatch.
     """
-    deep_state = DeepState(ctx.data)
-    diff_path: Path = deep_state.diff_path
+    deep_data = ctx.deep_data()
+    diff_path: Path = deep_data["diff_path"]
     inline_diff = _ttt_diff_text(ctx)
-    exploration_dir: Path | None = deep_state.exploration_dir_or_none
+    exploration_dir: Path | None = deep_data.get("exploration_dir")
     transport = (
         inline_transport
         if inline_transport is not None
@@ -363,7 +362,7 @@ async def _run_diagram_kind(
 
     Author and repair forks run sequentially so recorder ContextVars reset LIFO.
     """
-    deep_state = DeepState(ctx.data)
+    deep_data = ctx.deep_data()
     schema = SEQUENCE_SPEC_SCHEMA if kind == "sequence" else FLOWCHART_SPEC_SCHEMA
 
     def _ground(spec: dict[str, Any]) -> Any:
@@ -386,8 +385,8 @@ async def _run_diagram_kind(
 
     coerce = coerce_sequence_spec if kind == "sequence" else coerce_flowchart_spec
 
-    diff_path: Path = deep_state.diff_path
-    exploration_dir = deep_state.exploration_dir_or_none
+    diff_path: Path = deep_data["diff_path"]
+    exploration_dir = deep_data.get("exploration_dir")
     diagram_diff = _ttt_diff_text(ctx)
     # Bound before the guard: the repair turn and every failure path read both.
     advisory: dict[str, Any] | None = None
@@ -544,9 +543,9 @@ def _diagram_payload_without_mermaid(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _apply_diagrams_to_report(ctx: FlowContext, blocks: str) -> None:
     """Idempotently insert diagrams into both reports, preserving supervision and coverage text."""
-    deep_state = DeepState(ctx.data)
-    targets = [DeepArtifact.MERGED_REPORT.at(deep_state.dd)]
-    canonical = deep_state.merged_report_or_none
+    deep_data = ctx.deep_data()
+    targets = [DeepArtifact.MERGED_REPORT.at(deep_data["dd"])]
+    canonical = deep_data.get("merged_report")
     if canonical is not None:
         targets.append(Path(canonical))
     for target in targets:
@@ -570,17 +569,17 @@ async def _run_diagram_step(
     ctx: FlowContext, *, phase: "PhaseScopeHandle"
 ) -> Stop | None:
     """Run the durable diagram step inside its identified phase scope."""
-    deep_state = DeepState(ctx.data)
+    deep_data = ctx.deep_data()
     settings = _diagram_settings(ctx)
-    mode = deep_state.mode
+    mode = str(deep_data.get("mode", "loop"))
     target_dir = ctx.work.repo
-    dd: Path = deep_state.dd
+    dd: Path = deep_data["dd"]
 
     from daydream.hunk_index import head_side_ranges_by_file, load_hunk_index
     from daydream.run_config import _file_config_or_empty
     from daydream.services import enumerate_services
 
-    changed_files = sorted(str(path) for path in deep_state.changed_files)
+    changed_files = sorted(str(path) for path in deep_data["changed_files"])
     hunk_ranges = head_side_ranges_by_file(
         load_hunk_index(
             artifact_dir_for(
@@ -603,7 +602,7 @@ async def _run_diagram_step(
         services=enumerate_services(
             target_dir, file_config, service_roots=settings.service_roots or None
         ),
-        import_graph=deep_state.import_graph or {},
+        import_graph=(deep_data["import_graph"] if deep_data.get("import_graph") is not None else {}) or {},
         thresholds=settings.thresholds,
         force=settings.mode,
     )
@@ -668,7 +667,7 @@ async def _run_diagram_step(
     DeepArtifact.DIAGRAM_MARKDOWN.at(dd).write_text(
         f"{blocks}\n" if blocks else "", encoding="utf-8"
     )
-    deep_state.diagrams = {
+    deep_data["diagrams"] = {
         "blocks": blocks,
         "payload": _diagram_payload_without_mermaid(payload),
         "results": ordered,
@@ -694,13 +693,13 @@ async def _step_post_diagram(ctx: FlowContext) -> Stop:
 
     An unresolved PR or failed POST returns 1 because the comment is the deliverable.
     """
-    deep_state = DeepState(ctx.data)
+    deep_data = ctx.deep_data()
     from daydream.git_ops import GitError
     from daydream.pr_review import _resolve_pr
     from daydream.reviews.diagrams import diagram_comment_kinds, post_diagram_comment_to_pr, render_diagram_comment_body
     from daydream.runner import _emit_diagram_findings
 
-    diagrams: dict[str, Any] = deep_state.diagrams or {}
+    diagrams: dict[str, Any] = deep_data.get("diagrams") or {}
     payload: dict[str, Any] = diagrams.get("payload") or {}
 
     if ctx.config.findings_out is not None:

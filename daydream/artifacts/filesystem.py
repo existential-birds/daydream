@@ -12,6 +12,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from pydantic import TypeAdapter, ValidationError
+
 from daydream.artifacts.models import _SCHEMA_VERSION, ArtifactManifestEntry, ArtifactVisibilityError
 from daydream.json_utils import _fsync_directory, atomic_write_bytes
 
@@ -399,38 +401,30 @@ def _copy_tree(source: Path, destination: Path, entries: tuple[ArtifactManifestE
         raise ArtifactVisibilityError("artifact copy verification failed")
 
 
+_MANIFEST_ENTRY_ADMISSION = TypeAdapter(ArtifactManifestEntry)
+
+
 def _manifest_entry_from_payload(
     value: object,
     *,
     message: str = "artifact transfer intent is malformed",
 ) -> ArtifactManifestEntry:
-    """Validate one persisted manifest entry payload into its dataclass."""
+    """Admit declared manifest fields, then enforce tree-entry semantics."""
     if not isinstance(value, dict) or set(value) != {"path", "kind", "size", "mode", "sha256"}:
         raise ArtifactVisibilityError(message)
-    relative = value["path"]
-    kind = value["kind"]
-    size = value["size"]
-    mode = value["mode"]
-    digest = value["sha256"]
+    if not all(type(value[name]) is int for name in ("size", "mode")):
+        raise ArtifactVisibilityError(message)
+    try:
+        entry = _MANIFEST_ENTRY_ADMISSION.validate_python(value)
+    except ValidationError:
+        raise ArtifactVisibilityError(message) from None
     if (
-        not isinstance(relative, str)
-        or kind not in ("directory", "file")
-        or type(size) is not int
-        or type(mode) is not int
-        or size < 0
-        or not 0 <= mode <= 0o7777
-        or (kind == "directory" and (size != 0 or digest is not None))
-        or (kind == "file" and not _is_sha256(digest))
+        entry.kind == "directory" and (entry.size != 0 or entry.sha256 is not None)
+        or entry.kind == "file" and not _is_sha256(entry.sha256)
     ):
         raise ArtifactVisibilityError(message)
-    _validate_relative_name(relative)
-    return ArtifactManifestEntry(
-        relative,
-        cast(Literal["directory", "file"], kind),
-        size,
-        mode,
-        cast(str | None, digest),
-    )
+    _validate_relative_name(entry.path)
+    return entry
 
 
 def _deepest_first_directories(entries: Sequence[ArtifactManifestEntry]) -> list[ArtifactManifestEntry]:

@@ -680,3 +680,62 @@ def test_apply_orphan_rule_rejects_absolute_indexed(tmp_path: Path) -> None:
     f.write_text("case")
     with pytest.raises(WorkspaceCorrupt):
         recover_startup(tmp_path, indexed={str(f)}, on_disk={f})
+
+
+@pytest.mark.parametrize("operation", ["resolve", "stage", "commit"])
+def test_workspace_containment_is_rechecked_after_parent_replacement(
+    tmp_path: Path, operation: str,
+) -> None:
+    root = tmp_path / "workspace"
+    cases = root / "cases"
+    cases.mkdir(parents=True)
+    prior = b"private prior benchmark content"
+    (cases / "x.yaml").write_bytes(prior)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_file = outside / "x.yaml"
+    outside_file.write_bytes(b"outside sentinel")
+    resolve_authoring_path(root, "cases/x.yaml")
+    transaction = Transaction(root, op_id="fresh-containment", kind="curate")
+    if operation == "commit":
+        transaction.stage("cases/x.yaml", b"replacement benchmark content")
+    retired = root / "retired-cases"
+    cases.rename(retired)
+    cases.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(WorkspaceCorrupt, match="outside the workspace root"):
+        if operation == "resolve":
+            resolve_authoring_path(root, "cases/x.yaml")
+        elif operation == "stage":
+            transaction.stage("cases/x.yaml", b"replacement benchmark content")
+        else:
+            transaction.commit()
+    assert outside_file.read_bytes() == b"outside sentinel"
+    assert (retired / "x.yaml").read_bytes() == prior
+    if operation == "commit":
+        journal = root / "transactions" / "fresh-containment" / "journal.json"
+        assert load_json_strict(journal)["applied_count"] == 0
+        with pytest.raises(WorkspaceCorrupt, match="outside the workspace root"):
+            recover_startup(root)
+        assert journal.is_file()
+        cases.unlink()
+        retired.rename(cases)
+        recover_startup(root)
+        recover_startup(root)
+        assert (cases / "x.yaml").read_bytes() == prior
+        assert outside_file.read_bytes() == b"outside sentinel"
+
+
+def test_authoring_alias_follows_current_contained_target(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "x.yaml").write_bytes(b"first admitted source")
+    (second / "x.yaml").write_bytes(b"second admitted source")
+    alias = tmp_path / "cases"
+    alias.symlink_to(first, target_is_directory=True)
+    assert resolve_authoring_path(tmp_path, "cases/x.yaml").read_bytes() == b"first admitted source"
+    alias.unlink()
+    alias.symlink_to(second, target_is_directory=True)
+    assert resolve_authoring_path(tmp_path, "cases/x.yaml").read_bytes() == b"second admitted source"

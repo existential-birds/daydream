@@ -3,51 +3,21 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from daydream.agent import console
-from daydream.deep.state import DeepState
 from daydream.flows.engine import FlowContext
+from daydream.hunk_index import iter_diff_blocks as iter_diff_blocks
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget
 from daydream.ui import print_warning
 
-_DIFF_BLOCK_SPLIT = re.compile(r"^(?=diff --git )", re.MULTILINE)
-_DIFF_PLUS_HEADER = re.compile(r"^\+\+\+ (.+)$", re.MULTILINE)
-_DIFF_MINUS_HEADER = re.compile(r"^--- (.+)$", re.MULTILINE)
-_DIFF_GIT_HEADER = re.compile(r"^diff --git a/(\S+) b/(\S+)")
 # Markers carry dropped paths without matching any diff header, so all block
 # consumers skip the marker while file selection can reject partial input.
 _DIFF_TRUNCATION_MARKER = re.compile(
     r"^# daydream: deep diff truncated: \d+ -> \d+ bytes "
     r"\(\d+/\d+ blocks retained(?:; dropped: (?P<dropped>[^)]+))?\)\n"
 )
-
-
-def _diff_block_path(block: str) -> str | None:
-    """Resolve the changed path, preferring the post-state destination on renames.
-
-    Deletions use the pre-state path; binary and mode-only changes use the git
-    header. Skip /dev/null sentinels and non-diff fragments.
-    """
-
-    if not block.startswith("diff --git "):
-        return None
-    for pattern, prefix in ((_DIFF_PLUS_HEADER, "b/"), (_DIFF_MINUS_HEADER, "a/")):
-        match = pattern.search(block)
-        if match and match.group(1) != "/dev/null":
-            return match.group(1).removeprefix(prefix)
-    git = _DIFF_GIT_HEADER.match(block)
-    return git.group(2) if git else None
-
-
-def iter_diff_blocks(diff: str) -> Iterator[tuple[str, str]]:
-    """Yield resolved paths and untouched file blocks in source order."""
-    for block in _DIFF_BLOCK_SPLIT.split(diff):
-        path = _diff_block_path(block)
-        if path is not None:
-            yield path, block
 
 
 def _diff_blocks_for_files(diff: str, files: list[str]) -> str | None:
@@ -169,10 +139,10 @@ def _read_full_diff(ctx: FlowContext) -> str:
     The in-memory diff may be bounded, so callers needing complete evidence must
     use this read. OSError propagates for callers to choose their fallback.
     """
-    deep_state = DeepState(ctx.data)
-    diff_path = deep_state.diff_path_or_none
+    deep_data = ctx.deep_data()
+    diff_path = deep_data.get("diff_path")
     if diff_path is None:
-        return str(deep_state.diff)
+        return str(deep_data["diff"])
     return Path(diff_path).read_text(encoding="utf-8")
 
 
@@ -183,13 +153,13 @@ def _ttt_diff_text(ctx: FlowContext) -> str | None:
     the inline budget and uses the backend's pointer or truncated-clone transport.
     Warn and use the bounded value only if the artifact cannot be read.
     """
-    deep_state = DeepState(ctx.data)
-    if not deep_state.diff_truncated:
-        return str(deep_state.diff)
+    deep_data = ctx.deep_data()
+    if not (deep_data.get("diff_truncated") or False):
+        return str(deep_data["diff"])
     try:
         return _read_full_diff(ctx)
     except OSError as exc:
-        truncation = deep_state.diff_truncation
+        truncation = deep_data.get("diff_truncation")
         detail = (
             f" ({truncation.marker.strip()})"
             if truncation is not None and truncation.marker is not None
@@ -200,4 +170,4 @@ def _ttt_diff_text(ctx: FlowContext) -> str | None:
             f"Could not read the full diff for the intent/wonder phases "
             f"({exc}); falling back to the bounded in-memory diff{detail}",
         )
-    return str(deep_state.diff)
+    return str(deep_data["diff"])

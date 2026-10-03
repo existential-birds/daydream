@@ -806,3 +806,28 @@ def test_existing_extension_context_construction_keeps_auth_separate(
     assert data == {"extension-marker": "retained"}
     assert "installation-secret-marker" not in repr(owned)
     assert "github_execution" not in repr(owned)
+
+
+@pytest.mark.parametrize("key", ["items_file", "intent_authoritative", "tier"])
+async def test_invalid_public_extension_state_is_rejected_before_findings_publication(
+    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+    fake_gh: Any, tmp_path: Path, make_config: MakeConfig, key: str,
+) -> None:
+    extension = f"""
+from daydream.extensions import FlowStep
+
+async def corrupt_public_input(ctx):
+    ctx.data[{key!r}] = object()
+
+def register(r):
+    r.register_phase(FlowStep(name="corrupt-public-input", run=corrupt_public_input))
+    r.insert_after("deep", anchor="load-items", step="corrupt-public-input")
+"""
+    _install_filtered_surface(ext_dir, multi_stack_target, monkeypatch, extension_source=extension)
+    fake_gh.serve_open_pr(multi_stack_target)
+    output = tmp_path / "findings.json"
+    with pytest.raises(TypeError, match=rf"deep state key '{key}' expected"):
+        await runner.run(make_config(multi_stack_target, pr_number=7, findings_out=str(output)))
+    assert not output.exists()
+    assert not fake_gh.calls("POST", "repos/acme/widgets/pulls/7/reviews")
+    assert not fake_gh.calls("POST", "repos/acme/widgets/pulls/7/comments")

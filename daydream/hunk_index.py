@@ -5,8 +5,10 @@ use the same changed-range and added-line projections."""
 
 from __future__ import annotations
 
+import codecs
 import json
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -22,33 +24,9 @@ def _unquote_git_path(quoted: str) -> str:
     if not (quoted.startswith('"') and quoted.endswith('"')):
         return quoted
     inner = quoted[1:-1]
-    out = bytearray()
-    i = 0
-    while i < len(inner):
-        ch = inner[i]
-        if ch == "\\" and i + 1 < len(inner):
-            nxt = inner[i + 1]
-            if nxt == "\\":
-                out.append(ord("\\"))
-                i += 2
-            elif nxt == '"':
-                out.append(ord('"'))
-                i += 2
-            elif nxt in "01234567":
-                val = 0
-                j = i + 1
-                while j < len(inner) and j < i + 4 and inner[j] in "01234567":
-                    val = val * 8 + int(inner[j])
-                    j += 1
-                out.append(val)
-                i = j
-            else:
-                out.append(ord("\\"))
-                i += 1
-        else:
-            out.extend(ch.encode("utf-8"))
-            i += 1
-    return out.decode("utf-8")
+    if re.search(r"(?<!\\)(?:\\\\)*\\[4-7][0-7]{2}", inner):
+        raise ValueError("byte must be in range(0, 256)")
+    return codecs.escape_decode(inner.encode("utf-8"))[0].decode("utf-8")
 
 
 def _header_path(raw: str) -> str | None:
@@ -65,6 +43,54 @@ def _header_path(raw: str) -> str | None:
     if tail == "/dev/null":
         return None
     return tail
+
+
+_DIFF_BLOCK_SPLIT = re.compile(r"^(?=diff --git )", re.MULTILINE)
+
+
+def raw_diff_blocks(diff: str) -> Iterator[str]:
+    """Yield untouched Git file blocks without decoding unrelated paths."""
+    return (block for block in _DIFF_BLOCK_SPLIT.split(diff) if block.startswith("diff --git "))
+
+
+def _git_header_path(header: str) -> str | None:
+    # Binary and mode-only changes have equal pre/post names. Renames carry
+    # explicit metadata. Equal-name candidates disambiguate spaces inside paths.
+    paths = header.removeprefix("diff --git ")
+    if paths.startswith('"'):
+        quoted = re.match(r'^("(?:\\.|[^"\\])*") (.*)$', paths)
+        if quoted:
+            return _unquote_git_path(quoted.group(2)).removeprefix("b/")
+    new: str | None = None
+    for separator in re.finditer(r' (?=b/|")', paths):
+        old = _unquote_git_path(paths[:separator.start()]).removeprefix("a/")
+        new = _unquote_git_path(paths[separator.end():]).removeprefix("b/")
+        if old == new:
+            return new
+    return new
+
+
+def _diff_block_path(block: str) -> str | None:
+    old: str | None = None
+    renamed: str | None = None
+    for raw in block.splitlines():
+        if raw.startswith("@@"):
+            break
+        if raw.startswith("+++ ") and raw[4:] != "/dev/null":
+            return _header_path(raw)
+        if raw.startswith("--- ") and raw[4:] != "/dev/null":
+            old = _unquote_git_path(raw[4:].rstrip("\t")).removeprefix("a/")
+        if raw.startswith(("rename to ", "copy to ")):
+            renamed = _unquote_git_path(raw.partition(" to ")[2])
+    return renamed or old or _git_header_path(block.split("\n", 1)[0])
+
+
+def iter_diff_blocks(diff: str) -> Iterator[tuple[str, str]]:
+    """Yield decoded post-state paths (pre-state for deletions) and exact blocks."""
+    for block in raw_diff_blocks(diff):
+        path = _diff_block_path(block)
+        if path is not None:
+            yield path, block
 
 
 def parse_hunks(diff_text: str) -> dict[str, dict[str, Any]]:

@@ -12,7 +12,6 @@ from typing import Annotated, Any, ClassVar, Literal, get_args
 from uuid import UUID
 
 from pydantic import (
-    AfterValidator,
     BaseModel,
     BeforeValidator,
     ConfigDict,
@@ -60,10 +59,7 @@ __all__ = [
     "CASE_EXCLUSION_REASONS",
 ]
 
-_REPOSITORY_SHAPE = re.compile(r"^[^/]+/[^/]+$")
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
-_HEX64 = re.compile(r"^[0-9a-f]{64}$")
-_SOURCE_ID_RE = re.compile(r"^github:(review|inline_comment|thread_comment|issue_comment):\d+$")
 
 
 def _rfc3339(value: str | datetime) -> datetime:
@@ -82,49 +78,23 @@ def rfc3339_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def _hex64(value: str) -> str:
-    """Require a lowercase 64-hex digest."""
-    if not _HEX64.fullmatch(value):
-        raise ValueError(f"digest must be lowercase 64-hex, got {value!r}")
-    return value
-
-
-def _hex64_or_empty(value: str) -> str:
-    return value if value == "" else _hex64(value)
-
-
-def _validate_sha40(v: str | None) -> str | None:
-    if v is not None and not _HEX40.fullmatch(v):
-        raise ValueError(f"SHA must be lowercase 40-hex, got {v!r}")
-    return v
-
-
-def _validate_positive_line(v: int | None) -> int | None:
-    if v is not None and v < 1:
-        raise ValueError("line anchor must be positive when set")
-    return v
-
-
 def _validate_ts(v: str | datetime | None) -> datetime | None:
     if v is None:
         return None
     return _rfc3339(v)
 
 
-def _canonical_source_id(v: str) -> str:
-    if not _SOURCE_ID_RE.fullmatch(v):
-        raise ValueError(f"source_id must be github:<kind>:<database-id>, got {v!r}")
-    return v
+_SOURCE_ID_RE = re.compile(r"\Agithub:(review|inline_comment|thread_comment|issue_comment):\d+\Z")
 
 
-Sha40 = Annotated[str, AfterValidator(_validate_sha40)]
-Sha64 = Annotated[str, AfterValidator(_hex64)]
-Sha64OrEmpty = Annotated[str, AfterValidator(_hex64_or_empty)]
-NullableSha40 = Annotated[str | None, AfterValidator(_validate_sha40)]
-PositiveLine = Annotated[int | None, AfterValidator(_validate_positive_line)]
+Sha40 = Annotated[str, Field(pattern=r"\A[0-9a-f]{40}\z")]
+Sha64 = Annotated[str, Field(pattern=r"\A[0-9a-f]{64}\z")]
+Sha64OrEmpty = Annotated[str, Field(pattern=r"\A(?:[0-9a-f]{64})?\z")]
+NullableSha40 = Sha40 | None
+PositiveLine = Annotated[int, Field(ge=1)] | None
 Timestamp = Annotated[datetime, BeforeValidator(_validate_ts)]
 OptionalTimestamp = Annotated[datetime | None, BeforeValidator(_validate_ts)]
-SourceId = Annotated[str, AfterValidator(_canonical_source_id)]
+SourceId = Annotated[str, Field(pattern=_SOURCE_ID_RE)]
 
 
 def normalize_hostname(raw: str) -> str:
@@ -164,24 +134,10 @@ class Source(_StrictModel):
     """Immutable repository identity for the workspace's forge (github.com)."""
 
     provider: Literal["github"]
-    hostname: str
-    repository: str
+    hostname: Annotated[str, Field(pattern=r"\Agithub\.com\z")]
+    repository: Annotated[str, Field(pattern=r"^[^/]+/[^/]+$")]
     repository_id: str | None = None
     visibility: Literal["unresolved", "public", "private"] = "unresolved"
-
-    @field_validator("hostname")
-    @classmethod
-    def _github_only(cls, v: str) -> str:
-        if v != "github.com":
-            raise ValueError(f"v1 supports only the github.com forge, got {v!r}")
-        return v
-
-    @field_validator("repository")
-    @classmethod
-    def _repo_shape(cls, v: str) -> str:
-        if not v or not _REPOSITORY_SHAPE.match(v):
-            raise ValueError(f"repository must be OWNER/REPO, got {v!r}")
-        return v
 
     @field_validator("repository_id")
     @classmethod
@@ -218,8 +174,8 @@ class PullRequestEntry(_StrictModel):
 
     number: int
     import_state: Literal["pending", "fetched", "fetch_failed"]
-    import_file: str | None = None
-    import_sha256: str | None = None
+    import_file: Annotated[str, Field(min_length=1)] | None = None
+    import_sha256: Sha64 | None = None
     error: dict[str, str] | None = None
     latest_error: dict[str, str] | None = None
     requested_heads: list[str] = []
@@ -230,7 +186,6 @@ class PullRequestEntry(_StrictModel):
         if self.import_state == "fetched":
             if self.import_file is None or self.import_sha256 is None:
                 raise ValueError("fetched import requires import_file and import_sha256")
-            _hex64(self.import_sha256)
             if self.error is not None:
                 raise ValueError("fetched import must not carry an error")
         elif self.import_state == "fetch_failed":
@@ -250,8 +205,6 @@ class PullRequestEntry(_StrictModel):
                 raise ValueError(
                     "pending import must not set import_file/import_sha256/error/latest_error"
                 )
-        if self.import_file is not None and not self.import_file:
-            raise ValueError("import_file must not be blank")
         return self
 
 
@@ -447,8 +400,8 @@ class Location(_StrictModel):
     """A POSIX-relative source location with a positive ordered line span."""
 
     path: str
-    start_line: int
-    end_line: int
+    start_line: Annotated[int, Field(ge=1)]
+    end_line: Annotated[int, Field(ge=1)]
 
     @field_validator("path")
     @classmethod
@@ -457,8 +410,6 @@ class Location(_StrictModel):
 
     @model_validator(mode="after")
     def _ordered(self) -> "Location":
-        if self.start_line < 1 or self.end_line < 1:
-            raise ValueError("start_line/end_line must be positive")
         if self.start_line > self.end_line:
             raise ValueError("start_line must be <= end_line")
         return self
@@ -684,19 +635,12 @@ class Provenance(_StrictModel):
 class Finding(_StrictModel):
     """A single gold finding (or an authored/edited candidate)."""
 
-    finding_id: str
+    finding_id: Sha64
     title: str
     body: str
     severity: SeverityLevel | None = None
     location: Location | None = None
     provenance: Provenance
-
-    @field_validator("finding_id")
-    @classmethod
-    def _id_hex(cls, v: str) -> str:
-        if not _HEX64.fullmatch(v):
-            raise ValueError(f"finding_id must be 64-hex, got {v!r}")
-        return v
 
     @field_validator("title", "body")
     @classmethod
@@ -806,12 +750,7 @@ class Curation(_StrictModel):
     findings: list[Finding] = []
     exclusions: list[EvidenceExclusion] = []
     case_exclusion: CaseExclusion | None = None
-    task_spec_sha256: str | None = None
-
-    @field_validator("task_spec_sha256")
-    @classmethod
-    def _approved_spec_digest(cls, value: str | None) -> str | None:
-        return _hex64(value) if value is not None else None
+    task_spec_sha256: Sha64 | None = None
 
     @model_validator(mode="after")
     def _consistent(self) -> "Curation":

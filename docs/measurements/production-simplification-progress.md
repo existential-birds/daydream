@@ -10,7 +10,7 @@ contracts remain obligations. Internal signatures and module ownership may chang
 Baseline is `58cc88e4d7091b27afe1b2a6eec486504e255dfd`. Continuation began clean at
 `b98a9dd51fde81df5dc4534a85ab29a986f6a127`. GitHub still reports the same PR base,
 with no inherited upstream changes, and PR #1444 is open/draft. The latest pushed
-checkpoint is signed `3d994245f72277779321d2e5a7b8eb3262a84806`.
+checkpoint is signed `95d1b31557d5d9478c491f069ed98b8636c2a871`.
 
 Count every owned Python file under daydream/, scripts/, and rl/daydream_review/,
 including published runtime templates and all new modules. Exclude vendored ATIF
@@ -33,12 +33,14 @@ Comments, docstrings, blanks, docs, and tests receive no source-reduction credit
 | 25d1ac7c | 362 | 108776 | 83349 | 492 | 604 | 2240 |
 | 2f35025b | 362 | 108612 | 83232 | 492 | 604 | 2240 |
 | d6e99b67 | 362 | 108526 | 83157 | 492 | 603 | 2235 |
-| Latest pushed 3d994245 | 362 | 108357 | 83028 | 491 | 603 | 2220 |
+| 3d994245 | 362 | 108357 | 83028 | 491 | 603 | 2220 |
+| Latest pushed 95d1b315 | 362 | 108292 | 82966 | 491 | 602 | 2202 |
+| Frozen twelfth, gates pending | 362 | 107920 | 82698 | 490 | 601 | 2190 |
 
-Latest pushed aggregate reduction is 4.417% physical and 2.922% source;
-continuation removes 2668 physical /2137 source lines. Targets remain at most
-102027 physical and 76974 source: pushed shortfalls are 6330 physical /6054 source.
-The tenth batch removes 169 physical /129 source lines. The objective remains unmet;
+Latest pushed aggregate reduction is 4.474% physical and 2.994% source;
+continuation removes 2733 physical /2199 source lines. Targets remain at most
+102027 physical and 76974 source: pushed shortfalls are 6265 physical /5992 source.
+The eleventh batch removes 65 physical /62 source lines. The objective remains unmet;
 green gates and useful changes do not establish completion. The production inventory hash remains
 `76cc2585344c06d20088698af1466bab69e33436b8d4e3882a0511bd5590422f`.
 
@@ -107,13 +109,13 @@ archive publication. Current owner reviews are complete; historical unchanged dr
 areas have sampled broader review, not a claimed fresh exhaustive baseline review.
 Before final completion, review the full integrated baseline diff independently.
 
-All ten checkpoint commits and pushes succeeded through ordinary hooks. The full
+All eleven checkpoint commits and pushes succeeded through ordinary hooks. The full
 hook suite includes locked sync/extras, Ruff, root and RL Vulture, root mypy,
 parallel branch-coverage pytest with unchanged 86% floor, Docker actionlint,
-coverage artifact, signatures and naming. Latest 3d994245 passed 9545 tests,
-14 existing skips, 202 warnings, 602.28 seconds, and 90.65% branch coverage;
+coverage artifact, signatures and naming. Latest 95d1b315 passed 9591 tests,
+14 existing skips, 199 warnings, 604.38 seconds, and 90.68% branch coverage;
 root mypy checked 748 files. Earlier checkpoints passed respectively
-9330, 9340, 9363, 9401, 9430, 9443, 9464, 9471, and 9529 tests with 14 existing skips.
+9330, 9340, 9363, 9401, 9430, 9443, 9464, 9471, 9529, and 9545 tests with 14 existing skips.
 Normal hook failures were fixed and retried: telemetry mixed event typing,
 obsolete payload-labeler test seam, and execution-input resolver spy migration.
 No bypass or weakened assertion/coverage threshold was used.
@@ -205,7 +207,7 @@ compared every committed Git production byte too. GitHub head matches 3d994245,
 base remains 58cc88e4, PR #1444 remains open/draft. No bypasses or weakened gates.
 Freeze released for independently reviewed next-owner work.
 
-## Eleventh batch in progress
+## Eleventh batch pushed through normal hooks
 
 - StatementLines captures one native immutable-head membership index per source,
   replacing three per-point predicate APIs and language/line dispatch. Four
@@ -259,9 +261,14 @@ Complete frozen eleventh inventory: 362 files, 108292 physical / 82966 source,
 491 high CC / 602 high cognitive, clone LOC 2202; unchanged inventory hash.
 This batch removes 65 physical / 62 source lines. Aggregate reductions are
 4.474% physical / 2.994% source; continuation removes 2733 physical / 2199 source.
-Shortfalls remain 6265 physical / 5992 source, target false. Complete independent
-report/byte/integrated review and ordinary hooks are in progress. Pushed PR stays
-at the tenth checkpoint until they pass; no ready-for-review claim.
+Shortfalls remain 6265 physical / 5992 source, target false. Both independent reviewers reproduced the entire raw JSON and every production
+byte and closed the complete current integrated diff clean. Ordinary commit/push
+hooks passed: 9591 tests, 14 existing skips, 199 warnings, 604.38 seconds, 90.68%
+branch coverage with unchanged 86% floor, mypy 748, lock/extras/Ruff/both Vulture,
+Docker actionlint/coverage artifact/signatures/naming. All 362 committed Git paths
+and bytes equal the frozen snapshot; proof eleventh-committed-bytes.json. Same PR
+head 95d1b315/base 58cc88e4 open/draft verified and description updated to these
+exact metrics/gates. The objective remains unmet; no ready-for-review claim.
 
 The full authored native-model prototype is rejected: all nine caller modules
 cost +8 source / +63 physical after preserving schema descriptions, nullable
@@ -269,3 +276,103 @@ provider wire, integral float author hashes, redacted display projection, comple
 failed diagnostics and raw repair. The earlier isolated schema -35 estimate earns
 no credit. New cache evidence capture and annotation acquisition leads remain
 outside the checkout while this checkpoint is frozen.
+
+## Twelfth batch active
+
+Freeze released only after the eleventh ordinary push, committed byte proof and
+PR draft update succeeded. Approved reviewed cache receipt (-6 source/-31 physical)
+and streaming annotation capture (+13 source/+14 physical) may apply with byte
+guards and integrated checks. Cache receipts retain all bytes of one admitted hit
+until restoration (sum of its payloads rather than maximum single file); unchanged
+acceptance limits and this memory tradeoff must remain explicit. Annotation capture
+retains only two required inputs and consumes all other checksum files without
+retention; the earlier eager full-corpus payload map was rejected for memory cost.
+Native manifest field admission is applied after independent review: -8 source /
+-4 physical, 218 complete admission outcomes match, and 253 integrated checks pass
+with one existing skip (82.49 seconds). Ordinary transient dataclass construction,
+exact raw keys and integer guards, digest/path and file/directory policies remain.
+Benchmark authoring paths now resolve fresh rather than reusing a stale containment
+cache: -6 source / -10 physical. Native symlink replacement previously allowed an
+actual transaction write outside the workspace; four regressions retain refusal,
+recovery evidence and successful recovery after restoring containment.
+The full coverage-report typed-shape proposal is rejected after caller cost: +6
+source / +25 physical; tuple/slash-key strata projection and legacy collision
+precedence remain distinct supported boundaries, so no new mapper is applied.
+All candidate costs are provisional until whole inventory remeasurement; no target
+completion or cosmetic/source-packing credit. Root owns integration/metrics/PR.
+
+Twelfth active working-tree measurement (not a committed result): 362 production
+files, 108261 physical / 82959 source, high CC 492 / high cognitive 602, clone LOC
+2202. Complete pinned report and all-file snapshot: twelfth-active-scb.json and
+twelfth-active-snapshot under /tmp/daydream-pr1444. This batch currently removes
+31 physical / 7 source lines; source/physical shortfalls are 5985 / 6234. Target
+remains false. No counting scope changes or credit for docs/tests/comments.
+Workers are tracing full execution, telemetry/trajectory, and archive/benchmark/
+training responsibilities; root owns Improve/artifacts plus integration.
+
+Twelfth additional integrated owners (pending aggregate gates):
+
+- Native benchmark scalar constraints remove manual validator wrappers, retaining
+  cross-state/path/UTF-8/provenance checks and the shared source-ID pattern used
+  by GitHub refresh. Full two-file cost -48 source / -61 physical; 2196 exact
+  admission cases and 477 integrated checks pass. An initial missed refresh
+  import was corrected before application; independent final caller closure and
+  both applied-byte guards are clean.
+- Fork receipts retain child identity/reference/dispatch links; child trajectory
+  documents alone own invocation and phase facts. Ancestor copies, recursive
+  flatteners and wrapper phase-interval inference disappear. Legacy readers and
+  actual analyzer billing/timing remain. Cost -40 source / -44 physical; 48 native
+  workflow comparisons and 300 integrated checks pass. Meaningful child document
+  assertions replace mirror assertions; independent review and bytes are clean.
+- DeepData replaces the generic descriptor/dynamic-import view with the same
+  live public ctx.data dictionary, static types and admission of documented public
+  extension fields. Concrete FixCycleState, retained snapshot and PushReceipt
+  gates remain. Invalid public types now fail before publication; incidental
+  private descriptor diagnostics disappear with the layer. Full 18-file cost
+  -119 source / -181 physical; 469 complete native deep checks and 379 broader
+  extension/Improve/diagram checks pass outside. Guarded integrated checks run;
+  concurrent diff.py state/parser changes were explicitly merged and independently
+  compared definition by definition.
+- Hunk indexing owns native C-quoted paths and diff framing for deep, static
+  import impact, exploration and posting. Duplicate path/status records/parsers
+  disappear; posting still selects raw foreign blocks before decoding. Final
+  cost -38 source / -43 physical, high CC -2 / cognitive -1; 350 focused native
+  tests and eight actual Git graphs pass. Independent review found and resolved
+  quoted internal separators, Unicode deletion delimiters, filename metadata
+  substrings and filename hunk markers. True deletion fixtures use unique bytes;
+  all final populations equal actual Git NUL names. Integrated checks run.
+- Publication verification consumes the same confined scratch population that
+  passed SHA checks; semantic rereads and per-batch download scans disappear.
+  Remote SQLite payload remains separate from the scratch index. A native A/B
+  replacement previously allowed a valid second population to evade its listed
+  SHA checks. All identity/count/privacy/legacy omission policies remain; 469
+  integrated checks and independent applied-byte review pass. Honest cost is
+  zero source / +1 physical; this correction earns no deletion credit.
+
+The native readback operation is applied and measured only -16 source /
+-13 physical after complete transport/error policies, rather than its larger
+initial estimate. Native HTTPX client owns transport/deadline, bounded native
+failures replace discarded status/raw tuples and repeated error projections;
+45 integrated checks and Ruff/mypy pass with independent exact-byte review. Existing shallow/deep registered execution already shares the
+review spine; bypassing it would remove supported custom step insertion/replacement.
+Native coverage DTO and full authored-plan variants remain rejected for positive
+source cost. Production reference census finds only small unreferenced helpers
+or documented/runtime callbacks, not an evidenced large dead-code inventory.
+The architectural/LOC objective remains unmet; broader assessed opportunities
+must eliminate responsibilities across callers rather than relocate them.
+
+Frozen twelfth complete inventory: 362 files, 107920 physical / 82698 source,
+490 high CC / 601 high cognitive, clone LOC 2190, inventory hash unchanged.
+This batch removes 372 physical / 268 source lines. Aggregate reductions are
+4.802% physical / 3.308% source; continuation removes 3105 physical / 2467 source.
+Shortfalls remain 5893 physical / 5724 source, target false. Backend independently
+reproduced the full raw JSON, every production byte and complete 55-file current
+integrated diff; second reproduction/review runs. Applied root framing350 (37.59s),
+DeepData474 (91.92s), publication469 (107.85s), readback45 (8.93s), fork300 (67.79s),
+scalar477, cache74 and manifest253/one existing skip checks pass. Scoped static
+checks and both whole Vulture scans pass. Ordinary integrated repository gates,
+signed commit/push, committed-byte proof and same-PR draft update remain pending.
+Annotation consumption retains its final loop payload reference until admission
+finishes; this minor memory hygiene observation is deferred to the next batch and
+receives no deletion credit. It never creates a full-corpus payload map. Cache
+receipt retention still costs the sum of one entry's admitted payload bytes.

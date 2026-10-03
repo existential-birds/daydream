@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import Annotated, ClassVar, Literal
 
-from pydantic import ConfigDict, StrictInt, StrictStr
+from pydantic import ConfigDict, Field, StrictInt, StrictStr
 
 _SCHEMA_VERSION = 1
 _DAYDREAM = ".daydream"
@@ -120,11 +120,13 @@ _EXTERNAL_LIFECYCLE_VALUES = frozenset(value.value for value in _ExternalEntryLi
 class ArtifactManifestEntry:
     """One no-follow filesystem entry in an immutable artifact tree."""
 
-    path: str
+    __pydantic_config__: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
+
+    path: StrictStr
     kind: Literal["directory", "file"]
-    size: int
-    mode: int
-    sha256: str | None
+    size: Annotated[StrictInt, Field(ge=0)]
+    mode: Annotated[StrictInt, Field(ge=0, le=0o7777)]
+    sha256: StrictStr | None
 
 
 @dataclass(frozen=True)

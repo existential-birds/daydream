@@ -25,7 +25,6 @@ from daydream.deep.latency import (
     route_for,
     summarize_risk,
 )
-from daydream.deep.state import DeepState
 from daydream.extensions.registry import Registry
 from daydream.flows.engine import FlowContext
 from daydream.run_config import (
@@ -318,6 +317,6 @@ async def test_unsharded_arbiter_call_keeps_todays_xhigh_whatever_the_profile(
         ctx.data.update(dd=tmp_path, diff_path=tmp_path / "diff", intent_path=tmp_path / "intent",
                         alts_path=tmp_path / "alternatives", exploration_dir=None,
                         review_coverage=review_coverage())
-        await _run_arbiter(ctx, DeepState(ctx.data), plan, [], [], effort_pin=pin,
+        await _run_arbiter(ctx, ctx.deep_data(), plan, [], [], effort_pin=pin,
                            targets_by_group={"arbiter-group-0": []})
     assert observed == ["xhigh", "low", None]

@@ -889,7 +889,7 @@ def test_verify_publication_admits_advisory_only_batch(tmp_path: Path, capsys: p
     )
     assert verified == 1
 
-    rescan = scan_run_dir(stage / "_verify" / "batches" / "sess-a")
+    rescan = scan_run_dir(stage / "_verify" / "payloads" / "batches" / "sess-a")
     assert rescan.clean is False and rescan.blocking is False  # advisory-only
     captured = capsys.readouterr()
     out = captured.out + captured.err
@@ -1296,3 +1296,93 @@ def test_hydration_binds_the_policy_captured_before_file_replacement(
     ledger = hydrate.build_import_ledger(stage, revision=source, source_commit=source, binding=binding)
     assert [row["session_id"] for row in ledger["imported"]] == ["sess-a"]
     assert ledger["curation_id"] == binding["curation_id"]
+
+
+def test_verified_population_downloads_each_admitted_byte_once(tmp_path: Path) -> None:
+    hub, stage, curation_id, sha = _publish_verifiable_curation(
+        tmp_path, {"manifest.json": _BATCH_MANIFEST, "diff.patch": "+safe_change\n"},
+    )
+    assert hydrate.verify_publication(
+        hub, stage, output_commit_sha=sha, curation_id=curation_id,
+        dry_run_admitted=1, source_commit="a" * 40,
+    ) == 1
+    assert len(hub.downloaded_log) == len(set(hub.downloaded_log))
+    assert query_runs(stage / "_verify")[0]["session_id"] == "sess-a"
+
+
+def test_verified_population_consumes_checksum_admitted_manifest_and_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_a = json.dumps({"session_id": "sess-a", "git": {"head_sha": "a" * 40}})
+    manifest_b = json.dumps({"session_id": "sess-a", "git": {"head_sha": "b" * 40}})
+    hub, stage, curation_id, sha = _publish_verifiable_curation(tmp_path, {"manifest.json": manifest_a})
+    prefix = f"curated/{curation_id}/"
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / "manifest.json").write_text(manifest_b)
+    alternate_doc = json.loads(hub.files[prefix + "curation-manifest.json"])
+    alternate_doc["batches"][0]["content_digest"] = sanitize._derivative_digest(replacement)
+    later = {
+        prefix + "curation-manifest.json": json.dumps(alternate_doc).encode(),
+        prefix + "batches/sess-a/manifest.json": manifest_b.encode(),
+    }
+    download = hub.download_file
+    reads: dict[str, int] = {}
+
+    def unstable(path: str, revision: str | None = None) -> bytes:
+        reads[path] = reads.get(path, 0) + 1
+        return later[path] if path in later and reads[path] > 1 else download(path, revision=revision)
+
+    monkeypatch.setattr(hub, "download_file", unstable)
+    assert hydrate.verify_publication(
+        hub, stage, output_commit_sha=sha, curation_id=curation_id,
+        dry_run_admitted=1, source_commit="a" * 40,
+    ) == 1
+    assert query_runs(stage / "_verify")[0]["head_sha"] == "a" * 40
+    assert all(count == 1 for count in reads.values())
+
+
+def test_verified_population_confines_all_checksum_paths(tmp_path: Path) -> None:
+    hub, stage, curation_id, sha = _publish_verifiable_curation(tmp_path, {"manifest.json": _BATCH_MANIFEST})
+    prefix = f"curated/{curation_id}/"
+    payload = b"outside_write"
+    hub.files[prefix + "../../outside"] = payload
+    hub.files[prefix + "SHA256SUMS"] += f"{hashlib.sha256(payload).hexdigest()}  {prefix}../../outside\n".encode()
+    hub.commit_revision(sha)
+    sentinel = tmp_path / "outside"
+    sentinel.write_bytes(b"keep")
+    with pytest.raises(hydrate.VerificationError, match="invalid checksum path"):
+        hydrate.verify_publication(
+            hub, stage, output_commit_sha=sha, curation_id=curation_id,
+            dry_run_admitted=1, source_commit="a" * 40,
+        )
+    assert sentinel.read_bytes() == b"keep"
+
+
+def test_verified_population_preserves_legacy_manifest_omission(tmp_path: Path) -> None:
+    hub, stage, curation_id, sha = _publish_verifiable_curation(tmp_path, {"manifest.json": _BATCH_MANIFEST})
+    sums_path = f"curated/{curation_id}/SHA256SUMS"
+    hub.files[sums_path] = b"\n".join(
+        line for line in hub.files[sums_path].splitlines() if not line.endswith(b"/curation-manifest.json")
+    ) + b"\n"
+    hub.commit_revision(sha)
+    assert hydrate.verify_publication(
+        hub, stage, output_commit_sha=sha, curation_id=curation_id,
+        dry_run_admitted=1, source_commit="a" * 40,
+    ) == 1
+    assert len(hub.downloaded_log) == len(set(hub.downloaded_log))
+
+
+def test_verified_population_never_uses_remote_sql_as_scratch_index(tmp_path: Path) -> None:
+    hub, stage, curation_id, sha = _publish_verifiable_curation(tmp_path, {"manifest.json": _BATCH_MANIFEST})
+    prefix = f"curated/{curation_id}/"
+    payload = b"this is remote evidence, not an admitted SQLite database"
+    hub.files[prefix + "index.sqlite"] = payload
+    hub.files[prefix + "SHA256SUMS"] += f"{hashlib.sha256(payload).hexdigest()}  {prefix}index.sqlite\n".encode()
+    hub.commit_revision(sha)
+    assert hydrate.verify_publication(
+        hub, stage, output_commit_sha=sha, curation_id=curation_id,
+        dry_run_admitted=1, source_commit="a" * 40,
+    ) == 1
+    assert (stage / "_verify" / "payloads" / "index.sqlite").read_bytes() == payload
+    assert [row["session_id"] for row in query_runs(stage / "_verify")] == ["sess-a"]

@@ -344,7 +344,7 @@ def classify(
     thread for the labeler. Inline relocation annotates the caller-owned issue body."""
     renderers = renderers if renderers is not None else resolve_review_renderers(get_registry())
     out = ClassifiedIssues()
-    from daydream.hunk_index import head_side_ranges, head_side_ranges_by_file, parse_hunks
+    from daydream.hunk_index import head_side_ranges, head_side_ranges_by_file, parse_hunks, raw_diff_blocks
 
     remote_diff: str | None = None
 
@@ -396,7 +396,7 @@ def classify(
                     # Select the first matching Git header before parsing. A malformed
                     # unrelated file must not prevent placement in this file.
                     local_diff = ""
-                    for block in re.split(r"(?m)^(?=diff --git )", _read_remote_diff()):
+                    for block in raw_diff_blocks(_read_remote_diff()):
                         header = block.split("\n", 1)[0]
                         if header.startswith("diff --git ") and (
                             f"a/{issue.path} " in header

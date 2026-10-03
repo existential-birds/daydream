@@ -31,7 +31,7 @@ from daydream.deep.reuse_store import (
 )
 from daydream.deep.review_reuse import ReviewReuseUnit, _loop_grounding, _records_bytes_by_basename
 from daydream.deep.settings import _resolve_opt_in
-from daydream.deep.state import DeepState
+from daydream.deep.state import DeepData
 from daydream.extensions.api import Stop
 from daydream.flows.engine import FlowContext
 from daydream.json_utils import dataclass_payload
@@ -70,15 +70,15 @@ def _supervisor_mode(config: RunConfig) -> str:
     return mode if mode in {"off", "rules", "llm"} else "off"
 
 
-def _merge_contributing_records(deep_state: DeepState) -> dict[str, bytes | None]:
+def _merge_contributing_records(deep_data: DeepData) -> dict[str, bytes | None]:
     """Every records file the merge reads, keyed by basename.
 
     The primary-scope stacks (including the structural reviewer's records) plus the
     structural meta-stack. An unreadable file becomes a named miss (see
     :func:`_records_bytes_by_basename`).
     """
-    paths = list(deep_state.record_pool.language_paths)
-    structural = deep_state.record_pool.structural_path
+    paths = list(deep_data["record_pool"].language_paths)
+    structural = deep_data["record_pool"].structural_path
     if structural is not None:
         paths.append(structural)
     return _records_bytes_by_basename(paths)
@@ -144,15 +144,15 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
     Budget exhaustion persists the same salvage but publishes it successfully
     with incomplete-coverage diagnostics.
     """
-    deep_state = DeepState(ctx.data)
-    with review_stage(deep_state, "merge", persist=True, reasons=(ReasonCode.SYNTHESIS_FAILURE,)):
-        dd = deep_state.dd
-        alts_p: Path = deep_state.alts_path
-        all_records: list[dict[str, Any]] = deep_state.record_pool.language
-        failed_stacks: dict[str, str] = deep_state.unfinished_scopes
-        coverage = deep_state.review_coverage
+    deep_data = ctx.deep_data()
+    with review_stage(deep_data, "merge", persist=True, reasons=(ReasonCode.SYNTHESIS_FAILURE,)):
+        dd = deep_data["dd"]
+        alts_p: Path = deep_data["alts_path"]
+        all_records: list[dict[str, Any]] = deep_data["record_pool"].language
+        failed_stacks: dict[str, str] = deep_data["review_coverage"].unfinished_scopes
+        coverage = deep_data["review_coverage"]
         host_noop = merge_is_host_noop(
-            deep_state.record_pool, deep_state.alts_path,
+            deep_data["record_pool"], deep_data["alts_path"],
             builder=ctx.registry.prompt("merge"), strategy=ctx.strategy("merge"),
         )
 
@@ -165,7 +165,7 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
             )
             pairs = build_dedup_candidates(all_records, alt_issues_for_dedup)
             record_pairs = build_record_dedup_candidates(
-                all_records, sources=[deep_state.record_pool.paths[stack_name_from_uid(record_uid(r))].name
+                all_records, sources=[deep_data["record_pool"].paths[stack_name_from_uid(record_uid(r))].name
                                       for r in all_records]
             )
             dedup_p = DeepArtifact.DEDUP_CANDIDATES.at(dd)
@@ -201,14 +201,14 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
             if reuse is not None:
                 merge_identity = phase_identity_for(ctx, "merge")
                 merge_payload = merge_key_payload(
-                    contributing_records=_merge_contributing_records(deep_state),
-                    structural_records_present=deep_state.record_pool.structural_path is not None,
+                    contributing_records=_merge_contributing_records(deep_data),
+                    structural_records_present=deep_data["record_pool"].structural_path is not None,
                     failed_stacks=sorted(failed_stacks),
                     identity=merge_identity,
-                    grounding=_loop_grounding(deep_state),
+                    grounding=_loop_grounding(deep_data),
                 )
                 merge_unit = ReviewReuseUnit(reuse, "merge", merge_identity, merge_payload, coverage=coverage)
-                if merge_unit.restore(deep_state.dd):
+                if merge_unit.restore(deep_data["dd"]):
                     coverage.record_phase("merge", "complete", noop=host_noop)
                     return None
 
@@ -217,14 +217,14 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
                 await phase_cross_stack_merge(
                     ctx.backend_for("merge"),
                     ctx.work,
-                    record_pool=deep_state.record_pool,
-                    intent_path=deep_state.intent_path,
+                    record_pool=deep_data["record_pool"],
+                    intent_path=deep_data["intent_path"],
                     alternatives_path=alts_p,
                     dedup_candidates_path=dedup_p,
-                    exploration_dir=deep_state.exploration_dir,
+                    exploration_dir=deep_data["exploration_dir"],
                     failed_stacks=failed_stacks or None,
-                    intent_authoritative=deep_state.intent_authoritative,
-                    continuation=deep_state.arbiter_continuation,
+                    intent_authoritative=(deep_data.get("intent_authoritative") or False),
+                    continuation=deep_data.get("arbiter_continuation"),
                     strategy=ctx.strategy("merge"),
                     run_context=ctx.run_context,
                     artifact_session=ctx.artifacts,
@@ -253,8 +253,8 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
 
 def _salvage_merge_failure(ctx: FlowContext, exc: CrossStackMergeError) -> None:
     """Consolidate surviving language and structural findings after synthesis failure."""
-    deep_state = DeepState(ctx.data)
-    dd = deep_state.dd
+    deep_data = ctx.deep_data()
+    dd = deep_data["dd"]
     message = f"{exc}; consolidating surviving per-stack records into a partial report."
     if exc.budget_reason:
         print_warning(console, message + " Continuing to review publication.")
@@ -264,13 +264,13 @@ def _salvage_merge_failure(ctx: FlowContext, exc: CrossStackMergeError) -> None:
     # Build the partial canonical report from the surviving records via the
     # single-stack write helper. Coverage retains the synthesis failure. Apply the D-27
     # dedup pre-filter; these host-written items carry no merge-agent provenance.
-    records = _drop_cross_stack_duplicates(dd, deep_state.record_pool.language)
+    records = _drop_cross_stack_duplicates(dd, deep_data["record_pool"].language)
     _write_single_stack_merged_items(
         ctx.work.repo,
         dd,
-        deep_state.record_pool,
+        deep_data["record_pool"],
         records=records,
-        failed_stacks=deep_state.unfinished_scopes or None,
+        failed_stacks=deep_data["review_coverage"].unfinished_scopes or None,
         artifact_session=ctx.artifacts,
         allow_standalone=ctx.allow_standalone_artifacts,
     )
@@ -280,8 +280,8 @@ def _salvage_merge_failure(ctx: FlowContext, exc: CrossStackMergeError) -> None:
 
 async def _step_single_stack_merge(ctx: FlowContext) -> None:
     """Tiny-diff single-stack bypass (#172): host-side merged-items write."""
-    deep_state = DeepState(ctx.data)
-    failed_stacks: dict[str, str] = deep_state.unfinished_scopes
+    deep_data = ctx.deep_data()
+    failed_stacks: dict[str, str] = deep_data["review_coverage"].unfinished_scopes
 
     # Issue #172 — tiny-diff single-stack bypass. A ≤2-file diff
     # has nothing to cross-stack-merge and nothing contested to
@@ -293,21 +293,21 @@ async def _step_single_stack_merge(ctx: FlowContext) -> None:
     async with phase_scope(DaydreamPhase.MERGE, stage="single-stack-host"):
         _write_single_stack_merged_items(
             ctx.work.repo,
-            deep_state.dd,
-            deep_state.record_pool,
+            deep_data["dd"],
+            deep_data["record_pool"],
             failed_stacks=failed_stacks or None,
             artifact_session=ctx.artifacts,
             allow_standalone=ctx.allow_standalone_artifacts,
         )
-    deep_state.review_coverage.record_phase("merge", "complete", noop=True)
-    persist_review_coverage(deep_state.dd, deep_state.review_coverage)
+    deep_data["review_coverage"].record_phase("merge", "complete", noop=True)
+    persist_review_coverage(deep_data["dd"], deep_data["review_coverage"])
 
 
 async def _step_load_items(ctx: FlowContext) -> Stop | None:
     """Host-side merged-items guard + render-only markdown recovery."""
-    deep_state = DeepState(ctx.data)
+    deep_data = ctx.deep_data()
     target_dir = ctx.work.repo
-    dd = deep_state.dd
+    dd = deep_data["dd"]
 
     print_stage_progress(console, 5, 5, _PIPELINE_STAGE_NAMES[4])
     merged_report = review_output_path_for(
@@ -344,8 +344,8 @@ async def _step_load_items(ctx: FlowContext) -> Stop | None:
             if report.exists() and warning not in report.read_text():
                 report.write_text(warning + "\n\n" + report.read_text())
 
-    deep_state.merged_report = merged_report
-    deep_state.items_file = items_file
+    deep_data["merged_report"] = merged_report
+    deep_data["items_file"] = items_file
     return None
 
 
@@ -357,15 +357,15 @@ async def _step_findings_out(ctx: FlowContext) -> Stop:
 
 async def _step_supervise(ctx: FlowContext) -> None:
     """Record the required supervision stage at its artifact completion boundary."""
-    deep_state = DeepState(ctx.data)
-    coverage = deep_state.review_coverage
+    deep_data = ctx.deep_data()
+    coverage = deep_data["review_coverage"]
     from daydream.deep.prompts import build_supervise_prompt
     from daydream.review_profile import build_default_profile
 
-    with review_stage(deep_state, "supervision", persist=True):
+    with review_stage(deep_data, "supervision", persist=True):
         strategy = ctx.strategy("supervision")
         default_strategy = build_default_profile().strategies["supervision"].content
-        input_items = json.loads(deep_state.items_file.read_text())["items"]
+        input_items = json.loads(deep_data["items_file"].read_text())["items"]
         noop = not input_items and (_supervisor_mode(ctx.config) == "rules" or (
             (strategy is None or strategy == default_strategy)
             and ctx.registry.prompt("supervise") is build_supervise_prompt))
@@ -379,10 +379,10 @@ async def _step_supervise(ctx: FlowContext) -> None:
 
 async def _supervise_items(ctx: FlowContext) -> str | None:
     """Apply the configured findings supervisor to canonical merged items."""
-    deep_state = DeepState(ctx.data)
+    deep_data = ctx.deep_data()
     mode = _supervisor_mode(ctx.config)
     file_config = ctx.config.file_config
-    items_file: Path = deep_state.items_file
+    items_file: Path = deep_data["items_file"]
     items = json.loads(items_file.read_text())["items"]
     if mode == "rules":
         assert file_config is not None, "rules mode requires file_config (guaranteed by _supervisor_mode)"
@@ -394,10 +394,10 @@ async def _supervise_items(ctx: FlowContext) -> str | None:
                 ctx.backend_for("supervise"),
                 ctx.work,
                 items=items,
-                diff_path=deep_state.diff_path,
-                intent_path=deep_state.intent_path,
-                alternatives_path=deep_state.alts_path,
-                exploration_dir=deep_state.exploration_dir,
+                diff_path=deep_data["diff_path"],
+                intent_path=deep_data["intent_path"],
+                alternatives_path=deep_data["alts_path"],
+                exploration_dir=deep_data["exploration_dir"],
                 strategy=ctx.strategy("supervision"),
                 run_context=ctx.run_context,
                 artifact_session=ctx.artifacts,
@@ -407,15 +407,15 @@ async def _supervise_items(ctx: FlowContext) -> str | None:
     items_file.write_text(json.dumps({"items": kept, "held": held}, indent=2))
 
     report = render_report(kept)
-    warning = render_review_warnings(review_warnings(deep_state.dd))
+    warning = render_review_warnings(review_warnings(deep_data["dd"]))
     if warning:
         report = warning + "\n\n" + report
     held_section = render_held_section(held)
     if held_section:
         report = report.rstrip() + "\n\n" + held_section + "\n"
-    deep_report = DeepArtifact.MERGED_REPORT.at(deep_state.dd)
+    deep_report = DeepArtifact.MERGED_REPORT.at(deep_data["dd"])
     deep_report.write_text(report)
-    deep_state.merged_report.write_text(report)
+    deep_data["merged_report"].write_text(report)
 
     recorder = get_current_recorder()
     if recorder is not None:
@@ -434,13 +434,13 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
     warn-and-continue the default deep flow gets (#8). Report-only review mode
     never resolves a PR or enters the posting helper.
     """
-    deep_state = DeepState(ctx.data)
+    deep_data = ctx.deep_data()
     if ctx.config.findings_out is None:
         from daydream.deep.review_terminal import finalize_review
 
-        if not deep_state.review_coverage.is_finalized:
+        if not deep_data["review_coverage"].is_finalized:
             finalize_review(ctx, "completed")
-    if deep_state.mode == "review":
+    if str(deep_data.get("mode", "loop")) == "review":
         return None
 
     from daydream.pr_review import PostStatus, post_review_to_pr_from_report, resolve_review_renderers
@@ -451,13 +451,13 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
     if run_info.diagnostic is not None:
         print_warning(console, run_info.diagnostic)
 
-    items_file: Path = deep_state.items_file
+    items_file: Path = deep_data["items_file"]
     pr_kwargs: dict[str, Any] = (
         {"pr_number": ctx.config.pr_number}
         if ctx.config.pr_number is not None
         else {}
     )
-    warnings = review_warnings(deep_state.dd)
+    warnings = review_warnings(deep_data["dd"])
     if warnings:
         pr_kwargs["review_warnings"] = warnings
     outcome = await post_review_to_pr_from_report(
@@ -466,13 +466,13 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
         run_info=run_info.markdown,
         renderers=resolve_review_renderers(ctx.registry),
         console=console,
-        post=deep_state.mode == "comment",
+        post=str(deep_data.get("mode", "loop")) == "comment",
         approve_on_clean=_resolve_opt_in(ctx.config, "approve_on_clean"),
-        diagram_blocks=(deep_state.diagrams or {}).get("blocks"),
+        diagram_blocks=(deep_data.get("diagrams") or {}).get("blocks"),
         run_context=ctx.run_context,
         auth=ctx.github_execution.auth,
         **pr_kwargs,
     )
-    if deep_state.mode == "comment" and outcome in (PostStatus.NO_PR, PostStatus.FAILED):
+    if str(deep_data.get("mode", "loop")) == "comment" and outcome in (PostStatus.NO_PR, PostStatus.FAILED):
         return Stop(1)
     return None

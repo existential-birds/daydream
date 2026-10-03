@@ -78,7 +78,7 @@ deep FlowSteps -> phases/ -> agent.py -> Backend.execute()
 | `deep/{review,adjudication,merge,diagram,fix}_steps.py` | Review fan-out, record verdicts and arbiter work, publication, grounded diagrams, and authorized fix sequencing |
 | `deep/fix_state.py`, `deep/quality_gate.py`, `deep/remote_ci_steps.py` | Fix baselines/capture/confinement, quality checks, and remote CI gates |
 | `deep/review_reuse.py` | Reusable-unit identity and shared restore/store bookkeeping |
-| `deep/state.py` | Checked `DeepState` view over the same extension-visible `FlowContext.data` mapping; validates when consumed and writes through |
+| `deep/state.py` | Static `DeepData` shape and public extension-input admission for the same `FlowContext.data` dictionary; native producers own internal values |
 | `deep/diff.py` | Shared changed-file parsing and full-diff reads, also consumed by scope enforcement and Improve |
 | `deep/{detection,dedup,artifacts}.py` | `detect_stacks()` router, artifact paths, dedup pre-filter |
 | `deep/records.py` | Host-assigned identity, never content-derived: record `uid` (`stack:ordinal`) at record birth, merged-item `item_uid` (`item:n`) at merge write, and the `source_uids` derivation list |

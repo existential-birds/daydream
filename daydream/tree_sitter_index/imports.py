@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
 from pathlib import Path
 
 from daydream import git_ops
 from daydream._tree_sitter_safety import assert_tree_sitter_safe
 from daydream.exploration import FileInfo
 from daydream.git_ops import GitError
+from daydream.hunk_index import iter_diff_blocks
 
 from .runtime import (
     LANGUAGES,
@@ -19,47 +19,6 @@ from .runtime import (
     extract_imports,
     get_parser,
 )
-
-
-@dataclass
-class _DiffEntry:
-    status: str  # "A", "M", "D", "R"
-    path: str
-
-
-def _parse_diff_name_status(diff_text: str) -> list[_DiffEntry]:
-    """Extract (status, path) pairs from a unified git diff."""
-    entries: list[_DiffEntry] = []
-    lines = diff_text.splitlines()
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if line.startswith("diff --git "):
-            parts = line.split(" b/", 1)
-            path: str | None = None
-            if len(parts) == 2:
-                path = parts[1].strip()
-            status = "M"
-            # Look ahead for status hints in the next few lines.
-            j = i + 1
-            while j < len(lines) and not lines[j].startswith("diff --git "):
-                hint = lines[j]
-                if hint.startswith("new file mode"):
-                    status = "A"
-                elif hint.startswith("deleted file mode"):
-                    status = "D"
-                elif hint.startswith("rename to "):
-                    status = "R"
-                    path = hint[len("rename to ") :].strip()
-                if hint.startswith("@@"):
-                    break
-                j += 1
-            if path:
-                entries.append(_DiffEntry(status=status, path=path))
-        i += 1
-    return entries
-
-
 
 
 def _module_candidates(base: Path, dotted: str) -> list[Path]:
@@ -287,29 +246,30 @@ def detect_affected_files(
         seen.add(key)
         results.append(FileInfo(path=path, role=role))
 
-    entries = _parse_diff_name_status(diff_text)
+    entries = [
+        (path, any(line.startswith("deleted file mode") for line in block.split("\n@@", 1)[0].splitlines()))
+        for path, block in iter_diff_blocks(diff_text)
+    ]
     reverse_paths = [
-        entry.path
-        for entry in entries
-        if entry.status != "D" and Path(entry.path).suffix in LANGUAGES
+        path for path, deleted in entries if not deleted and Path(path).suffix in LANGUAGES
     ]
     # Collect symbol exemptions during the forward pass to avoid rereading files.
     defining_paths: set[str] = set()
     go_package_index: dict[str, tuple[Path, ...]] | None = None
 
-    for entry in entries:
-        _add(entry.path, "modified")
+    for path, deleted in entries:
+        _add(path, "modified")
 
-        if entry.status == "D":
+        if deleted:
             continue
 
-        suffix = Path(entry.path).suffix
+        suffix = Path(path).suffix
         lang_entry = LANGUAGES.get(suffix)
         if lang_entry is None:
             continue
         language_id, _factory = lang_entry
 
-        abs_path = repo_root / entry.path
+        abs_path = repo_root / path
         try:
             source = abs_path.read_bytes()
         except (FileNotFoundError, OSError):
@@ -321,7 +281,7 @@ def detect_affected_files(
 
         def_query = _def_query_for_language(language_id)
         if def_query is not None and extract_definitions(parser, source, def_query):
-            defining_paths.add(entry.path)
+            defining_paths.add(path)
 
         query_string = _query_for_language(language_id)
         if query_string is None:

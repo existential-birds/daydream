@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from daydream.deep.fix_state import FixCycleState
 from daydream.deep.records import item_uid
-from daydream.deep.state import DeepState
 from daydream.flows.engine import FlowContext
 from daydream.phases import FIX_VERIFY_ACTIONABLE_VERDICTS, FIX_VERIFY_RETARGETABLE_VERDICTS
 
@@ -108,10 +108,10 @@ def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> 
     verdicts and carry their reasons into prompts. Retargeting is confined to the
     authorized edit set and cannot widen it; canonical items remain unchanged.
     """
-    deep_state = DeepState(ctx.data)
-    iteration = deep_state.iteration
-    outcomes = deep_state.fix_outcomes or {}
-    state = DeepState(ctx.data).fix_cycle_state
+    deep_data = ctx.deep_data()
+    iteration = deep_data.get("iteration")
+    outcomes = deep_data.get("fix_outcomes", {}) or {}
+    state = FixCycleState.require(ctx)
     if iteration in (None, 1) or not outcomes:
         initial_dispatch = [dict(i) for i in canonical]
         for item in initial_dispatch:

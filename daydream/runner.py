@@ -781,7 +781,6 @@ async def _run_improve(
                 backend_execution=backend_execution,
                 allow_standalone_artifacts=False,
             )
-            ctx.data["audit_repo"] = audit.repo
             ctx.data["improve_dir"] = directory
             ctx.data["effort_tier"] = tier
             ctx.data["improve_publish_issues"] = (

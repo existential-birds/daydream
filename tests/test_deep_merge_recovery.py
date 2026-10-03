@@ -20,7 +20,7 @@ from daydream.deep.artifacts import (
     deep_dir,
 )
 from daydream.deep.merge_steps import _drop_cross_stack_duplicates, _step_cross_stack_merge, _step_load_items
-from daydream.deep.reuse_store import ReuseCache, review_cache_dir
+from daydream.deep.reuse_store import ReuseCache
 from daydream.extensions import get_registry
 from daydream.flows.engine import FlowContext
 from daydream.phases import CrossStackMergeError, phase_cross_stack_merge
@@ -57,7 +57,7 @@ async def test_empty_merge_cold_reuse_and_resume_preserve_coverage_and_lifecycle
     intent = dd / "intent.md"
     intent.write_text("Review the new API contract")
     backend = ScriptedBackend(events=[AssertionError("empty synthesis must not dispatch")])
-    cache = ReuseCache(review_cache_dir(dd), run_id="empty-synthesis")
+    cache = ReuseCache(dd.parent / "review-cache", run_id="empty-synthesis")
     coverage = ReviewCoverage("empty-synthesis", AnalyzedRevision("a" * 40, "b" * 40, "c" * 64),
         [PlannedScope("python", "python", ("api.py",)), PlannedScope("react", "react", ("App.tsx",))], ["merge"])
     coverage.record_scope("python", "incomplete", reasons=("host_tool_budget_exhaustion",),

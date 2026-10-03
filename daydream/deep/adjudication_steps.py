@@ -52,7 +52,7 @@ from daydream.deep.reuse_store import (
 from daydream.deep.review_reuse import ReviewReuseUnit, _loop_grounding, _records_bytes_by_basename
 from daydream.deep.routing_record import write_routing_record
 from daydream.deep.settings import _resolve_opt_in
-from daydream.deep.state import DeepState
+from daydream.deep.state import DeepData
 from daydream.fanout import run_fanout
 from daydream.flows.engine import FlowContext
 from daydream.output_schema import record_array_schema, strict_object
@@ -251,13 +251,13 @@ def _arbiter_groups_record(
     return records
 
 
-def _review_context_kwargs(ctx: FlowContext, deep_state: DeepState, *, strategy: str) -> dict[str, Any]:
+def _review_context_kwargs(ctx: FlowContext, deep_data: DeepData, *, strategy: str) -> dict[str, Any]:
     """Structured-review context shared by the arbiter and suppression calls."""
     return {
-        "diff_path": deep_state.diff_path,
-        "intent_path": deep_state.intent_path,
-        "alternatives_path": deep_state.alts_path,
-        "exploration_dir": deep_state.exploration_dir,
+        "diff_path": deep_data["diff_path"],
+        "intent_path": deep_data["intent_path"],
+        "alternatives_path": deep_data["alts_path"],
+        "exploration_dir": deep_data["exploration_dir"],
         "strategy": strategy,
         "run_context": ctx.run_context,
         "artifact_session": ctx.artifacts,
@@ -286,18 +286,18 @@ def _arbiter_backend(ctx: FlowContext, group: PlannedGroup, *, sharded: bool, ef
             ctx.backend_for_effort("arbiter", group.effort if sharded else "xhigh"))
 
 
-def _adjudication_contract(ctx: FlowContext, state: DeepState, phase: str, backend: Backend,
+def _adjudication_contract(ctx: FlowContext, state: DeepData, phase: str, backend: Backend,
                            effort: str | None, schema: dict[str, Any], strategy: str) -> str:
     """Bind the actual execution and the source context seen by adjudication."""
     return _digest({'backend': type(backend).__qualname__, 'model': backend.model,
         'effort': getattr(backend, 'reasoning_effort', None), 'requested_effort': effort, 'schema': schema,
         'profile': phase_identity_for(ctx, phase).profile_digest,
-        'strategy': ctx.strategy(strategy), 'intent_authoritative': state.intent_authoritative,
-        'revision': state.review_coverage.revision.to_dict(),
-        'grounding': {**_loop_grounding(state), 'intent': digest_or_absent(state.intent_path.read_text())}})
+        'strategy': ctx.strategy(strategy), 'intent_authoritative': (state.get("intent_authoritative") or False),
+        'revision': state["review_coverage"].revision.to_dict(),
+        'grounding': {**_loop_grounding(state), 'intent': digest_or_absent(state["intent_path"].read_text())}})
 
 
-def _arbiter_plan_component(ctx: FlowContext, state: DeepState, plan: ArbiterPlan,
+def _arbiter_plan_component(ctx: FlowContext, state: DeepData, plan: ArbiterPlan,
                             effort_pin: str | None) -> dict[str, Any]:
     """Bind each actual execution contract, independent of informational routing reasons."""
     return {'sharded': plan.sharded, 'groups': [
@@ -326,23 +326,23 @@ _PLAN_PROOF_SCHEMA = strict_object(
 )
 
 
-def _completed_adjudication(ctx: FlowContext, state: DeepState, contract: dict[str, Any]) -> bool:
+def _completed_adjudication(ctx: FlowContext, state: DeepData, contract: dict[str, Any]) -> bool:
     """Validate saved execution against current policy and its host-settled evidence.
 
     Selection can change after a confirmed revision or dismissal. Reconstruct
     the completed plan to keep those findings out of a second suppression pass.
     """
     phases = ['arbiter', *(['suppression'] if contract['precision_mode'] else [])]
-    if any(state.review_coverage.phases.get(phase, {}).get('status') != 'complete' for phase in phases):
+    if any(state["review_coverage"].phases.get(phase, {}).get('status') != 'complete' for phase in phases):
         return False
     try:
-        saved = json.loads(DeepArtifact.ADJUDICATION_COMPLETE.at(state.dd).read_text())
+        saved = json.loads(DeepArtifact.ADJUDICATION_COMPLETE.at(state["dd"]).read_text())
     except (OSError, ValueError):
         return False
     if not isinstance(saved, dict):
         return False
     plan = saved.get('plan')
-    if (plan is None) != state.review_coverage.phases['arbiter']['noop']:
+    if (plan is None) != state["review_coverage"].phases['arbiter']['noop']:
         return False
     if plan is not None:
         if not _validates_schema(plan, _PLAN_PROOF_SCHEMA):
@@ -354,19 +354,19 @@ def _completed_adjudication(ctx: FlowContext, state: DeepState, contract: dict[s
         if (len(set(group_ids)) != len(group_ids) or len(set(uids)) != len(uids)
                 or (not plan['sharded'] and len(group_ids) != 1)):
             return False
-        if plan['sharded'] and any(state.review_coverage.phases.get(g, {}).get('status') != 'complete'
+        if plan['sharded'] and any(state["review_coverage"].phases.get(g, {}).get('status') != 'complete'
                                    for g in group_ids):
             return False
         groups = tuple(PlannedGroup(g['group_id'], tuple(g['target_uids']), g['effort'], 'completed')
                        for g in plan['groups'])
         contract = {**contract, 'plan': _arbiter_plan_component(ctx, state,
             ArbiterPlan(plan['sharded'], groups, 'completed'), _explicit_reasoning_effort_pin(ctx.config, 'arbiter'))}
-    return bool(saved == {**contract, 'records': _digest(state.record_pool.records)})
+    return bool(saved == {**contract, 'records': _digest(state["record_pool"].records)})
 
 
 async def _run_arbiter(
     ctx: FlowContext,
-    deep_state: DeepState,
+    deep_data: DeepData,
     plan: ArbiterPlan,
     arbiter_targets: list[int],
     adjudicated: list[dict[str, Any]],
@@ -383,7 +383,7 @@ async def _run_arbiter(
     records (``_apply_adjudication_verdicts(..., fail_closed=False)``).
     """
     contracts = {group["group_id"]: group["contract"]
-                 for group in _arbiter_plan_component(ctx, deep_state, plan, effort_pin)["groups"]}
+                 for group in _arbiter_plan_component(ctx, deep_data, plan, effort_pin)["groups"]}
     records_digests = {group.group_id: _digest([adjudicated[i] for i in targets_by_group[group.group_id]])
                        for group in plan.groups} if plan.sharded else {}
 
@@ -393,25 +393,25 @@ async def _run_arbiter(
             backend, ctx.work,
             selected_records=[adjudicated[i] for i in
                               (targets_by_group[group.group_id] if plan.sharded else arbiter_targets)],
-            input_path=arbiter_group_input_path(deep_state.dd, group.group_id) if plan.sharded else None,
-            **_review_context_kwargs(ctx, deep_state, strategy=ctx.strategy("arbitration")),
-            intent_authoritative=deep_state.intent_authoritative,
+            input_path=arbiter_group_input_path(deep_data["dd"], group.group_id) if plan.sharded else None,
+            **_review_context_kwargs(ctx, deep_data, strategy=ctx.strategy("arbitration")),
+            intent_authoritative=(deep_data.get("intent_authoritative") or False),
         )
         if not plan.sharded and token is not None and backend is ctx.backend_for("merge"):
-            deep_state.arbiter_continuation = token
+            deep_data["arbiter_continuation"] = token
         return verdicts
 
     if not plan.sharded:
         async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
             return await invoke(plan.groups[0]), {plan.groups[0].group_id: False}, []
 
-    dd = deep_state.dd
+    dd = deep_data["dd"]
     group_verdicts: dict[str, dict[int, dict[str, Any]]] = {}
     reused: dict[str, bool] = {}
     failed_groups: list[str] = []
     pending: list[PlannedGroup] = []
     for group in plan.groups:
-        deep_state.review_coverage.require_phase(group.group_id)
+        deep_data["review_coverage"].require_phase(group.group_id)
         loaded = _load_group_verdicts(dd, group, contract=contracts[group.group_id],
                                       records_digest=records_digests[group.group_id])
         if loaded is None:
@@ -419,7 +419,7 @@ async def _run_arbiter(
         else:
             group_verdicts[group.group_id] = loaded
             reused[group.group_id] = True
-            prior = deep_state.review_coverage.phases.get(group.group_id)
+            prior = deep_data["review_coverage"].phases.get(group.group_id)
             if prior is None or prior["status"] != "complete":
                 pending.append(group)
                 group_verdicts.pop(group.group_id, None)
@@ -436,7 +436,7 @@ async def _run_arbiter(
             ) as dispatch:
                 def record_failure(planned: PlannedGroup, exc: Exception) -> None:
                     failed_groups.append(planned.group_id)
-                    deep_state.review_coverage.record_phase(planned.group_id, "failed",
+                    deep_data["review_coverage"].record_phase(planned.group_id, "failed",
                                                            reasons=(reason_for_exception(exc),))
                     reused[planned.group_id] = False
                     print_warning(
@@ -447,7 +447,7 @@ async def _run_arbiter(
                     )
 
                 def save_verdicts(planned: PlannedGroup, group_verdicts_call: dict[int, dict[str, Any]]) -> None:
-                    if not _record_verdict_coverage(deep_state.review_coverage, planned.group_id,
+                    if not _record_verdict_coverage(deep_data["review_coverage"], planned.group_id,
                             len(targets_by_group[planned.group_id]), group_verdicts_call):
                         failed_groups.append(planned.group_id)
                         if not isinstance(group_verdicts_call, IncompleteVerdicts):
@@ -459,7 +459,7 @@ async def _run_arbiter(
                             records_digest=records_digests[planned.group_id])
                     except (OSError, ValueError) as exc:
                         failed_groups.append(planned.group_id)
-                        deep_state.review_coverage.record_phase(planned.group_id, "failed",
+                        deep_data["review_coverage"].record_phase(planned.group_id, "failed",
                                                                reasons=(ReasonCode.MALFORMED_ARTIFACT,))
                         print_warning(console,
                                       f"Arbiter group {planned.group_id} could not persist its verdicts "
@@ -506,7 +506,7 @@ def _arbiter_store_payload(
         return None
 
 
-def _reload_adjudicated_records(deep_state: DeepState) -> bool:
+def _reload_adjudicated_records(deep_data: DeepData) -> bool:
     """Refresh ``ctx.data`` from the restored post-arbitration records files.
 
     A whole-unit hit must present exactly what a real adjudication left behind,
@@ -515,16 +515,16 @@ def _reload_adjudicated_records(deep_state: DeepState) -> bool:
     file cannot be parsed, which makes the hit a miss instead of a split brain.
     """
     try:
-        restored = deep_state.record_pool.reload(deep_state.review_coverage.revision.to_dict())
+        restored = deep_data["record_pool"].reload(deep_data["review_coverage"].revision.to_dict())
     except (OSError, ValueError):
         return False
-    deep_state.record_pool = restored
+    deep_data["record_pool"] = restored
     return True
 
 
 def _try_reuse_arbiter(
     unit: ReviewReuseUnit,
-    deep_state: DeepState,
+    deep_data: DeepData,
     plan: ArbiterPlan,
 ) -> bool:
     """Try to restore a completed whole-arbiter unit; ``True`` when it hit.
@@ -534,15 +534,15 @@ def _try_reuse_arbiter(
     ``ctx.data`` from those files and records the hit with its grounding delta.
     Any failure is recorded as a miss and the caller runs the real adjudication.
     """
-    hit = unit.lookup(deep_state.dd)
+    hit = unit.lookup(deep_data["dd"])
     if hit is None:
         return False
-    if not _reload_adjudicated_records(deep_state):
+    if not _reload_adjudicated_records(deep_data):
         unit.cache.record("arbiter", outcome="miss", reason="restored records unreadable", key=unit.key)
         return False
     unit.record_hit(hit)
     write_routing_record(
-        deep_state.dd,
+        deep_data["dd"],
         {
             "arbiter": {
                 "sharded": plan.sharded,
@@ -569,14 +569,14 @@ async def _step_arbiter(ctx: FlowContext) -> None:
     applies one merged verdict mapping, and persists per-group artifacts so a
     resume reruns only the incomplete groups.
     """
-    deep_state = DeepState(ctx.data)
+    deep_data = ctx.deep_data()
     if ctx.pipeline().arbitration.enabled:
-        deep_state.review_coverage.require_phase("arbiter")
-    with review_stage(deep_state, lambda: ("suppression" if "suppression" in deep_state.review_coverage.phases
-        and deep_state.review_coverage.phases["suppression"]["status"] == "uncovered" else "arbiter"), persist=True):
+        deep_data["review_coverage"].require_phase("arbiter")
+    with review_stage(deep_data, lambda: ("suppression" if "suppression" in deep_data["review_coverage"].phases
+        and deep_data["review_coverage"].phases["suppression"]["status"] == "uncovered" else "arbiter"), persist=True):
         config = ctx.config
-        dd = deep_state.dd
-        pool = deep_state.record_pool
+        dd = deep_data["dd"]
+        pool = deep_data["record_pool"]
 
         # A merge resume skips adjudication only with a whole-pass completion marker.
         adjudication_marker = DeepArtifact.ADJUDICATION_COMPLETE.at(dd)
@@ -589,16 +589,17 @@ async def _step_arbiter(ctx: FlowContext) -> None:
 
             precision_mode = bool(ctx.pipeline().suppression.enabled or _resolve_opt_in(config, "precision_mode"))
             if precision_mode:
-                deep_state.review_coverage.require_phase("suppression")
+                deep_data["review_coverage"].require_phase("suppression")
             from daydream.run_config import _resolved_reasoning_effort
 
+            captured_route = deep_data.get("latency_route")
             completion_contract: dict[str, Any] = {'plan': None, 'precision_mode': precision_mode,
                 'profile': phase_identity_for(ctx, 'arbiter').profile_digest,
-                'route': asdict(deep_state.latency_route) if deep_state.latency_route is not None else None,
-                'suppression': _adjudication_contract(ctx, deep_state, 'suppression',
+                'route': asdict(captured_route) if captured_route is not None else None,
+                'suppression': _adjudication_contract(ctx, deep_data, 'suppression',
                     ctx.backend_for('suppression'), _resolved_reasoning_effort(config, 'suppression'),
                     SUPPRESSION_SCHEMA, 'suppression') if precision_mode else None}
-            if config.start_at == 'merge' and _completed_adjudication(ctx, deep_state, completion_contract):
+            if config.start_at == 'merge' and _completed_adjudication(ctx, deep_data, completion_contract):
                 return
 
             arbiter_targets = select_arbiter_targets(
@@ -621,13 +622,13 @@ async def _step_arbiter(ctx: FlowContext) -> None:
             arbiter_unit: ReviewReuseUnit | None = None
             plan: ArbiterPlan | None = None
             if arbiter_targets:
-                route = deep_state.latency_route or PROFILE_ROUTES[FAIL_SAFE_LATENCY_PROFILE]
+                route = deep_data.get("latency_route") or PROFILE_ROUTES[FAIL_SAFE_LATENCY_PROFILE]
                 # Only sharded routes partition; an unsharded route may have a zero group bound.
                 groups = (
                     partition_arbiter_targets(
                         adjudicated,
                         arbiter_targets,
-                        edges=deep_state.import_graph,
+                        edges=(deep_data["import_graph"] if deep_data.get("import_graph") is not None else {}),
                         max_targets=route.group_max_targets,
                     )
                     if route.arbiter_sharded
@@ -648,14 +649,14 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                     else frozenset()
                 )
                 plan = arbiter_plan(route, groups, records=adjudicated, contested=contested)
-                deep_state.arbiter_plan = plan
+                deep_data["arbiter_plan"] = plan
                 targets_by_group = {
                     group.group_id: list(group.target_indices) for group in groups
                 }
                 from daydream.run_config import _explicit_reasoning_effort_pin
 
                 effort_pin = _explicit_reasoning_effort_pin(config, "arbiter")
-                plan_contract = _arbiter_plan_component(ctx, deep_state, plan, effort_pin)
+                plan_contract = _arbiter_plan_component(ctx, deep_data, plan, effort_pin)
                 completion_contract['plan'] = plan_contract
                 # Capture the key before adjudication mutates records, then reuse or store under it.
                 reuse = reuse_cache_for(ctx)
@@ -672,17 +673,17 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                         plan=completion_contract,
                         precision_mode=precision_mode,
                         identity=arbiter_identity,
-                        grounding=_loop_grounding(deep_state),
+                        grounding=_loop_grounding(deep_data),
                     )
                     arbiter_unit = ReviewReuseUnit(reuse, "arbiter", arbiter_identity, arbiter_payload,
-                                                   coverage=deep_state.review_coverage)
-                    if _try_reuse_arbiter(arbiter_unit, deep_state, plan):
-                        deep_state.review_coverage.record_phase("arbiter", "complete")
+                                                   coverage=deep_data["review_coverage"])
+                    if _try_reuse_arbiter(arbiter_unit, deep_data, plan):
+                        deep_data["review_coverage"].record_phase("arbiter", "complete")
                         if precision_mode:
-                            deep_state.review_coverage.record_phase("suppression", "complete")
+                            deep_data["review_coverage"].record_phase("suppression", "complete")
                         return
                 verdicts, reused, failed_groups = await _run_arbiter(
-                    ctx, deep_state, plan, arbiter_targets, adjudicated,
+                    ctx, deep_data, plan, arbiter_targets, adjudicated,
                     effort_pin=effort_pin, targets_by_group=targets_by_group,
                 )
                 adjudication_complete = not failed_groups
@@ -712,7 +713,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                     "failed_groups": list(failed_groups),
                 }
             adjudication_complete = _record_verdict_coverage(
-                deep_state.review_coverage, "arbiter", len(arbiter_targets),
+                deep_data["review_coverage"], "arbiter", len(arbiter_targets),
                 verdicts if arbiter_targets else {}, complete=adjudication_complete,
             )
             write_routing_record(dd, {"arbiter": arbiter_slice})
@@ -741,7 +742,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                             ctx.backend_for("suppression"),
                             ctx.work,
                             selected_records=[adjudicated[i] for i in suppression_targets],
-                            **_review_context_kwargs(ctx, deep_state, strategy=ctx.strategy("suppression")),
+                            **_review_context_kwargs(ctx, deep_data, strategy=ctx.strategy("suppression")),
                         )
                     adjudicated, suppression_outcomes = _apply_adjudication_verdicts(
                         adjudicated, suppression_targets, sup_verdicts,
@@ -753,7 +754,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                     pool.save()
                     record_provenance(dd, pass_name="suppression", outcomes=suppression_outcomes)
                 adjudication_complete = _record_verdict_coverage(
-                    deep_state.review_coverage, "suppression", len(suppression_targets),
+                    deep_data["review_coverage"], "suppression", len(suppression_targets),
                     sup_verdicts if suppression_targets else {},
                 ) and adjudication_complete
             # Whole-block marker: written only when every planned group completed,

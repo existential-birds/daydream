@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from daydream.extensions.api import (
     BreakLoop,
@@ -24,6 +24,7 @@ from daydream.run_context import bind_run_context, resolve_run_context
 if TYPE_CHECKING:
     from daydream.artifact_visibility import ArtifactSession, PrivateWorkspaceOwner
     from daydream.backends import Backend, BackendExecutionInput
+    from daydream.deep.state import DeepData
     from daydream.extensions.registry import FlowEntry, Registry
     from daydream.review_profile import Pipeline, ResolvedProfile
     from daydream.run_config import RunConfig
@@ -68,6 +69,13 @@ class FlowContext:
     _backend_cache: BackendCache = field(
         default_factory=dict, repr=False
     )
+
+    def deep_data(self) -> DeepData:
+        """Admit the documented extension inputs and return this flow's exact live state."""
+        from daydream.deep.state import validate_extension_inputs
+
+        validate_extension_inputs(self.data)
+        return cast("DeepData", self.data)
 
     def _backend(self, phase: str, *, effort: str | None = None) -> Backend:
         """Resolve ``phase``'s backend using this context's captured execution input."""

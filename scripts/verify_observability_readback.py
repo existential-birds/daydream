@@ -168,7 +168,18 @@ def stable_hash(payload: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
-class ReadbackClient:
+class ReadbackFailure(Exception):
+    """Carry one fixed transport/admission failure to the destination result boundary."""
+
+    def __init__(self, disposition: str, detail: str) -> None:
+        super().__init__(detail)
+        self.disposition = disposition
+
+    def to_dict(self) -> dict[str, str]:
+        return {"disposition": self.disposition, "detail": str(self)}
+
+
+class ReadbackClient(httpx.AsyncClient):
     """Own one AsyncClient and one immutable deadline; close on every exit."""
 
     def __init__(self, *, budget_s: float) -> None:
@@ -176,13 +187,10 @@ class ReadbackClient:
             raise ReadbackError("--deadline must be a positive number of seconds")
         self.budget_s = float(budget_s)
         self.request_log: list[dict[str, Any]] = []
-        self._started: float | None = None
-
-    def start(self) -> None:
         self._started = anyio.current_time()
+        super().__init__(trust_env=False, follow_redirects=False, timeout=httpx.Timeout(None))
 
     def remaining(self) -> float:
-        assert self._started is not None
         return self._started + self.budget_s - anyio.current_time()
 
     def _record(self, destination: str, op: str, key: str) -> None:
@@ -197,7 +205,6 @@ class ReadbackClient:
 
     async def request_json(
         self,
-        client: httpx.AsyncClient,
         method: Literal["GET", "POST"],
         *,
         destination: str,
@@ -205,29 +212,30 @@ class ReadbackClient:
         headers: Mapping[str, str],
         op: str,
         key: str,
+        detail: str,
         payload: Mapping[str, Any] | None = None,
         params: Mapping[str, Any] | None = None,
-    ) -> tuple[str, int, Any, bytes]:
+    ) -> Any:
         """One bounded request under the shared immutable deadline."""
         request_kwargs: dict[str, Any] = (
             {"json": dict(payload or {})} if method == "POST" else {"params": dict(params or {})}
         )
         left = self.remaining()
         if left <= 0:
-            return (DISPOSITION_TIMEOUT, 0, {}, b"")
+            raise ReadbackFailure(DISPOSITION_TIMEOUT, detail)
         self._record(destination, op, key)
         try:
             with anyio.fail_after(left):
-                async with client.stream(method, url, **request_kwargs, headers=dict(headers)) as response:
+                async with self.stream(method, url, **request_kwargs, headers=dict(headers)) as response:
                     status = response.status_code
                     if status in (301, 302, 303, 307, 308):
-                        return (DISPOSITION_REDIRECT, status, {}, b"")
+                        raise ReadbackFailure(DISPOSITION_REDIRECT, detail)
                     if status in (401, 403):
-                        return (DISPOSITION_AUTH, status, {}, b"")
+                        raise ReadbackFailure(DISPOSITION_AUTH, detail)
                     if status == 404:
-                        return (DISPOSITION_NOT_FOUND, status, {}, b"")
+                        raise ReadbackFailure(DISPOSITION_NOT_FOUND, detail)
                     if status in (429, 502, 503, 504) or status >= 500:
-                        return (DISPOSITION_HTTP_ERROR, status, {}, b"")
+                        raise ReadbackFailure(DISPOSITION_HTTP_ERROR, detail)
                     raw = bytearray()
                     oversized = False
                     async for chunk in response.aiter_bytes():
@@ -236,18 +244,18 @@ class ReadbackClient:
                             oversized = True
                             break
                     if oversized:
-                        return (DISPOSITION_OVERSIZED, status, {}, b"")
+                        raise ReadbackFailure(DISPOSITION_OVERSIZED, detail)
         except (TimeoutError, anyio.ClosedResourceError, anyio.BrokenResourceError):
-            return (DISPOSITION_TIMEOUT, 0, {}, b"")
+            raise ReadbackFailure(DISPOSITION_TIMEOUT, detail) from None
         except httpx.HTTPError:
-            return (DISPOSITION_HTTP_ERROR, 0, {}, b"")
+            raise ReadbackFailure(DISPOSITION_HTTP_ERROR, detail) from None
         try:
             parsed = json.loads(bytes(raw).decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
-            return (DISPOSITION_MALFORMED, status, {}, bytes(raw))
+            raise ReadbackFailure(DISPOSITION_MALFORMED, detail) from None
         if not isinstance(parsed, dict if method == "POST" else (dict, list)):
-            return (DISPOSITION_MALFORMED, status, {}, bytes(raw))
-        return (DISPOSITION_PASS, status, parsed, bytes(raw))
+            raise ReadbackFailure(DISPOSITION_MALFORMED, detail)
+        return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +265,6 @@ class ReadbackClient:
 
 async def read_honeyhive(
     client_ctx: ReadbackClient,
-    client: httpx.AsyncClient,
     *,
     base_url: str,
     api_key: str,
@@ -274,25 +281,23 @@ async def read_honeyhive(
     url = f"{base_url}{search_path}"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept": "application/json"}
 
-    async def _read_complete() -> dict[str, Any]:
+    async def _read_complete() -> list[dict[str, Any]]:
         """Read one bounded complete session, stopping at count or page exhaustion.
 
-        Reject duplicates, wrong sessions, or shape/count changes; return {count, rows}
-        or a closed {error, detail} failure.
+        Reject duplicates, wrong sessions, or shape/count changes before admitting rows.
         """
         page = 1
         rows: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
         while True:
             if page > 1000:
-                return {"error": DISPOSITION_BOUNDS, "detail": "page bound exceeded"}
+                raise ReadbackFailure(DISPOSITION_BOUNDS, "page bound exceeded")
             payload = {
                 "filters": [{"field": "session_id", "operator": "is", "value": session_id, "type": "string"}],
                 "limit": limit,
                 "page": page,
             }
-            disposition, status, parsed, _raw = await client_ctx.request_json(
-                client,
+            parsed = await client_ctx.request_json(
                 "POST",
                 destination="honeyhive",
                 url=url,
@@ -300,75 +305,68 @@ async def read_honeyhive(
                 headers=headers,
                 op="search",
                 key=f"page:{page}",
+                detail=f"search page {page}",
             )
-            if disposition != DISPOSITION_PASS:
-                return {"error": disposition, "detail": f"search page {page}"}
             events = parsed.get("events")
             count = parsed.get("count")
             if not isinstance(events, list) or not isinstance(count, int) or isinstance(count, bool):
-                return {"error": DISPOSITION_SHAPE, "detail": "expected {events: list, count: int}"}
+                raise ReadbackFailure(DISPOSITION_SHAPE, "expected {events: list, count: int}")
             if len(events) > limit:
-                return {"error": DISPOSITION_BOUNDS, "detail": "page item bound exceeded"}
+                raise ReadbackFailure(DISPOSITION_BOUNDS, "page item bound exceeded")
             for event in events:
                 if not isinstance(event, dict):
-                    return {"error": DISPOSITION_MALFORMED, "detail": "non-object event"}
+                    raise ReadbackFailure(DISPOSITION_MALFORMED, "non-object event")
                 event_session = event.get("session_id")
                 if event_session != session_id:
-                    return {"error": DISPOSITION_WRONG_SESSION, "detail": "event session mismatch"}
+                    raise ReadbackFailure(DISPOSITION_WRONG_SESSION, "event session mismatch")
                 identity = next((event.get(key) for key in HH_EVENT_ID_KEYS if isinstance(event.get(key), str)), None)
                 if identity is None:
-                    return {"error": DISPOSITION_MALFORMED, "detail": "event without string id"}
+                    raise ReadbackFailure(DISPOSITION_MALFORMED, "event without string id")
                 if identity in seen_ids:
-                    return {"error": DISPOSITION_DUPLICATE, "detail": f"duplicate event id {identity}"}
+                    raise ReadbackFailure(DISPOSITION_DUPLICATE, f"duplicate event id {identity}")
                 seen_ids.add(identity)
                 rows.append(event)
             if len(rows) >= count:
                 if len(rows) != count:
-                    return {"error": DISPOSITION_SHAPE, "detail": "rows/count reconciliation failed"}
-                return {"count": count, "rows": rows}
+                    raise ReadbackFailure(DISPOSITION_SHAPE, "rows/count reconciliation failed")
+                return rows
             if len(events) < limit:
-                return {"error": DISPOSITION_SHAPE, "detail": "rows/count reconciliation failed"}
+                raise ReadbackFailure(DISPOSITION_SHAPE, "rows/count reconciliation failed")
             page += 1
 
-    def _snapshot(read: dict[str, Any]) -> str:
+    def _snapshot(read: list[dict[str, Any]]) -> str:
         """Fingerprint the admitted identities of one complete read."""
-        ids = [event.get("id", event.get("event_id")) for event in read["rows"]]
+        ids = [event.get("id", event.get("event_id")) for event in read]
         ordered = sorted(identity for identity in ids if isinstance(identity, str))
-        return stable_hash({"session": session_id, "count": read["count"], "ids": ordered})
+        return stable_hash({"session": session_id, "count": len(read), "ids": ordered})
 
     # Two stable complete post-shutdown snapshots are required (the same
     # stability contract as the LangSmith exact-ID tree).
     first = await _read_complete()
-    if "error" in first:
-        return {"disposition": first["error"], "detail": first["detail"]}
     first_hash = _snapshot(first)
 
     second = await _read_complete()
-    if "error" in second:
-        return {"disposition": second["error"], "detail": second["detail"]}
     stable = second if _snapshot(second) == first_hash else None
     if stable is None:
         # One bounded stable re-check after a short sleep inside the deadline.
         if client_ctx.remaining() <= 0:
-            return {"disposition": DISPOSITION_UNSTABLE, "detail": "session snapshots disagreed and deadline elapsed"}
+            raise ReadbackFailure(DISPOSITION_UNSTABLE, "session snapshots disagreed and deadline elapsed")
         await anyio.sleep(min(0.5, client_ctx.remaining()))
         third = await _read_complete()
-        if "error" in third:
-            return {"disposition": third["error"], "detail": third["detail"]}
         if _snapshot(third) != first_hash:
-            return {"disposition": DISPOSITION_UNSTABLE, "detail": "two equal complete snapshots not reached"}
+            raise ReadbackFailure(DISPOSITION_UNSTABLE, "two equal complete snapshots not reached")
         stable = third
 
-    ids = [event.get("id", event.get("event_id")) for event in stable["rows"]]
+    ids = [event.get("id", event.get("event_id")) for event in stable]
     return {
         "disposition": DISPOSITION_PASS,
         "destination": "honeyhive",
         "session_id": session_id,
-        "count": stable["count"],
+        "count": len(stable),
         "ids": ids,
         "snapshot_hash": first_hash,
         "ids_hash": ",".join(sorted(identity for identity in ids if isinstance(identity, str))),
-        "rows": stable["rows"],
+        "rows": stable,
         "detail": f"expected run {expected_run_id}; two stable complete snapshots",
     }
 
@@ -380,7 +378,6 @@ async def read_honeyhive(
 
 async def read_langsmith(
     client_ctx: ReadbackClient,
-    client: httpx.AsyncClient,
     *,
     base_url: str,
     api_key: str,
@@ -402,8 +399,7 @@ async def read_langsmith(
 
     # Bounded project-name -> vendor-session-id resolution. The lookup is by
     # exact name; zero or ambiguous matches fail closed.
-    disposition_sessions, _status, parsed_sessions, _raw = await client_ctx.request_json(
-        client,
+    parsed_sessions = await client_ctx.request_json(
         "GET",
         destination="langsmith",
         url=f"{base_url}/api/v1/sessions",
@@ -411,19 +407,18 @@ async def read_langsmith(
         headers=headers,
         op="resolve_project",
         key=project,
+        detail="project resolution",
     )
-    if disposition_sessions != DISPOSITION_PASS:
-        return {"disposition": disposition_sessions, "detail": "project resolution"}
     sessions = parsed_sessions if isinstance(parsed_sessions, list) else parsed_sessions.get("sessions")
     if not isinstance(sessions, list):
-        return {"disposition": DISPOSITION_SHAPE, "detail": "project resolution expected a session list"}
+        raise ReadbackFailure(DISPOSITION_SHAPE, "project resolution expected a session list")
     named = [
         session
         for session in sessions
         if isinstance(session, dict) and isinstance(session.get("id"), str) and session.get("name") == project
     ]
     if len(named) != 1:
-        return {"disposition": DISPOSITION_NOT_FOUND, "detail": "project name must resolve to exactly one session"}
+        raise ReadbackFailure(DISPOSITION_NOT_FOUND, "project name must resolve to exactly one session")
     session_id = str(named[0]["id"])
 
     discovery_payload = {
@@ -432,40 +427,40 @@ async def read_langsmith(
         "limit": 100,
         "start_time": started_at,
     }
-    disposition, status, parsed, _raw = await client_ctx.request_json(
-        client,
-        "POST",
-        destination="langsmith",
-        url=url,
-        payload=discovery_payload,
-        headers=headers,
-        op="discovery",
-        key=run_id,
-    )
-    if disposition != DISPOSITION_PASS:
-        if disposition == DISPOSITION_NOT_FOUND:
-            return {"disposition": DISPOSITION_NOT_FOUND, "detail": "no trace found"}
-        return {"disposition": disposition, "detail": "discovery"}
+    try:
+        parsed = await client_ctx.request_json(
+            "POST",
+            destination="langsmith",
+            url=url,
+            payload=discovery_payload,
+            headers=headers,
+            op="discovery",
+            key=run_id,
+            detail="discovery",
+        )
+    except ReadbackFailure as exc:
+        if exc.disposition == DISPOSITION_NOT_FOUND:
+            raise ReadbackFailure(DISPOSITION_NOT_FOUND, "no trace found") from None
+        raise
     runs = parsed.get("runs")
     if not isinstance(runs, list):
-        return {"disposition": DISPOSITION_SHAPE, "detail": "expected {runs: [...]}"}
+        raise ReadbackFailure(DISPOSITION_SHAPE, "expected {runs: [...]}")
     if not runs:
         # Zero exact-ID matches are honest absence, including historical spans outside vendor ingest windows.
-        return {"disposition": DISPOSITION_NOT_FOUND, "detail": "no trace found for the exact run id"}
+        raise ReadbackFailure(DISPOSITION_NOT_FOUND, "no trace found for the exact run id")
     roots = [run for run in runs if isinstance(run, dict) and not run.get("parent_run_id")]
     # The exact-session filtered discovery must identify exactly one trace.
     trace_ids = {run.get("trace_id") for run in runs if isinstance(run, dict) and isinstance(run.get("trace_id"), str)}
     if len(roots) != 1 or len(trace_ids) != 1:
-        return {"disposition": DISPOSITION_AMBIGUOUS_ROOT, "detail": "discovery must return exactly one root/trace"}
+        raise ReadbackFailure(DISPOSITION_AMBIGUOUS_ROOT, "discovery must return exactly one root/trace")
     root_id = roots[0].get("id")
     trace_id = next(iter(trace_ids))
     if not isinstance(root_id, str) or not isinstance(trace_id, str):
-        return {"disposition": DISPOSITION_SHAPE, "detail": "root id/trace id must be strings"}
+        raise ReadbackFailure(DISPOSITION_SHAPE, "root id/trace id must be strings")
 
     # Exact-ID read: documented semantics — providing the returned run ID
     # ignores all other filtering arguments and reads that exact record.
-    disposition_root, _status, parsed_root, _raw = await client_ctx.request_json(
-        client,
+    parsed_root = await client_ctx.request_json(
         "POST",
         destination="langsmith",
         url=url,
@@ -473,18 +468,16 @@ async def read_langsmith(
         headers=headers,
         op="exact_root",
         key=root_id,
+        detail="exact root-ID read",
     )
-    if disposition_root != DISPOSITION_PASS:
-        return {"disposition": disposition_root, "detail": "exact root-ID read"}
     root_runs = parsed_root.get("runs")
     if not isinstance(root_runs, list) or not any(
         isinstance(run, dict) and run.get("id") == root_id for run in root_runs
     ):
-        return {"disposition": DISPOSITION_SHAPE, "detail": "exact root-ID read did not return the frozen root"}
+        raise ReadbackFailure(DISPOSITION_SHAPE, "exact root-ID read did not return the frozen root")
 
-    async def _tree_read() -> dict[str, Any]:
-        disposition_tree, _status, parsed_tree, _raw_tree = await client_ctx.request_json(
-            client,
+    async def _tree_read() -> list[Any]:
+        parsed_tree = await client_ctx.request_json(
             "POST",
             destination="langsmith",
             url=url,
@@ -492,32 +485,27 @@ async def read_langsmith(
             headers=headers,
             op="tree",
             key=trace_id,
+            detail="exact-ID tree read",
         )
-        if disposition_tree != DISPOSITION_PASS:
-            return {"disposition": disposition_tree, "detail": "exact-ID tree read"}
         tree_runs = parsed_tree.get("runs")
         if not isinstance(tree_runs, list):
-            return {"disposition": DISPOSITION_SHAPE, "detail": "tree expected {runs: [...]}"}
-        return {"disposition": DISPOSITION_PASS, "runs": tree_runs}
+            raise ReadbackFailure(DISPOSITION_SHAPE, "tree expected {runs: [...]}")
+        return tree_runs
 
     first = await _tree_read()
-    if first["disposition"] != DISPOSITION_PASS:
-        return first
     stable = await _tree_read()
-    if stable["disposition"] != DISPOSITION_PASS:
-        return stable
-    first_hash = stable_hash([_run_identity(r) for r in first["runs"]])
-    if stable_hash([_run_identity(r) for r in stable["runs"]]) != first_hash:
+    first_hash = stable_hash([_run_identity(r) for r in first])
+    if stable_hash([_run_identity(r) for r in stable]) != first_hash:
         # One bounded stable re-check after a short sleep inside the deadline.
         if client_ctx.remaining() <= 0:
-            return {"disposition": DISPOSITION_UNSTABLE, "detail": "tree snapshots disagreed and deadline elapsed"}
+            raise ReadbackFailure(DISPOSITION_UNSTABLE, "tree snapshots disagreed and deadline elapsed")
         await anyio.sleep(min(0.5, client_ctx.remaining()))
-        stable = await _tree_read()
-        if (
-            stable["disposition"] != DISPOSITION_PASS
-            or stable_hash([_run_identity(r) for r in stable["runs"]]) != first_hash
-        ):
-            return {"disposition": DISPOSITION_UNSTABLE, "detail": "two equal complete snapshots not reached"}
+        try:
+            stable = await _tree_read()
+        except ReadbackFailure:
+            raise ReadbackFailure(DISPOSITION_UNSTABLE, "two equal complete snapshots not reached") from None
+        if stable_hash([_run_identity(r) for r in stable]) != first_hash:
+            raise ReadbackFailure(DISPOSITION_UNSTABLE, "two equal complete snapshots not reached")
     return {
         "disposition": DISPOSITION_PASS,
         "destination": "langsmith",
@@ -525,8 +513,8 @@ async def read_langsmith(
         "run_id": run_id,
         "root_id": root_id,
         "trace_id": trace_id,
-        "count": len(stable["runs"]),
-        "runs": stable["runs"],
+        "count": len(stable),
+        "runs": stable,
         "snapshot_hash": first_hash,
         "detail": "exact-ID tree reached two equal snapshots",
     }
@@ -824,7 +812,6 @@ async def _verify(
     budget_s: float,
 ) -> dict[str, Any]:
     ctx = ReadbackClient(budget_s=budget_s)
-    ctx.start()
     result: dict[str, Any] = {
         "schema_version": 1,
         "dispositions": [],
@@ -835,11 +822,7 @@ async def _verify(
     destinations = set(receipt["destinations"])
     enabled: list[str] = []
 
-    async with httpx.AsyncClient(
-        trust_env=False,
-        follow_redirects=False,
-        timeout=httpx.Timeout(None),  # the immutable fail_after budget is the only timeout
-    ) as client:
+    async with ctx:
         if "honeyhive" in destinations:
             enabled.append("honeyhive")
             base = validate_base_url(os.environ.get("HH_API_URL", ""), "HH_API_URL")
@@ -850,14 +833,16 @@ async def _verify(
                     "terminal": DISPOSITION_AUTH,
                     "detail": "HH_API_KEY is required for honeyhive readback",
                 }
-            result["honeyhive"] = await read_honeyhive(
-                ctx,
-                client,
-                base_url=base,
-                api_key=key,
-                session_id=str(receipt["session_id"]),
-                expected_run_id=str(receipt["run_id"]),
-            )
+            try:
+                result["honeyhive"] = await read_honeyhive(
+                    ctx,
+                    base_url=base,
+                    api_key=key,
+                    session_id=str(receipt["session_id"]),
+                    expected_run_id=str(receipt["run_id"]),
+                )
+            except ReadbackFailure as exc:
+                result["honeyhive"] = exc.to_dict()
         if "langsmith" in destinations:
             enabled.append("langsmith")
             base = validate_base_url(
@@ -870,15 +855,17 @@ async def _verify(
                     "terminal": DISPOSITION_AUTH,
                     "detail": "LANGSMITH_API_KEY is required for langsmith readback",
                 }
-            result["langsmith"] = await read_langsmith(
-                ctx,
-                client,
-                base_url=base,
-                api_key=key,
-                project=str(receipt["langsmith_project"]),
-                run_id=str(receipt["run_id"]),
-                started_at=str(receipt["started_at"]),
-            )
+            try:
+                result["langsmith"] = await read_langsmith(
+                    ctx,
+                    base_url=base,
+                    api_key=key,
+                    project=str(receipt["langsmith_project"]),
+                    run_id=str(receipt["run_id"]),
+                    started_at=str(receipt["started_at"]),
+                )
+            except ReadbackFailure as exc:
+                result["langsmith"] = exc.to_dict()
     result["enabled_destinations"] = enabled
     rows = compare_stored(result, matrix, acceptance_kind=str(receipt["acceptance_kind"]))
     result["matrix_rows"] = rows

@@ -382,8 +382,8 @@ async def test_subtrajectory_step_ids_track_multiple_invocations(tmp_path: Path,
     assert subs[0]["step_ids"] == [1]
     assert subs[1]["step_ids"] == [2]
 
-async def test_fork_subtrajectory_entries_have_timestamps(tmp_path: Path) -> None:
-    """Fork siblings register subtrajectory entries on the parent (issue #212)."""
+async def test_fork_receipt_resolves_native_invocation_timing(tmp_path: Path) -> None:
+    """A parent link resolves the child document that owns actual invocation timing."""
 
     rec = make_recorder(tmp_path)
     async with rec:
@@ -396,10 +396,12 @@ async def test_fork_subtrajectory_entries_have_timestamps(tmp_path: Path) -> Non
     subs = traj["extra"].get("subtrajectories", [])
     assert len(subs) == 1, f"expected 1 fork subtrajectory, got {len(subs)}: {subs}"
     sub = subs[0]
-    assert sub["phase"] == "fix", f"expected phase 'fix' for descriptor 'fix-src-foo-py', got {sub['phase']!r}"
-    assert sub["descriptor"] == "fix-src-foo-py", f"descriptor missing/incorrect: {sub}"
-    assert sub["started_at"], "started_at must be non-empty"
-    assert sub["ended_at"], "ended_at must be non-empty"
+    child_document = read_trajectory(child.path)
+    assert sub["trajectory_id"] == child_document["trajectory_id"]
+    invocation = child_document["extra"]["subtrajectories"][0]
+    assert invocation["phase"] == "fix"
+    assert child_document["extra"]["run_started_at"] <= invocation["started_at"]
+    assert invocation["started_at"] <= invocation["ended_at"] <= child_document["extra"]["run_ended_at"]
     assert sub["sibling_trajectory_ref"], "sibling_trajectory_ref must be non-empty"
     assert "step_ids" not in sub, "step_ids should be replaced by sibling_trajectory_ref"
     assert ".json" in sub["sibling_trajectory_ref"], (
@@ -614,15 +616,14 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     api_summaries = [summary
         for summary in root["extra"]["subtrajectories"]
         if summary.get("dispatch_id") == dispatch["extra"]["dispatch_id"]
-        and summary.get("descriptor") == "fix-api.py"
+        and summary.get("trajectory_id") == api_ref["trajectory_id"]
     ]
     assert len(api_summaries) == 1
     api_summary = api_summaries[0]
     assert "invocation_id" not in api_summary
     assert api_summary["trajectory_id"] == api_ref["trajectory_id"]
     assert api_summary["sibling_trajectory_ref"] == api_ref["trajectory_path"]
-    assert api_summary["invocations"] == api_child["extra"]["subtrajectories"]
-    api_invocations = api_summary["invocations"]
+    api_invocations = api_child["extra"]["subtrajectories"]
     assert len(api_invocations) == 4
     assert all(invocation["phase"] == "fix" for invocation in api_invocations)
     assert all(invocation["trajectory_id"] == api_child["trajectory_id"] for invocation in api_invocations)
@@ -759,7 +760,9 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
     # Subtrajectories: the review invocation registered one with timestamps.
     subs = data["extra"].get("subtrajectories", [])
     assert subs, "subtrajectories missing from trajectory extra"
-    assert all(s["started_at"] and s["ended_at"] for s in subs), "subtrajectory missing complete timestamps"
+    invocations = [s for s in subs if "invocation_id" in s]
+    assert invocations, "actual review invocation missing"
+    assert all(s["started_at"] and s["ended_at"] for s in invocations), "invocation missing complete timestamps"
 
     # Manifest: phase_timings appears in the metrics block.
     assert _read_phase_timings(tmp_path) is not None
@@ -792,7 +795,18 @@ async def test_deep_run_emits_phase_events_and_manifest_timings(
     # Subtrajectories: TTT invocations registered timing entries.
     subs = data["extra"].get("subtrajectories", [])
     assert subs, "subtrajectories missing from deep trajectory extra"
-    assert all(s["started_at"] and s["ended_at"] for s in subs), f"subtrajectory missing timestamps: {subs!r}"
+    for receipt in subs:
+        if "sibling_trajectory_ref" not in receipt:
+            assert receipt["started_at"] and receipt["ended_at"]
+            continue
+        child = read_trajectory(multi_stack_target / ".daydream" / receipt["sibling_trajectory_ref"])
+        assert child["trajectory_id"] == receipt["trajectory_id"]
+        assert child["extra"]["run_started_at"] <= child["extra"]["run_ended_at"]
+        assert all(
+            row["started_at"] and row["ended_at"]
+            for row in child["extra"]["subtrajectories"]
+            if "invocation_id" in row
+        )
 
     # Manifest: phase_timings carries the deep bucket.
     phase_timings = _read_phase_timings(tmp_path)
@@ -846,13 +860,27 @@ async def test_parallel_fix_registers_subtrajectories(
     data = await _run_with_config(tmp_path, multi_stack_target, assume="yes",)
 
     subs = data["extra"].get("subtrajectories", [])
-    fix_subs = [s for s in subs if s["phase"] == "fix"]
+    fix_dispatches = {
+        step["extra"]["dispatch_id"]
+        for step in data["steps"]
+        if step.get("extra", {}).get("daydream_phase") == "fix"
+        and "dispatch_id" in step.get("extra", {})
+    }
+    fix_subs = [s for s in subs if s.get("dispatch_id") in fix_dispatches]
     assert len(fix_subs) >= 2, f"expected >=2 fix subtrajectories from parallel forks, got {len(fix_subs)}: {fix_subs}"
     for sub in fix_subs:
-        assert sub["descriptor"].startswith("fix-"), f"fix subtrajectory descriptor must start with 'fix-': {sub}"
-        assert sub["started_at"], f"fix subtrajectory missing started_at: {sub}"
-        assert sub["ended_at"], f"fix subtrajectory missing ended_at: {sub}"
-        assert sub["sibling_trajectory_ref"], f"fix subtrajectory missing sibling_trajectory_ref: {sub}"
+        reference = sub["sibling_trajectory_ref"]
+        assert Path(reference).name.startswith("fix-"), f"fix trajectory name must start with 'fix-': {reference}"
+        child = read_trajectory(multi_stack_target / ".daydream" / reference)
+        assert child["trajectory_id"] == sub["trajectory_id"]
+        invocations = child["extra"]["subtrajectories"]
+        assert invocations
+        assert all(invocation["phase"] == "fix" for invocation in invocations)
+        assert all(
+            child["extra"]["run_started_at"] <= invocation["started_at"]
+            <= invocation["ended_at"] <= child["extra"]["run_ended_at"]
+            for invocation in invocations
+        )
         assert "step_ids" not in sub, f"step_ids should be replaced by sibling_trajectory_ref: {sub}"
 
 async def test_review_flow_emits_phase_events_and_manifest_timings(

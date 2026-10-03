@@ -87,7 +87,7 @@ def assert_dispatch_children(target_dir: Path, dispatch: dict[str, Any], phase: 
         for summary in root["extra"]["subtrajectories"]
         if summary.get("dispatch_id") == dispatch["extra"]["dispatch_id"]
     ]
-    assert [summary["descriptor"] for summary in summaries] == descriptors
+    assert [summary["trajectory_id"] for summary in summaries] == [ref["trajectory_id"] for ref in refs]
     assert all("invocation_id" not in summary for summary in summaries)
 
     children: list[dict[str, Any]] = []
@@ -102,10 +102,8 @@ def assert_dispatch_children(target_dir: Path, dispatch: dict[str, Any], phase: 
         assert summary["trajectory_id"] == ref["trajectory_id"]
         assert summary["sibling_trajectory_ref"] == ref["trajectory_path"]
         assert summary["fork_id"] == ref["trajectory_id"]
-        assert summary["phase"] == phase
-        assert summary["invocations"] == child["extra"]["subtrajectories"]
-        assert len(summary["invocations"]) == 1
-        invocation = summary["invocations"][0]
+        assert len(child["extra"]["subtrajectories"]) == 1
+        invocation = child["extra"]["subtrajectories"][0]
         assert invocation["phase"] == phase
         assert invocation["trajectory_id"] == child["trajectory_id"]
         assert (child["extra"]["run_started_at"]

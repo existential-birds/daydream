@@ -24,6 +24,7 @@ from daydream.exploration import (
     merge_contexts,
 )
 from daydream.fanout import run_fanout
+from daydream.hunk_index import iter_diff_blocks
 from daydream.prompt_budget import truncate_utf8_to_budget
 from daydream.prompts.exploration_subagents import (
     DEPENDENCY_TRACER_SCHEMA,
@@ -49,7 +50,6 @@ from daydream.trajectory import (
     maybe_fork,
 )
 from daydream.tree_sitter_index import detect_affected_files
-from daydream.tree_sitter_index.imports import _parse_diff_name_status
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -122,7 +122,7 @@ def _static_guidance(repo_root: Path, modified_files: list[FileInfo]) -> str:
 
 def count_changed_files(diff_text: str) -> int:
     """Count unique file paths in a unified-diff string."""
-    return len({entry.path for entry in _parse_diff_name_status(diff_text)})
+    return len({path for path, _ in iter_diff_blocks(diff_text)})
 
 
 def select_tier(file_count: int) -> Tier:
@@ -268,7 +268,7 @@ async def pre_scan(
         # Static resolution failed outright; still seed specialists with the
         # changed files so they have a starting point. Reuse the rename-aware
         # name/status parser so a renamed file seeds its new path, not the old.
-        changed = sorted({e.path for e in _parse_diff_name_status(diff_text)})
+        changed = sorted({path for path, _ in iter_diff_blocks(diff_text)})
         static_files = [FileInfo(path=p, role="modified") for p in changed]
 
     static_context = ExplorationContext(affected_files=static_files)

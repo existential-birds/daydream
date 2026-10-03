@@ -1114,3 +1114,83 @@ def test_replay_native_wire_marker_requires_exact_string_binding(kind: str) -> N
             _replay._require_local_wire_success(spans, resources)
     finally:
         receiver.stop()
+
+
+def test_each_destination_records_its_own_failure_after_the_first_read_fails(
+    tmp_path: Path, fake_vendors: tuple[FakeVendorServer, FakeVendorServer],
+) -> None:
+    honeyhive, langsmith = fake_vendors
+    honeyhive.respond("POST", "/v1/events/search", lambda _r: (401, {}, _SECRET_KEY.encode()))
+    langsmith.respond("GET", "/api/v1/sessions", lambda _r: (404, {}, _SECRET_KEY.encode()))
+    receipt = _write_receipt(tmp_path)
+    result_path = tmp_path / "both-failures.json"
+    assert _run_verify(receipt, result_path, budget_s=2) == 1
+    result = json.loads(result_path.read_text())
+    assert result["terminal"] == _verifier.DISPOSITION_AUTH
+    assert result["destinations"]["honeyhive"] == {
+        "destination": "honeyhive", "disposition": _verifier.DISPOSITION_AUTH, "detail": "search page 1",
+    }
+    assert result["destinations"]["langsmith"] == {
+        "destination": "langsmith", "disposition": _verifier.DISPOSITION_NOT_FOUND, "detail": "project resolution",
+    }
+    assert [entry["op"] for entry in result["request_log"]] == ["search", "resolve_project"]
+    assert len(honeyhive.requests) == len(langsmith.requests) == 1
+    assert _SECRET_KEY not in result_path.read_text()
+
+
+@pytest.mark.anyio
+async def test_native_readback_client_closes_the_stream_and_client_on_caller_cancellation() -> None:
+    import anyio
+
+    peer = _LoopbackPeer(trickle=True)
+    client = _verifier.ReadbackClient(budget_s=5)
+    try:
+        async with client:
+            with anyio.move_on_after(0.12) as cancelled:
+                await client.request_json(
+                    "POST", destination="honeyhive", url=peer.base_url, headers={},
+                    op="search", key="page:1", detail="search page 1", payload={},
+                )
+            assert cancelled.cancel_called
+        assert client.is_closed
+        peer.close()
+        deadline = anyio.current_time() + 2.0
+        while not peer.connections and anyio.current_time() < deadline:
+            await anyio.sleep(0.02)
+        assert len(peer.connections) == 1
+        accepted_at, closed_at = peer.connections[0]
+        assert closed_at - accepted_at < 1.0
+        assert [entry["op"] for entry in client.request_log] == ["search"]
+    finally:
+        await client.aclose()
+        peer.close()
+
+
+@pytest.mark.anyio
+async def test_native_readback_failures_suppress_private_transport_and_decode_causes(
+    fake_vendor: FakeVendorServer,
+) -> None:
+    import traceback
+
+    fake_vendor.respond("POST", "/v1/events/search", lambda _r: (200, {}, b'{"secret":"' + _SECRET_KEY.encode()))
+    async with _verifier.ReadbackClient(budget_s=2) as client:
+        with pytest.raises(_verifier.ReadbackFailure) as malformed:
+            await client.request_json(
+                "POST", destination="honeyhive", url=fake_vendor.base_url + "/v1/events/search",
+                headers={}, op="search", key="page:1", detail="search page 1", payload={},
+            )
+        assert malformed.value.disposition == _verifier.DISPOSITION_MALFORMED
+        assert _SECRET_KEY not in "".join(traceback.format_exception(malformed.value))
+        fake_vendor.close()
+        with pytest.raises(_verifier.ReadbackFailure) as unavailable:
+            await client.request_json(
+                "POST", destination="honeyhive", url=fake_vendor.base_url + "/private-endpoint",
+                headers={}, op="search", key="page:1", detail="search page 1", payload={},
+            )
+        assert unavailable.value.disposition == _verifier.DISPOSITION_HTTP_ERROR
+        assert fake_vendor.base_url not in "".join(traceback.format_exception(unavailable.value))
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"

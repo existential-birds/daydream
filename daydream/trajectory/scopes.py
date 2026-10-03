@@ -116,20 +116,9 @@ async def fork_scope(
                 )
                 child.parent._folded_fork_totals = True
                 sibling_ref = child.parent._logical_child_trajectory_ref(child.path)
-                phase = DaydreamPhase.FIX.value
-                for step in child.steps:
-                    if step.extra is None:
-                        continue
-                    candidate = step.extra.get("daydream_phase")
-                    if isinstance(candidate, str):
-                        phase = candidate
-                        break
                 child.parent._register_fork_subtrajectory(
                     child=child,
-                    phase=phase,
                     identity=identity,
-                    started_at=entered_at or timeutil.now_iso(),
-                    ended_at=exited_at or timeutil.now_iso(),
                     sibling_trajectory_ref=sibling_ref,
                 )
                 if dispatch is not None and identity is not None:
