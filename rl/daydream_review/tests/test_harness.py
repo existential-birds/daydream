@@ -267,8 +267,12 @@ async def test_docker_launch_preflights_writability_before_run_as_agent(fixture_
             "the image bakes ownership at build time"
         )
     preflight = next(argv for argv in runtime.commands if f"test -w {harness.config.repo_path}" in " ".join(argv))
-    assert f"test -w {harness.config.repo_path}" in " ".join(preflight)
-    assert "test -w /srv/mirror.git" in " ".join(preflight)
+    joined = " ".join(preflight)
+    assert f"test -w {harness.config.repo_path}" in joined
+    assert "test -w /srv/mirror.git" in joined
+    # One probe chains every surface: the tree roots and the per-file write surfaces.
+    assert f"test -w {harness.config.repo_path}/.git" in joined
+    assert "test -w /srv/mirror.git/refs" in joined
     (argv, _), = runtime.programs
     assert argv[0] == "run-as-agent"
     assert runtime.sequence.index(preflight) < runtime.sequence.index(argv), (
@@ -291,7 +295,7 @@ async def test_docker_launch_fails_closed_when_trees_not_agent_writable(fixture_
     task = _task(fixture_manifest_path)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
     runtime = _OrderingDockerRuntime(exit_code=1,
-        failed_argv=["run-as-agent", "sh", "-c", f"test -w {harness.config.repo_path} && test -w /srv/mirror.git"],
+        failed_argv=["run-as-agent", "sh", "-c"],  # the single writability preflight
     )
 
     with pytest.raises(RuntimeError) as excinfo:
