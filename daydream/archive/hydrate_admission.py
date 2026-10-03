@@ -156,8 +156,8 @@ def apply_license_gate(
     revision: str,
     license_policy_path: str | Path | None,
     allow_copyleft: frozenset[str] | set[str],
-) -> list[tuple[str, str]]:
-    """Apply the required license policy after ingest, dedupe, and enrichment."""
+) -> dict[str, Any]:
+    """Admit and bind the curation using one captured license-policy version."""
     if not license_policy_path:
         raise ValueError(
             "license admission gate requires license_policy_path (fail-closed): "
@@ -167,15 +167,19 @@ def apply_license_gate(
         load_license_policy,
     )
 
-    policy, _digest = load_license_policy(license_policy_path)
+    policy, policy_digest = load_license_policy(license_policy_path)
     curated = _pre_identity_dir(stage, str(revision))
     ledger_path = _dedupe_dir(stage, curated.name) / "dedupe.jsonl"
-    rejected: list[tuple[str, str]] = []
+    rejected = False
+    decisions: dict[str, tuple[str, str | None, str | None]] = {}
     unresolved = _repo_commit_unresolved_sessions(stage)
     for derivative, data in _derivative_manifests(stage):
         sid = _admitted_session_id(derivative, data)
         decision = _repo_license_decision(data, policy, allow_copyleft)
         if decision.status != "rejected" or decision.reason_code is None:
+            decisions[str(decision.repo_slug)] = (
+                str(decision.status), decision.reason_code, decision.spdx_id,
+            )
             continue
         reason_code = decision.reason_code
         if reason_code == REASON_CODE_LICENSE_EVIDENCE_MISSING and sid in unresolved:
@@ -183,10 +187,46 @@ def apply_license_gate(
             reason_code = REASON_CODE_REPO_COMMIT_UNRESOLVED
         _move_dir(derivative, stage / "excluded" / sid)
         _append_dedupe_entry(ledger_path, sid, str(revision), status="excluded", reason_code=reason_code)
-        rejected.append((sid, reason_code))
+        rejected = True
     if rejected:
         rebuild_index(stage)  # excluded derivatives leave the staging index immediately
-    return rejected
+    # Bind rejected repos too: changed gate reasons must change identity.
+    # Preserve the recorded reason, which may be more specific than a fresh
+    # policy resolution. Fixture/ingest exclusions were never license decisions.
+    recorded_excluded = _DedupeLedger.load(
+        ledger_path
+    ).latest
+    for derivative, data in _derivative_manifests(stage, "excluded"):
+        sid = str(data.get("session_id") or derivative.name)
+        entry = recorded_excluded.get(sid) or {}
+        code = entry.get("reason_code")
+        if code not in _LICENSE_REASON_CODES:
+            continue  # never a license-gate decision, never in the digest
+        decision = _repo_license_decision(data, policy, allow_copyleft)
+        decisions[str(decision.repo_slug)] = (
+            "rejected", str(code), decision.spdx_id,
+        )
+    decision_lines = sorted(
+        f"{slug}\t{status}\t{reason_code or ''}\t{spdx_id or ''}\n"
+        for slug, (status, reason_code, spdx_id) in decisions.items()
+    )
+    decisions_digest = hashlib.sha256("".join(decision_lines).encode()).hexdigest()
+    distribution = Counter(spdx for (_, __, spdx) in decisions.values() if spdx)
+    distribution_lines = sorted(
+        f"{spdx}\t{count}\n" for spdx, count in distribution.items()
+    )
+    distribution_digest = hashlib.sha256("".join(distribution_lines).encode()).hexdigest()
+    binding = {
+        "policy_digest": str(policy_digest),
+        "policy_version": str(policy.policy_version),
+        "allow_copyleft": set(allow_copyleft),
+        "exclusions_digest": _exclusions_digest(),
+        "decisions_digest": decisions_digest,
+        "distribution_digest": distribution_digest,
+    }
+
+    binding["curation_id"] = _curated_dir(stage, str(revision), binding=binding).name
+    return binding
 
 
 def _staging_local_source_path(raw: Any, stage: Path) -> str | None:
@@ -297,77 +337,6 @@ def _exclusions_digest() -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def _policy_binding(
-    stage: Path,
-    source_commit: str,
-    policy: Any,
-    policy_digest: str,
-    allow_copyleft: frozenset[str] | set[str],
-) -> dict[str, Any]:
-    """Bind post-gate decisions and pinned policy inputs to canonical digests."""
-    decisions: dict[str, tuple[str, str | None, str | None]] = {}
-    for derivative, data in _derivative_manifests(stage):
-        decision = _repo_license_decision(data, policy, allow_copyleft)
-        decisions[str(decision.repo_slug)] = (
-            str(decision.status), decision.reason_code, decision.spdx_id,
-        )
-    # Bind rejected repos too: changed gate reasons must change identity.
-    # Preserve the recorded reason, which may be more specific than a fresh
-    # policy resolution. Fixture/ingest exclusions were never license decisions.
-    recorded_excluded = _DedupeLedger.load(
-        _dedupe_dir(stage, _pre_identity_dir(stage, str(source_commit)).name) / "dedupe.jsonl"
-    ).latest
-    for derivative, data in _derivative_manifests(stage, "excluded"):
-        sid = str(data.get("session_id") or derivative.name)
-        entry = recorded_excluded.get(sid) or {}
-        code = entry.get("reason_code")
-        if code not in _LICENSE_REASON_CODES:
-            continue  # never a license-gate decision, never in the digest
-        decision = _repo_license_decision(data, policy, allow_copyleft)
-        decisions[str(decision.repo_slug)] = (
-            "rejected", str(code), decision.spdx_id,
-        )
-    decision_lines = sorted(
-        f"{slug}\t{status}\t{reason_code or ''}\t{spdx_id or ''}\n"
-        for slug, (status, reason_code, spdx_id) in decisions.items()
-    )
-    decisions_digest = hashlib.sha256("".join(decision_lines).encode()).hexdigest()
-    distribution = Counter(spdx for (_, __, spdx) in decisions.values() if spdx)
-    distribution_lines = sorted(
-        f"{spdx}\t{count}\n" for spdx, count in distribution.items()
-    )
-    distribution_digest = hashlib.sha256("".join(distribution_lines).encode()).hexdigest()
-    return {
-        "policy_digest": str(policy_digest),
-        "policy_version": str(policy.policy_version),
-        "allow_copyleft": set(allow_copyleft),
-        "exclusions_digest": _exclusions_digest(),
-        "decisions_digest": decisions_digest,
-        "distribution_digest": distribution_digest,
-    }
-
-
-def resolve_curation_identity(
-    stage: Path,
-    *,
-    source_commit: str,
-    license_policy_path: str | Path | None,
-    allow_copyleft: frozenset[str] | set[str],
-) -> dict[str, Any]:
-    """Derive the v2 curation id after the license gate from its policy-bound evidence."""
-    if not license_policy_path:
-        raise HydrationError(
-            "curation identity requires license_policy_path (fail-closed): "
-            "no license policy file was provided"
-        )
-    from daydream.training.corpus_projection.license import (  # noqa: PLC0415  # local: avoid import cycle
-        load_license_policy,
-    )
-
-    policy, policy_digest = load_license_policy(license_policy_path)
-    binding = _policy_binding(stage, str(source_commit), policy, policy_digest, allow_copyleft)
-    binding["curation_id"] = _curated_dir(stage, str(source_commit), binding=binding).name
-    return binding
 
 
 def _dedupe_dir(stage: Path, curation_id: str) -> Path:

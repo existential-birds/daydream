@@ -2109,3 +2109,65 @@ def test_equivalent_imports_produce_identical_facts_and_rank(tmp_path: Path, fak
     assert v1["prioritized_evidence"] == v2["prioritized_evidence"]
     assert load_yaml_strict(ws1 / "cases" / f"{case_id1}.yaml")["prioritization"] == \
         load_yaml_strict(ws2 / "cases" / f"{case_id2}.yaml")["prioritization"]
+
+
+@pytest.mark.parametrize("gate, code", [
+    ("user", "auth_failed"), ("repository", "no_access"), ("git", "git_preflight_failed"),
+])
+@pytest.mark.parametrize("cli", [False, True])
+@pytest.mark.parametrize("credential", [
+    "api_key=private-preflight-canary", "Authorization: Bearer private-preflight-canary",
+    "https://operator:private-preflight-canary@github.com/o/r",
+])
+def test_preflight_process_errors_are_private_before_direct_or_cli_reporting(
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    gate: str, code: str, cli: bool, credential: str,
+) -> None:
+    import traceback
+
+    ws = tmp_path / "ws"
+    _seed_manifest(ws)
+    before = (ws / "benchmark.yaml").read_bytes()
+    fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
+    fake_gh.set_response("repo-view-full", value=dict(_REPO_VIEW))
+    process_run = subprocess.run
+    calls: list[list[str]] = []
+
+    def process_error(args: Any, *pargs: Any, **kwargs: Any) -> Any:
+        calls.append(list(args))
+        failed = (
+            (gate == "user" and args[:3] == ["gh", "api", "user"])
+            or (gate == "repository" and args[:3] == ["gh", "repo", "view"])
+            or (gate == "git" and args[0] == "git" and "ls-remote" in args)
+        )
+        if failed:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr=f"remote access denied: {credential}")
+        return process_run(args, *pargs, **kwargs)
+
+    monkeypatch.setattr("daydream.git_ops.process.subprocess.run", process_error)
+    if cli:
+        with pytest.raises(SystemExit) as exit_info:
+            top_cli.main(["benchmark", "import-prs", str(ws), "--pr", "101"])
+        assert exit_info.value.code == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        diagnostic = captured.err
+        assert code in diagnostic
+    else:
+        with pytest.raises(gi.PreflightError) as failure:
+            gi.preflight(ws, pr_count=1)
+        assert failure.value.code == code
+        diagnostic = "".join(traceback.format_exception(failure.value))
+        assert "private-preflight-canary" not in failure.value.message
+        captured = capsys.readouterr()
+        assert captured.out == ""
+    assert "remote access denied" in diagnostic
+    assert "private-preflight-canary" not in diagnostic
+    assert (ws / "benchmark.yaml").read_bytes() == before
+    assert not (ws / "runtime/preflight.json").exists()
+    assert not list((ws / "imports").iterdir())
+    assert calls[0] == ["gh", "auth", "status", "--hostname", "github.com"]
+    if gate == "git":
+        argv = calls[-1]
+        assert any(a.startswith("credential.helper=") for a in argv)
+        assert "https://github.com/o/r.git" in argv and credential not in " ".join(argv)

@@ -31,7 +31,6 @@ from daydream.archive.hydrate_admission import (
     license_admission_by_repo as license_admission_by_repo,
     license_admission_summary as license_admission_summary,
     rebuild_index as rebuild_index,
-    resolve_curation_identity as resolve_curation_identity,
     restamp_admitted_digests as restamp_admitted_digests,
 )
 from daydream.archive.hydrate_discovery import (
@@ -752,12 +751,8 @@ def prepare_hydration(config: HydrateHubConfig, source_client: HubClient) -> tup
     # before the gate moves rejected derivatives out of the admitted population.
     enrich_license_evidence(config.stage_dir, resolver=_make_license_resolver())
     restamp_admitted_digests(config.stage_dir, revision=source_commit)
-    apply_license_gate(
+    binding = apply_license_gate(
         config.stage_dir, revision=source_commit, license_policy_path=config.license_policy_path,
-        allow_copyleft=config.allow_copyleft,
-    )
-    binding = resolve_curation_identity(
-        config.stage_dir, source_commit=source_commit, license_policy_path=config.license_policy_path,
         allow_copyleft=config.allow_copyleft,
     )
     return source_commit, binding

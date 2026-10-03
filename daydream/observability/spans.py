@@ -6,11 +6,11 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
-from dataclasses import asdict, replace
+from dataclasses import asdict, fields, replace
 from functools import singledispatchmethod
 from importlib.metadata import version
 from types import TracebackType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from opentelemetry import trace
 from opentelemetry.context import Context
@@ -32,6 +32,7 @@ from daydream.backends import (
     GenerationEndEvent,
     GenerationStartEvent,
     MetricsEvent,
+    ModelUsageTotals,
     OspreyRequestConfig,
     PiRequestConfig,
     ReasoningChoicePart,
@@ -407,10 +408,20 @@ class AttemptObserver:
     def capture(self) -> bool:
         return self.scope.session is not None and self.scope.session.policy.capture_content
 
-    def _identity(self, event: Any) -> None:
-        for field, collection, attrs in (
-            ("model_name", self.models, ("gen_ai.response.model",)),
-            ("provider_name", self.providers, ("gen_ai.provider.name", "gen_ai.system")),
+    def _response_label(self, value: Any, *, max_chars: int, context: str) -> str | None:
+        if value is None:
+            return None
+        admitted, diagnostic = _admit_identity_label(value, max_chars=max_chars, context=context)
+        if diagnostic is not None:
+            code = diagnostic.code
+            self.diagnostic_counts[code] = self.diagnostic_counts.get(code, 0) + 1
+        return admitted
+
+    def _identity(self, event: AgentEvent) -> AgentEvent:
+        rejected: dict[str, None] = {}
+        for field, collection, attrs, limit in (
+            ("model_name", self.models, ("gen_ai.response.model",), _MAX_MODEL_NAME_CHARS),
+            ("provider_name", self.providers, ("gen_ai.provider.name", "gen_ai.system"), _MAX_PROVIDER_NAME_CHARS),
         ):
             value = getattr(event, field, None)
             if field == "model_name" and isinstance(event, RequestEvent):
@@ -418,12 +429,15 @@ class AttemptObserver:
             if value is not None:
                 if value not in collection:
                     collection.append(value)
-                self.scope.attrs(dict.fromkeys(attrs, value))
+                admitted = self._response_label(value, max_chars=limit, context=field)
+                self.scope.attrs(dict.fromkeys(attrs, admitted))
+                if admitted is None:
+                    rejected[field] = None
         self.scope.attrs(
             {
                 "gen_ai.conversation.id": getattr(event, "session_id", None),
                 "gen_ai.response.finish_reasons": (
-                    [event.finish_reason] if getattr(event, "finish_reason", None) is not None else None
+                    [getattr(event, "finish_reason")] if getattr(event, "finish_reason", None) is not None else None
                 ),
             }
         )
@@ -434,13 +448,16 @@ class AttemptObserver:
                     "daydream.duration_api_ms": event.duration_api_ms,
                 }
             )
+        # Keep raw native evidence for the recorder; only the telemetry projection
+        # omits rejected labels from per-message and generation metadata.
+        return replace(cast(Any, event), **rejected) if rejected else event
 
     def observe(self, event: AgentEvent) -> None:
         if self.scope.session is None:
             return
         try:
-            self._identity(event)
-            self._observe(event, self.scope.session.policy)
+            projected = self._identity(event)
+            self._observe(projected, self.scope.session.policy)
         except Exception:
             _logger.warning("Trace event could not be recorded; execution continues")
 
@@ -551,7 +568,19 @@ class AttemptObserver:
             # Terminal/session totals close billing; absent generations bill the attempt.
             self._saw_authoritative_total = True
         if event.model_usage is not None:
-            self.scope.attrs({"daydream.model_usage": {key: asdict(value) for key, value in event.model_usage.items()}})
+            model_usage: dict[str, dict[str, Any]] = {}
+            for key, value in event.model_usage.items():
+                model_key = self._response_label(key, max_chars=_MAX_MODEL_NAME_CHARS, context="model_name")
+                model = self._response_label(value.model_name, max_chars=_MAX_MODEL_NAME_CHARS, context="model_name")
+                if model_key is None or model is None:
+                    continue
+                record = {field.name: getattr(value, field.name) for field in fields(ModelUsageTotals)}
+                record["model_name"] = model
+                record["provider_name"] = self._response_label(
+                    value.provider_name, max_chars=_MAX_PROVIDER_NAME_CHARS, context="provider_name"
+                )
+                model_usage[model_key] = record
+            self.scope.attrs({"daydream.model_usage": model_usage})
 
     @_observe.register
     def _observe_result(self, event: ResultEvent, policy: PrivacyPolicy) -> None:

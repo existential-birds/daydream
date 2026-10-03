@@ -7,11 +7,11 @@ Continuation started at `b98a9dd51fde81df5dc4534a85ab29a986f6a127` on
 The original inventory and pinned Python 3.12 / scb-check 0.2.0 method reproduce
 113,364 physical lines and 85,527 source lines at baseline. The continuation's
 starting inventory reproduces 111,025 physical lines across 364 production files.
-The latest pushed checkpoint `25d1ac7cc35d834ec612c889977cbbe8c62dfa53` has
-362 production files, 108,776 physical lines and 83,349 source lines
-(4.047% and 2.547% aggregate reductions). Starting source LOC is 85,165.
+The latest pushed checkpoint `2f35025ba7f55538cc67d167b23250b7dcc42c7a` has
+362 production files, 108,612 physical lines and 83,232 source lines
+(4.192% and 2.683% aggregate reductions). Starting source LOC is 85,165.
 Targets remain at most 102,027 physical and 76,974 source lines: shortfalls are
-6,749 physical and 6,375 source lines. The objective remains unmet; useful
+6,585 physical and 6,258 source lines. The objective remains unmet; useful
 owner consolidation and passing checks do not establish completion.
 
 ## Decisions under integration
@@ -485,3 +485,87 @@ reproduction and ordinary hook verification remain required before pushing this
 checkpoint. No generated/packed code or inventory changes contribute to its count.
 Further assessment targets one captured license-policy gate and native plan/event
 ownership across all callers; unchanged rejected local conversions are not repeated.
+
+
+### Eighth checkpoint normal-hook result
+
+Signed `2f35025ba7f55538cc67d167b23250b7dcc42c7a` committed and pushed normally.
+All ordinary gates passed: lock/sync, Ruff, both Vulture scans, mypy (748 files),
+9,471 tests / 14 existing skips / 205 warnings in 595.30 seconds, 90.60% branch
+coverage against the unchanged 86% floor, Docker actionlint, coverage artifact
+and naming. Both independent reviews reproduced the complete pinned report and
+all 362 production paths/bytes; the coordinator separately checked every committed
+Git production byte. PR base remains the original baseline, head is this checkpoint,
+and PR #1444 remains open/draft. Its description reports the exact counts, native
+workflow evidence and remaining shortfalls. No hooks or gates were bypassed.
+The integration freeze is released for the reviewed license-policy capture and
+further supported plan/event ownership work.
+
+The whole invocation closure prototype was rejected: after wrapping readable
+calls it removed only nine source / five physical lines, retained twelve real
+finalization controls and nested the same large executor. Measured CC and cognitive
+mass nearly doubled. Different ATIF, message/total override and sealed generation
+billing policies remain distinct; merging them would recreate three adapters.
+The native AUC tie-group prototype was rejected after independent review:
+three source / two physical lines did not justify the added synthetic NaN grouping
+condition. The original kernel remains unchanged and receives no reduction credit. No unsupported public helper or legacy feature is retired.
+
+
+### Ninth checkpoint integration
+
+The frozen dirty inventory measures 83,157 source / 108,526 physical lines across
+362 production files with the same pinned method and unchanged inventory hash.
+This batch removes 75 source / 86 physical lines, including all security additions.
+Aggregate reduction is 2.771% source / 4.268% physical; remaining shortfalls are
+6,183 source / 6,499 physical. High CC remains 492; high cognitive functions fall
+604 → 603, and clone LOC falls 2,240 → 2,235. The target remains unmet.
+
+- Hydration captures one license policy and digest for admission, persisted
+  exclusion history, and curation binding. The identity-only adapter and second
+  parse/reclassification disappear. A native policy replacement regression proves
+  that admission and identity bind the same captured policy; 166 native differential
+  cases and 155 affected checks pass. The owner costs 32 fewer source / 36 physical
+  lines; its coarser responsibility increases one local cognitive-threshold count.
+- Improve retains the normalized, repaired, redacted authored plan and only used
+  commands plus captured excerpts. Host numbering, command-expansion, STOP/default
+  projections and landing reconstruction disappear. Markdown and complete issue
+  outputs match across 1,600 cases; 387 native flow/plan checks pass, including
+  custom builders, repair, audit, landing and resume. Successful diagnostic SHA,
+  lengths and shape now bind the retained authored object; exact assertions and
+  extension documentation record the intentional evidence identity change. The
+  owner removes 58 source / 59 physical lines without a new module.
+- Harvest owns one successful raw comment population for reviewer and scoped
+  resolution evidence. Failed acquisition remains retryable; standalone signal
+  APIs still acquire their own evidence. The parent-login mirror and replied-ID
+  set disappear. 120 population and 840 acquisition cases match; 152 native
+  checks and a real acquisition-race regression pass. Final readable cost is
+  four fewer source / nine physical lines, including two explicit API boundaries.
+- Telemetry admits response labels through existing bounded identity policy in
+  detached observer copies. Actual installed SDK → runner → loopback OTLP tests
+  exposed unsafe aliases in response model/message usage despite safe aggregates.
+  Public backend events and recorder evidence remain native; numeric billing and
+  distinct reconciliation policies remain. 116 affected checks pass. The security
+  correction adds 26 source / 29 physical lines and receives no reduction credit.
+- GitHub preflight applies the existing structured redactor to three command
+  diagnostic boundaries and suppresses raw lower causes. Opaque lowercase API key
+  and header canaries cannot escape through direct errors or top-level CLI output.
+  Gate categories, safe detail, auth/command order and persisted identity remain;
+  136 native checks pass. This correction adds three source / three physical lines.
+- Record deduplication captures normalized description grams once for a native
+  pairwise population. Pair DTOs and verbatim evidence remain. 12,000 complete
+  output populations match, including source UIDs, absent/stopword/Unicode/nonstring
+  descriptions and threshold edge cases. At 200 records, both emit 19,900 pairs;
+  normalization calls fall from 20,100 to 200. The owner removes ten source /
+  fourteen physical lines and one cognitive-threshold function. Independent
+  review is clean; all 186 affected dedup, analyzer and real merge checks pass,
+  with scoped Ruff/mypy and diff checks clean.
+
+All owner applications were reviewed independently and checked against the exact
+reviewed before/after bytes. Two complete integrated reviews found no material
+issues; independently reproduced complete pinned reports and every one of 362
+production paths/bytes match the frozen inventory. The coordinator separately
+checks the committed inventory; ordinary hook verification remains required before
+pushing this checkpoint. Required locked extras were restored after a coordinator proof
+command inadvertently recreated the shared virtual environment; tracked files,
+locks and gate requirements were unchanged. Further owner prototypes stay outside
+this frozen checkout, and the PR stays draft until both ten-percent targets pass.

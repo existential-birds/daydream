@@ -19,6 +19,7 @@ from daydream.artifact_visibility import (
     validate_private_workspace_owner,
 )
 from daydream.improve import plan_index
+from daydream.improve.assemble import AdmittedPlan
 from daydream.improve.plan_diagnostics import (
     _attempt_diagnostic,
     _validation_stage,
@@ -304,7 +305,12 @@ class PlanWriteSession:
         self._written.append(
             (
                 reservation.index,
-                {**selection, "number": number, "path": path},
+                {
+                    "finding": finding,
+                    "number": number,
+                    "path": path,
+                    "title": selection["plan"].authored["title"],
+                },
             )
         )
         self._diagnostics.append(
@@ -332,7 +338,9 @@ class PlanWriteSession:
         number = reservation.number
         title = str(finding.get("title") or "Selected finding")
         attempt = self._attempt_of(selection)
-        slug = plan_slug(selection.get("title"))
+        plan = selection.get("plan")
+        plan_title = plan.authored["title"] if isinstance(plan, AdmittedPlan) else None
+        slug = plan_slug(plan_title)
         if selection.get("error"):
             raw_errors = attempt.get("errors") if attempt is not None else None
             if not isinstance(raw_errors, (list, tuple)) and attempt is not None:
@@ -427,6 +435,7 @@ class PlanWriteSession:
                     self._reanchor_worktree = worktree
                 plans_dir = worktree / "daydream_plans"
             try:
+                assert plan_result is not None
                 text = render_plan(
                     finding,
                     plan=plan_result,
@@ -454,7 +463,7 @@ class PlanWriteSession:
             entry = plan_index._index_entry(
                 number=number,
                 slug=slug,
-                title=selection.get("title") or title,
+                title=plan_title or title,
                 fingerprint=reservation.fingerprint,
                 finding=finding,
                 planned_at=planned_at,
@@ -549,13 +558,9 @@ class PlanWriteSession:
         )
 
 
-def _plan_payload(selection: dict[str, Any]) -> dict[str, Any]:
-    """Return the authored plan fields, without host bookkeeping keys."""
-    return {
-        key: value
-        for key, value in selection.items()
-        if key not in {"finding", "error"} and not key.startswith("_")
-    }
+def _plan_payload(selection: dict[str, Any]) -> AdmittedPlan | None:
+    plan = selection.get("plan")
+    return plan if isinstance(plan, AdmittedPlan) else None
 
 
 def _by_reservation(

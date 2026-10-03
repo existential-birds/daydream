@@ -14,13 +14,14 @@ import yaml
 from daydream import git_ops
 from daydream.benchmark import schema, storage
 from daydream.git_ops import process as git_process
+from daydream.redaction import redact_structured_text
 
 
 def _run_gh_api_user(root: Path) -> dict[str, Any]:
     """Return the authenticated GitHub user record from ``gh api user``."""
     proc = git_process._run_gh(root, ["api", "user"], auth=git_ops.INHERIT_GITHUB_AUTH)
     if proc.returncode != 0:
-        raise git_ops.GitError(f"gh api user failed: {proc.stderr.strip()}")
+        raise git_ops.GitError(redact_structured_text(f"gh api user failed: {proc.stderr.strip()}"))
     data = json.loads(proc.stdout)
     if not isinstance(data, dict):
         raise git_ops.GitError("gh api user returned a non-object payload")
@@ -44,7 +45,9 @@ def _run_repo_view(root: Path, repo_slug: str) -> dict[str, Any]:
         auth=git_ops.INHERIT_GITHUB_AUTH,
     )
     if proc.returncode != 0:
-        raise PreflightError("no_access", f"cannot read repository {repo_slug}: {proc.stderr.strip()}")
+        raise PreflightError(
+            "no_access", redact_structured_text(f"cannot read repository {repo_slug}: {proc.stderr.strip()}")
+        )
     try:
         view = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
@@ -108,7 +111,7 @@ def preflight(root: Path, pr_count: int) -> None:
     try:
         user = _run_gh_api_user(root)
     except git_ops.GitError as exc:
-        raise PreflightError("auth_failed", str(exc)) from exc
+        raise PreflightError("auth_failed", redact_structured_text(str(exc))) from None
     login = user.get("login") if isinstance(user, dict) else None
     if not login:
         raise PreflightError("auth_failed", "gh api user returned no login")
@@ -136,7 +139,7 @@ def preflight(root: Path, pr_count: int) -> None:
     try:
         git_ops.git_ls_remote(root, f"https://github.com/{repo_slug}.git")
     except git_ops.GitError as exc:
-        raise PreflightError("git_preflight_failed", str(exc)) from exc
+        raise PreflightError("git_preflight_failed", redact_structured_text(str(exc))) from None
 
     # The read-access gate passed, so the fresh identity may now be persisted:
     # never stage the identity before repository read access is confirmed

@@ -597,11 +597,12 @@ def test_enriched_evidence_matches_declared_evidence_contract(tmp_path: Path) ->
     assert (declared.status, declared.reason_code) == (enriched.status, enriched.reason_code)
     assert (declared.status, declared.reason_code) == ("admitted", None)
 
-    rejected = hydrate.apply_license_gate(
+    hydrate.apply_license_gate(
         stage, revision="a" * 40, license_policy_path="daydream/training/schema/license-policy-production.json",
         allow_copyleft=frozenset(),
     )
-    assert rejected == []
+    assert sorted(p.name for p in (stage / "runs").iterdir()) == ["sess-declared", "sess-enriched"]
+    assert not (stage / "excluded").exists()
 
     row_declared_t: tuple[str | None, dict[str, str] | None] = _session_identity(
         stage, "sess-declared", "a" * 40, root="runs", collision=False)
@@ -1199,10 +1200,8 @@ def _identity_for(stage: Path, *, policy_path: str, allow_copyleft: frozenset[st
     revision = "a" * 40
     license_enrich.enrich_license_evidence(stage, resolver=_FakeLicenseResolver())
     hydrate.restamp_admitted_digests(stage, revision=revision)
-    hydrate.apply_license_gate(stage, revision=revision, license_policy_path=policy_path, allow_copyleft=allow_copyleft,
-    )
-    binding = hydrate.resolve_curation_identity(
-        stage, source_commit=revision, license_policy_path=policy_path, allow_copyleft=allow_copyleft,
+    binding = hydrate.apply_license_gate(
+        stage, revision=revision, license_policy_path=policy_path, allow_copyleft=allow_copyleft,
     )
     return str(binding["curation_id"])
 
@@ -1255,3 +1254,45 @@ def test_hf_atomic_commit_uses_captured_bytes_with_native_operation_constructor(
         assert operation.upload_info.size == len(expected)
         with operation.as_file() as stream:
             assert stream.read() == expected
+
+
+def test_hydration_binds_the_policy_captured_before_file_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daydream.archive import hydrate_admission
+
+    _fake_resolver(monkeypatch)
+    policy_path = Path(_write_policy(tmp_path))
+    original_digest = hashlib.sha256(policy_path.read_bytes()).hexdigest()
+    replacement = json.dumps({"policy_version": "2", "spdx_decisions": {"MIT": "rejected"}}).encode()
+    resolve = hydrate_admission._repo_license_decision
+
+    def replace_policy_after_decision(data: dict[str, Any], policy: Any, optins: Any) -> Any:
+        decision = resolve(data, policy, optins)
+        policy_path.write_bytes(replacement)
+        return decision
+
+    monkeypatch.setattr(hydrate_admission, "_repo_license_decision", replace_policy_after_decision)
+    hub = FakeHub(repo_id="org/private-ds", private=True, files={
+        "bundles/sess-a/manifest.json": json.dumps({
+            "session_id": "sess-a",
+            "git": {"remote_url": "https://github.com/octo/good", "repo_slug": "octo/good"},
+            "license_evidence": {"spdx_id": "MIT", "source": "declared"},
+        }).encode(),
+        "bundles/sess-a/trajectory.json": b"{}",
+    })
+    hub.commit_revision("a" * 40)
+    stage = tmp_path / "stage"
+    source, binding = hydrate.prepare_hydration(hydrate.HydrateHubConfig(
+        source_repo="org/private-ds", source_revision="a" * 40,
+        destination_repo="org/private-ds", stage_dir=stage,
+        license_policy_path=str(policy_path),
+    ), hub)
+
+    assert policy_path.read_bytes() == replacement
+    assert binding is not None and binding["policy_version"] == "1"
+    assert binding["policy_digest"] == original_digest
+    assert [row["session_id"] for row in query_runs(stage)] == ["sess-a"]
+    ledger = hydrate.build_import_ledger(stage, revision=source, source_commit=source, binding=binding)
+    assert [row["session_id"] for row in ledger["imported"]] == ["sess-a"]
+    assert ledger["curation_id"] == binding["curation_id"]

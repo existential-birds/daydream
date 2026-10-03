@@ -1389,3 +1389,68 @@ def test_rubric_to_dict_carries_full_per_finding_resolutions() -> None:
     assert stored[0]["evidence_digest"] == "d" * 32
     assert stored[0]["evidence"] == [{"reply_id": 1}]
     assert d["per_finding_outcomes"] == ["accepted"]
+
+
+def test_native_harvest_captures_one_comments_population_for_both_scopes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = _seed_deep_bronze(tmp_path)
+    _write_findings(run_dir, _FP_A)
+    first = _finding_comments(_FP_A, reply="applied", reply_created_at="2026-09-01T00:00:00Z")
+    first.extend([
+        _bot_comment(_FP_B, id=10),
+        {"id": 11, "in_reply_to_id": 10, "user": {"login": "outside-reviewer"}, "body": "thanks"},
+    ])
+    later = [comment for comment in first if comment["id"] != 2]
+    calls: list[str] = []
+
+    def api(_repo: Path, endpoint: str, **_kwargs: Any) -> Any:
+        calls.append(endpoint)
+        if endpoint.endswith("/reviews"):
+            return []
+        if endpoint.endswith("/comments"):
+            return first if calls.count(endpoint) == 1 else later
+        return {"merged": True, "merged_at": "2026-09-02T00:00:00Z"}
+
+    monkeypatch.setattr(git_ops, "gh_api", api)
+    evidence = HarvestPass(HarvestConfig(tmp_path)).acquire_harvest_evidence(
+        _typed_row(_pr_row(run_dir, "s1")), repo_resolution=None, base_sha_status="unavailable",
+    )
+    assert calls == ["repos/o/r/pulls/7", "repos/o/r/pulls/7/reviews", "repos/o/r/pulls/7/comments"]
+    assert evidence.reviewer_logins == ("amelia", "outside-reviewer")
+    assert evidence.rubric.comment_resolution == CommentResolutionSignal(total=1, replied=1, unresolved=0)
+    assert evidence.rubric.per_finding_resolutions is not None
+    assert evidence.rubric.per_finding_resolutions[0].disposition == "accepted"
+    assert _build_annotation(_typed_row(_pr_row(run_dir, "s1")), evidence).labels == ["accepted"]
+
+
+@pytest.mark.parametrize("failed_endpoint", ["reviews", "comments"])
+def test_native_harvest_retries_comments_after_reviewer_acquisition_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_endpoint: str,
+) -> None:
+    run_dir = _seed_deep_bronze(tmp_path)
+    _write_findings(run_dir, _FP_A)
+    comments = _finding_comments(_FP_A, reply="applied", reply_created_at="2026-09-01T00:00:00Z")
+    calls: list[str] = []
+
+    def api(_repo: Path, endpoint: str, **_kwargs: Any) -> Any:
+        kind = endpoint.rsplit("/", 1)[-1]
+        calls.append(kind)
+        if kind == failed_endpoint and calls.count(kind) == 1:
+            raise GitError("temporary reviewer acquisition failure")
+        if kind == "reviews":
+            return [{"user": {"login": "formal-reviewer"}}]
+        if kind == "comments":
+            return comments
+        return {"merged": True, "merged_at": "2026-09-02T00:00:00Z"}
+
+    monkeypatch.setattr(git_ops, "gh_api", api)
+    evidence = HarvestPass(HarvestConfig(tmp_path)).acquire_harvest_evidence(
+        _typed_row(_pr_row(run_dir, "s1")), repo_resolution=None, base_sha_status="unavailable",
+    )
+    expected = (["7", "reviews", "comments"] if failed_endpoint == "reviews"
+                else ["7", "reviews", "comments", "comments"])
+    assert calls == expected
+    assert evidence.reviewer_logins == ()
+    assert evidence.rubric.per_finding_resolutions is not None
+    assert evidence.rubric.per_finding_resolutions[0].disposition == "accepted"

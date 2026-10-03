@@ -815,3 +815,69 @@ async def test_runner_failed_billed_attempt_wears_its_own_bill_real_pi(
     assert failed["daydream.billing.owner"] == "structural_attempt"
     # No result file: the failure surfaced to the caller.
     assert not (feature_branch_repo / ".daydream/protocol-result.json").exists()
+
+
+@pytest.mark.parametrize("content_mode", ["full", "metadata"])
+@pytest.mark.parametrize("source", ["assistant", "usage-key", "usage-model", "usage-provider"])
+@pytest.mark.parametrize("template", ["/{}/model", "api_key={}", "{}\nmodel", "{}" * 20])
+async def test_claude_response_identity_admission_on_real_export_wire(
+    content_mode: str, source: str, template: str, ext_dir: ExtDir, feature_branch_repo: Path,
+    make_config: Callable[..., RunConfig], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from claude_agent_sdk.types import AssistantMessage, ModelUsage, ResultMessage, TextBlock
+
+    private = "private-native-response-8fe2"
+    label = template.format(*([private] * template.count("{}")))
+    _flow(ext_dir)
+    usage = {"input_tokens": 60, "output_tokens": 12}
+    native_model = label if source == "assistant" else "ordinary-response-model"
+    per_model = ModelUsage(
+        inputTokens=60, outputTokens=12, cacheReadInputTokens=0, cacheCreationInputTokens=0,
+        webSearchRequests=0, costUSD=0.021, contextWindow=100000, maxOutputTokens=1000,
+        canonicalModel=label if source == "usage-model" else "ordinary-canonical-model",
+        provider=label if source == "usage-provider" else "ordinary-provider",
+    )
+    messages = [
+        AssistantMessage(content=[TextBlock("ordinary answer")], model=native_model, usage=usage),
+        ResultMessage(
+            subtype="success", duration_ms=150, duration_api_ms=120, is_error=False, num_turns=1,
+            session_id="ordinary-session", total_cost_usd=0.021, usage=usage, result="ordinary answer",
+            model_usage={label if source == "usage-key" else "ordinary-bucket": per_model},
+        ),
+    ]
+    captured: dict[str, Any] = {}
+    client = scripted_client(messages, captured=captured)
+    monkeypatch.setattr("daydream.backends.claude.ClaudeSDKClient", client)
+    monkeypatch.setattr("daydream.backends.claude._RunLocalClaudeSDKClient", lambda **kwargs: client(kwargs["options"]))
+    with otlp_collector() as receiver:
+        _configure_otlp(monkeypatch, receiver.base_url + "/v1/traces")
+        monkeypatch.setenv("DAYDREAM_TRACE_CONTENT", content_mode)
+        assert await runner.run(_flow_config(make_config, feature_branch_repo, backend="claude")) == 0
+    assert captured["prompt"] == "inspect the sample"
+    assert json.loads((feature_branch_repo / ".daydream/protocol-result.json").read_text()) == {
+        "output": "ordinary answer",
+    }
+    payload = json.dumps([request["body"] for request in receiver.requests])
+    assert receiver.requests and private not in payload
+    attempt = attributes(_attempt(receiver.spans))
+    assert attempt["gen_ai.usage.input_tokens"] == 60
+    assert attempt["gen_ai.usage.output_tokens"] == 12
+    assert attempt["gen_ai.usage.cost"] == 0.021
+    assert attempt["daydream.billing.owner"] == "structural_attempt"
+    assert attempt["daydream.backend_diagnostic.codes"]
+    if source == "assistant":
+        assert "gen_ai.response.model" not in attempt
+        assert "daydream.models" not in attempt
+        assert json.loads(attempt["daydream.message_usage"])[0]["model"] is None
+    else:
+        assert attempt["gen_ai.response.model"] == "ordinary-response-model"
+        assert attempt["daydream.models"] == ["ordinary-response-model"]
+    model_usage = json.loads(attempt["daydream.model_usage"])
+    if source in ("usage-key", "usage-model"):
+        assert model_usage == {}
+    else:
+        assert model_usage["ordinary-bucket"]["model_name"] == "ordinary-canonical-model"
+        assert model_usage["ordinary-bucket"]["provider_name"] == (
+            None if source == "usage-provider" else "ordinary-provider"
+        )
+        assert model_usage["ordinary-bucket"]["cost_usd"] == 0.021

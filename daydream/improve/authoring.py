@@ -116,7 +116,7 @@ async def author_plan(
         else:
             assembled, issues = None, (AssemblyIssue(code="NO_STRUCTURED_OBJECT", pointer="/"),)
         if assembled is not None and not issues:
-            return {"finding": finding, "_attempt": attempt, **assembled}
+            return {"finding": finding, "_attempt": attempt, "plan": assembled}
         errors = tuple(render_issue(issue) for issue in issues)
         if generation == 1:
             return failed_plan_result(

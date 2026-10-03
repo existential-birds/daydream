@@ -1058,3 +1058,51 @@ async def test_actual_nested_agent_scope_is_subagent_siblings_are_not() -> None:
     assert by_path["daydream.agent.parent"]["daydream.agent.role"] == "root"
     assert by_path["daydream.agent.child"]["daydream.agent.role"] == "subagent"
     assert by_path["daydream.agent.sibling"]["daydream.agent.role"] == "root"
+
+
+async def test_response_identity_projection_does_not_mutate_native_events() -> None:
+    private_model = "/private/native-event-model"
+    private_provider = "api_key=private-native-provider"
+    event = MetricsEvent("native-message", 0, 2, 0, 0.0, model_name=private_model, provider_name=private_provider)
+    exporter, registry = _memory_tracing()
+    async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
+        async with attempt_scope(1) as observer:
+            observer.observe(event)
+    assert event.model_name == private_model and event.provider_name == private_provider
+    attempt = next(span for span in exporter.get_finished_spans()
+                   if (span.attributes or {}).get("daydream.span.kind") == "attempt")
+    attrs = attempt.attributes or {}
+    assert "gen_ai.response.model" not in attrs
+    assert "gen_ai.provider.name" not in attrs and "gen_ai.system" not in attrs
+    assert attrs["gen_ai.usage.input_tokens"] == 0
+    assert attrs["gen_ai.usage.cost"] == 0.0
+    message = json.loads(str(attrs["daydream.message_usage"]))[0]
+    assert message["model"] is None and message["provider"] is None
+    assert private_model not in str(attrs) and "private-native-provider" not in str(attrs)
+
+
+async def test_model_usage_projection_excludes_private_subclass_fields() -> None:
+    from dataclasses import dataclass
+
+    from daydream.backends import ModelUsageTotals
+
+    @dataclass(frozen=True)
+    class ExtendedUsage(ModelUsageTotals):
+        private_path: str = "/private/native-model-usage-canary"
+
+    event = CostEvent(0.0, 0, 2, model_usage={
+        "ordinary-model": ExtendedUsage("ordinary-model", "ordinary-provider", input_tokens=0, cost_usd=0.0),
+    })
+    exporter, registry = _memory_tracing()
+    async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
+        async with attempt_scope(1) as observer:
+            observer.observe(event)
+    attempt = next(span for span in exporter.get_finished_spans()
+                   if (span.attributes or {}).get("daydream.span.kind") == "attempt")
+    attrs = attempt.attributes or {}
+    usage = json.loads(str(attrs["daydream.model_usage"]))["ordinary-model"]
+    assert usage["model_name"] == "ordinary-model" and usage["provider_name"] == "ordinary-provider"
+    assert usage["input_tokens"] == 0 and usage["cost_usd"] == 0.0
+    assert set(usage) == {"model_name", "provider_name", "input_tokens", "output_tokens", "cached_tokens",
+                          "cache_creation_tokens", "cost_usd"}
+    assert "private_path" not in usage and "native-model-usage-canary" not in str(attrs)

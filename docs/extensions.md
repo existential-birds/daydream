@@ -428,8 +428,10 @@ own `PLAN_AUTHOR_SCHEMA` as the backend `output_schema` for the plan-write
 call. `daydream.improve.assemble.assemble_plan` is the single validation
 boundary: it validates the authored object against that schema, applies the
 deterministic repairs, collects every remaining authoring defect as a pointered
-`AssemblyIssue`, and only then expands the result into the host-owned assembled
-plan shape that `render_plan` consumes. A wholesale prompt override cannot
+`AssemblyIssue`, and only then returns an `AdmittedPlan` containing the normalized authoring
+object and captured repository excerpts and approved command facts. The built-in
+`render_plan` derives numbering, command displays, and execution policy from that
+owner. A wholesale prompt override cannot
 replace or weaken that boundary.
 
 Legacy override output containing `{markdown: ...}` fails closed: every
@@ -439,6 +441,13 @@ required authoring field is absent, so assembly returns one
 and no plan file is written. There is intentionally no Markdown-to-typed
 adapter. Override authors must update their prompt to request
 `PlanWriterResult`.
+
+Successful plan-attempt diagnostics retain their existing closed metadata keys.
+Their `received.sha256`, serialized length, and shape counts identify the
+normalized, repaired, redacted authoring object in `AdmittedPlan.authored`. They
+exclude derived numbering, Git policy, expanded commands, and captured source
+excerpts. The artifact path and plan index still identify the rendered handoff.
+Failed-attempt metadata continues to describe the received model output.
 
 This compatibility repair does not bump `EXTENSION_API_VERSION` or its support
 floor. The documented prompt name and kwargs are unchanged, and the legacy

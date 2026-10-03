@@ -25,10 +25,11 @@ def test_license_exclusion_removes_current_run_and_preserves_readmission_history
     stage = _ingested_stage(tmp_path)
     hydrate.dedupe_admitted(stage, revision="a" * 40)
     history = _observe(stage, "sess-a")
-    rejected = hydrate.apply_license_gate(
+    hydrate.apply_license_gate(
         stage, revision="a" * 40, license_policy_path=_write_policy(tmp_path), allow_copyleft=frozenset(),
     )
-    assert rejected == [("sess-a", "repo_identity_missing")]
+    entry = json.loads(next(stage.glob("_dedupe/*/dedupe.jsonl")).read_text().splitlines()[-1])
+    assert (entry["session_id"], entry["reason_code"]) == ("sess-a", "repo_identity_missing")
     assert query_runs(stage) == []
     assert label_observation_history(stage, "sess-a") == history
     ledger = hydrate.build_import_ledger(stage, revision="a" * 40, source_commit="a" * 40)

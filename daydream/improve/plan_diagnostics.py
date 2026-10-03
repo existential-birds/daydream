@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from daydream.improve.assemble import AdmittedPlan
 from daydream.improve.redaction import redact_model_value
 from daydream.trajectory import redact_text
 
@@ -26,6 +27,8 @@ def _safe_metadata_label(value: Any, *, fallback: str) -> str:
 
 
 def _received_metadata(value: Any) -> dict[str, Any]:
+    if isinstance(value, AdmittedPlan):
+        value = value.authored
     received_type = (
         "null"
         if value is None

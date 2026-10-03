@@ -361,12 +361,45 @@ class PRCommentThreads:
     IDs cover footer-marked top-level comments; an optional fingerprint scope
     excludes other runs' threads. Each fingerprint keeps its first comment id.
     replies_by_comment retains full reply objects for semantic classification;
-    replied_ids is the subset with replies."""
+    reply mapping keys are the parent ids with replies."""
 
     top_level_daydream_ids: set[int]
-    replied_ids: set[int]
     comment_id_by_fingerprint: dict[str, int]
-    replies_by_comment: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
+    replies_by_comment: dict[int, list[dict[str, Any]]]= field(default_factory=dict)
+
+    @classmethod
+    def from_comments(
+        cls, comments: list[dict[str, Any]], *, session_fingerprints: list[str] | None = None,
+    ) -> PRCommentThreads:
+        """Index one captured population, retaining reply evidence and first markers."""
+        scope = set(session_fingerprints) if session_fingerprints is not None else None
+
+        # Pass 1: top-level daydream comment IDs and the fingerprints they carry.
+        top_level_daydream_ids: set[int] = set()
+        comment_id_by_fingerprint: dict[str, int] = {}
+        for comment in comments:
+            if comment.get("in_reply_to_id") is None and _is_daydream_comment(comment):
+                markers = parse_finding_markers(comment.get("body") or "")
+                if scope is not None and not any(fp in scope for fp in markers):
+                    continue
+                cid = comment["id"]
+                top_level_daydream_ids.add(cid)
+                for fingerprint in markers:
+                    comment_id_by_fingerprint.setdefault(fingerprint, cid)
+
+        # Pass 2: which top-level comments received a reply, keeping the full
+        # reply objects (author, association, body, timestamps) rather than a
+        # count — the reply text is the evidence downstream classifiers need.
+        replies_by_comment: dict[int, list[dict[str, Any]]] = {}
+        for comment in comments:
+            in_reply_to = comment.get("in_reply_to_id")
+            if in_reply_to in top_level_daydream_ids:
+                replies_by_comment.setdefault(in_reply_to, []).append(comment)
+        return cls(
+            top_level_daydream_ids=top_level_daydream_ids,
+            comment_id_by_fingerprint=comment_id_by_fingerprint,
+            replies_by_comment=replies_by_comment,
+        )
 
 
 def index_pr_review_comments(
@@ -384,41 +417,8 @@ def index_pr_review_comments(
     number = row.get("pr_number")
     if repo is None or number is None:
         return None
-
     comments = gh_api(repo, f"repos/{repo}/pulls/{number}/comments", paginate=True)
-
-    scope = set(session_fingerprints) if session_fingerprints is not None else None
-
-    # Pass 1: top-level daydream comment IDs and the fingerprints they carry.
-    top_level_daydream_ids: set[int] = set()
-    comment_id_by_fingerprint: dict[str, int] = {}
-    for comment in comments:
-        if comment.get("in_reply_to_id") is None and _is_daydream_comment(comment):
-            markers = parse_finding_markers(comment.get("body") or "")
-            if scope is not None and not any(fp in scope for fp in markers):
-                continue
-            cid = comment["id"]
-            top_level_daydream_ids.add(cid)
-            for fingerprint in markers:
-                comment_id_by_fingerprint.setdefault(fingerprint, cid)
-
-    # Pass 2: which top-level comments received a reply, keeping the full
-    # reply objects (author, association, body, timestamps) rather than a
-    # count — the reply text is the evidence downstream classifiers need.
-    replied_ids: set[int] = set()
-    replies_by_comment: dict[int, list[dict[str, Any]]] = {}
-    for comment in comments:
-        in_reply_to = comment.get("in_reply_to_id")
-        if in_reply_to in top_level_daydream_ids:
-            replied_ids.add(in_reply_to)
-            replies_by_comment.setdefault(in_reply_to, []).append(comment)
-
-    return PRCommentThreads(
-        top_level_daydream_ids=top_level_daydream_ids,
-        replied_ids=replied_ids,
-        comment_id_by_fingerprint=comment_id_by_fingerprint,
-        replies_by_comment=replies_by_comment,
-    )
+    return PRCommentThreads.from_comments(comments, session_fingerprints=session_fingerprints)
 
 
 def comment_resolution_signal(
@@ -437,7 +437,7 @@ def comment_resolution_signal(
     if threads is None:
         return CommentResolutionSignal(total=0, replied=0, unresolved=0)
     total = len(threads.top_level_daydream_ids)
-    replied = len(threads.replied_ids)
+    replied = len(threads.replies_by_comment)
     return CommentResolutionSignal(total=total, replied=replied, unresolved=total - replied)
 
 
@@ -584,39 +584,24 @@ def reviewer_logins_signal(
     if repo is None or number is None:
         return []
 
-    logins: set[str] = set()
-    excluded: set[str] = set()
-
-    # (a) Authors of PR reviews.
     reviews = gh_api(repo, f"repos/{repo}/pulls/{number}/reviews", paginate=True)
-    for review in reviews:
-        user = review.get("user") or {}
-        login = user.get("login", "")
-        if login:
-            logins.add(login)
-
-    # (b) Authors of replies to daydream's footer-marked top-level comments.
     comments = gh_api(repo, f"repos/{repo}/pulls/{number}/comments", paginate=True)
-    daydream_comment_ids: set[int] = set()
-    replies_by_parent: dict[int, list[str]] = {}
-    for comment in comments:
-        in_reply_to = comment.get("in_reply_to_id")
-        user = comment.get("user") or {}
-        login = user.get("login", "")
-        if in_reply_to is None:
-            if _is_daydream_comment(comment):
-                daydream_comment_ids.add(comment["id"])
-                if login:
-                    excluded.add(login)
-        else:
-            if login:
-                replies_by_parent.setdefault(in_reply_to, []).append(login)
+    return reviewer_logins_from_comments(reviews, comments)
 
-    for parent_id in daydream_comment_ids:
-        logins.update(replies_by_parent.get(parent_id, []))
 
-    # Exclude bots and any login that authored a daydream-footer comment.
-    humans = {
-        login for login in logins if not login.endswith("[bot]") and login not in excluded
-    }
-    return sorted(humans)
+def reviewer_logins_from_comments(
+    reviews: list[dict[str, Any]], comments: list[dict[str, Any]],
+) -> list[str]:
+    """Qualify reviewers across all Daydream threads in the captured population."""
+    logins = {(review.get("user") or {}).get("login", "") for review in reviews}
+    daydream_comments = [
+        comment for comment in comments
+        if comment.get("in_reply_to_id") is None and _is_daydream_comment(comment)
+    ]
+    daydream_ids = {comment["id"] for comment in daydream_comments}
+    logins.update(
+        (comment.get("user") or {}).get("login", "") for comment in comments
+        if comment.get("in_reply_to_id") is not None and comment["in_reply_to_id"] in daydream_ids
+    )
+    excluded = {(comment.get("user") or {}).get("login", "") for comment in daydream_comments}
+    return sorted(login for login in logins if login and not login.endswith("[bot]") and login not in excluded)

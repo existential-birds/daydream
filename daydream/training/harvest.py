@@ -53,15 +53,15 @@ from daydream.training.labeler_signals import (
     FixAppliedSignal,
     LocalCommitAppliedSignal,
     PerFindingResolution,
+    PRCommentThreads,
     PRMergeSignal,
     comment_resolution_signal,
     fix_applied_signal,
-    index_pr_review_comments,
     local_commit_applied_signal,
     per_finding_resolution_signal,
     pr_link_signal,
     pr_merge_signal,
-    reviewer_logins_signal,
+    reviewer_logins_from_comments,
 )
 from daydream.training.reward import ScoringInputs, score_trajectory
 from daydream.training.rubric import Rubric, derive_outcome_label
@@ -645,20 +645,19 @@ class HarvestPass:
         *,
         repo_clone: Path,
         pr_merge: PRMergeSignal,
+        captured_comments: list[dict[str, Any]],
         pr_author_logins: frozenset[str] = frozenset(),
         review_author_logins: frozenset[str] = frozenset(),
     ) -> Rubric:
         """Combine a fetched PR state with scoped comment, fix, and finding signals.
 
-        Fetch comments once; PR/review author sets govern decisive reply eligibility."""
+        Reuse captured comments; PR/review authors govern decisive reply eligibility."""
         signal_row = row.as_signal_row()
-        # Fetch + index the PR's review comments once; both resolution signals
-        # consume this index instead of each hitting the /comments endpoint.
+        # Index the captured review comments once; both resolution signals
+        # consume the same fingerprint-scoped evidence.
         recorded_fingerprints = self.read_recorded_fingerprints(row)
-        comment_threads = index_pr_review_comments(
-            signal_row,
-            gh_api=self.github,
-            session_fingerprints=list(recorded_fingerprints),
+        comment_threads = PRCommentThreads.from_comments(
+            captured_comments, session_fingerprints=list(recorded_fingerprints),
         )
         comments = comment_resolution_signal(signal_row, gh_api=self.github, threads=comment_threads)
         fix = self.fix_applied(
@@ -755,15 +754,22 @@ class HarvestPass:
                 clone_resolved=repo_resolution is not None,
             )
         else:
+            assert row.pr_repo is not None
+            captured_comments = None
+            endpoint = f"repos/{row.pr_repo}/pulls/{row.pr_number}"
             try:
-                reviewer_logins = reviewer_logins_signal(row.as_signal_row(), gh_api=self.github)
+                reviews = self.github(row.pr_repo, f"{endpoint}/reviews", paginate=True)
+                captured_comments = self.github(row.pr_repo, f"{endpoint}/comments", paginate=True)
+                reviewer_logins = reviewer_logins_from_comments(reviews, captured_comments)
             except RateLimitError:
                 raise
             except GitError:
                 pass
+            if captured_comments is None:
+                captured_comments = self.github(row.pr_repo, f"{endpoint}/comments", paginate=True)
             rubric = self._build_rubric_pr(
                 row, repo_clone=repo_clone,
-                pr_merge=pr_merge,
+                pr_merge=pr_merge, captured_comments=captured_comments,
                 pr_author_logins=frozenset({pr_merge.author_login}) if pr_merge.author_login else frozenset(),
                 review_author_logins=frozenset(reviewer_logins),
             )

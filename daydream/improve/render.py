@@ -5,11 +5,14 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from datetime import date
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from daydream.improve.prioritize import plan_priority
 from daydream.improve.redaction import redact_model_value
 from daydream.trajectory import redact_text
+
+if TYPE_CHECKING:
+    from daydream.improve.assemble import AdmittedPlan
 
 _SLUG_SEPARATOR = re.compile(r"[^a-z0-9]+")
 
@@ -230,7 +233,7 @@ def _done_criterion_fallback(kind: str, in_scope_paths: Sequence[str]) -> str:
 def render_plan(
     finding: dict[str, Any],
     *,
-    plan: dict[str, Any],
+    plan: AdmittedPlan,
     planned_at: str,
     planned_on: date,
     number: int,
@@ -238,21 +241,25 @@ def render_plan(
 ) -> str:
     """Render validated PlanWriterResult data without authored Markdown."""
     finding = redact_model_value(finding)
-    plan = redact_model_value(plan)
-    scope = plan["scope"]
-    why = plan["why_this_matters"]
+    from daydream.improve.assemble import GIT_BRANCH_BASIS
+
+    owner = plan
+    authored = redact_model_value(owner.authored)
+    scope = authored["scope"]
+    why = authored["why_this_matters"]
     current_state: list[str] = []
-    for excerpt in plan["current_state_excerpts"]:
-        anchor = excerpt["line_anchor"]
+    for excerpt, text in owner.excerpts:
+        excerpt = redact_model_value(excerpt)
+        text = redact_model_value(text)
         current_state.extend(
             [
                 (
-                    f"- `{excerpt['path']}:{anchor['start_line']}-"
-                    f"{anchor['end_line']}` — {excerpt['file_role']}"
+                    f"- `{excerpt['path']}:{excerpt['start_line']}-"
+                    f"{excerpt['end_line']}` — {excerpt['file_role']}"
                 ),
                 "",
                 "```text",
-                excerpt["verbatim_excerpt"],
+                text,
                 "```",
             ]
         )
@@ -277,13 +284,14 @@ def render_plan(
             for entry in scope["out_of_scope_behaviors"]
         ],
     ]
-    workflow = plan["git_workflow"]
+    workflow = authored["git_workflow"]
+    branch_name = f"improve/{plan_slug(authored['title'])}"
     in_scope_paths = [
         *[entry["path"] for entry in scope["existing_paths"]],
         *[entry["path"] for entry in scope["new_paths"]],
     ]
     step_sections: list[str] = []
-    for step in sorted(plan["steps"], key=lambda item: item["order"]):
+    for number_in_plan, step in enumerate(authored["steps"], start=1):
         changes = "\n".join(
             (
                 f"- `{change['path']}` — `{change['symbol']}` "
@@ -293,15 +301,15 @@ def render_plan(
             for change in step["changes"]
         )
         step_sections.append(
-            f"### Step {step['order']}: {step['title']}\n\n"
+            f"### Step {number_in_plan}: {step['title']}\n\n"
             f"{changes}\n\n"
             "**Verify**\n\n"
             + _render_verification(
-                step["verification"],
+                owner.command(step["verification"]),
                 changes=step["changes"],
             )
         )
-    test_plan = plan["test_plan"]
+    test_plan = authored["test_plan"]
     test_mode = str(test_plan["mode"])
     test_plan_header = f"- **Mode**: `{test_mode}`\n- **Rationale**: {test_plan['rationale']}"
     if test_mode == "new-or-updated-tests":
@@ -326,7 +334,7 @@ def render_plan(
                 + "\n".join(f"  - Assert: {assertion}" for assertion in case["assertions"])
                 + "\n  - Verification:\n"
                 + _render_verification_list(
-                    case["verification"],
+                    owner.command(case["verification"]),
                     indent="    ",
                     fallback=_test_case_fallback(case["test_file"], case["test_symbol"]),
                 )
@@ -346,7 +354,7 @@ def render_plan(
                 f"  - Already proves: {coverage['behavior']}\n"
                 "  - Verification:\n"
                 + _render_verification_list(
-                    coverage["verification"],
+                    owner.command(coverage["verification"]),
                     indent="    ",
                     fallback=_test_case_fallback(coverage["path"], coverage["symbol"]),
                 )
@@ -364,24 +372,35 @@ def render_plan(
             "through the step gates and done criteria above and below."
         )
     done_lines = "\n".join(
-        f"- [ ] **{criterion['id']} ({criterion['kind']})**: "
+        f"- [ ] **done-{index} ({criterion['kind']})**: "
         f"{criterion['description']}\n"
         + _render_verification_list(
-            criterion["verification"],
+            owner.command(criterion["verification"]),
             indent="  ",
             fallback=_done_criterion_fallback(
                 str(criterion["kind"]), in_scope_paths
             ),
         )
-        for criterion in plan["done_criteria"]
+        for index, criterion in enumerate(owner.done_criteria(), start=1)
     )
-    stop_lines = "\n".join(
-        f"- **{condition['kind']}** — {condition['condition']} "
-        f"STOP and report: {condition['evidence_to_report']}"
-        for condition in plan["stop_conditions"]
-    )
+    stop_lines = "\n".join((
+        "- **drift** — Before editing a file, read the exact line range quoted for "
+        "it in the Current state section and compare it to the quoted "
+        "text. It does not match character for character. STOP and report: "
+        "Report the mismatched file, the quoted excerpt, and the "
+        "current repository content.",
+        "- **repeated-verification-failure** — A verification in this plan fails, "
+        "you make exactly one correction, and it fails again — two failures total "
+        "for the same verification. Do not attempt a third time. STOP and report: "
+        "Report both failing command outputs and the correction that was attempted.",
+        "- **out-of-scope-change** — Completing a step requires editing a path that "
+        "is not declared in this plan's scope. STOP and report: "
+        "Report the required path and why the declared scope boundary is insufficient.",
+        f"- **false-assumption** — {authored['false_assumption']['condition']} "
+        f"STOP and report: {authored['false_assumption']['evidence_to_report']}",
+    ))
     return (
-        f"# Plan {number:03d}: {plan['title']}\n\n"
+        f"# Plan {number:03d}: {authored['title']}\n\n"
         "> **Executor instructions**: Do the \"Before you start\" checks first, then\n"
         "> work through the Steps in the order they are numbered. After each step run\n"
         "> its **Verify** block and confirm the stated expected result before starting\n"
@@ -397,7 +416,7 @@ def render_plan(
         f"- **Risk**: {finding.get('risk', '—')}\n"
         f"- **Category**: {finding.get('category', '—')}\n"
         f"- **Covered finding fingerprints**: "
-        f"{_path_list(plan['covered_fingerprints'])}\n"
+        f"{_path_list(authored['covered_fingerprints'])}\n"
         f"- **Planned at**: commit `{planned_at[:7]}`, {planned_on.isoformat()}\n\n"
         + (f"Daydream run: `{run_session_id}`\n\n" if run_session_id is not None else "")
         + "## Before you start\n\n"
@@ -422,8 +441,8 @@ def render_plan(
         "   file: before you edit it, re-read the line range quoted for it and\n"
         "   compare. If a quoted excerpt no longer matches, that is the `drift`\n"
         "   STOP condition. Files outside this list do not matter.\n"
-        f"4. `git switch --create {workflow['branch_name']}` — expected:\n"
-        f"   `Switched to a new branch '{workflow['branch_name']}'`. This\n"
+        f"4. `git switch --create {branch_name}` — expected:\n"
+        f"   `Switched to a new branch '{branch_name}'`. This\n"
         "   branches from your current HEAD, which is what you want. If the\n"
         "   branch already exists, stop and report; do not reuse or delete it.\n\n"
         "## Why this matters\n\n"
@@ -434,13 +453,13 @@ def render_plan(
         "## Current state\n\n"
         + "\n".join(current_state)
         + "\n\n## Commands you will need\n\n"
-        + _commands_table(plan["commands_you_will_need"])
+        + _commands_table(owner.commands())
         + "\n\n## Scope\n\n**In scope**\n\n"
         + "\n".join(in_scope_lines)
         + "\n\n**Out of scope**\n\n"
         + "\n".join(out_scope_lines)
         + "\n\n## Git workflow\n\n"
-        f"- **Branch**: {workflow['branch_name']} ({workflow['branch_basis']})\n"
+        f"- **Branch**: {branch_name} ({GIT_BRANCH_BASIS})\n"
         f"- **Commit boundaries**: {workflow['commit_boundaries']}\n"
         f"- **Commit example**: `{workflow['commit_message_example']}`\n"
         "- **Push**: never without operator instruction\n"

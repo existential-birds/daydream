@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from daydream.improve import plan_contract as contract, plan_normalization as normalization
 from daydream.improve.plan_contract import AssemblyIssue, render_issue
-from daydream.improve.render import plan_slug, redact_secret_values
+from daydream.improve.redaction import redact_model_value
+from daydream.improve.render import redact_secret_values
 
 GIT_PUSH_POLICY = "never-without-operator-instruction"
 GIT_PULL_REQUEST_POLICY = "never-without-operator-instruction"
@@ -24,117 +26,11 @@ GIT_BRANCH_BASIS = (
 )
 
 
-def _expand_command_ref(
-    ref: dict[str, Any],
-    *,
-    recon_by_id: dict[str, dict[str, Any]],
-) -> dict[str, Any]:
-    base = recon_by_id[ref["recon_command_id"]]
-    appended = ref["appended_args"]
-    return {
-        "purpose": base["purpose"],
-        "command": (
-            base["command"]
-            if appended is None
-            else f"{base['command']} {appended}"
-        ),
-        "working_directory": base["working_directory"],
-        "expected_success": deepcopy(base["expected_success"]),
-        "note": ref["note"],
-    }
-
-
-def _expand_commands(
-    normalized: dict[str, Any],
-    *,
-    recon_by_id: dict[str, dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Expand validated references in place and return the first-use table."""
-    table: list[dict[str, Any]] = []
-    seen: set[tuple[str, str | None]] = set()
-    for _, ref, _ in contract._iter_command_refs(normalized):
-        key = (ref["recon_command_id"], ref["appended_args"])
-        expanded = _expand_command_ref(ref, recon_by_id=recon_by_id)
-        if key not in seen:
-            seen.add(key)
-            table.append(deepcopy(expanded))
-        ref.clear()
-        ref.update(expanded)
-    return table
-
-
 def _resolve_excerpt(repo: Path, path: str, start: int, end: int) -> str:
     # Repository bytes are spliced in after _redact_strings has already run over
     # the authored content, so they must be redacted here.
     lines = (repo / path).read_text(encoding="utf-8").splitlines()
     return redact_secret_values("\n".join(lines[start - 1 : end]))
-
-
-def _boilerplate_stop_conditions(
-    normalized: dict[str, Any],
-    step_count: int,
-) -> list[dict[str, Any]]:
-    scope = normalized["scope"]
-    existing_paths = contract._entry_paths(scope["existing_paths"])
-    in_scope_paths = [*existing_paths, *contract._entry_paths(scope["new_paths"])]
-    specifications = [
-        (
-            "drift",
-            "Before editing a file, read the exact line range quoted for "
-            "it in the Current state section and compare it to the quoted "
-            "text. It does not match character for character.",
-            "Report the mismatched file, the quoted excerpt, and the "
-            "current repository content.",
-            existing_paths,
-        ),
-        (
-            "repeated-verification-failure",
-            "A verification in this plan fails, you make exactly one "
-            "correction, and it fails again — two failures total for the "
-            "same verification. Do not attempt a third time.",
-            "Report both failing command outputs and the correction that "
-            "was attempted.",
-            [],
-        ),
-        (
-            "out-of-scope-change",
-            "Completing a step requires editing a path that is not "
-            "declared in this plan's scope.",
-            "Report the required path and why the declared scope "
-            "boundary is insufficient.",
-            in_scope_paths,
-        ),
-    ]
-    conditions = [
-        {
-            "kind": kind,
-            "condition": condition,
-            "required_action": STOP_REQUIRED_ACTION,
-            "evidence_to_report": evidence,
-            "related_paths": paths,
-            "related_step_ids": [],
-        }
-        for kind, condition, evidence, paths in specifications
-    ]
-
-    def mapped(kind: str, condition: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "kind": kind,
-            "condition": condition["condition"],
-            "required_action": STOP_REQUIRED_ACTION,
-            "evidence_to_report": condition["evidence_to_report"],
-            "related_paths": list(condition["related_paths"]),
-            "related_step_ids": [
-                f"step-{number}"
-                for number in condition["related_step_numbers"]
-                if number <= step_count
-            ],
-        }
-
-    conditions.append(
-        mapped("false-assumption", normalized["false_assumption"])
-    )
-    return conditions
 
 
 def _injected_done_criteria(normalized: dict[str, Any]) -> list[dict[str, Any]]:
@@ -196,10 +92,44 @@ def _injected_done_criteria(normalized: dict[str, Any]) -> list[dict[str, Any]]:
         criteria.append(
             criterion("scope-integrity", description)
         )
-    return [
-        {"id": f"done-{index}", **criterion}
-        for index, criterion in enumerate(criteria, start=1)
-    ]
+    return criteria
+
+
+@dataclass(frozen=True)
+class AdmittedPlan:
+    """One admitted authoring object with captured repository and command facts."""
+
+    authored: dict[str, Any]
+    recon_by_id: dict[str, dict[str, Any]]
+    excerpts: tuple[tuple[dict[str, Any], str], ...]
+
+    def command(self, ref: dict[str, Any] | None) -> dict[str, Any] | None:
+        if ref is None:
+            return None
+        base = self.recon_by_id[ref["recon_command_id"]]
+        appended = ref["appended_args"]
+        result: dict[str, Any] = redact_model_value({
+            "purpose": base["purpose"],
+            "command": base["command"] if appended is None else f"{base['command']} {appended}",
+            "working_directory": base["working_directory"],
+            "expected_success": base["expected_success"],
+            "note": ref["note"],
+        })
+        return result
+
+    def commands(self) -> list[dict[str, Any]]:
+        table: dict[tuple[str, str | None], dict[str, Any]] = {}
+        for _, ref, _ in contract._iter_command_refs(self.authored):
+            key = (ref["recon_command_id"], ref["appended_args"])
+            if key not in table:
+                command = self.command(ref)
+                assert command is not None
+                table[key] = command
+        return list(table.values())
+
+    def done_criteria(self) -> list[dict[str, Any]]:
+        criteria: list[dict[str, Any]] = redact_model_value(_injected_done_criteria(self.authored))
+        return criteria
 
 
 def assemble_plan(
@@ -208,7 +138,7 @@ def assemble_plan(
     repo: Path,
     recon_commands: Sequence[dict[str, Any]],
     expected_fingerprints: Sequence[str] | None = None,
-) -> tuple[dict[str, Any] | None, tuple[AssemblyIssue, ...]]:
+) -> tuple[AdmittedPlan | None, tuple[AssemblyIssue, ...]]:
     """Return a host-assembled plan, or all remaining authoring issues.
 
     Normalization and validation only read repository files. Successful output
@@ -233,37 +163,20 @@ def assemble_plan(
     if issues:
         return None, tuple(issues)
 
-    commands = _expand_commands(normalized, recon_by_id=recon_by_id)
-    normalized["current_state_excerpts"] = [
-        {
-            "path": entry["path"],
-            "line_anchor": {
-                "start_line": entry["start_line"],
-                "end_line": entry["end_line"],
-            },
-            "file_role": entry["file_role"],
-            "verbatim_excerpt": _resolve_excerpt(
-                repo, entry["path"], entry["start_line"], entry["end_line"]
-            ),
+    # Retain the admitted authoring object. Capture external facts now; rendering
+    # derives host numbering and policy without manufacturing a second plan shape.
+    captured_commands = {
+        ref["recon_command_id"]: {
+            name: deepcopy(recon_by_id[ref["recon_command_id"]][name])
+            for name in ("purpose", "command", "working_directory", "expected_success")
         }
+        for _, ref, _ in contract._iter_command_refs(normalized)
+    }
+    excerpts = tuple(
+        (entry, _resolve_excerpt(repo, entry["path"], entry["start_line"], entry["end_line"]))
         for entry in normalized["context_excerpts"]
-    ]
-    # Normalization already owns a detached copy. Enrich that one plan rather
-    # than projecting its validated fields through another parallel shape.
-    normalized["commands_you_will_need"] = commands
-    normalized["git_workflow"].update(
-        branch_name=f"improve/{plan_slug(normalized['title'])}",
-        branch_basis=GIT_BRANCH_BASIS,
-        push_policy=GIT_PUSH_POLICY,
-        pull_request_policy=GIT_PULL_REQUEST_POLICY,
     )
-    for index, step in enumerate(normalized["steps"], start=1):
-        step.update(id=f"step-{index}", order=index)
-    normalized["done_criteria"] = _injected_done_criteria(normalized)
-    normalized["stop_conditions"] = _boilerplate_stop_conditions(normalized, len(normalized["steps"]))
-    for authored_only in ("context_excerpts", "false_assumption", "additional_command_refs"):
-        del normalized[authored_only]
-    return normalized, ()
+    return AdmittedPlan(normalized, captured_commands, excerpts), ()
 
 
 __all__ = [
@@ -273,5 +186,6 @@ __all__ = [
     "STOP_REQUIRED_ACTION",
     "AssemblyIssue",
     "assemble_plan",
+    "AdmittedPlan",
     "render_issue",
 ]

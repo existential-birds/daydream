@@ -37,11 +37,8 @@ def _v2_curation_id(hub: FakeHub, tmp_path: Path) -> str:
     hydrate.dedupe_admitted(stage, revision=REVISION)
     license_enrich.enrich_license_evidence(stage, resolver=_FakeLicenseResolver())
     hydrate.restamp_admitted_digests(stage, revision=REVISION)
-    hydrate.apply_license_gate(
+    binding = hydrate.apply_license_gate(
         stage, revision=REVISION, license_policy_path=_write_policy(tmp_path), allow_copyleft=frozenset(),
-    )
-    binding = hydrate.resolve_curation_identity(
-        stage, source_commit=REVISION, license_policy_path=_write_policy(tmp_path), allow_copyleft=frozenset(),
     )
     return str(binding["curation_id"])
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from itertools import combinations
 from typing import Any
 
 from daydream.deep.records import record_uid
@@ -150,46 +151,31 @@ def build_record_dedup_candidates(
     if len(sources) != len(records):
         raise ValueError("sources must contain exactly one entry per record")
     pairs: list[RecordDuplicatePair] = []
-    n = len(records)
-    for i in range(n):
-        r_a = records[i]
-        a_id = str(r_a.get("id", ""))
-        # Post-merge eval inputs may lack pre-merge UIDs; they must still participate.
-        a_uid = record_uid(r_a)
-        a_file = str(r_a.get("file", ""))
-        a_desc = str(r_a.get("description", ""))
-        a_source = sources[i]
-        a_bigrams = bigrams(normalize_title(a_desc))
-        if not a_desc or not a_bigrams:
+    population = [
+        (record, source, bigrams(normalize_title(str(record.get("description", "")))))
+        for record, source in zip(records, sources)
+    ]
+    for (a, a_source, a_bigrams), (b, b_source, b_bigrams) in combinations(population, 2):
+        if not a_bigrams or not b_bigrams:
             continue
-        for j in range(i + 1, n):
-            r_b = records[j]
-            b_id = str(r_b.get("id", ""))
-            b_desc = str(r_b.get("description", ""))
-            b_bigrams = bigrams(normalize_title(b_desc))
-            if not b_desc or not b_bigrams:
-                continue
-            sim = jaccard(a_bigrams, b_bigrams)
-            if sim >= threshold:
-                pairs.append(
-                    # Keyword arguments throughout: the dataclass now has ten
-                    # same-typed ``str`` fields in a/b order, so a positional
-                    # construction would mis-assign silently (and type-check
-                    # clean) the next time a field is inserted.
-                    RecordDuplicatePair(
-                        record_a_id=a_id,
-                        record_a_uid=a_uid,
-                        record_a_file=a_file,
-                        record_a_description=a_desc,
-                        record_a_source=a_source,
-                        record_b_id=b_id,
-                        record_b_uid=record_uid(r_b),
-                        record_b_file=str(r_b.get("file", "")),
-                        record_b_description=b_desc,
-                        record_b_source=sources[j],
-                        similarity=sim,
-                    )
+        similarity = jaccard(a_bigrams, b_bigrams)
+        if similarity >= threshold:
+            # Persist verbatim evidence; normalized grams belong only to this scan.
+            pairs.append(
+                RecordDuplicatePair(
+                    record_a_id=str(a.get("id", "")),
+                    record_a_uid=record_uid(a),
+                    record_a_file=str(a.get("file", "")),
+                    record_a_description=str(a.get("description", "")),
+                    record_a_source=a_source,
+                    record_b_id=str(b.get("id", "")),
+                    record_b_uid=record_uid(b),
+                    record_b_file=str(b.get("file", "")),
+                    record_b_description=str(b.get("description", "")),
+                    record_b_source=b_source,
+                    similarity=similarity,
                 )
+            )
     # Reviewer IDs repeat across stacks; UID tie-breakers make their order stable.
     pairs.sort(key=lambda p: (p.record_a_id, p.record_b_id, p.record_a_uid, p.record_b_uid))
     return pairs
