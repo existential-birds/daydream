@@ -6,20 +6,23 @@ Bad or incomplete evidence never turns a phase green.
 """
 
 from collections.abc import Mapping, Sequence
-from math import isfinite
 from pathlib import Path
-from typing import Any, TypeGuard
+from typing import Any, TypeGuard, cast
 
 from daydream.archive import _read_json_artifact
 from daydream.remote_ci import (
     CIObservation,
+    RemoteCILimits,
     RequiredContext,
-    required_context_label,
-    required_context_matches,
+    RequiredPolicy,
 )
+from daydream.remote_ci.evaluation import partition_required_observations
 from daydream.remote_ci.evidence import (
+    _is_finite_number,
+    _is_positive_int,
     _normalize_repository as _normalize_remote_repository,
     _require_sha as _require_remote_sha,
+    _required_text,
 )
 from daydream.timeutil import parse_iso_timestamp
 from daydream.trajectory import (
@@ -77,54 +80,14 @@ def _unknown() -> dict[str, Any]:
     return {"ran": True, "status": _UNKNOWN}
 
 
-def _legacy_merge_state(target_dir: Path) -> dict[str, Any]:
-    """Read the strict pre-identity artifact fallback."""
-    deep = _deep_dir(target_dir)
-    failures_path = deep / "per-stack-failures.json"
-    if failures_path.is_file():
-        failures = _read_json_artifact(failures_path, dict)
-        if failures is None:
-            return _unknown()
-        if "__merge__" in failures:
-            merge_failure = failures["__merge__"]
-            if not isinstance(merge_failure, dict):
-                return _unknown()
-            message = merge_failure.get("message")
-            if not isinstance(message, str) or not message.strip():
-                return _unknown()
-            return {"ran": True, "status": _FAILED}
-
-    items_path = deep / "merged-items.json"
-    if items_path.is_file():
-        items = _read_json_artifact(items_path, dict)
-        if items is None or not isinstance(items.get("items"), list):
-            return _unknown()
-        return {"ran": True, "status": _SUCCEEDED}
-    return {"ran": False, "status": _ABSENT}
-
-
 def _merge_state(
-    target_dir: Path,
     phase_events: Any,
     *,
     session_id: str | None,
 ) -> dict[str, Any]:
-    """Derive merge truth from a valid current-session pair or strict legacy artifacts."""
+    """Derive merge truth solely from a valid current-session lifecycle pair."""
     rows, malformed_container = _event_rows(phase_events)
-    if session_id is None:
-        if malformed_container:
-            return _unknown()
-        if any(
-            _event_value(event, "session_id") is not None
-            or _event_value(event, "scope_id") is not None
-            for event in rows
-        ):
-            return _unknown()
-        return _legacy_merge_state(target_dir)
-
-    if not session_id:
-        return _unknown()
-    if malformed_container:
+    if not session_id or malformed_container:
         return _unknown()
 
     current: list[Any] = []
@@ -280,14 +243,10 @@ def _phase_started(phase_events: Any, phase: DaydreamPhase) -> bool:
 
 
 def _bounded_text(value: object) -> str | None:
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > 2_000
-        or any(ord(char) < 32 or ord(char) == 127 for char in value)
-    ):
+    try:
+        return _required_text(value, "artifact text")
+    except ValueError:
         return None
-    return value
 
 
 def _repository(value: object) -> str | None:
@@ -328,7 +287,8 @@ def _push_payload(
     repository = payload.get("pushed_repository")
     valid_repository = repository is None or _repository(repository) is not None
     valid = (
-        payload.get("schema_version") == 1
+        type(payload.get("schema_version")) is int
+        and payload.get("schema_version") == 1
         and isinstance(payload.get("status"), str)
         and payload.get("status") in {"succeeded", "failed"}
         and all(_bounded_text(payload.get(key)) is not None for key in required_text)
@@ -366,109 +326,50 @@ def _identity_mapping(value: object) -> dict[str, Any] | None:
 
 
 def _nonnegative_number(value: object) -> TypeGuard[int | float]:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and isfinite(value)
-        and value >= 0
-    )
+    return _is_finite_number(value) and isinstance(value, (int, float)) and value >= 0
 
 
 def _string_list(value: object) -> bool:
     return isinstance(value, list) and all(_bounded_text(item) is not None for item in value)
 
 
-def _observation_list(value: object) -> bool:
-    if not isinstance(value, list):
-        return False
-    for item in value:
-        if not isinstance(item, dict):
-            return False
-        source = item.get("source")
-        app_id = item.get("app_id")
-        if (
-            not isinstance(source, str)
-            or source not in {"check_run", "status"}
-            or _bounded_text(item.get("context")) is None
-            or not isinstance(item.get("state"), str)
-            or item.get("state") not in {"pass", "pending", "fail"}
-            or _bounded_text(item.get("raw_state")) is None
-            or (item.get("url") is not None and _bounded_text(item.get("url")) is None)
-            or (
-                item.get("diagnostic") is not None
-                and _bounded_text(item.get("diagnostic")) is None
-            )
-        ):
-            return False
-        if source == "check_run":
-            if not isinstance(app_id, int) or isinstance(app_id, bool) or app_id <= 0:
-                return False
-        elif app_id is not None:
-            return False
-    return True
-
-
 def _remote_evidence_consistent(payload: dict[str, Any]) -> bool:
-    """Recheck the serialized policy partition with the producer's match rules."""
-    contexts = tuple(
-        RequiredContext(item["context"], item.get("app_id"))
-        for item in payload["policy"]["contexts"]
-    )
+    """Decode normalized evidence and recheck the producer's policy partition."""
+    policy = payload["policy"]
+    contexts = tuple(RequiredContext(item["context"], item.get("app_id")) for item in policy["contexts"])
+    RequiredPolicy(contexts, policy["strict"])
     if len(set(contexts)) != len(contexts):
         return False
 
     def observations(key: str) -> tuple[CIObservation, ...]:
+        rows = payload[key]
+        if not isinstance(rows, list):
+            raise ValueError("CI observations must be an array")
         return tuple(
             CIObservation(
-                source=item["source"],
-                context=item["context"],
-                app_id=item.get("app_id"),
-                state=item["state"],
-                raw_state=item["raw_state"],
-                url=item.get("url"),
+                source=item["source"], context=item["context"], app_id=item.get("app_id"),
+                state=item["state"], raw_state=item["raw_state"], url=item.get("url"),
                 diagnostic=item.get("diagnostic"),
             )
-            for item in payload[key]
+            for item in rows
         )
 
     required = observations("required_observations")
     advisory = observations("advisory_observations")
     all_observations = (*required, *advisory)
     producer_keys = {
-        (
-            item.source,
-            item.context.casefold() if item.source == "status" else item.context,
-            item.app_id,
-        )
+        (item.source, item.context.casefold() if item.source == "status" else item.context, item.app_id)
         for item in all_observations
     }
     if len(producer_keys) != len(all_observations):
         return False
-    if any(
-        not any(required_context_matches(context, item) for context in contexts)
-        for item in required
-    ) or any(
-        any(required_context_matches(context, item) for context in contexts)
-        for item in advisory
-    ):
-        return False
-
-    failing: list[str] = []
-    pending: list[str] = []
-    missing: list[str] = []
-    for context in contexts:
-        matches = [item for item in required if required_context_matches(context, item)]
-        label = required_context_label(context)
-        if not matches:
-            missing.append(label)
-        elif any(item.state == "fail" for item in matches):
-            failing.append(label)
-        elif any(item.state == "pending" for item in matches):
-            pending.append(label)
-    return bool(
-        payload["failing_contexts"] == failing
-        and payload["pending_contexts"] == pending
-        and payload["missing_contexts"] == missing
+    evidence = partition_required_observations(contexts, all_observations)
+    return (
+        set(evidence.required) == set(required)
+        and evidence.advisory == advisory
+        and list(evidence.failing) == payload["failing_contexts"]
+        and list(evidence.pending) == payload["pending_contexts"]
+        and list(evidence.missing) == payload["missing_contexts"]
     )
 
 
@@ -486,34 +387,23 @@ def _terminal_remote_shape(payload: dict[str, Any], status: str) -> bool:
     active_count = payload.get("active_workflow_count")
     contexts = policy.get("contexts")
     if (
-        payload.get("schema_version") != 1
+        type(payload.get("schema_version")) is not int
+        or payload.get("schema_version") != 1
         or _bounded_text(payload.get("reason")) is None
-        or not isinstance(poll_count, int)
-        or isinstance(poll_count, bool)
-        or poll_count <= 0
-        or not isinstance(stable_polls, int)
-        or isinstance(stable_polls, bool)
-        or stable_polls <= 0
+        or not _is_positive_int(poll_count)
+        or not _is_positive_int(stable_polls)
         or stable_polls > poll_count
-        or not isinstance(required_stable_polls, int)
-        or isinstance(required_stable_polls, bool)
-        or required_stable_polls <= 0
+        or not _is_positive_int(required_stable_polls)
         or _bounded_text(polling.get("started_at")) is None
         or _bounded_text(polling.get("updated_at")) is None
         or not _nonnegative_number(polling.get("elapsed_seconds"))
         or not _nonnegative_number(polling.get("discovery_deadline"))
         or not _nonnegative_number(polling.get("completion_deadline"))
-        or not _nonnegative_number(discovery_seconds)
-        or discovery_seconds <= 0
-        or not _nonnegative_number(completion_seconds)
-        or completion_seconds < discovery_seconds
         or not isinstance(policy.get("strict"), bool)
         or not isinstance(contexts, list)
         or not isinstance(active_count, int)
         or isinstance(active_count, bool)
         or active_count < 0
-        or not _observation_list(payload.get("required_observations"))
-        or not _observation_list(payload.get("advisory_observations"))
         or not _string_list(payload.get("failing_contexts"))
         or not _string_list(payload.get("pending_contexts"))
         or not _string_list(payload.get("missing_contexts"))
@@ -525,18 +415,14 @@ def _terminal_remote_shape(payload: dict[str, Any], status: str) -> bool:
         )
     ):
         return False
-    for item in contexts:
-        if not isinstance(item, dict) or _bounded_text(item.get("context")) is None:
-            return False
-        app_id = item.get("app_id")
-        if app_id is not None and (
-            not isinstance(app_id, int) or isinstance(app_id, bool) or app_id <= 0
-        ):
-            return False
     try:
+        RemoteCILimits(
+            discovery_seconds=cast(float, discovery_seconds), completion_seconds=cast(float, completion_seconds),
+            stable_polls=required_stable_polls,
+        )
         if not _remote_evidence_consistent(payload):
             return False
-    except ValueError:
+    except (ValueError, TypeError, KeyError, AttributeError):
         return False
     if status in {"passed", "no_ci"} and stable_polls < required_stable_polls:
         return False
@@ -597,75 +483,41 @@ def _remote_identity_matches(
         return False
 
     pushed_repository = _repository(push.get("pushed_repository"))
-    target_base = _repository(target.get("base_repository"))
-    target_head = _repository(target.get("head_repository"))
-    binding_base = _repository(binding.get("base_repository"))
-    binding_head = _repository(binding.get("head_repository"))
-    target_number = target.get("pr_number")
-    binding_number = binding.get("pr_number")
-    target_url = _bounded_text(target.get("pr_url"))
-    binding_url = _bounded_text(binding.get("pr_url"))
-    target_base_ref = _bounded_text(target.get("base_ref"))
-    binding_base_ref = _bounded_text(binding.get("base_ref"))
-    target_head_ref = _bounded_text(target.get("head_ref"))
-    binding_head_ref = _bounded_text(binding.get("head_ref"))
-    target_sha = _sha(target.get("pushed_sha"))
-    binding_head_sha = _sha(binding.get("head_sha"))
-    binding_merge = binding.get("merge_sha")
-    merge_sha = None if binding_merge is None else _sha(binding_merge)
-    payload_head = _sha(payload.get("head_sha"))
-    payload_merge = payload.get("merge_sha")
-    normalized_payload_merge = None if payload_merge is None else _sha(payload_merge)
-    evidence_sha = _sha(payload.get("evidence_sha"))
-
-    if (
-        pushed_repository is None
-        or target_base is None
-        or target_head is None
-        or binding_base is None
-        or binding_head is None
-        or not isinstance(target_number, int)
-        or isinstance(target_number, bool)
-        or target_number <= 0
-        or not isinstance(binding_number, int)
-        or isinstance(binding_number, bool)
-        or binding_number <= 0
-        or target_url is None
-        or binding_url is None
-        or target_base_ref is None
-        or binding_base_ref is None
-        or target_head_ref is None
-        or binding_head_ref is None
-        or target_sha is None
-        or binding_head_sha is None
-        or (binding_merge is not None and merge_sha is None)
-        or payload_head is None
-        or (payload_merge is not None and normalized_payload_merge is None)
-        or evidence_sha is None
-    ):
+    if pushed_repository is None:
         return False
-
-    valid_evidence = {target_sha}
-    if merge_sha is not None:
-        valid_evidence.add(merge_sha)
+    for identity in (target, binding):
+        if (
+            not _is_positive_int(identity.get("pr_number"))
+            or any(_repository(identity.get(key)) is None for key in ("base_repository", "head_repository"))
+            or any(_bounded_text(identity.get(key)) is None for key in ("pr_url", "base_ref", "head_ref"))
+        ):
+            return False
+    if any(_sha(value) is None for value in (
+        target.get("pushed_sha"), binding.get("head_sha"), payload.get("head_sha"), payload.get("evidence_sha"),
+    )):
+        return False
+    merge_sha = binding.get("merge_sha")
+    payload_merge = payload.get("merge_sha")
+    if any(value is not None and _sha(value) is None for value in (merge_sha, payload_merge)):
+        return False
     identities_match = (
         binding.get("state") == "open"
-        and target_base == binding_base
-        and target_head == binding_head == pushed_repository
-        and target_base_ref == binding_base_ref
-        and target_head_ref == binding_head_ref == push["branch"]
-        and target_number == binding_number
-        and target_url == binding_url
+        and target["base_repository"] == binding["base_repository"]
+        and target["head_repository"] == binding["head_repository"] == pushed_repository
+        and target["base_ref"] == binding["base_ref"]
+        and target["head_ref"] == binding["head_ref"] == push["branch"]
+        and target["pr_number"] == binding["pr_number"]
+        and target["pr_url"] == binding["pr_url"]
         and target.get("remote") == push["remote"]
-        and target_sha == binding_head_sha == payload_head == push["pushed_sha"]
-        and normalized_payload_merge == merge_sha
-        and evidence_sha in valid_evidence
+        and target["pushed_sha"] == binding["head_sha"] == payload["head_sha"] == push["pushed_sha"]
+        and payload_merge == merge_sha
+        and payload["evidence_sha"] in {target["pushed_sha"], merge_sha}
     )
     if not identities_match:
         return False
-    if pr_repo is not None and _configured_repository(pr_repo) != target_base:
+    if pr_repo is not None and _configured_repository(pr_repo) != target["base_repository"]:
         return False
-    return pr_number is None or pr_number == target_number
+    return pr_number is None or pr_number == target["pr_number"]
 
 
 def _remote_ci_state(
@@ -738,8 +590,8 @@ def derive_phase_states(
     the same session plus exact pushed/PR identities. All five ``runs_*`` flags
     gate reads to phases the current flow executes, so a skipped phase remains
     neutral regardless of artifacts left by prior runs.
-    Merge uses one valid current-session event pair, retaining its artifact
-    heuristic only for an explicitly unbound legacy caller.
+    Merge requires one valid current-session event pair; absent run identity
+    cannot inherit a result from on-disk artifacts.
     """
     stabilization_failed = _matching_stabilization_failure(target_dir, session_id)
     push_state, push = (
@@ -749,7 +601,7 @@ def derive_phase_states(
     )
     return {
         "merge": (
-            _merge_state(target_dir, phase_events, session_id=session_id)
+            _merge_state(phase_events, session_id=session_id)
             if runs_merge
             else _absent()
         ),

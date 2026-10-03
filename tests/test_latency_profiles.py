@@ -5,17 +5,19 @@ touches the filesystem, the clock, or the environment -- see MH3.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from daydream.deep.adjudication_steps import _load_group_verdicts, _persist_group_verdicts
 from daydream.deep.arbiter import partition_arbiter_targets
 from daydream.deep.artifacts import (
-    adjudication_complete_path,
+    DeepArtifact,
     arbiter_group_complete_path,
     arbiter_group_input_path,
     arbiter_group_verdicts_path,
-    arbiter_input_path,
 )
 from daydream.deep.latency import (
     ARBITER_EFFORTS,
@@ -26,6 +28,7 @@ from daydream.deep.latency import (
     WONDER_ROUTES,
     DiffSignals,
     FindingSignals,
+    PlannedGroup,
     arbiter_plan,
     diff_signals,
     resolve_latency_profile,
@@ -212,11 +215,106 @@ def test_one_group_or_forensic_stays_unsharded_at_todays_effort() -> None:
     assert fast.sharded is False and [g.effort for g in fast.groups] == ["xhigh"]
     assert "unsharded" in (fast.reason or "")
 
-def test_group_artifact_paths_are_group_scoped_and_backward_compatible(tmp_path: Path) -> None:
+def test_group_artifact_paths_are_group_scoped_and_distinct_from_whole_completion(tmp_path: Path) -> None:
     dd = tmp_path / "deep"
     dd.mkdir()
     assert arbiter_group_input_path(dd, "arbiter-group-1").name == "arbiter-group-1-input.json"
     assert arbiter_group_verdicts_path(dd, "arbiter-group-1").name == "arbiter-group-1-verdicts.json"
     assert arbiter_group_complete_path(dd, "arbiter-group-1").name == "arbiter-group-1-complete.marker"
-    assert arbiter_input_path(dd).name == "arbiter-input.json"       # unchanged, MH2
-    assert adjudication_complete_path(dd).name == "arbiter-complete.marker"   # unchanged, MH2
+    assert DeepArtifact.ARBITER_INPUT.at(dd).name == "arbiter-input.json"       # unchanged, MH2
+    assert DeepArtifact.ADJUDICATION_COMPLETE.at(dd).name == "adjudication-complete.marker"   # unchanged, MH2
+
+
+@pytest.mark.parametrize('fault',
+                         ['identity', 'null-targets', 'id-binding', 'boolean', 'missing-field', 'missing-verdict',
+                          'execution-contract', 'record-evidence'])
+def test_group_cache_rejects_malformed_bound_verdicts(tmp_path: Path, fault: str) -> None:
+    group = PlannedGroup('arbiter-group-0', ('python:1',), 'high', 'policy')
+    verdict: dict[str, Any] = {'arb_id': 1, 'keep': True, 'severity': 'high', 'confidence': 'HIGH',
+                               'description': 'finding', 'rationale': 'verified', 'evidence': 'a.py:1'}
+    _persist_group_verdicts(tmp_path, group, {1: verdict}, contract="execution-contract", records_digest="records")
+    loaded = _load_group_verdicts(tmp_path, group, contract="execution-contract", records_digest="records")
+    assert loaded == {1: verdict}
+    path = arbiter_group_verdicts_path(tmp_path, group.group_id)
+    payload = json.loads(path.read_text())
+    if fault == 'execution-contract':
+        payload['contract'] = 'foreign'
+    elif fault == 'record-evidence':
+        payload['input_digest'] = payload['settled_digest'] = 'foreign'
+    elif fault == 'identity':
+        payload['group_id'] = 'other'
+    elif fault == 'null-targets':
+        payload['target_uids'] = None
+    elif fault == 'id-binding':
+        payload['verdicts']['1']['arb_id'] = 2
+    elif fault == 'boolean':
+        payload['verdicts']['1']['keep'] = 'no'
+    elif fault == 'missing-field':
+        del payload['verdicts']['1']['evidence']
+    else:
+        payload['verdicts'] = {}
+    path.write_text(json.dumps(payload))
+    assert _load_group_verdicts(tmp_path, group, contract="execution-contract", records_digest="records") is None
+
+
+@pytest.mark.parametrize('change', ['model', 'effort', 'schema'])
+def test_arbiter_contract_binds_actual_execution(tmp_path: Path, make_config: Any, make_work: Any,
+                                               monkeypatch: pytest.MonkeyPatch, change: str) -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from daydream.deep.adjudication_steps import _arbiter_plan_component
+    from daydream.deep.latency import ArbiterPlan
+    from daydream.deep.state import DeepState
+    from daydream.extensions import get_registry
+    from daydream.flows.engine import FlowContext
+    from tests.harness.review_result import review_coverage
+
+    path = tmp_path / 'intent.md'
+    path.write_text('current context')
+    backend = SimpleNamespace(model='first-model', reasoning_effort='high')
+    ctx = FlowContext(make_config(tmp_path), make_work(tmp_path), get_registry(),
+        data={'review_coverage': review_coverage(), 'intent_path': path, 'alts_path': path,
+              'exploration_dir': None, 'intent_summary': 'current context'})
+    monkeypatch.setattr(ctx, 'backend_for', lambda _: backend)
+    monkeypatch.setattr(ctx, 'backend_for_effort', lambda *_: backend)
+    group = PlannedGroup('arbiter-group-0', ('python:1',), 'high', 'policy')
+    plan = ArbiterPlan(True, (group,), 'policy')
+    before = _arbiter_plan_component(ctx, DeepState(ctx.data), plan, None)
+    if change == 'model':
+        backend.model = 'second-model'
+    elif change == 'effort':
+        plan = replace(plan, groups=(replace(group, effort='medium'),))
+        backend.reasoning_effort = 'medium'
+    else:
+        monkeypatch.setattr('daydream.deep.adjudication_steps.ARBITER_SCHEMA', {'type': 'object'})
+    after = _arbiter_plan_component(ctx, DeepState(ctx.data), plan, None)
+    assert before['groups'][0]['target_uids'] == after['groups'][0]['target_uids']
+    assert before['groups'][0]['contract'] != after['groups'][0]['contract']
+
+
+@pytest.mark.parametrize('phase', ['arbiter', 'suppression'])
+def test_whole_adjudication_proof_requires_current_positive_stage(
+    tmp_path: Path, phase: str, make_config: Any, make_work: Any,
+) -> None:
+    from daydream.deep.adjudication_steps import _completed_adjudication, _digest
+    from daydream.deep.records import RecordPool
+    from daydream.deep.state import DeepState
+    from tests.harness.review_result import review_coverage
+
+    coverage = review_coverage(scope_ids=(), phases=('arbiter', 'suppression'))
+    for stage in coverage.phases:
+        coverage.record_phase(stage, 'complete', noop=True)
+    state = DeepState({'dd': tmp_path, 'record_pool': RecordPool({}, {}), 'review_coverage': coverage})
+    from daydream.extensions import get_registry
+    from daydream.flows.engine import FlowContext
+
+    ctx = FlowContext(make_config(tmp_path), make_work(tmp_path), get_registry())
+    contract = {'plan': None, 'precision_mode': True, 'suppression': 'execution-contract'}
+    DeepArtifact.ADJUDICATION_COMPLETE.at(tmp_path).write_text(json.dumps({**contract, 'records': _digest([])}))
+    assert _completed_adjudication(ctx, state, contract)
+    if phase == 'arbiter':
+        coverage.record_phase('arbiter', 'complete', noop=False)
+        assert not _completed_adjudication(ctx, state, contract)
+    coverage.record_phase(phase, 'uncovered', reasons=('coverage_unknown',))
+    assert not _completed_adjudication(ctx, state, contract)

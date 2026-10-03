@@ -13,9 +13,7 @@ from daydream.backends import (
 )
 from daydream.check_claims import substantiate_check_claims
 from daydream.deep.adjudication_provenance import load_provenance
-from daydream.deep.artifacts import (
-    verdicts_path,
-)
+from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.verify_selection import (
     SELECTION_RULE_VERSION,
     SKIP_REASON_CODE,
@@ -105,7 +103,7 @@ async def phase_verify_recommendations(
     items.
     """
     run_context = resolve_run_context(run_context)
-    output_path = verdicts_path(deep_dir)
+    output_path = DeepArtifact.VERDICTS.at(deep_dir)
 
     items: list[dict[str, Any]] = json.loads(merged_items_path.read_text()).get("items", [])
     config = selection if selection is not None else SelectionConfig(verify_all=True)

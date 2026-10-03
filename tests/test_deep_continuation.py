@@ -1,8 +1,6 @@
 """Deep arbiter-session continuation integration tests."""
 from __future__ import annotations
 
-import os
-import time
 from pathlib import Path
 from typing import Any
 
@@ -10,8 +8,9 @@ import pytest
 
 from daydream.deep.prompts import build_merge_prompt
 from tests.harness.review_profile import default_strategy as _default_strategy
+from tests.harness.review_result import saved_coverage
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
-from tests.test_deep_orchestrator import _prime_merge_resume, _record, _run_deep
+from tests.test_deep_orchestrator import _run_deep
 
 
 def _merge_call(stub: StubBackend) -> dict[str, Any]:
@@ -48,15 +47,12 @@ async def test_merge_cold_when_arbiter_skipped_on_resume(multi_stack_target: Pat
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     stub.arbiter_session_id = "arb-sess"
-    deep = _prime_merge_resume(multi_stack_target, python=[_record(description="py issue", severity="high")],
-        react=[_record(description="tsx issue", severity="high")],
-        generic=[_record(description="md issue", severity="high")], structure=[],
-    )
-    (deep / "arbiter-complete.marker").write_text("done")
-    # Fresh runs write the key before producing each prerequisite artifact.
-    future = time.time() + 1
-    for artifact in [deep / "intent.md", deep / "alternatives.json", *deep.glob("stack-*-records.json"),]:
-        os.utime(artifact, (future, future))
+    stub.parse_severity = "high"
+    assert await _run_deep(multi_stack_target) == 0
+    assert _merge_call(stub)["continuation"].data["session_id"] == "arb-sess"
+    deep = multi_stack_target / ".daydream/deep"
+    assert saved_coverage(deep).phases["arbiter"]["status"] == "complete"
+    stub.calls.clear()
     assert await _run_deep(multi_stack_target, start_at="merge") == 0
     assert [c for c in stub.calls if "you are the arbiter" in c["prompt"].lower()] == []
     merge_call = _merge_call(stub)

@@ -25,6 +25,7 @@ from daydream.backends import (
     AgentEventStream,
     Backend,
     ContinuationToken,
+    DiagnosticEvent,
     ResultEvent,
     TextEvent,
     ToolStartEvent,
@@ -239,6 +240,17 @@ def is_environmental_failure(test_output: str) -> bool:
     return any(signature in output_lower for signature in infra_signatures)
 
 
+class StructuredOutputFailure(str):
+    """Text fallback carrying the host's rejected structured-output witness."""
+
+    reason: str
+
+    def __new__(cls, text: str, reason: str) -> "StructuredOutputFailure":
+        value = super().__new__(cls, text)
+        value.reason = reason
+        return value
+
+
 def _validates_schema(value: Any, schema: dict[str, Any]) -> bool:
     """Return whether ``value`` validates against ``schema`` (shape + required)."""
     return not any(Draft202012Validator(schema).iter_errors(value))
@@ -247,12 +259,10 @@ def _validates_schema(value: Any, schema: dict[str, Any]) -> bool:
 def _salvageable(value: Any, schema: dict[str, Any]) -> bool:
     """Accept full schema validity or a shape downstream consumers can salvage.
 
-    Bare arrays support merge normalization. Objects must contain required keys,
-    with lists in required array slots; nested records are validated downstream.
+    Objects must contain required keys, with lists in required array slots;
+    nested records are validated downstream by callers using this capability.
     """
     if _validates_schema(value, schema):
-        return True
-    if isinstance(value, list):
         return True
     if not isinstance(value, dict):
         return False
@@ -288,6 +298,7 @@ async def run_agent(
     tool_call_budget: int | None = None,
     retry_recovery_allowance_s: float | None = None,
     validate_structured_output: bool = True,
+    require_full_schema: bool = False,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext | None = None,
     review_limits: ReviewLimits | None = None,
@@ -317,6 +328,7 @@ async def run_agent(
     evidence = ReviewEvidence(output_schema) if review_limits is not None else None
     review_instructions = review_system_instructions
     hard_deadline = deadline
+    shared: float | None = None
     if review_limits is not None:
         review_limits = review_limits_for_scope(review_limits)
         started = clock.monotonic()
@@ -351,19 +363,29 @@ async def run_agent(
         phase.value, backend=backend_name, model=backend.model
     ) as observed:
         observed.content("traceloop.entity.input", {"prompt": prompt, "output_schema": output_schema})
-        result = await _run_agent(
-            backend, cwd, prompt, phase=phase, output_schema=output_schema, progress_callback=progress_callback,
-            continuation=continuation, agents=agents, max_turns=max_turns, read_only=read_only,
-            persist_session=persist_session, wall_budget_s=wall_budget_s, deadline=deadline,
-            tool_call_budget=tool_call_budget,
-            retry_recovery_allowance_s=retry_recovery_allowance_s,
-            validate_structured_output=validate_structured_output,
-            sanctioned_inputs=sanctioned_inputs,
-            run_context=context,
-            review_evidence=evidence,
-            review_instructions=review_instructions,
-            tools_disabled=tools_disabled,
-        )
+        try:
+            result = await _run_agent(
+                backend, cwd, prompt, phase=phase, output_schema=output_schema, progress_callback=progress_callback,
+                continuation=continuation, agents=agents, max_turns=max_turns, read_only=read_only,
+                persist_session=persist_session, wall_budget_s=wall_budget_s, deadline=deadline,
+                tool_call_budget=tool_call_budget,
+                retry_recovery_allowance_s=retry_recovery_allowance_s,
+                validate_structured_output=validate_structured_output,
+                require_full_schema=require_full_schema,
+                sanctioned_inputs=sanctioned_inputs,
+                run_context=context,
+                review_evidence=evidence,
+                review_instructions=review_instructions,
+                tools_disabled=tools_disabled,
+            )
+        except Exception as exc:
+            from daydream.review_result import ReasonCode, reason_for_exception
+            if (evidence is None or not evidence.valid(evidence.checkpoint)
+                    or reason_for_exception(exc) != ReasonCode.MODEL_BUDGET_EXHAUSTION):
+                raise
+            # Provider turn exhaustion retains this invocation's strictly validated
+            # checkpoint; it cannot establish completed investigation coverage.
+            result = (evidence.checkpoint, None, "error_max_turns")
         if evidence is not None and review_limits is not None and result[2] in {
             "wall_budget_exceeded", "tool_call_budget_exceeded",
         }:
@@ -387,6 +409,7 @@ async def run_agent(
                     finalized, _, final_reason = await _run_agent(
                         backend, cwd, final_prompt, phase=phase,
                         output_schema=output_schema, progress_callback=progress_callback,
+                        require_full_schema=require_full_schema,
                         read_only=read_only, persist_session=persist_session, finalization=True,
                         deadline=min(hard_deadline, clock.monotonic() + review_limits.finalization_s),
                         tool_call_budget=0,
@@ -404,6 +427,9 @@ async def run_agent(
             # Budget-limited outputs use full validation, never shape-only salvage.
             if output_schema is not None and not evidence.valid(result[0]):
                 result = ("", None, reason)
+        if (result[2] == "wall_budget_exceeded" and shared is not None
+                and hard_deadline == shared and clock.monotonic() >= shared):
+            result = (result[0], result[1], "pipeline_budget_exceeded")
         observed.output(result[0])
         observed.finish(1 if result[2] else 0, reason=result[2])
         return result
@@ -427,6 +453,7 @@ async def _run_agent(
     tool_call_budget: int | None = None,
     retry_recovery_allowance_s: float | None = None,
     validate_structured_output: bool = True,
+    require_full_schema: bool = False,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext,
     review_evidence: ReviewEvidence | None = None,
@@ -449,6 +476,7 @@ async def _run_agent(
     structured_result: Any = None
     result_continuation: ContinuationToken | None = None
     aborted_reason: str | None = None
+    evidence_incomplete = False
     tool_supervisor = get_registry().tool_supervisor_if_registered()
 
     with run_context.backend_registration(backend):
@@ -535,6 +563,7 @@ async def _run_agent(
                 output_parts = []
                 structured_result = None
                 result_continuation = None
+                evidence_incomplete = False
                 tool_calls = 0
                 if review_evidence is not None:
                     review_evidence.reset()
@@ -632,12 +661,21 @@ async def _run_agent(
                                 # ignores RequestEvent (the one armless member).
                                 if inv is not None:
                                     inv.observe(event)
+                                if (isinstance(event, DiagnosticEvent)
+                                        and event.code == "codex_transport_coverage"
+                                        and event.metadata.get("coverage") == "incomplete"):
+                                    evidence_incomplete = True
                                 if isinstance(event, TextEvent):
                                     output_parts.append(event.text)
                                 elif isinstance(event, ResultEvent):
                                     structured_result = event.structured_output
                                     result_continuation = event.continuation
-                                await display.observe(event)
+                                if not (
+                                    require_full_schema and output_schema is not None
+                                    and isinstance(event, ResultEvent)
+                                    and not _validates_schema(event.structured_output, output_schema)
+                                ):
+                                    await display.observe(event)
                                 if isinstance(event, ToolStartEvent):
                                     if tool_supervisor is not None:
                                         try:
@@ -894,10 +932,16 @@ async def _run_agent(
                 _logger.exception("backend.cancel() failed during shutdown")
             raise
 
+    if evidence_incomplete and aborted_reason is None and require_full_schema:
+        aborted_reason = "evidence_incomplete"
+
     def _usable(value: Any) -> bool:
         """Accept explicit validation opt-out or a downstream-salvageable value."""
         return not validate_structured_output or (
-            output_schema is not None and _salvageable(value, output_schema)
+            output_schema is not None and (
+                _validates_schema(value, output_schema) if require_full_schema
+                else _salvageable(value, output_schema)
+            )
         )
 
     if output_schema is not None and structured_result is not None and _usable(structured_result):
@@ -913,4 +957,8 @@ async def _run_agent(
             parsed = extract_json(raw)
             if parsed is not None and _usable(parsed):
                 return parsed, result_continuation, aborted_reason
-    return "".join(output_parts), result_continuation, aborted_reason
+    raw = "".join(output_parts)
+    if output_schema is not None and require_full_schema:
+        reason = "malformed_output" if structured_result is not None or raw.strip() else "missing_output"
+        return StructuredOutputFailure(raw, reason), result_continuation, aborted_reason
+    return raw, result_continuation, aborted_reason

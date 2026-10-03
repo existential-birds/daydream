@@ -16,6 +16,7 @@ import pytest
 from daydream.backends import Backend, ResultEvent, TextEvent
 from daydream.json_utils import extract_json
 from daydream.phases import phase_arbiter_review
+from daydream.phases.review import ReviewOutputError
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
@@ -41,10 +42,10 @@ ARBITER_MESSAGE = (
     '{"findings": ['
     '{"arb_id": 1, "keep": true, "severity": "high", "confidence": "HIGH",'
     ' "description": "OAuth state is a constant md5; CSRF defeated.",'
-    ' "rationale": "Reproduced the hardcoded signature from open-source FQNs."},'
+    ' "rationale": "Reproduced the hardcoded signature from open-source FQNs.", "evidence": "integration.py:402"},'
     '{"arb_id": 2, "keep": true, "severity": "high", "confidence": "HIGH",'
     ' "description": "Unchecked metadata sender subscript 500s.",'
-    ' "rationale": "Fail closed via .get() instead of subscripting."}'
+    ' "rationale": "Fail closed via .get() instead of subscripting.", "evidence": "integration.py:502"}'
     "]}\n"
     "```"
 )
@@ -87,11 +88,13 @@ async def test_arbiter_still_raises_on_genuinely_unparseable_output(
 ) -> None:
     """A message with no JSON yields no findings object; the phase raises, not papers over."""
     diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
-    with pytest.raises(ValueError):
+    with pytest.raises(ReviewOutputError) as failure:
         await phase_arbiter_review(
             cast(Backend, _pi_like_backend(MALFORMED_MESSAGE)), make_work(tmp_path), selected_records=SELECTED_RECORDS,
             diff_path=diff_path, intent_path=intent_path, alternatives_path=alternatives_path, allow_standalone=True,
         )
+
+    assert failure.value.reason_code.value == "malformed_output"
 
 
 # Model text has truncated JSON while ResultEvent already carries a complete
@@ -110,9 +113,9 @@ PROSE_WITH_TRUNCATED_JSON = (
 # well-formed structured answer.
 STRUCTURED_OUTPUT: dict[str, Any] = {"findings": [{"arb_id": 1, "keep": True, "severity": "low", "confidence": "HIGH",
             "description": "init_instrumentation() omits the ddtrace setLevel.",
-            "rationale": "Confirmed against code; log-hygiene only.",
+            "rationale": "Confirmed against code; log-hygiene only.", "evidence": "app.py:28",
         }, {"arb_id": 2, "keep": False, "severity": "low", "confidence": "MEDIUM", "description": "Not a real defect.",
-            "rationale": "Rejected on inspection.",
+            "rationale": "Rejected on inspection.", "evidence": "integration.py:502",
         },
     ]
 }

@@ -12,8 +12,8 @@ from daydream.backends import (
     Backend,
 )
 from daydream.deep.artifacts import (
+    DeepArtifact,
     deep_dir,
-    evidence_reuse_path,
 )
 from daydream.deep.evidence_reuse import (
     EVIDENCE_REUSE_FORMAT,
@@ -139,7 +139,7 @@ def _persist_reuse_audit(
     or push. The merge preserves an earlier gate's decision (Pattern B).
     """
     try:
-        path = evidence_reuse_path(deep_dir(work.repo, allow_standalone=True))
+        path = DeepArtifact.EVIDENCE_REUSE.at(deep_dir(work.repo, allow_standalone=True))
         existing = read_json_object(path)
         gates = existing.get("gates")
         merged: dict[str, Any] = dict(gates) if isinstance(gates, dict) else {}

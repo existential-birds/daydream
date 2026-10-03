@@ -9,7 +9,7 @@ from rich.markup import escape as escape_markup
 
 from daydream import git_ops
 from daydream.agent import console
-from daydream.deep.artifacts import remote_ci_handoff_path, remote_ci_verdict_path
+from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.state import DeepState
 from daydream.extensions.api import Stop
 from daydream.flows.engine import FlowContext
@@ -135,7 +135,7 @@ async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
 
     def write_snapshot(snapshot: RemoteCIVerdict) -> None:
         write_remote_ci_verdict(
-            remote_ci_verdict_path(deep_state.dd),
+            DeepArtifact.REMOTE_CI_VERDICT.at(deep_state.dd),
             snapshot,
             session_id=state.session_id,
             poll_count=poll_count,
@@ -177,7 +177,7 @@ async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
                 # The new target is durable before the previous attempt's
                 # guidance is retired. Do this before any CI request so a
                 # blocked or abruptly interrupted resume cannot expose it.
-                remote_ci_handoff_path(deep_state.dd).unlink(missing_ok=True)
+                DeepArtifact.REMOTE_CI_HANDOFF.at(deep_state.dd).unlink(missing_ok=True)
                 print_info(
                     console,
                     f"Verifying remote CI for {target.base_repository} PR "
@@ -210,7 +210,7 @@ async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
             try:
                 with anyio.CancelScope(shield=True):
                     write_remote_ci_handoff(
-                        remote_ci_handoff_path(deep_state.dd),
+                        DeepArtifact.REMOTE_CI_HANDOFF.at(deep_state.dd),
                         verdict,
                         session_id=state.session_id,
                     )
@@ -222,7 +222,7 @@ async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
         return Stop(1)
 
     _print_remote_ci_result(verdict)
-    handoff = remote_ci_handoff_path(deep_state.dd)
+    handoff = DeepArtifact.REMOTE_CI_HANDOFF.at(deep_state.dd)
     if verdict.status in {"passed", "no_ci"}:
         try:
             handoff.unlink(missing_ok=True)

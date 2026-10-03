@@ -27,6 +27,7 @@ from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import bare_remote, git as _git
 from tests.harness.phase_backend import PhaseDispatchBackend
+from tests.harness.review_result import review_coverage
 from tests.test_deep_orchestrator import _fix_prompts, _install_stub_backend, _silence, _StubBackend
 
 KEEP_ME = "KEEP_ME"
@@ -37,6 +38,9 @@ InstallBackend = Callable[[object], object]
 
 # The no-op turn every non-dispatching stub in this file yielded: empty text plus
 # a terminal result.
+_REVIEW_TURN = (TextEvent(text="Intent and review complete."),
+                ResultEvent(structured_output={"issues": []}, continuation=None))
+
 _EMPTY_TURN = (TextEvent(text=""), ResultEvent(structured_output=None, continuation=None))
 
 
@@ -155,12 +159,18 @@ def _post_context(*, dd: Path, items_file: Path) -> FlowContext:
     registry = Registry()
     registry.override_renderer("finding", pr_review.default_render_finding)
     registry.override_renderer("summary", pr_review.default_render_summary)
+    coverage = review_coverage()
+    for scope in coverage.scopes:
+        coverage.record_scope(scope, "complete")
+    coverage.record_phase("merge", "complete", noop=True)
+    coverage.finalize("completed")
     return FlowContext(
         config=RunConfig(),
         work=WorkContext(
             repo=dd.parent, source=dd.parent, base_branch="main", base_sha="base", head_branch="feature",
             head_sha="head", is_ephemeral=False, run_id="test-run",
-        ), registry=registry, data={"dd": dd, "items_file": items_file}, run_context=RunContext(InteractionPolicy()),
+        ), registry=registry, data={"dd": dd, "items_file": items_file, "review_coverage": coverage},
+        run_context=RunContext(InteractionPolicy()),
     )
 
 
@@ -368,7 +378,7 @@ async def test_fork_inserts_custom_phase_into_review_flow(
         "    r.register_phase(FlowStep(name='ro_audit', run=_ro))\n"
         "    r.insert_after('deep', anchor='intent', step='ro_audit')\n"
     )
-    backend = ScriptedBackend(events=_EMPTY_TURN, model="mock-model")
+    backend = ScriptedBackend(events=_REVIEW_TURN, model="mock-model")
     install_backend(backend)
 
     rc = await runner.run(make_config(tiny_diff_target, output_mode="review"))
@@ -720,7 +730,7 @@ async def test_flow_review_routes_to_review_helper(
     tiny_diff_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
 ) -> None:
     """--flow review reaches structural review with the default design lens."""
-    backend = ScriptedBackend(events=_EMPTY_TURN, model="mock-model")
+    backend = ScriptedBackend(events=_REVIEW_TURN, model="mock-model")
     install_backend(backend)
 
     rc = await runner.run(make_config(tiny_diff_target, flow_name="review"))

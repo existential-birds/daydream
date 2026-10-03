@@ -31,10 +31,8 @@ from daydream.backends.codex import CodexBackend
 from daydream.config import REVIEW_OUTPUT_FILE, STRUCTURE_STACK_NAME, TEST_WALL_BUDGET_S
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.artifacts import (
+    DeepArtifact,
     deep_dir,
-    evidence_reuse_path,
-    merged_items_path,
-    verdicts_path,
 )
 from daydream.deep.detection import StackAssignment
 from daydream.deep.prompts import build_per_stack_prompt
@@ -58,7 +56,6 @@ from daydream.phases import (
     phase_alternative_review,
     phase_commit_push,
     phase_cross_stack_merge,
-    phase_per_stack_reviews,
     phase_understand_intent,
     phase_verify_recommendations,
     publish,
@@ -127,6 +124,7 @@ from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock
 from tests.harness.git_helpers import commit as git_commit, git, init_repo
 from tests.harness.review_profile import default_strategy as _default_strategy
+from tests.harness.review_result import merge_result, review_scopes
 from tests.harness.trajectory import make_recorder, read_trajectory
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
@@ -135,6 +133,8 @@ _PASS_TURN: tuple[AgentEvent, ...] = (TextEvent(text="All 1 tests passed"), _RES
 _FIX_TURN: tuple[AgentEvent, ...] = (TextEvent(text="Applied fix attempt"), _RESULT)
 
 def _structured_turn(structured: object) -> tuple[AgentEvent, ...]:
+    if isinstance(structured, dict) and isinstance(structured.get("items"), list):
+        structured = merge_result(structured["items"])
     return (ResultEvent(structured_output=structured, continuation=None),)
 
 def _verdict(verdict: str, suggested_command: str | None, reason: str) -> dict[str, str | None]:
@@ -828,13 +828,13 @@ async def test_phase_test_and_heal_honors_wall_budget_override(
 
     captured = _record_host_runs(monkeypatch)
 
-    success, retries, _ = await phases.phase_test_and_heal(ScriptedBackend(), make_work(tmp_path),
+    result = await phases.phase_test_and_heal(ScriptedBackend(), make_work(tmp_path),
         config=SimpleNamespace(
             test_command="true", file_config=DaydreamFileConfig(test_command="true", test_command_wall_s=1234.0),
         ), allow_standalone=True,
     )
-    assert success is True
-    assert retries == 0
+    assert result.passed is True
+    assert result.retries == 0
     assert captured[-1]["wall_budget_s"] == 1234.0
 
     # Unset: falls through to the orchestrator default.
@@ -865,12 +865,12 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(
         {"id": 2, "description": "Missing import", "file": "src/utils.py", "line": 1},
     ]
 
-    success, retries, _ = await phases.phase_test_and_heal(
+    result = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), feedback_items=feedback_items, allow_standalone=True,
     )
 
-    assert success is True
-    assert retries == 1
+    assert result.passed is True
+    assert result.retries == 1
     assert backend.call_count == 3
     assert backend.continuations[1] is None, "Fix call should start fresh with no continuation"
     assert backend.continuations[2] is None, "Retry after fix should start fresh"
@@ -916,12 +916,12 @@ async def test_phase_test_and_heal_fix_prompt_absolute_path_and_no_turn_cap(
 
     feedback_items = [{"id": 1, "description": "Bug", "file": "src/handler.py", "line": 10}]
 
-    success, retries, _ = await phases.phase_test_and_heal(
+    result = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), feedback_items=feedback_items, allow_standalone=True,
     )
 
-    assert success is True
-    assert retries == 1
+    assert result.passed is True
+    assert result.retries == 1
     assert backend.call_count == 3
 
     fix_prompt = backend.prompts[1]
@@ -1357,7 +1357,7 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
     alts.write_text("[]")
     stacks = [StackAssignment(stack_name=STRUCTURE_STACK_NAME, files=["api/main.py"], is_docs_only=False,)]
 
-    results, failures = await phase_per_stack_reviews(
+    results, failures = await review_scopes(
         backend, make_work(tmp_path), stacks, diff_path=diff, intent_path=intent, alternatives_path=alts,
         exploration_dir=exploration_dir, allow_standalone=True,
     )
@@ -1840,13 +1840,12 @@ def _make_intent_backend(summary: str) -> ScriptedBackend:
 @pytest.mark.parametrize(("summary", "visible"), [
     ("This change adds a login page with email and password authentication.",
      "This change adds a login page with email and password authentication."),
-    ("", "(the agent produced no intent summary)"),
 ])
 async def test_phase_understand_intent_renders_summary_before_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
     silence_console: Callable[..., None], summary: str, visible: str,
 ) -> None:
-    """Record the actual Understanding panel, including the empty-reply placeholder."""
+    """Record the actual Understanding panel before the intent confirmation gate."""
     silence_console("daydream.ui", keep=("console", "print_intent_summary"))
     recording = Console(file=StringIO(), record=True, force_terminal=True, width=200)
     monkeypatch.setattr("daydream.agent.console", recording)
@@ -1873,9 +1872,11 @@ async def test_phase_alternative_review_returns_issues(
     structured_issues = {"issues": [{"id": 1, "title": "Use dependency injection",
                 "description": "Hard-coded dependencies make testing difficult",
                 "recommendation": "Use constructor injection", "severity": "high", "files": ["src/service.py"],
+                "confidence": "HIGH", "rationale": "Constructor dependencies are fixed", "evidence": "src/service.py:1",
             },
             {"id": 2, "title": "Missing error handling", "description": "No error handling for API calls",
                 "recommendation": "Add try/except with retries", "severity": "medium", "files": ["src/api.py"],
+                "confidence": "HIGH", "rationale": "Errors escape API calls", "evidence": "src/api.py:1",
             },
         ]
     }
@@ -2167,13 +2168,13 @@ async def test_approved_investigator_command_stays_host_side(
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "y")
     calls = _record_host_runs(monkeypatch, output=output)
 
-    passed, retries, proceed = await phases.phase_test_and_heal(
+    result = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), feedback_items=None, allow_standalone=True,
     )
 
-    assert passed is True
-    assert retries == 0
-    assert proceed is True
+    assert result.passed is True
+    assert result.retries == 0
+    assert result.proceed is True
     assert [call["cmd"] for call in calls] == [argv]
     assert calls[0]["cwd"] == tmp_path
     assert len(backend.prompts) == 2
@@ -2199,13 +2200,13 @@ async def test_approved_investigator_backtick_only_command_is_skipped_not_crash(
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "y")
     calls = _record_host_runs(monkeypatch)
 
-    passed, retries, proceed = await phases.phase_test_and_heal(
+    result = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), feedback_items=None, allow_standalone=True,
     )
 
-    assert passed is True
-    assert retries == 1
-    assert proceed is True
+    assert result.passed is True
+    assert result.retries == 1
+    assert result.proceed is True
     # No executable argv reaches the host runner.
     assert calls == []
 
@@ -2225,13 +2226,13 @@ async def test_phase_test_and_heal_spawn_error_routes_through_failure_gate(
     monkeypatch.setattr("daydream.phases.testing.resolve_gate", lambda **_k: False)
     config = make_config(tmp_path, test_command="cd server && npm test")
 
-    passed, retries, proceed = await phases.phase_test_and_heal(
+    result = await phases.phase_test_and_heal(
         ScriptedBackend(script=[]), make_work(tmp_path), feedback_items=None, config=config, allow_standalone=True,
     )
 
-    assert passed is False
-    assert retries == 0
-    assert proceed is False
+    assert result.passed is False
+    assert result.retries == 0
+    assert result.proceed is False
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("investigation", ["correct", "declined", "failed"])
@@ -2248,9 +2249,9 @@ async def test_unreplaced_test_command_retries_original_prompt(
     turn = (RuntimeError("scripted investigator failure"),) if investigation == "failed" else _structured_turn(verdict)
     backend = ScriptedBackend(script=[_FAIL_TURN, turn, _PASS_TURN])
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "n")
-    success, retries, _ = await phases.phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
-    assert success is True
-    assert retries == 1
+    result = await phases.phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
+    assert result.passed is True
+    assert result.retries == 1
     assert len(backend.prompts) == 3
     assert "read-only setup-investigator" in backend.prompts[1]
     assert backend.prompts[2] == backend.prompts[0]
@@ -2280,16 +2281,22 @@ def test_minimal_handoff_separates_facts_from_unknown_cause() -> None:
     assert "cause" in body.lower() and "unknown" in body.lower()
     assert "not revert" in body or "do NOT revert" in body
 
-@pytest.mark.asyncio
-async def test_summarizer_invoked_read_only_normal_calls_mutating(
+@pytest.mark.parametrize("body", [
+    pytest.param("# H", id="read-only-summarizer"),
+    pytest.param("# Handoff\n\nbody here", id="live-handoff-written"),
+    pytest.param("# H\nbody", id="facts-and-hypotheses-contract"),
+])
+async def test_option4_writes_summarizer_handoff_with_read_only_facts_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
-    _quiet_phase_ui: None,
+    _quiet_phase_ui: None, body: str,
 ) -> None:
-    backend, _, _ = await _run_option4_handoff(
-        monkeypatch, tmp_path, make_work, _handoff_turn("# H"),
-    )
-    # First call = the failing test run (mutating allowed); second = summarizer (read-only).
+    backend, success, retries = await _run_option4_handoff(monkeypatch, tmp_path, make_work, _handoff_turn(body))
+    assert success is False and retries == 0
     assert backend.read_only_calls == [False, True]
+    handoff = tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md"
+    assert handoff.is_file() and handoff.read_text(encoding="utf-8") == body
+    prompt = backend.prompts[-1]
+    assert "Verified facts" in prompt and "Hypotheses (unverified)" in prompt and "git blame" in prompt
 
 def _install_recorder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, on_write: Any=None) -> Any:
     """Install a recorder/path fixture and no-op forks, with on_write indicating archival."""
@@ -2329,22 +2336,9 @@ async def _run_option4_handoff(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, 
     backend = ScriptedBackend(script=[_FAIL_TURN, turn])
     if prepare is not None:
         prepare(backend, fake_recorder)
-    success, retries, _ = await phases.phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True,)
-    return backend, success, retries
+    result = await phases.phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True,)
+    return backend, result.passed, result.retries
 
-@pytest.mark.asyncio
-async def test_phase_test_and_heal_option4_writes_handoff_to_live_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
-    _quiet_phase_ui: None,
-) -> None:
-    _, success, retries = await _run_option4_handoff(
-        monkeypatch, tmp_path, make_work, _handoff_turn("# Handoff\n\nbody here"),
-    )
-    assert success is False
-    assert retries == 0
-    expected = tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md"
-    assert expected.is_file()
-    assert expected.read_text(encoding="utf-8") == "# Handoff\n\nbody here"
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_option4_clipboard_offer_fires_on_confirm(
@@ -2443,22 +2437,6 @@ async def test_phase_test_and_heal_option4_summarizer_fallback_writes_minimal(
     for expected in expected_substrings:
         assert expected in body
 
-@pytest.mark.asyncio
-async def test_option4_handoff_has_facts_and_hypotheses_on_disk(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
-    _quiet_phase_ui: None,
-) -> None:
-    """Real path: option-4 drives the summarizer with the facts/hypotheses contract."""
-    backend, _, _ = await _run_option4_handoff(
-        monkeypatch, tmp_path, make_work, _handoff_turn("# H\nbody"),
-    )
-    # The code we own is the prompt sent to the summarizer (agent output mocked).
-    summarizer_prompt = backend.prompts[-1]
-    assert "Verified facts" in summarizer_prompt
-    assert "Hypotheses (unverified)" in summarizer_prompt
-    assert "git blame" in summarizer_prompt
-    # Runs under the enforced read-only profile.
-    assert backend.read_only_calls == [False, True]
 
 @pytest.mark.asyncio
 async def test_option4_fallback_puts_unknown_cause_in_hypotheses(
@@ -2532,80 +2510,35 @@ def _make_ephemeral_workcontext(source: Path, repo: Path) -> Any:
         is_ephemeral=True, run_id="20260101000000-deadbeef",
     )
 
-def test_resolve_handoff_paths_ephemeral_archive_routes_to_archive_bundle(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("ephemeral,session_id", [
+    pytest.param(True, "sess-xyz", id="ephemeral-archive-bundle"),
+    pytest.param(False, "sess-abc", id="inplace-live-artifacts"),
+    pytest.param(False, "sess-empty", id="forward-references-before-recorder-flush"),
+])
+def test_resolve_handoff_paths_routes_complete_artifact_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
+    ephemeral: bool, session_id: str,
 ) -> None:
-    """Ephemeral handoff shares the archive bundle so cleanup preserves a complete session."""
+    archive = tmp_path / "archive"
+    monkeypatch.setattr("daydream.archive.get_archive_dir", lambda: archive)
     source = tmp_path / "source"
-    source.mkdir()
-    worktree = source / ".daydream" / "worktrees" / "ephemeral-run"
-    worktree.mkdir(parents=True)
-    archive_root = tmp_path / "archive"
+    repo = source / "tmp-worktrees" / "ephemeral-run" if ephemeral else tmp_path
+    repo.mkdir(parents=True, exist_ok=True)
+    work = _make_ephemeral_workcontext(source, repo) if ephemeral else make_work(repo)
+    recorder = SimpleNamespace(target_dir=repo, session_id=session_id,
+                               on_write=(lambda *_args, **_kwargs: None) if ephemeral else None)
+    handoff, artifacts = _resolve_handoff_paths(cast(TrajectoryRecorder, recorder), work, allow_standalone=True)
+    daydream_dir = archive / "runs" / session_id if ephemeral else repo / ".daydream"
+    run_dir = daydream_dir if ephemeral else daydream_dir / "runs" / session_id
+    assert handoff == run_dir / "handoff.md"
+    expected = {"trajectory": run_dir / "trajectory.json", "trajectories": run_dir / "trajectories",
+                "manifest": run_dir / "manifest.json", "diff": daydream_dir / "diff.patch",
+                "deep": daydream_dir / "deep"}
+    for field, path in expected.items():
+        assert getattr(artifacts, field) == path
+        assert not path.exists(), "handoff references must survive the recorder's later flush"
 
-    monkeypatch.setattr("daydream.archive.get_archive_dir", lambda: archive_root,)
 
-    work = _make_ephemeral_workcontext(source, worktree)
-
-    class _Recorder:
-        target_dir = worktree
-        session_id = "sess-xyz"
-        on_write = lambda *_args, **_kw: None  # archiving enabled  # noqa: E731
-
-    handoff, artifacts = _resolve_handoff_paths(
-        cast(TrajectoryRecorder, _Recorder()), work, allow_standalone=True,
-    )
-
-    archive_run_dir = archive_root / "runs" / "sess-xyz"
-    # All artifacts — including handoff — live inside the archive bundle.
-    assert handoff == archive_run_dir / "handoff.md"
-    assert artifacts.trajectory == archive_run_dir / "trajectory.json"
-    assert artifacts.trajectories == archive_run_dir / "trajectories"
-    assert artifacts.manifest == archive_run_dir / "manifest.json"
-    assert artifacts.diff == archive_run_dir / "diff.patch"
-    assert artifacts.deep == archive_run_dir / "deep"
-
-def test_resolve_handoff_paths_inplace_uses_live_target_dir(tmp_path: Path, make_work: Callable[..., WorkContext]
-) -> None:
-
-    work = make_work(tmp_path)
-
-    class _Recorder:
-        target_dir = tmp_path
-        session_id = "sess-abc"
-        on_write = None  # archive disabled — should be irrelevant in-place
-
-    handoff, artifacts = _resolve_handoff_paths(
-        cast(TrajectoryRecorder, _Recorder()), work, allow_standalone=True,
-    )
-
-    live_run_dir = tmp_path / ".daydream" / "runs" / "sess-abc"
-    assert handoff == live_run_dir / "handoff.md"
-    assert artifacts.trajectory == live_run_dir / "trajectory.json"
-    assert artifacts.trajectories == live_run_dir / "trajectories"
-    assert artifacts.manifest == live_run_dir / "manifest.json"
-    assert artifacts.diff == tmp_path / ".daydream" / "diff.patch"
-    assert artifacts.deep == tmp_path / ".daydream" / "deep"
-
-def test_resolve_handoff_paths_returns_paths_even_when_files_missing(
-    tmp_path: Path, make_work: Callable[..., WorkContext]
-) -> None:
-    """Keep trajectory forward references: recorder exit flushes after handoff creation."""
-    work = make_work(tmp_path)
-
-    class _Recorder:
-        target_dir = tmp_path
-        session_id = "sess-empty"
-        on_write = None
-
-    handoff, artifacts = _resolve_handoff_paths(
-        cast(TrajectoryRecorder, _Recorder()), work, allow_standalone=True,
-    )
-
-    # References must resolve before recorder/archive exit creates the files.
-    assert artifacts.trajectory is not None and not artifacts.trajectory.exists()
-    assert artifacts.trajectories is not None and not artifacts.trajectories.exists()
-    assert artifacts.manifest is not None and not artifacts.manifest.exists()
-    assert artifacts.deep is not None and not artifacts.deep.exists()
 
 @pytest.mark.asyncio
 async def test_resolve_handoff_paths_roots_at_the_layout_run_directory(
@@ -2689,12 +2622,12 @@ async def test_phase_test_and_heal_non_interactive_writes_handoff_without_menu(
     backend = ScriptedBackend(script=[_FAIL_TURN,
         _handoff_turn("# Handoff\n\nnon-interactive failure context"),
     ])
-    passed, retries, _ = await phases.phase_test_and_heal(
+    result = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), run_context=run_context, allow_standalone=True,
     )
     # Took the abort/terminate path (choice "4" semantics, no mutation).
-    assert passed is False
-    assert retries == 0
+    assert result.passed is False
+    assert result.retries == 0
     # The live handoff contains the summarizer body.
     expected = tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md"
     assert expected.is_file()
@@ -2721,11 +2654,11 @@ async def test_phase_test_and_heal_non_interactive_fallback_has_facts_hypotheses
     prompt_sentinel = Mock(side_effect=AssertionError("prompt_user must not be called in non-interactive mode"),)
     monkeypatch.setattr("daydream.run_context._prompt_user", prompt_sentinel)
     backend = ScriptedBackend(script=[_FAIL_TURN, (RuntimeError("scripted summarizer failure"),)])
-    passed, retries, _ = await phases.phase_test_and_heal(
+    result = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), run_context=run_context, allow_standalone=True,
     )
-    assert passed is False
-    assert retries == 0
+    assert result.passed is False
+    assert result.retries == 0
     body = (tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md").read_text(encoding="utf-8",)
     assert "## Verified facts" in body
     assert "## Hypotheses (unverified)" in body
@@ -2753,12 +2686,12 @@ async def test_phase_test_and_heal_yes_bounded_loop_exactly_one_auto_attempt(
         _FAIL_TURN,
         _handoff_turn("# Handoff\nauto-mode failure"),
     ])
-    success, retries, _ = await phases.phase_test_and_heal(
+    result = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), run_context=run_context, allow_standalone=True,
     )
     # Loop terminated after exactly one auto fix attempt.
-    assert success is False
-    assert retries == 1
+    assert result.passed is False
+    assert result.retries == 1
     # Exactly 4 backend calls: test → fix → test → summarizer.
     assert backend.call_count == 4, (f"Expected 4 backend calls, got {backend.call_count}: {backend.prompts!r}")
     assert "Analyze the failures and fix them" in backend.prompts[1], backend.prompts[1]
@@ -2794,11 +2727,11 @@ async def test_normal_test_path_uses_host_runner_no_agent_turn(
     )
 
     work = make_work(tmp_path)
-    passed, retries, proceed = await phases.phase_test_and_heal(backend, work, allow_standalone=True)
+    result = await phases.phase_test_and_heal(backend, work, allow_standalone=True)
 
-    assert passed is True
-    assert retries == 0
-    assert proceed is True
+    assert result.passed is True
+    assert result.retries == 0
+    assert result.proceed is True
     assert calls == [{"cmd": ["uv", "run", "pytest"], "cwd": tmp_path, "wall_budget_s": TEST_WALL_BUDGET_S,}]
     assert backend.call_count == 0, "no agent turn on the configured host-run happy path"
 
@@ -2817,9 +2750,9 @@ async def test_phase_test_and_heal_option1_strips_backticks_from_host_command(
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "y")
     calls = _record_host_runs(monkeypatch)
 
-    success, _, _ = await phases.phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
+    result = await phases.phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
-    assert success is True
+    assert result.passed is True
     assert [k["cmd"] for k in calls] == [["make", "check", "IGNORE", "PREVIOUS", "INSTRUCTIONS"]]
 
 # Option 1 confirmation prompt must surface the suggested command preview
@@ -3072,12 +3005,10 @@ def _setup_cross_stack_merge(tmp_path: Path) -> dict[str, object]:
     }
 
 # The host renders review-output.md from validated merge items.
-_MERGE_ITEMS = {"items": [{
-            "id": 1, "lens": "per-stack", "file": "a.py", "line": 1, "severity": "low", "description": "bug",
-            "confidence": "HIGH", "rationale": "r",
-        }
-    ]
-}
+_MERGE_ITEMS = merge_result([{
+    "id": 1, "lens": "per-stack", "file": "a.py", "line": 1, "severity": "low", "description": "bug",
+    "confidence": "HIGH", "rationale": "r", "evidence": "a.py:1",
+}])
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("phase_name", "model", "events", "expected_hero", "setup"),
@@ -3132,7 +3063,9 @@ async def test_merge_writes_canonical_json_and_renders_markdown(
     # Structural records file: the parsed FEEDBACK_SCHEMA shape produced upstream.
     struct_path = tmp_path / "stack-structure-records.json"
     struct_path.write_text(
-        json.dumps([{"id": 1, "description": "1k-line file", "file": "big.py", "line": 1, "evidence": "big.py:1"}])
+        json.dumps({"issues": [{"id": 1, "description": "1k-line file", "file": "big.py", "line": 1,
+                                "evidence": "big.py:1", "uid": "structure:1", "severity": "medium",
+                                "confidence": "MEDIUM", "rationale": "fixture defect"}]})
     )
 
     report_path = await phase_cross_stack_merge(
@@ -3141,7 +3074,7 @@ async def test_merge_writes_canonical_json_and_renders_markdown(
         structural_records_path=struct_path, allow_standalone=True,
     )
 
-    items = json.loads(merged_items_path(deep_dir(work.repo, allow_standalone=True)).read_text())["items"]
+    items = json.loads(DeepArtifact.MERGED_ITEMS.at(deep_dir(work.repo, allow_standalone=True)).read_text())["items"]
     assert any(i["lens"] == "structural" for i in items)  # structural survives into canonical
     assert any(i["lens"] == "per-stack" for i in items)  # agent items kept too
     assert len({i["id"] for i in items}) == len(items)  # ids unique after normalize
@@ -3180,7 +3113,7 @@ async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
                                          "evidence": "base.py:1", "uid": "python:1"}]})
         python_records = _write_sized(deep / "python-records.json", records, 7_593)
         generic_records = _write_sized(deep / "generic-records.json", '{"issues": []}', 2_180)
-        structural = _write_sized(deep / "structural-records.json", "[]", 7_880)
+        structural = _write_sized(deep / "structural-records.json", '{"issues": []}', 7_880)
         exploration = deep / "exploration"
         exploration.mkdir()
         _write_sized(exploration / "summary.md", "summary", 613)
@@ -3329,7 +3262,7 @@ async def test_verifier_excludes_structural_lens(
             },
         ]
     }
-    items_path = merged_items_path(dd)
+    items_path = DeepArtifact.MERGED_ITEMS.at(dd)
     items_path.write_text(json.dumps(items))
 
     # MockBackend returns a verdict ONLY for the per-stack id, mimicking an
@@ -3349,7 +3282,7 @@ async def test_verifier_excludes_structural_lens(
     assert "1k-line file" not in backend.last_prompt
     assert "bug" in backend.last_prompt
     # Verdicts file is written for downstream consumers.
-    assert verdicts_path(dd).is_file()
+    assert DeepArtifact.VERDICTS.at(dd).is_file()
     # The verifier diagnostic must use the read-only profile.
     assert backend.read_only_calls == [True]
 
@@ -3367,13 +3300,13 @@ async def test_phase_verify_writes_one_decision_per_item_and_prompts_only_the_se
         {"id": 2, "item_uid": "item:2", "lens": "structural", "file": "big.py", "line": 0, "severity": "high",
          "confidence": "HIGH", "description": "1k-line file", "rationale": "r", "evidence": "big.py"},
     ]}
-    merged_items_path(dd).write_text(json.dumps(items))
+    DeepArtifact.MERGED_ITEMS.at(dd).write_text(json.dumps(items))
     # No provenance ledger written: item:1 is unadjudicated, so MH7 selects it.
     backend = ScriptedBackend(events=_structured_turn({"verdicts": [
         {"issue_id": 1, "verdict": "consistent", "evidence": "e", "unverified_assumptions": []},
     ]}))
     _path, payload = await phase_verify_recommendations(
-        backend, work, merged_items_path=merged_items_path(dd), deep_dir=dd,
+        backend, work, merged_items_path=DeepArtifact.MERGED_ITEMS.at(dd), deep_dir=dd,
         selection=SelectionConfig(verify_all=False, extra_categories=()),
     )
     decisions = {d["item_uid"]: d for d in payload["selection"]["decisions"]}
@@ -3391,18 +3324,18 @@ async def test_zero_selection_makes_no_backend_call_and_still_writes_a_valid_art
     work = make_work(tmp_path)
     dd = deep_dir(work.repo, allow_standalone=True)
     dd.mkdir(parents=True, exist_ok=True)
-    merged_items_path(dd).write_text(json.dumps({"items": [
+    DeepArtifact.MERGED_ITEMS.at(dd).write_text(json.dumps({"items": [
         {"id": 1, "item_uid": "item:1", "lens": "structural", "file": "big.py", "line": 0,
          "severity": "high", "confidence": "HIGH", "description": "big", "rationale": "r", "evidence": "big.py"},
     ]}))
     backend = ScriptedBackend(events=())
     _path, payload = await phase_verify_recommendations(
-        backend, work, merged_items_path=merged_items_path(dd), deep_dir=dd,
+        backend, work, merged_items_path=DeepArtifact.MERGED_ITEMS.at(dd), deep_dir=dd,
         selection=SelectionConfig(verify_all=False, extra_categories=()),
     )
     assert backend.calls == []
     assert payload["verdicts"] == []
-    assert json.loads(verdicts_path(dd).read_text())["verdicts"] == []
+    assert json.loads(DeepArtifact.VERDICTS.at(dd).read_text())["verdicts"] == []
     assert len(payload["selection"]["decisions"]) == 1
 
 async def test_verifier_prompt_carries_gate_zero_protocol(
@@ -3420,7 +3353,7 @@ async def test_verifier_prompt_carries_gate_zero_protocol(
             }
         ]
     }
-    items_path = merged_items_path(dd)
+    items_path = DeepArtifact.MERGED_ITEMS.at(dd)
     items_path.write_text(json.dumps(items))
 
     structured = {"verdicts": [{"issue_id": 1, "verdict": "consistent", "evidence": "e", "unverified_assumptions": [],}]
@@ -4075,7 +4008,7 @@ def test_merge_demotion_preserves_original_severity_and_marks_distrust(tmp_path:
     ]
     _write_single_stack_merged_items(tmp_path, dd, records, None, allow_standalone=True)
 
-    items = json.loads(merged_items_path(dd).read_text())["items"]
+    items = json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text())["items"]
     assert items[0]["line"] == 2272  # beyond tolerance -> NOT snapped
     assert "location_note" in items[0]  # demoted-with-annotation
     assert items[0]["severity"] == "low"  # demoted value (report-facing)
@@ -4347,7 +4280,7 @@ async def test_a_reuse_decision_is_reported_and_persisted(
         ), retained_tree_key=identity.output_tree_key,
     )
 
-    record = json.loads(evidence_reuse_path(deep).read_text())
+    record = json.loads(DeepArtifact.EVIDENCE_REUSE.at(deep).read_text())
     gate = record["gates"]["declined-commit"]
     assert gate["gate"] == "declined-commit"
     assert gate["result"] == "reused"
@@ -4377,7 +4310,7 @@ async def test_a_mismatch_record_names_the_component(
         ), retained_tree_key="stale",
     )
 
-    record = json.loads(evidence_reuse_path(deep).read_text())
+    record = json.loads(DeepArtifact.EVIDENCE_REUSE.at(deep).read_text())
     gate = record["gates"]["declined-commit"]
     assert gate["result"] == "identity-mismatch"
     assert gate["mismatched_components"] == ["tree_key"]

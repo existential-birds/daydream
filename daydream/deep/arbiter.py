@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from daydream.deep.dependency import co_locate_groups
-from daydream.deep.records import record_uid, stack_name_from_records_source, stack_name_from_uid
+from daydream.deep.records import record_uid, stack_name_from_uid
 from daydream.severity import CANONICAL_LEVELS, SEVERITY_RANK
 
 # Canonical confidence vocabulary (uppercase HIGH|MEDIUM|LOW schema enum,
@@ -25,14 +25,6 @@ def _severity(record: dict[str, Any]) -> str:
     """Lowercase severity; absent/non-string values cannot qualify by severity."""
     value = record.get("severity")
     return value.lower() if isinstance(value, str) else ""
-
-
-def _stack_name(record: dict[str, Any], source: str) -> str:
-    """Prefer the host-minted UID's stack, falling back to a normalized source.
-
-    A bare stack name and its records filename must count as the same stack.
-    """
-    return stack_name_from_uid(record_uid(record)) or stack_name_from_records_source(source)
 
 
 def _confidence(record: dict[str, Any]) -> str:
@@ -53,7 +45,6 @@ def _at_or_above(min_severity: str) -> frozenset[str]:
 
 def contested_indices(
     records: list[dict[str, Any]],
-    sources: list[str],
     *,
     contested_only: Iterable[int] = (),
 ) -> frozenset[int]:
@@ -62,7 +53,7 @@ def contested_indices(
     Ordinary records group by (file, line). A contested-only line-0 record also
     joins a file's sole ordinary location, when exactly one exists; widening to
     several locations would conflate unrelated defects. Whole-file records retain
-    their own line-0 group. Sources must align positionally with records.
+    their own line-0 group. Each record carries its host-minted scope UID.
     """
     severity_exempt = set(contested_only)
     contested: set[int] = set()
@@ -84,7 +75,7 @@ def contested_indices(
         by_location.setdefault((file, 0), list(indices))
 
     for indices in by_location.values():
-        stacks = {_stack_name(records[i], sources[i]) for i in indices}
+        stacks = {stack_name_from_uid(record_uid(records[i])) for i in indices}
         severities = {severity for i in indices if (severity := _severity(records[i]))}
         if len(stacks) >= 2 and len(severities) >= 2:
             contested.update(indices)
@@ -93,7 +84,6 @@ def contested_indices(
 
 def select_arbiter_targets(
     records: list[dict[str, Any]],
-    sources: list[str],
     min_severity: str = "high",
     contested_location: bool = True,
     contested_only: Iterable[int] = (),
@@ -101,14 +91,10 @@ def select_arbiter_targets(
     """Return sorted unique indices qualifying by severity or contested location.
 
     Records in contested_only skip severity selection but remain eligible through
-    contested_indices. Missing severity cannot qualify by severity. Mismatched
-    record/source lengths or a noncanonical minimum raise ValueError.
+    contested_indices. Missing severity cannot qualify by severity. A noncanonical minimum raises ValueError.
     """
-    if len(records) != len(sources):
-        raise ValueError(
-            f"records/sources length mismatch: {len(records)} != {len(sources)}"
-        )
-
+    if any(not stack_name_from_uid(record_uid(record)) for record in records):
+        raise ValueError("Arbiter records require scope UIDs")
     severity_exempt = set(contested_only)
     eligible = _at_or_above(min_severity)
     selected = {
@@ -116,7 +102,7 @@ def select_arbiter_targets(
         if i not in severity_exempt and _severity(record) in eligible
     }
     if contested_location:
-        selected.update(contested_indices(records, sources, contested_only=severity_exempt))
+        selected.update(contested_indices(records, contested_only=severity_exempt))
 
     return sorted(selected)
 

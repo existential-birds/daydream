@@ -7,21 +7,75 @@ merged markdown report to target/REVIEW_OUTPUT_FILE.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+import json
+import re
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from jsonschema import ValidationError
 
 from daydream.artifact_visibility import ArtifactSession, artifact_dir_for
-from daydream.json_utils import read_json_object
+from daydream.diagnostics import exception_text
+from daydream.json_utils import atomic_write_json
 
-# Reserved entry; resume loaders must not interpret it as a stack name.
-MERGE_FAILURE_KEY = "__merge__"
+if TYPE_CHECKING:
+    from daydream.deep.state import DeepState
+    from daydream.review_result import ReasonCode, ReviewCoverage
 
-_DEEP_STAGE_PREREQS: dict[str, list[str]] = {
+
+class DeepArtifact(StrEnum):
+    """Fixed session-private files; dynamic stack and group paths remain separate."""
+
+    # Intent and alternatives form the review context bus.
+    INTENT = "intent.md"
+    ALTERNATIVES = "alternatives.json"
+    # Whole adjudication completion requires persisted final records.
+    ARBITER_INPUT = "arbiter-input.json"
+    SUPPRESSION_INPUT = "suppression-input.json"
+    ADJUDICATION_COMPLETE = "adjudication-complete.marker"
+    DEDUP_CANDIDATES = "dedup-candidates.json"
+    # Diagram decisions are auditable even when no kind renders.
+    DIAGRAM = "diagram.json"
+    DIAGRAM_MARKDOWN = "diagram.md"
+    # Canonical merged JSON drives fixes and posting; markdown is a derived view.
+    MERGED_REPORT = "review-output.md"
+    MERGED_ITEMS = "merged-items.json"
+    # Resume evidence binds positive scope coverage to the analyzed revision.
+    REVIEW_COVERAGE = "review-coverage.json"
+    FIX_FAILURES = "fix-failures.json"
+    # Fix outcomes and authorization audit are session/evidence bound.
+    FIX_OUTCOMES = "fix-outcomes.json"
+    FIX_FOOTPRINT = "fix-footprint.json"
+    STABILIZATION_FAILED = "stabilization-failed.json"
+    # Recommended capture identifies the post-test or pre-test patch tree.
+    RECOMMENDED_CAPTURE = "recommended-capture.json"
+    FIX_QUALITY_GATE = "fix-quality-gate.json"
+    GENERATED_FILE_VIOLATIONS = "generated-file-violations.json"
+    FIX_LEFTOVER_UNTRACKED = "fix-leftover-untracked.json"
+    VERDICTS = "recommendation-verdicts.json"
+    ADJUDICATION_PROVENANCE = "adjudication-provenance.json"
+    # Agent-inferred test verdicts are separate from pushed-SHA-bound remote CI.
+    TEST_VERDICT = "test-verdict.json"
+    EVIDENCE_REUSE = "evidence-reuse.json"
+    PUSH_VERDICT = "push-verdict.json"
+    REMOTE_CI_VERDICT = "remote-ci-verdict.json"
+    REMOTE_CI_HANDOFF = "remote-ci-handoff.json"
+    # Routing evidence is append-only and never a decision input.
+    LATENCY_ROUTING = "latency-routing.json"
+    DIFF_KEY = "diff-key"
+
+    def at(self, root: Path) -> Path:
+        return root / self.value
+
+
+_DEEP_STAGE_PREREQS: dict[str, list[DeepArtifact]] = {
     "ttt": [],
-    "per-stack": ["intent.md", "alternatives.json"],
-    "merge": ["intent.md", "alternatives.json"],  # + at least one current reviewer output
-    "fix": ["merged-items.json"],  # Markdown is only a derived view.
+    "per-stack": [DeepArtifact.INTENT, DeepArtifact.ALTERNATIVES],
+    "merge": [DeepArtifact.INTENT, DeepArtifact.ALTERNATIVES],  # + at least one current reviewer output
+    "fix": [DeepArtifact.MERGED_ITEMS],  # Markdown is only a derived view.
 }
 
 # Which --start-at to suggest when a stage's prerequisites are missing.
@@ -39,16 +93,6 @@ def deep_dir(
     d = artifact_dir_for(target, session=session, allow_standalone=allow_standalone) / "deep"
     d.mkdir(parents=True, exist_ok=True)
     return d
-
-
-def intent_path(deep_dir_path: Path) -> Path:
-    """Path to the TTT intent summary artifact (D-19 context bus)."""
-    return deep_dir_path / "intent.md"
-
-
-def alternatives_path(deep_dir_path: Path) -> Path:
-    """Path to the TTT alternative-review findings artifact (D-19 context bus)."""
-    return deep_dir_path / "alternatives.json"
 
 
 def write_review_markdown(path: Path, issues: list[dict[str, Any]]) -> None:
@@ -69,26 +113,6 @@ def per_stack_records_path(deep_dir_path: Path, stack_name: str) -> Path:
     return deep_dir_path / f"stack-{stack_name}-records.json"
 
 
-def arbiter_input_path(deep_dir_path: Path) -> Path:
-    """High-severity/contested records tagged with arb_id for the arbiter to echo."""
-    return deep_dir_path / "arbiter-input.json"
-
-
-def suppression_input_path(deep_dir_path: Path) -> Path:
-    """Borderline records tagged with sup_id, audited separately from arbiter inputs."""
-    return deep_dir_path / "suppression-input.json"
-
-
-def adjudication_complete_path(deep_dir_path: Path) -> Path:
-    """Marker proving final records were persisted after arbiter and suppression.
-
-    Absence forces the whole adjudication block to rerun before merge. Group
-    markers cannot replace it. Keep the legacy arbiter-complete.marker filename
-    for resume compatibility.
-    """
-    return deep_dir_path / "arbiter-complete.marker"
-
-
 def arbiter_group_input_path(deep_dir_path: Path, group_id: str) -> Path:
     """One sharded group's resume input; the unsharded input path remains separate."""
     return deep_dir_path / f"{group_id}-input.json"
@@ -104,146 +128,65 @@ def arbiter_group_complete_path(deep_dir_path: Path, group_id: str) -> Path:
     return deep_dir_path / f"{group_id}-complete.marker"
 
 
-def dedup_candidates_path(deep_dir_path: Path) -> Path:
-    """Dedup pre-filter candidate-pairs output (D-27)."""
-    return deep_dir_path / "dedup-candidates.json"
+def persist_review_coverage(deep_dir_path: Path, coverage: ReviewCoverage, *, error: Exception | None = None) -> None:
+    """Persist checked evidence atomically, retaining any earlier failure as primary."""
+    from daydream.review_result import ReviewCoverage
+
+    try:
+        payload = coverage.to_dict()
+        ReviewCoverage.from_dict(payload)
+        atomic_write_json(DeepArtifact.REVIEW_COVERAGE.at(deep_dir_path), payload)
+    except Exception as exc:
+        if error is None:
+            raise
+        error.add_note(f"Review coverage persistence failed: {type(exc).__name__}")
 
 
-def diagram_path(deep_dir_path: Path) -> Path:
-    """Eligibility and per-kind proposed/final specs, grounding verdicts and mermaid.
+@contextmanager
+def review_stage(state: DeepState, phase: str | Callable[[], str], *, persist: bool = False,
+                 reasons: tuple[ReasonCode, ...] = ()) -> Iterator[None]:
+    """Record a stage failure without replacing it with a secondary evidence-write error."""
+    from daydream.review_result import reason_for_exception
 
-    Written even when all kinds are skipped so the decision remains auditable.
-    """
-    return deep_dir_path / "diagram.json"
-
-
-def diagram_markdown_path(deep_dir_path: Path) -> Path:
-    """Folded blocks rendered from diagram.json; empty/absent when no kind rendered."""
-    return deep_dir_path / "diagram.md"
-
-
-def merged_report_path(deep_dir_path: Path) -> Path:
-    """Markdown rendered from canonical merged-items.json and copied to the public report."""
-    return deep_dir_path / "review-output.md"
-
-
-def merged_items_path(deep_dir_path: Path) -> Path:
-    """Canonical {items: [...]} findings for fixes, verification and PR posting.
-
-    Schema-validated items carry lens and severity; markdown is a derived view.
-    """
-    return deep_dir_path / "merged-items.json"
+    coverage = state.review_coverage
+    if isinstance(phase, str):
+        coverage.require_phase(phase)
+    try:
+        yield
+    except Exception as exc:
+        coverage.record_phase(phase if isinstance(phase, str) else phase(), "failed",
+                              reasons=(*reasons, reason_for_exception(exc)),
+                              diagnostic=f"{type(exc).__name__}: {exception_text(exc) or '(unavailable)'}")
+        if persist:
+            persist_review_coverage(state.dd, coverage, error=exc)
+        raise
+    else:
+        if persist:
+            persist_review_coverage(state.dd, coverage)
 
 
-def per_stack_failures_path(deep_dir_path: Path) -> Path:
-    """Persisted {stack_name: reason} failures, retained across merge resumes."""
-    return deep_dir_path / "per-stack-failures.json"
+def restore_review_coverage(deep_dir_path: Path, current: ReviewCoverage) -> ReviewCoverage:
+    """Restore matching evidence into this run; corrupt or foreign evidence fails closed."""
+    from daydream.review_result import ReviewCoverage
 
-
-def fix_failures_path(deep_dir_path: Path) -> Path:
-    """Persisted {file_group: reason} failures; the archive marks such runs partial."""
-    return deep_dir_path / "fix-failures.json"
-
-
-def fix_outcomes_path(deep_dir_path: Path) -> Path:
-    """Full-canonical verification keyed by durable item UID and bound to session/evidence.
-
-    Each round replaces the preceding envelope.
-    """
-    return deep_dir_path / "fix-outcomes.json"
-
-
-def fix_footprint_path(deep_dir_path: Path) -> Path:
-    """Session-bound authorization and enforcement audit for the fix cycle."""
-    return deep_dir_path / "fix-footprint.json"
-
-
-def stabilization_failed_path(deep_dir_path: Path) -> Path:
-    """Terminal reason emitted when the bounded retained tree cannot stabilize."""
-    return deep_dir_path / "stabilization-failed.json"
-
-
-def recommended_capture_path(deep_dir_path: Path) -> Path:
-    """Identify the tree producing recommended.patch: post_test, or pre_test fallback.
-
-    The orchestrator writes the session-bound capture; the archive supplies fallback.
-    """
-    return deep_dir_path / "recommended-capture.json"
-
-
-def fix_quality_gate_path(deep_dir_path: Path) -> Path:
-    """Fail-open per-round quality deltas for edited files, consumed by the archive.
-
-    Disabled gates write {enabled: false}; enabled gates include per_file results.
-    """
-    return deep_dir_path / "fix-quality-gate.json"
-
-
-def generated_file_violations_path(deep_dir_path: Path) -> Path:
-    """Generated-file edits rejected by the fix-phase runtime guard."""
-    return deep_dir_path / "generated-file-violations.json"
-
-
-def fix_leftover_untracked_path(deep_dir_path: Path) -> Path:
-    """New surviving paths from a failed fix pass, written alongside fix failures.
-
-    Parallel groups share a tree, so unattributable paths are preserved and audited.
-    """
-    return deep_dir_path / "fix-leftover-untracked.json"
-
-
-def verdicts_path(deep_dir_path: Path) -> Path:
-    """Path to the recommendation-verifier verdicts artifact."""
-    return deep_dir_path / "recommendation-verdicts.json"
-
-
-def adjudication_provenance_path(deep_dir_path: Path) -> Path:
-    """Host-stamped targeting, verdict binding, survival and rewrite provenance.
-
-    Verify selection reads this alongside the separate recommendation verdicts.
-    """
-    return deep_dir_path / "adjudication-provenance.json"
-
-
-def test_verdict_path(deep_dir_path: Path) -> Path:
-    """Persist {passed: bool, retries: int} for both successful and failed test runs.
-
-    The verdict is inferred from agent prose, not independent proof of test success.
-    """
-    return deep_dir_path / "test-verdict.json"
-
-
-def evidence_reuse_path(deep_dir_path: Path) -> Path:
-    """Gate-keyed audit retaining both declined-commit and pre-push decisions.
-
-    Contains identity facts only: no command, config digest, secret or prompt.
-    """
-    return deep_dir_path / "evidence-reuse.json"
-
-
-def push_verdict_path(deep_dir_path: Path) -> Path:
-    """Session-bound outcome of the current run's ordinary push attempt."""
-    return deep_dir_path / "push-verdict.json"
-
-
-def remote_ci_verdict_path(deep_dir_path: Path) -> Path:
-    """Session- and pushed-SHA-bound remote CI state."""
-    return deep_dir_path / "remote-ci-verdict.json"
-
-
-def remote_ci_handoff_path(deep_dir_path: Path) -> Path:
-    """Operator handoff for a failed or incomplete remote CI state."""
-    return deep_dir_path / "remote-ci-handoff.json"
-
-
-def latency_routing_path(deep_dir_path: Path) -> Path:
-    """Append-only profile/risk/wonder/arbiter routing evidence; never a decision input."""
-    return deep_dir_path / "latency-routing.json"
-
-
-def diff_key_path(deep_dir_path: Path) -> Path:
-    """Sibling file recording which diff the deep artifacts were produced from."""
-    return deep_dir_path / "diff-key"
+    restart = "Re-run without --start-at to restart review and regenerate coverage evidence."
+    try:
+        stored = ReviewCoverage.from_dict(json.loads(DeepArtifact.REVIEW_COVERAGE.at(deep_dir_path).read_text()))
+    except (OSError, ValueError, TypeError, KeyError, ValidationError) as exc:
+        raise ValueError(f"Cannot resume review: missing or corrupt versioned coverage evidence. {restart}") from exc
+    stored_inventory = stored.to_dict()["planned_scopes"]
+    current_inventory = current.to_dict()["planned_scopes"]
+    if stored.revision != current.revision or stored_inventory != current_inventory:
+        raise ValueError(f"Cannot resume review: analyzed revision or planned scope inventory changed. {restart}")
+    extra_phases = stored.required_phases - current.required_phases
+    extra_phases = {phase for phase in extra_phases
+                    if phase not in {"arbiter", "suppression", "findings", "pipeline"}
+                    and re.fullmatch(r"arbiter-group-\d+", phase) is None}
+    if not current.required_phases <= stored.required_phases or extra_phases:
+        raise ValueError(f"Cannot resume review: required review stages changed. {restart}")
+    payload = stored.to_dict()
+    payload["run_id"] = current.run_id
+    return ReviewCoverage.from_dict(payload)
 
 
 def diff_key(diff: str) -> str:
@@ -264,7 +207,7 @@ def check_deep_artifacts(
     if stage not in _DEEP_STAGE_PREREQS:
         raise ValueError(f"Unknown deep stage: {stage!r}")
 
-    prerequisites = [deep_dir_path / name for name in _DEEP_STAGE_PREREQS[stage]]
+    prerequisites = [artifact.at(deep_dir_path) for artifact in _DEEP_STAGE_PREREQS[stage]]
     # is_file rejects directories shadowing prerequisite filenames.
     missing = [path for path in prerequisites if not path.is_file()]
     if stage == "merge":
@@ -285,7 +228,7 @@ def check_deep_artifacts(
         raise FileNotFoundError(msg)
 
     if current_diff_sha is not None:
-        key_file = diff_key_path(deep_dir_path)
+        key_file = DeepArtifact.DIFF_KEY.at(deep_dir_path)
         try:
             stored = key_file.read_text(encoding="utf-8").strip()
         except OSError:
@@ -316,11 +259,3 @@ def check_deep_artifacts(
                 f"Resuming would review stale findings against changed code.\n"
                 f"Re-run without --start-at to regenerate them."
             )
-
-
-def _load_failures(path: Path) -> dict[str, Any]:
-    """Load failures verbatim, including the reserved merge entry.
-
-    Missing files, malformed JSON and non-dict roots yield {}; other I/O errors propagate.
-    """
-    return read_json_object(path)

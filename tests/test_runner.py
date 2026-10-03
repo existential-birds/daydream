@@ -11,6 +11,7 @@ import threading
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,7 +42,10 @@ from daydream.backends import (
 from daydream.cli import _signal_handler
 from daydream.config import DEFAULT_PI_MODEL, REVIEW_OUTPUT_FILE
 from daydream.config_file import DaydreamFileConfig
-from daydream.deep.artifacts import diff_key, diff_key_path, merged_items_path
+from daydream.deep.artifacts import (
+    DeepArtifact,
+    diff_key,
+)
 from daydream.exploration import ExplorationContext
 from daydream.extensions import get_registry
 from daydream.extensions.loader import build_registry
@@ -72,6 +76,7 @@ from tests.harness.claude_sdk import patch_claude_sdk
 from tests.harness.git_helpers import bare_remote, commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.review_profile import independent_exploration_profile
+from tests.harness.review_result import terminal_result
 from tests.harness.stub_backend import StubBackend, silence
 from tests.harness.trajectory import make_recorder
 from tests.test_deep_pr_comment_integration import (
@@ -220,7 +225,7 @@ def test_run_write_capture_does_not_swallow_base_exception(
     capture = _RunWriteCapture(session_id="session")
     def interrupt(_payload: bytes) -> Any:
         raise KeyboardInterrupt
-    monkeypatch.setattr("daydream.run_artifacts.json.loads", interrupt)
+    monkeypatch.setattr("daydream.trajectory.types.json.loads", interrupt)
     with pytest.raises(KeyboardInterrupt):
         capture.retain(capture_recorder, _capture_snapshot(tmp_path, "partial", json_bytes=b"{}"))
     assert capture.partial is None
@@ -250,7 +255,9 @@ def test_findings_preparation_diagnostic_does_not_expose_private_write_path(
     result = runner._write_findings_for_parsed(
         repo, RunConfig(pr_number=7, findings_out=str(private_path)), [],
         renderers=pr_review.ReviewRenderers(pr_review.default_render_finding, pr_review.default_render_summary),
-        run_info="Fixture run info",
+        run_info="Fixture run info", captured_pr=replace(_ARTIFACT_PR, head_sha=git_ops.head_sha(repo),
+                                                       base_sha=git_ops.head_sha(repo)),
+        terminal_result=terminal_result(head_sha=git_ops.head_sha(repo)), snapshot_diff="",
     )
     output = capsys.readouterr().out
     assert result == 0
@@ -258,8 +265,8 @@ def test_findings_preparation_diagnostic_does_not_expose_private_write_path(
     assert "Findings artifact prepared." in output
     assert str(private_path) not in output
 
-def test_findings_artifact_diff_fallback_uses_the_run_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Missing local PR objects keep artifact classification on the owning session."""
+def test_diagram_artifact_diff_fallback_uses_the_run_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Diagram target resolution without local PR objects uses the owning session."""
     repo = tmp_path / "repo"
     _init_repo(repo)
     auth = git_ops.StaticGitHubAuth({"PATH": "/usr/bin", "GH_TOKEN": "artifact-owner"})
@@ -276,7 +283,7 @@ def test_findings_artifact_diff_fallback_uses_the_run_auth(tmp_path: Path, monke
     destination = tmp_path / "findings.json"
     assert (
         runner._write_findings_for_parsed(
-            repo, RunConfig(pr_number=7, findings_out=str(destination)), [], auth=auth,
+            repo, RunConfig(pr_number=7, findings_out=str(destination)), [], auth=auth, kind="diagram",
             renderers=pr_review.ReviewRenderers(pr_review.default_render_finding, pr_review.default_render_summary),
             run_info="Fixture run info",
         )
@@ -939,45 +946,32 @@ async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
 # --- Per-phase model resolution tests --------------------------------------
 
 class TestResolveBackendPhaseModel:
-    def test_explicit_phase_flag_wins_over_table(self) -> None:
-        config = RunConfig(backend="claude", review_model="claude-haiku-4-5")
-        backend = runner._resolve_backend(config, "review")
-        assert backend.model == "claude-haiku-4-5"
+    @pytest.mark.parametrize("options,phase,model", [
+        pytest.param({"backend": "claude", "review_model": "claude-haiku-4-5"}, "review", "claude-haiku-4-5",
+                     id="explicit-review-model"),
+        pytest.param({"backend": "claude"}, "review", "claude-opus-5", id="default-review"),
+        pytest.param({"backend": "claude"}, "wonder", "claude-opus-5", id="phase-without-model-flag"),
+        pytest.param({"backend": "codex"}, "parse", "gpt-5.6-luna", id="cheap-parse-tier"),
+        pytest.param({"backend": "claude", "review_backend": "codex"}, "review", "gpt-5.6-sol",
+                     id="overridden-backend-tier"),
+    ])
+    def test_model_resolution_precedence(self, options: dict[str, Any], phase: str, model: str) -> None:
+        assert runner._resolve_backend(RunConfig(**options), phase).model == model
 
-    def test_table_default_used_when_no_flag(self) -> None:
-        config = RunConfig(backend="claude")  # no review_model override
-        backend = runner._resolve_backend(config, "review")
-        assert backend.model == "claude-opus-5"  # claude REVIEW default
 
-    def test_table_default_for_phase_without_flag(self) -> None:
-        config = RunConfig(backend="claude")
-        backend = runner._resolve_backend(config, "wonder")
-        assert backend.model == "claude-opus-5"
 
-    def test_codex_table_default(self) -> None:
-        config = RunConfig(backend="codex")
-        backend = runner._resolve_backend(config, "parse")
-        assert backend.model == "gpt-5.6-luna"  # codex PARSE default (cheap tier)
 
-    def test_backend_override_uses_overridden_backends_table(self) -> None:
-        config = RunConfig(backend="claude", review_backend="codex")
-        backend = runner._resolve_backend(config, "review")
-        assert backend.model == "gpt-5.6-sol"  # codex REVIEW default (heavy tier)
 
-    def test_cache_returns_same_instance_for_same_phase_and_backend(self) -> None:
+
+    @pytest.mark.parametrize("second_phase,same", [("review", True), ("parse", False)])
+    def test_cache_identity_tracks_resolved_phase(self, second_phase: str, same: bool) -> None:
         cache: dict[tuple[str, str | None, str | None, Path | None], Backend] = {}
         config = RunConfig(backend="claude")
-        b1 = runner._resolve_backend(config, "review", cache)
-        b2 = runner._resolve_backend(config, "review", cache)
-        assert b1 is b2
+        first = runner._resolve_backend(config, "review", cache)
+        second = runner._resolve_backend(config, second_phase, cache)
+        assert (first is second) is same
 
-    def test_cache_returns_distinct_instances_for_different_phases(self) -> None:
-        # Different models -> different backends, even on the same backend kind.
-        cache: dict[tuple[str, str | None, str | None, Path | None], Backend] = {}
-        config = RunConfig(backend="claude")
-        review_backend = runner._resolve_backend(config, "review", cache)
-        parse_backend = runner._resolve_backend(config, "parse", cache)
-        assert review_backend is not parse_backend
+
 
     def test_codex_backend_receives_resolved_reasoning_effort_and_cache_splits_on_it(self) -> None:
         cache: dict[tuple[str, str | None, str | None, Path | None], Backend] = {}
@@ -1098,13 +1092,34 @@ async def test_improve_inherited_storage_override_stops_before_model(
 # --- Deep fix-cycle hero is followed by Model: dim line --------------------
 
 def _seed_fix_resume(target: Path, items: list[dict[str, Any]]) -> Path:
-    """Seed merged items with a matching diff-key and return the deep directory for resume tests."""
+    """Seed identity-bound completed shallow review evidence for fix-only tests."""
+    from daydream.deep.artifacts import persist_review_coverage
+    from daydream.deep.diff import _diff_changed_files
+    from daydream.deep.orchestrator import _prepare_review_stacks
+    from daydream.deep.records import stamp_item_uids
+    from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
+
     deep = target / ".daydream" / "deep"
     deep.mkdir(parents=True, exist_ok=True)
     base = _resolve_base(target, None, None)
-    diff = git_ops.diff(target, base)
-    diff_key_path(deep).write_text(diff_key(diff or ""), encoding="utf-8")
-    merged_items_path(deep).write_text(json.dumps({"items": items}))
+    diff = git_ops.diff(target, base) or ""
+    head = git_ops.head_sha(target)
+    merge_base = git_ops.resolve_diff_merge_base(target, base, head)
+    config = RunConfig(target=str(target), shallow=True)
+    stacks, _, _ = _prepare_review_stacks(config, _diff_changed_files(diff), diff, target, "deep")
+    coverage = ReviewCoverage("fix-resume-fixture", AnalyzedRevision(head, merge_base, diff_key(diff)),
+                              [PlannedScope(stack.stack_name, stack.stack_name.split("#", 1)[0],
+                                            files=tuple(sorted(stack.files))) for stack in stacks],
+                              ("intent", "alternatives", "merge"))
+    for scope in coverage.planned_scopes:
+        coverage.record_scope(scope.scope_id, "complete")
+    coverage.record_phase("intent", "complete")
+    coverage.record_phase("alternatives", "complete", noop=True)
+    coverage.record_phase("merge", "complete")
+    DeepArtifact.DIFF_KEY.at(deep).write_text(diff_key(diff), encoding="utf-8")
+    stamp_item_uids(items)
+    DeepArtifact.MERGED_ITEMS.at(deep).write_text(json.dumps({"items": items}))
+    persist_review_coverage(deep, coverage)
     return deep
 
 def _fix_item(item_id: int = 1, *, severity: str = "medium") -> dict[str, Any]:
@@ -1112,7 +1127,7 @@ def _fix_item(item_id: int = 1, *, severity: str = "medium") -> dict[str, Any]:
     return {
         "id": item_id, "lens": "per-stack", "file": "main.py", "line": 1, "severity": severity,
         "description": f"{severity} issue in main.py", "confidence": "MEDIUM", "rationale": "rationale",
-        "evidence": "main.py:1",
+        "evidence": "main.py:1", "source_uids": [f"python:{item_id}"], "related_files": None,
     }
 
 def _silence_fix_cycle_ui(silence_console: Callable[..., None]) -> None:
@@ -1122,8 +1137,11 @@ def _silence_fix_cycle_ui(silence_console: Callable[..., None]) -> None:
     silence_console("daydream.deep.fix_steps")
     silence_console("daydream.ui", keep=("print_phase_hero", "print_dim"))
 
-async def _stub_verify(*_a: Any, **_k: Any) -> tuple[Path, dict[str, Any]]:
-    return Path("/nonexistent"), {"verdicts": []}
+async def _stub_verify(*_a: Any, **kwargs: Any) -> tuple[Path, dict[str, Any]]:
+    items = json.loads(kwargs["merged_items_path"].read_text())["items"]
+    return Path("/nonexistent"), {"verdicts": [], "selection": {"decisions": [
+        {"item_uid": item["item_uid"], "selected": True, "reason_code": "verify_all"} for item in items
+    ]}}
 
 async def _stub_fix_verify(
     _backend: Any, _work: Any, items: list[dict[str, Any]], *_args: Any, **_kwargs: Any,
@@ -1512,62 +1530,36 @@ def _build_manifest(config: RunConfig, flow: DaydreamRunFlow, tmp_path: Path) ->
         ), git_ctx=GitContext(), status="complete", archive_path=tmp_path,
     )
 
-def test_manifest_backend_is_general_default_not_per_stack_review(tmp_path: Path) -> None:
-    """Archive the general backend independently of per-phase review overrides.
-
-    General precedence is CLI global > file global > claude; review_backend retains
-    only the review-specific override marker.
-    """
-    config = RunConfig(
-        target=str(tmp_path / "project"), run_eval=False, review_backend="codex",
-        file_config=DaydreamFileConfig(phases={"per_stack_review": {"backend": "pi"}}),
-    )
-    m = _build_manifest(config, DaydreamRunFlow.NORMAL, tmp_path)
-    assert m.backend == "claude"
-    assert m.review_backend == "codex"
-
-def test_manifest_normal_records_fix_and_test_backend(tmp_path: Path) -> None:
-    config = RunConfig(
-        target=str(tmp_path / "project"), run_eval=False, backend="codex", fix_backend="pi", test_backend="osprey",
-    )
-    m = _build_manifest(config, DaydreamRunFlow.NORMAL, tmp_path)
-    assert m.backend == "codex"
-    assert m.review_backend is None
-    assert m.fix_backend == "pi"
-    assert m.test_backend == "osprey"
-    run = m.to_dict()["run"]
-    assert run["fix_backend"] == "pi"
-    assert run["test_backend"] == "osprey"
-
-@pytest.mark.parametrize("flow", [DaydreamRunFlow.TTT, DaydreamRunFlow.IMPROVE])
-def test_manifest_nonfix_flows_omit_fix_test_backend(tmp_path: Path, flow: DaydreamRunFlow) -> None:
-    config = RunConfig(target=str(tmp_path / "project"), run_eval=False, backend="codex")
+@pytest.mark.parametrize("flow,options,expected", [
+    pytest.param(DaydreamRunFlow.NORMAL,
+                 {"review_backend": "codex", "file_config": DaydreamFileConfig(phases={
+                     "per_stack_review": {"backend": "pi"}})},
+                 ("claude", "codex", "claude", "claude"), id="general-independent-of-per-stack"),
+    pytest.param(DaydreamRunFlow.NORMAL, {"backend": "codex", "fix_backend": "pi", "test_backend": "osprey"},
+                 ("codex", None, "pi", "osprey"), id="fix-and-test-overrides"),
+    pytest.param(DaydreamRunFlow.TTT, {"backend": "codex"}, ("codex", None, None, None), id="ttt-no-fix"),
+    pytest.param(DaydreamRunFlow.IMPROVE, {"backend": "codex"}, ("codex", None, None, None), id="improve-no-fix"),
+    pytest.param(DaydreamRunFlow.PR, {"review_backend": "codex"}, ("claude", "codex", "claude", None),
+                 id="pr-fixes-without-testing"),
+    pytest.param(DaydreamRunFlow.NORMAL, {}, ("claude", None, "claude", "claude"), id="claude-default"),
+])
+def test_manifest_backend_identity_and_phase_fields(
+    tmp_path: Path, flow: DaydreamRunFlow, options: dict[str, Any], expected: tuple[str | None, ...],
+) -> None:
+    config = RunConfig(target=str(tmp_path / "project"), run_eval=False, **options)
     manifest = _build_manifest(config, flow, tmp_path)
-    assert manifest.backend == "codex"
-    assert manifest.review_backend is None
-    assert manifest.fix_backend is None
-    assert manifest.test_backend is None
-    run = manifest.to_dict()["run"]
-    assert "fix_backend" not in run
-    assert "test_backend" not in run
+    assert (manifest.backend, manifest.review_backend, manifest.fix_backend, manifest.test_backend) == expected
+    serialized = manifest.to_dict()["run"]
+    for field, backend in zip(("fix_backend", "test_backend"), expected[2:], strict=True):
+        if backend is None:
+            assert field not in serialized
+        else:
+            assert serialized[field] == backend
 
-def test_manifest_pr_flow_records_fix_omits_test_backend(tmp_path: Path) -> None:
-    config = RunConfig(target=str(tmp_path / "project"), run_eval=False, review_backend="codex")
-    m = _build_manifest(config, DaydreamRunFlow.PR, tmp_path)
-    assert m.backend == "claude"
-    assert m.review_backend == "codex"
-    assert m.fix_backend == "claude"
-    assert m.test_backend is None
-    run = m.to_dict()["run"]
-    assert "test_backend" not in run
 
-def test_manifest_backend_falls_back_to_claude(tmp_path: Path) -> None:
-    config = RunConfig(target=str(tmp_path / "project"), run_eval=False)
-    m = _build_manifest(config, DaydreamRunFlow.NORMAL, tmp_path)
-    assert m.backend == "claude"
-    assert m.review_backend is None
-    assert m.fix_backend == "claude"
-    assert m.test_backend == "claude"
+
+
+
 
 @pytest.mark.parametrize("flow", list(DaydreamRunFlow))
 def test_manifest_identity_preserves_mode_capabilities(tmp_path: Path, flow: DaydreamRunFlow) -> None:

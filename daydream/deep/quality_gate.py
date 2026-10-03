@@ -17,7 +17,7 @@ from daydream.config import (
     DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE,
     DEFAULT_QUALITY_GATE_VERBOSITY_DELTA,
 )
-from daydream.deep.artifacts import fix_quality_gate_path
+from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.settings import _resolve_non_negative_float
 from daydream.trajectory import current_session_id
 from daydream.ui import print_warning
@@ -207,7 +207,7 @@ async def _evaluate_quality_gate(
     """
     session_id = current_session_id()
     try:
-        gate_p = fix_quality_gate_path(dd)
+        gate_p = DeepArtifact.FIX_QUALITY_GATE.at(dd)
         if not enabled:
             gate_p.write_text(
                 json.dumps({"enabled": False, "session_id": session_id}, indent=2)
@@ -311,7 +311,7 @@ async def _evaluate_quality_gate(
         # ALWAYS warn -- a gate failure that surfaces nothing reads as a clean
         # pass, which is the exact hazard #329 describes.
         try:
-            gate_p = fix_quality_gate_path(dd)
+            gate_p = DeepArtifact.FIX_QUALITY_GATE.at(dd)
             rounds = _load_quality_gate_rounds(gate_p, session_id)
             round_no = iteration if iteration is not None else len(rounds) + 1
             _persist_quality_gate_unavailable(

@@ -122,6 +122,8 @@ class PRInfo:
     # must point at the repo that actually holds the head commit; comments
     # always post to the base repo via ``owner``/``repo``.
     head_repo: str | None = None
+    # GitHub base tip at initial lookup, distinct from base_sha (diff merge-base).
+    pr_base_sha: str | None = None
 
 
 @dataclass(frozen=True)

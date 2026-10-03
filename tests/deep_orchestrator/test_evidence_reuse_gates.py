@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from daydream.deep.artifacts import evidence_reuse_path
+from daydream.deep.artifacts import DeepArtifact
 from daydream.phases import TestAttemptEvidence, phase_commit_push
 from daydream.runner import run
 from daydream.test_execution import TestExecutionIdentity
@@ -155,7 +155,7 @@ async def test_the_pre_push_reuse_decision_is_persisted_in_the_real_flow(
 
     await run(make_config(repo, assume="yes", output_mode="loop", test_command="true"))
 
-    record = json.loads(evidence_reuse_path(repo / ".daydream" / "deep").read_text())
+    record = json.loads(DeepArtifact.EVIDENCE_REUSE.at(repo / ".daydream" / "deep").read_text())
     gate = record["gates"]["pre-push"]
     assert gate["gate"] == "pre-push"
     assert gate["result"] == "reused"

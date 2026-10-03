@@ -9,7 +9,12 @@ from typing import Any
 import pytest
 
 from daydream import review_profile as rp, severity
-from daydream.deep.diagram_prompts import DIAGRAM_GROUNDING_INSTRUCTION
+from daydream.deep.diagram_prompts import (
+    DIAGRAM_GROUNDING_INSTRUCTION,
+    build_diagram_repair_prompt,
+    build_flowchart_prompt,
+    build_sequence_diagram_prompt,
+)
 from daydream.deep.diff import _diff_blocks_for_files, bound_deep_diff
 from daydream.deep.prompts import (
     ANTI_SLOP_RUBRIC_INSTRUCTION,
@@ -20,18 +25,14 @@ from daydream.deep.prompts import (
     TRUST_MODEL_INSTRUCTION,
     VERIFICATION_PROTOCOL_INSTRUCTION,
     build_arbiter_prompt,
-    build_diagram_repair_prompt,
-    build_fix_verify_prompt,
-    build_flowchart_prompt,
     build_generic_fallback_prompt,
     build_merge_prompt,
     build_per_stack_prompt,
-    build_sequence_diagram_prompt,
     build_structural_prompt,
     build_supervise_prompt,
     build_suppression_prompt,
-    build_verification_prompt,
 )
+from daydream.deep.verification_prompts import build_fix_verify_prompt, build_verification_prompt
 from daydream.exploration_runner import count_changed_files
 from daydream.extensions import Registry
 from daydream.extensions.builtins import _register_builtin_prompts, register_builtins

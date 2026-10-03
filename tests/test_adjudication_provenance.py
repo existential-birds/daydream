@@ -21,7 +21,7 @@ from daydream.deep.adjudication_provenance import (
     record_provenance,
 )
 from daydream.deep.adjudication_steps import _apply_adjudication_verdicts
-from daydream.deep.artifacts import adjudication_provenance_path
+from daydream.deep.artifacts import DeepArtifact
 
 
 def test_a_revision_that_changes_a_revisable_field_is_recorded(tmp_path: Path) -> None:
@@ -42,7 +42,7 @@ def test_a_revision_that_changes_a_revisable_field_is_recorded(tmp_path: Path) -
     assert recorded["python:1"].confirmed is True
     assert recorded["python:2"].verdict_bound is False and recorded["python:2"].confirmed is False
     assert recorded["python:2"].targeted is True
-    assert json.loads(adjudication_provenance_path(tmp_path).read_text())["format"] == PROVENANCE_FORMAT
+    assert json.loads(DeepArtifact.ADJUDICATION_PROVENANCE.at(tmp_path).read_text())["format"] == PROVENANCE_FORMAT
 
 def test_apply_adjudication_verdicts_reports_confirmation_and_revision() -> None:
     """A bound keep-verdict confirms; an unbound or missing one does not."""
@@ -57,8 +57,8 @@ def test_apply_adjudication_verdicts_reports_confirmation_and_revision() -> None
     verdicts: dict[int, dict[str, Any]] = {1: {"arb_id": 1, "keep": True, "severity": "low"},
         2: {"arb_id": 99, "keep": True},  # echoed id mismatch -> unconfirmed
     }
-    _kept, _sources, outcomes = _apply_adjudication_verdicts(
-        records, ["stack-python-records.json"] * 3, [0, 1, 2], verdicts, pass_name="arbiter", id_field="arb_id",
+    _kept, outcomes = _apply_adjudication_verdicts(
+        records, [0, 1, 2], verdicts, pass_name="arbiter", id_field="arb_id",
         fail_closed=False,
     )
 
@@ -71,7 +71,7 @@ def test_apply_adjudication_verdicts_reports_confirmation_and_revision() -> None
 
 def test_absent_or_malformed_ledger_loads_as_no_provenance(tmp_path: Path) -> None:
     assert load_provenance(tmp_path) == {}
-    adjudication_provenance_path(tmp_path).write_text("{not json")
+    DeepArtifact.ADJUDICATION_PROVENANCE.at(tmp_path).write_text("{not json")
     assert load_provenance(tmp_path) == {}
 
 def test_a_body_missing_kept_parses_as_unkept_not_confirmed() -> None:

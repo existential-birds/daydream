@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import copy
 import re
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -78,11 +78,16 @@ FLOWCHART_GOLDEN = """flowchart TD
 SEQUENCE_HEADING = "<details><summary><h3>Sequence Diagram</h3></summary>"
 FLOWCHART_HEADING = "<details><summary><h3>Flowchart</h3></summary>"
 
-def _legacy_sequence_builder(
+def _obsolete_sequence_builder(
     *, diff_path: Path, inline_diff: str | None, files_by_module: dict[str, list[str]], cwd: Path,
     exploration_dir: Path | None, schema: dict[str, Any],
 ) -> str:
     return f"legacy: diff={diff_path} cwd={cwd} exploration={exploration_dir}"
+
+def _current_sequence_builder(**kwargs: Any) -> str:
+    assert kwargs["clone_mode"] is True
+    assert "inline_exploration" in kwargs and "inline_dependencies" in kwargs
+    return f"current: diff={kwargs['diff_path']} cwd={kwargs['cwd']} exploration={kwargs['exploration_dir']}"
 
 # --- Harness -----------------------------------------------------------------
 
@@ -545,20 +550,25 @@ async def test_cross_service_trigger_fires_without_an_import_edge(
 
 # --- Spec test 10: force flags and config -----------------------------------
 
-async def test_diagram_sequence_forces_the_kind_on_a_flat_diff(tmp_path: Path, review_run: Callable[..., Any],) -> None:
-    """``--diagram sequence`` forces sequence eligible and leaves flowchart skipped."""
+@pytest.mark.parametrize("mode,kinds", [("sequence", ("sequence",)), ("both", ("sequence", "flowchart"))])
+async def test_diagram_mode_forces_named_kinds_on_a_flat_diff(
+    tmp_path: Path, review_run: Callable[..., Any], mode: str, kinds: tuple[str, ...],
+) -> None:
     target = dr.build_flat_repo(tmp_path)
-    exit_code, stub = await review_run(target, diagram="sequence")
+    exit_code, stub = await review_run(target, diagram=mode)
     assert exit_code == 0
     artifact = _artifact(target)
-    assert artifact["eligibility"]["sequence"] == {
-        "eligible": True, "rule": "forced", "reason": "Forced eligible: diagram mode 'sequence' names this kind.",
-    }
-    assert artifact["results"]["flowchart"]["status"] == "skipped"
-    # Forcing changes eligibility, never verification: the empty spec the stub
-    # returns for an unscripted kind still has to clear the floor, and does not.
-    assert artifact["results"]["sequence"]["status"] == "omitted"
-    assert len(_diagram_calls(stub, "sequence")) == 1
+    for kind in kinds:
+        reason = f"Forced eligible: diagram mode '{mode}' names this kind."
+        if kind == "flowchart":
+            reason += (" No changed function meets the branch-point threshold, so every changed function "
+                       "is offered as a candidate root.")
+        assert artifact["eligibility"][kind] == {"eligible": True, "rule": "forced", "reason": reason}
+        assert len(_diagram_calls(stub, kind)) == 1
+        # Eligibility never bypasses grounding: unscripted empty specs are omitted.
+        assert artifact["results"][kind]["status"] == "omitted"
+    for kind in {"sequence", "flowchart"} - set(kinds):
+        assert artifact["results"][kind]["status"] == "skipped"
 
 async def test_diagram_flowchart_forced_offers_every_changed_function(tmp_path: Path, review_run: Callable[..., Any],
 ) -> None:
@@ -574,37 +584,21 @@ async def test_diagram_flowchart_forced_offers_every_changed_function(tmp_path: 
     prompt = _diagram_calls(stub, "flowchart")[0]["prompt"]
     assert "call_handle" in prompt
 
-async def test_diagram_both_forces_both_kinds(tmp_path: Path, review_run: Callable[..., Any],) -> None:
-    """``--diagram both`` runs an author turn for each kind on a flat diff."""
-    target = dr.build_flat_repo(tmp_path)
-    exit_code, stub = await review_run(target, diagram="both")
-    assert exit_code == 0
-    eligibility = _artifact(target)["eligibility"]
-    assert eligibility["sequence"]["rule"] == "forced"
-    assert eligibility["flowchart"]["rule"] == "forced"
-    assert len(_diagram_calls(stub, "sequence")) == 1
-    assert len(_diagram_calls(stub, "flowchart")) == 1
 
+@pytest.mark.parametrize("options", [
+    pytest.param({"diagram": "off"}, id="cli-off"),
+    pytest.param({"file_config": DaydreamFileConfig(diagram_mode="off")}, id="repository-off"),
+])
 async def test_diagram_off_suppresses_a_complex_diff(
-    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
+    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost, options: dict[str, Any],
 ) -> None:
-    """``--diagram off`` writes no artifact at all and makes no diagram call."""
     target = dr.build_cross_module_repo(tmp_path)
-    exit_code, stub = await review_run(target, specs={"sequence": [dr.sequence_spec()]}, diagram="off")
+    exit_code, stub = await review_run(target, specs={"sequence": [dr.sequence_spec()]}, **options)
     assert exit_code == 0
     assert not (target / ".daydream" / "deep" / "diagram.json").exists()
     assert _diagram_calls(stub, "sequence") == []
     assert SEQUENCE_HEADING not in captured_post.body()
 
-async def test_file_config_mode_off_suppresses_diagrams(tmp_path: Path, review_run: Callable[..., Any],) -> None:
-    """``[tool.daydream.diagram] mode = "off"`` suppresses without a CLI flag."""
-    target = dr.build_cross_module_repo(tmp_path)
-    exit_code, stub = await review_run(
-        target, specs={"sequence": [dr.sequence_spec()]}, file_config=DaydreamFileConfig(diagram_mode="off"),
-    )
-    assert exit_code == 0
-    assert not (target / ".daydream" / "deep" / "diagram.json").exists()
-    assert _diagram_calls(stub, "sequence") == []
 
 async def test_cli_diagram_both_overrides_file_config_off(tmp_path: Path, review_run: Callable[..., Any],) -> None:
     """The CLI flag outranks the repository file's off switch."""
@@ -897,23 +891,24 @@ def test_inline_exploration_text_truncation_is_byte_accurate(tmp_path: Path) -> 
     body = summary.split("\n[exploration summary truncated]", 1)[0]
     assert len(body.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
 
-def test_diagram_author_prompt_legacy_fork_override_gets_documented_kwargs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("obsolete", [False, True], ids=["current-contract", "obsolete-rejected"])
+def test_diagram_author_prompt_requires_current_inline_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, obsolete: bool
 ) -> None:
-    """Legacy fork overrides receive only documented kwargs in clone mode.
-
-    Extra inline kwargs would fail the turn; exploration_dir must be None
-    because the clone cannot read the host artifact path.
-    """
+    """Current overrides receive inline inputs; obsolete signatures fail explicitly."""
     registry = Registry()
-    registry.override_prompt("diagram_sequence", _legacy_sequence_builder)
+    registry.override_prompt("diagram_sequence", _obsolete_sequence_builder if obsolete else _current_sequence_builder)
     monkeypatch.setattr(deep, "get_registry", lambda: registry)
     backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
     ctx = _clone_test_ctx(
         tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b"
     )
+    if obsolete:
+        with pytest.raises(TypeError, match="clone_mode"):
+            deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), backend)
+        return
     prompt = deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), backend)
-    assert prompt.startswith("legacy:")
+    assert prompt.startswith("current:")
     assert "exploration=None" in prompt  # no dangling host path on a clone run
 
 @pytest.mark.parametrize("kind", ["sequence", "flowchart"])
@@ -1006,12 +1001,9 @@ async def test_large_pr_author_prompt_reports_the_capped_projection(
     assert author_prompts, "the sequence author turn must run"
     assert "omitted to fit the prompt budget" in author_prompts[0]
 
-async def _session_test_ctx(tmp_path: Path) -> Any:
-    """Create realistic artifacts on a FlowContext with an active session.
-
-    Keep the session open throughout the test to exercise production clone
-    paths; callers needing teardown should use async with instead.
-    """
+@pytest.fixture
+async def diagram_ctx(tmp_path: Path) -> AsyncIterator[FlowContext]:
+    """Keep the artifact session owned and open for the entire author/repair test."""
     repo = tmp_path / "repo"
     repo.mkdir()
     init_repo(repo)
@@ -1023,24 +1015,30 @@ async def _session_test_ctx(tmp_path: Path) -> Any:
     owner = resolve_private_workspace_owner(
         repo, locations=private_root_locations(base=(tmp_path / "private").resolve())
     )
-    session = await open_artifact_session(work, session_id="diagram-advisory", owner=owner).__aenter__()
-    dd = artifact_dir_for(repo, session=session, allow_standalone=True)
-    exploration = dd / "exploration"
-    exploration.mkdir(parents=True)
-    (exploration / "summary.md").write_text("s" * 614, encoding="utf-8")
-    (exploration / "dependencies.md").write_text("d" * 4_306, encoding="utf-8")
-    (exploration / "affected_files.md").write_text("a" * 23_684, encoding="utf-8")
-    deep_dir = dd / "deep"
-    deep_dir.mkdir(parents=True, exist_ok=True)
-    diff_path = deep_dir / "diff.patch"
-    diff_path.write_text("diff --git a/a.py b/a.py\n+line\n", encoding="utf-8")
-    (deep_dir / "hunk-index.json").write_text("{}", encoding="utf-8")
-    ctx = FlowContext(config=RunConfig(target=str(repo)), work=work, registry=Registry(),
-        data={"diff_path": diff_path, "diff": diff_path.read_text(encoding="utf-8"),
-              "exploration_dir": exploration, "dd": dd},
-        artifacts=session,
+    async with open_artifact_session(work, session_id="diagram-advisory", owner=owner) as session:
+        dd = artifact_dir_for(repo, session=session, allow_standalone=True)
+        exploration = dd / "exploration"
+        exploration.mkdir(parents=True)
+        (exploration / "summary.md").write_text("s" * 614, encoding="utf-8")
+        (exploration / "dependencies.md").write_text("d" * 4_306, encoding="utf-8")
+        (exploration / "affected_files.md").write_text("a" * 23_684, encoding="utf-8")
+        deep_dir = dd / "deep"
+        deep_dir.mkdir(parents=True, exist_ok=True)
+        diff_path = deep_dir / "diff.patch"
+        diff_path.write_text("diff --git a/a.py b/a.py\n+line\n", encoding="utf-8")
+        (deep_dir / "hunk-index.json").write_text("{}", encoding="utf-8")
+        ctx = FlowContext(config=RunConfig(target=str(repo)), work=work, registry=Registry(),
+            data={"diff_path": diff_path, "diff": diff_path.read_text(encoding="utf-8"),
+                  "exploration_dir": exploration, "dd": dd},
+            artifacts=session,
+        )
+        yield ctx
+
+async def _author_sequence(ctx: FlowContext, backend: Any) -> dict[str, Any]:
+    return await deep._run_diagram_kind(
+        ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+        symbols=RepoSymbols(ctx.work.repo), recorder=None, backend=backend,
     )
-    return ctx
 
 @pytest.mark.parametrize("backend_factory",
     [lambda repo: SimpleNamespace(read_only_disposable_clone=True, model="fake"),
@@ -1049,42 +1047,34 @@ async def _session_test_ctx(tmp_path: Path) -> Any:
     ], ids=["clone-like-inline", "strict-audit-inline", "sandbox-inline"],
 )
 async def test_eligible_diagram_reaches_the_backend_when_advisory_artifacts_overflow(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_factory: Callable[[Path], Any]
+    diagram_ctx: FlowContext, monkeypatch: pytest.MonkeyPatch, backend_factory: Callable[[Path], Any]
 ) -> None:
-    ctx = await _session_test_ctx(tmp_path)
     prompts: list[str] = []
     monkeypatch.setattr(deep, "run_agent", _recording_agent(prompts))
-    result = await deep._run_diagram_kind(ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
-        symbols=RepoSymbols(ctx.work.repo), recorder=None, backend=backend_factory(ctx.work.repo),
-    )
+    result = await _author_sequence(diagram_ctx, backend_factory(diagram_ctx.work.repo))
     assert prompts, "the author turn must be reached — no preflight abort"
     assert result["status"] != "failed", result.get("reason")
 
-async def test_exact_paths_run_with_over_limit_diff_reaches_the_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_exact_paths_run_with_over_limit_diff_reaches_the_backend(
+    diagram_ctx: FlowContext, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ctx = await _session_test_ctx(tmp_path)
-    diff_path = ctx.data["diff_path"]
+    diff_path = diagram_ctx.data["diff_path"]
     diff_path.write_text("+" + ("x" * 1_100_000) + "\n", encoding="utf-8")   # > 1 MiB per-file limit
-    ctx.data["diff"] = diff_path.read_text(encoding="utf-8")
+    diagram_ctx.data["diff"] = diff_path.read_text(encoding="utf-8")
     prompts: list[str] = []
     monkeypatch.setattr(deep, "run_agent", _recording_agent(prompts))
-    result = await deep._run_diagram_kind(ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
-        symbols=RepoSymbols(ctx.work.repo), recorder=None, backend=SimpleNamespace(model="fake"),
-    )
+    result = await _author_sequence(diagram_ctx, SimpleNamespace(model="fake"))
     assert prompts, "an EXACT_PATHS run must reach the author turn with the diff omitted, not aborted"
     assert [item["label"] for item in result["advisory"]["omitted"]] == ["diff"]
     assert result["advisory"]["transport"] == "exact_paths"
 
-async def test_advisory_omission_is_recorded_and_not_a_failed_kind(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_advisory_omission_is_recorded_and_not_a_failed_kind(
+    diagram_ctx: FlowContext, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
 
-    ctx = await _session_test_ctx(tmp_path)
 
     monkeypatch.setattr(deep, "run_agent", _empty_agent)
-    result = await deep._run_diagram_kind(ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
-        symbols=RepoSymbols(ctx.work.repo), recorder=None,
-        backend=SimpleNamespace(read_only_disposable_clone=True, model="fake"),
-    )
+    result = await _author_sequence(diagram_ctx, SimpleNamespace(read_only_disposable_clone=True, model="fake"))
 
     assert result["status"] != "failed"
     assert result["advisory"]["transport"] == "inline"
@@ -1102,21 +1092,18 @@ async def test_advisory_omission_is_recorded_and_not_a_failed_kind(tmp_path: Pat
     ], ids=["strict-audit-inline", "sandbox-inline"],
 )
 async def test_inline_prompt_names_no_private_path_on_non_clone_backends(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: Any
+    diagram_ctx: FlowContext, monkeypatch: pytest.MonkeyPatch, backend: Any
 ) -> None:
 
-    ctx = await _session_test_ctx(tmp_path)
-    backend.audit_root = ctx.work.repo.resolve() if hasattr(backend, "audit_root_isolation") else None
+    backend.audit_root = diagram_ctx.work.repo.resolve() if hasattr(backend, "audit_root_isolation") else None
     prompts: list[str] = []
 
     monkeypatch.setattr(deep, "run_agent", _recording_agent(prompts))
-    await deep._run_diagram_kind(ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
-        symbols=RepoSymbols(ctx.work.repo), recorder=None, backend=backend,
-    )
+    await _author_sequence(diagram_ctx, backend)
 
     prompt = prompts[0]
-    for private in (str(ctx.data["diff_path"]), str(ctx.data["diff_path"].parent / "hunk-index.json"),
-        str(ctx.data["exploration_dir"]),
+    for private in (str(diagram_ctx.data["diff_path"]), str(diagram_ctx.data["diff_path"].parent / "hunk-index.json"),
+        str(diagram_ctx.data["exploration_dir"]),
     ):
         assert private not in prompt, f"INLINE prompt leaked {private}"
     assert "inlined below" in prompt                      # the diff itself is still grounded
@@ -1127,29 +1114,30 @@ def test_clone_mode_diff_block_includes_its_banner_and_marker_in_the_budget() ->
     assert "[diff truncated to fit the prompt budget]" in block
     assert len(block.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
 
-async def test_inline_legacy_prompt_builder_still_works_and_leaks_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("obsolete", [False, True], ids=["current-contract", "obsolete-rejected"])
+async def test_inline_prompt_contract_redacts_private_artifacts(
+    diagram_ctx: FlowContext, monkeypatch: pytest.MonkeyPatch, obsolete: bool
 ) -> None:
-    """Req 10 × req 4: a fork override written before the inline kwargs keeps its
-    documented kwarg set AND must not be handed a private host path to print."""
+    """Current inline inputs stay grounded without exposing private host pointers."""
 
     registry = Registry()
-    registry.override_prompt("diagram_sequence", _legacy_sequence_builder)
+    registry.override_prompt("diagram_sequence", _obsolete_sequence_builder if obsolete else _current_sequence_builder)
     monkeypatch.setattr(deep, "get_registry", lambda: registry)
-    ctx = await _session_test_ctx(tmp_path)
     prompts: list[str] = []
 
     monkeypatch.setattr(deep, "run_agent", _recording_agent(prompts))
-    await deep._run_diagram_kind(ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
-        symbols=RepoSymbols(ctx.work.repo), recorder=None, backend=SimpleNamespace(sandbox=True, model="fake"),
-    )
-    assert prompts[0].startswith("legacy:")
-    assert str(ctx.data["diff_path"]) not in prompts[0]
+    result = await _author_sequence(diagram_ctx, SimpleNamespace(sandbox=True, model="fake"))
+    if obsolete:
+        assert not prompts and result["status"] == "failed" and "TypeError" in result["reason"]
+        return
+    assert prompts[0].startswith("current:")
+    assert str(diagram_ctx.data["diff_path"]) not in prompts[0]
     assert "exploration=None" in prompts[0]
 
-async def test_author_and_repair_turns_share_one_prepared_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_author_and_repair_turns_share_one_prepared_set(
+    diagram_ctx: FlowContext, monkeypatch: pytest.MonkeyPatch,
+) -> None:
 
-    ctx = await _session_test_ctx(tmp_path)
     seen: list[Any] = []
 
     async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
@@ -1161,13 +1149,11 @@ async def test_author_and_repair_turns_share_one_prepared_set(tmp_path: Path, mo
 
     monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
     backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
-    await deep._run_diagram_kind(ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
-        symbols=RepoSymbols(ctx.work.repo), recorder=None, backend=backend,
-    )
+    await _author_sequence(diagram_ctx, backend)
 
     assert len(seen) == 2, "the repair turn must have run"
     assert seen[0] is seen[1] is not None, "both turns must reuse the same prepared set"
     # mutate-before-repair: the same object revalidates fail-closed, the authority for both turns.
-    ctx.data["exploration_dir"].joinpath("summary.md").write_text("changed after capture\n", encoding="utf-8")
+    diagram_ctx.data["exploration_dir"].joinpath("summary.md").write_text("changed after capture\n", encoding="utf-8")
     with pytest.raises(SanctionedInputUnavailable):
-        seen[1].revalidate(backend, ctx.work.repo, True)
+        seen[1].revalidate(backend, diagram_ctx.work.repo, True)

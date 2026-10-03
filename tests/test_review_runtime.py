@@ -142,7 +142,7 @@ async def test_spent_shared_deadline_skips_queued_review_but_not_fix(tmp_path: P
             run_context=RunContext(InteractionPolicy(quiet=True)),
         review_limits=ReviewLimits(),
         )
-        assert result == ("", None, "wall_budget_exceeded")
+        assert result == ("", None, "pipeline_budget_exceeded")
         assert backend.call_count == 0
         assert (await run_agent(backend, tmp_path, "fix", phase=DaydreamPhase.FIX))[0] == "fixed"
     assert (await run_agent(backend, tmp_path, "new review", phase=DaydreamPhase.DEEP))[2] is None
@@ -226,7 +226,7 @@ async def test_synthesis_uses_reserved_time_after_discovery_deadline(tmp_path: P
         result = await run_agent(backend, tmp_path, "queued discovery", phase=DaydreamPhase.DEEP, output_schema=SCHEMA,
             review_limits=ReviewLimits(), progress_callback=lambda _: None,
         )
-        assert result[2] == "wall_budget_exceeded"
+        assert result[2] == "pipeline_budget_exceeded"
         assert backend.call_count == 0
         result = await run_agent(backend, tmp_path, "adjudicate", phase=DaydreamPhase.DEEP, output_schema=SCHEMA,
             review_limits=ReviewLimits(30, 10, 4, discovery=False), progress_callback=lambda _: None,

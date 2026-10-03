@@ -20,7 +20,8 @@ from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
-_CLEAN_TURN = (TextEvent(text=""), ResultEvent(structured_output={"issues": []}, continuation=None),)
+_CLEAN_TURN = (TextEvent(text="Intent and review complete."),
+                ResultEvent(structured_output={"issues": []}, continuation=None))
 
 async def test_shallow_stack_uses_native_profile_strategy_no_skill(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],

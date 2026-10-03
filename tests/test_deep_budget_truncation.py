@@ -11,6 +11,7 @@ import pytest
 
 from daydream.backends import AgentEvent, ToolStartEvent
 from daydream.config_file import DaydreamFileConfig
+from daydream.review_result import ReviewCoverage
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.deep_orchestrator.support import _scan_trajectory_extra
@@ -36,7 +37,9 @@ async def test_budget_truncated_stack_lands_in_failed_stacks(
                 multi_stack_target, trajectory_path=tmp_path / "trajectory.json", assume="yes", output_mode="loop",
             )
         )
-    failures = json.loads((multi_stack_target / ".daydream" / "deep" / "per-stack-failures.json").read_text())
+    coverage = ReviewCoverage.from_dict(json.loads(
+        (multi_stack_target / ".daydream/deep/review-coverage.json").read_text()))
+    failures = coverage.unfinished_scopes
     assert "python" in failures, failures
     assert "budget" in failures["python"].lower()
 
@@ -113,6 +116,18 @@ async def test_review_budget_stop_emits_partial_findings(
     assert artifact["review_warnings"], "budget stop must be visible to the poster"
     assert any(f"{budget}_budget_exceeded" in warning for warning in artifact["review_warnings"])
     assert artifact["findings"], "completed reviewers' findings must survive"
+    terminal = artifact["terminal_result"]
+    assert terminal["analysis_state"] == "incomplete"
+    expected_reason = ("host_wall_budget_exhaustion" if budget == "wall" else "host_tool_budget_exhaustion")
+    assert expected_reason in terminal["reason_codes"]
+    if phase == "per_stack":
+        scope = next(row for row in terminal["stack_outcomes"] if row["scope_id"] == "python")
+        assert scope["status"] == "incomplete"
+    else:
+        phase_name = {"supervisor": "supervision"}.get(phase, phase)
+        outcome = next(row for row in terminal["phase_outcomes"] if row["phase"] == phase_name)
+        assert outcome["status"] in {"incomplete", "failed"}
+        assert expected_reason in outcome["reason_codes"]
     assert "incomplete" in (multi_stack_target / ".review-output.md").read_text().lower()
 
     if phase == "merge":
@@ -133,7 +148,7 @@ async def test_single_stack_alternatives_timeout_still_emits_findings(
         tiny_diff_target, pr_number=7, findings_out=str(out), review_profile=independent_alternatives_profile(),
     )) == 0
     artifact = json.loads(out.read_text())
-    assert artifact["review_warnings"] == ["Alternatives: tool_call_budget_exceeded"]
+    assert artifact["review_warnings"] == ["alternatives: tool_call_budget_exceeded"]
 
 async def test_partial_checkpoint_survives_publication_and_merge_resume(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig],
@@ -163,6 +178,12 @@ async def test_partial_checkpoint_survives_publication_and_merge_resume(
         assert saved["incomplete"] is True
         published = json.loads(out.read_text())
         assert published["findings"]
+        terminal = published["terminal_result"]
+        assert terminal["analysis_state"] == "incomplete"
+        scope = next(row for row in terminal["stack_outcomes"] if row["scope_id"] == "python")
+        assert scope["status"] == "incomplete"
+        assert scope["partial_evidence"] is True
+        assert scope["reason_codes"] == ["host_tool_budget_exhaustion"]
         assert any("python" in warning for warning in published["review_warnings"])
 
 async def test_spent_pipeline_budget_still_publishes_explicitly_incomplete_artifact(
@@ -178,5 +199,8 @@ async def test_spent_pipeline_budget_still_publishes_explicitly_incomplete_artif
     assert not backend.calls
     artifact = json.loads(out.read_text())
     assert artifact["findings"] == []
+    assert artifact["terminal_result"]["analysis_state"] == "failed"
+    assert "host_pipeline_budget_exhaustion" in artifact["terminal_result"]["reason_codes"]
+    assert all(row["status"] == "uncovered" for row in artifact["terminal_result"]["stack_outcomes"])
     assert artifact["review_warnings"]
     assert "Review incomplete" in (multi_stack_target / ".review-output.md").read_text()

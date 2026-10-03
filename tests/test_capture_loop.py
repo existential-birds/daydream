@@ -17,8 +17,7 @@ from unittest.mock import patch
 import pytest
 
 from daydream import git_ops
-from daydream.backends import ResultEvent, TextEvent
-from daydream.findings import FINDINGS_SCHEMA_VERSION, write_findings_artifact
+from daydream.findings import write_findings_artifact
 from daydream.pr_review import parse_finding_markers
 from daydream.run_config import RunConfig
 from daydream.runner import run
@@ -27,8 +26,9 @@ from daydream.training.labeler_signals import (
     index_pr_review_comments,
     per_finding_resolution_signal,
 )
+from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
 from tests.harness.fake_gh import FakeGh
-from tests.harness.phase_backend import PhaseDispatchBackend
+from tests.harness.review_result import findings_artifact
 from tests.harness.scripts import cli_main
 
 FILE_FINGERPRINT = "f" * 64
@@ -60,14 +60,15 @@ def _review_run_env(repo: Path, monkeypatch: pytest.MonkeyPatch, out: Path, back
         yield config
 
 
-def _scripted_review_backend(issue: dict[str, Any]) -> PhaseDispatchBackend:
-    """A backend that reports exactly one scripted per-stack issue."""
-    return PhaseDispatchBackend(events=[TextEvent(text="Review complete."),
-            # Issue #742: the deep per-stack parse schema requires a
-            # ``verdicts`` property (Codex strict-mode output).
-            ResultEvent(structured_output={"issues": [issue]}, continuation=None,),
-        ]
-    )
+def _scripted_review_backend(repo: Path, issue: dict[str, Any]) -> EmptyReviewBackend:
+    """Report one schema-valid per-stack issue through the real merge path."""
+    record = {key: issue[key] for key in (
+        "id", "description", "file", "line", "severity", "confidence", "rationale", "evidence")}
+    backend = EmptyReviewBackend(repo, forbid_merge=False, forbid_supervise=False,
+                                 review_by_stack={"python": [record]})
+    backend.merge_echo_records = True
+    backend.merge_items = None
+    return backend
 
 
 def _issue(*, line: int) -> dict[str, Any]:
@@ -88,7 +89,8 @@ async def test_unanchorable_finding_on_changed_file_is_placed_file_level(
     """
     out = tmp_path / "findings.json"
     issue = _issue(line=9)
-    with _review_run_env(feature_branch_repo, monkeypatch, out, _scripted_review_backend(issue), fake_gh) as config:
+    backend = _scripted_review_backend(feature_branch_repo, issue)
+    with _review_run_env(feature_branch_repo, monkeypatch, out, backend, fake_gh) as config:
         assert await run(config) == 0
 
     findings = json.loads(out.read_text())["findings"]
@@ -106,7 +108,8 @@ async def test_in_hunk_citation_is_placed_inline_without_an_anchor_match(
     """A valid in-hunk citation stays inline despite having no matching text anchor."""
     out = tmp_path / "findings.json"
     issue = _issue(line=1)
-    with _review_run_env(feature_branch_repo, monkeypatch, out, _scripted_review_backend(issue), fake_gh) as config:
+    backend = _scripted_review_backend(feature_branch_repo, issue)
+    with _review_run_env(feature_branch_repo, monkeypatch, out, backend, fake_gh) as config:
         assert await run(config) == 0
 
     findings = json.loads(out.read_text())["findings"]
@@ -125,11 +128,7 @@ async def test_in_hunk_citation_is_placed_inline_without_an_anchor_match(
 
 
 def _artifact(path: Path, findings: list[dict[str, Any]]) -> Path:
-    write_findings_artifact(path,
-        {"schema_version": FINDINGS_SCHEMA_VERSION, "repo": "o/r", "pr_number": 7, "head_sha": "h" * 40,
-            "run_info": "test run info", "findings": findings,
-        },
-    )
+    write_findings_artifact(path, findings_artifact(findings, run_info="test run info"))
     return path
 
 

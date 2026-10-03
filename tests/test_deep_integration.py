@@ -31,6 +31,7 @@ from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.conftest import silence_module_console
 from tests.harness.backend import ScriptedBackend
+from tests.harness.review_result import merge_result
 
 
 class _DeepMockBackend(ScriptedBackend):
@@ -93,7 +94,7 @@ class _DeepMockBackend(ScriptedBackend):
                                 "line": 1, "severity": "medium", "confidence": "MEDIUM", "rationale": "stub",
                                 "evidence": "api.py:1",
                             }
-                        ], "verdicts": [],
+                        ],
                     }, continuation=None,
                 ),
             ]
@@ -126,7 +127,7 @@ class _DeepMockBackend(ScriptedBackend):
                       "line": 1, "severity": "medium", "confidence": "MEDIUM", "rationale": "stub",
                       "evidence": "api.py:1", "source_uids": ["python:1"]}
                      ] if self.language_finding else []
-            events += [TextEvent(text=""), ResultEvent(structured_output={"items": items}, continuation=None),]
+            events += [TextEvent(text=""), ResultEvent(structured_output=merge_result(items), continuation=None),]
             return events
 
         # Fallback -- unexpected prompt, but keep the pipeline alive.

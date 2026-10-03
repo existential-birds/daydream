@@ -11,10 +11,10 @@ from daydream.deep.review_steps import _step_intent
 from daydream.extensions import Registry
 from daydream.flows.engine import FlowContext
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
-from daydream.review_budget import review_budget_path
 from daydream.review_profile import ResolvedProfile, build_default_profile
 from daydream.run_context import InteractionPolicy, RunContext
 from tests.harness.backend import ScriptedBackend
+from tests.harness.review_result import review_coverage
 
 
 def _context(
@@ -41,7 +41,8 @@ def _context(
     ctx = FlowContext(config=make_config(tmp_path, pr_number=7), work=make_work(tmp_path), registry=Registry(),
         review_profile=ResolvedProfile(profile=profile, source_kind="test"),
         run_context=RunContext(InteractionPolicy(interactive=variant == "interactive")),
-        data={"dd": dd, "diff": diff[:300], "diff_path": diff_path, "log": "abc Author commit\n",
+        data={"review_coverage": review_coverage(scope_ids=(), phases=("intent",)),
+              "dd": dd, "diff": diff[:300], "diff_path": diff_path, "log": "abc Author commit\n",
               "branch": "feature", "exploration_dir": None},
     )
     backend: Any = ScriptedBackend() if variant == "other_backend" else PiBackend(model="fixture-model")
@@ -64,7 +65,8 @@ async def test_modest_unattended_pi_persists_advisory_author_evidence_without_mo
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
 ) -> None:
     ctx, calls = _context(tmp_path, monkeypatch, make_config, make_work)
-    review_budget_path(ctx.data["dd"]).write_text('{"Intent analysis": "wall_budget_exceeded"}')
+    ctx.data["review_coverage"].record_phase("intent", "incomplete",
+        reasons=("host_wall_budget_exhaustion",), diagnostic="wall_budget_exceeded")
     await _step_intent(ctx)
     assert calls == []
     summary = ctx.data["intent_path"].read_text()
@@ -76,7 +78,8 @@ async def test_modest_unattended_pi_persists_advisory_author_evidence_without_mo
     assert "no inferred intent summary" in summary
     assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in summary
     assert ctx.data["intent_authoritative"] is True
-    assert not review_budget_path(ctx.data["dd"]).exists()
+    assert not ctx.data["review_coverage"].diagnostics["phases"]
+    assert ctx.data["review_coverage"].phases["intent"]["status"] == "complete"
 
 async def test_custom_intent_prompt_keeps_model_dispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,

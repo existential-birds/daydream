@@ -14,6 +14,7 @@ are review-only. Four backends — Claude
 (in-process SDK), Codex, Pi, and Osprey (subprocess CLIs) — all emit the same `AgentEvent` stream.
 
 Reference docs: `README.md` (user CLI + config), `docs/{extensions,benchmark,observability}.md`.
+Review exports follow the [terminal findings contract](README.md#terminal-review-findings-contract); preserve typed coverage, snapshot binding and atomic publication.
 
 ## Commands
 

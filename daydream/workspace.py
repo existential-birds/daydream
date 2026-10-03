@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import secrets
 import shutil
+import stat
 import tempfile
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from typing import AsyncIterator, Iterable
 
 from daydream import git_ops
 from daydream.artifact_visibility import (
+    ArtifactVisibilityError,
     PrivateWorkspaceOwner,
     operational_worktree_root,
     private_root_locations,
@@ -25,7 +27,30 @@ from daydream.artifact_visibility import (
 )
 from daydream.config_file import load_toml_or_empty
 from daydream.git_ops import BranchNotFoundError, GitError
-from daydream.workspace_legacy import _retire_legacy_operational_worktrees
+
+
+def reject_public_operational_storage(source: Path) -> None:
+    """Refuse unsupported source-local worktrees without following or changing operator data."""
+    root = source / ".daydream"
+    try:
+        metadata = root.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ArtifactVisibilityError("public operational storage is inaccessible") from exc
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ArtifactVisibilityError("public operational storage ancestor must be a real directory")
+    for namespace in ("worktrees", "audit"):
+        try:
+            (root / namespace).lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ArtifactVisibilityError("public operational storage is inaccessible") from exc
+        raise ArtifactVisibilityError(
+            f"Unsupported public operational storage .daydream/{namespace}; relocate it before opening a workspace"
+        )
+
 
 _logger = logging.getLogger(__name__)
 
@@ -105,7 +130,7 @@ async def open_workspace(
     else:
         validate_private_workspace_owner(private_owner, source=source)
     source = private_owner.source
-    _retire_legacy_operational_worktrees(source, private_owner)
+    reject_public_operational_storage(source)
 
     if allow_unborn and git_ops.is_unborn_head(source):
         if branch is not None or base is not None or force_ephemeral:

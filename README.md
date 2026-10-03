@@ -790,6 +790,20 @@ Private storage prevents generated artifacts from appearing in ordinary cwd-root
 
 The `.daydream/exploration/` cache is reused on an exact key match. The key excludes uncommitted edits. A near-match never counts as a hit, because a stale hit would misground every review prompt. The `--shallow` and `--review` modes delete the directory. Alternating modes degrade to a cache miss, never to stale grounding.
 
+### Terminal review findings contract
+
+`--findings-out` emits schema version 2. Review artifacts require a `terminal_result` (nested version 1); diagram artifacts carry no code-review coverage. Readers reject older or unknown versions. Producer and poster must use the same reviewed version.
+
+Analysis is `complete` only with positive completion or host no-op evidence for every planned reviewer and required phase. Valid work with unfinished coverage is `incomplete`; unusable analysis or an invalid findings projection is `failed`. Findings count, warning absence, CLI success and archive status cannot establish completeness. `pipeline_state` covers review finalization independently of later fixes or publication.
+
+Coverage records run identity, exact stack/shard outcomes, captured head, diff merge base and diff key, plus initial PR base tip when available. Backend/authentication, missing/malformed output, evidence and policy failures remain typed; model-turn, host wall/tool and pipeline budgets have distinct reasons.
+
+Findings and coverage are validated and atomically published together. Valid partial findings survive normal finalization; incomplete/failed results publish COMMENT notices and cannot authorize approval or stale-thread resolution. Commit-bound exports require a clean checkout and use captured identity and diff for placement. Interactive dirty reviews remain supported; publishers validate the independently trusted target.
+
+Use a unique, initially absent output path for each invocation. Reusing a path requires an independently known expected run ID: failed replacement can preserve an old complete file. Missing/truncated output, process destruction and failed installation provide no valid current result.
+
+Resume and cache proofs require typed coverage for the exact revision and scope inventory. Missing, damaged or mismatched proofs restart review; same-revision partial resumes preserve failures, successful scope reruns clear them, and complete reuse receives the current run ID.
+
 ## Development
 
 **New to contributing? Read [CONTRIBUTING.md](CONTRIBUTING.md) — setup, commands, the required gate, and PR workflow.**

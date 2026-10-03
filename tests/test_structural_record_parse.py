@@ -12,6 +12,7 @@ from daydream.deep.review_steps import _per_stack_body, _step_per_stack_parse
 from daydream.extensions import Registry, get_registry
 from daydream.flows.engine import FlowContext
 from daydream.run_context import InteractionPolicy, RunContext
+from tests.harness.review_result import records_artifact, review_coverage
 
 
 @pytest.mark.parametrize("start_at", [None, "merge", "fix"])
@@ -21,22 +22,23 @@ async def test_parse_preserves_structural_partition_on_resume(
 ) -> None:
     dd = tmp_path / ".daydream/deep"
     dd.mkdir(parents=True)
-    primary: dict[str, Any] = {"issues": []}
+    coverage = review_coverage(files=("api.py",), phases=())
+    primary = records_artifact(coverage, "python")
     (dd / "stack-python-records.json").write_text(json.dumps(primary))
     issues = [{"id": 1, "uid": uid, "file": "api.py", "line": 1, "description": "Boundary mismatch",
                "severity": "high", "confidence": "HIGH", "rationale": "Shared contract", "evidence": "api.py:1"}
               for uid in uids]
-    structural = {"issues": issues}
+    structural = records_artifact(coverage, "structure", issues)
     path = dd / "stack-structure-records.json"
     path.write_text(json.dumps(structural))
     ctx = FlowContext(config=make_config(tmp_path, start_at=start_at), work=make_work(tmp_path), registry=Registry(),
-        data={"dd": dd, "stacks": [StackAssignment("python", ["api.py"]),
+        data={"dd": dd, "review_coverage": coverage, "stacks": [StackAssignment("python", ["api.py"]),
                                     StackAssignment("structure", ["api.py"])], "failed_stacks": {}},
     )
     assert await _step_per_stack_parse(ctx) is None
     assert json.loads(path.read_text()) == structural
-    assert ctx.data["structural_records"] == issues
-    assert ctx.data["records"] == []
+    assert ctx.data["record_pool"].structural == issues
+    assert ctx.data["record_pool"].language == []
 
 @pytest.mark.parametrize("start_at", [None, "per-stack"])
 async def test_per_stack_rerun_clears_stale_structural_outputs_before_review(
@@ -69,7 +71,8 @@ async def test_per_stack_rerun_clears_stale_structural_outputs_before_review(
         config=make_config(tmp_path, start_at=start_at), work=make_work(tmp_path), registry=get_registry(),
         allow_standalone_artifacts=True, run_context=RunContext(InteractionPolicy(interactive=False)),
         _backend_factory=lambda *_: backend,
-        data={"dd": dd, "diff_path": diff, "diff": diff.read_text(), "intent_path": intent,
+        data={"dd": dd, "review_coverage": review_coverage(files=("api.py",), phases=()),
+              "diff_path": diff, "diff": diff.read_text(), "intent_path": intent,
               "alts_path": alternatives, "exploration_dir": None, "failed_stacks": {},
               "stacks": [StackAssignment("python", ["api.py"]), StackAssignment("structure", ["api.py"])]},
     )
@@ -78,3 +81,13 @@ async def test_per_stack_rerun_clears_stale_structural_outputs_before_review(
     assert json.loads(artifacts[0].read_text())["issues"] == []
     assert artifacts[1].read_text().startswith("# Review")
     assert ctx.data["failed_stacks"] == {}
+
+
+@pytest.mark.parametrize('ordinal', ['²', '١', '01', '0', '-1'])
+def test_record_artifact_rejects_noncanonical_ordinals(ordinal: str) -> None:
+    from daydream.phases.review import valid_record_artifact
+    from tests.harness.review_result import records_artifact, review_coverage
+
+    coverage = review_coverage()
+    artifact = records_artifact(coverage, 'python', [{'uid': f'python:{ordinal}'}])
+    assert not valid_record_artifact(artifact, scope_id='python', analyzed_revision=coverage.revision.to_dict())

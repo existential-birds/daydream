@@ -157,11 +157,15 @@ def lookup_reuse_entry(
     dest_dir: Path,
     *,
     on_restore_failure: Callable[[str], None] | None = None,
+    expected_coverage: Mapping[str, Any] | None = None,
 ) -> ReuseHit | None:
     """Return a restored hit or record a miss; optionally report restore failures."""
     hit = reuse.lookup(key)
     if not isinstance(hit, ReuseHit):
         reuse.record(unit, outcome="miss", reason=hit.reason, key=key)
+        return None
+    if expected_coverage is not None and hit.manifest.get("coverage") != dict(expected_coverage):
+        reuse.record(unit, outcome="miss", reason="complete coverage proof absent or mismatched", key=key)
         return None
     restore_reason = restore_entry_payload(hit, dest_dir)
     if restore_reason is None:
@@ -318,6 +322,7 @@ class ReuseCache:
         identity: PhaseIdentity,
         grounding: Mapping[str, str],
         grounding_status: Mapping[str, str],
+        coverage: Mapping[str, Any] | None = None,
         now: float | None = None,
     ) -> None:
         """Write a completed entry: payload, then manifest, then marker.
@@ -356,6 +361,8 @@ class ReuseCache:
             "created_at": recorded_at,
             "last_used_at": recorded_at,
         }
+        if coverage is not None:
+            manifest["coverage"] = dict(coverage)
         atomic_write_bytes(
             entry_manifest_path(self.store_dir, key),
             json.dumps(manifest, indent=2).encode("utf-8"),
@@ -468,11 +475,24 @@ class ReuseCache:
             return ReuseMiss(key, "manifest unreadable")
         if manifest.get("key") != key:
             return ReuseMiss(key, "manifest key mismatch")
+        if manifest.get("format") != REUSE_KEY_FORMAT:
+            return ReuseMiss(key, "manifest format mismatch")
+        origin = manifest.get("origin")
+        if (not isinstance(origin, dict)
+                or any(origin.get(field) is not None and not isinstance(origin[field], str)
+                       for field in ("run_id", "session_id"))):
+            return ReuseMiss(key, "manifest origin unreadable")
 
         recorded = manifest.get("payload")
         if not isinstance(recorded, dict):
             return ReuseMiss(key, "manifest unreadable")
         for name, expected in recorded.items():
+            if not isinstance(name, str) or not isinstance(expected, str):
+                return ReuseMiss(key, "manifest payload unreadable")
+            try:
+                _validate_payload_name(name)
+            except ValueError:
+                return ReuseMiss(key, "manifest payload name invalid")
             try:
                 actual = hashlib.sha256((entry / name).read_bytes()).hexdigest()
             except OSError:

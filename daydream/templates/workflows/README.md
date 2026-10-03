@@ -102,3 +102,5 @@ fingerprint markers in each comment body:
 
 Comment format is unchanged from `daydream --comment` — these workflows add
 triggers and posting identity, not a new output format.
+
+Review artifacts require current findings schema version 2 with typed terminal coverage. Upgrade producer and poster pins together; older schemas are rejected. For states, invocation freshness and output absence, see the [terminal findings contract](../../../README.md#terminal-review-findings-contract).

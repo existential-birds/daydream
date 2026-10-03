@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -308,7 +308,30 @@ def _pr_info_from_row(
         repo=repo,
         url=url,
         head_repo=head_repo,
+        pr_base_sha=row.get("baseRefOid") if isinstance(row.get("baseRefOid"), str) else None,
     )
+
+
+def capture_pr_base_tip(
+    target_dir: Path, pr: PRInfo, *, auth: GitHubAuth = INHERIT_GITHUB_AUTH,
+) -> str | None:
+    """Read optional base-tip evidence without requiring newer gh JSON fields.
+
+    A PR that advanced between reads cannot supply evidence for this snapshot.
+    The required identity and merge base already come from the initial lookup.
+    """
+    if pr.pr_base_sha is not None:
+        return pr.pr_base_sha
+    try:
+        data = git_ops.gh_api(target_dir, f"repos/{pr.owner}/{pr.repo}/pulls/{pr.number}", auth=auth)
+    except GitError:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("head"), dict):
+        return None
+    if data["head"].get("sha") != pr.head_sha or not isinstance(data.get("base"), dict):
+        return None
+    sha = data["base"].get("sha")
+    return sha if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha) else None
 
 
 def find_open_pr(
@@ -554,6 +577,7 @@ def classify(
     *,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
     renderers: ReviewRenderers | None = None,
+    snapshot_diff: str | None = None,
 ) -> ClassifiedIssues:
     """Place findings inline, then at file level, then in the review body.
 
@@ -562,7 +586,13 @@ def classify(
     renderers = renderers if renderers is not None else resolve_review_renderers(get_registry())
     out = ClassifiedIssues()
     hunks_cache: dict[str, list[tuple[int, int]]] = {}
-    changed_files = pr_changed_files(target_dir, pr, auth=auth)
+    if snapshot_diff is not None:
+        from daydream.hunk_index import head_side_ranges_by_file, parse_hunks
+
+        hunks_cache = head_side_ranges_by_file(parse_hunks(snapshot_diff))
+        changed_files = set(git_ops.diff_name_only_strict(target_dir, pr.base_sha, pr.head_sha))
+    else:
+        changed_files = pr_changed_files(target_dir, pr, auth=auth)
 
     def _unplaced(issue: ParsedIssue) -> None:
         if issue.path in changed_files:
@@ -589,14 +619,14 @@ def classify(
         # are what lets `resolve_line` pass an already-valid in-hunk line
         # through untouched instead of re-deriving it from prose (issue #1102).
         if issue.path not in hunks_cache:
-            hunks_cache[issue.path] = file_hunks(
+            hunks_cache[issue.path] = ([] if snapshot_diff is not None else file_hunks(
                 target_dir,
                 pr.base_sha,
                 pr.head_sha,
                 issue.path,
                 pr_number=pr.number,
                 auth=auth,
-            )
+            ))
         hunks = hunks_cache[issue.path]
         line = resolve_line(target_dir, pr.head_sha, issue, hunks)
         if line is None:
@@ -1092,8 +1122,9 @@ def post_findings_from_artifact(
         print_error(console, "Prior-Finding Inventory Failed", str(exc))
         return 1
 
+    review_warnings = artifact.review_warnings + artifact.coverage_notice
     plan = partition([f.fingerprint for f in artifact.findings], prior)
-    if plan.stale and not artifact.review_warnings:
+    if plan.stale and artifact.analysis_complete and not review_warnings:
         resolved, failed = resolve_threads(target_dir, plan.stale, auth=auth)
         print_info(console, f"Stale findings minimized: {resolved} succeeded, {failed} failed.")
 
@@ -1119,7 +1150,7 @@ def post_findings_from_artifact(
     # without this a new low-only batch could post APPROVE over the bot's own
     # open high finding (#343 R2 F2b). Matched findings are never re-posted
     # as comments — only their severities count here.
-    can_approve = approve_on_clean and not artifact.review_warnings and not any(
+    can_approve = approve_on_clean and artifact.analysis_complete and not review_warnings and not any(
         _finding_blocks_approval(
             finding.severity,
             finding.location_distrust,
@@ -1129,7 +1160,7 @@ def post_findings_from_artifact(
         for finding in artifact.findings
     )
 
-    if classified.is_empty() and not can_approve and diagram_blocks is None and not artifact.review_warnings:
+    if classified.is_empty() and not can_approve and diagram_blocks is None and not review_warnings:
         print_info(
             console,
             f"No new findings to post ({len(plan.matched)} already on PR #{pr_number}).",
@@ -1145,7 +1176,7 @@ def post_findings_from_artifact(
         ),
         renderers=renderers,
         diagram_blocks=diagram_blocks,
-        review_warnings=artifact.review_warnings,
+        review_warnings=review_warnings,
     )
     result = post_classified_review(
         submission_plan,
@@ -1173,16 +1204,4 @@ def post_findings_from_artifact(
 
 def _issue_from_artifact_finding(finding: ArtifactFinding) -> ParsedIssue:
     """Restore validated issue fields; artifact placement requires no local PR Git objects."""
-    return ParsedIssue(
-        path=finding.path,
-        line=finding.line,
-        title=finding.title,
-        body=finding.body,
-        is_cross_stack=finding.is_cross_stack,
-        confidence=finding.confidence,
-        severity=finding.severity,
-        fingerprint=finding.fingerprint,
-        location_distrust=finding.location_distrust,
-        severity_before_demotion=finding.severity_before_demotion,
-        severity_off_vocabulary=finding.severity_off_vocabulary,
-    )
+    return ParsedIssue(**{member.name: getattr(finding, member.name) for member in fields(ParsedIssue)})

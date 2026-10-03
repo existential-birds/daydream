@@ -19,6 +19,26 @@ from daydream.deep.reuse_store import (
 
 if TYPE_CHECKING:
     from daydream.deep.state import DeepState
+    from daydream.review_result import ReviewCoverage
+
+
+def bind_reuse_coverage(payload: dict[str, Any], coverage: ReviewCoverage) -> None:
+    """Bind versioned review caches to the captured snapshot and full scope inventory."""
+    payload["components"]["review_coverage"] = {
+        "schema_version": 1,
+        "analyzed_revision": coverage.revision.to_dict(),
+        "planned_scopes": [scope.to_dict() for scope in coverage.planned_scopes],
+    }
+
+
+def _reuse_expectation(coverage: ReviewCoverage, unit: str) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "unit": unit,
+        "analyzed_revision": coverage.revision.to_dict(),
+        "planned_scopes": [scope.to_dict() for scope in coverage.planned_scopes],
+        "status": "complete",
+    }
 
 
 @dataclass
@@ -29,9 +49,11 @@ class ReviewReuseUnit:
     name: str
     identity: PhaseIdentity
     payload: dict[str, Any]
+    coverage: ReviewCoverage
     key: str | None = field(init=False)
 
     def __post_init__(self) -> None:
+        bind_reuse_coverage(self.payload, self.coverage)
         self.key = unit_key(self.payload)
         if self.key is None:
             record_absent_components(self.cache, self.name, self.payload)
@@ -43,6 +65,7 @@ class ReviewReuseUnit:
             return None
         return lookup_reuse_entry(
             self.cache, self.name, self.key, destination, on_restore_failure=on_restore_failure,
+            expected_coverage=_reuse_expectation(self.coverage, self.name),
         )
 
     def record_hit(self, hit: ReuseHit) -> None:
@@ -62,6 +85,10 @@ class ReviewReuseUnit:
         """Read and store outputs only for a usable key and a complete artifact set."""
         if self.key is None:
             return
+        outcomes = self.coverage.scopes if self.name.startswith("shard:") else self.coverage.phases
+        outcome = outcomes.get(self.name.removeprefix("shard:"))
+        if outcome is None or outcome["status"] != "complete":
+            return
         outputs = collect()
         if outputs is not None:
             self.cache.store(
@@ -72,6 +99,7 @@ class ReviewReuseUnit:
                 identity=self.identity,
                 grounding=grounding_digests(self.payload),
                 grounding_status=reuse_grounding_statuses(self.cache, self.payload),
+                coverage=_reuse_expectation(self.coverage, self.name),
             )
 
 

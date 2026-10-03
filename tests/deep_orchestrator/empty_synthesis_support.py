@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,7 @@ class EmptyReviewBackend(StubBackend):
         fail_stack: str | None = None, stack_error: Exception | None = None,
         alternatives: list[dict[str, Any]] | None = None,
         incomplete_stack: str | None = None,
+        responder: Callable[[str], Iterable[AgentEvent | BaseException] | None] | None = None,
     ) -> None:
         super().__init__(target)
         self.forbid_merge = forbid_merge
@@ -32,8 +33,18 @@ class EmptyReviewBackend(StubBackend):
         self.stack_error = stack_error or RuntimeError("review provider unavailable")
         self.alternatives = alternatives or []
         self.incomplete_stack = incomplete_stack
+        self.responder = responder
 
     async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+        if self.responder is not None:
+            events = self.responder(prompt)
+            if events is not None:
+                self.calls.append({"prompt": prompt, "model": self.model})
+                for event in events:
+                    if isinstance(event, BaseException):
+                        raise event
+                    yield event
+                return
         lower = prompt.lower()
         merge = "cross-stack merge agent" in lower
         supervise = "supervisor adjudication" in lower

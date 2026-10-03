@@ -17,7 +17,7 @@ import pytest
 from daydream import git_ops
 from daydream.config import DIAGRAM_MAX_NODES
 from daydream.deep import diagram_steps
-from daydream.findings import FINDINGS_SCHEMA_VERSION, write_findings_artifact
+from daydream.findings import write_findings_artifact
 from daydream.pr_review import diagram_marker, parse_diagram_markers, validate_diagram_payload
 from daydream.runner import run
 from tests.harness import diagram_repos as dr
@@ -310,7 +310,7 @@ def test_phase_b_rejects_an_invalid_diagrams_payload(tmp_path: Path, fake_gh: Fa
 
     artifact_path = tmp_path / "bad.json"
     write_findings_artifact(artifact_path,
-        {"schema_version": FINDINGS_SCHEMA_VERSION, "repo": "acme/widgets", "pr_number": 7, "head_sha": "h" * 40,
+        {"schema_version": 2, "review_warnings": [], "repo": "acme/widgets", "pr_number": 7, "head_sha": "h" * 40,
             "run_info": None, "kind": "diagram", "diagrams": {"eligibility": {"flowchart": {"eligible": True}},
                 "results": {"flowchart": {"status": "rendered",
                         # ``root`` must be an object with file/name/line.

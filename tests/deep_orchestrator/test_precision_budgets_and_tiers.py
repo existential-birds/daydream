@@ -191,14 +191,14 @@ async def test_merge_resume_reruns_arbiter_when_marker_absent(multi_stack_target
     _silence(monkeypatch)
     calls = _install_model_capturing_stubs(monkeypatch, multi_stack_target, merge_echo_records=True)
     deep = _prime_merge_resume_records(multi_stack_target, python_severity="high")
-    assert not (deep / "arbiter-complete.marker").exists()
+    assert not (deep / "adjudication-complete.marker").exists()
 
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
     assert exit_code == 0
 
     arbiter_calls = [c for c in calls if "you are the arbiter" in c["prompt"].lower()]
     assert arbiter_calls, "arbiter must re-run on merge resume when no completion marker exists"
-    assert (deep / "arbiter-complete.marker").is_file(), "completion marker must be written after arbitration"
+    assert (deep / "adjudication-complete.marker").is_file(), "completion marker must be written after arbitration"
 
     report = (multi_stack_target / ".review-output.md").read_text()
     assert "ARBITRATED:" in report, f"arbitrated finding missing from merge-resume report:\n{report}"
@@ -210,7 +210,10 @@ async def test_merge_resume_skips_arbiter_when_marker_present(multi_stack_target
     _silence(monkeypatch)
     calls = _install_model_capturing_stubs(monkeypatch, multi_stack_target, merge_echo_records=True)
     deep = _prime_merge_resume_records(multi_stack_target, python_severity="high")
-    (deep / "arbiter-complete.marker").write_text("")
+    assert await _run_deep(multi_stack_target, start_at="merge") == 0
+    assert (deep / "adjudication-complete.marker").is_file()
+    assert any("you are the arbiter" in call["prompt"].lower() for call in calls)
+    calls.clear()
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
     assert exit_code == 0
     arbiter_calls = [c for c in calls if "you are the arbiter" in c["prompt"].lower()]

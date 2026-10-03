@@ -92,6 +92,7 @@ from daydream.trajectory import (
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import configure_identity as _configure_identity, git as _git
 from tests.harness.improve_backend import install_improve_stub
+from tests.harness.review_result import review_coverage
 from tests.harness.trajectory import make_manifest, make_recorder
 from tests.test_extension_seam_integration import CUSTOM_FLOW_EXT
 
@@ -1532,6 +1533,14 @@ def _write_deep(target: Path, name: str, data: Any) -> None:
     deep.mkdir(parents=True, exist_ok=True)
     (deep / name).write_text(json.dumps(data), encoding="utf-8")
 
+
+def _write_review_coverage(target: Path, *, state: str = "failed") -> None:
+    coverage = review_coverage(run_id="prior", scope_ids=("python",))
+    coverage.record_scope("python", "complete")
+    coverage.record_phase("merge", state, reasons=() if state == "complete" else ("synthesis_failure",))
+    _write_deep(target, "review-coverage.json", coverage.to_dict())
+
+
 _PUSHED_SHA = "a" * 40
 _MERGE_SHA = "b" * 40
 
@@ -1589,6 +1598,17 @@ def _write_remote_verdict(
         completion_deadline=1800,
     )
 
+
+def _current_ci_artifact(
+    target: Path, *, status: str = "passed", advisory: tuple[CIObservation, ...] = (),
+) -> tuple[Path, dict[str, Any]]:
+    """Seed a matching current push/CI pair, then expose CI bytes for corruption tests."""
+    _write_push_verdict(target)
+    _write_remote_verdict(target, status=status, advisory=advisory)
+    artifact = target / ".daydream" / "deep" / "remote-ci-verdict.json"
+    return artifact, json.loads(artifact.read_text(encoding="utf-8"))
+
+
 def _derive_push_remote_states(target: Path, *, session_id: str = "current", events: list[PhaseEvent] | None = None,
     pr_repo: str | None = "example/project", pr_number: int | None = 42,
 ) -> dict[str, dict[str, Any]]:
@@ -1643,10 +1663,7 @@ def test_incomplete_remote_statuses_are_partial(tmp_path: Path, remote_status: s
     ],
 )
 def test_remote_success_identity_mismatch_is_partial(tmp_path: Path, path: tuple[str, ...], value: object) -> None:
-    _write_push_verdict(tmp_path)
-    _write_remote_verdict(tmp_path)
-    artifact = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
-    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    artifact, payload = _current_ci_artifact(tmp_path)
     cursor = payload
     for key in path[:-1]:
         cursor = cursor[key]
@@ -1655,25 +1672,22 @@ def test_remote_success_identity_mismatch_is_partial(tmp_path: Path, path: tuple
     assert _derive_push_remote_states(tmp_path)["remote_ci"]["status"] == "partial"
 
 def test_remote_archive_state_field_is_not_outcome_authority(tmp_path: Path) -> None:
-    _write_push_verdict(tmp_path)
-    _write_remote_verdict(tmp_path)
-    artifact = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
-    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    artifact, payload = _current_ci_artifact(tmp_path)
     payload["archive_state"] = "failed"
     artifact.write_text(json.dumps(payload), encoding="utf-8")
     assert _derive_push_remote_states(tmp_path)["remote_ci"]["status"] == "succeeded"
 
-@pytest.mark.parametrize(("repo", "number"), [("other/project", 42), ("example/project", 43)],)
-def test_remote_success_must_match_configured_pr(tmp_path: Path, repo: str, number: int) -> None:
+@pytest.mark.parametrize(("repo", "number", "expected_status"), [
+    ("other/project", 42, "partial"), ("example/project", 43, "partial"),
+    ("ExAmPlE/PrOjEcT", 42, "succeeded"),
+])
+def test_remote_success_matches_configured_pr(
+    tmp_path: Path, repo: str, number: int, expected_status: str,
+) -> None:
     _write_push_verdict(tmp_path)
     _write_remote_verdict(tmp_path)
-    assert _derive_push_remote_states(tmp_path, pr_repo=repo, pr_number=number)["remote_ci"]["status"] == "partial"
-
-def test_remote_success_accepts_case_insensitive_configured_pr(tmp_path: Path) -> None:
-    _write_push_verdict(tmp_path)
-    _write_remote_verdict(tmp_path)
-    assert _derive_push_remote_states(tmp_path, pr_repo="ExAmPlE/PrOjEcT", pr_number=42,
-    )["remote_ci"]["status"] == "succeeded"
+    remote = _derive_push_remote_states(tmp_path, pr_repo=repo, pr_number=number)["remote_ci"]
+    assert remote["status"] == expected_status
 
 @pytest.mark.parametrize(("artifact_name", "path"),
     [("push-verdict.json", ("pushed_repository",)), ("remote-ci-verdict.json", ("target", "base_repository")),
@@ -1749,10 +1763,7 @@ def test_archive_rejects_repository_identity_the_producer_cannot_create(
 
 @pytest.mark.parametrize("malformed_sha", ["A" * 40, "a" * 39, "a" * 41])
 def test_remote_archive_rejects_noncanonical_commit_sha(tmp_path: Path, malformed_sha: str,) -> None:
-    _write_push_verdict(tmp_path)
-    _write_remote_verdict(tmp_path)
-    artifact = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
-    payload = json.loads(artifact.read_text())
+    artifact, payload = _current_ci_artifact(tmp_path)
     payload["target"]["pushed_sha"] = malformed_sha
     payload["binding"]["head_sha"] = malformed_sha
     payload["head_sha"] = malformed_sha
@@ -1841,10 +1852,7 @@ def test_archive_no_policy_pending_observation_cannot_be_passed(tmp_path: Path) 
     advisory = CIObservation(source="check_run", context="Build", app_id=10, state="pending", raw_state="in_progress",
         url="https://github.com/example/project/actions/runs/8", diagnostic=None,
     )
-    _write_push_verdict(tmp_path)
-    _write_remote_verdict(tmp_path, advisory=(advisory,))
-    artifact = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
-    payload = json.loads(artifact.read_text())
+    artifact, payload = _current_ci_artifact(tmp_path, advisory=(advisory,))
     payload["policy"] = {"contexts": [], "strict": False}
     payload["required_observations"] = []
     artifact.write_text(json.dumps(payload))
@@ -1857,10 +1865,8 @@ def test_archive_no_policy_pending_observation_cannot_be_passed(tmp_path: Path) 
     ],
 )
 def test_archive_rejects_contradictory_terminal_ci_evidence(tmp_path: Path, corruption: str) -> None:
-    _write_push_verdict(tmp_path)
-    _write_remote_verdict(tmp_path, status="failed" if corruption == "wrong-failing-context" else "passed",)
-    artifact = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
-    payload = json.loads(artifact.read_text())
+    status = "failed" if corruption == "wrong-failing-context" else "passed"
+    artifact, payload = _current_ci_artifact(tmp_path, status=status)
     if corruption == "missing-required-observations":
         payload["required_observations"] = []
         payload["urls"] = []
@@ -1892,10 +1898,7 @@ def test_archive_rejects_contradictory_terminal_ci_evidence(tmp_path: Path, corr
 @pytest.mark.parametrize("discovery_seconds", [120.0, 0.5])
 def test_archive_no_ci_retains_empty_strict_policy(tmp_path: Path, discovery_seconds: float) -> None:
     """Strictness alone does not declare a required CI context."""
-    _write_push_verdict(tmp_path)
-    _write_remote_verdict(tmp_path, status="no_ci")
-    artifact = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
-    payload = json.loads(artifact.read_text())
+    artifact, payload = _current_ci_artifact(tmp_path, status="no_ci")
     limits = RemoteCILimits(discovery_seconds=discovery_seconds)
     verdict = evaluate_remote_ci(RemoteCISnapshot(
             target=RemoteCITarget(target_dir=tmp_path, **payload["target"]), binding=PRCIBinding(**payload["binding"]),
@@ -1918,26 +1921,21 @@ def test_archive_no_ci_retains_empty_strict_policy(tmp_path: Path, discovery_sec
 def test_archive_terminal_ci_requires_declared_discovery_and_stability(
     tmp_path: Path, status: str, field: str, value: object
 ) -> None:
-    _write_push_verdict(tmp_path)
-    _write_remote_verdict(tmp_path, status=status)
-    artifact = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
-    payload = json.loads(artifact.read_text())
+    artifact, payload = _current_ci_artifact(tmp_path, status=status)
     payload["polling"][field] = value
     artifact.write_text(json.dumps(payload))
     assert _derive_push_remote_states(tmp_path)["remote_ci"]["status"] == "partial"
 
 def test_archive_unpinned_legacy_status_uses_casefolded_context(tmp_path: Path) -> None:
-    _write_push_verdict(tmp_path)
-    _write_remote_verdict(tmp_path)
-    artifact = tmp_path / ".daydream" / "deep" / "remote-ci-verdict.json"
-    payload = json.loads(artifact.read_text())
+    artifact, payload = _current_ci_artifact(tmp_path)
     payload["policy"]["contexts"][0]["app_id"] = None
     payload["required_observations"][0].update(source="status", app_id=None, context="BUILD", raw_state="success")
     artifact.write_text(json.dumps(payload))
     assert _derive_push_remote_states(tmp_path)["remote_ci"]["status"] == "succeeded"
 
 @pytest.mark.parametrize(("artifact_name", "field_path", "value"),
-    [("push-verdict.json", ("status",), []), ("remote-ci-verdict.json", ("status",), {}),
+    [("push-verdict.json", ("schema_version",), True), ("remote-ci-verdict.json", ("schema_version",), True),
+        ("push-verdict.json", ("status",), []), ("remote-ci-verdict.json", ("status",), {}),
         ("remote-ci-verdict.json", ("required_observations", 0, "state"), []),
         ("remote-ci-verdict.json", ("required_observations", 0, "source"), {}),
         ("remote-ci-verdict.json", ("binding", "state"), "closed"),
@@ -2059,7 +2057,7 @@ def _merge_events(session_id: str, status: str, *, scope_id: str = "merge-scope"
     ]
 
 @pytest.mark.parametrize(("status", "artifact", "payload"),
-    [pytest.param("succeeded", "per-stack-failures.json", {"__merge__": {"message": "prior failure"}},
+    [pytest.param("succeeded", "review-coverage.json", None,
             id="success-despite-stale-failure",
         ), pytest.param("failed", "merged-items.json", {"items": [{"id": 1}]}, id="failure-despite-stale-success"),
         pytest.param("partial", None, None, id="partial"),
@@ -2067,7 +2065,9 @@ def _merge_events(session_id: str, status: str, *, scope_id: str = "merge-scope"
 )
 def test_current_merge_event_controls_pipeline_status(tmp_path: Path, status: str, artifact: str | None, payload: Any,
 ) -> None:
-    if artifact is not None:
+    if artifact == "review-coverage.json":
+        _write_review_coverage(tmp_path)
+    elif artifact is not None:
         _write_deep(tmp_path, artifact, payload)
     states = pipeline.derive_phase_states(
         tmp_path, phase_events=_merge_events("current", status), runs_merge=True, runs_fix=False, runs_test=False,
@@ -2124,26 +2124,25 @@ def test_missing_current_merge_event_never_uses_stale_success_artifact(tmp_path:
     assert states["merge"] == {"ran": False, "status": "absent"}
     assert pipeline.derive_pipeline_status("complete", None, states, runs_merge=True) == "partial"
 
-@pytest.mark.parametrize(("failure_payload", "items_payload", "expected"),
-    [(None, {"items": []}, {"ran": True, "status": "succeeded"}),
-        ({"__merge__": {"message": "failed"}}, {"items": []}, {"ran": True, "status": "failed"}),
-        ({"__merge__": "corrupt"}, {"items": []}, {"ran": True, "status": "unknown"}),
-        (None, {"items": "corrupt"}, {"ran": True, "status": "unknown"}),
-    ], ids=("success", "failure", "malformed-failure", "malformed-items"),
-)
-def test_legacy_merge_artifact_fallback_is_strict(
-    tmp_path: Path, failure_payload: Any, items_payload: Any, expected: dict[str, Any],
+@pytest.mark.parametrize(("coverage_state", "items_payload"), [
+    ("complete", {"items": []}), ("failed", {"items": []}),
+    ("malformed", {"items": []}), ("complete", {"items": "corrupt"}),
+], ids=("success", "failure", "malformed-coverage", "malformed-items"))
+def test_merge_artifacts_cannot_supply_missing_run_identity(
+    tmp_path: Path, coverage_state: str, items_payload: Any,
 ) -> None:
-    if failure_payload is not None:
-        _write_deep(tmp_path, "per-stack-failures.json", failure_payload)
+    if coverage_state == "malformed":
+        _write_deep(tmp_path, "review-coverage.json", {"phases": "corrupt"})
+    else:
+        _write_review_coverage(tmp_path, state=coverage_state)
     _write_deep(tmp_path, "merged-items.json", items_payload)
     states = pipeline.derive_phase_states(
         tmp_path, phase_events=[], runs_merge=True, runs_fix=False, runs_test=False, session_id=None,
     )
-    assert states["merge"] == expected
+    assert states["merge"] == {"ran": True, "status": "unknown"}
 
-@pytest.mark.parametrize("artifact_name", ["per-stack-failures.json", "merged-items.json"],)
-def test_legacy_merge_invalid_utf8_is_unknown(tmp_path: Path, artifact_name: str,) -> None:
+@pytest.mark.parametrize("artifact_name", ["review-coverage.json", "merged-items.json"])
+def test_merge_without_identity_ignores_invalid_utf8_artifacts(tmp_path: Path, artifact_name: str) -> None:
     deep = tmp_path / ".daydream" / "deep"
     deep.mkdir(parents=True)
     (deep / artifact_name).write_bytes(b"\xff")
@@ -2186,7 +2185,7 @@ def test_start_at_fix_archive_does_not_require_or_inherit_merge(
     session_id = "fix-resume-session"
     recorder = _MockRecorder(session_id=session_id)
     _write_deep(target, "merged-items.json", {"items": [{"id": 1}]})
-    _write_deep(target, "per-stack-failures.json", {"__merge__": {"message": "prior failure"}})
+    _write_review_coverage(target)
     _write_deep(target, "test-verdict.json", {"session_id": session_id, "passed": True})
     fix_start = _phase_start_event("fix", session_id)
 
@@ -2279,16 +2278,18 @@ def test_project_documents_destinations_are_the_layout_surface(tmp_path: Path) -
     assert run_document_path(run_dir).read_bytes() == root_bytes
     assert sibling_document_path(run_dir, "deep-python.json").read_bytes() == sibling_bytes
 
-def test_merge_failed_discriminates_on_merge_key_not_merged_items(tmp_path: Path,) -> None:
+def test_merge_failed_discriminates_on_current_event_not_merged_items(tmp_path: Path,) -> None:
     _write_deep(tmp_path, "merged-items.json", {"items": []})
-    _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "x"}})
-    states = pipeline.derive_phase_states(tmp_path, phase_events=[])
+    _write_review_coverage(tmp_path)
+    states = pipeline.derive_phase_states(tmp_path, phase_events=_merge_events("current", "failed"),
+                                           session_id="current")
     assert states["merge"]["ran"] is True
     assert states["merge"]["status"] == "failed"   # merged-items present is NOT sufficient
 
-def test_merge_succeeded_when_items_and_no_merge_key(tmp_path: Path) -> None:
+def test_merge_succeeded_from_current_events(tmp_path: Path) -> None:
     _write_deep(tmp_path, "merged-items.json", {"items": []})
-    states = pipeline.derive_phase_states(tmp_path, phase_events=[])
+    states = pipeline.derive_phase_states(tmp_path, phase_events=_merge_events("current", "succeeded"),
+                                           session_id="current")
     assert states["merge"]["status"] == "succeeded"
 
 def test_test_failed_from_verdict(tmp_path: Path) -> None:
@@ -2403,11 +2404,12 @@ def test_non_deep_flow_ignores_stale_deep_artifacts(tmp_path: Path) -> None:
     # a non-deep flow run afterwards must NOT inherit them as its own pipeline
     # state -- the phases it does not run read absent regardless of disk.
     _write_deep(tmp_path, "merged-items.json", {"items": []})
-    _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "x"}})
+    _write_review_coverage(tmp_path)
     _write_deep(tmp_path, "test-verdict.json", {"passed": False})
     _write_deep(tmp_path, "fix-failures.json", {"src/a.py": "reverted"})
     # TTT review runs the merge spine but never the fix/test cycle.
-    states = pipeline.derive_phase_states(tmp_path, phase_events=[], runs_merge=True, runs_fix=False, runs_test=False)
+    states = pipeline.derive_phase_states(tmp_path, phase_events=_merge_events("current", "failed"),
+                                           session_id="current", runs_merge=True, runs_fix=False, runs_test=False)
     assert states["merge"]["status"] == "failed"   # merge ran (spine wrote fresh artifacts)
     assert states["fix"] == {"ran": False, "status": "absent"}    # stale fix ignored
     assert states["test"] == {"ran": False, "status": "absent"}   # stale test ignored
@@ -2418,7 +2420,7 @@ def test_non_deep_flow_ignores_stale_deep_artifacts(tmp_path: Path) -> None:
 def test_merge_failed_archives_failed_pipeline(tmp_path: Path, archive_dir: Path, make_config: MakeConfig) -> None:
     target = _frozen_target(tmp_path)
     _write_deep(target, "merged-items.json", {"items": []})
-    _write_deep(target, "per-stack-failures.json", {"__merge__": {"message": "x"}})
+    _write_review_coverage(target)
     _write_deep(target, "test-verdict.json", {"passed": False, "retries": 0, "ignored": False})
     recorder = _MockRecorder(session_id="merge-failed-session")  # run_flow NORMAL
     _strict_archive(target=target, session_id=recorder.session_id, config=make_config(target, archive=True),
@@ -2565,7 +2567,7 @@ def test_diagram_flow_does_not_inherit_a_prior_deep_run_pipeline_state(
     """Diagram runs retain old deep files on disk; flow capabilities must prevent their attribution."""
     target = _frozen_target(tmp_path)
     _write_deep(target, "merged-items.json", {"items": []})
-    _write_deep(target, "per-stack-failures.json", {"__merge__": {"message": "x"}})
+    _write_review_coverage(target)
     _write_deep(target, "test-verdict.json", {"passed": False, "retries": 0, "ignored": False})
     _write_deep(target, "fix-failures.json", {"src/a.py": "reverted"})
 

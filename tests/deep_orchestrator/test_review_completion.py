@@ -1,0 +1,408 @@
+"""Snapshot-bound terminal contracts through the real runner and Git."""
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from daydream import git_ops, json_utils, runner
+from daydream.backends import MaxTurnsError, ResultEvent, TextEvent, ToolStartEvent
+from daydream.findings import FindingsValidationError, load_findings_artifact
+from daydream.phases import findings
+from daydream.phases.review import ReviewOutputError
+from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
+from tests.harness.console import collapse_panel_text
+from tests.harness.fake_clock import FakeClock
+from tests.harness.git_helpers import git
+from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipeline, _record
+
+
+class ReviewRun:
+    def __init__(self, repo: Path, tmp: Path, patch: pytest.MonkeyPatch) -> None:
+        self.repo, self.tmp, self.patch = repo, tmp, patch
+        self.pr = _pin_findings_pr(patch, repo)
+        self.output = tmp / 'findings.json'
+        self.backend = EmptyReviewBackend(repo)
+        self.config = empty_review_config(repo, tmp / 'trajectory.json', findings_out=str(self.output), pr_number=7)
+        patch.setattr('daydream.runner.create_backend', lambda *_a, **_k: self.backend)
+
+    async def run(self, **overrides: Any) -> int:
+        return await runner.run(replace(self.config, **overrides))
+
+    def load(self) -> dict[str, Any]:
+        artifact = load_findings_artifact(self.output, expected_repo='o/r', expected_pr_number=7,
+                                         expected_head_sha=self.pr.head_sha)
+        assert artifact.schema_version == 2 and artifact.head_sha == self.pr.head_sha
+        data: dict[str, Any] = json.loads(self.output.read_text())
+        revision = data['terminal_result']['analyzed_revision']
+        assert (data['head_sha'], revision['head_sha'], revision['merge_base_sha']) == (
+            self.pr.head_sha, self.pr.head_sha, self.pr.base_sha)
+        return data
+
+
+@pytest.fixture
+def review(multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ReviewRun:
+    return ReviewRun(multi_stack_target, tmp_path, monkeypatch)
+
+
+def scopes(data: dict[str, Any]) -> dict[str, Any]:
+    return {s['scope_id']: s for s in data['terminal_result']['stack_outcomes']}
+
+
+def record(line: int = 2) -> dict[str, Any]:
+    return _record(description='Grounded defect', file='api.py', line=line, severity='medium', confidence='MEDIUM',
+                   rationale='Boundary evidence', evidence=f'api.py:{line}')
+
+
+def reviewer(prompt: str) -> bool:
+    return 'you are reviewing the ' in prompt.lower() or 'you are the structural reviewer' in prompt.lower()
+
+
+class AuthError(RuntimeError):
+    category = 'AUTH_CONFIG'
+
+
+@pytest.mark.parametrize(('case', 'state', 'reason'), [
+    ('empty', 'complete', None), ('backend', 'incomplete', 'backend_failure'),
+    ('auth', 'incomplete', 'authentication_failure'), ('model', 'incomplete', 'model_budget_exhaustion'),
+    ('structural', 'complete', None), ('mixed', 'incomplete', 'backend_failure'),
+    ('total', 'failed', 'backend_failure'), ('demoted', 'complete', None),
+    ('language', 'complete', None), ('archive', 'incomplete', 'backend_failure'),
+])
+async def test_outcomes(review: ReviewRun, archive_dir: Path, case: str, state: str, reason: str | None) -> None:
+    nonempty = case in {'structural', 'mixed', 'demoted', 'language'}
+    errors = {'auth': AuthError('rejected'), 'model': MaxTurnsError('spent turns')}
+    review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
+        review_by_stack={'python' if case == 'language' else 'structure': [record(500 if case == 'demoted' else 2)]}
+        if nonempty else {}, fail_stack='python' if reason and case != 'total' else None,
+        stack_error=errors.get(case), responder=lambda p: [RuntimeError('unavailable')]
+        if case == 'total' and reviewer(p) else None)
+    review.backend.merge_echo_records = True
+    if case == 'language':
+        review.backend.merge_items = None
+    assert await review.run(archive=case == 'archive') == 0
+    data = review.load()
+    result, inventory = data['terminal_result'], scopes(data)
+    assert (result['analysis_state'], result['pipeline_state']) == (state, 'completed')
+    assert set(inventory) == {'python', 'react', 'generic', 'structure'}
+    assert bool(data['findings']) is nonempty
+    assert {name: s['status'] for name, s in inventory.items()} == {
+        name: 'failed' if case == 'total' or (name == 'python' and reason) else 'complete' for name in inventory}
+    if reason:
+        assert inventory['python']['reason_codes'] == [reason]
+    else:
+        assert result['reason_codes'] == []
+    if nonempty:
+        assert len(data['findings']) == 1 and data['findings'][0]['title'] == 'Grounded defect'
+    if case == 'demoted':
+        assert (data['findings'][0]['confidence'], data['findings'][0]['location_distrust']) == ('LOW', True)
+    if case == 'language':
+        canonical = json.loads((review.repo / '.daydream/deep/merged-items.json').read_text())
+        assert canonical['items'][0]['source_uids'] == ['python:1']
+    if case == 'empty':
+        assert not any('cross-stack merge agent' in c['prompt'].lower() or
+                       'supervisor adjudication' in c['prompt'].lower() for c in review.backend.calls)
+    if case == 'archive':
+        archived = archive_dir / 'runs' / result['run_id']
+        assert json.loads((archived / 'manifest.json').read_text())['archive_status'] == 'complete'
+        assert json.loads((archived / 'findings.json').read_text()) == data
+        paths = list(archived.rglob('review-coverage.json'))
+        assert len(paths) == 1
+        saved = json.loads(paths[0].read_text())
+        assert (saved['stack_outcomes'], saved['analyzed_revision']) == (result['stack_outcomes'],
+                                                                      result['analyzed_revision'])
+        assert json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text()) == saved
+
+
+@pytest.mark.parametrize(('mode', 'reason'), [('missing', 'missing_output'), ('malformed', 'malformed_output'),
+                                             ('invalid', 'malformed_output'), ('fallback', None)])
+async def test_schema_output(review: ReviewRun, mode: str, reason: str | None) -> None:
+    payload = {'missing': None, 'invalid': {'issues': [{'id': 1}, 'invalid']}}.get(mode, {'unexpected': []})
+    review.backend.responder = lambda p: [TextEvent(text='{"issues": []}' if mode == 'fallback' else ''),
+        ResultEvent(structured_output=payload, continuation=None)] if 'python stack' in p.lower() else None
+    assert await review.run() == 0
+    data = review.load()
+    assert data['terminal_result']['analysis_state'] == ('complete' if reason is None else 'incomplete')
+    assert scopes(data)['python']['reason_codes'] == ([] if reason is None else [reason])
+
+
+@pytest.mark.parametrize('case', ['live', 'dirty', 'no-diff', 'dirty-no-diff', 'interactive', 'mismatch',
+                                  'base-tip', 'shards', 'pipeline-budget'])
+async def test_snapshot_boundaries(review: ReviewRun, shard_many_python_target: Path, case: str) -> None:
+    overrides: dict[str, Any] = {}
+    live, calls = review.pr, []
+    if case in {'no-diff', 'dirty-no-diff', 'base-tip'}:
+        git(review.repo, 'checkout', 'main')
+        if case == 'base-tip':
+            (review.repo / 'base-only.txt').write_text('advanced\n')
+            git(review.repo, 'add', 'base-only.txt')
+            git(review.repo, 'commit', '-m', 'advance base')
+            tip = git_ops.head_sha(review.repo)
+            git(review.repo, 'checkout', 'feature')
+            live = replace(review.pr, pr_base_sha=tip)
+        else:
+            review.pr = _pin_findings_pr(review.patch, review.repo)
+            live = review.pr
+    if case in {'dirty', 'dirty-no-diff', 'interactive'}:
+        (review.repo / 'api.py').write_text('DIRTY = True\n')
+    if case == 'interactive':
+        overrides['findings_out'] = None
+    if case == 'shards':
+        review = ReviewRun(shard_many_python_target, review.tmp, review.patch)
+        overrides.update(deep_shard_enabled=True, deep_shard_max_files=1)
+    if case == 'pipeline-budget':
+        overrides['review_profile'] = _profile_with_pipeline(review_wall_budget_s=0)
+    if case in {'live', 'mismatch', 'base-tip'}:
+        def lookup(*_a: Any, **_k: Any) -> Any:
+            calls.append(live)
+            return replace(live, head_sha=live.base_sha) if case == 'mismatch' else live
+        review.patch.setattr('daydream.pr_review.find_pr_by_number', lookup)
+        def advance(_p: str) -> None:
+            nonlocal live
+            live = replace(review.pr, head_sha=review.pr.base_sha)
+        if case == 'live':
+            review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False,
+                review_by_stack={'structure': [record()]}, responder=advance)
+    assert await review.run(**overrides) == (1 if case in {'dirty', 'dirty-no-diff', 'mismatch'} else 0)
+    if case in {'interactive', 'mismatch'}:
+        assert not review.output.exists()
+        assert bool(review.backend.calls) is (case == 'interactive')
+        if case == 'interactive':
+            assert 'DIRTY = True' in (review.repo / '.daydream/diff.patch').read_text()
+        return
+    data = review.load()
+    result = data['terminal_result']
+    failed = case in {'dirty', 'dirty-no-diff', 'pipeline-budget'}
+    assert result['analysis_state'] == ('failed' if failed else 'complete')
+    if case in {'dirty', 'dirty-no-diff', 'no-diff', 'pipeline-budget'}:
+        assert review.backend.calls == []
+    if case.startswith('dirty'):
+        assert 'dirty_snapshot' in result['reason_codes']
+    if case == 'pipeline-budget':
+        assert 'host_pipeline_budget_exhaustion' in result['reason_codes']
+        assert all(s['status'] == 'uncovered' for s in scopes(data).values())
+    if case == 'no-diff':
+        assert result['stack_outcomes'] == [] and result['phase_outcomes'][0]['noop'] is True and result['run_id']
+    if case == 'live':
+        assert live.head_sha == review.pr.base_sha and git_ops.head_sha(review.repo) == review.pr.head_sha
+        assert git_ops.show(review.repo, live.head_sha, 'api.py') and len(calls) == 1
+        assert (data['findings'][0]['placement'], data['findings'][0]['line']) == ('inline', 2)
+        assert result['analyzed_revision']['pr_base_sha'] == review.pr.base_sha
+    if case == 'base-tip':
+        assert result['analyzed_revision']['pr_base_sha'] == tip != review.pr.base_sha
+    if case == 'shards':
+        assert set(scopes(data)) == {'python#0', 'python#1', 'python#2', 'generic', 'structure'}
+        assert all(s['status'] == 'complete' for s in scopes(data).values())
+        assert {f for n, s in scopes(data).items() if n != 'structure' for f in s['files']} == {
+            'mod0.py', 'mod1.py', 'mod2.py', 'README.md'}
+
+
+@pytest.mark.parametrize(('budget', 'fault'), [('tool', None), ('wall', None), ('model', None),
+                                              ('model', 'missing'), ('model', 'corrupt')])
+@pytest.mark.parametrize('nonempty', [False, True])
+async def test_partial_checkpoints(review: ReviewRun, budget: str, fault: str | None, nonempty: bool) -> None:
+    fake = FakeClock().install(review.patch)
+    def response(prompt: str) -> Any:
+        if reviewer(prompt):
+            yield ResultEvent(structured_output={'issues': [record()] if nonempty else []}, continuation=None)
+            if budget == 'model':
+                yield MaxTurnsError('spent turns')
+            else:
+                for index in range(3):
+                    if budget == 'wall':
+                        fake.advance(601)
+                    yield ToolStartEvent(id=f'budget-{index}', name='Read', input={'file_path': 'api.py'})
+    review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
+                                       responder=lambda p: response(p) if reviewer(p) else None)
+    review.backend.merge_echo_records = True
+    review.patch.setattr('daydream.config.DEFAULT_TOOL_CALL_BUDGET', 1 if budget == 'tool' else None)
+    if fault:
+        method = 'is_file' if fault == 'missing' else 'read_text'
+        original = getattr(Path, method)
+        review.patch.setattr(Path, method, lambda p, *a, **k: (False if fault == 'missing' else '{')
+            if p.name == 'stack-python-records.json' else original(p, *a, **k))
+    assert await review.run(review_profile=_profile_with_pipeline(review_wall_budget_s=99999)) == (1 if fault else 0)
+    data = review.load()
+    result = data['terminal_result']
+    reason = 'model_budget_exhaustion' if budget == 'model' else f'host_{budget}_budget_exhaustion'
+    assert result['analysis_state'] == 'incomplete' and result['completed_stacks'] == []
+    assert reason in result['reason_codes'] and bool(data['findings']) is nonempty
+    for name, scope in scopes(data).items():
+        damaged = name == 'python' and fault is not None
+        assert (scope['status'], scope['partial_evidence']) == ('failed' if damaged else 'incomplete', not damaged)
+        damage_reason = 'missing_artifact' if fault == 'missing' else 'malformed_artifact'
+        assert scope['reason_codes'] == sorted([reason] + ([damage_reason] if damaged else []))
+
+
+@pytest.mark.parametrize('fault', ['missing', 'corrupt', 'revision', 'scope', 'origin'])
+async def test_loaded_artifact_faults(review: ReviewRun, fault: str) -> None:
+    write, read = Path.write_text, Path.read_text
+    def faulty_write(path: Path, text: str, *args: Any, **kwargs: Any) -> int:
+        count = write(path, '{invalid' if path.name == 'stack-python-records.json' and fault == 'corrupt' else text,
+                      *args, **kwargs)
+        if path.name == 'stack-python-records.json' and fault == 'missing':
+            path.unlink()
+        return count
+    def faulty_read(path: Path, *args: Any, **kwargs: Any) -> str:
+        text = read(path, *args, **kwargs)
+        if path.name == 'stack-python-records.json' and fault in {'revision', 'scope', 'origin'}:
+            data = json.loads(text)
+            if fault == 'revision':
+                data['analyzed_revision']['head_sha'] = 'foreign-head'
+            elif fault == 'scope':
+                data['scope_id'] = 'foreign-scope'
+            else:
+                data.pop('originating_run_id')
+            return json.dumps(data)
+        return text
+    review.patch.setattr(Path, 'write_text', faulty_write)
+    review.patch.setattr(Path, 'read_text', faulty_read)
+    if fault in {'missing', 'corrupt'}:
+        review.backend.review_by_stack = {'react': [_record(
+            description='Surviving sibling defect', file='App.tsx', line=1)]}
+    assert await review.run() == 1
+    data = review.load()
+    result, inventory = data['terminal_result'], scopes(data)
+    reason = 'missing_artifact' if fault == 'missing' else 'malformed_artifact'
+    assert (result['pipeline_state'], result['analysis_state'], result['projection_valid']) == (
+        'failed', 'incomplete', True)
+    assert set(inventory) == {'python', 'react', 'generic', 'structure'} and reason in result['reason_codes']
+    assert {n: s['status'] for n, s in inventory.items()} == dict.fromkeys(inventory, 'complete') | {'python': 'failed'}
+    assert inventory['python']['reason_codes'] == [reason]
+    if fault in {'missing', 'corrupt'}:
+        assert [(f['title'], f['placement']) for f in data['findings']] == [('Surviving sibling defect', 'inline')]
+    else:
+        assert data['findings'] == []
+    assert not any('cross-stack merge agent' in c['prompt'].lower() for c in review.backend.calls)
+
+
+@pytest.mark.parametrize(('phase', 'reason'), [('intent', 'backend_failure'), ('alternatives', 'backend_failure'),
+    ('merge', 'synthesis_failure'), ('missing', 'missing_output'), ('malformed', 'malformed_output'),
+    ('omitted', 'evidence_incomplete')])
+async def test_required_phase_faults(review: ReviewRun, phase: str, reason: str) -> None:
+    from tests.harness.review_profile import independent_alternatives_profile
+    def response(prompt: str) -> Any:
+        lower = prompt.lower()
+        if (phase == 'intent' and 'present your understanding concisely' in lower) or (
+                phase == 'alternatives' and 'evaluate the implementation' in lower):
+            return [RuntimeError(f'{phase} unavailable')]
+        if phase in {'missing', 'malformed', 'omitted'} and 'supervisor adjudication' in lower:
+            payload = None if phase == 'missing' else {'verdicts': [None] if phase == 'malformed' else []}
+            return [ResultEvent(structured_output=payload, continuation=None)]
+    review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
+        review_by_stack={'python' if phase == 'merge' else 'structure': [record()]}, responder=response)
+    review.backend.merge_echo_records = True
+    review.backend.merge_emit_str = 'invalid merge output' if phase == 'merge' else None
+    if phase in {'intent', 'alternatives', 'merge'}:
+        review.config = replace(review.config, review_profile=independent_alternatives_profile())
+    if phase in {'merge', 'omitted'}:
+        assert await review.run() == (1 if phase == 'merge' else 0)
+    else:
+        error_type = ReviewOutputError if phase in {'missing', 'malformed'} else RuntimeError
+        with pytest.raises(error_type, match=None if error_type is ReviewOutputError else f'{phase} unavailable'):
+            await review.run()
+    data = review.load()
+    result = data['terminal_result']
+    assert (result['pipeline_state'], result['analysis_state']) == (
+        'completed' if phase == 'omitted' else 'failed',
+        'failed' if phase in {'intent', 'alternatives'} else 'incomplete')
+    assert reason in result['reason_codes']
+    expected_titles = [] if phase in {'intent', 'alternatives'} else ['Grounded defect']
+    assert [f['title'] for f in data['findings']] == expected_titles
+    if phase in {'missing', 'malformed', 'omitted'}:
+        outcome = next(p for p in result['phase_outcomes'] if p['phase'] == 'supervision')
+        expected = 'incomplete' if phase == 'omitted' else 'failed'
+        assert (outcome['status'], outcome['reason_codes']) == (expected, [reason])
+        assert any('supervisor adjudication' in c['prompt'].lower() for c in review.backend.calls)
+
+
+@pytest.mark.parametrize('fault', ['absent-install', 'prior-install', 'staging'])
+async def test_atomic_public_failure(review: ReviewRun, fault: str) -> None:
+    if fault == 'prior-install':
+        assert await review.run() == 0
+    prior = review.output.read_bytes() if review.output.exists() else None
+    link, stage = os.link, json_utils._stage_bytes
+    injected: list[bool] = []
+    def fail_link(source: Any, destination: Any, **kwargs: Any) -> None:
+        if Path(destination) == review.output and not injected:
+            injected.append(True)
+            raise OSError('public install failed')
+        link(source, destination, **kwargs)
+    def fail_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
+        if b'"terminal_result"' in content:
+            injected.append(True)
+            raise OSError('findings staging failed')
+        return stage(path, content, **kwargs)
+    review.patch.setattr(os, 'link', fail_link)
+    if fault == 'staging':
+        review.patch.setattr(json_utils, '_stage_bytes', fail_stage)
+    assert await review.run() == 1 and injected
+    assert review.output.read_bytes() == prior if prior else not review.output.exists()
+
+
+@pytest.mark.parametrize('fault', ['coverage', 'fix', 'salvage'])
+async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str) -> None:
+    error = RuntimeError('original provider error')
+    stage, write, salvage = json_utils._stage_bytes, Path.write_text, findings._write_single_stack_merged_items
+    state: dict[str, Any] = {'failed': False, 'merged': None, 'rejected': False, 'writes': []}
+    def observe_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
+        if path.name == 'review-coverage.json':
+            state['writes'].append((state['failed'], content))
+            if fault == 'coverage':
+                raise OSError('coverage staging failed')
+        return stage(path, content, **kwargs)
+    def observe_write(path: Path, text: str, *args: Any, **kwargs: Any) -> int:
+        if path.name == 'merged-items.json':
+            state['merged'] = path
+        return write(path, text, *args, **kwargs)
+    def reject_salvage(*args: Any, **kwargs: Any) -> None:
+        if state['failed'] and fault == 'salvage':
+            state['rejected'] = True
+            raise ValueError('rejected projection')
+        salvage(*args, **kwargs)
+    def response(prompt: str) -> Any:
+        trigger = {'coverage': 'present your understanding concisely', 'fix': 'fix this issue',
+                   'salvage': 'supervisor adjudication'}[fault]
+        if trigger in prompt.lower() or (fault == 'fix' and prompt.lower().startswith('fix these')):
+            state['failed'] = True
+            if fault == 'salvage':
+                assert json.loads(state['merged'].read_text())['items']
+                state['merged'].unlink()
+            return [error]
+    review.patch.setattr(json_utils, '_stage_bytes', observe_stage)
+    review.patch.setattr(Path, 'write_text', observe_write)
+    review.patch.setattr(findings, '_write_single_stack_merged_items', reject_salvage)
+    review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False,
+                                       review_by_stack={'structure': [record()]}, responder=response)
+    if fault == 'fix':
+        assert await review.run(output_mode='loop', findings_out=None) == 1
+        saved_path = review.repo / '.daydream/deep/review-coverage.json'
+        assert state['failed'] and state['writes'] and all(not after for after, _ in state['writes'])
+        assert saved_path.read_bytes() == state['writes'][-1][1]
+        saved = json.loads(saved_path.read_text())
+        assert all(s['status'] == 'complete' for s in saved['stack_outcomes'] + saved['phase_outcomes'])
+        assert 'pipeline' not in saved['required_phases']
+        return
+    with pytest.raises(RuntimeError) as raised:
+        await review.run()
+    assert raised.value is error
+    if fault == 'coverage':
+        assert state['writes'] and not review.output.exists()
+        assert 'Terminal review finalization failed: OSError' in collapse_panel_text(capsys)
+        with pytest.raises(FindingsValidationError):
+            review.load()
+    else:
+        data = review.load()
+        result = data['terminal_result']
+        assert state['rejected'] and data['findings'] == []
+        assert (result['pipeline_state'], result['analysis_state'], result['projection_valid']) == (
+            'failed', 'failed', False)
+        assert all(s['status'] == 'complete' for s in scopes(data).values())
+        phases = {p['phase']: p for p in result['phase_outcomes']}
+        assert phases['supervision']['status'] == phases['findings']['status'] == 'failed'
+        assert (phases['supervision']['reason_codes'], phases['findings']['reason_codes']) == (
+            ['backend_failure'], ['malformed_artifact'])
