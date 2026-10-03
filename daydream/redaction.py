@@ -50,6 +50,13 @@ _PEM_KEY_REDACTED_MARKER = "[REDACTED_PEM_KEY]"
 _REDACTED_CREDENTIAL = "[REDACTED_CREDENTIAL]"
 
 
+#: An already-redacted value survives every later pass: structured rules replace a
+#: value only when no marker is present, so re-redaction cannot swap one host
+#: marker for another. Both spellings count — this module's bracketed form and the
+#: angle-bracket form Improve's plan renderer emits.
+_REDACTION_MARKER = re.compile(r"\[REDACTED|<redacted>", re.IGNORECASE)
+
+
 # Match complete secret-name segments, preserving MONKEY_PATCH, KEYBOARD_LAYOUT,
 # AUTHOR and TOKENIZED. Horizontal-only whitespace keeps an empty assignment
 # from consuming the following line as its value.
@@ -189,7 +196,7 @@ _AUTHORIZATION_HEADER_PATTERN = re.compile(
 _STRUCTURED_KEY_VALUE_PATTERN = re.compile(
     r"(['\"]?)([A-Za-z_][A-Za-z0-9_.\-]*)\1([^\S\n\r]*[:=][^\S\n\r]*)"
     r"(?:\"((?:\\.|[^\"\\])*)\"|'((?:\\.|[^'\\])*)'|(Basic|Bearer|Token)[^\S\n\r]+([^\s,;\"']+)|([^\s\"'\[\]{}():,=]++))"
-    r"(?![^\S\n\r]*\[REDACTED)",
+    r"(?![^\S\n\r]*(?:\[REDACTED|<redacted>))",
 )
 
 
@@ -206,11 +213,11 @@ def _redact_structured_key_value(match: re.Match[str], text: str) -> str:
     if match.group(6) is not None:
         # Bearer|Basic|Token <opaque>: keep the scheme, replace the token.
         token = match.group(7)
-        if token is None or token == "" or "[REDACTED" in token:
+        if token is None or token == "" or _REDACTION_MARKER.search(token):
             return match.group(0)
         return f"{wrapped_key}{sep}{match.group(6)} {_REDACTED_CREDENTIAL}"
     value = match.group(4) or match.group(5) or match.group(8)
-    if value is None or value == "" or "[REDACTED" in value:
+    if value is None or value == "" or _REDACTION_MARKER.search(value):
         return match.group(0)
     if match.group(8) is not None and not _bare_value_redactable(sep, text, match.end()):
         return match.group(0)

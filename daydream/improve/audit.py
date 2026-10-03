@@ -38,7 +38,7 @@ from daydream.improve.prompts import (
     AUDIT_FINDINGS_SCHEMA,
     VET_SCHEMA,
 )
-from daydream.improve.redaction import redact_model_value
+from daydream.redaction import redact_value
 from daydream.services import (
     Service,
 )
@@ -191,7 +191,7 @@ async def _run_audit_assignments(
                                 else []
                             )
                             findings = [
-                                redact_model_value(finding)
+                                redact_value(finding)
                                 for finding in raw_findings
                                 if isinstance(finding, dict)
                             ]
@@ -549,7 +549,7 @@ async def _step_vet(ctx: FlowContext) -> None:
                                 except Exception:  # noqa: BLE001 - no verdict fails closed
                                     output = {}
                                     failed_slots.add(slot)
-                                safe_output = redact_model_value(output)
+                                safe_output = redact_value(output)
                                 verdicts = (
                                     safe_output.get("verdicts", [])
                                     if isinstance(safe_output, dict)
