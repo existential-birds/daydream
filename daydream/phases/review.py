@@ -36,17 +36,10 @@ from daydream.deep.reuse_key import (
     PhaseIdentity,
     blob_map_digest,
     digest_text,
-    grounding_digests,
     shard_key_payload,
-    unit_key,
 )
-from daydream.deep.reuse_store import (
-    ReuseCache,
-    lookup_reuse_entry,
-    record_absent_components,
-    record_reuse_hit,
-    reuse_grounding_statuses,
-)
+from daydream.deep.reuse_store import ReuseCache
+from daydream.deep.review_reuse import ReviewReuseUnit
 from daydream.extensions import Registry, get_registry
 from daydream.hunk_index import load_hunk_index
 from daydream.phases.inputs import (
@@ -443,8 +436,7 @@ async def phase_per_stack_reviews(
         async def _review_stack(stack: "StackAssignment") -> None:
             output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
             inline_diff, stack_sanctioned_inputs = prepared[stack.stack_name]
-            stack_reuse_key: str | None = None
-            stack_payload: dict[str, Any] | None = None
+            reuse_unit: ReviewReuseUnit | None = None
             if reuse_cache is not None and phase_identity is not None:
                 stack_payload = shard_key_payload(
                     stack_name=stack.stack_name,
@@ -471,25 +463,17 @@ async def phase_per_stack_reviews(
                     components["hunk_slice"] = digest_text("")
                     components["assigned_blobs"] = blob_map_digest(work.repo, [])
                     components["frontier_blobs"] = blob_map_digest(work.repo, [])
-                unit_name = f"shard:{stack.stack_name}"
-                candidate_key = unit_key(stack_payload)
-                if candidate_key is None:
-                    record_absent_components(reuse_cache, unit_name, stack_payload)
-                else:
-                    stack_reuse_key = candidate_key
-                    hit = lookup_reuse_entry(
-                        reuse_cache,
-                        unit_name,
-                        candidate_key,
-                        deep_dir_path,
-                        on_restore_failure=lambda reason: ui.print_warning(
-                            agent.console, f"Reuse restore failed for {stack.stack_name}: {reason}"
-                        ),
-                    )
-                    if hit is not None:
-                        record_reuse_hit(reuse_cache, unit_name, candidate_key, hit, stack_payload)
-                        results[stack.stack_name] = output_path
-                        return
+                reuse_unit = ReviewReuseUnit(
+                    reuse_cache, f"shard:{stack.stack_name}", phase_identity, stack_payload,
+                )
+                if reuse_unit.restore(
+                    deep_dir_path,
+                    on_restore_failure=lambda reason: ui.print_warning(
+                        agent.console, f"Reuse restore failed for {stack.stack_name}: {reason}"
+                    ),
+                ):
+                    results[stack.stack_name] = output_path
+                    return
             per_stack_records_path(deep_dir_path, stack.stack_name).unlink(missing_ok=True)
             pointer_dir = _pointer_dir(stack_sanctioned_inputs, exploration_dir)
             prompt_name, strategy_name = {
@@ -583,26 +567,12 @@ async def phase_per_stack_reviews(
                     failures[stack_name] = f"{type(exc).__name__}: {exc}"
                     return
                 results[stack_name] = output_path
-                if (
-                    reuse_cache is not None
-                    and phase_identity is not None
-                    and stack_payload is not None
-                    and stack_reuse_key is not None
-                    and budget_reason is None
-                ):
+                if reuse_unit is not None and budget_reason is None:
                     records_path = per_stack_records_path(deep_dir_path, stack_name)
-                    reuse_cache.store(
-                        stack_reuse_key,
-                        unit=f"shard:{stack_name}",
-                        payload={
-                            records_path.name: records_path.read_bytes(),
-                            output_path.name: output_path.read_bytes(),
-                        },
-                        components=stack_payload["components"],
-                        identity=phase_identity,
-                        grounding=grounding_digests(stack_payload),
-                        grounding_status=reuse_grounding_statuses(reuse_cache, stack_payload),
-                    )
+                    reuse_unit.store(lambda: {
+                        records_path.name: records_path.read_bytes(),
+                        output_path.name: output_path.read_bytes(),
+                    })
 
         async with anyio.create_task_group() as tg:
             for stack in stacks:
