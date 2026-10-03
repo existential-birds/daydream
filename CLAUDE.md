@@ -22,6 +22,10 @@ Use `make install`, then `make hooks`. `make check` runs the required root gate;
 the [Makefile](Makefile) defines its focused targets. Run `make rl-check`
 separately for changes to the standalone RL package.
 
+```bash
+make check # lockcheck + install + lint + deadcode + typecheck + test + actionlint + coverage-report + check-naming (the gate)
+```
+
 `daydream /path` (or `daydream review /path`) runs the deep review/fix/test flow.
 `--comment` posts reviews; `--review` writes a report; `--shallow` uses one stack.
 `daydream improve /path` audits a repository; `improve plan "request" /path`

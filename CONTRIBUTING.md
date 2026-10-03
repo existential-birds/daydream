@@ -46,9 +46,14 @@ git rebase --exec 'git commit --amend --no-edit -S' HEAD~N
 
 ## Everyday commands and the required gate
 
-Run `make check` before pushing. The [Makefile](Makefile) defines the gate:
-lockcheck, install, lint, deadcode, typecheck, test, actionlint, coverage-report,
-and check-naming. Each is also a focused `make` target.
+Run `make check` before pushing. The [Makefile](Makefile) defines the gate,
+which runs, in order:
+
+```text
+lockcheck install lint deadcode typecheck test actionlint coverage-report check-naming
+```
+
+Each is also a focused `make` target.
 
 - `make test` runs parallel pytest with branch coverage and the configured
   coverage floor. Bare or targeted pytest runs do not measure coverage.

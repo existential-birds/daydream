@@ -40,7 +40,7 @@ _LAYOUT_SYMBOLS = frozenset({
 #: carries the name in a *different* layout or cannot import the owner.
 _PERMITTED = {
     # A download temp file's suffix, unrelated to trajectory documents.
-    "daydream/archive/hydrate.py": frozenset({"partial"}),
+    "daydream/archive/hydrate_stage.py": frozenset({"partial"}),
     # Harbor container logs: `agent/trajectory.json` inside a benchmark job tree.
     "daydream/benchmark/harbor/agent.py": frozenset({"root-document"}),
     "daydream/benchmark/harbor/clean.py": frozenset({"root-document"}),
