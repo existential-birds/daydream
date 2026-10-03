@@ -183,7 +183,51 @@ async def test_test_healing_guard_reverts_generated_migration_edit(
     assert new_migration.read_text() == "-- new healing migration\n"
     assert not (project / ".daydream-heal-fix-applied").exists()
     violations = project / ".daydream" / "deep" / "generated-file-violations.json"
-    assert json.loads(violations.read_text()) == {"violations": ["migrations/0001_init.sql"], "ref": "HEAD"}
+    recorded = json.loads(violations.read_text())
+    # The host's full confinement runs after the repair turn and is this
+    # artifact's last writer, so it records its own phase instead of the
+    # per-turn guard's pre-repair ref. The offending path is recorded either way.
+    assert recorded["violations"] == ["migrations/0001_init.sql"]
+    assert recorded["phase"] == "test_heal"
+    assert recorded["session_id"]
+
+async def test_unauthorized_heal_edit_is_confined_before_the_test_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
+) -> None:
+    """Requirement 12 (real path): the rerun after a heal turn sees the confined tree.
+
+    The heal turn edits a tracked file outside the reviewed diff. Without the
+    pre-rerun confinement the suite reran against that unconfined tree and only
+    terminal stabilization removed the edit, so the footprint audit recorded the
+    restoration under a post-test phase instead of a test-heal one.
+    """
+
+    target = _build_scope_creep_target(tmp_path, "heal_scope_creep")
+    pre_unrelated = (target / "unrelated.py").read_text()
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
+    mute_side_effects(heal=False)
+    stub = _install_stub_backend(monkeypatch, target, pin_skill_availability=False)
+    stub.merge_items = [_merge_item(1, "api.py", "high", desc="source fix")]
+    stub.fix_edit_line = "\n# daydream fix\n"
+    # The first suite run fails, so the heal turn runs and edits a file the
+    # reviewed diff never covered.
+    stub.fail_first_test_run = True
+    stub.heal_fix_unauthorized = "unrelated.py"
+
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop", non_interactive=False, archive=False,))
+
+    assert exit_code == 0
+    # The unauthorized edit is gone from the retained tree...
+    assert (target / "unrelated.py").read_text() == pre_unrelated
+    # ...and it was the pre-rerun confinement that removed it: the guard event
+    # names the test-heal phase, which no later phase can produce.
+    audit = json.loads((target / ".daydream" / "deep" / "fix-footprint.json").read_text())
+    restored = [e for e in audit["events"] if e.get("phase") == "test_heal" and e["path"] == "unrelated.py"]
+    assert [e["action"] for e in restored] == ["restore"]
+    assert not (target / ".daydream-heal-fix-applied").exists()
+    committed = _git(target, "show", "--name-only", "--format=", "HEAD").split()
+    assert "unrelated.py" not in committed
+    assert "api.py" in committed
 
 async def test_fix_guard_restore_failure_aborts_before_commit(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,

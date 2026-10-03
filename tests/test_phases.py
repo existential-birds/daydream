@@ -949,6 +949,132 @@ async def test_phase_test_and_heal_records_interrupted_repair_instead_of_discard
     assert backend.call_count == 2
 
 @pytest.mark.asyncio
+async def test_unauthorized_repair_edit_is_confined_before_the_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
+    _quiet_phase_ui: None,
+) -> None:
+    """Requirement 12: the rerun observes the confined tree, not the raw repair tree."""
+
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "2")
+    confined: list[str] = []
+    observed: dict[str, str] = {}
+    test_turns = 0
+
+    def confine() -> None:
+        confined.append("ran")
+        # Stand-in for fix_state._strict_scope_and_scrub: restore the single
+        # unauthorized path the repair turn touched, nothing else.
+        (tmp_path / "unrelated.py").write_text("y = 2\n")
+
+    def responder(cwd: Path, prompt: str, *_rest: Any) -> tuple[AgentEvent, ...]:
+        nonlocal test_turns
+        if prompt.lower().startswith("the tests failed"):
+            (Path(cwd) / "unrelated.py").write_text("y = 999\n")  # unauthorized edit
+            return _FIX_TURN
+        test_turns += 1
+        if test_turns == 1:
+            return _FAIL_TURN
+        # The rerun reads the tree the repair turn left behind.
+        observed["unrelated.py"] = (Path(cwd) / "unrelated.py").read_text()
+        return _PASS_TURN
+
+    result = await phases.phase_test_and_heal(
+        ScriptedBackend(responder=responder), make_work(tmp_path), session_id="s1",
+        capture_tree_key=lambda: "tree-1", footprint=_footprint(tmp_path),
+        confinement=confine, allow_standalone=True,
+    )
+
+    assert (result.passed, result.retries) == (True, 1)
+    assert confined == ["ran"], "confinement must run exactly once per repair outcome"
+    assert observed["unrelated.py"] == "y = 2\n", "the rerun observed the unconfined repair tree"
+
+@pytest.mark.parametrize("outcome_case", ["normal", "timeout", "exception"])
+@pytest.mark.asyncio
+async def test_confinement_runs_for_every_repair_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
+    _quiet_phase_ui: None, outcome_case: str,
+) -> None:
+    """Requirement 12: timeout and exception are covered, not just completion."""
+
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "2")
+    calls: list[str] = []
+    repair_turn: Callable[[], Any]
+    if outcome_case == "timeout":
+        monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
+
+        async def stall(**_kwargs: Any) -> AsyncIterator[TextEvent]:
+            while True:
+                yield TextEvent(text="partial")
+                await anyio.sleep(0)
+
+        def _stall(*_a: Any, **_k: Any) -> AsyncIterator[TextEvent]:
+            return stall()
+        repair_turn = _stall
+    elif outcome_case == "exception":
+        def _boom(*_a: Any, **_k: Any) -> Any:
+            raise RuntimeError("boom")
+        repair_turn = _boom
+    else:
+        def _complete(*_a: Any, **_k: Any) -> tuple[AgentEvent, ...]:
+            return _FIX_TURN
+        repair_turn = _complete
+    test_turns = 0
+
+    def responder(_cwd: Path, prompt: str, *_rest: Any) -> Any:
+        nonlocal test_turns
+        if prompt.lower().startswith("the tests failed"):
+            return repair_turn()
+        test_turns += 1
+        return _FAIL_TURN if test_turns == 1 else _PASS_TURN
+
+    call = phases.phase_test_and_heal(
+        ScriptedBackend(responder=responder), make_work(tmp_path), session_id="s1",
+        capture_tree_key=lambda: "tree-1", footprint=_footprint(tmp_path),
+        confinement=lambda: calls.append("ran"), allow_standalone=True,
+    )
+    if outcome_case == "exception":
+        # The host error still reaches the caller; confinement must not swallow it.
+        with pytest.raises(RuntimeError, match="boom"):
+            await call
+    else:
+        await call
+    assert calls == ["ran"], f"confinement skipped for outcome={outcome_case}"
+
+@pytest.mark.asyncio
+async def test_failing_confinement_blocks_the_repair_and_records_the_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
+    _quiet_phase_ui: None,
+) -> None:
+    """A confinement that cannot converge stops the loop and names the failure by type."""
+
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "2")
+    test_turns = 0
+
+    def responder(_cwd: Path, prompt: str, *_rest: Any) -> tuple[AgentEvent, ...]:
+        nonlocal test_turns
+        if prompt.lower().startswith("the tests failed"):
+            return _FIX_TURN
+        test_turns += 1
+        return _FAIL_TURN if test_turns == 1 else _PASS_TURN
+
+    def confine() -> None:
+        raise GitError("restore failed")
+
+    backend = ScriptedBackend(responder=responder)
+    result = await phases.phase_test_and_heal(
+        backend, make_work(tmp_path), session_id="s1",
+        capture_tree_key=lambda: "tree-1", footprint=_footprint(tmp_path),
+        confinement=confine, allow_standalone=True,
+    )
+
+    # The suite is never rerun against the unconverged tree.
+    assert (result.passed, result.retries, result.proceed) == (False, 1, False)
+    assert backend.call_count == 2
+    assert [r.outcome for r in result.repairs] == [RepairOutcome.SCOPE_BLOCKED]
+    assert any("GitError" in diagnostic and "restore failed" in diagnostic
+        for r in result.repairs for diagnostic in r.diagnostics)
+
+@pytest.mark.asyncio
 async def test_phase_test_and_heal_uses_repair_backend_for_the_repair_turn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
     _quiet_phase_ui: None,

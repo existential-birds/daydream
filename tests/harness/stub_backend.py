@@ -129,6 +129,11 @@ class StubBackend:
         # fix turn, plus an optional new generated path created by that turn.
         self.heal_fix_generated: str | None = None
         self.heal_fix_new_generated: str | None = None
+        # Repo-relative tracked path outside the reviewed diff edited by a
+        # test-healing turn, with the line it appends. Exercises the early
+        # full confinement that must run before the suite is rerun.
+        self.heal_fix_unauthorized: str | None = None
+        self.heal_fix_unauthorized_line: str = "\n# unauthorized healing edit\n"
         # Emit a runaway ToolStartEvent burst without a result to exercise budgets.
         self.runaway_fix: bool = False
         # Runaway pacing; zero still yields via sleep(0). Positive values can trip
@@ -701,6 +706,11 @@ class StubBackend:
                 new_generated = cwd / self.heal_fix_new_generated
                 new_generated.parent.mkdir(parents=True, exist_ok=True)
                 new_generated.write_text("-- new healing migration\n")
+            if self.heal_fix_unauthorized is not None:
+                unauthorized = cwd / self.heal_fix_unauthorized
+                unauthorized.write_text(
+                    unauthorized.read_text() + self.heal_fix_unauthorized_line
+                )
             yield TextEvent(text="Attempted to fix the test failures.")
             yield ResultEvent(structured_output=None, continuation=None)
             return

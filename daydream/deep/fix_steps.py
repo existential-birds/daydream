@@ -917,6 +917,16 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
             # names the instance that actually served it).
             test_backend = ctx.backend_for("test")
             repair_backend = ctx.backend_for("fix")
+
+            def _confine_after_repair() -> None:
+                # Requirement 12: full confinement runs after every repair outcome,
+                # before the rerun. It reuses the one implementation terminal
+                # stabilization already runs, so this only moves the enforcement
+                # point earlier; `finalize_retained_tree_after_test` is untouched and
+                # still owns the final pass. The mutated-tree report is the caller's
+                # to consume, not this seam's.
+                fix_state._strict_scope_and_scrub(ctx, state, phase="test_heal", round_number=None)
+
             result = await phase_test_and_heal(
                 test_backend,
                 ctx.work,
@@ -926,6 +936,7 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
                 capture_tree_key=lambda: fix_state._capture_full_delta_key(ctx.work, state),
                 footprint=state.footprint,
                 repair_backend=repair_backend,
+                confinement=_confine_after_repair,
                 run_context=ctx.run_context,
                 artifact_session=ctx.artifacts,
                 allow_standalone=ctx.allow_standalone_artifacts,

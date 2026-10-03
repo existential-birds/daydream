@@ -540,7 +540,7 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
                 return None
             private_partial = Path(_prompt_ref(prompt, "trajectory-partial"))
             partial_payload = json.loads(private_partial.read_text(encoding="utf-8"))
-            changed_relative = Path(".daydream-heal-fix-applied")
+            changed_relative = Path("api.py")
             sanctioned = _sanctioned_inputs(prompt)
             assert sanctioned["trajectory-partial"] == private_partial
             assert all(path.is_file() for path in sanctioned.values())
@@ -572,6 +572,10 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub,)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     stub.fail_all_test_runs = True
+    # The handoff's live bytes come from the run's authorized fix edit, not from
+    # the heal turn's marker: an unauthorized new untracked path is confined away
+    # before the rerun, which is the behavior under test elsewhere.
+    stub.fix_edit_line = "\n# run edit\n"
     mute_side_effects(heal=False)
     _add_bare_remote(multi_stack_target)
 
@@ -598,7 +602,7 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
     assert str(artifact_runtime_root.parent) not in body
     assert len(summarizer_observations) == 1
     observation = summarizer_observations[0]
-    assert observation["changed_body"] == "healed\n"
+    assert observation["changed_body"].endswith("\n# run edit\n")
     assert observation["session_id"] == handoffs[0].parent.name
     if trajectory_mode == "external":
         assert observation["private_partial"] == str(expected_trajectory.with_suffix(".json.partial"))
@@ -606,8 +610,8 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
         assert str(artifact_runtime_root.parent) in observation["private_partial"]
     assert "Future handoff links (not readable evidence during this turn)" in observation["prompt"]
     assert "## On-disk artifacts (read these first" not in observation["prompt"]
-    assert "- .daydream-heal-fix-applied" in observation["prompt"]
-    assert str(multi_stack_target / ".daydream-heal-fix-applied") in observation["prompt"]
+    assert "- api.py" in observation["prompt"]
+    assert str(multi_stack_target / "api.py") in observation["prompt"]
     assert observation["future_children"] == str(public_run / "trajectories")
     private_partial = observation["private_partial"]
     if response_kind == "clean":

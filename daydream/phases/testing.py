@@ -47,7 +47,7 @@ from daydream.phases.inputs import (
     _tail_test_output,
     append_extended_facts,
 )
-from daydream.phases.repair_outcome import classify_repair_outcome
+from daydream.phases.repair_outcome import RepairOutcome, classify_repair_outcome
 from daydream.phases.test_evidence import (
     RepairAttemptEvidence,
     TestAndHealResult,
@@ -277,6 +277,23 @@ async def _run_setup_investigator(
     return result if isinstance(result, dict) and "verdict" in result else None
 
 
+def _confine_repaired_tree(confinement: Callable[[], None] | None) -> str | None:
+    """Run the host's footprint confinement, returning a named failure or ``None``.
+
+    ``None`` means there is nothing to enforce — the legacy agent-run path has
+    no run-wide footprint. A failure is returned, never raised: the caller is
+    already holding a repair outcome, and the failure has to be recorded by name
+    rather than replace the turn's own error.
+    """
+    if confinement is None:
+        return None
+    try:
+        confinement()
+    except Exception as exc:  # noqa: BLE001 -- the failure is data, not a crash
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
 def _reject_test_healing_generated_file_edits(
     repo: Path,
     *,
@@ -287,7 +304,16 @@ def _reject_test_healing_generated_file_edits(
     artifact_session: ArtifactSession | None = None,
     allow_standalone: bool = False,
 ) -> list[str] | None:
-    """Restore generated files, returning ``None`` if any restoration fails."""
+    """Restore generated files, returning ``None`` if any restoration fails.
+
+    Layering: this is the phase's own generated-file guard, scoped to the files a
+    healing turn edited against the pre-turn stash. The run-wide *footprint*
+    confinement (unauthorized paths, protected state, index) is the host's
+    ``confinement`` seam and is independent of this guard. In the deep pipeline
+    both run, in that order, before any rerun; this guard remains because it
+    still owns the legacy agent-run path and the ``confinement=None`` case, where
+    the per-turn stash is the only pre-repair reference available.
+    """
     if not snapshot_captured:
         # HEAD is not a safe substitute when capturing the pre-fix state
         # failed: it may discard edits that were present before this pass.
@@ -402,6 +428,7 @@ async def phase_test_and_heal(
     capture_tree_key: Callable[[], str] | None = None,
     footprint: AuthorizedFixFootprint | None = None,
     repair_backend: Backend | None = None,
+    confinement: Callable[[], None] | None = None,
     artifact_session: ArtifactSession | None = None,
     allow_standalone: bool = False,
     recipe: TestRecipe | None = None,
@@ -414,6 +441,11 @@ async def phase_test_and_heal(
     the heal turn runs on ``repair_backend`` (the FIX configuration). ``None``
     reuses ``backend`` for both, which is the single-instance behaviour every
     caller that predates the split relies on.
+
+    ``confinement`` is the host's run-wide footprint confinement, invoked once
+    after every repair outcome and before the generated-file guard, so the rerun
+    and any handoff observe the confined tree. ``None`` leaves the tree exactly
+    as the repair turn left it, which is the legacy agent-run behaviour.
     """
     run_context = resolve_run_context(run_context)
     if session_id is None or capture_tree_key is None or footprint is None:
@@ -472,12 +504,21 @@ async def phase_test_and_heal(
         fix_prompt = append_extended_facts(fix_prompt, recipe)
         input_tree_key = capture_tree_key()
         started = time.monotonic()
-        partial_output, continuation_token, abort_reason = await agent.run_agent(
-            repair_instance, work.repo, fix_prompt, phase=DaydreamPhase.FIX,
-            tool_call_budget=tool_call_budget,
-            wall_budget_s=wall_budget_s,
-            run_context=run_context,
-        )
+        try:
+            partial_output, continuation_token, abort_reason = await agent.run_agent(
+                repair_instance, work.repo, fix_prompt, phase=DaydreamPhase.FIX,
+                tool_call_budget=tool_call_budget,
+                wall_budget_s=wall_budget_s,
+                run_context=run_context,
+            )
+        except Exception:
+            # A turn that died still left a tree behind, so confinement runs on
+            # this path too. The original error is what the caller must see: a
+            # confinement failure here is reported, never raised over it.
+            # Cancellation is not this branch's business -- it already carries its
+            # own cleanup contract.
+            _confine_repaired_tree(confinement)
+            raise
         # The host, not the turn, decides what happened: the abort reason outranks
         # whatever the partial prose claimed. `output` is the failing test output
         # the turn worked from; `partial_output` is the turn's own unfinished text.
@@ -494,17 +535,33 @@ async def phase_test_and_heal(
                 # Never abort the repair over a degraded read, and never hide it:
                 # the record names the miss so the job can re-derive the paths.
                 diagnostics.append(f"changed_paths_unavailable: {exc}")
+        # Full footprint confinement runs after every repair outcome, before the
+        # generated-file guard and before any rerun or handoff, so the next test
+        # execution observes the confined tree rather than the raw repair tree.
+        # The host supplies the routine (the deep pipeline passes the same
+        # implementation its terminal stabilization uses); `None` is the legacy
+        # agent-run path, which has no run-wide footprint to enforce.
+        confinement_error = _confine_repaired_tree(confinement)
+        if confinement_error is not None:
+            diagnostics.append(f"confinement_failed: {confinement_error}")
         repairs.append(RepairAttemptEvidence(
             job_id=job_id,
             execution_id=f"{job_id}:execution:{retries_used}",
             run_id=work.run_id,
-            outcome=classify_repair_outcome(abort_reason, turn_output),
+            # A tree that could not be converged was never a candidate: the host
+            # blocked it, whatever the turn claimed.
+            outcome=(
+                RepairOutcome.SCOPE_BLOCKED if confinement_error is not None
+                else classify_repair_outcome(abort_reason, turn_output)
+            ),
             abort_reason=abort_reason,
             backend_name=type(repair_instance).__name__.removesuffix("Backend").lower(),
             model=repair_instance.model,
             execution_elapsed_s=time.monotonic() - started,
             job_elapsed_s=time.monotonic() - job_started,
             input_tree_key=input_tree_key,
+            # Re-captured after confinement: removing part of a candidate
+            # invalidates the evidence bound to the pre-confinement tree.
             output_tree_key=capture_tree_key(),
             changed_paths=changed,
             focused_evidence=_repair_excerpt(turn_output),
@@ -523,6 +580,15 @@ async def phase_test_and_heal(
             artifact_session=artifact_session,
             allow_standalone=allow_standalone,
         )
+        if confinement_error is not None:
+            # Confinement is the guarantee the rerun depends on. Without it the
+            # suite would run against a tree the host cannot vouch for.
+            ui.print_warning(
+                agent.console,
+                f"Confinement after the repair turn failed ({confinement_error}); not rerunning "
+                "tests against the unconverged tree.",
+            )
+            return False
         if abort_reason is not None:
             # An aborted turn left a tree the host cannot vouch for, exactly like a
             # failed restoration: stop here rather than rerun the suite against it.
