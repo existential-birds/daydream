@@ -105,14 +105,6 @@ class DeepState:
             )
         return value
 
-    def _optional(
-        self, key: str, expected: type[object], expected_name: str, default: object | None = None
-    ) -> object | None:
-        value: object | None = self._data.get(key)
-        if value is None:
-            return default
-        return self._check(key, value, expected, expected_name)
-
     review_coverage = _StateField[ReviewCoverage](ReviewCoverage)
 
     @property
@@ -121,9 +113,7 @@ class DeepState:
 
     diff = _StateField[str](str)
 
-    @property
-    def diff_or_empty(self) -> str:
-        return cast(str, self._optional("diff", str, "str")) or ""
+    diff_or_empty = _StateField[str](str, key="diff", default=str)
 
     diff_path = _StateField[Path](Path)
 
@@ -252,16 +242,7 @@ class DeepState:
         TestRecipe, label="TestRecipe or None", default=lambda: None, writable=True
     )
 
-    @property
-    def iteration(self) -> int | None:
-        value: object | None = self._data.get("iteration")
-        if value is None:
-            return None
-        if type(value) is not int:
-            raise TypeError(
-                f"deep state key 'iteration' expected int or None, got {type(value).__name__}"
-            )
-        return value
+    iteration = _StateField[int | None](int, label="int or None", default=lambda: None)
 
     fix_outcomes = _StateField[dict[str, dict[str, Any]]](dict, default=dict, writable=True)
 
