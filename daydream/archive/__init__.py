@@ -258,7 +258,7 @@ def finalize_archive_run(
             ),
         )
         (assembly_dir / "manifest.json").write_text(
-            json.dumps(manifest.to_dict(), indent=2),
+            json.dumps(manifest, indent=2),
             encoding="utf-8",
         )
         if config.archive and upload:

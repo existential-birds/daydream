@@ -435,7 +435,7 @@ def _handle_benchmark_curate(args: argparse.Namespace) -> int:
         )
     try:
         fragment = load_yaml_strict(args.apply_gold)
-        cu.apply_gold_fragment(args.dir, args.case, fragment)
+        cu.CaseEditor(args.dir, args.case).apply_gold_fragment(fragment)
     except (cu.CurationError, WorkspaceCorrupt, git_ops.GitError, ValidationError, KeyError, TypeError) as exc:
         return _fail(str(exc))
     return 0

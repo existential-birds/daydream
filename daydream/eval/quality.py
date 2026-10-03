@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -108,13 +109,37 @@ def _is_wildcard_case(node: Any) -> bool:
     return pattern is not None and pattern.text.decode().strip() == "_"
 
 
-def _count_decision_nodes(node: Any) -> int:
-    """Cyclomatic decision count of a subtree, skipping nested functions."""
-    return sum(
-        (child.type in _CC_DECISION_TYPES and not _is_wildcard_case(child))
-        or (child.type == "if_clause" and _is_comprehension_filter(child))
-        for child in _iter_function(node)
+def _function_quality(func: Any) -> tuple[int, set[int]]:
+    """Analyze one function's scoped decisions and later-name evidence once.
+
+    Definitions include their signatures, while cyclomatic decisions belong
+    only to the body. Nested function bodies remain independently owned.
+    Identifier rows follow source order; same-line uses never count as later.
+    """
+    body = func.child_by_field_name("body")
+    decisions = 0
+    references: dict[str, list[int]] = {}
+    assignments: list[tuple[str, int]] = []
+    for node in _iter_function(func):
+        if body is not None and node.start_byte >= body.start_byte:
+            decisions += (
+                node.type in _CC_DECISION_TYPES and not _is_wildcard_case(node)
+                or node.type == "if_clause" and _is_comprehension_filter(node)
+            )
+        if node.type == "identifier":
+            references.setdefault(node.text.decode(), []).append(node.start_point.row)
+        elif node.type == "assignment":
+            target = node.child_by_field_name("left")
+            if target is not None and target.type == "identifier":
+                name = target.text.decode()
+                if not name.startswith("_"):
+                    assignments.append((name, node.start_point.row))
+    flagged = _trivial_wrapper(func) or set()
+    flagged.update(
+        row for name, row in assignments
+        if len(references[name]) - bisect_right(references[name], row) == 1
     )
+    return 1 + decisions, flagged
 
 
 def _scoped_python_files(workspace: Path) -> list[tuple[Path, str]]:
@@ -181,9 +206,10 @@ def _file_quality_from_tree(
     # Erosion: pooled cyclomatic mass of functions with CC > 10.
     functions = [node for node in _iter_tree(root) if node.type == "function_definition"]
     metrics: list[tuple[int, int, float]] = []  # (cc, sloc, mass)
+    flagged = _identity_comprehension_lines(root) | _empty_list_guard_lines(root) | _nested_ladder_lines(root)
     for func in functions:
-        body = func.child_by_field_name("body")
-        cc = 1 + _count_decision_nodes(body) if body is not None else 1
+        cc, function_flags = _function_quality(func)
+        flagged |= function_flags
         sloc = func.end_point.row - func.start_point.row + 1
         if sloc < 1:
             continue
@@ -195,7 +221,6 @@ def _file_quality_from_tree(
 
     # Verbosity: deterministic rule subset + clone detection over lines.
     sloc_file = sum(1 for line in lines if line.strip())
-    flagged = _verbosity_flagged_lines(root)
     flagged |= _clone_flagged_lines(lines)
     if cross_file_flagged:
         flagged |= cross_file_flagged
@@ -215,17 +240,6 @@ def _file_quality_from_tree(
         "flagged": len(flagged),
         "loc": sloc_file,
     }
-
-
-def _verbosity_flagged_lines(root: Any) -> set[int]:
-    """Line rows (0-based) flagged by the deterministic taxonomy subset."""
-    flagged: set[int] = set()
-    flagged |= _identity_comprehension_lines(root)
-    flagged |= _empty_list_guard_lines(root)
-    flagged |= _single_use_variable_lines(root)
-    flagged |= _trivial_wrapper_lines(root)
-    flagged |= _nested_ladder_lines(root)
-    return flagged
 
 
 def _comprehension_body(node: Any) -> Any | None:
@@ -368,35 +382,6 @@ def _empty_list_guard_lines(root: Any) -> set[int]:
     return flagged
 
 
-def _count_later_references(func: Any, name: str, after_row: int) -> int:
-    """Identifier occurrences of *name* after *after_row* inside *func*."""
-    return sum(
-        1
-        for node in _iter_function(func)
-        if node.type == "identifier" and node.text.decode() == name and node.start_point.row > after_row
-    )
-
-
-def _single_use_variable_lines(root: Any) -> set[int]:
-    """Flag plain non-private names assigned then referenced once later in their function."""
-    flagged: set[int] = set()
-    for func in _iter_tree(root):
-        if func.type != "function_definition":
-            continue
-        for node in _iter_function(func):
-            if node.type != "assignment":
-                continue
-            target = node.child_by_field_name("left")
-            if target is None or target.type != "identifier":
-                continue
-            name = target.text.decode()
-            if name.startswith("_"):
-                continue
-            if _count_later_references(func, name, node.start_point.row) == 1:
-                flagged.add(node.start_point.row)
-    return flagged
-
-
 def _return_value(return_node: Any) -> Any | None:
     """The expression a ``return`` yields (the ``return`` keyword is a token)."""
     for child in return_node.children:
@@ -476,17 +461,6 @@ def _trivial_wrapper(func: Any) -> set[int] | None:
     if [name for name, _ in param_defs] != arg_names:
         return None
     return set(range(func.start_point.row, func.end_point.row + 1))
-
-
-def _trivial_wrapper_lines(root: Any) -> set[int]:
-    flagged: set[int] = set()
-    for func in _iter_tree(root):
-        if func.type != "function_definition":
-            continue
-        lines = _trivial_wrapper(func)
-        if lines is not None:
-            flagged.update(lines)
-    return flagged
 
 
 def _direct_nested_ifs(if_node: Any) -> list[Any]:

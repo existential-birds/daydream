@@ -426,6 +426,27 @@ def test_quality_erosion_zero_when_no_high_cc(tmp_path: Path) -> None:
     assert result["per_file"]["app.py"]["erosion"] == 0.0
     assert result["per_file"]["app.py"]["high_cc_functions"] == 0
 
+def test_quality_function_signature_decisions_stay_outside_body_mass(tmp_path: Path) -> None:
+    defaults = " and ".join(["True"] * 12)
+    result = _quality(tmp_path, {"app.py": f"def subject(value={defaults}):\n    return value + 1\n"})
+
+    assert result["per_file"]["app.py"] == {
+        "erosion": 0.0, "verbosity": 0.0, "sloc": 2, "functions": 1, "high_cc_functions": 0,
+    }
+
+@pytest.mark.parametrize(("source", "verbosity"), [
+    ("def subject(arg):\n    value = arg; same = value\n    return arg\n", 0.0),
+    ("def subject(arg):\n    value = arg\n    value = arg + 1\n    return value * 2\n", 0.25),
+    ("def subject(arg):\n    value = arg\n    def nested():\n        return value\n    return arg\n", 0.0),
+])
+def test_quality_later_name_evidence_respects_rows_and_nested_scope(
+    tmp_path: Path, source: str, verbosity: float,
+) -> None:
+    result = _quality(tmp_path, {"app.py": source})
+
+    assert result["per_file"]["app.py"]["verbosity"] == verbosity
+    assert result["erosion"] == 0.0
+
 @pytest.mark.parametrize(("source", "expected"),
     [
         pytest.param("def f(items):\n    return [x for x in items]\n", 1 / 2, id="identity-comprehension"),

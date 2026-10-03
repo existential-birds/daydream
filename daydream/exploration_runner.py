@@ -23,6 +23,7 @@ from daydream.exploration import (
     FileInfo,
     merge_contexts,
 )
+from daydream.fanout import run_fanout
 from daydream.prompt_budget import truncate_utf8_to_budget
 from daydream.prompts.exploration_subagents import (
     DEPENDENCY_TRACER_SCHEMA,
@@ -297,50 +298,36 @@ async def pre_scan(
     has_mapping_targets = bool(source_files) or strategies["exploration.test_mapping"] != defaults[
         "exploration.test_mapping"
     ].content
-    descriptors = (
-        ("explore-dependency_tracer",)
-        if tier == "single"
-        else (
-            "explore-pattern_scanner",
-            "explore-dependency_tracer",
-            *(("explore-test_mapper",) if has_mapping_targets else ()),
-        )
-    )
     async def _run_specialist(
-        name: str,
-        prompt: str,
-        schema: dict[str, Any],
-        dispatch: DispatchHandle | None,
+        request: tuple[str, str, dict[str, Any]],
     ) -> None:
         nonlocal specialist_failed
-        async with limiter, maybe_fork(
-            recorder, f"explore-{name}", dispatch=dispatch,
-        ):
-            try:
-                structured, _, budget_reason = await run_agent(
-                    backend, repo_root, prompt, output_schema=schema, max_turns=specialist_max_turns,
-                    phase=DaydreamPhase.EXPLORATION,
-                    read_only=True,
-                    review_limits=_PRE_SCAN_REVIEW_LIMITS,
-                    finalization_context=FinalizationContext(
-                        task=f"Finalize exploration mapping: {name}",
-                        assigned_files=tuple(f.path for f in static_files),
-                        output_semantics="Return only the requested conventions, dependency edges, or test mappings "
-                        "in the schema. Do not review defects. Omit unconfirmed mappings; empty arrays are valid.",
-                        supplied_context=(("change diff", diff_text),),
-                    ),
-                    wall_budget_s=DEFAULT_WALL_BUDGET_S * review_scale_for_scope(),
-                    tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-                    run_context=run_context,
-                )
-                if budget_reason:
-                    specialist_failed = True
-                if isinstance(structured, dict):
-                    results[name] = structured
-                else:
-                    specialist_failed = True
-            except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
+        name, prompt, schema = request
+        try:
+            structured, _, budget_reason = await run_agent(
+                backend, repo_root, prompt, output_schema=schema, max_turns=specialist_max_turns,
+                phase=DaydreamPhase.EXPLORATION,
+                read_only=True,
+                review_limits=_PRE_SCAN_REVIEW_LIMITS,
+                finalization_context=FinalizationContext(
+                    task=f"Finalize exploration mapping: {name}",
+                    assigned_files=tuple(f.path for f in static_files),
+                    output_semantics="Return only the requested conventions, dependency edges, or test mappings "
+                    "in the schema. Do not review defects. Omit unconfirmed mappings; empty arrays are valid.",
+                    supplied_context=(("change diff", diff_text),),
+                ),
+                wall_budget_s=DEFAULT_WALL_BUDGET_S * review_scale_for_scope(),
+                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                run_context=run_context,
+            )
+            if budget_reason:
                 specialist_failed = True
+            if isinstance(structured, dict):
+                results[name] = structured
+            else:
+                specialist_failed = True
+        except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
+            specialist_failed = True
 
     # Builders split this bounded static map into changed targets and optional
     # context for each specialist, so imported files never become new targets.
@@ -350,65 +337,44 @@ async def pre_scan(
     # topology, which points at the sibling main worktree.
     static_files_abs = [replace(f, path=str(repo_root / f.path)) for f in static_files]
 
+    specialists: list[tuple[str, Callable[[], str], dict[str, Any]]] = [(
+        "dependency_tracer",
+        lambda: build_dependency_tracer_prompt(static_files_abs, diff_ref,
+                strategy=strategies["exploration.dependency_trace"], cwd=repo_root, inline_diff=diff_text),
+        DEPENDENCY_TRACER_SCHEMA,
+    )]
+    if tier != "single":
+        specialists.insert(0, (
+            "pattern_scanner",
+            lambda: build_pattern_scanner_prompt(static_files_abs, diff_ref,
+                    strategy=strategies["exploration.pattern_scan"], cwd=repo_root, inline_diff=diff_text),
+            PATTERN_SCANNER_SCHEMA,
+        ))
+        if has_mapping_targets:
+            specialists.append((
+                "test_mapper",
+                lambda: build_test_mapper_prompt(static_files_abs, diff_ref,
+                        strategy=strategies["exploration.test_mapping"],
+                        source_only=strategies["exploration.test_mapping"] == defaults[
+                            "exploration.test_mapping"
+                        ].content, cwd=repo_root, inline_diff=diff_text),
+                TEST_MAPPER_SCHEMA,
+            ))
+
     async with dispatch_scope(
         recorder,
         phase=DaydreamPhase.EXPLORATION,
-        descriptors=descriptors,
+        descriptors=tuple(f"explore-{name}" for name, _, _ in specialists),
     ) as dispatch:
         with anyio.move_on_after(_PRE_SCAN_TIMEOUT_SECONDS * review_scale_for_scope()) as timeout_scope:
-            async with anyio.create_task_group() as tg:
-                if tier == "single":
-                    dep_prompt = build_dependency_tracer_prompt(
-                        static_files_abs,
-                        diff_ref,
-                        cwd=repo_root,
-                        strategy=strategies["exploration.dependency_trace"],
-                        inline_diff=diff_text,
-                    )
-                    tg.start_soon(
-                        _run_specialist,
-                        "dependency_tracer",
-                        dep_prompt,
-                        DEPENDENCY_TRACER_SCHEMA,
-                        dispatch,
-                    )
-                else:  # parallel
-                    tg.start_soon(
-                        _run_specialist, "pattern_scanner",
-                        build_pattern_scanner_prompt(
-                            static_files_abs,
-                            diff_ref,
-                            cwd=repo_root,
-                            strategy=strategies["exploration.pattern_scan"],
-                            inline_diff=diff_text,
-                        ), PATTERN_SCANNER_SCHEMA, dispatch,
-                    )
-                    tg.start_soon(
-                        _run_specialist, "dependency_tracer",
-                        build_dependency_tracer_prompt(
-                            static_files_abs,
-                            diff_ref,
-                            cwd=repo_root,
-                            strategy=strategies["exploration.dependency_trace"],
-                            inline_diff=diff_text,
-                        ),
-                        DEPENDENCY_TRACER_SCHEMA,
-                        dispatch,
-                    )
-                    if has_mapping_targets:
-                        tg.start_soon(
-                            _run_specialist, "test_mapper",
-                            build_test_mapper_prompt(
-                                static_files_abs,
-                                diff_ref,
-                                cwd=repo_root,
-                                strategy=strategies["exploration.test_mapping"],
-                                inline_diff=diff_text,
-                                source_only=strategies["exploration.test_mapping"] == defaults[
-                                    "exploration.test_mapping"
-                                ].content,
-                            ), TEST_MAPPER_SCHEMA, dispatch,
-                        )
+            await run_fanout(
+                ((name, build_prompt(), schema) for name, build_prompt, schema in specialists),
+                _run_specialist,
+                limiter=limiter,
+                recorder=recorder,
+                descriptor=lambda request: f"explore-{request[0]}",
+                dispatch=dispatch,
+            )
         _finish_exploration_dispatch(dispatch, timeout_scope, specialist_failed, results)
 
     if not results:

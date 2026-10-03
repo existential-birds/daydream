@@ -476,8 +476,9 @@ def test_ready_declined_leaves_draft_and_no_digest(tmp_path: Path, fake_gh: Fake
 
 def _add_late_finding(cu_mod: Any, ws: Path, case_id: str) -> None:
     """A real post-render curator action: one authored finding, no sources."""
-    cu_mod.add_finding(ws, case_id, title="late concern", body="added after render",
-                       severity="low", location=None, source_ids=[])
+    cu_mod.CaseEditor(ws, case_id).add_findings(findings=[{
+        "title": "late concern", "body": "added after render", "severity": "low", "location": None, "source_ids": [],
+    }])
 
 
 def test_render_case_shows_prioritized_sections_and_legend(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -540,9 +541,17 @@ def test_stale_binding_prompts_rerender_instead_of_reinterpreting(
         if late[0] >= 2:
             return "q"
         late[0] += 1
-        cu.add_finding(ws2, case_id2, title=f"late concern {late[0]}",
-                       body=f"added after render #{late[0]}", severity="low",
-                       location=None, source_ids=[])
+        cu.CaseEditor(ws2, case_id2).add_findings(
+            findings=[
+                {
+                    "title": f"late concern {late[0]}",
+                    "body": f"added after render #{late[0]}",
+                    "severity": "low",
+                    "location": None,
+                    "source_ids": [],
+                }
+            ]
+        )
         return "1"
 
     rc = run_curate_tui(ws2, case_id2, read_line=mutate_then_answer)
@@ -562,7 +571,7 @@ def test_accept_non_candidate_and_context_is_rejected_without_write(tmp_path: Pa
     view = cu.get_case(ws, case_id)
     ctx_sid = next(e["source_id"] for e in view["prioritized_evidence"]["entries"] if e["band"] == "context")
     with pytest.raises(cu.CurationError):
-        cu.accept_candidate(ws, case_id, ctx_sid)
+        cu.CaseEditor(ws, case_id).accept_candidate(ctx_sid)
     assert path.read_bytes() == before
 
 def test_low_priority_exact_candidate_still_acceptable(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -582,7 +591,7 @@ def test_low_priority_exact_candidate_still_acceptable(tmp_path: Path, fake_gh: 
     assert view["prioritized_evidence"]["by_source"][cand_sid]["band"] == "possibly_actioned"
     assert view["prioritized_evidence"]["by_source"][cand_sid]["reasons"] == ["resolved"]
 
-    cu.accept_candidate(ws, case_id, cand_sid)   # must not raise
+    cu.CaseEditor(ws, case_id).accept_candidate(cand_sid)   # must not raise
     cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
     assert cur["findings"][0]["provenance"]["kind"] == "historical"
     assert cur["findings"][0]["provenance"]["source_ids"] == [cand_sid]

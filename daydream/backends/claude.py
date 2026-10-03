@@ -7,7 +7,7 @@ import json
 import os
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
 from claude_agent_sdk.types import (
@@ -264,17 +264,6 @@ class ClaudeBackend:
         if agents:
             options.agents = agents
 
-        # Record exact applied options, including resume only for an accepted
-        # Claude token and multi-model capability for any nonempty agent mapping.
-        resume_applied = (
-            continuation is not None and continuation.backend == "claude" and bool(continuation.data.get("session_id"))
-        )
-        agents_nonempty = bool(agents)
-        allowed_tools = options.allowed_tools
-        audit_tools = options.allowed_tools if audit_guard is not None else None
-        audit_tools_count = len(audit_tools) if audit_tools else None
-        audit_tools_present = bool(audit_tools) if audit_tools is not None else None
-
         structured_result: Any = None
         # SDK session id from the terminal ResultMessage; minted into the
         # ContinuationToken so a later call can --resume this conversation.
@@ -289,30 +278,34 @@ class ClaudeBackend:
 
         yield RequestEvent(
             prompt=prompt,
-            model_name=self.model,
+            model_name=options.model,
             session_id=options.resume,
-            reasoning_effort=effort,
+            reasoning_effort=options.effort,
             output_schema=output_schema,
             config=ClaudeRequestConfig(
                 finalization=finalization,
                 tools_count=len(options.tools) if isinstance(options.tools, list) else None,
-                max_turns=max_turns,
+                max_turns=options.max_turns,
                 read_only=read_only,
-                persist_session=persist_session,
-                continuation_mode="resume" if resume_applied else "fresh",
-                model_mode="multi_or_dynamic" if agents_nonempty else "single",
-                permission_mode="bypassPermissions",
-                allowed_tools_count=len(allowed_tools) if finalization or allowed_tools else None,
-                allowed_tools_present=bool(allowed_tools),
-                audit_tools_count=audit_tools_count,
-                audit_tools_present=audit_tools_present,
+                persist_session="no-session-persistence" not in options.extra_args,
+                continuation_mode="resume" if options.resume else "fresh",
+                model_mode="multi_or_dynamic" if options.agents else "single",
+                permission_mode=cast(Literal["bypassPermissions"] | None, options.permission_mode),
+                allowed_tools_count=(
+                    len(options.allowed_tools) if options.tools == [] or options.allowed_tools else None
+                ),
+                allowed_tools_present=bool(options.allowed_tools),
+                audit_tools_count=(
+                    len(options.allowed_tools) if audit_guard is not None and options.allowed_tools else None
+                ),
+                audit_tools_present=bool(options.allowed_tools) if audit_guard is not None else None,
                 setting_sources_present=bool(options.setting_sources),
-                native_output_format=output_format is not None,
-                buffer_limit_bytes=10 * 1024 * 1024,
-                hooks_enabled=True,
+                native_output_format=options.output_format is not None,
+                buffer_limit_bytes=options.max_buffer_size,
+                hooks_enabled=bool(options.hooks),
             ),
             model_source="configured",
-            session_source="host_generated" if resume_applied else None,
+            session_source="host_generated" if options.resume else None,
         )
 
         if self._execution_input is not None:

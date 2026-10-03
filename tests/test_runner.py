@@ -26,7 +26,6 @@ from daydream import clipboard, git_ops, pr_review, runner
 from daydream.archive import ArchiveFinalizationError
 from daydream.archive.git_context import GitContext
 from daydream.archive.manifest import (
-    Manifest,
     archive_recorder_provenance_from_snapshot,
     build_manifest_from_snapshot,
 )
@@ -1489,29 +1488,56 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
 @pytest.mark.parametrize(
     ("config", "flow", "expected"),
     [
-        pytest.param(RunConfig(backend="codex", fix_backend="pi"), DaydreamRunFlow.NORMAL,
-                     ("codex", "codex", "pi", "codex"), id="normal-phase-overrides"),
-        pytest.param(RunConfig(review_backend="codex", file_config=DaydreamFileConfig(
-            phases={"per_stack_review": {"backend": "pi"}})), DaydreamRunFlow.NORMAL,
-                     ("pi", "pi", "claude", "claude"), id="per-stack-review-phase"),
-        pytest.param(RunConfig(backend="codex"), DaydreamRunFlow.IMPROVE,
-                     ("codex", "codex", "", ""), id="improve-omits-fix-test"),
-        pytest.param(RunConfig(backend="codex"), DaydreamRunFlow.TTT,
-                     ("codex", "codex", "", ""), id="review-omits-fix-test"),
-        pytest.param(RunConfig(backend="codex", fix_backend="pi"), DaydreamRunFlow.CUSTOM,
-                     ("codex", "codex", "", ""), id="custom-omits-fix-test"),
-        pytest.param(RunConfig(backend="codex", fix_backend="pi"), DaydreamRunFlow.DIAGRAM,
-                     ("codex", "codex", "", ""), id="diagram-omits-fix-test"),
-        pytest.param(RunConfig(review_backend="codex", file_config=DaydreamFileConfig(
-            phases={"diagram": {"backend": "pi"}})), DaydreamRunFlow.DIAGRAM,
-                     ("pi", "pi", "", ""), id="diagram-phase-override"),
-        pytest.param(RunConfig(review_backend="codex", file_config=DaydreamFileConfig(
-            phases={"recon": {"backend": "pi"}})), DaydreamRunFlow.IMPROVE,
-                     ("pi", "pi", "", ""), id="improve-recon-phase"),
-        pytest.param(RunConfig(review_backend="codex"), DaydreamRunFlow.PR,
-                     ("codex", "codex", "claude", ""), id="pr-omits-test"),
-        pytest.param(RunConfig(), DaydreamRunFlow.NORMAL,
-                     ("claude", "claude", "claude", "claude"), id="backend-fallback"),
+        pytest.param(
+            RunConfig(backend="codex", fix_backend="pi"),
+            DaydreamRunFlow.NORMAL,
+            ("codex", "codex", "pi", "codex"),
+            id="normal-phase-overrides",
+        ),
+        pytest.param(
+            RunConfig(
+                review_backend="codex", file_config=DaydreamFileConfig(phases={"per_stack_review": {"backend": "pi"}})
+            ),
+            DaydreamRunFlow.NORMAL,
+            ("pi", "pi", "claude", "claude"),
+            id="per-stack-review-phase",
+        ),
+        pytest.param(
+            RunConfig(backend="codex"), DaydreamRunFlow.IMPROVE, ("codex", "codex", "", ""), id="improve-omits-fix-test"
+        ),
+        pytest.param(
+            RunConfig(backend="codex"), DaydreamRunFlow.TTT, ("codex", "codex", "", ""), id="review-omits-fix-test"
+        ),
+        pytest.param(
+            RunConfig(backend="codex", fix_backend="pi"),
+            DaydreamRunFlow.CUSTOM,
+            ("codex", "codex", "", ""),
+            id="custom-omits-fix-test",
+        ),
+        pytest.param(
+            RunConfig(backend="codex", fix_backend="pi"),
+            DaydreamRunFlow.DIAGRAM,
+            ("codex", "codex", "", ""),
+            id="diagram-omits-fix-test",
+        ),
+        pytest.param(
+            RunConfig(review_backend="codex", file_config=DaydreamFileConfig(phases={"diagram": {"backend": "pi"}})),
+            DaydreamRunFlow.DIAGRAM,
+            ("pi", "pi", "", ""),
+            id="diagram-phase-override",
+        ),
+        pytest.param(
+            RunConfig(review_backend="codex", file_config=DaydreamFileConfig(phases={"recon": {"backend": "pi"}})),
+            DaydreamRunFlow.IMPROVE,
+            ("pi", "pi", "", ""),
+            id="improve-recon-phase",
+        ),
+        pytest.param(
+            RunConfig(review_backend="codex"), DaydreamRunFlow.PR, ("codex", "codex", "claude", ""), id="pr-omits-test"
+        ),
+        pytest.param(
+            RunConfig(), DaydreamRunFlow.NORMAL, ("claude", "claude", "claude", "claude"), id="backend-fallback"
+        ),
     ],
 )
 def test_open_recorder_backend_identity(
@@ -1525,7 +1551,8 @@ def test_open_recorder_backend_identity(
     assert (recorder.backend_name, recorder.review_backend_name,
             recorder.fix_backend_name, recorder.test_backend_name) == expected
 
-def _build_manifest(config: RunConfig, flow: DaydreamRunFlow, tmp_path: Path) -> Manifest:
+
+def _build_manifest(config: RunConfig, flow: DaydreamRunFlow, tmp_path: Path) -> dict[str, Any]:
     """Build a manifest for ``config``/``flow`` from one real frozen snapshot."""
     snapshot = _capture_snapshot(tmp_path, "complete")
     return build_manifest_from_snapshot(
@@ -1535,26 +1562,48 @@ def _build_manifest(config: RunConfig, flow: DaydreamRunFlow, tmp_path: Path) ->
         ), git_ctx=GitContext(), status="complete", archive_path=tmp_path,
     )
 
-@pytest.mark.parametrize("flow,options,expected", [
-    pytest.param(DaydreamRunFlow.NORMAL,
-                 {"review_backend": "codex", "file_config": DaydreamFileConfig(phases={
-                     "per_stack_review": {"backend": "pi"}})},
-                 ("claude", "codex", "claude", "claude"), id="general-independent-of-per-stack"),
-    pytest.param(DaydreamRunFlow.NORMAL, {"backend": "codex", "fix_backend": "pi", "test_backend": "osprey"},
-                 ("codex", None, "pi", "osprey"), id="fix-and-test-overrides"),
-    pytest.param(DaydreamRunFlow.TTT, {"backend": "codex"}, ("codex", None, None, None), id="ttt-no-fix"),
-    pytest.param(DaydreamRunFlow.IMPROVE, {"backend": "codex"}, ("codex", None, None, None), id="improve-no-fix"),
-    pytest.param(DaydreamRunFlow.PR, {"review_backend": "codex"}, ("claude", "codex", "claude", None),
-                 id="pr-fixes-without-testing"),
-    pytest.param(DaydreamRunFlow.NORMAL, {}, ("claude", None, "claude", "claude"), id="claude-default"),
-])
+
+@pytest.mark.parametrize(
+    "flow,options,expected",
+    [
+        pytest.param(
+            DaydreamRunFlow.NORMAL,
+            {
+                "review_backend": "codex",
+                "file_config": DaydreamFileConfig(phases={"per_stack_review": {"backend": "pi"}}),
+            },
+            ("claude", "codex", "claude", "claude"),
+            id="general-independent-of-per-stack",
+        ),
+        pytest.param(
+            DaydreamRunFlow.NORMAL,
+            {"backend": "codex", "fix_backend": "pi", "test_backend": "osprey"},
+            ("codex", None, "pi", "osprey"),
+            id="fix-and-test-overrides",
+        ),
+        pytest.param(DaydreamRunFlow.TTT, {"backend": "codex"}, ("codex", None, None, None), id="ttt-no-fix"),
+        pytest.param(DaydreamRunFlow.IMPROVE, {"backend": "codex"}, ("codex", None, None, None), id="improve-no-fix"),
+        pytest.param(
+            DaydreamRunFlow.PR,
+            {"review_backend": "codex"},
+            ("claude", "codex", "claude", None),
+            id="pr-fixes-without-testing",
+        ),
+        pytest.param(DaydreamRunFlow.NORMAL, {}, ("claude", None, "claude", "claude"), id="claude-default"),
+    ],
+)
 def test_manifest_backend_identity_and_phase_fields(
     tmp_path: Path, flow: DaydreamRunFlow, options: dict[str, Any], expected: tuple[str | None, ...],
 ) -> None:
     config = RunConfig(target=str(tmp_path / "project"), run_eval=False, **options)
     manifest = _build_manifest(config, flow, tmp_path)
-    assert (manifest.backend, manifest.review_backend, manifest.fix_backend, manifest.test_backend) == expected
-    serialized = manifest.to_dict()["run"]
+    assert (
+        manifest["run"].get("backend"),
+        manifest["run"].get("review_backend"),
+        manifest["run"].get("fix_backend"),
+        manifest["run"].get("test_backend"),
+    ) == expected
+    serialized = manifest["run"]
     for field, backend in zip(("fix_backend", "test_backend"), expected[2:], strict=True):
         if backend is None:
             assert field not in serialized

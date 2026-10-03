@@ -11,11 +11,13 @@ from typing import Any
 import pytest
 
 from daydream import cli, git_ops
+from daydream.archive.git_context import GitContext
 from daydream.archive.index import label_observation_history, query_runs, upsert_run
 from daydream.reviews.identity import DAYDREAM_FOOTER, finding_marker
 from daydream.training import labeler_versions, reward
 from tests.harness.git_helpers import git
 from tests.harness.trajectory import make_manifest
+from tests.test_archive import _build, _manifest_write_snapshot
 
 
 @pytest.mark.parametrize("outcome", ["accepted", "unanswered", "malformed", "rate_limited"])
@@ -39,7 +41,10 @@ def test_corpus_harvest_archive_and_resume_journey(
         pr_number=None, pr_repo=None,
     )
     manifest_path = run_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest.to_dict()), encoding="utf-8")
+    wire = _build(run_dir, write_snapshot=_manifest_write_snapshot(session_id=session, final_metrics={}),
+                  source_path=str(git_repo), git_ctx=GitContext(repo_slug="org/repo", branch="main",
+                                                              base_branch="main", head_sha=head))
+    manifest_path.write_text(json.dumps(wire), encoding="utf-8")
     original_manifest = manifest_path.read_bytes()
     upsert_run(archive_dir, manifest)
     if outcome == "malformed":

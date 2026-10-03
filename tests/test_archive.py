@@ -42,7 +42,6 @@ from daydream.archive.index import (
     upsert_run,
 )
 from daydream.archive.manifest import (
-    Manifest,
     archive_recorder_provenance_from_snapshot,
     build_manifest_from_snapshot,
 )
@@ -275,9 +274,16 @@ def test_capture_git_context_populates_base_sha_and_changed_files(tmp_path: Path
     assert ctx.base_sha == base_sha
     assert sorted(ctx.changed_files) == ["a.py", "b.py"]
 
-def _build(tmp_path: Path, *, git_ctx: GitContext | None = None, write_snapshot: RunWriteSnapshot | None = None,
-    run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL, identity: ManifestRunIdentity | None = None, **kw: Any,
-) -> Manifest:
+
+def _build(
+    tmp_path: Path,
+    *,
+    git_ctx: GitContext | None = None,
+    write_snapshot: RunWriteSnapshot | None = None,
+    run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL,
+    identity: ManifestRunIdentity | None = None,
+    **kw: Any,
+) -> dict[str, Any]:
     """Build a manifest from immutable public archive inputs."""
     snapshot = write_snapshot or _manifest_write_snapshot()
     return build_manifest_from_snapshot(run=_archive_snapshot(snapshot, run_flow=run_flow, identity=identity,),
@@ -292,23 +298,27 @@ def test_build_manifest_basic(tmp_path: Path) -> None:
         ),
     )
 
-    assert m.session_id == "abcd1234-0000-0000-0000-000000000000"
-    assert m.run_flow == "normal"
-    assert m.skill == "python"
+    assert m.get("session_id") == "abcd1234-0000-0000-0000-000000000000"
+    assert m["run"].get("flow") == "normal"
+    assert m["run"].get("skill") == "python"
     # Per-phase models replaced config.model; the manifest stamps model as None.
-    assert m.model is None
-    assert m.backend == "claude"
-    assert m.review_backend is None
-    assert m.total_cost_usd == 0.05
-    assert m.total_prompt_tokens == 100
-    assert m.total_completion_tokens == 50
-    assert m.total_cached_tokens == 20
-    assert m.repo_slug == "org/repo"
-    assert m.head_sha == "a" * 40
+    assert m["run"].get("model") is None
+    assert m["run"].get("backend") == "claude"
+    assert m["run"].get("review_backend") is None
+    assert m["metrics"].get("total_cost_usd") == 0.05
+    assert m["metrics"].get("total_prompt_tokens") == 100
+    assert m["metrics"].get("total_completion_tokens") == 50
+    assert m["metrics"].get("total_cached_tokens") == 20
+    assert m["git"]["repo_slug"] == "org/repo"
+    assert m["git"]["head_sha"] == "a" * 40
+
 
 def test_build_manifest_serializes_resolved_profile_identity(tmp_path: Path) -> None:
     profile = RunProfileIdentity(schema_version=7, name="focused", source_kind="explicit", digest="e2e-profile-digest",)
-    manifest = _build(tmp_path, identity=_manifest_identity(profile=profile),).to_dict()
+    manifest = _build(
+        tmp_path,
+        identity=_manifest_identity(profile=profile),
+    )
     assert {key: manifest[key]
         for key in ("profile_schema_version", "profile_name", "profile_source_kind", "profile_digest",)
     } == {"profile_schema_version": 7, "profile_name": "focused", "profile_source_kind": "explicit",
@@ -316,7 +326,7 @@ def test_build_manifest_serializes_resolved_profile_identity(tmp_path: Path) -> 
     }
 
 def test_build_manifest_omits_unresolved_profile_identity(tmp_path: Path) -> None:
-    manifest = _build(tmp_path).to_dict()
+    manifest = _build(tmp_path)
     assert {"profile_schema_version", "profile_name", "profile_source_kind", "profile_digest",}.isdisjoint(manifest)
 
 def test_build_manifest_omits_fix_metadata_for_diagram_flow(tmp_path: Path) -> None:
@@ -325,9 +335,10 @@ def test_build_manifest_omits_fix_metadata_for_diagram_flow(tmp_path: Path) -> N
         fix_failures={"src/old.py": "reverted"}, fix_leftover_untracked=["src/leftover.py"],
         fix_quality_gate={"enabled": True, "rounds": []},
     )
-    assert m.fix_failures is None
-    assert m.fix_leftover_untracked is None
-    assert m.fix_quality_gate is None
+    assert m.get("fix_failures") is None
+    assert m.get("fix_leftover_untracked") is None
+    assert m.get("fix_quality_gate") is None
+
 
 def test_fix_cycle_classification_covers_every_run_flow() -> None:
     mode_gated_labels = {DaydreamRunFlow.TTT}
@@ -389,7 +400,7 @@ async def test_custom_flow_archive_real_path_omits_fix_test_backend(
 
 def test_manifest_to_dict_structure(tmp_path: Path) -> None:
     m = _build(tmp_path)
-    d = m.to_dict()
+    d = m
     assert d["schema_version"] == "1.0"
     assert d["session_id"] == "abcd1234-0000-0000-0000-000000000000"
     assert "run" in d and d["run"]["flow"] == "normal"
@@ -408,7 +419,7 @@ def test_manifest_to_dict_code_context_carries_git_ctx_fields(tmp_path: Path) ->
             branch="feat/x", base_branch="main", head_sha="b" * 40, base_sha="c" * 40, changed_files=["a.py", "b.py"],
         ),
     )
-    d = m.to_dict()
+    d = m
     assert d["code_context"] == {"base_sha": "c" * 40, "head_sha": "b" * 40, "base_branch": "main", "branch": "feat/x",
         "changed_files": ["a.py", "b.py"],
     }
@@ -420,28 +431,30 @@ def test_build_manifest_with_evaluation(tmp_path: Path) -> None:
             "derived": {"cost_per_finding_usd": 0.007},
         },
     )
-    assert m.wall_clock_seconds == 42.5
-    assert m.total_findings == 7
-    assert "grounding_rate" not in m.to_dict()["metrics"]
-    assert "coverage_ratio" not in m.to_dict()["metrics"]
-    assert m.cost_per_finding_usd == 0.007
+    assert m["metrics"].get("wall_clock_seconds") == 42.5
+    assert m["metrics"].get("total_findings") == 7
+    assert "grounding_rate" not in m["metrics"]
+    assert "coverage_ratio" not in m["metrics"]
+    assert m["metrics"].get("cost_per_finding_usd") == 0.007
+
 
 def test_build_manifest_with_quality(tmp_path: Path) -> None:
     m = _build(tmp_path, evaluation={"quality": {"erosion": 0.34, "verbosity": 0.19},},)
-    assert m.erosion == 0.34
-    assert m.verbosity == 0.19
-    d = m.to_dict()
+    assert m["metrics"].get("erosion") == 0.34
+    assert m["metrics"].get("verbosity") == 0.19
+    d = m
     assert d["metrics"]["erosion"] == 0.34
     assert d["metrics"]["verbosity"] == 0.19
 
 def test_build_manifest_without_evaluation(tmp_path: Path) -> None:
     m = _build(tmp_path)
-    assert m.total_findings is None
-    assert "grounding_rate" not in m.to_dict()["metrics"]
-    assert "coverage_ratio" not in m.to_dict()["metrics"]
-    assert m.cost_per_finding_usd is None
-    assert m.erosion is None
-    assert m.verbosity is None
+    assert m["metrics"].get("total_findings") is None
+    assert "grounding_rate" not in m["metrics"]
+    assert "coverage_ratio" not in m["metrics"]
+    assert m["metrics"].get("cost_per_finding_usd") is None
+    assert m["metrics"].get("erosion") is None
+    assert m["metrics"].get("verbosity") is None
+
 
 def test_build_manifest_wall_clock_without_evaluation(tmp_path: Path) -> None:
     m = _build(tmp_path,
@@ -449,8 +462,8 @@ def test_build_manifest_wall_clock_without_evaluation(tmp_path: Path) -> None:
             extra={"run_started_at": "2026-01-01T00:00:00Z", "run_ended_at": "2026-01-01T00:00:12.300000Z",},
         ),
     )
-    assert m.wall_clock_seconds == 12.3
-    assert m.total_findings is None
+    assert m["metrics"].get("wall_clock_seconds") == 12.3
+    assert m["metrics"].get("total_findings") is None
 
 def test_build_manifest_snapshot_timing_overrides_conflicting_evaluation(tmp_path: Path,) -> None:
     session_id = "snapshot-session"
@@ -474,17 +487,20 @@ def test_build_manifest_snapshot_timing_overrides_conflicting_evaluation(tmp_pat
 
     manifest = _build(tmp_path, write_snapshot=snapshot, evaluation={"timing": {"total_wall_clock_seconds": 42.5}},)
 
-    assert manifest.wall_clock_seconds == 10.0
-    assert manifest.phase_timings == {"review": {"wall_clock_seconds": 6.0, "occurrences": 1}}
-    assert manifest.timing_coverage == {
-        "attributed_wall_clock_seconds": 6.0, "unattributed_wall_clock_seconds": 4.0, "coverage_ratio": 0.6,
+    assert manifest["metrics"].get("wall_clock_seconds") == 10.0
+    assert manifest["metrics"].get("phase_timings") == {"review": {"wall_clock_seconds": 6.0, "occurrences": 1}}
+    assert manifest["metrics"].get("timing_coverage") == {
+        "attributed_wall_clock_seconds": 6.0,
+        "unattributed_wall_clock_seconds": 4.0,
+        "coverage_ratio": 0.6,
         "agent_completeness": {"total": 0, "attributed": 0, "unattributed": 0},
         "diagnostics": {
             "malformed_interval": 0, "duplicate_interval": 0, "orphaned_interval": 0, "malformed_invocation": 0,
             "duplicate_invocation": 0, "legacy_fork_proxy_used": 0,
         },
     }
-    assert manifest.total_prompt_tokens == 7
+    assert manifest["metrics"].get("total_prompt_tokens") == 7
+
 
 def test_upsert_run_creates_db(tmp_path: Path) -> None:
     m = make_manifest()
@@ -629,9 +645,9 @@ def test_build_manifest_projects_location_and_duplication_metrics(tmp_path: Path
         },
     )
 
-    assert m.location_in_hunk_rate == 0.75
-    assert m.shipped_duplicate_pairs == 2
-    d = m.to_dict()
+    assert m["metrics"].get("location_in_hunk_rate") == 0.75
+    assert m["metrics"].get("shipped_duplicate_pairs") == 2
+    d = m
     assert d["metrics"]["location_in_hunk_rate"] == 0.75
     assert d["metrics"]["shipped_duplicate_pairs"] == 2
 
@@ -642,10 +658,10 @@ def test_build_manifest_location_duplication_metrics_none_when_blocks_absent(tmp
         },
     )
 
-    assert m.total_findings == 7  # the legacy axes still project
-    assert m.location_in_hunk_rate is None
-    assert m.shipped_duplicate_pairs is None
-    d = m.to_dict()
+    assert m["metrics"].get("total_findings") == 7  # the legacy axes still project
+    assert m["metrics"].get("location_in_hunk_rate") is None
+    assert m["metrics"].get("shipped_duplicate_pairs") is None
+    d = m
     assert d["metrics"]["location_in_hunk_rate"] is None
     assert d["metrics"]["shipped_duplicate_pairs"] is None
 
@@ -656,11 +672,14 @@ def test_null_in_hunk_rate_survives_manifest_and_db_as_null(tmp_path: Path) -> N
             "findings": {"total": 0, "shipped_duplication": {"near_duplicate_pairs": 0},},
         },
     )
-    assert m.location_in_hunk_rate is None
-    assert m.to_dict()["metrics"]["location_in_hunk_rate"] is None
+    assert m["metrics"].get("location_in_hunk_rate") is None
+    assert m["metrics"]["location_in_hunk_rate"] is None
 
-    row = _stored_manifest_row(tmp_path, "s-loc-null", location_in_hunk_rate=m.location_in_hunk_rate,
-        shipped_duplicate_pairs=m.shipped_duplicate_pairs,
+    row = _stored_manifest_row(
+        tmp_path,
+        "s-loc-null",
+        location_in_hunk_rate=m["metrics"].get("location_in_hunk_rate"),
+        shipped_duplicate_pairs=m["metrics"].get("shipped_duplicate_pairs"),
     )
     assert row["location_in_hunk_rate"] is None  # SQL NULL, not 0.0
     assert row["shipped_duplicate_pairs"] == 0  # a real zero is still a zero
@@ -690,15 +709,16 @@ def test_build_manifest_carries_fix_quality_gate(tmp_path: Path) -> None:
         ],
     }
     m = _build(tmp_path, fix_quality_gate=gate)
-    assert m.fix_quality_gate == gate
-    d = m.to_dict()
+    assert m.get("fix_quality_gate") == gate
+    d = m
     assert d["fix_quality_gate"] == gate
     assert d["fix_quality_gate"]["rounds"][0]["per_file"]["api.py"]["flagged"] is True
 
 def test_manifest_fix_quality_gate_none_when_absent(tmp_path: Path) -> None:
     m = _build(tmp_path)
-    assert m.fix_quality_gate is None
-    assert m.to_dict()["fix_quality_gate"] is None
+    assert m.get("fix_quality_gate") is None
+    assert m["fix_quality_gate"] is None
+
 
 def test_upsert_run_persists_fix_quality_gate(tmp_path: Path) -> None:
     gate = {"enabled": True, "rounds": [{"round": 1, "per_file": {"api.py": {"flagged": True}}}],}
@@ -740,21 +760,25 @@ def test_read_recommended_capture_absent_is_none(tmp_path: Path) -> None:
 
 def test_manifest_recommended_patch_capture_defaults_pre_test(tmp_path: Path) -> None:
     m = _build(tmp_path)  # no recommended_capture arg => sidecar absent
-    assert m.recommended_patch_capture == "pre_test"
-    assert m.to_dict()["recommended_patch_capture"] == "pre_test"
+    assert m.get("recommended_patch_capture") == "pre_test"
+    assert m["recommended_patch_capture"] == "pre_test"
+
 
 def test_manifest_recommended_patch_capture_omitted_when_none() -> None:
-    assert "recommended_patch_capture" not in Manifest().to_dict()
+    assert "recommended_patch_capture" not in _build(Path("/tmp"), run_flow=DaydreamRunFlow.PR)
+
 
 def test_manifest_recommended_patch_capture_passes_through(tmp_path: Path) -> None:
     m = _build(tmp_path, recommended_capture="post_test")
-    assert m.to_dict()["recommended_patch_capture"] == "post_test"
+    assert m["recommended_patch_capture"] == "post_test"
+
 
 def test_feedback_run_leaves_recommended_patch_capture_none() -> None:
     """Feedback never writes recommended.patch, so absence cannot imply a pre-test capture."""
     m = _build(tmp_path=Path("/tmp"), run_flow=DaydreamRunFlow.PR)
-    assert m.recommended_patch_capture is None
-    assert "recommended_patch_capture" not in m.to_dict()
+    assert m.get("recommended_patch_capture") is None
+    assert "recommended_patch_capture" not in m
+
 
 def test_get_archive_dir_creates_structure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     target = tmp_path / "custom_archive"
@@ -981,10 +1005,15 @@ def test_finalize_archive_run_round_trip(tmp_path: Path, archive_dir: Path) -> N
 
 
 def _seed_one_run(archive_dir: Path, session_id: str) -> None:
-    upsert_run(archive_dir,
-        Manifest(session_id=session_id, archived_at="2026-01-01T00:00:00Z", run_flow="normal", backend="claude",
-            archive_path=str(archive_dir / session_id),
-        ),
+    upsert_run(
+        archive_dir,
+        {
+            "session_id": session_id,
+            "archived_at": "2026-01-01T00:00:00Z",
+            "run_flow": "normal",
+            "backend": "claude",
+            "archive_path": str(archive_dir / session_id),
+        },
     )
 
 def test_label_observations_has_bitemporal_reward_columns(tmp_path: Path) -> None:
@@ -1329,11 +1358,16 @@ def test_reviewer_set_penalty_prior_scoped_to_repo(tmp_path: Path) -> None:
     # Two alice rows in distinct repos (s_a: repo-A rejected@T1; s_b: repo-B accepted@T2)
     # verify per-repo filtering. cur has no repo_slug, excluded by session_id.
     for sid, slug in (("s_a", "org/repo-A"), ("s_b", "org/repo-B"), ("cur", None)):
-        upsert_run(tmp_path,
-            Manifest(
-                session_id=sid, archived_at="2026-01-01T00:00:00Z", run_flow="normal", backend="claude", repo_slug=slug,
-                archive_path=str(tmp_path / sid),
-            ),
+        upsert_run(
+            tmp_path,
+            {
+                "session_id": sid,
+                "archived_at": "2026-01-01T00:00:00Z",
+                "run_flow": "normal",
+                "backend": "claude",
+                "repo_slug": slug,
+                "archive_path": str(tmp_path / sid),
+            },
         )
     append_label_observation(
         tmp_path, "s_a", labels=["rejected"], pr_state="closed", labeler_version="2026.05.28-1", evidence_sha=None,
@@ -1363,27 +1397,27 @@ def test_reviewer_set_penalty_prior_scoped_to_repo(tmp_path: Path) -> None:
     assert (prior_x, n_x) == (None, 0)
 
 def test_manifest_includes_source_path() -> None:
-    m = Manifest(
-        session_id="test-session", source_path="/home/user/code/myrepo", remote_url="git@github.com:org/repo.git",
-        repo_slug="org/repo",
-    )
-    d = m.to_dict()
+    d = _build(Path("/tmp"), source_path="/home/user/code/myrepo")
     assert d["git"]["source_path"] == "/home/user/code/myrepo"
 
 def test_source_path_indexed_in_sqlite(tmp_path: Path) -> None:
     idx_dir = tmp_path / "idx"
     idx_dir.mkdir()
-    m = Manifest(session_id="sp-test", archived_at="2026-01-01T00:00:00Z", run_flow="normal", backend="claude",
-        source_path="/original/repo/path", archive_path=str(tmp_path),
-    )
+    m = {
+        "session_id": "sp-test",
+        "archived_at": "2026-01-01T00:00:00Z",
+        "run_flow": "normal",
+        "backend": "claude",
+        "source_path": "/original/repo/path",
+        "archive_path": str(tmp_path),
+    }
     upsert_run(idx_dir, m)
     rows = query_runs(idx_dir)
     assert rows[0]["source_path"] == "/original/repo/path"
 
 def test_source_path_defaults_to_none() -> None:
-    m = Manifest(session_id="old")
-    assert m.source_path is None
-    assert m.to_dict()["git"]["source_path"] is None
+    assert _build(Path("/tmp"))["git"]["source_path"] is None
+
 
 def test_update_labels_is_backward_compat_thin_wrapper(tmp_path: Path) -> None:
     _seed_one_run(tmp_path, "sess-5")
@@ -1496,22 +1530,29 @@ async def test_build_manifest_totals_include_fork_trajectories(tmp_path: Path) -
         archive_path=tmp_path,
     )
 
-    assert m.total_prompt_tokens == 500  # 100 main + 400 fork
-    assert m.total_completion_tokens == 75
-    assert m.total_cached_tokens == 25
-    assert m.total_cost_usd == pytest.approx(0.25)
+    assert m["metrics"].get("total_prompt_tokens") == 500  # 100 main + 400 fork
+    assert m["metrics"].get("total_completion_tokens") == 75
+    assert m["metrics"].get("total_cached_tokens") == 25
+    assert m["metrics"].get("total_cost_usd") == pytest.approx(0.25)
+
 
 def test_manifest_splits_status_from_pipeline() -> None:
-    m = Manifest(session_id="s-1", status="complete", archive_status="complete",
-        pipeline_status="failed", phase_states={
-            "merge": {"ran": True, "status": "failed"}, "fix": {"ran": False, "status": "absent"},
+    d = _build(
+        Path("/tmp"),
+        pipeline_status="failed",
+        phase_states={
+            "merge": {"ran": True, "status": "failed"},
+            "fix": {"ran": False, "status": "absent"},
             "test": {"ran": False, "status": "absent"},
         },
-        daydream=ExecutableProvenance(
-            version="0.27.0", install_source="git", commit="abc", dirty=False, container_digest="unknown",
+        provenance=ExecutableProvenance(
+            version="0.27.0",
+            install_source="git",
+            commit="abc",
+            dirty=False,
+            container_digest="unknown",
         ),
     )
-    d = m.to_dict()
     assert d["status"] == "complete"
     assert d["archive_status"] == "complete"
     assert d["pipeline_status"] == "failed"
@@ -1522,7 +1563,7 @@ def test_manifest_splits_status_from_pipeline() -> None:
     assert "commit" not in d["git"]
 
 def test_legacy_manifest_reads_new_fields_as_unknown(tmp_path: Path) -> None:
-    upsert_run(tmp_path, Manifest())
+    upsert_run(tmp_path, {})
     row = query_runs(tmp_path)[0]
     assert row["pipeline_status"] == "unknown"
     assert row["archive_status"] == "complete"
@@ -1696,10 +1737,15 @@ def test_remote_archive_state_field_is_not_outcome_authority(tmp_path: Path) -> 
     artifact.write_text(json.dumps(payload), encoding="utf-8")
     assert _derive_push_remote_states(tmp_path)["remote_ci"]["status"] == "succeeded"
 
-@pytest.mark.parametrize(("repo", "number", "expected_status"), [
-    ("other/project", 42, "partial"), ("example/project", 43, "partial"),
-    ("ExAmPlE/PrOjEcT", 42, "succeeded"),
-])
+
+@pytest.mark.parametrize(
+    ("repo", "number", "expected_status"),
+    [
+        ("other/project", 42, "partial"),
+        ("example/project", 43, "partial"),
+        ("ExAmPlE/PrOjEcT", 42, "succeeded"),
+    ],
+)
 def test_remote_success_matches_configured_pr(
     tmp_path: Path, repo: str, number: int, expected_status: str,
 ) -> None:
@@ -2143,10 +2189,17 @@ def test_missing_current_merge_event_never_uses_stale_success_artifact(tmp_path:
     assert states["merge"] == {"ran": False, "status": "absent"}
     assert pipeline.derive_pipeline_status("complete", None, states, runs_merge=True) == "partial"
 
-@pytest.mark.parametrize(("coverage_state", "items_payload"), [
-    ("complete", {"items": []}), ("failed", {"items": []}),
-    ("malformed", {"items": []}), ("complete", {"items": "corrupt"}),
-], ids=("success", "failure", "malformed-coverage", "malformed-items"))
+
+@pytest.mark.parametrize(
+    ("coverage_state", "items_payload"),
+    [
+        ("complete", {"items": []}),
+        ("failed", {"items": []}),
+        ("malformed", {"items": []}),
+        ("complete", {"items": "corrupt"}),
+    ],
+    ids=("success", "failure", "malformed-coverage", "malformed-items"),
+)
 def test_merge_artifacts_cannot_supply_missing_run_identity(
     tmp_path: Path, coverage_state: str, items_payload: Any,
 ) -> None:
@@ -2465,12 +2518,20 @@ def test_schema_additive_columns_and_migration(tmp_path: Path) -> None:
     assert "daydream_version" in cols and "daydream_commit" in cols and "daydream_dirty" in cols
 
 def test_upsert_run_persists_pipeline_fields(tmp_path: Path) -> None:
-    m = Manifest(session_id="s-2", status="complete", archive_status="complete", pipeline_status="failed",
-        phase_states={"merge": {"ran": True, "status": "failed"}},
-        daydream=ExecutableProvenance(
-            version="0.27.0", install_source="git", commit="abc", dirty=False, container_digest="unknown",
-        ),
-    )
+    m = {
+        "session_id": "s-2",
+        "status": "complete",
+        "archive_status": "complete",
+        "pipeline_status": "failed",
+        "phase_states": {"merge": {"ran": True, "status": "failed"}},
+        "daydream": ExecutableProvenance(
+            version="0.27.0",
+            install_source="git",
+            commit="abc",
+            dirty=False,
+            container_digest="unknown",
+        ).to_dict(),
+    }
     index.upsert_run(tmp_path, m)
     row = index.query_runs(tmp_path, "session_id = ?", ("s-2",))[0]
     assert row["archive_status"] == "complete"
@@ -2661,10 +2722,10 @@ def test_snapshot_manifest_pr_metadata_is_immutable_after_live_inputs_mutate(tmp
         git_ctx=GitContext(), status="complete", archive_path=tmp_path,
     )
 
-    assert manifest.session_id == snapshot.root_trajectory_id
-    assert manifest.pr_number == 7
-    assert manifest.pr_repo == "Owner/Repo"
-    assert manifest.to_dict()["pr"] == {"number": 7, "repo": "Owner/Repo"}
+    assert manifest.get("session_id") == snapshot.root_trajectory_id
+    assert manifest["pr"]["number"] == 7
+    assert manifest["pr"]["repo"] == "Owner/Repo"
+    assert manifest["pr"] == {"number": 7, "repo": "Owner/Repo"}
 
 @pytest.mark.parametrize(("extra", "message"),
     [({"pr_number": True}, "pr_number"), ({"pr_number": 7, "pr_repo": None}, "pr_repo"),
@@ -2816,3 +2877,54 @@ def test_dump_scan_refusal_preserves_archive_and_removes_late_stage(tmp_path: Pa
     assert not dump_stage.exists()
     assert (get_archive_dir() / "runs" / session_id / "manifest.json").is_file()
     assert query_runs(get_archive_dir())
+
+
+def test_manifest_projects_only_approved_git_and_profile_fields(tmp_path: Path) -> None:
+    class PrivateCanary:
+        def __deepcopy__(self, _memo: Any) -> Any:
+            raise AssertionError("private metadata must never be copied into an archive")
+
+    @dataclass
+    class ExtendedGitContext(GitContext):
+        private_metadata: Any = None
+
+    @dataclass(frozen=True)
+    class ExtendedProfile(RunProfileIdentity):
+        private_metadata: Any = None
+
+    profile = ExtendedProfile(schema_version=1, name="python", source_kind="builtin", digest="abc",
+                              private_metadata=PrivateCanary())
+    git = ExtendedGitContext(repo_slug="org/repo", private_metadata=PrivateCanary())
+    wire = _build(tmp_path, git_ctx=git, identity=_manifest_identity(profile=profile))
+    assert set(wire["git"]) == {"source_path", "remote_url", "repo_slug", "branch", "base_branch", "head_sha"}
+    assert {key for key in wire if key.startswith("profile_")} == {
+        "profile_schema_version", "profile_name", "profile_source_kind", "profile_digest",
+    }
+    assert wire["git"]["repo_slug"] == "org/repo"
+    assert wire["profile_digest"] == "abc"
+
+
+def test_index_projects_native_wire_at_the_persistence_boundary(tmp_path: Path) -> None:
+    wire = _build(tmp_path, git_ctx=GitContext(repo_slug="org/repo", head_sha="a" * 40),
+                  provenance=ExecutableProvenance(version="1", install_source="git", dirty=False))
+    upsert_run(tmp_path, wire)
+    row = query_runs(tmp_path)[0]
+    assert row["run_flow"] == "normal"
+    assert row["head_sha"] == "a" * 40
+    assert row["daydream_version"] == "1"
+    assert row["daydream_dirty"] == 0
+    assert row["total_cost_usd"] == 0.05
+
+
+def test_index_preserves_legacy_and_canonical_block_precedence(tmp_path: Path) -> None:
+    wire = {"session_id": "flat", "outcome_labels": '["flat"]', "run": {"session_id": "run"},
+            "git": {"session_id": "git"}, "code_context": {"session_id": "context"},
+            "pr": {"session_id": "pr"}, "metrics": {"session_id": "metrics"},
+            "outcome": {"session_id": "outcome", "labels": '["nested-string"]'}}
+    upsert_run(tmp_path, wire)
+    row = query_runs(tmp_path)[0]
+    assert row["session_id"] == "outcome"
+    assert row["outcome_labels"] == json.dumps('["nested-string"]')
+    upsert_run(tmp_path, {"session_id": "legacy", "outcome_labels": '["flat"]'})
+    row = query_runs(tmp_path, "session_id = ?", ("legacy",))[0]
+    assert row["outcome_labels"] == '["flat"]'

@@ -1,25 +1,13 @@
 """Private PR benchmark schemas, journaled workspace services, snapshots, and curation.
-Stable service and model types are re-exported here.
+The concrete case editor and validated model types are re-exported here.
 """
 
 from daydream.benchmark.curation import (  # noqa: F401 - stable service surface
+    CaseEditor,
     CurationError,
     StaleStateError,
-    accept_candidate,
-    add_edited_findings,
-    add_finding,
-    add_findings,
-    apply_gold_fragment,
-    attest_clean,
-    exclude_case,
-    exclude_evidence,
-    exclude_evidence_batch,
     get_case,
     list_cases,
-    mark_ready,
-    reinclude_case,
-    replace_findings,
-    validate_case,
 )
 from daydream.benchmark.github_import import run_import_prs
 from daydream.benchmark.schema import (
@@ -45,6 +33,7 @@ from daydream.benchmark.workspace import (
 
 __all__ = [
     "BenchmarkManifest",
+    "CaseEditor",
     "CurationError",
     "StaleStateError",
     "Candidate",
@@ -61,21 +50,8 @@ __all__ = [
     "init_workspace",
     "normalize_hostname",
     "run_import_prs",
-    "accept_candidate",
-    "add_edited_findings",
-    "add_finding",
-    "add_findings",
-    "apply_gold_fragment",
-    "attest_clean",
-    "exclude_case",
-    "exclude_evidence",
-    "exclude_evidence_batch",
     "get_case",
     "list_cases",
-    "mark_ready",
-    "reinclude_case",
-    "replace_findings",
-    "validate_case",
     "validate_workspace",
     "workspace_status",
 ]

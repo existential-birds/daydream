@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -151,6 +152,42 @@ def test_phase_event_to_dict_includes_metadata() -> None:
     )
     d = ev.to_dict()
     assert d["metadata"] == {"stage": "review"}
+
+def test_phase_event_serializes_only_base_fields_without_copying_metadata() -> None:
+    class Metadata(dict[str, Any]):
+        def __deepcopy__(self, _memo: Any) -> Any:
+            raise AssertionError("metadata must stay inside its admission guard")
+
+    @dataclass
+    class ExtendedPhaseEvent(PhaseEvent):
+        private_path: str = "/private/phase-secret"
+
+    event = ExtendedPhaseEvent(
+        phase=DaydreamPhase.DEEP, event="phase_end", timestamp="2026-01-01T00:00:00Z",
+        session_id="session", scope_id="scope", metadata=Metadata(stage="review", api_key="phase-secret"),
+    )
+    payload = event.to_dict()
+    assert list(payload) == ["phase", "event", "timestamp", "session_id", "scope_id", "metadata"]
+    assert payload["metadata"] == {"stage": "review", "api_key": "[REDACTED_CREDENTIAL]"}
+    assert "phase-secret" not in json.dumps(payload)
+
+@pytest.mark.parametrize("metadata", [{"value": float("nan")}, {"value": float("inf")}, {"value": object()}])
+def test_phase_event_omits_unserializable_metadata(metadata: dict[str, Any]) -> None:
+    event = PhaseEvent(DaydreamPhase.REVIEW, "phase_end", "2026-01-01T00:00:00Z", metadata=metadata)
+    assert event.to_dict() == {"phase": "review", "event": "phase_end", "timestamp": "2026-01-01T00:00:00Z"}
+
+def test_phase_event_keeps_required_nulls_and_enum_like_wire_values() -> None:
+    @dataclass
+    class EnumLike:
+        value: str
+
+    values: dict[str, Any] = {
+        "phase": EnumLike("review"), "event": None, "timestamp": None,
+        "status": EnumLike("failed"), "reason_code": EnumLike("domain_failure"),
+    }
+    assert PhaseEvent(**values).to_dict() == {
+        "phase": "review", "event": None, "timestamp": None, "status": "failed", "reason_code": "domain_failure",
+    }
 
 async def test_emit_supervisor_and_tool_veto_events(tmp_path: Path) -> None:
     """Supervisor decisions and tool vetoes are recorded as phase events."""

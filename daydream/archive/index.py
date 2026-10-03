@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import warnings
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -35,7 +35,6 @@ from daydream.archive._schema import (
     _recreate_label_observations_if_stale,
 )
 from daydream.archive.git_safe import normalize_remote_url
-from daydream.archive.manifest import Manifest
 from daydream.training.labeler_versions import STALE_LEGACY
 from daydream.training.reward import FP_PENALTY_MAP
 
@@ -57,6 +56,7 @@ __all__ = [
     "LABEL_OBSERVATION_NAMES",
     "_CREATE_TABLE",
     "upsert_run",
+    "manifest_index_fields",
     "update_labels",
     "query_runs",
     "append_label_observation",
@@ -134,7 +134,7 @@ def _connection(archive_dir: Path, *, readonly: bool = False) -> Iterator[sqlite
 def _project_daydream(daydream: Any) -> dict[str, Any]:
     """Project executable provenance; absent provenance and non-bool dirty states become NULL."""
     values = {
-        f"daydream_{name}": getattr(daydream, name) if daydream is not None else None
+        f"daydream_{name}": daydream.get(name) if daydream is not None else None
         for name in ("version", "install_source", "commit", "dirty", "container_digest")
     }
     dirty = values["daydream_dirty"]
@@ -142,39 +142,75 @@ def _project_daydream(daydream: Any) -> dict[str, Any]:
     return values
 
 
-def _run_upsert_values(manifest: Manifest) -> dict[str, Any]:
-    """Project declared upsert columns, normalizing credentials, JSON, booleans, and provenance."""
+_RUN_DEFAULTS: dict[str, Any] = {
+    "session_id": "",
+    "archived_at": "",
+    "status": "complete",
+    "archive_status": "complete",
+    "pipeline_status": "unknown",
+    "run_flow": "",
+    "backend": "claude",
+    "review_only": False,
+    "deep": False,
+    "changed_files": [],
+    "outcome_labels": "[]",
+    "archive_path": "",
+}
+
+
+def manifest_index_fields(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Decode portable manifest blocks and flat legacy fields in historical precedence.
+
+    The index owns this persisted projection. Native executable identity stays in
+    its separate block; hydration explicitly discards that untrusted provenance.
+    """
+    valid = {col.name for col in RUNS_COLUMNS if col.upserted and not col.name.startswith("daydream_")}
+    values = {key: value for key, value in data.items() if key in valid}
+    if "daydream" in data:
+        values["daydream"] = data["daydream"]
+    for block_name in ("run", "git", "code_context", "pr", "metrics", "outcome"):
+        block = data.get(block_name)
+        if not isinstance(block, dict):
+            continue
+        aliases = {
+            "run": {"flow": "run_flow"},
+            "pr": {"number": "pr_number", "repo": "pr_repo"},
+            "outcome": {"labels": "outcome_labels"},
+        }.get(block_name, {})
+        for key, value in block.items():
+            name = aliases.get(key, key)
+            if name in valid:
+                values[name] = json.dumps(value) if name == "outcome_labels" else value
+    return values
+
+
+def _run_upsert_values(fields: Mapping[str, Any]) -> dict[str, Any]:
+    """Project portable or legacy wire, then normalize index values at persistence."""
+    fields = manifest_index_fields(fields)
+    values: dict[str, Any] = {
+        col.name: fields.get(col.name, _RUN_DEFAULTS.get(col.name)) for col in RUNS_COLUMNS if col.upserted
+    }
     # Normalize again at persistence even if capture bypassed URL sanitization.
-    normalized_slug, normalized_url = (
-        (manifest.repo_slug, None)
-        if manifest.remote_url is None
-        else normalize_remote_url(manifest.remote_url)
+    slug, url = ((values["repo_slug"], None) if values["remote_url"] is None
+                 else normalize_remote_url(values["remote_url"]))
+    values.update(
+        **_project_daydream(fields.get("daydream")),
+        review_only=int(values["review_only"]),
+        deep=int(values["deep"]),
+        remote_url=url,
+        repo_slug=slug,
+        changed_files=json.dumps(values["changed_files"]),
+        phase_states=json.dumps(values["phase_states"]) if values["phase_states"] is not None else None,
+        fix_quality_gate=json.dumps(values["fix_quality_gate"]) if values["fix_quality_gate"] is not None else None,
+        schema_version=SCHEMA_VERSION,
     )
-    overrides = {
-        **_project_daydream(manifest.daydream),
-        "review_only": int(manifest.review_only),
-        "deep": int(manifest.deep),
-        "remote_url": normalized_url,
-        "repo_slug": normalized_slug,
-        "changed_files": json.dumps(manifest.changed_files),
-        "phase_states": json.dumps(manifest.phase_states) if manifest.phase_states is not None else None,
-        "fix_quality_gate": json.dumps(manifest.fix_quality_gate)
-        if manifest.fix_quality_gate is not None
-        else None,
-        "schema_version": SCHEMA_VERSION,
-    }
-    return {
-        col.name: overrides[col.name] if col.name in overrides else getattr(manifest, col.name)
-        for col in RUNS_COLUMNS
-        if col.upserted
-    }
+    return values
 
 
-def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
-    """Insert or replace a manifest using the schema declaration for columns and parameters."""
-    values = _run_upsert_values(manifest)
+def upsert_run(archive_dir: Path, fields: Mapping[str, Any]) -> None:
+    """Persist portable or legacy metadata through the declared column/parameter contract."""
     with _connection(archive_dir) as conn:
-        conn.execute(_UPSERT_SQL, values)
+        conn.execute(_UPSERT_SQL, _run_upsert_values(fields))
         conn.commit()
 
 

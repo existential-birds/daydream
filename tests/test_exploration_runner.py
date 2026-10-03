@@ -530,6 +530,31 @@ async def test_pre_scan_dispatch_interval_success(tmp_path: Path) -> None:
     assert step["extra"]["attempted_count"] == 3
     assert step["extra"]["completed_count"] == 3
 
+
+@pytest.mark.parametrize("file_count", [2, 4])
+async def test_pre_scan_prompt_failure_records_dispatch_without_model_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file_count: int,
+) -> None:
+    def broken_prompt(*args: Any, **kwargs: Any) -> str:
+        raise ValueError("prompt capture failed")
+
+    monkeypatch.setattr(er, "build_dependency_tracer_prompt", broken_prompt)
+    backend = _specialist_backend()
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        with pytest.raises(ExceptionGroup, match="unhandled errors") as caught:
+            await specialist_pre_scan(
+                cast(Backend, backend), tmp_path,
+                _multifile_diff([f"src/file_{index}.py" for index in range(file_count)]),
+            )
+
+    assert any(str(error) == "prompt capture failed" for error in caught.value.exceptions)
+    assert backend.call_count == 0
+    step = _dispatch_steps(read_trajectory(recorder.path), phase="exploration")[0]
+    assert step["extra"]["dispatch_status"] == "failed"
+    assert step["extra"]["attempted_count"] == 0
+    assert step["extra"]["planned_count"] == (1 if file_count == 2 else 3)
+
 async def test_pre_scan_dispatch_interval_timeout_dispatch_keeps_completed_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

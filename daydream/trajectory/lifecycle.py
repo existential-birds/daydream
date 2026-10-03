@@ -7,7 +7,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -43,30 +43,24 @@ def maybe_fork(
 class PhaseEvent:
     """Identified phase start/terminal evidence, paired by session_id and scope_id with optional stage metadata."""
 
-    phase: DaydreamPhase
+    phase: DaydreamPhase = field(metadata={"enum": True})
     event: str
     timestamp: str
     session_id: str | None = None
     scope_id: str | None = None
-    status: LifecycleStatus | None = None
-    reason_code: LifecycleReasonCode | None = None
+    status: LifecycleStatus | None = field(default=None, metadata={"enum": True})
+    reason_code: LifecycleReasonCode | None = field(default=None, metadata={"enum": True})
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a fail-closed, JSON-serializable representation."""
-        d: dict[str, Any] = {
-            "phase": self.phase.value,
-            "event": self.event,
-            "timestamp": self.timestamp,
-        }
-        if self.session_id is not None:
-            d["session_id"] = self.session_id
-        if self.scope_id is not None:
-            d["scope_id"] = self.scope_id
-        if self.status is not None:
-            d["status"] = self.status.value
-        if self.reason_code is not None:
-            d["reason_code"] = self.reason_code.value
+        d: dict[str, Any] = {}
+        for member in fields(PhaseEvent):
+            if member.name == "metadata":
+                continue
+            value = getattr(self, member.name)
+            if value is not None or member.default is not None:
+                d[member.name] = value.value if member.metadata.get("enum") else value
         if self.metadata:
             try:
                 metadata = redact_value(dict(self.metadata))

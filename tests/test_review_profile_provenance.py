@@ -5,10 +5,12 @@ Legacy manifests omit optional fields; legacy databases receive an additive migr
 import sqlite3
 from pathlib import Path
 
-from daydream.archive import _schema, manifest as m
+from daydream.archive import _schema
 from daydream.backends import ResultEvent, TextEvent
+from daydream.run_snapshot import RunProfileIdentity
 from daydream.trajectory import DaydreamPhase
 from tests.harness.trajectory import make_recorder
+from tests.test_archive import _build, _manifest_identity
 
 
 async def test_trajectory_build_extra_carries_profile_provenance(tmp_path: Path) -> None:
@@ -26,22 +28,16 @@ async def test_trajectory_build_extra_carries_profile_provenance(tmp_path: Path)
     assert extra["profile_source_kind"] == "default"
     assert extra["profile_digest"] == "abc"
 
-def test_manifest_to_dict_carries_profile_provenance_and_omits_when_none() -> None:
-    # Current manifests serialize profile metadata; legacy manifests omit it.
-    man = m.Manifest(  # fields per Manifest.__init__/to_dict; executor fills the rest
-        schema_version="1", session_id="s", archived_at="2026-08-23T00:00:00Z", status="complete",
-        profile_schema_version=1, profile_name="p", profile_source_kind="default", profile_digest="abc",
-    )
-    d = man.to_dict()
+
+def test_manifest_carries_profile_provenance(tmp_path: Path) -> None:
+    profile = RunProfileIdentity(schema_version=1, name="p", source_kind="default", digest="abc")
+    d = _build(tmp_path, identity=_manifest_identity(profile=profile))
     assert d["profile_schema_version"] == 1 and d["profile_digest"] == "abc"
     assert d["profile_name"] == "p" and d["profile_source_kind"] == "default"
 
-def test_legacy_manifest_without_profile_fields_still_serializes() -> None:
-    # Read legacy JSON without rewriting it; serialization omits absent profile fields.
-    man = m.Manifest(  # profile_* all None (legacy shape)
-        schema_version="1", session_id="s", archived_at="2026-01-01T00:00:00Z", status="complete",
-    )
-    d = man.to_dict()
+
+def test_manifest_without_profile_omits_optional_fields(tmp_path: Path) -> None:
+    d = _build(tmp_path)
     assert "profile_digest" not in d and "profile_name" not in d
     assert "profile_schema_version" not in d and "profile_source_kind" not in d
 

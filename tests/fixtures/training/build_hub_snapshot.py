@@ -22,7 +22,6 @@ from daydream.archive.hydrate_rules import (
     SANITIZER_VERSION,
     derive_pre_identity_curation_id,
 )
-from daydream.archive.manifest import Manifest
 from tests.fixtures.training.build_archive import _MINIMAL_TRAJECTORY, FIXTURE_SESSIONS
 from tests.harness.hub import FakeHub
 
@@ -67,16 +66,32 @@ def _snapshot_trajectory(session_id: str) -> dict[str, object]:
     return trajectory
 
 
-def _snapshot_manifest(session_id: str, repo_slug: str, skill: str, outcome_labels: tuple[str, ...]) -> Manifest:
+def _snapshot_manifest(
+    session_id: str, repo_slug: str, skill: str, outcome_labels: tuple[str, ...]
+) -> dict[str, object]:
     """Use snapshot-internal archive/source placeholders, avoiding pytest paths rejected by fixture
     exclusion. Indexing replaces them with staging-local paths.
     """
-    return Manifest(
-        session_id=session_id, archived_at="2026-05-17T00:00:00+00:00", status="complete", pipeline_status="succeeded",
-        skill=skill, repo_slug=repo_slug, branch="feat/x", base_branch="main", head_sha="abc123",
-        outcome_labels=json.dumps(list(outcome_labels)), archive_path=f"/archive/runs/{session_id}",
-        remote_url=f"https://github.com/{repo_slug}",
-    )
+    return {
+        "schema_version": "1.0", "recommended_patch_supported": True,
+        "session_id": session_id, "archived_at": "2026-05-17T00:00:00+00:00", "status": "complete",
+        "archive_status": "complete", "pipeline_status": "succeeded",
+        "run": {"flow": "", "skill": skill, "model": None, "backend": "claude",
+                "review_only": False, "deep": False},
+        "fix_failures": None, "fix_leftover_untracked": None, "fix_quality_gate": None,
+        "git": {"source_path": None, "remote_url": f"https://github.com/{repo_slug}",
+                "repo_slug": repo_slug, "branch": "feat/x", "base_branch": "main", "head_sha": "abc123"},
+        "code_context": {"head_sha": "abc123", "base_branch": "main", "branch": "feat/x",
+                         "base_sha": None, "changed_files": []},
+        "pr": {"number": None, "repo": None},
+        "metrics": {"total_cost_usd": None, "total_prompt_tokens": None, "total_completion_tokens": None,
+                    "total_cached_tokens": None, "wall_clock_seconds": None, "phase_timings": None,
+                    "total_findings": None, "cost_per_finding_usd": None, "erosion": None, "verbosity": None,
+                    "location_in_hunk_rate": None, "shipped_duplicate_pairs": None},
+        "outcome": {"labels": list(outcome_labels), "labeled_at": None, "composite_reward": None},
+        "archive_path": f"/archive/runs/{session_id}",
+    }
+
 
 
 def _snapshot_files(*, trajectory_fn: Callable[[str], dict[str, object]] = _snapshot_trajectory,
@@ -85,7 +100,7 @@ def _snapshot_files(*, trajectory_fn: Callable[[str], dict[str, object]] = _snap
     files: dict[str, bytes] = {}
     for session_id, session in zip(_SNAPSHOT_SESSION_IDS, FIXTURE_SESSIONS, strict=False):
         manifest = _snapshot_manifest(session_id, session.repo_slug, session.skill, session.outcome_labels)
-        data = manifest.to_dict()
+        data = manifest
         if manifest_hook is not None:
             manifest_hook(data)
         files[f"{session_id}/manifest.json"] = json.dumps(data, indent=2).encode()
@@ -123,7 +138,7 @@ def build_pinned_snapshot() -> FakeHub:
     files: dict[str, bytes] = {}
     for session_id, repo_slug, evidence in _PINNED_SESSIONS:
         manifest = _snapshot_manifest(session_id, repo_slug, "pr_review", ("merged",))
-        data = manifest.to_dict()
+        data = manifest
         if evidence is not None:
             data["license_evidence"] = evidence
         files[f"{session_id}/manifest.json"] = json.dumps(data, indent=2).encode()

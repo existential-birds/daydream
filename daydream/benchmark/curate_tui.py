@@ -406,7 +406,7 @@ def _action_new(
     del binding
     return _edit_and_stage_fragment(
         _editor_fragment_authored([]),
-        lambda atoms: cu.add_findings(root, case_id, findings=atoms),
+        lambda atoms: cu.CaseEditor(root, case_id).add_findings(findings=atoms),
         success=lambda n: f"added {n} authored finding(s)",
         err_outcome="rerender",
     )
@@ -441,7 +441,7 @@ def _action_edit(
     finding = findings[indices[0]]
     return _edit_and_stage_fragment(
         _editor_fragment_edit(finding),
-        lambda atoms: cu.replace_findings(root, case_id, finding["finding_id"], replacements=atoms),
+        lambda atoms: cu.CaseEditor(root, case_id).replace_findings(finding["finding_id"], replacements=atoms),
         success=lambda n: f"replaced finding with {n} atom(s)",
     )
 
@@ -476,7 +476,7 @@ def _edit_author_evidence(
     source_ids = [binding[i] for i in indices]
     return _edit_and_stage_fragment(
         _editor_fragment_authored(source_ids),
-        lambda atoms: cu.add_edited_findings(root, case_id, atoms=atoms),
+        lambda atoms: cu.CaseEditor(root, case_id).add_findings(findings=atoms, kind="edited"),
         success=lambda n: f"authored {n} edited finding(s)",
     )
 
@@ -509,7 +509,7 @@ def _action_exclude_case(
             return "continue"
         note = value
     try:
-        cu.exclude_case(root, case_id, reason, note=note)
+        cu.CaseEditor(root, case_id).exclude_case(reason, note=note)
     except cu.CurationError as exc:
         return _service_error(exc)
     print(f"excluded case {case_id}")
@@ -522,7 +522,7 @@ def _action_reinclude(
     """The ``[i]`` re-include action for an excluded case."""
     del binding
     try:
-        cu.reinclude_case(root, case_id)
+        cu.CaseEditor(root, case_id).reinclude_case()
     except cu.CurationError as exc:
         return _service_error(exc)
     print(f"re-included case {case_id}")
@@ -544,7 +544,7 @@ def _action_clean(
     if answer.lower() != "y":
         return "continue"
     try:
-        cu.attest_clean(root, case_id)
+        cu.CaseEditor(root, case_id).attest_clean()
     except cu.CurationError as exc:
         return _service_error(exc)
     print(f"attested {case_id} clean")
@@ -571,7 +571,7 @@ def _action_ready(
     if answer.lower() != "y":
         return "continue"
     try:
-        cu.mark_ready(root, case_id, head_sha=head)
+        cu.CaseEditor(root, case_id).mark_ready(head_sha=head)
     except cu.CurationError as exc:
         return _service_error(exc)
     print(f"marked {case_id} ready")
@@ -606,7 +606,7 @@ def _action_exclude(
     elif len(indices) == 1:
         note = _prompt(read_line, "note: ").strip() or None
     try:
-        cu.exclude_evidence_batch(root, case_id, source_ids, reason=reason, note=note)
+        cu.CaseEditor(root, case_id).exclude_evidence_batch(source_ids, reason=reason, note=note)
     except cu.CurationError as exc:
         return _service_error(exc)
     print(f"excluded {len(indices)} evidence source(s)")
@@ -642,7 +642,7 @@ def _action_accept(
         print(f"{sid} is not exactly acceptable \u2014 use [e] to edit it")
         return "continue"
     try:
-        cu.accept_candidate(root, case_id, sid)
+        cu.CaseEditor(root, case_id).accept_candidate(sid)
     except cu.CurationError as exc:
         return _service_error(exc)
     print(f"accepted {sid} as a historical finding")

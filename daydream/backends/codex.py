@@ -13,9 +13,7 @@ import sys as sys
 import tempfile
 import threading
 import uuid
-from collections import Counter
 from collections.abc import AsyncGenerator, Mapping
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +24,6 @@ from daydream.backends import (
     CodexRequestConfig,
     ContinuationToken,
     CostEvent,
-    DiagnosticEvent,
     MetricsEvent,
     RequestEvent,
     ResultEvent,
@@ -40,9 +37,8 @@ from daydream.backends import (
 from daydream.backends._codex_events import (
     _bounded_diagnostic_label as _bounded_diagnostic_label,
     _bounded_process_excerpt,
+    _CodexDiagnostics,
     _file_change_events,
-    _parser_diagnostics,
-    _record_unknown,
     _unwrap_shell_command as _unwrap_shell_command,
     display_shell_command as display_shell_command,
     supervisor_shell_command as supervisor_shell_command,
@@ -288,67 +284,10 @@ class CodexBackend:
         # Pair idless tools FIFO with observable orphan ids; retain updated text when completion omits it.
         pending_fifo: dict[str, list[str]] = {}  # item_type → [ids] in start order
         updated_text: dict[str, list[str]] = {}  # item_id → [text deltas]
-        parse_warnings: Counter[str] = Counter()  # persisted bounded reasons
-        unknown_event_types: Counter[str] = Counter()
-        unknown_event_overflow = [0]
-        unknown_item_types: Counter[str] = Counter()
-        unknown_item_overflow = [0]
-        malformed_shapes: Counter[str] = Counter()
-        record_unknown_item = partial(_record_unknown, unknown_item_types, overflow=unknown_item_overflow)
-        non_json_count = 0
-        error_sentinel_count = 0
+        diagnostics = _CodexDiagnostics()
         _pending_result: ResultEvent | None = None
         non_json_lines: list[str] = []  # redacted/capped process-exit excerpts
         unmatched_seq = 0  # monotonic source for orphaned tool-result ids
-
-        def _warn(reason: str) -> None:
-            """Log and retain only a fixed parser-warning reason."""
-            parse_warnings[reason] += 1
-            _logger.warning("codex parser warning: %s", reason.replace("_", " "))
-
-        emitted_diagnostic_signatures: dict[str, str] = {}
-        early_diagnostic_codes: set[str] = set()
-
-        def _current_diagnostics() -> list[DiagnosticEvent]:
-            return _parser_diagnostics(
-                error_sentinel_count=error_sentinel_count,
-                unknown_event_types=unknown_event_types,
-                unknown_event_overflow=unknown_event_overflow,
-                unknown_item_types=unknown_item_types,
-                unknown_item_overflow=unknown_item_overflow,
-                malformed_shapes=malformed_shapes,
-                non_json_count=non_json_count,
-                parse_warnings=parse_warnings,
-            )
-
-        def _diagnostic_signature(event: DiagnosticEvent) -> str:
-            return json.dumps(
-                {
-                    "code": event.code,
-                    "message": event.message,
-                    "metadata": event.metadata,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-
-        def _take_early_diagnostics() -> list[DiagnosticEvent]:
-            """Emit the first observable marker for each diagnostic code."""
-            fresh = [event for event in _current_diagnostics() if event.code not in early_diagnostic_codes]
-            for event in fresh:
-                early_diagnostic_codes.add(event.code)
-                emitted_diagnostic_signatures[event.code] = _diagnostic_signature(event)
-            return fresh
-
-        def _take_final_diagnostics() -> list[DiagnosticEvent]:
-            """Emit only aggregates that changed since their first marker."""
-            changed = []
-            for event in _current_diagnostics():
-                signature = _diagnostic_signature(event)
-                if emitted_diagnostic_signatures.get(event.code) != signature:
-                    emitted_diagnostic_signatures[event.code] = signature
-                    changed.append(event)
-            return changed
 
         def _claim_tool_id(item_type: str) -> str:
             """Pair idless completions with starts in FIFO order; misses warn and get deterministic orphan ids."""
@@ -356,7 +295,7 @@ class CodexBackend:
             fifo = pending_fifo.get(item_type, [])
             item_id = fifo.pop(0) if fifo else None
             if item_id is None:
-                _warn("unmatched_tool_result")
+                diagnostics.warning("unmatched_tool_result")
                 item_id = f"codex-unmatched-{unmatched_seq}"
                 unmatched_seq += 1
             return item_id
@@ -482,38 +421,38 @@ class CodexBackend:
                 except json.JSONDecodeError:
                     # Retain bounded lines only for exit exceptions; persistent diagnostics/logs keep counts without
                     # payloads.
-                    non_json_count += 1
+                    diagnostics.non_json_count += 1
                     if len(non_json_lines) >= _NON_JSON_EXCERPT_MAX_LINES:
                         non_json_lines.pop(0)
                     non_json_lines.append(_bounded_process_excerpt(raw_line))
                     _logger.debug("codex: non-JSON line skipped")
-                    for diagnostic in _take_early_diagnostics():
+                    for diagnostic in diagnostics.events():
                         yield diagnostic
                     continue
 
                 if not isinstance(event, dict):
-                    malformed_shapes["event_not_object"] += 1
-                    for diagnostic in _take_early_diagnostics():
+                    diagnostics.malformed_shapes["event_not_object"] += 1
+                    for diagnostic in diagnostics.events():
                         yield diagnostic
                     continue
                 event_type = event.get("type", "")
                 if isinstance(event_type, (dict, list)):
-                    malformed_shapes["event_type_not_scalar"] += 1
-                    for diagnostic in _take_early_diagnostics():
+                    diagnostics.malformed_shapes["event_type_not_scalar"] += 1
+                    for diagnostic in diagnostics.events():
                         yield diagnostic
                     continue
 
                 if event_type in ("item.started", "item.updated", "item.completed"):
                     item = event.get("item", {})
                     if not isinstance(item, dict):
-                        malformed_shapes["item_not_object"] += 1
-                        for diagnostic in _take_early_diagnostics():
+                        diagnostics.malformed_shapes["item_not_object"] += 1
+                        for diagnostic in diagnostics.events():
                             yield diagnostic
                         continue
                     item_type = item.get("type", "")
                     if isinstance(item_type, (dict, list)):
-                        malformed_shapes["item_type_not_scalar"] += 1
-                        for diagnostic in _take_early_diagnostics():
+                        diagnostics.malformed_shapes["item_type_not_scalar"] += 1
+                        for diagnostic in diagnostics.events():
                             yield diagnostic
                         continue
 
@@ -529,9 +468,9 @@ class CodexBackend:
                     if item_type == "command_execution":
                         raw_cmd = item.get("command", "")
                         if not isinstance(raw_cmd, str):
-                            _warn("command_not_string")
+                            diagnostics.warning("command_not_string")
                             raw_cmd = ""
-                            for diagnostic in _take_early_diagnostics():
+                            for diagnostic in diagnostics.events():
                                 yield diagnostic
                         yield ToolStartEvent(
                             id=item_id,
@@ -541,15 +480,15 @@ class CodexBackend:
                     elif item_type == "mcp_tool_call":
                         tool_name = item.get("tool", "unknown")
                         if not isinstance(tool_name, str):
-                            _warn("tool_not_string")
+                            diagnostics.warning("tool_not_string")
                             tool_name = "unknown"
-                            for diagnostic in _take_early_diagnostics():
+                            for diagnostic in diagnostics.events():
                                 yield diagnostic
                         arguments = item.get("arguments", {})
                         if not isinstance(arguments, dict):
-                            _warn("tool_arguments_not_object")
+                            diagnostics.warning("tool_arguments_not_object")
                             arguments = {}
-                            for diagnostic in _take_early_diagnostics():
+                            for diagnostic in diagnostics.events():
                                 yield diagnostic
                         yield ToolStartEvent(
                             id=item_id,
@@ -557,7 +496,7 @@ class CodexBackend:
                             input=arguments,
                         )
                     elif item_type not in ("agent_message", "reasoning", "file_change", "error"):
-                        record_unknown_item(item_type)
+                        diagnostics.unknown_item(item_type)
                     # agent_message and reasoning item.started are no-ops
                     # (text is empty, we wait for item.completed)
 
@@ -569,14 +508,14 @@ class CodexBackend:
                         if text and item_id:
                             updated_text.setdefault(item_id, []).append(text)
                     elif item_type not in ("command_execution", "mcp_tool_call", "file_change", "error"):
-                        record_unknown_item(item_type)
+                        diagnostics.unknown_item(item_type)
 
                 elif event_type == "item.completed":
                     if item_type in ("command_execution", "mcp_tool_call"):
                         item_id = item.get("id")
                         if not item_id:
                             item_id = _claim_tool_id(item_type)
-                            for diagnostic in _take_early_diagnostics():
+                            for diagnostic in diagnostics.events():
                                 yield diagnostic
 
                     if item_type in ("agent_message", "reasoning"):
@@ -620,8 +559,8 @@ class CodexBackend:
                             if isinstance(result, dict):
                                 result_content = str(result.get("content", ""))
                             else:
-                                _warn("tool_result_not_object")
-                                for diagnostic in _take_early_diagnostics():
+                                diagnostics.warning("tool_result_not_object")
+                                for diagnostic in diagnostics.events():
                                     yield diagnostic
                         error = item.get("error")
                         yield ToolResultEvent(
@@ -631,15 +570,15 @@ class CodexBackend:
                         )
 
                     elif item_type == "error":
-                        error_sentinel_count += 1
+                        diagnostics.error_sentinel_count += 1
 
                     else:
-                        record_unknown_item(item_type)
+                        diagnostics.unknown_item(item_type)
 
                 elif event_type == "turn.completed":
                     usage = event.get("usage", {})
                     if not isinstance(usage, dict):
-                        malformed_shapes["usage_not_object"] += 1
+                        diagnostics.malformed_shapes["usage_not_object"] += 1
                         usage = {}
                     native_model = event.get("model")
                     native_provider = event.get("provider")
@@ -691,8 +630,8 @@ class CodexBackend:
                         except json.JSONDecodeError:
                             # Observable failure path — surface the bad payload
                             # instead of silently degrading to None.
-                            _warn("structured_output_parse_failed")
-                            for diagnostic in _take_early_diagnostics():
+                            diagnostics.warning("structured_output_parse_failed")
+                            for diagnostic in diagnostics.events():
                                 yield diagnostic
 
                     # Fallback: result/output field directly on turn.completed.
@@ -706,8 +645,8 @@ class CodexBackend:
                                     try:
                                         structured_result = json.loads(raw)
                                     except json.JSONDecodeError:
-                                        _warn("structured_output_parse_failed")
-                                        for diagnostic in _take_early_diagnostics():
+                                        diagnostics.warning("structured_output_parse_failed")
+                                        for diagnostic in diagnostics.events():
                                             yield diagnostic
                                 if structured_result is not None:
                                     break
@@ -737,24 +676,20 @@ class CodexBackend:
                         if isinstance(error, dict)
                         else "Unknown Codex error"
                     )
-                    for diagnostic in _take_final_diagnostics():
+                    for diagnostic in diagnostics.events(final=True):
                         yield diagnostic
                     raise CodexError(str(message))
 
                 elif event_type not in ("turn.started",):
-                    _record_unknown(
-                        unknown_event_types,
-                        event_type,
-                        overflow=unknown_event_overflow,
-                    )
+                    diagnostics.unknown_event(event_type)
 
-                for diagnostic in _take_early_diagnostics():
+                for diagnostic in diagnostics.events():
                     yield diagnostic
 
             # Reap, emit final diagnostics, then raise a backend-specific exit error.
             returncode = await transport.wait()
 
-            for diagnostic in _take_final_diagnostics():
+            for diagnostic in diagnostics.events(final=True):
                 yield diagnostic
 
             # Report nonzero process exits even without turn.failed; empty/partial output is not success.

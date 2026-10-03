@@ -12,8 +12,10 @@ import pytest
 
 from daydream import cli, git_ops
 from daydream.archive import hydrate, license_enrich
+from daydream.archive.git_context import GitContext
 from daydream.archive.index import append_label_observation, label_observation_history, upsert_run
 from daydream.reviews.identity import DAYDREAM_FOOTER, finding_marker
+from daydream.run_snapshot import RunProfileIdentity
 from daydream.training.adjudication.observations import load_observations
 from daydream.training.labeler_versions import ADJUDICATION_LABELER_VERSION, REPLY_CLASSIFIER_VERSION
 from tests.fixtures.training.build_archive import _MINIMAL_TRAJECTORY
@@ -21,6 +23,7 @@ from tests.fixtures.training.build_hub_snapshot import PINNED_POLICY_FIXTURE
 from tests.harness.git_helpers import git
 from tests.harness.hub import FakeHub
 from tests.harness.trajectory import make_manifest
+from tests.test_archive import _build, _manifest_identity, _manifest_write_snapshot
 
 
 def _cli(args: list[str]) -> int:
@@ -37,14 +40,16 @@ def _tree(root: Path) -> dict[str, bytes]:
 def fresh_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, list[dict[str, Any]]]:
     root = tmp_path / "hydrated"
     run = root / "runs" / "semantic"
-    manifest = make_manifest(session_id="semantic", archive_path="/archive/semantic", repo_slug="org/repo",
-        head_sha="b" * 40, pr_repo="org/repo", pr_number=7,
-        pipeline_status="succeeded", remote_url="https://github.com/org/repo",
-        profile_schema_version=2, profile_name="pr_review", profile_source_kind="builtin", profile_digest="f" * 64,
+    manifest = _build(Path("/archive/semantic"),
+        write_snapshot=_manifest_write_snapshot(session_id="semantic", final_metrics={},
+            extra={"pr_repo": "org/repo", "pr_number": 7}),
+        git_ctx=GitContext(head_sha="b" * 40, repo_slug="org/repo", remote_url="https://github.com/org/repo"),
+        pipeline_status="succeeded", identity=_manifest_identity(profile=RunProfileIdentity(
+            schema_version=2, name="pr_review", source_kind="builtin", digest="f" * 64)),
     )
     fingerprints = [str(i) * 64 for i in range(1, 6)]
     source = FakeHub(repo_id="org/bronze", private=True, files={
-        "semantic/manifest.json": json.dumps(manifest.to_dict()).encode(),
+        "semantic/manifest.json": json.dumps(manifest).encode(),
         "semantic/trajectory.json": json.dumps(_MINIMAL_TRAJECTORY).encode(), "semantic/findings.json": json.dumps({
             "findings": [{"fingerprint": fp, "stack": "python"} for fp in fingerprints],
         }).encode(),
@@ -254,7 +259,11 @@ def test_harvest_dry_run_does_not_prepare_bronze_or_resume_state(
         repo_slug="org/repo", pr_repo="org/repo", pr_number=7,
         head_sha=git(git_repo, "rev-parse", "HEAD"), base_branch="main", branch="main",
     )
-    (run / "manifest.json").write_text(json.dumps(manifest.to_dict()))
+    wire = _build(run, write_snapshot=_manifest_write_snapshot(session_id="semantic", final_metrics={},
+                      extra={"pr_repo": "org/repo", "pr_number": 7}), source_path=str(git_repo),
+                  git_ctx=GitContext(repo_slug="org/repo", head_sha=git(git_repo, "rev-parse", "HEAD"),
+                                     base_branch="main", branch="main"))
+    (run / "manifest.json").write_text(json.dumps(wire))
     upsert_run(root, manifest)
     before, repo_before = _tree(root), _tree(git_repo)
     assert _cli(["harvest", "--archive-dir", str(root), "--cache-dir", str(root / "cache"), "--dry-run"]) == 0

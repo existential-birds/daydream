@@ -1055,8 +1055,8 @@ def test_in_scope_explicit_and_final_heads_validate_and_compile(tmp_path: Path, 
     for row in manifest["cases"]:
         case_id = row["case_id"]
         case = load_yaml_strict(ws / row["case_file"])
-        cu.attest_clean(ws, case_id)
-        cu.mark_ready(ws, case_id, head_sha=case["snapshot"]["original_head_sha"])
+        cu.CaseEditor(ws, case_id).attest_clean()
+        cu.CaseEditor(ws, case_id).mark_ready(head_sha=case["snapshot"]["original_head_sha"])
 
     assert validate_workspace(ws) == (0, "ready")
     lock = build.compile_workspace(ws)
@@ -2000,7 +2000,7 @@ def test_refresh_reuses_persisted_facts_and_preserves_curation(
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, candidate=True)
     case_path = ws / "cases" / f"{case_id}.yaml"
     sid = load_yaml_strict(case_path)["candidates"][0]["source_id"]
-    cu.accept_candidate(ws, case_id, sid)     # curator action
+    cu.CaseEditor(ws, case_id).accept_candidate(sid)     # curator action
     before_case = load_yaml_strict(case_path)
     origin_url = str(tmp_path / "origin_local.git")
 

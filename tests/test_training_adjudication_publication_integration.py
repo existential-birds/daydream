@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +12,8 @@ import pytest
 
 from daydream import cli
 from daydream.archive import hydrate
+from daydream.archive._schema import RUNS_COLUMNS
 from daydream.archive.index import append_label_observation, label_observation_history, query_runs, upsert_run
-from daydream.archive.manifest import Manifest
 from daydream.training.adjudication import cli as adjudication_cli
 from daydream.training.adjudication.final_bundle import final_snapshot_id
 from daydream.training.adjudication.publish import FinalAnnotationBundle, publish_final_annotation_bundle
@@ -62,7 +61,7 @@ def _import_backup(root: Path, stage: Path, state: Path, capsys: pytest.CaptureF
     # The special history row exists only in SQLite, never state observations.
     backup = root / "local-backup"
     row = query_runs(stage, "session_id = ?", ("sess-a",))[0]
-    upsert_run(backup, Manifest(**{field.name: row[field.name] for field in fields(Manifest) if field.name in row}))
+    upsert_run(backup, {field.name: row[field.name] for field in RUNS_COLUMNS if field.upserted and field.name in row})
     shutil.copytree(stage / "runs" / "sess-a", backup / "runs" / "sess-a")
     assert append_label_observation(backup, "sess-a", labels=["accepted"], pr_state=None,
         labeler_version="980-rubric-r2", evidence_sha=str(row["head_sha"]), reward_version="vm-loss-sqlite-canary",

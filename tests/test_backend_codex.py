@@ -1266,6 +1266,22 @@ async def test_first_parser_gap_is_observable_before_following_stream_stall(monk
     assert [event.code for event in diagnostics] == ["codex_parser_coverage"]
     assert diagnostics[0].metadata["unknown_event_types"]["total"] == 1
 
+@pytest.mark.parametrize("gap_count", [1, 2])
+async def test_parser_emission_history_is_isolated_from_consumer_mutation(gap_count: int) -> None:
+    process = make_mock_process([json.dumps({"type": "future.one"})] * gap_count)
+    observed: list[DiagnosticEvent] = []
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=process):
+        async for event in CodexBackend(model="fixture-model").execute(Path("/tmp"), "Inspect gaps"):
+            if isinstance(event, DiagnosticEvent):
+                observed.append(event)
+                if len(observed) == 1:
+                    event.metadata.clear()
+    assert len(observed) == gap_count
+    if gap_count == 2:
+        assert observed[-1].metadata["unknown_event_types"] == {
+            "total": 2, "labels": {"future.one": 2}, "overflow": 0,
+        }
+
 async def test_parser_diagnostic_precedes_nonzero_process_exit() -> None:
     backend = CodexBackend(model="fixture-model")
     secret_line = (

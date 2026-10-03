@@ -472,9 +472,15 @@ class AttemptObserver:
                     if value is not None
                 }
             )
+        model, diagnostic = (None, None)
+        if event.model_name is not None:
+            model, diagnostic = _admit_identity_label(
+                event.model_name, max_chars=_MAX_MODEL_NAME_CHARS, context="model_name"
+            )
         self.scope.attrs(
             {
-                "gen_ai.request.model": event.model_name,
+                "gen_ai.request.model": model,
+                "daydream.request.model.diagnostic": diagnostic.code if diagnostic is not None else None,
                 "gen_ai.request.reasoning_effort": event.reasoning_effort,
                 "daydream.request.timestamp": event.timestamp,
             }

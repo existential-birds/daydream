@@ -252,7 +252,7 @@ def _seed_three_repo_hub() -> FakeHub:
     files: dict[str, bytes] = {}
     for session_id, repo_slug in zip(("acme-run-1", "acme-run-2", "ghost-run-1"), SEED_THREE_REPO, strict=True):
         manifest = _snapshot_manifest(session_id, repo_slug, "beagle-python:review-python", ("accepted",))
-        files[f"{session_id}/manifest.json"] = json.dumps(manifest.to_dict(), indent=2).encode()
+        files[f"{session_id}/manifest.json"] = json.dumps(manifest, indent=2).encode()
         files[f"{session_id}/trajectory.json"] = json.dumps(_snapshot_trajectory(session_id), indent=2).encode()
     hub = FakeHub(repo_id="org/private-ds", private=True, files=files)
     hub.commit_revision(SNAPSHOT_REVISION)

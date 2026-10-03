@@ -22,7 +22,6 @@ from daydream.archive.index import (
     query_runs,
     upsert_run,
 )
-from daydream.archive.manifest import Manifest
 from daydream.git_ops import GitError
 from daydream.reviews.identity import DAYDREAM_FOOTER, finding_marker
 from daydream.training import harvest, labeler_versions, reward
@@ -288,12 +287,32 @@ def test_build_annotation_rejected_pr_empty_pool_uses_default_prior(tmp_path: Pa
     assert rb["posterior_cost"] == 0.5
     assert payload.reviewer_logins == ["alice", "amelia"]
 
-@pytest.mark.parametrize(("session", "pr_number", "author", "pr_author", "body", "created", "label"), [
-    pytest.param("s_fork_auth", 13, "prfiona", "prfiona", "Fixed in abc123", "2026-08-02T10:00:00Z", "accepted",
-        id="fork-pr-author"),
-    pytest.param("s_review_auth", 14, "revbob", "someone-else", "False positive, the linter is wrong here",
-        "2026-08-02T09:00:00Z", "rejected", id="formal-review-author"),
-])
+
+@pytest.mark.parametrize(
+    ("session", "pr_number", "author", "pr_author", "body", "created", "label"),
+    [
+        pytest.param(
+            "s_fork_auth",
+            13,
+            "prfiona",
+            "prfiona",
+            "Fixed in abc123",
+            "2026-08-02T10:00:00Z",
+            "accepted",
+            id="fork-pr-author",
+        ),
+        pytest.param(
+            "s_review_auth",
+            14,
+            "revbob",
+            "someone-else",
+            "False positive, the linter is wrong here",
+            "2026-08-02T09:00:00Z",
+            "rejected",
+            id="formal-review-author",
+        ),
+    ],
+)
 def test_build_annotation_author_reply_is_decisive(
     tmp_path: Path, session: str, pr_number: int, author: str, pr_author: str, body: str, created: str, label: str,
 ) -> None:
@@ -330,12 +349,21 @@ def test_build_annotation_rejected_pr_populated_prior_drives_pool(tmp_path: Path
     # Seed real reviewer history to exercise before_valid_at filtering. Even below ten observations,
     # prior_n must reveal the nonempty pool.
     prior_session_id = "s_prior_alice"
-    upsert_run(archive_dir,
-        Manifest(session_id=prior_session_id, archived_at="2025-01-01T00:00:00Z", run_flow="normal", backend="claude",
-            repo_slug="org/repo", pr_repo="org/repo", pr_number=1, head_sha="aaa", base_branch="main",
-
-            changed_files=["app.py"], archive_path=str(tmp_path),
-        ),
+    upsert_run(
+        archive_dir,
+        {
+            "session_id": prior_session_id,
+            "archived_at": "2025-01-01T00:00:00Z",
+            "run_flow": "normal",
+            "backend": "claude",
+            "repo_slug": "org/repo",
+            "pr_repo": "org/repo",
+            "pr_number": 1,
+            "head_sha": "aaa",
+            "base_branch": "main",
+            "changed_files": ["app.py"],
+            "archive_path": str(tmp_path),
+        },
     )
     append_label_observation(
         archive_dir, prior_session_id, labels=["rejected"], pr_state="closed", labeler_version="test",
@@ -461,13 +489,23 @@ def _seed_run_manifest(archive_dir: Path, run_dir: Path, session_id: str, *, pr_
     head_sha: str = "abc", base_branch: str | None = "main", branch: str | None = None, source_path: Path | None = None,
 ) -> None:
     """Index a bronze bundle with the requested PR linkage, branch identity and source path."""
-    upsert_run(archive_dir,
-        Manifest(session_id=session_id, archived_at="2026-01-01T00:00:00Z", run_flow="normal", backend="claude",
-            repo_slug="org/repo", branch=branch, head_sha=head_sha, base_branch=base_branch, pr_number=pr_number,
-            pr_repo=pr_repo,
-
-            changed_files=["app.py"], archive_path=str(run_dir), source_path=str(source_path) if source_path else None,
-        ),
+    upsert_run(
+        archive_dir,
+        {
+            "session_id": session_id,
+            "archived_at": "2026-01-01T00:00:00Z",
+            "run_flow": "normal",
+            "backend": "claude",
+            "repo_slug": "org/repo",
+            "branch": branch,
+            "head_sha": head_sha,
+            "base_branch": base_branch,
+            "pr_number": pr_number,
+            "pr_repo": pr_repo,
+            "changed_files": ["app.py"],
+            "archive_path": str(run_dir),
+            "source_path": str(source_path) if source_path else None,
+        },
     )
 
 

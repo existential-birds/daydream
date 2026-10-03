@@ -18,7 +18,7 @@ from collections.abc import Iterable
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, cast
+from typing import Any, Iterator, Literal, cast
 
 import yaml
 from pydantic import ValidationError
@@ -128,17 +128,6 @@ def _load_case(root: Path, case_id: str) -> dict[str, Any]:
     if not path.exists():
         raise CurationError(f"unknown case {case_id}")
     return load_yaml_strict(path)
-
-
-def _with_case_lock(
-    root: Path, case_id: str, op: str, mutate: Callable[[dict[str, Any]], None]
-) -> None:
-    """Lock, recover interrupted transactions, then load and mutate the latest case."""
-    with storage.WorkspaceLock(root):
-        storage.recover_startup(root)
-        raw = _load_case(root, case_id)
-        mutate(raw)
-        _stage_case(root, case_id, raw, op=op)
 
 
 def _changed_file_stats(root: Path, case_id: str, snapshot_doc: dict[str, Any]) -> tuple[int, int]:
@@ -537,111 +526,11 @@ def _derive_content(raw: dict[str, Any]) -> None:
     curation["gold_mode"] = schema.derive_gold_mode(model)
 
 
-def _validate_location(root: Path, raw: dict[str, Any], finding: dict[str, Any]) -> None:
-    """Validate the finding range against the frozen bundle head, independently of the mirror."""
-    location = finding.get("location")
-    if location is None:
-        return
-    if not _snapshot_head(raw):
-        raise CurationError("finding has a location but the snapshot carries no frozen head")
-    path = location.get("path")
-    start = location.get("start_line")
-    end = location.get("end_line")
-    if start is None or end is None:
-        raise CurationError(
-            f"finding location {path!r} is missing start_line and/or end_line"
-        )
-    line_count = _head_file_line_count(root, raw.get("snapshot") or {}, path)
-    if start < 1:
-        raise CurationError(f"finding location start_line {start} must be >= 1")
-    if end > line_count:
-        raise CurationError(
-            f"finding location {path!r} end_line {end} exceeds the head file's "
-            f"line count {line_count}"
-        )
-
-
-def _validate_raw(root: Path, case_id: str, raw: dict[str, Any]) -> None:
-    """Validate service rules before the full schema; preserve CurationError versus ValidationError."""
-    curation = raw.get("curation") or {}
-    findings = curation.get("findings") or []
-
-    if len(findings) > MAX_GOLD_FINDINGS:
-        raise CurationError(f"case {case_id} exceeds 50 gold findings")
-    ids = [f.get("finding_id") for f in findings]
-    for fid in set(ids):
-        if ids.count(fid) > 1:
-            raise CurationError(f"case {case_id} has duplicate finding {fid}")
-
-    # ready => snapshot_attested and stale => not-attested are enforced by the
-    # schema Curation._consistent validator.
-    candidates = raw.get("candidates") or []
-    for finding in findings:
-        _validate_location(root, raw, finding)
-        provenance = finding.get("provenance") or {}
-        if provenance.get("kind") == "historical":
-            srcs = provenance.get("source_ids") or []
-            if len(srcs) != 1:
-                raise CurationError(
-                    f"case {case_id} historical finding must reference exactly one source"
-                )
-            src = srcs[0]
-            cand = next((c for c in candidates if c.get("source_id") == src), None)
-            if cand is None:
-                raise CurationError(f"historical finding references unknown candidate {src}")
-            if not _projection_matches(cand, finding):
-                raise CurationError(
-                    f"historical finding source {src} does not byte-match its candidate projection"
-                )
-
-    schema.CaseDocument(**_schema_ready(raw))
-
-
-def validate_case(root: Path, case_id: str) -> None:
-    """Read and validate one case without writing; propagate service and schema errors unchanged."""
-    raw = _load_case(root, case_id)
-    _validate_raw(root, case_id, raw)
-    return None
-
-
-def _stage_case(root: Path, case_id: str, raw: dict[str, Any], *, op: str) -> None:
-    """Validate the entire case before opening its atomic YAML rewrite; never stage the manifest."""
-    _validate_raw(root, case_id, raw)
-    with storage.Transaction(root, op_id=f"curate-{case_id}", kind=f"curation:{op}") as tx:
-        tx.stage(
-            f"cases/{case_id}.yaml",
-            yaml.safe_dump(raw, sort_keys=False).encode("utf-8"),
-        )
-        tx.commit()
-
-
-def accept_candidate(root: Path, case_id: str, source_id: str) -> None:
-    """Accept an exact candidate with unchanged content, derived ID, and historical provenance."""
-
-    def mutate(raw: dict[str, Any]) -> None:
-        candidate = next(
-            (c for c in (raw.get("candidates") or []) if c.get("source_id") == source_id),
-            None,
-        )
-        if candidate is None:
-            raise CurationError(f"no candidate {source_id} in case {case_id}")
-        if not candidate.get("exact_acceptable"):
-            raise CurationError(f"candidate {source_id} is not exact_acceptable")
-
-        curation = raw.setdefault("curation", {})
-        _reopen_for_mutation(curation)
-        finding = _build_finding(case_id, {**candidate, "source_ids": [source_id]}, kind="historical")
-        curation.setdefault("findings", []).append(finding)
-        _derive_content(raw)
-
-    _with_case_lock(root, case_id, "accept", mutate)
-
-
 def _derive_provenance_kind(
-    source_ids: list[str], *, authored: bool = False
+    source_ids: list[str]
 ) -> str:
-    """Explicit authoring or no sources means authored; source rewrites mean edited, never historical."""
-    return "authored" if authored or not source_ids else "edited"
+    """No sources means authored; source rewrites mean edited, never historical."""
+    return "authored" if not source_ids else "edited"
 
 
 def _evidence_source_ids(root: Path, raw: dict[str, Any]) -> set[str]:
@@ -661,74 +550,9 @@ def _check_evidence_sources(
             raise CurationError(f"source {src} is not evidence of case {case_id}")
 
 
-def _append_atoms_to_case(
-    root: Path, raw: dict[str, Any], case_id: str, atoms: list[dict[str, Any]],
-    *, authored: bool, require_sources: bool,
-) -> None:
-    """Validate all sources, reopen curation, and add the derived batch atomically."""
-    def sources() -> Iterator[str]:
-        for i, atom in enumerate(atoms):
-            source_ids = list(atom.get("source_ids") or [])
-            if require_sources and not source_ids:
-                raise CurationError(f"edited-finding atom {i} carries no source_ids")
-            yield from source_ids
-
-    _check_evidence_sources(root, raw, sources(), case_id)
-    curation = raw.setdefault("curation", {})
-    _reopen_for_mutation(curation)
-    for atom in atoms:
-        curation.setdefault("findings", []).append(
-            _build_finding(case_id, atom, authored=authored)
-        )
-    _derive_content(raw)
-
-
-def add_finding(
-    root: Path,
-    case_id: str,
-    *,
-    title: str,
-    body: str,
-    severity: str | None = None,
-    location: dict[str, Any] | None = None,
-    source_ids: list[str] | None = None,
-) -> None:
-    """Add an authored (new) finding. provenance is ``authored`` with empty sources."""
-    atom = {"title": title, "body": body, "severity": severity,
-            "location": location, "source_ids": source_ids or []}
-
-    add_findings(root, case_id, findings=[atom])
-
-
-def add_findings(
-    root: Path, case_id: str, *, findings: list[dict[str, Any]]
-) -> None:
-    """Add a batch as authored findings; validate every source and the complete result before staging."""
-
-    def mutate(raw: dict[str, Any]) -> None:
-        _append_atoms_to_case(
-            root, raw, case_id, findings, authored=True, require_sources=False
-        )
-
-    _with_case_lock(root, case_id, "add", mutate)
-
-
-def add_edited_findings(
-    root: Path, case_id: str, *, atoms: list[dict[str, Any]]
-) -> None:
-    """Add an atomic split/merge batch with derived IDs and edited provenance."""
-
-    def mutate(raw: dict[str, Any]) -> None:
-        _append_atoms_to_case(
-            root, raw, case_id, atoms, authored=False, require_sources=True
-        )
-
-    _with_case_lock(root, case_id, "add-edited", mutate)
-
-
 def _build_finding(
     case_id: str, replacement: dict[str, Any],
-    *, authored: bool = False, kind: str | None = None,
+    *, kind: str | None = None,
 ) -> dict[str, Any]:
     """Construct trusted finding fields, provenance, and a content-derived finding id."""
     source_ids = list(replacement.get("source_ids") or [])
@@ -738,37 +562,12 @@ def _build_finding(
         "severity": replacement.get("severity"),
         "location": replacement.get("location"),
         "provenance": {
-            "kind": kind if kind is not None else _derive_provenance_kind(source_ids, authored=authored),
+            "kind": kind if kind is not None else _derive_provenance_kind(source_ids),
             "source_ids": source_ids,
         },
     }
     finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
     return finding
-
-
-def replace_findings(
-    root: Path, case_id: str, finding_id: str, *, replacements: list[dict[str, Any]]
-) -> None:
-    """Replace one finding with an atomic split/merge batch, validating the resulting whole case."""
-
-    def mutate(raw: dict[str, Any]) -> None:
-        curation = raw.setdefault("curation", {})
-        _reopen_for_mutation(curation)
-        findings = curation.setdefault("findings", [])
-        index = next(
-            (i for i, f in enumerate(findings) if f.get("finding_id") == finding_id),
-            None,
-        )
-        if index is None:
-            raise CurationError(f"no finding {finding_id}")
-        sources = (source for atom in replacements for source in list(atom.get("source_ids") or []))
-        _check_evidence_sources(root, raw, sources, case_id)
-        built = [_build_finding(case_id, r) for r in replacements]
-        new_findings = list(findings[:index]) + built + list(findings[index + 1:])
-        curation["findings"] = new_findings
-        _derive_content(raw)
-
-    _with_case_lock(root, case_id, "replace", mutate)
 
 
 def _set_clean(curation: dict[str, Any]) -> None:
@@ -788,30 +587,6 @@ def _append_evidence_exclusion(
     ]
     exclusions.append({"source_id": source_id, "reason": reason, "note": note})
     curation["exclusions"] = exclusions
-
-
-def exclude_evidence(
-    root: Path, case_id: str, source_id: str, *, reason: str, note: str | None = None
-) -> None:
-    """Exclude one source, replacing any previous row."""
-
-    exclude_evidence_batch(root, case_id, [source_id], reason=reason, note=note)
-
-
-def exclude_evidence_batch(
-    root: Path, case_id: str, source_ids: list[str], *, reason: str, note: str | None = None
-) -> None:
-    """Validate reason, note, and all sources before atomically appending the exclusion batch."""
-
-    def mutate(raw: dict[str, Any]) -> None:
-        _validate_evidence_exclusion_contract(reason, note)
-        _check_evidence_sources(root, raw, source_ids, case_id)
-        curation = raw.setdefault("curation", {})
-        _reopen_for_mutation(curation)
-        for source_id in source_ids:
-            _append_evidence_exclusion(curation, source_id, reason, note)
-
-    _with_case_lock(root, case_id, "exclude-evidence", mutate)
 
 
 def _validate_transition(frm: str | None, to: str) -> None:
@@ -855,56 +630,6 @@ def _reopen_for_mutation(curation: dict[str, Any]) -> dict[str, Any]:
     return curation
 
 
-def mark_ready(root: Path, case_id: str, *, head_sha: str, task_spec_sha256: str | None = None) -> None:
-    """Attest the exact frozen head and approved task-spec digest, then mark ready."""
-
-    def mutate(raw: dict[str, Any]) -> None:
-        snapshot_doc = raw.get("snapshot") or {}
-        original = snapshot_doc.get("original_head_sha")
-        if head_sha != original:
-            raise StaleStateError(
-                f"attestation SHA mismatch: expected {original} got {head_sha}"
-            )
-        curation = raw.setdefault("curation", {})
-        # Single-sourced empty-gold eligibility: derive_gold_status is None
-        # exactly when the gold set is empty and never clean-attested -- the
-        # same derived status harbor/build._is_compilable trusts.
-        if schema.derive_gold_status(_curation_model(curation)) is None:
-            raise CurationError(
-                f"case {case_id} cannot be marked ready with an empty gold findings set "
-                "and no clean attestation (clean-attest first)"
-            )
-        _validate_transition(curation.get("state"), "ready")
-        stored_task_spec_sha256 = task_spec_sha256
-        if stored_task_spec_sha256 is None:
-            from daydream.benchmark.harbor import build
-
-            stored_task_spec_sha256 = build.task_spec_digest(raw)
-        curation["state"] = "ready"
-        curation["snapshot_attested"] = True
-        curation["task_spec_sha256"] = stored_task_spec_sha256
-        curation["task_spec_approved_at"] = datetime.now(timezone.utc).isoformat()
-        _derive_content(raw)
-
-    _with_case_lock(root, case_id, "mark-ready", mutate)
-
-
-def attest_clean(root: Path, case_id: str) -> None:
-    """Attest an empty gold set as clean; reopen mutable state without marking the snapshot ready."""
-
-    def mutate(raw: dict[str, Any]) -> None:
-        curation = raw.setdefault("curation", {})
-        if curation.get("findings"):
-            raise CurationError(
-                f"case {case_id} has gold findings; clean attestation requires an empty gold set"
-            )
-        # Reopen as draft; clean attestation cannot replace final snapshot approval.
-        _reopen_for_mutation(curation)
-        _set_clean(curation)
-
-    _with_case_lock(root, case_id, "attest-clean", mutate)
-
-
 def _apply_case_exclusion(
     curation: dict[str, Any], *, reason: str, note: str | None
 ) -> None:
@@ -917,95 +642,6 @@ def _apply_case_exclusion(
     # A ready case's task-spec approval was already invalidated by
     # _demote_ready's ready->draft step; no non-ready state carries one.
     curation["case_exclusion"] = {"reason": reason, "note": note}
-
-
-def exclude_case(
-    root: Path, case_id: str, reason: str, *, note: str | None = None
-) -> None:
-    """Exclude a case through valid transitions; ready passes through draft and loses attestation."""
-
-    def mutate(raw: dict[str, Any]) -> None:
-        curation = raw.setdefault("curation", {})
-        _apply_case_exclusion(curation, reason=reason, note=note)
-
-    _with_case_lock(root, case_id, "exclude-case", mutate)
-
-
-def reinclude_case(root: Path, case_id: str) -> None:
-    """Re-include an excluded case to the state its snapshot supports."""
-
-    def mutate(raw: dict[str, Any]) -> None:
-        curation = raw.setdefault("curation", {})
-        if curation.get("state") != "excluded":
-            raise CurationError(f"case {case_id} is not excluded")
-        snapshot_doc = raw.get("snapshot") or {}
-        destination = "draft" if snapshot_doc.get("status") == "ready" else "unreplayable"
-        _validate_transition("excluded", destination)
-        curation["state"] = destination
-        curation["snapshot_attested"] = False
-        curation["case_exclusion"] = None
-
-    _with_case_lock(root, case_id, "reinclude-case", mutate)
-
-
-def _fragment_provenance(
-    root: Path, raw: dict[str, Any], finding: dict[str, Any], source_ids: list[str],
-    *,
-    case_id: str,
-) -> tuple[str, list[str]]:
-    """Derive historical only for one source whose candidate content matches exactly."""
-    _check_evidence_sources(root, raw, source_ids, case_id)
-    if len(source_ids) == 1:
-        cand = next(
-            (c for c in (raw.get("candidates") or []) if c.get("source_id") == source_ids[0]),
-            None,
-        )
-        if cand is not None and _projection_matches(cand, finding):
-            return "historical", source_ids
-    return _derive_provenance_kind(source_ids, authored=False), source_ids
-
-
-def apply_gold_fragment(root: Path, case_id: str, fragment: dict[str, Any]) -> None:
-    """Derive and validate a reviewed gold fragment, ignoring forged IDs and status."""
-
-    def mutate(raw: dict[str, Any]) -> None:
-        curation = raw.setdefault("curation", {})
-        _reopen_for_mutation(curation)
-
-        findings: list[dict[str, Any]] = []
-        for frag in fragment.get("findings") or []:
-            kind, _ = _fragment_provenance(
-                root, raw, frag, list(frag.get("source_ids") or []), case_id=case_id,
-            )
-            findings.append(_build_finding(case_id, frag, kind=kind))
-        curation["findings"] = findings
-
-        for exc in fragment.get("exclusions") or []:
-            src = exc["source_id"]
-            reason = exc["reason"]
-            note = exc.get("note")
-            _validate_evidence_exclusion_contract(reason, note)
-            _check_evidence_sources(root, raw, [src], case_id)
-            _append_evidence_exclusion(curation, src, reason, note)
-        curation["exclusions"] = curation.get("exclusions") or []
-
-        case_exclusion = fragment.get("case_exclusion")
-        if case_exclusion is not None:
-            _apply_case_exclusion(
-                curation, reason=case_exclusion["reason"], note=case_exclusion.get("note")
-            )
-
-        clean = bool(fragment.get("clean"))
-        if clean:
-            if findings:
-                raise CurationError(
-                    f"case {case_id} clean fragment requires an empty gold findings set"
-                )
-            _set_clean(curation)
-        else:
-            _derive_content(raw)
-
-    _with_case_lock(root, case_id, "apply-gold", mutate)
 
 
 def _validate_exclusion_contract(
@@ -1029,3 +665,302 @@ def _validate_evidence_exclusion_contract(reason: str, note: str | None) -> None
 def _validate_case_exclusion_contract(reason: str, note: str | None) -> None:
     """Case-level reason/note contract (shared by exclude and apply-gold)."""
     _validate_exclusion_contract(reason, note, valid_reasons=schema.CASE_EXCLUSION_REASONS, noun="case")
+
+
+class CaseEditor:
+    """Own one case's locked mutations and complete transactional validation.
+
+    Each operation reloads the latest case after recovery under the workspace
+    lock; constructing the editor does not hold a lock across user interaction.
+    """
+
+    def __init__(self, root: Path, case_id: str) -> None:
+        self.root = Path(root)
+        self.case_id = case_id
+
+    @contextmanager
+    def _edit(self, op: str) -> Iterator[dict[str, Any]]:
+        with storage.WorkspaceLock(self.root):
+            storage.recover_startup(self.root)
+            raw = _load_case(self.root, self.case_id)
+            yield raw
+            self._validate(raw)
+            with storage.Transaction(self.root, op_id=f"curate-{self.case_id}", kind=f"curation:{op}") as tx:
+                tx.stage(
+                    f"cases/{self.case_id}.yaml",
+                    yaml.safe_dump(raw, sort_keys=False).encode("utf-8"),
+                )
+                tx.commit()
+
+    def _validate_location(self, raw: dict[str, Any], finding: dict[str, Any]) -> None:
+        """Validate the finding range against the frozen bundle head, independently of the mirror."""
+        location = finding.get("location")
+        if location is None:
+            return
+        if not _snapshot_head(raw):
+            raise CurationError("finding has a location but the snapshot carries no frozen head")
+        path = location.get("path")
+        start = location.get("start_line")
+        end = location.get("end_line")
+        if start is None or end is None:
+            raise CurationError(
+                f"finding location {path!r} is missing start_line and/or end_line"
+            )
+        line_count = _head_file_line_count(self.root, raw.get("snapshot") or {}, path)
+        if start < 1:
+            raise CurationError(f"finding location start_line {start} must be >= 1")
+        if end > line_count:
+            raise CurationError(
+                f"finding location {path!r} end_line {end} exceeds the head file's "
+                f"line count {line_count}"
+            )
+
+
+    def _validate(self, raw: dict[str, Any]) -> None:
+        """Validate service rules before the full schema; preserve CurationError versus ValidationError."""
+        curation = raw.get("curation") or {}
+        findings = curation.get("findings") or []
+
+        if len(findings) > MAX_GOLD_FINDINGS:
+            raise CurationError(f"case {self.case_id} exceeds 50 gold findings")
+        ids = [f.get("finding_id") for f in findings]
+        for fid in set(ids):
+            if ids.count(fid) > 1:
+                raise CurationError(f"case {self.case_id} has duplicate finding {fid}")
+
+        # ready => snapshot_attested and stale => not-attested are enforced by the
+        # schema Curation._consistent validator.
+        candidates = raw.get("candidates") or []
+        for finding in findings:
+            self._validate_location(raw, finding)
+            provenance = finding.get("provenance") or {}
+            if provenance.get("kind") == "historical":
+                srcs = provenance.get("source_ids") or []
+                if len(srcs) != 1:
+                    raise CurationError(
+                        f"case {self.case_id} historical finding must reference exactly one source"
+                    )
+                src = srcs[0]
+                cand = next((c for c in candidates if c.get("source_id") == src), None)
+                if cand is None:
+                    raise CurationError(f"historical finding references unknown candidate {src}")
+                if not _projection_matches(cand, finding):
+                    raise CurationError(
+                        f"historical finding source {src} does not byte-match its candidate projection"
+                    )
+
+        schema.CaseDocument(**_schema_ready(raw))
+
+
+    def validate(self) -> None:
+        """Read and validate one case without writing; propagate service and schema errors unchanged."""
+        raw = _load_case(self.root, self.case_id)
+        self._validate(raw)
+        return None
+
+
+    def _fragment_provenance(
+        self, raw: dict[str, Any], finding: dict[str, Any], source_ids: list[str],
+    ) -> tuple[str, list[str]]:
+        """Derive historical only for one source whose candidate content matches exactly."""
+        _check_evidence_sources(self.root, raw, source_ids, self.case_id)
+        if len(source_ids) == 1:
+            cand = next(
+                (c for c in (raw.get("candidates") or []) if c.get("source_id") == source_ids[0]),
+                None,
+            )
+            if cand is not None and _projection_matches(cand, finding):
+                return "historical", source_ids
+        return _derive_provenance_kind(source_ids), source_ids
+
+
+    def accept_candidate(self, source_id: str) -> None:
+        """Accept an exact candidate with unchanged content, derived ID, and historical provenance."""
+
+        with self._edit('accept') as raw:
+            candidate = next(
+                (c for c in (raw.get("candidates") or []) if c.get("source_id") == source_id),
+                None,
+            )
+            if candidate is None:
+                raise CurationError(f"no candidate {source_id} in case {self.case_id}")
+            if not candidate.get("exact_acceptable"):
+                raise CurationError(f"candidate {source_id} is not exact_acceptable")
+
+            curation = raw.setdefault("curation", {})
+            _reopen_for_mutation(curation)
+            finding = _build_finding(self.case_id, {**candidate, "source_ids": [source_id]}, kind="historical")
+            curation.setdefault("findings", []).append(finding)
+            _derive_content(raw)
+
+
+    def replace_findings(
+        self, finding_id: str, *, replacements: list[dict[str, Any]]
+    ) -> None:
+        """Replace one finding with an atomic split/merge batch, validating the resulting whole case."""
+
+        with self._edit('replace') as raw:
+            curation = raw.setdefault("curation", {})
+            _reopen_for_mutation(curation)
+            findings = curation.setdefault("findings", [])
+            index = next(
+                (i for i, f in enumerate(findings) if f.get("finding_id") == finding_id),
+                None,
+            )
+            if index is None:
+                raise CurationError(f"no finding {finding_id}")
+            sources = (source for atom in replacements for source in list(atom.get("source_ids") or []))
+            _check_evidence_sources(self.root, raw, sources, self.case_id)
+            built = [_build_finding(self.case_id, r) for r in replacements]
+            new_findings = list(findings[:index]) + built + list(findings[index + 1:])
+            curation["findings"] = new_findings
+            _derive_content(raw)
+
+
+    def exclude_evidence_batch(
+        self, source_ids: list[str], *, reason: str, note: str | None = None
+    ) -> None:
+        """Validate reason, note, and all sources before atomically appending the exclusion batch."""
+
+        with self._edit('exclude-evidence') as raw:
+            _validate_evidence_exclusion_contract(reason, note)
+            _check_evidence_sources(self.root, raw, source_ids, self.case_id)
+            curation = raw.setdefault("curation", {})
+            _reopen_for_mutation(curation)
+            for source_id in source_ids:
+                _append_evidence_exclusion(curation, source_id, reason, note)
+
+
+    def mark_ready(self, *, head_sha: str, task_spec_sha256: str | None = None) -> None:
+        """Attest the exact frozen head and approved task-spec digest, then mark ready."""
+
+        with self._edit('mark-ready') as raw:
+            snapshot_doc = raw.get("snapshot") or {}
+            original = snapshot_doc.get("original_head_sha")
+            if head_sha != original:
+                raise StaleStateError(
+                    f"attestation SHA mismatch: expected {original} got {head_sha}"
+                )
+            curation = raw.setdefault("curation", {})
+            # Single-sourced empty-gold eligibility: derive_gold_status is None
+            # exactly when the gold set is empty and never clean-attested -- the
+            # same derived status harbor/build._is_compilable trusts.
+            if schema.derive_gold_status(_curation_model(curation)) is None:
+                raise CurationError(
+                    f"case {self.case_id} cannot be marked ready with an empty gold findings set "
+                    "and no clean attestation (clean-attest first)"
+                )
+            _validate_transition(curation.get("state"), "ready")
+            stored_task_spec_sha256 = task_spec_sha256
+            if stored_task_spec_sha256 is None:
+                from daydream.benchmark.harbor import build
+
+                stored_task_spec_sha256 = build.task_spec_digest(raw)
+            curation["state"] = "ready"
+            curation["snapshot_attested"] = True
+            curation["task_spec_sha256"] = stored_task_spec_sha256
+            curation["task_spec_approved_at"] = datetime.now(timezone.utc).isoformat()
+            _derive_content(raw)
+
+
+    def attest_clean(self) -> None:
+        """Attest an empty gold set as clean; reopen mutable state without marking the snapshot ready."""
+
+        with self._edit('attest-clean') as raw:
+            curation = raw.setdefault("curation", {})
+            if curation.get("findings"):
+                raise CurationError(
+                    f"case {self.case_id} has gold findings; clean attestation requires an empty gold set"
+                )
+            # Reopen as draft; clean attestation cannot replace final snapshot approval.
+            _reopen_for_mutation(curation)
+            _set_clean(curation)
+
+
+    def exclude_case(
+        self, reason: str, *, note: str | None = None
+    ) -> None:
+        """Exclude a case through valid transitions; ready passes through draft and loses attestation."""
+
+        with self._edit('exclude-case') as raw:
+            curation = raw.setdefault("curation", {})
+            _apply_case_exclusion(curation, reason=reason, note=note)
+
+
+    def reinclude_case(self) -> None:
+        """Re-include an excluded case to the state its snapshot supports."""
+
+        with self._edit('reinclude-case') as raw:
+            curation = raw.setdefault("curation", {})
+            if curation.get("state") != "excluded":
+                raise CurationError(f"case {self.case_id} is not excluded")
+            snapshot_doc = raw.get("snapshot") or {}
+            destination = "draft" if snapshot_doc.get("status") == "ready" else "unreplayable"
+            _validate_transition("excluded", destination)
+            curation["state"] = destination
+            curation["snapshot_attested"] = False
+            curation["case_exclusion"] = None
+
+
+    def apply_gold_fragment(self, fragment: dict[str, Any]) -> None:
+        """Derive and validate a reviewed gold fragment, ignoring forged IDs and status."""
+
+        with self._edit('apply-gold') as raw:
+            curation = raw.setdefault("curation", {})
+            _reopen_for_mutation(curation)
+
+            findings: list[dict[str, Any]] = []
+            for frag in fragment.get("findings") or []:
+                kind, _ = self._fragment_provenance(
+                    raw, frag, list(frag.get("source_ids") or []),
+                )
+                findings.append(_build_finding(self.case_id, frag, kind=kind))
+            curation["findings"] = findings
+
+            for exc in fragment.get("exclusions") or []:
+                src = exc["source_id"]
+                reason = exc["reason"]
+                note = exc.get("note")
+                _validate_evidence_exclusion_contract(reason, note)
+                _check_evidence_sources(self.root, raw, [src], self.case_id)
+                _append_evidence_exclusion(curation, src, reason, note)
+            curation["exclusions"] = curation.get("exclusions") or []
+
+            case_exclusion = fragment.get("case_exclusion")
+            if case_exclusion is not None:
+                _apply_case_exclusion(
+                    curation, reason=case_exclusion["reason"], note=case_exclusion.get("note")
+                )
+
+            clean = bool(fragment.get("clean"))
+            if clean:
+                if findings:
+                    raise CurationError(
+                        f"case {self.case_id} clean fragment requires an empty gold findings set"
+                    )
+                _set_clean(curation)
+            else:
+                _derive_content(raw)
+
+
+    def add_findings(
+        self, *, findings: list[dict[str, Any]], kind: Literal["authored", "edited"] = "authored",
+    ) -> None:
+        """Admit source references and derive one authored or edited batch atomically."""
+        with self._edit("add" if kind == "authored" else "add-edited") as raw:
+            if kind not in ("authored", "edited"):
+                raise CurationError(f"unknown finding provenance {kind!r}")
+            def sources() -> Iterator[str]:
+                for i, atom in enumerate(findings):
+                    source_ids = list(atom.get("source_ids") or [])
+                    if kind == "edited" and not source_ids:
+                        raise CurationError(f"edited-finding atom {i} carries no source_ids")
+                    yield from source_ids
+
+            _check_evidence_sources(self.root, raw, sources(), self.case_id)
+            curation = raw.setdefault("curation", {})
+            _reopen_for_mutation(curation)
+            curation.setdefault("findings", []).extend(
+                _build_finding(self.case_id, atom, kind=kind) for atom in findings
+            )
+            _derive_content(raw)

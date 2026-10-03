@@ -24,7 +24,6 @@ from daydream.archive.hydrate_rules import (
 )
 from daydream.archive.hydrate_stage import _discovered_session_ids, _download_discovery_block
 from daydream.archive.index import query_runs
-from daydream.archive.manifest import Manifest
 from daydream.archive.provenance import ExecutableProvenance
 from daydream.archive.scan import scan_run_dir
 from daydream.training.corpus_projection.license import load_license_policy, resolve_repo_decision
@@ -226,12 +225,19 @@ def test_hf_atomic_commit_maps_only_precondition_failed_to_concurrent_update(
     assert len(api.create_commit_calls) == 1
     assert "hf_secret_token" not in str(excinfo.value)
 
-@pytest.mark.parametrize("error", [
-    *[_hf_http_error(status, "https://user:hf_secret_token@huggingface.co/private")
-      for status in (409, 401, 403, 404, 500, 503)],
-    RuntimeError("transport failed"), ValueError("bad request"),
-    _hf_error_without_response(),
-])
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        *[
+            _hf_http_error(status, "https://user:hf_secret_token@huggingface.co/private")
+            for status in (409, 401, 403, 404, 500, 503)
+        ],
+        RuntimeError("transport failed"),
+        ValueError("bad request"),
+        _hf_error_without_response(),
+    ],
+)
 def test_hf_atomic_commit_does_not_misclassify_other_errors(
     error: Exception, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -743,14 +749,23 @@ class TestIngestAndIndex:
 
     def test_produced_nested_manifest_indexed_without_crash(self, tmp_path: Path) -> None:
         """Real manifests nest git.* and carry a nested daydream provenance dict."""
-        manifest = Manifest(
-            session_id="sess-real", remote_url="https://github.com/octo/nested-repo", repo_slug="octo/nested-repo",
-            source_path="/orig/absolute/path", daydream=ExecutableProvenance(version="1.0", install_source="editable"),
+        manifest = {
+            "session_id": "sess-real",
+            "git": {
+                "remote_url": "https://github.com/octo/nested-repo",
+                "repo_slug": "octo/nested-repo",
+                "source_path": "/orig/absolute/path",
+            },
+            "daydream": ExecutableProvenance(version="1.0", install_source="editable").to_dict(),
+        }
+        hub = FakeHub(
+            repo_id="org/private-ds",
+            private=True,
+            files={
+                "bundles/sess-real/manifest.json": json.dumps(manifest).encode(),
+                "bundles/sess-real/trajectory.json": b"{}",
+            },
         )
-        hub = FakeHub(repo_id="org/private-ds", private=True, files={
-            "bundles/sess-real/manifest.json": json.dumps(manifest.to_dict()).encode(),
-            "bundles/sess-real/trajectory.json": b"{}",
-        })
         stage, results = _stage_and_ingest(hub, tmp_path)
         assert [r.status for r in results] == ["admitted"]
         hydrate.rebuild_index(stage)  # must not raise: nested daydream dict is dropped

@@ -22,7 +22,6 @@ from daydream.archive import hydrate_rules, sanitize
 from daydream.archive._console import warn as _warn
 from daydream.archive.hydrate_admission import (
     _iter_enrichment_cache,
-    _manifest_index_fields,
     _session_identity,
     admission_summary_buckets as admission_summary_buckets,
     apply_license_gate as apply_license_gate,
@@ -65,8 +64,7 @@ from daydream.archive.hydrate_types import (
     StageError as StageError,
     VerificationError as VerificationError,
 )
-from daydream.archive.index import query_runs, upsert_run
-from daydream.archive.manifest import Manifest
+from daydream.archive.index import manifest_index_fields, query_runs, upsert_run
 from daydream.archive.scan import scan_run_dir
 from daydream.json_utils import atomic_write_json
 from daydream.redaction import redact_text
@@ -720,11 +718,12 @@ def verify_publication(
         data = _read_manifest_dict(batch_dir)
         if data is None:
             raise VerificationError(redact_text(f"verify: batch {sid!r} has an unreadable manifest"))
-        kwargs = _manifest_index_fields(data)
+        kwargs = manifest_index_fields(data)
+        kwargs.pop("daydream", None)
         kwargs["archive_path"] = str(batch_dir)
         _has_url, slug, canonical = _manifest_remote_fields(data)
         kwargs["repo_slug"], kwargs["remote_url"] = slug, canonical
-        upsert_run(verify_dir, Manifest(**kwargs))
+        upsert_run(verify_dir, kwargs)
 
     verify_admitted = len(query_runs(verify_dir))
     if verify_admitted != dry_run_admitted:

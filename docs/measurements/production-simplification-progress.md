@@ -193,3 +193,85 @@ payload import in test_training_labeler_signals.py was missed. The test now uses
 the actual typed renderer and transport serializer; all footer assertions remain.
 35 focused tests, Ruff/mypy and independent flow review pass. Ordinary signed amend
 and full normal push gate retry follow; no hooks are bypassed.
+
+Checkpoint 2a8b0b2330f8cdad2a9a27c9aff52274406e8577 is signed and pushed.
+Normal commit and retry push hooks pass: 9,401 passed / 14 skipped / 204 warnings,
+652.39s; 90.52% branch coverage against the unchanged 86% floor. Ruff, both
+Vulture scans, mypy (747 files), actionlint, coverage artifact and naming pass.
+Every committed production byte matches the independently reproduced fourth
+snapshot. Mutation freeze lifted for the fifth curation/native-protocol batch.
+
+## Fifth batch integrated, verification in progress
+
+- CaseEditor owns each lazy lock/recover/fresh-read/mutate/validate/commit operation.
+  The callback router, fifteen mutation closures, append adapter, and redundant
+  one-item service forwards disappear. Raw repair before final strict validation
+  remains supported; no lock spans an interactive editor or network operation.
+  Four production files remove 65 source / 89 physical lines. 23 operation/error/
+  wire-byte comparisons match; 101 final curation/TUI/CLI checks and 201 preceding
+  callers pass. Independent flow review passes.
+- Claude request evidence derives from the applied SDK options rather than parallel
+  input facts. CodexDiagnostics owns early-once/final-on-change emission and detached
+  consumer payloads. Native model-label privacy admission is shared with logical
+  agent evidence. Four production files remove 36 source / 40 physical lines;
+  355 checks pass with four existing skips, 277 native replay cases and 20,000
+  diagnostic polls match. Actual OTLP private-label canaries and independent review
+  pass; native SDK model selection is preserved.
+- Harbor uses native httpx.Response and asyncio.Process contracts. Fake-only response
+  and process adapters, a second child-kill site, and impossible retry fallbacks
+  disappear. The bounded stdout reader owns EOF/exit/deadline/error/cancellation
+  cleanup; stderr remains DEVNULL. One production file removes 26 source / 34
+  physical lines; 143 checks pass including actual subprocess stdout, overflow,
+  EOF-without-exit, and cancellation behavior. Independent backend/flow review passes.
+- Archive portable wire is produced directly from captured native snapshot inputs;
+  the mutable flat Manifest and reconstruction/projection bridge disappear. One
+  canonical/legacy SQL projection serves native indexing and hydration. All five
+  production files remove 71 source / 110 physical lines, including final typed
+  SQL persistence ownership and its native caller. 156 exact wire/index/
+  legacy/error comparisons match. Review caught subclass field leakage/deepcopy
+  from an early asdict prototype; exact shallow approved-field projections and a
+  real wire private-field/deepcopy-trap regression resolve it. Expanded 19-file integration suite passes 753 checks; final persistence-boundary
+  rerun passes 442 checks. Mypy (27 files), Ruff and independent final review pass;
+  caller fixtures now use native producer or literal wire.
+- PhaseEvent wire policy lives on the exact base dataclass fields. Required-null and
+  optional omission, duck enum values, order, and separately guarded metadata remain
+  unchanged. Six source / six physical lines removed; high cognitive count rises
+  0→1. 99 real lifecycle/OTLP checks and 5,000 exact wire/error comparisons pass;
+  Ruff/mypy/Vulture and independent flow review pass.
+- Quality has one scoped function-evidence traversal for body-only CC, identifier
+  and assignment references, and wrapper flags. Repeated assignment subtree scans
+  and separate single-use/wrapper function inventories disappear. 20 source / 26
+  physical lines removed; high CC rises 8→9 while cognitive falls 11→10. 1,777
+  inputs / 15,760 functions compare exactly and 153 checks pass, including actual
+  deep fix-quality workflows. Independent backend review passes.
+- Exploration's one native specialist inventory supplies dispatch descriptors,
+  prompts, schemas, and model names. Duplicate dependency scheduling and the local
+  task/limiter/fork workflow disappear into the existing fan-out owner. Deferred
+  builders are consumed inside its task group, preserving prompt failure grouping
+  and evidence before any model dispatch. 35 source / 34 physical lines removed including the existing fan-out cost.
+  63 focused checks pass, including two prompt-failure/no-model/durable-dispatch
+  cases; Ruff/mypy and independent backend review pass. No new production module is added.
+
+Provisional complete owned snapshot: 83,709 source / 109,257 physical, 362 files,
+unchanged inventory SHA256. Aggregate source reduction remains about 2.126%; physical
+about 3.623%. Shortfall remains 6,735 source / 7,230 physical lines. These are dirty
+checkout measurements and are not a claim that completion criteria are satisfied.
+
+Rejected full-cost prototypes: native adjudication UID binding removes ordinal
+translation but needs native-local-ID witness, unsharded selection-order preservation,
+UID-less positional drops, and post-save coverage timing. Its eight-line gross saving
+is consumed by necessary adapters; no repo edits. Combined retry accounting must retain
+prepaid cancellable-backoff allowance versus completed-sleep telemetry, so its apparent
+class deletion saves under twenty lines after callers; no new state owner was added.
+A broader unreferenced-method scan found registered serializers, native overrides and
+Pydantic validators rather than substantial dead methods. Negative assessments are
+not blockers; source/physical targets remain outstanding and substantive work continues.
+
+Final fifth fixed snapshot supersedes the provisional count: 83,712 source /
+109,260 physical, 362 files, clone lines 2,244, high CC 493, high cognitive 605.
+Aggregate source reduction 2.122%; physical reduction 3.620%. Remaining shortfall:
+6,738 source / 7,233 physical. Batch removes 259 source / 339 physical lines;
+continuation removes 1,453 source / 1,765 physical. Inventory unchanged and every
+owned Python module/runtime template counted. Targets remain false. All production
+owners are frozen for independent integrated review and ordinary signed commit/
+push hooks; next read-side prototype remains outside the repository meanwhile.

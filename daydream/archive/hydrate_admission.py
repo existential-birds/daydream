@@ -8,7 +8,7 @@ import re
 import shutil
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass, field, fields as dataclass_fields
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -40,8 +40,7 @@ from daydream.archive.hydrate_types import (
     DedupeResult,
     HydrationError,
 )
-from daydream.archive.index import query_runs, upsert_run
-from daydream.archive.manifest import Manifest
+from daydream.archive.index import manifest_index_fields, query_runs, upsert_run
 from daydream.json_utils import atomic_write_json
 from daydream.redaction import redact_text
 from daydream.timeutil import now_iso_utc
@@ -205,38 +204,17 @@ def _staging_local_source_path(raw: Any, stage: Path) -> str | None:
     return raw
 
 
-def _manifest_index_fields(data: dict[str, Any]) -> dict[str, Any]:
-    """Decode producer manifest blocks into index fields, retaining flat legacy input."""
-    valid = {f.name for f in dataclass_fields(Manifest)} - {"daydream"}
-    fields = {key: value for key, value in data.items() if key in valid}
-    for block_name in ("run", "git", "code_context", "pr", "metrics", "outcome"):
-        block = data.get(block_name)
-        if not isinstance(block, dict):
-            continue
-        aliases = {
-            "run": {"flow": "run_flow"},
-            "pr": {"number": "pr_number", "repo": "pr_repo"},
-            "outcome": {"labels": "outcome_labels"},
-        }.get(block_name, {})
-        for key, value in block.items():
-            field_name = aliases.get(key, key)
-            if field_name in valid:
-                fields[field_name] = json.dumps(value) if field_name == "outcome_labels" else value
-    return fields
-
-
 def rebuild_index(stage: Path) -> None:
     """Index admitted derivatives with credential-free URLs and staging-local paths."""
     for derivative, data in _derivative_manifests(stage):
-        # ``daydream`` provenance is a nested dict in produced manifests; the
-        # index expects the executable-provenance object, so it is dropped from
-        # the hydrated rebuild (never coerced into a Manifest field).
-        kwargs = _manifest_index_fields(data)
+        kwargs = manifest_index_fields(data)
+        # A hydrated bundle never attests the local executable that is rebuilding it.
+        kwargs.pop("daydream", None)
         _has_url, slug, canonical = _manifest_remote_fields(data)
         kwargs["repo_slug"], kwargs["remote_url"] = slug, canonical
         kwargs["source_path"] = _staging_local_source_path(_read_manifest_field(data, "source_path"), stage)
         kwargs["archive_path"] = str(derivative)
-        upsert_run(stage, Manifest(**kwargs))
+        upsert_run(stage, kwargs)
 
 
 def build_resolution_map(

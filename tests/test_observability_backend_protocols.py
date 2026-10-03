@@ -250,6 +250,35 @@ async def test_claude_real_backend_runner_trace_sdk_options_and_config(
     assert "gen_ai.provider.name" not in billed or billed["gen_ai.provider.name"]
     _assert_leak_free(receiver, canary)
 
+@pytest.mark.parametrize("content_mode", ["full", "metadata"])
+@pytest.mark.parametrize("model_template", ["/{}/model", "api_key={}", "{}\nmodel", "{}" * 20])
+async def test_claude_private_request_model_never_reaches_real_export_wire(
+    content_mode: str, model_template: str, ext_dir: ExtDir, feature_branch_repo: Path,
+    make_config: Callable[..., RunConfig], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private = "private-claude-model-4fca"
+    model = model_template.format(*([private] * model_template.count("{}")))
+    _flow(ext_dir, f"""
+from daydream.backends.claude import ClaudeBackend
+await run_agent(ClaudeBackend(model={model!r}), ctx.work.repo, "inspect sample", phase=DaydreamPhase.REVIEW)
+""")
+    captured: dict[str, Any] = {}
+    patch_claude_sdk(monkeypatch, scripted_client(_claude_messages("ordinary reply"), captured=captured))
+    with otlp_collector() as receiver:
+        _configure_otlp(monkeypatch, receiver.base_url + "/v1/traces")
+        monkeypatch.setenv("DAYDREAM_TRACE_CONTENT", content_mode)
+        assert await runner.run(_flow_config(make_config, feature_branch_repo, backend="claude")) == 0
+    assert captured["options"].model == model
+    payload = json.dumps([request["body"] for request in receiver.requests])
+    assert receiver.requests and private not in payload
+    attempt = attributes(_attempt(receiver.spans))
+    agent = attributes(_kind(receiver.spans, "agent")[0])
+    assert "gen_ai.request.model" not in attempt
+    assert "daydream.configured.model" not in agent
+    assert attempt["daydream.request.model.diagnostic"] == agent["daydream.configured.model.diagnostic"]
+    assert attempt["daydream.models"] == ["claude-opus-4-5-20250901"]
+
+
 async def test_claude_specialist_agents_make_aggregate_multi_model_without_claiming_single(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

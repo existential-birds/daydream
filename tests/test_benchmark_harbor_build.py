@@ -90,7 +90,7 @@ def _mark_ready(ws: Path, case_id: str, head_sha: str) -> None:
     task_spec_sha256 = hashlib.sha256(
         build.render_task_spec(load_yaml_strict(ws / "cases" / f"{case_id}.yaml"), instruction=build.ASSIGNMENT_TEXT)
     ).hexdigest()
-    cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256=task_spec_sha256)
+    cu.CaseEditor(ws, case_id).mark_ready(head_sha=head_sha, task_spec_sha256=task_spec_sha256)
 
 PK_BODY = b"PK\x05\x06" + b"\x00" * 18
 
@@ -134,7 +134,7 @@ def _seed_ready_workspace(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) ->
 
     ws, case_id, head_sha = _import_case(tmp_path, fake_gh, number=101, lines=lines)
     candidate = next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
-    cu.accept_candidate(ws, case_id, candidate["source_id"])
+    cu.CaseEditor(ws, case_id).accept_candidate(candidate["source_id"])
     _mark_ready(ws, case_id, head_sha)
     return ws, case_id, head_sha
 
@@ -147,7 +147,7 @@ def _seed_clean_workspace(tmp_path: Path, fake_gh: FakeGh, *, ready: bool = True
     """
 
     ws, case_id, head_sha = _import_case(tmp_path, fake_gh, number=101, with_candidate=False)
-    cu.attest_clean(ws, case_id)
+    cu.CaseEditor(ws, case_id).attest_clean()
     if ready:
         _mark_ready(ws, case_id, head_sha)
     return ws, case_id, head_sha
@@ -161,7 +161,7 @@ def _seed_second_ready_case(ws: Path, tmp_path: Path, fake_gh: FakeGh, *, lines:
 
     _, case_id, head_sha = _import_case(tmp_path, fake_gh, number=102, lines=lines, ws=ws)
     candidate = next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
-    cu.accept_candidate(ws, case_id, candidate["source_id"])
+    cu.CaseEditor(ws, case_id).accept_candidate(candidate["source_id"])
     _mark_ready(ws, case_id, head_sha)
     return case_id
 
@@ -979,7 +979,7 @@ def test_compile_rejects_when_a_case_is_not_compilable(tmp_path: Path, fake_gh: 
 def test_compile_skips_excluded_cases(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, included_case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     excluded_case_id = _seed_second_ready_case(ws, tmp_path, fake_gh)
-    cu.exclude_case(ws, excluded_case_id, reason="duplicate_case")
+    cu.CaseEditor(ws, excluded_case_id).exclude_case(reason="duplicate_case")
 
     lock = build.compile_workspace(ws)
 
@@ -1164,7 +1164,7 @@ def test_spec_change_forces_recompile(tmp_path: Path, fake_gh: FakeGh) -> None:
     raw2["curation"]["state"] = "draft"
     raw2["curation"]["snapshot_attested"] = False
     storage.atomic_write_yaml(path, raw2)
-    cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256=new_digest)
+    cu.CaseEditor(ws, case_id).mark_ready(head_sha=head_sha, task_spec_sha256=new_digest)
     lock2 = build.compile_workspace(ws)
     assert lock2["authoring_input_digest"] != lock1["authoring_input_digest"]   # R11: spec change forces recompile
     # the task-spec digest itself must have changed (not merely the title member,

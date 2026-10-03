@@ -32,6 +32,7 @@ from daydream.benchmark.harbor.calibrate import (
     _write_receipt,
     run_calibration,
 )
+from tests.harness.benchmark_judge import CliProcess, http_response as _http_response
 
 _FIXTURE = Path(__file__).parents[1] / "daydream" / "benchmark" / "harbor" / "calibration"
 
@@ -269,7 +270,11 @@ def _scripted_http(responses: Any) -> tuple[Any, ...]:
             v = responses[i[0] % len(responses)]
             i[0] += 1
             body = {"choices": [{"message": {"content": _jsonlib.dumps(v)}}]}
-            return type("R", (), {"status_code": 200, "text": "ok", "json": lambda self: body})()
+            return _http_response(
+                       200,
+                       body,
+                       text='ok',
+                   )
     return Fake(), i
 
 
@@ -290,17 +295,12 @@ def _scripted_responses(pairs: Any, *, mislabel_count: Any=0) -> Any:
 def _scripted_cli_runner(responses: Any) -> tuple[Any, Any]:
     """Return CLI result envelopes in the judge's deterministic pair order."""
 
-    class FakeProc:
-        returncode = 0
-        stdout = ""
-
     i = [0]
 
     async def runner(self: Any, argv: Any, env: Any) -> Any:
         payload = {"result": json.dumps(responses[i[0] % len(responses)])}
         i[0] += 1
-        FakeProc.stdout = json.dumps(payload)
-        return FakeProc()
+        return CliProcess(json.dumps(payload))
 
     return runner, i
 

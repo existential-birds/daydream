@@ -2,21 +2,17 @@
 import asyncio
 import hashlib as _h
 import json
+import os
+import sys
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from tests.harness.benchmark_judge import MatchClient, judge_env
+from tests.harness.benchmark_judge import CliProcess, MatchClient, http_response as _http_response, judge_env
 
 _VERDICT_JSON = '{"match": true, "confidence": 0.9, "reasoning": "same"}'
 _OK_ENVELOPE = {"is_error": False, "subtype": "success", "type": "result", "result": _VERDICT_JSON}
-
-
-def _http_response(status: int, body: Any = None, *, text: str = "ok", **attrs: Any) -> Any:
-    """An httpx-like response for the injected judge transport."""
-    return SimpleNamespace(status_code=status, text=text, json=lambda: body, **attrs)
 
 
 def _assert_scored_zero(out: Path, reward: Any) -> dict[str, Any]:
@@ -604,15 +600,11 @@ def test_shipped_gold_and_oracle_fixtures_validate_and_score_reward_1(sr_module:
 def _fake_cli_runner(stdout_arg: str, rc: int = 0) -> Any:
     """Fake subprocess seam for ``ClaudeCliJudgeClient``: fixed returncode + stdout."""
 
-    class FakeProc:
-        returncode = rc
-        stdout = stdout_arg  # class bodies cannot see the enclosing function scope
-
     calls: list[list[Any]] = []
 
     async def runner(argv: Any, env: Any) -> Any:
         calls.append([argv, env])
-        return FakeProc()
+        return CliProcess(stdout_arg, rc)
 
     runner.calls = calls  # type: ignore[attr-defined]
     return runner
@@ -627,7 +619,11 @@ async def test_both_providers_produce_identical_verdicts_and_errors(sr_module: A
     def make(body: Any) -> Any:
         class FakeClient:
             async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
-                return type("R", (), {"status_code": 200, "text": "ok", "json": lambda self, _b=body: _b})()
+                return _http_response(
+                           200,
+                           body,
+                           text='ok',
+                       )
 
         return FakeClient()
 
@@ -644,7 +640,10 @@ async def test_both_providers_produce_identical_verdicts_and_errors(sr_module: A
         class RetryClient:
             async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
                 calls.append(1)
-                return type("R", (), {"status_code": 503, "text": "down"})()
+                return _http_response(
+                           503,
+                           text='down',
+                       )
 
         provider.http = RetryClient()
         with pytest.raises(sr.VerifierError):
@@ -903,8 +902,11 @@ async def test_clients_validate_initial_url_before_request(sr_module: Any) -> No
         async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
             calls.append(url)  # would be reached only if validation passed
             verdict = '{"match": true, "confidence": 0.9, "reasoning": "x"}'
-            return type("R", (), {"status_code": 200, "text": "ok",
-                "json": lambda self: {"content": [{"type": "text", "text": verdict}]}})()
+            return _http_response(
+                       200,
+                       {'content': [{'type': 'text', 'text': verdict}]},
+                       text='ok',
+                   )
     # anthropic validates the hardcoded constant -> ok when allowlist matches
     c = sr.AnthropicJudgeClient("sk-ant-x", "m", http=F())
     assert await c.complete_json(user="u") is not None and len(calls) == 1
@@ -923,12 +925,17 @@ async def test_redirects_preserve_configured_headers_and_bound_depth(sr_module: 
             seen.append((url, dict(headers)))
             loc = self.hops.pop(0) if self.hops else None
             if loc is not None:
-                return type("R", (), {"status_code": 302,
-                    "headers": {"location": loc, "x-server-token": "SHOULD-NOT-REPLAY"},
-                    "text": ""})()
+                return _http_response(
+                           302,
+                           headers={'location': loc, 'x-server-token': 'SHOULD-NOT-REPLAY'},
+                           text='',
+                       )
             verdict = '{"match": true, "confidence": 0.9, "reasoning": "x"}'
-            return type("R", (), {"status_code": 200, "text": "ok",
-                "json": lambda self: {"content": [{"type": "text", "text": verdict}]}})()
+            return _http_response(
+                       200,
+                       {'content': [{'type': 'text', 'text': verdict}]},
+                       text='ok',
+                   )
     allow = {"api.anthropic.com"}
     client = Redirecting(["/v1/next"])  # relative Location, same host
     raw = await sr._complete_json_with_http(client, url="https://api.anthropic.com/v1/messages", payload={"x": 1},
@@ -958,8 +965,12 @@ async def test_response_body_is_size_capped_before_json_parse(sr_module: Any) ->
     class Huge:
         async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
             calls.append(1)
-            return type("R", (), {"status_code": 200, "text": "", "content": b"x" * (sr._RESPONSE_CAP_BYTES + 1),
-                                  "json": lambda self: {"content": [{"type": "text", "text": '{"match": true}'}]}})()
+            return _http_response(
+                       200,
+                       {'content': [{'type': 'text', 'text': '{"match": true}'}]},
+                       text='',
+                       content=b'x' * (sr._RESPONSE_CAP_BYTES + 1),
+                   )
     with pytest.raises(sr.VerifierError) as e:
         await sr._complete_json_with_http(Huge(), url="u", payload={}, headers={}, content=lambda b: b, allowlist={"u"})
     assert "256 KiB" in str(e.value) or "exceeds" in str(e.value)
@@ -1024,8 +1035,11 @@ async def test_both_providers_share_identical_hardened_error_and_redirect_policy
         class RedirectRule:
             async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
                 seen.append(1)
-                return type("R", (), {"status_code": 302,
-                    "headers": {"location": "/v1/next", "x-srv": "NO-REPLAY"}, "text": ""})()
+                return _http_response(
+                           302,
+                           headers={'location': '/v1/next', 'x-srv': 'NO-REPLAY'},
+                           text='',
+                       )
         client.http = RedirectRule()
         with pytest.raises(sr.VerifierError):
             await client.complete_json(user="u")
@@ -1033,8 +1047,12 @@ async def test_both_providers_share_identical_hardened_error_and_redirect_policy
 
         class Oversize:
             async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
-                return type("R", (), {"status_code": 200, "text": "",
-                    "content": b"x" * (sr._RESPONSE_CAP_BYTES + 1), "json": lambda self: {}})()
+                return _http_response(
+                           200,
+                           {},
+                           text='',
+                           content=b'x' * (sr._RESPONSE_CAP_BYTES + 1),
+                       )
         client.http = Oversize()
         with pytest.raises(sr.VerifierError) as e:
             await client.complete_json(user="u")
@@ -1042,8 +1060,11 @@ async def test_both_providers_share_identical_hardened_error_and_redirect_policy
 
         class BadRedirect:
             async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
-                return type("R", (), {"status_code": 302,
-                    "headers": {"location": "https://evil.example/x"}, "text": ""})()
+                return _http_response(
+                           302,
+                           headers={'location': 'https://evil.example/x'},
+                           text='',
+                       )
         client.http = BadRedirect()
         with pytest.raises(sr.VerifierError) as e:
             await client.complete_json(user="u")
@@ -1135,14 +1156,9 @@ async def test_claude_cli_client_shells_subprocess_and_returns_verdict(sr_module
     sr = sr_module
     calls = []
 
-    class FakeProc:
-        rc = 0
-        stdout = json.dumps(_OK_ENVELOPE)
-        stderr = ""
-
     async def fake_run(*args: Any, **kwargs: Any) -> Any:
         calls.append((args, kwargs))
-        return FakeProc()
+        return CliProcess(json.dumps(_OK_ENVELOPE))
 
     client = sr.ClaudeCliJudgeClient(model="claude-x", runner=fake_run)
     raw = await client.complete_json(user="<prompt>", system="sys", max_tokens=512)
@@ -1188,10 +1204,8 @@ async def test_claude_cli_timeout_kills_child_every_attempt(sr_module: Any, monk
     with pytest.raises(sr.VerifierError) as e:
         await client.complete_json(user="u")
     assert "timeout" in str(e.value)
-    # Every hung attempt kills the child (once inside _claude_cli_stdout and
-    # again by the caller's backstop), so a retry or the next concurrent pair
-    # never sees a leftover claude process consuming quota/egress.
-    assert len(kills) == sr._MAX_RETRIES * 2
+    # The reader owns exactly one kill for every hung captured child before retry.
+    assert len(kills) == sr._MAX_RETRIES
 
 @pytest.mark.asyncio
 async def test_claude_cli_oversize_stdout_is_rejected_not_truncated(sr_module: Any) -> None:
@@ -1274,6 +1288,8 @@ async def test_claude_cli_post_eof_wait_settles(sr_module: Any) -> None:
     settled: list[int] = []
 
     class SettlingProc:
+        returncode = 0
+
         def __init__(self) -> None:
             self.stdout = self
             self.eof = False
@@ -1329,31 +1345,63 @@ async def test_claude_cli_post_eof_wait_timeout_kills_child(sr_module: Any, monk
     with pytest.raises(sr.VerifierError) as e:
         await client.complete_json(user="u")
     assert "timeout" in str(e.value)
-    # Killed in _claude_cli_stdout's wait() deadline path and again by the
-    # caller's backstop on each of the _MAX_RETRIES attempts -- mirrors the
-    # hanging-read timeout test.
-    assert len(killed) == sr._MAX_RETRIES * 2
+    # Each EOF-but-hung child is killed once by its reader before the next attempt.
+    assert len(killed) == sr._MAX_RETRIES
 
 @pytest.mark.asyncio
-async def test_claude_cli_communicate_only_fallback(sr_module: Any) -> None:
-    """Without an exposed stdout stream, communicate() drains both pipes together."""
+async def test_claude_cli_native_reader_discards_stderr_and_settles(
+    sr_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drive the default runner through a real child with large private stderr."""
     sr = sr_module
-    seen: list[tuple[bytes, bytes]] = []
+    executable = tmp_path / "claude"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "sys.stderr.write('private diagnostic' * 100000)\n"
+        f"sys.stdout.write({json.dumps(_OK_ENVELOPE)!r})\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    client = sr.ClaudeCliJudgeClient(model="m")
+    assert await client.complete_json(user="u") == {
+        "match": True, "confidence": 0.9, "reasoning": "same",
+    }
 
-    class CommunicatingProc:
-        async def communicate(self) -> tuple[bytes, bytes]:
-            out = json.dumps(_OK_ENVELOPE).encode("utf-8")
-            seen.append((out, b""))
-            return out, b""
 
-    async def fake_run(*args: Any, **kwargs: Any) -> Any:
-        return CommunicatingProc()
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["overflow", "eof_timeout", "cancel"])
+async def test_claude_cli_native_reader_kills_its_child(
+    sr_module: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    sr = sr_module
+    executable = tmp_path / "claude"
+    action = (
+        "sys.stdout.buffer.write(b'x' * 1000000); sys.stdout.flush()"
+        if failure == "overflow" else "os.close(1)"
+    )
+    executable.write_text(
+        f"#!{sys.executable}\nimport os, sys, time\n{action}\ntime.sleep(60)\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(sr, "_REQUEST_TIMEOUT", 0.1 if failure == "eof_timeout" else 5.0)
+    monkeypatch.setattr(sr, "_MAX_RETRIES", 1)
+    client = sr.ClaudeCliJudgeClient(model="m")
+    child = await client._default_runner(["claude"], dict(os.environ))
+    request = asyncio.create_task(sr._claude_cli_stdout(child))
+    if failure == "cancel":
+        await asyncio.sleep(0.02)
+        request.cancel()
+        expected: type[BaseException] = asyncio.CancelledError
+    elif failure == "eof_timeout":
+        expected = TimeoutError
+    else:
+        expected = sr.VerifierError
+    with pytest.raises(expected):
+        await request
+    assert await asyncio.wait_for(child.wait(), timeout=2) < 0
 
-    client = sr.ClaudeCliJudgeClient(model="m", runner=fake_run)
-    raw = await client.complete_json(user="u")
-    assert raw == {"match": True, "confidence": 0.9, "reasoning": "same"}
-    assert len(seen) == 1
-    assert seen[0][1] == b""  # stderr is drained by communicate, never blocks
 
 def test_build_client_empty_string_api_key_fails_closed(sr_module: Any) -> None:
     """The template's `${VAR:-}` fallback resolves to "" — still fail-closed (#979)."""

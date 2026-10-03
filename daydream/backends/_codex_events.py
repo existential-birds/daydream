@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shlex
 import uuid
 from collections import Counter
 from collections.abc import Iterator
+from copy import deepcopy
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -97,60 +100,83 @@ def _counter_summary(counter: Counter[str], overflow: list[int]) -> dict[str, An
     }
 
 
-def _parser_diagnostics(
-    *,
-    error_sentinel_count: int,
-    unknown_event_types: Counter[str],
-    unknown_event_overflow: list[int],
-    unknown_item_types: Counter[str],
-    unknown_item_overflow: list[int],
-    malformed_shapes: Counter[str],
-    non_json_count: int,
-    parse_warnings: Counter[str],
-) -> list[DiagnosticEvent]:
-    """Build deterministic conditional diagnostics from bounded parser state."""
-    diagnostics: list[DiagnosticEvent] = []
-    if error_sentinel_count:
-        diagnostics.append(
-            DiagnosticEvent(
-                code="codex_transport_coverage",
-                message=(
-                    "The current Codex public stream contains uncorrelated error items; tool coverage is incomplete."
-                ),
-                metadata={
-                    "coverage": "incomplete",
-                    "reason": "uncorrelated_public_error_item",
-                    "occurrences": error_sentinel_count,
-                    "contract": _TRANSPORT_COVERAGE_CONTRACT,
-                },
-            )
-        )
-    if (
-        unknown_event_types
-        or unknown_event_overflow[0]
-        or unknown_item_types
-        or unknown_item_overflow[0]
-        or malformed_shapes
-        or non_json_count
-        or parse_warnings
-    ):
-        diagnostics.append(
-            DiagnosticEvent(
-                code="codex_parser_coverage",
-                message="The Codex public stream contained parser coverage gaps.",
-                metadata={
-                    "unknown_event_types": _counter_summary(unknown_event_types, unknown_event_overflow),
-                    "unknown_item_types": _counter_summary(unknown_item_types, unknown_item_overflow),
-                    "malformed_shapes": dict(malformed_shapes),
-                    "non_json_lines": non_json_count,
-                    "warnings": {
-                        "total": sum(parse_warnings.values()),
-                        "reasons": dict(parse_warnings),
+@dataclass
+class _CodexDiagnostics:
+    """Bounded native parser evidence and first/final emission history for one invocation."""
+
+    parse_warnings: Counter[str] = field(default_factory=Counter)
+    unknown_event_types: Counter[str] = field(default_factory=Counter)
+    unknown_event_overflow: list[int] = field(default_factory=lambda: [0])
+    unknown_item_types: Counter[str] = field(default_factory=Counter)
+    unknown_item_overflow: list[int] = field(default_factory=lambda: [0])
+    malformed_shapes: Counter[str] = field(default_factory=Counter)
+    non_json_count: int = 0
+    error_sentinel_count: int = 0
+    _emitted: dict[str, tuple[str, dict[str, Any]]] = field(default_factory=dict)
+
+    def warning(self, reason: str) -> None:
+        self.parse_warnings[reason] += 1
+        logging.getLogger("daydream.backends.codex").warning("codex parser warning: %s", reason.replace("_", " "))
+
+    def unknown_item(self, value: Any) -> None:
+        _record_unknown(self.unknown_item_types, value, overflow=self.unknown_item_overflow)
+
+    def unknown_event(self, value: Any) -> None:
+        _record_unknown(self.unknown_event_types, value, overflow=self.unknown_event_overflow)
+
+    def events(self, *, final: bool = False) -> Iterator[DiagnosticEvent]:
+        """Emit initial code markers immediately; final polls also emit changed aggregates."""
+        for event in self._current():
+            signature = (event.message, event.metadata)
+            if event.code not in self._emitted or final and self._emitted[event.code] != signature:
+                self._emitted[event.code] = (event.message, deepcopy(event.metadata))
+                yield event
+
+    def _current(self) -> list[DiagnosticEvent]:
+        """Build deterministic conditional diagnostics from bounded parser state."""
+        diagnostics: list[DiagnosticEvent] = []
+        if self.error_sentinel_count:
+            diagnostics.append(
+                DiagnosticEvent(
+                    code="codex_transport_coverage",
+                    message=(
+                        "The current Codex public stream contains uncorrelated error items; "
+                        "tool coverage is incomplete."
+                    ),
+                    metadata={
+                        "coverage": "incomplete",
+                        "reason": "uncorrelated_public_error_item",
+                        "occurrences": self.error_sentinel_count,
+                        "contract": _TRANSPORT_COVERAGE_CONTRACT,
                     },
-                },
+                )
             )
-        )
-    return diagnostics
+        if (
+            self.unknown_event_types
+            or self.unknown_event_overflow[0]
+            or self.unknown_item_types
+            or self.unknown_item_overflow[0]
+            or self.malformed_shapes
+            or self.non_json_count
+            or self.parse_warnings
+        ):
+            diagnostics.append(
+                DiagnosticEvent(
+                    code="codex_parser_coverage",
+                    message="The Codex public stream contained parser coverage gaps.",
+                    metadata={
+                        "unknown_event_types": _counter_summary(self.unknown_event_types, self.unknown_event_overflow),
+                        "unknown_item_types": _counter_summary(self.unknown_item_types, self.unknown_item_overflow),
+                        "malformed_shapes": dict(self.malformed_shapes),
+                        "non_json_lines": self.non_json_count,
+                        "warnings": {
+                            "total": sum(self.parse_warnings.values()),
+                            "reasons": dict(self.parse_warnings),
+                        },
+                    },
+                )
+            )
+        return diagnostics
 
 
 def _file_change_events(

@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
-from daydream.archive.manifest import Manifest
 from daydream.backends import (
     CostEvent,
     MetricsEvent,
@@ -161,7 +160,7 @@ def observe_metrics_and_result(
     inv.observe(ResultEvent(structured_output=None, continuation=None))
 
 
-def make_manifest(session_id: str = "sess-0001", **overrides: Any) -> Manifest:
+def make_manifest(session_id: str = "sess-0001", **overrides: Any) -> dict[str, Any]:
     """Build a minimal indexed manifest with optional field overrides, including PR identity."""
     defaults: dict[str, Any] = {
         "session_id": session_id, "archived_at": "2026-04-29T00:00:00+00:00", "status": "complete",
@@ -169,7 +168,7 @@ def make_manifest(session_id: str = "sess-0001", **overrides: Any) -> Manifest:
         "archive_path": "/tmp/archive/runs/sess-0001",
     }
     defaults.update(overrides)
-    return Manifest(**defaults)
+    return defaults
 
 
 def diff_adding(line: str, *, file: str = "app.py") -> str:

@@ -15,6 +15,8 @@ import os
 import re
 import sys
 import urllib.parse
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -32,58 +34,30 @@ class _AsyncHttpClient(Protocol):
 
     async def post(
         self, url: str, *, headers: dict[str, str], json: dict[str, Any], timeout: float
-    ) -> Any:
-        """POST ``json`` to ``url`` and return an httpx-like response object."""
+    ) -> httpx.Response:
+        """POST ``json`` to ``url`` and return the native HTTP response."""
 
 
 VerifierError = verifier_core.VerifierError
 
 
-def _terminate_proc(proc: Any) -> None:
-    """Best-effort kill of a spawned CLI child; a no-op on the seam fakes.
+async def _claude_cli_stdout(proc: asyncio.subprocess.Process) -> str:
+    """Own bounded native stdout and EOF/exit settlement under one deadline.
 
-    A hung or oversized child must never outlive the verifier, so every
-    timeout/over-cap exit kills it. Kill failures are swallowed: the
-    timeout/over-cap outcome the caller is recording must not be masked.
+    The runner always pipes stdout and discards stderr. Timeout, overflow or
+    cancellation kills the captured child before it can escape the request.
     """
-    kill = getattr(proc, "kill", None) or getattr(proc, "terminate", None)
-    if kill is not None:
-        try:
-            kill()
-        except Exception:
-            pass
-
-
-async def _claude_cli_stdout(proc: Any) -> str:
-    """Read bounded stdout and settle the child within one deadline; kill on timeout or
-    overflow. Seam fakes may provide captured text/bytes or communicate() instead.
-    """
+    assert proc.stdout is not None
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _REQUEST_TIMEOUT
+    raw_output = bytearray()
     try:
-        stream = getattr(proc, "stdout", None)
-        if stream is None:
-            communicate = getattr(proc, "communicate", None)
-            if communicate is None:
-                return ""
-            stream, _stderr = await asyncio.wait_for(communicate(), timeout=_REQUEST_TIMEOUT)
-        if isinstance(stream, (str, bytes)):
-            raw = stream.encode("utf-8") if isinstance(stream, str) else stream
-            if len(raw) > _RESPONSE_CAP_BYTES:
-                raise VerifierError(
-                    f"claude-cli judge output exceeds {_RESPONSE_CAP_BYTES // 1024} KiB"
-                )
-            return stream if isinstance(stream, str) else raw.decode("utf-8", errors="replace")
-        read = getattr(stream, "read", None)
-        if read is None:
-            return ""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + _REQUEST_TIMEOUT
-        raw_output = bytearray()
         async with asyncio.timeout_at(deadline):
             while True:
                 # Buffered reads may not yield: retain the explicit wall-clock check.
                 if loop.time() >= deadline:
                     raise TimeoutError
-                chunk = await read(_STDOUT_CHUNK_BYTES)
+                chunk = await proc.stdout.read(_STDOUT_CHUNK_BYTES)
                 if not chunk:
                     break
                 raw_output.extend(chunk)
@@ -92,14 +66,14 @@ async def _claude_cli_stdout(proc: Any) -> str:
                         f"claude-cli judge output exceeds {_RESPONSE_CAP_BYTES // 1024} KiB"
                     )
             # EOF can precede exit; include child settlement in the same deadline.
-            wait = getattr(proc, "wait", None)
-            if wait is not None:
-                if loop.time() >= deadline:
-                    raise TimeoutError
-                await wait()
+            if loop.time() >= deadline:
+                raise TimeoutError
+            await proc.wait()
         return raw_output.decode("utf-8", errors="replace")
-    except (TimeoutError, VerifierError):
-        _terminate_proc(proc)
+    except (TimeoutError, VerifierError, asyncio.CancelledError):
+        # Cleanup must not mask the original timeout, cancellation or overflow.
+        with suppress(Exception):
+            proc.kill()
         raise
 
 
@@ -212,15 +186,6 @@ def _resolve_redirect(request_url: str, location: str, allowlist: set[str]) -> s
     """
     resolved = urllib.parse.urljoin(request_url, location)
     return _validate_base_url(resolved, allowlist)
-
-
-def _response_bytes(response: Any) -> bytes:
-    """Return the response payload as bytes, preferring ``.content``."""
-    content = getattr(response, "content", None)
-    if content is not None:
-        return bytes(content)
-    text = getattr(response, "text", "")
-    return str(text).encode("utf-8")
 
 
 def _redact_text(text: str) -> str:
@@ -356,19 +321,19 @@ class _Retryable(Exception):
     """An internal marker: a request that should be retried (transport/5xx/429)."""
 
 
-def _parse_json_response(response: Any, *, content: Any) -> dict[str, Any]:
+def _parse_json_response(response: httpx.Response, *, content: Any) -> dict[str, Any]:
     """Enforce the raw response cap before status handling, including non-2xx bodies.
     Oversize bodies fail terminally and are never truncated into acceptance.
     """
-    body = _response_bytes(response)
+    body = response.content
     if len(body) > _RESPONSE_CAP_BYTES:
         raise VerifierError(  # terminal, never truncated
             f"judge response body exceeds {_RESPONSE_CAP_BYTES // 1024} KiB"
         )
-    status_code = getattr(response, "status_code", None)
-    if status_code is None or not 200 <= int(status_code) < 300:
+    status_code = response.status_code
+    if not 200 <= status_code < 300:
         body_text = body.decode("utf-8", errors="replace")
-        code = int(status_code) if status_code is not None else -1
+        code = status_code
         # 429 is retryable (rate limit); all other 4xx are terminal client errors.
         if 400 <= code < 500 and code != 429:
             raise VerifierError(
@@ -436,12 +401,11 @@ async def _complete_json_with_http(
                     )
                 except Exception as exc:
                     raise _Retryable(f"Judge request failed: {exc}") from exc
-                status_code = getattr(response, "status_code", None)
-                if status_code is not None and 300 <= int(status_code) < 400:
+                status_code = response.status_code
+                if 300 <= status_code < 400:
                     if hop >= _MAX_REDIRECTS:
                         raise VerifierError("judge request exceeded maximum redirects")
-                    response_headers = getattr(response, "headers", {}) or {}
-                    location = response_headers.get("location")
+                    location = response.headers.get("location")
                     if not location:
                         raise VerifierError("judge request redirected without a Location")
                     # Resolve allowlisted redirects; retain configured auth and discard server headers.
@@ -543,12 +507,17 @@ class ClaudeCliJudgeClient:
     replaces subprocess creation for tests.
     """
 
-    def __init__(self, model: str, *, runner: Any = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        *,
+        runner: Callable[[list[str], dict[str, str]], Awaitable[asyncio.subprocess.Process]] | None = None,
+    ) -> None:
         self.model = model
         self.runner = runner
 
-    def _default_runner(self, argv: list[str], env: dict[str, str]) -> Any:
-        return asyncio.create_subprocess_exec(
+    async def _default_runner(self, argv: list[str], env: dict[str, str]) -> asyncio.subprocess.Process:
+        return await asyncio.create_subprocess_exec(
             *argv,
             env=env,
             stdout=asyncio.subprocess.PIPE,
@@ -581,16 +550,14 @@ class ClaudeCliJudgeClient:
         env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
         # CLI output tokens use an environment cap; byte/verdict caps reject rather than truncate.
         env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_tokens)
-        last_error = "claude-cli judge failed (unknown)"
         for attempt in range(_MAX_RETRIES):
-            proc = None
             try:
                 proc = await asyncio.wait_for(
                     (self.runner or self._default_runner)(argv, env),
                     timeout=_REQUEST_TIMEOUT,
                 )
                 stdout = await _claude_cli_stdout(proc)
-                rc = getattr(proc, "returncode", getattr(proc, "rc", 0))
+                rc = proc.returncode
                 # Only timeouts retry; exit, empty/malformed output, and CLI errors are terminal.
                 if rc != 0:
                     raise VerifierError(f"claude-cli judge failed (exit {rc})")
@@ -612,16 +579,15 @@ class ClaudeCliJudgeClient:
                 # return the validated dict (judge_pairs re-parses).
                 parse_verdict(parsed)
                 return parsed
-            except (asyncio.TimeoutError, TimeoutError):
-                # Kill timed-out children before retrying; spawn timeouts may have no child handle.
-                _terminate_proc(proc)
-                last_error = "claude-cli judge failed (timeout)"
+            except TimeoutError:
+                # The reader owns captured-child cleanup; a spawn timeout has no handle.
+                pass
             except ValueError:
                 # Invalid JSON is terminal; malformed verdicts propagate their own VerifierError.
                 raise VerifierError("claude-cli judge failed (invalid verdict)") from None
             if attempt < _MAX_RETRIES - 1:
                 await asyncio.sleep(2**attempt)
-        raise VerifierError(last_error or "claude-cli judge failed (unknown)")
+        raise VerifierError("claude-cli judge failed (timeout)")
 
 
 _CHAT_COMPLETIONS_PATH = "/chat/completions"
