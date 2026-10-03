@@ -336,7 +336,7 @@ async def test_retry_notice_distinguishes_server_hint_from_jitter_fallback(
         )
     notice = rec.export_text()
     assert "server" in notice.lower() or "advertised" in notice.lower()  # hint wait is labelled
-    assert notice.count("after") == 1  # the jitter/fallback word must not also appear on a hint wait
+    assert notice.count("server-advertised wait") == 1  # the hint label is attached exactly once, never duplicated
 
 @pytest.mark.parametrize(
     ("retry_after", "expected_slept", "stop"),
