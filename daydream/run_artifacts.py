@@ -20,6 +20,7 @@ from daydream.artifact_visibility import (
 from daydream.backends import BackendExecutionInput
 from daydream.config import DEFAULT_PI_MODEL
 from daydream.extensions import Registry, UnresolvedExtensionError, get_registry
+from daydream.github_app import GitHubExecutionInput
 from daydream.observability.runtime import associate_run_trajectory
 from daydream.review_profile import ResolvedProfile, resolve_from_runconfig
 from daydream.run_config import (
@@ -79,7 +80,7 @@ class _RunWriteCapture:
 
 @dataclass(frozen=True)
 class _RunArtifacts:
-    """One outer host session and its pre-model registered output routes."""
+    """One captured host session, private execution capabilities and registered output routes."""
 
     session: ArtifactSession
     owner: PrivateWorkspaceOwner
@@ -87,6 +88,9 @@ class _RunArtifacts:
     capture: _RunWriteCapture
     dump: RoutedDestination | None
     execution_input: BackendExecutionInput | None = field(default=None, kw_only=True, repr=False, compare=False)
+    github_execution: GitHubExecutionInput = field(
+        default_factory=GitHubExecutionInput, kw_only=True, repr=False, compare=False,
+    )
 
     def write_trajectory_document(
         self, document: TrajectoryDocumentSnapshot, status: Literal["complete", "partial"]

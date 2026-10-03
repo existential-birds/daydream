@@ -6,8 +6,11 @@ import re
 from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
-from typing import Literal, Mapping, Sequence, TypeGuard, cast
+from typing import Annotated, Literal, Mapping, Sequence, TypeGuard, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+from pydantic import BeforeValidator, ConfigDict, Field, StrictFloat, StrictInt
+from pydantic.dataclasses import dataclass as validated_dataclass
 
 from daydream.redaction import redact_structured_text
 
@@ -56,65 +59,55 @@ _LIMITATION = (
 )
 
 
+# Native values and receipt reconstruction use the same strict scalar declarations.
+# Live REST normalization and canonical receipt identity comparison remain distinct.
+_CI_VALUE_CONFIG = ConfigDict(strict=True, extra="forbid", hide_input_in_errors=True)
+_CIText = Annotated[str, Field(strict=True, min_length=1, max_length=2_000, pattern=r"^[^\x00-\x1f\x7f]+\z")]
+_PositiveInt = Annotated[StrictInt, Field(gt=0)]
+
+
+def _positive_number(value: object) -> int | float:
+    if not _is_finite_number(value) or value <= 0:
+        raise ValueError("remote CI time limits must be positive")
+    return value
+
+
+_PositiveNumber = Annotated[StrictInt | StrictFloat, BeforeValidator(_positive_number)]
+_CommitSHA = Annotated[str, Field(strict=True, pattern=r"^[0-9a-f]{40}\z")]
+
+
 class RemoteCIIdentityMismatch(ValueError):
     """The live REST pull request no longer names the fixed push target."""
 
 
-@dataclass(frozen=True)
+@validated_dataclass(frozen=True, config=_CI_VALUE_CONFIG)
 class RemoteCILimits:
     """Finite polling and diagnostic bounds for remote CI verification."""
 
-    poll_seconds: float = 10.0
-    discovery_seconds: float = 120.0
-    completion_seconds: float = 1800.0
-    request_seconds: float = 30.0
-    stable_polls: int = 2
-    per_page: int = 100
-    max_pages: int = 10
-    diagnostic_chars: int = 2_000
+    poll_seconds: _PositiveNumber = 10.0
+    discovery_seconds: _PositiveNumber = 120.0
+    completion_seconds: _PositiveNumber = 1800.0
+    request_seconds: _PositiveNumber = 30.0
+    stable_polls: _PositiveInt = 2
+    per_page: _PositiveInt = 100
+    max_pages: _PositiveInt = 10
+    diagnostic_chars: _PositiveInt = 2_000
 
     def __post_init__(self) -> None:
-        finite_positive = (
-            self.poll_seconds,
-            self.discovery_seconds,
-            self.completion_seconds,
-            self.request_seconds,
-        )
-        if any(
-            not _is_finite_number(item) or item <= 0
-            for item in finite_positive
-        ):
-            raise ValueError("remote CI time limits must be positive")
         if self.completion_seconds < self.discovery_seconds:
             raise ValueError("completion deadline must not precede discovery deadline")
-        for item in (self.stable_polls, self.per_page, self.max_pages, self.diagnostic_chars):
-            if not _is_positive_int(item):
-                raise ValueError("remote CI count limits must be positive integers")
 
 
-@dataclass(frozen=True)
+@validated_dataclass(frozen=True, config=_CI_VALUE_CONFIG)
 class RequiredContext:
-    context: str
-    app_id: int | None
-
-    def __post_init__(self) -> None:
-        _required_text(self.context, "required context")
-        if self.app_id is not None and not _is_positive_int(self.app_id):
-            raise ValueError("required context app id must be a positive integer or null")
+    context: _CIText
+    app_id: _PositiveInt | None
 
 
-@dataclass(frozen=True)
+@validated_dataclass(frozen=True, config=_CI_VALUE_CONFIG)
 class RequiredPolicy:
     contexts: tuple[RequiredContext, ...]
     strict: bool
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.contexts, tuple) or not all(
-            isinstance(item, RequiredContext) for item in self.contexts
-        ):
-            raise ValueError("required policy contexts must be normalized")
-        if not isinstance(self.strict, bool):
-            raise ValueError("required policy strict must be boolean")
 
 
 def _normalize_remote_identity(target: RemoteCITarget | PRCIBinding) -> None:
@@ -129,84 +122,61 @@ def _normalize_remote_identity(target: RemoteCITarget | PRCIBinding) -> None:
         "head_repository",
         _normalize_repository(target.head_repository, "head repository"),
     )
-    _required_text(target.base_ref, "base ref")
-    _required_text(target.head_ref, "head ref")
     object.__setattr__(target, "pr_url", _safe_url(target.pr_url, _URL_CHARS, "PR URL"))
 
 
-@dataclass(frozen=True)
+@validated_dataclass(frozen=True, config=_CI_VALUE_CONFIG)
 class RemoteCITarget:
     target_dir: Path
     base_repository: str
-    base_ref: str
+    base_ref: _CIText
     head_repository: str
-    head_ref: str
-    pr_number: int
+    head_ref: _CIText
+    pr_number: _PositiveInt
     pr_url: str
-    remote: str
-    pushed_sha: str
+    remote: _CIText
+    pushed_sha: _CommitSHA
 
     def __post_init__(self) -> None:
-        if not isinstance(self.target_dir, Path) or not self.target_dir.is_absolute():
+        if not self.target_dir.is_absolute():
             raise ValueError("remote CI target directory must be an absolute Path")
         _normalize_remote_identity(self)
-        if not _is_positive_int(self.pr_number):
-            raise ValueError("PR number must be a positive integer")
-        _required_text(self.remote, "remote")
-        _require_sha(self.pushed_sha, "pushed SHA")
 
 
-@dataclass(frozen=True)
+@validated_dataclass(frozen=True, config=_CI_VALUE_CONFIG)
 class PRCIBinding:
     """Latest REST identity for the fixed pull request and pushed head."""
 
-    pr_number: int
+    pr_number: _PositiveInt
     pr_url: str
     base_repository: str
-    base_ref: str
+    base_ref: _CIText
     head_repository: str
-    head_ref: str
-    head_sha: str
-    merge_sha: str | None
+    head_ref: _CIText
+    head_sha: _CommitSHA
+    merge_sha: _CommitSHA | None
     state: Literal["open", "closed"]
 
     def __post_init__(self) -> None:
-        if not _is_positive_int(self.pr_number):
-            raise ValueError("PR binding number must be a positive integer")
         _normalize_remote_identity(self)
-        _require_sha(self.head_sha, "head SHA")
-        if self.merge_sha is not None:
-            _require_sha(self.merge_sha, "merge SHA")
-        if self.state not in {"open", "closed"}:
-            raise ValueError("PR state must be open or closed")
 
 
-@dataclass(frozen=True)
+@validated_dataclass(frozen=True, config=_CI_VALUE_CONFIG)
 class CIObservation:
     source: Literal["check_run", "status"]
-    context: str
-    app_id: int | None
+    context: _CIText
+    app_id: _PositiveInt | None
     state: ObservationState
-    raw_state: str
-    url: str | None
-    diagnostic: str | None
+    raw_state: _CIText
+    url: _CIText | None
+    diagnostic: _CIText | None
 
     def __post_init__(self) -> None:
-        if self.source not in {"check_run", "status"}:
-            raise ValueError("unknown CI observation source")
-        _required_text(self.context, "observation context")
         if self.source == "check_run":
-            if not _is_positive_int(self.app_id):
+            if self.app_id is None:
                 raise ValueError("check-run observation requires a positive app id")
         elif self.app_id is not None:
             raise ValueError("legacy status observation cannot have an app id")
-        if self.state not in {"pass", "pending", "fail"}:
-            raise ValueError("unknown CI observation state")
-        _required_text(self.raw_state, "raw observation state")
-        for name in ("url", "diagnostic"):
-            value = getattr(self, name)
-            if value is not None:
-                _required_text(value, f"observation {name}")
 
 
 @dataclass(frozen=True)

@@ -13,6 +13,7 @@ from daydream.archive import sanitize
 from daydream.archive.git_safe import normalize_remote_url
 from daydream.archive.hydrate_discovery import (
     _discover_snapshot,
+    _Discovery,
     _is_bare_segment,
     _validate_relpath,
 )
@@ -41,8 +42,12 @@ def download_snapshot(
     revision: str,
     stage_dir: Path,
     expect: dict[str, str] | None = None,
-) -> None:
-    """Download a pinned snapshot into ``stage_dir/<revision>/bundles/<session-id>``."""
+) -> _Discovery:
+    """Download a pinned snapshot and return its captured source discovery.
+
+    The generated manifest remains a resumable cache receipt, not a later
+    authority that can add candidates to this invocation.
+    """
     revision = str(revision)
     root = stage_dir / revision
     manifest_path = root / "_download_manifest.json"
@@ -135,6 +140,7 @@ def download_snapshot(
         )
     )
 
+    return discovery
 
 def _read_manifest_dict(bundle_dir: Path) -> dict[str, Any] | None:
     """Read ``manifest.json`` from ``bundle_dir``; ``None`` when absent/unparseable."""
@@ -190,59 +196,18 @@ def _manifest_remote_fields(data: dict[str, Any]) -> tuple[bool, str | None, str
     return False, None, None
 
 
-def _read_download_manifest(stage: Path, revision: str) -> dict[str, Any] | None:
-    """Read and parse the download manifest, or ``None`` when it is absent."""
-    path = stage / "downloads" / str(revision) / "_download_manifest.json"
-    if not path.is_file():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise HydrationError(redact_text(f"invalid download discovery ledger {path}: {exc}")) from exc
-    if not isinstance(payload, dict):
-        raise HydrationError(redact_text(f"invalid download discovery ledger {path}"))
-    return payload
-
-
-def _download_discovery_block(stage: Path, revision: str) -> dict[str, Any]:
-    """Read discovery diagnostics; legacy manifests return empty, while invalid JSON fails closed."""
-    payload = _read_download_manifest(stage, revision)
-    if payload is None:
-        return {}
-    discovery = payload.get("discovery", {})
-    if not isinstance(discovery, dict):
-        path = stage / "downloads" / str(revision) / "_download_manifest.json"
-        raise HydrationError(redact_text(f"invalid download discovery ledger {path}"))
-    return discovery
-
-
-def _discovered_session_ids(stage: Path, revision: str) -> list[str] | None:
-    """Read the authoritative candidate list, rejecting unsafe or duplicate ids."""
-    payload = _read_download_manifest(stage, revision)
-    if payload is None:
-        return None
-    if "candidate_sessions" not in payload:
-        return None
-    path = stage / "downloads" / str(revision) / "_download_manifest.json"
-    candidates = payload["candidate_sessions"]
-    if not isinstance(candidates, list) or not all(
-        isinstance(session_id, str) and _is_bare_segment(session_id) for session_id in candidates
-    ):
-        raise HydrationError(redact_text(f"invalid candidate session ids in {path}"))
-    if len(set(candidates)) != len(candidates):
-        raise HydrationError(redact_text(f"duplicate candidate session ids in {path}"))
-    return list(candidates)
-
-
-def ingest_bundles(stage: Path, *, revision: str) -> None:
-    """Admit discovered bundles through the shared import and sanitization gates."""
+def ingest_bundles(
+    stage: Path,
+    *,
+    revision: str,
+    discovery: _Discovery,
+) -> list[dict[str, str | None]]:
+    """Admit captured source candidates through the shared sanitization gates."""
     bundles_root = stage / "downloads" / str(revision) / "bundles"
-    discovered_ids = _discovered_session_ids(stage, revision)
-    bundle_items = (
-        [(bundle_dir.name, bundle_dir) for bundle_dir in _bundle_dirs(bundles_root)]
-        if discovered_ids is None
-        else [(session_id, bundles_root / session_id) for session_id in discovered_ids]
-    )
+    bundle_items = [
+        (session.session_id, bundles_root / session.session_id)
+        for session in discovery.sessions
+    ]
     results: list[dict[str, str | None]] = []
     for name, bundle_dir in bundle_items:
         data = _read_manifest_dict(bundle_dir)
@@ -295,6 +260,7 @@ def ingest_bundles(stage: Path, *, revision: str) -> None:
         },
     )
 
+    return results
 
 def _move_dir(source: Path, target: Path) -> None:
     """Move a directory, replacing any prior occupant of ``target``."""

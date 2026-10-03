@@ -17,13 +17,13 @@ import daydream.git_ops as git_ops
 from daydream.archive import hydrate, hydrate_rules, license_enrich, sanitize
 from daydream.archive.hydrate_admission import _session_identity, admission_summary_buckets
 from daydream.archive.hydrate_client import FakeHub
+from daydream.archive.hydrate_discovery import _Discovery
 from daydream.archive.hydrate_rules import (
     EXCLUSION_CODES,
     REASON_CODE_REPO_COMMIT_UNRESOLVED,
     derive_curation_id,
     derive_pre_identity_curation_id,
 )
-from daydream.archive.hydrate_stage import _discovered_session_ids, _download_discovery_block
 from daydream.archive.index import query_runs
 from daydream.archive.provenance import ExecutableProvenance
 from daydream.archive.scan import scan_run_dir
@@ -53,22 +53,24 @@ def make_fake_hub(tmp_path: Path) -> FakeHub:
     return hub
 
 def _stage_and_ingest(hub: FakeHub, tmp_path: Path, revision: str = "a" * 40
-) -> tuple[Path, list[dict[str, str | None]]]:
+) -> tuple[Path, _Discovery, list[dict[str, str | None]]]:
     """Pin the hub tree at ``revision``, download it, and ingest into a new stage."""
     hub.commit_revision(revision)
     stage = tmp_path / "stage"
-    hydrate.download_snapshot(hub, revision=revision, stage_dir=stage / "downloads")
-    hydrate.ingest_bundles(stage, revision=revision)
-    return stage, json.loads((stage / "downloads" / revision / "_ingest_results.json").read_bytes())["results"]
+    discovery = hydrate.download_snapshot(hub, revision=revision, stage_dir=stage / "downloads")
+    results = hydrate.ingest_bundles(stage, revision=revision, discovery=discovery)
+    return stage, discovery, results
 
 def _ingested_stage(tmp_path: Path, revision: str = "a" * 40) -> Path:
-    stage, _ = _stage_and_ingest(make_fake_hub(tmp_path), tmp_path, revision)
+    stage, _, _ = _stage_and_ingest(make_fake_hub(tmp_path), tmp_path, revision)
     return stage
 
 def _admitted_stage(tmp_path: Path, revision: str = "a" * 40) -> Path:
-    stage = _ingested_stage(tmp_path, revision)
+    stage, discovery, results = _stage_and_ingest(make_fake_hub(tmp_path), tmp_path, revision)
     hydrate.dedupe_admitted(stage, revision=revision)
-    hydrate.build_import_ledger(stage, revision=revision, source_commit=revision)
+    hydrate.build_import_ledger(
+        stage, revision=revision, source_commit=revision, discovery=discovery, ingest_results=results,
+    )
     return stage
 
 def test_fake_hub_roundtrip_and_revision(tmp_path: Path) -> None:
@@ -473,14 +475,18 @@ class TestDownloadSnapshot:
         assert art["sha256"] == expected
         assert (stage / ("a" * 40) / art["relpath"]).read_bytes() == SNAPSHOT[art["relpath"]]
 
-    def test_legacy_manifest_without_discovery_block_returns_empty(self, tmp_path: Path) -> None:
+    def test_legacy_download_manifest_is_rebuilt_by_the_source_producer(self, tmp_path: Path) -> None:
         stage = tmp_path / "stage"
         revision = "a" * 40
         manifest_dir = stage / "downloads" / revision
         manifest_dir.mkdir(parents=True)
         (manifest_dir / "_download_manifest.json").write_text(json.dumps({"artifacts": []}))
-        assert _download_discovery_block(stage, revision) == {}
-        assert _discovered_session_ids(stage, revision) is None
+        hub = make_fake_hub(tmp_path)
+        discovery = hydrate.download_snapshot(hub, revision=revision, stage_dir=stage / "downloads")
+        assert [session.session_id for session in discovery.sessions] == ["sess-a"]
+        rebuilt = json.loads((manifest_dir / "_download_manifest.json").read_bytes())
+        assert rebuilt["candidate_sessions"] == ["sess-a"]
+        assert len(rebuilt["artifacts"]) == len(SNAPSHOT)
 
     def test_resume_skips_verified_artifacts(self, tmp_path: Path) -> None:
         hub = make_fake_hub(tmp_path)
@@ -626,7 +632,7 @@ def _staged_with(tmp_path: Path, remote_urls: dict[str, str | None]) -> Path:
         files[f"bundles/{sid}/manifest.json"] = json.dumps(manifest).encode()
         files[f"bundles/{sid}/trajectory.json"] = b"{}"
     hub = FakeHub(repo_id="org/private-ds", private=True, files=files)
-    stage, _ = _stage_and_ingest(hub, tmp_path)
+    stage, discovery, results = _stage_and_ingest(hub, tmp_path)
     hydrate.rebuild_index(stage)
     return stage
 
@@ -690,8 +696,8 @@ def test_resolution_map_wired_from_enrichment_cache_in_pipeline(tmp_path: Path, 
 
 class TestIngestAndIndex:
     def test_clean_bundle_ingested_and_indexed_staging_local(self, tmp_path: Path) -> None:
-        stage = _ingested_stage(tmp_path)
-        hydrate.ingest_bundles(stage, revision="a" * 40)
+        stage, discovery, _ = _stage_and_ingest(make_fake_hub(tmp_path), tmp_path)
+        hydrate.ingest_bundles(stage, revision="a" * 40, discovery=discovery)
         results = json.loads((stage / "downloads" / ("a" * 40) / "_ingest_results.json").read_bytes())["results"]
         assert [r["status"] for r in results] == ["admitted"]
         row_dir = stage / "runs" / "sess-a"
@@ -709,7 +715,7 @@ class TestIngestAndIndex:
         hub.files["bundles/sess-bad/manifest.json"] = \
             b'{"session_id": "sess-bad", "remote_url": "https://user:hunter2@github.com/o/r"}'
         hub.files["bundles/sess-bad/trajectory.json"] = b"{}"
-        stage, results = _stage_and_ingest(hub, tmp_path)
+        stage, discovery, results = _stage_and_ingest(hub, tmp_path)
         bad = [r for r in results if r["session_id"] == "sess-bad"]
         assert bad and bad[0]["status"] == "quarantined"
         assert bad[0]["reason_code"] == "secrets_scan_dirty"
@@ -724,7 +730,7 @@ class TestIngestAndIndex:
             b' "remote_url": "file:///etc/passwd"}'
         )
         hub.files["bundles/sess-evil/trajectory.json"] = b"{}"
-        stage, results = _stage_and_ingest(hub, tmp_path)
+        stage, discovery, results = _stage_and_ingest(hub, tmp_path)
         evil = [r for r in results if r["session_id"] == "sess-evil"]
         assert evil and evil[0]["status"] == "quarantined"   # non-allowlisted host fails closed
         assert not pathlib.Path("/etc/passwd.git").exists()
@@ -734,7 +740,7 @@ class TestIngestAndIndex:
                 b'{"session_id": "../escape", "remote_url": "https://github.com/o/r"}',
             "bundles/sess-evil/trajectory.json": b"{}",
         })
-        stage, results = _stage_and_ingest(hub, tmp_path)
+        stage, discovery, results = _stage_and_ingest(hub, tmp_path)
         evil = [r for r in results if r["session_id"] == "../escape"]
         assert evil and evil[0]["status"] == "quarantined"
         assert evil[0]["reason_code"] == hydrate_rules.REASON_CODE_PATH_TRAVERSAL
@@ -761,7 +767,7 @@ class TestIngestAndIndex:
                 "bundles/sess-real/trajectory.json": b"{}",
             },
         )
-        stage, results = _stage_and_ingest(hub, tmp_path)
+        stage, discovery, results = _stage_and_ingest(hub, tmp_path)
         assert [r["status"] for r in results] == ["admitted"]
         hydrate.rebuild_index(stage)  # must not raise: nested daydream dict is dropped
         rows = [r for r in query_runs(stage) if r["session_id"] == "sess-real"]
@@ -769,8 +775,8 @@ class TestIngestAndIndex:
         assert rows[0]["repo_slug"] == "octo/nested-repo"  # nested git.remote_url read
 
     def test_bundles_exclude_git_dirs(self, tmp_path: Path) -> None:
-        stage = _ingested_stage(tmp_path)
-        hydrate.ingest_bundles(stage, revision="a" * 40)
+        stage, discovery, _ = _stage_and_ingest(make_fake_hub(tmp_path), tmp_path)
+        hydrate.ingest_bundles(stage, revision="a" * 40, discovery=discovery)
         assert not list((stage / "runs").rglob(".git"))
 
 class TestFinalizeAndVerify:
@@ -967,7 +973,7 @@ class TestDedupeAndLedger:
         self, tmp_path: Path, filename: str, payload: bytes, repeats: int,
     ) -> None:
         hub = make_fake_hub(tmp_path)
-        stage, _ = _stage_and_ingest(hub, tmp_path)
+        stage, discovery, results = _stage_and_ingest(hub, tmp_path)
         hydrate.dedupe_admitted(stage, revision="a" * 40)
         admitted = stage / "runs" / "sess-a"
         baseline = {p.name: p.read_bytes() for p in admitted.iterdir() if p.is_file()}
@@ -975,8 +981,8 @@ class TestDedupeAndLedger:
         hub.commit_revision("a" * 40)
         for _ in range(repeats):
             (stage / "downloads" / ("a" * 40) / "bundles" / "sess-a" / filename).unlink()
-            hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
-            hydrate.ingest_bundles(stage, revision="a" * 40)
+            discovery = hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
+            hydrate.ingest_bundles(stage, revision="a" * 40, discovery=discovery)
             hydrate.dedupe_admitted(stage, revision="a" * 40)
             entry = json.loads(next(stage.glob("_dedupe/*/dedupe.jsonl")).read_text().splitlines()[-1])
             assert (entry["session_id"], entry["status"], entry["reason_code"]) == (
@@ -1004,7 +1010,7 @@ class TestDedupeAndLedger:
             b'{"session_id": "sess-fixture", "source_path": "/tmp/pytest-of-user/test_x"}'
         )
         hub.files["bundles/sess-fixture/trajectory.json"] = b"{}"
-        stage, _ = _stage_and_ingest(hub, tmp_path)
+        stage, discovery, results = _stage_and_ingest(hub, tmp_path)
         hydrate.dedupe_admitted(stage, revision="a" * 40)
         entries = [json.loads(line) for line in next(stage.glob("_dedupe/*/dedupe.jsonl")).read_text().splitlines()]
         assert any((entry["session_id"], entry["status"], entry["reason_code"]) == (
@@ -1018,8 +1024,10 @@ class TestDedupeAndLedger:
             b'{"session_id": "sess-bad", "remote_url": "https://user:hunter2@github.com/o/r"}'
         )
         hub.files["bundles/sess-bad/trajectory.json"] = b"{}"
-        stage, _ = _stage_and_ingest(hub, tmp_path)
-        ledger = hydrate.build_import_ledger(stage, revision="a" * 40, source_commit="a" * 40)
+        stage, discovery, results = _stage_and_ingest(hub, tmp_path)
+        ledger = hydrate.build_import_ledger(
+            stage, revision="a" * 40, source_commit="a" * 40, discovery=discovery, ingest_results=results,
+        )
         text = json.dumps(ledger)
         assert "hunter2" not in text and "user:" not in text  # no matched secret values (M11)
         assert ledger["pinned_revision"] == "a" * 40
@@ -1047,7 +1055,7 @@ class TestLicenseAdmissionGate:
             files[f"bundles/{sid}/manifest.json"] = manifest
             files[f"bundles/{sid}/trajectory.json"] = b"{}"
         hub = FakeHub(repo_id="org/private-ds", private=True, files=files)
-        stage, _ = _stage_and_ingest(hub, tmp_path, self.REV)
+        stage, self.discovery, self.ingest_results = _stage_and_ingest(hub, tmp_path, self.REV)
         hydrate.dedupe_admitted(stage, revision=self.REV)
         return stage
 
@@ -1059,7 +1067,10 @@ class TestLicenseAdmissionGate:
         return policy_path
 
     def _built_manifest(self, stage: Path) -> dict[str, Any]:
-        ledger = hydrate.build_import_ledger(stage, revision=self.REV, source_commit=self.REV)
+        ledger = hydrate.build_import_ledger(
+            stage, revision=self.REV, source_commit=self.REV,
+            discovery=self.discovery, ingest_results=self.ingest_results,
+        )
         return hydrate._curation_manifest_doc(
             stage, curation_id=str(ledger["curation_id"]), source_commit=self.REV, ledger=ledger
         )
@@ -1174,7 +1185,10 @@ class TestAdmissionSummary:
         })
         hydrate.apply_license_gate(stage, revision=gate.REV,
             license_policy_path=gate._write_policy(tmp_path), allow_copyleft=frozenset())
-        ledger = hydrate.build_import_ledger(stage, revision=gate.REV, source_commit=gate.REV)
+        ledger = hydrate.build_import_ledger(
+            stage, revision=gate.REV, source_commit=gate.REV,
+            discovery=gate.discovery, ingest_results=gate.ingest_results,
+        )
         summary = hydrate.license_admission_summary(ledger)
         assert summary["admitted"] == 1
         assert summary["c5_excluded"] == 1
@@ -1283,7 +1297,7 @@ def test_hydration_binds_the_policy_captured_before_file_replacement(
     })
     hub.commit_revision("a" * 40)
     stage = tmp_path / "stage"
-    source, binding = hydrate.prepare_hydration(hydrate.HydrateHubConfig(
+    source, binding, discovery, results = hydrate.prepare_hydration(hydrate.HydrateHubConfig(
         source_repo="org/private-ds", source_revision="a" * 40,
         destination_repo="org/private-ds", stage_dir=stage,
         license_policy_path=str(policy_path),
@@ -1293,7 +1307,9 @@ def test_hydration_binds_the_policy_captured_before_file_replacement(
     assert binding is not None and binding["policy_version"] == "1"
     assert binding["policy_digest"] == original_digest
     assert [row["session_id"] for row in query_runs(stage)] == ["sess-a"]
-    ledger = hydrate.build_import_ledger(stage, revision=source, source_commit=source, binding=binding)
+    ledger = hydrate.build_import_ledger(
+        stage, revision=source, source_commit=source, binding=binding, discovery=discovery, ingest_results=results,
+    )
     assert [row["session_id"] for row in ledger["imported"]] == ["sess-a"]
     assert ledger["curation_id"] == binding["curation_id"]
 

@@ -758,8 +758,7 @@ def _make_recording_dispatch(
 
         async def improve_stub(
             work: WorkContext, config: RunConfig, _run_artifacts: Any, *,
-            run_context: RunContext, github_execution: GitHubExecutionInput,
-            backend_execution: BackendExecutionInput | None,
+            run_context: RunContext,
         ) -> int:
             return capture(work, config, run_context)
 

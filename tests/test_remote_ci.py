@@ -4,7 +4,10 @@ import asyncio
 import json
 import math
 import time
+import traceback
 from collections.abc import Callable
+from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -46,10 +49,26 @@ from tests.harness.processes import (
 PUSHED_SHA = "1" * 40
 MERGE_SHA = "2" * 40
 
-@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
-def test_limits_reject_nonfinite_time_values(value: float) -> None:
+@pytest.mark.parametrize("value", [
+    math.nan, math.inf, -math.inf, True, False, 0, -1, "1", None, [], (), Decimal("1"), Fraction(1, 2),
+])
+def test_limits_reject_invalid_time_values(value: Any) -> None:
     with pytest.raises(ValueError):
         RemoteCILimits(request_seconds=value)
+
+
+@pytest.mark.parametrize("contexts", [[], [RequiredContext("Build", None)], ({"context": "Build", "app_id": None},)])
+def test_required_policy_requires_native_context_tuple(contexts: Any) -> None:
+    with pytest.raises(ValueError):
+        RequiredPolicy(contexts, False)
+
+
+def test_native_ci_validation_does_not_echo_invalid_input() -> None:
+    private_prefix = "private-credential"
+    with pytest.raises(ValueError) as error:
+        RequiredContext(private_prefix + "\n", None)
+    for rendered in (str(error.value), repr(error.value), "".join(traceback.format_exception(error.value))):
+        assert private_prefix not in rendered
 
 
 def _target(tmp_path: Path) -> RemoteCITarget:

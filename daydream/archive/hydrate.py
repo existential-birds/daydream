@@ -34,6 +34,7 @@ from daydream.archive.hydrate_admission import (
     restamp_admitted_digests as restamp_admitted_digests,
 )
 from daydream.archive.hydrate_discovery import (
+    _Discovery,
     _is_bare_segment,
     _validate_relpath,
 )
@@ -733,30 +734,33 @@ def verify_publication(
     return verify_admitted
 
 
-def prepare_hydration(config: HydrateHubConfig, source_client: HubClient) -> tuple[str, dict[str, Any] | None]:
+def prepare_hydration(
+    config: HydrateHubConfig,
+    source_client: HubClient,
+) -> tuple[str, dict[str, Any] | None, _Discovery, list[dict[str, str | None]]]:
     """Stage the exact candidate population shared by preview and publication."""
     source_commit = resolve_source_revision(
         source_client, config.source_revision, exploratory=config.exploratory,
     )
-    download_snapshot(source_client, revision=source_commit, stage_dir=config.stage_dir / "downloads")
-    ingest_bundles(config.stage_dir, revision=source_commit)
+    discovery = download_snapshot(source_client, revision=source_commit, stage_dir=config.stage_dir / "downloads")
+    ingest_results = ingest_bundles(config.stage_dir, revision=source_commit, discovery=discovery)
     dedupe_admitted(config.stage_dir, revision=source_commit)
-    if config.license_policy_path is None:
-        return source_commit, None
-    from daydream.archive.license_enrich import (  # noqa: PLC0415  # avoid import cycle
-        _make_license_resolver,
-        enrich_license_evidence,
-    )
+    binding = None
+    if config.license_policy_path is not None:
+        from daydream.archive.license_enrich import (  # noqa: PLC0415  # avoid import cycle
+            _make_license_resolver,
+            enrich_license_evidence,
+        )
 
-    # Resolver drift changes identity; enriched bytes must become the baseline
-    # before the gate moves rejected derivatives out of the admitted population.
-    enrich_license_evidence(config.stage_dir, resolver=_make_license_resolver())
-    restamp_admitted_digests(config.stage_dir, revision=source_commit)
-    binding = apply_license_gate(
-        config.stage_dir, revision=source_commit, license_policy_path=config.license_policy_path,
-        allow_copyleft=config.allow_copyleft,
-    )
-    return source_commit, binding
+        # Resolver drift changes identity; enriched bytes must become the baseline
+        # before the gate moves rejected derivatives out of the admitted population.
+        enrich_license_evidence(config.stage_dir, resolver=_make_license_resolver())
+        restamp_admitted_digests(config.stage_dir, revision=source_commit)
+        binding = apply_license_gate(
+            config.stage_dir, revision=source_commit, license_policy_path=config.license_policy_path,
+            allow_copyleft=config.allow_copyleft,
+        )
+    return source_commit, binding, discovery, ingest_results
 
 
 def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -> HydrateSummary:
@@ -776,7 +780,7 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
             "refusing to publish: the Hub repo is not private; hydration "
             "publishes sanitized corpora only to private repos (M17)"
         )
-    source_commit, binding = prepare_hydration(config, source_client)
+    source_commit, binding, discovery, ingest_results = prepare_hydration(config, source_client)
     assert binding is not None  # the required policy was checked before client construction
     curation_id = str(binding["curation_id"])
     # The enrichment cache is copied into the *v2* curated prefix as the
@@ -788,7 +792,10 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
         curated_dir=config.stage_dir / "curated" / curation_id,
     )
     ledger = build_import_ledger(
-        config.stage_dir, revision=source_commit, source_commit=source_commit, binding=binding,
+        config.stage_dir, revision=source_commit, source_commit=source_commit,
+        discovery=discovery,
+        ingest_results=ingest_results,
+        binding=binding,
     )
     license_admission = license_admission_summary(ledger)
     checkpoint = resume_state(dest_client, curation_id=curation_id, stage_dir=config.stage_dir / "_resume")

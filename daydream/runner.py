@@ -453,6 +453,7 @@ async def _run_workspace(
                 run_artifacts = _RunArtifacts(
                     artifacts, private_owner, trajectory, capture, dump,
                     execution_input=backend_execution,
+                    github_execution=github_execution,
                 )
                 dispatch_config = (
                     config if findings is None else replace(config, findings_out=str(findings.write_path))
@@ -462,7 +463,6 @@ async def _run_workspace(
                 try:
                     result = await _dispatch(
                         work, dispatch_config, run_artifacts, run_context=run_context,
-                        github_execution=github_execution, backend_execution=backend_execution,
                     )
                 except BaseException as exc:
                     primary = exc
@@ -560,8 +560,6 @@ def _verify_approved_head(work: WorkContext, config: RunConfig) -> int:
 async def _dispatch(
     work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
     run_context: RunContext,
-    github_execution: github_app.GitHubExecutionInput,
-    backend_execution: BackendExecutionInput | None = None,
 ) -> int:
     """Verify the approved head and dispatch the selected flow."""
     if work.is_unborn:
@@ -573,15 +571,13 @@ async def _dispatch(
 
     if config.flow_name == "improve":
         return await _run_improve(
-            work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
-            backend_execution=backend_execution,
+            work, config, run_artifacts, run_context=run_context,
         )
     if config.flow_name is not None and config.flow_name not in DEEP_FLOW_ALIASES:
         # Resolve before preparing custom-flow artifacts or making model calls.
         get_registry().flow(config.flow_name)
         return await _run_custom_flow(
-            work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
-            backend_execution=backend_execution,
+            work, config, run_artifacts, run_context=run_context,
         )
 
     if config.flow_name in ("shallow", "deep") or (
@@ -592,8 +588,9 @@ async def _dispatch(
 
     _resolve_review_profile(config)
     return await run_deep(
-        config, work, run_artifacts=run_artifacts, run_context=run_context, github_execution=github_execution,
-        backend_execution=backend_execution,
+        config, work, run_artifacts=run_artifacts, run_context=run_context,
+        github_execution=run_artifacts.github_execution,
+        backend_execution=run_artifacts.execution_input,
         allow_standalone=False,
     )
 
@@ -721,8 +718,6 @@ def _gather_diff_seed(work: WorkContext, config: RunConfig) -> tuple[str | None,
 async def _run_improve(
     work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
     run_context: RunContext,
-    github_execution: github_app.GitHubExecutionInput,
-    backend_execution: BackendExecutionInput | None = None,
 ) -> int:
     """Preamble for the registered repository-wide improve flow."""
     from daydream.improve.artifacts import improve_dir
@@ -777,8 +772,8 @@ async def _run_improve(
                 audit_workspace=audit,
                 private_workspace_owner=run_artifacts.owner,
                 artifacts=run_artifacts.session,
-                run_context=run_context, github_execution=github_execution,
-                backend_execution=backend_execution,
+                run_context=run_context, github_execution=run_artifacts.github_execution,
+                backend_execution=run_artifacts.execution_input,
                 allow_standalone_artifacts=False,
             )
             ctx.data["improve_dir"] = directory
@@ -823,8 +818,6 @@ async def _run_improve(
 async def _run_custom_flow(
     work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
     run_context: RunContext,
-    github_execution: github_app.GitHubExecutionInput,
-    backend_execution: BackendExecutionInput | None = None,
 ) -> int:
     """Seed a registered custom flow with diff/log/branch and a shared recorder.
 
@@ -860,8 +853,8 @@ async def _run_custom_flow(
             review_profile=config.review_profile,
             private_workspace_owner=run_artifacts.owner,
             artifacts=run_artifacts.session,
-            run_context=run_context, github_execution=github_execution,
-            backend_execution=backend_execution,
+            run_context=run_context, github_execution=run_artifacts.github_execution,
+            backend_execution=run_artifacts.execution_input,
             allow_standalone_artifacts=False,
         )
         ctx.data["post_to_pr"] = False  # custom flows do not post to PR by default

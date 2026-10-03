@@ -10,7 +10,7 @@ import pytest
 
 from daydream.archive import hydrate
 from daydream.archive.index import append_label_observation, label_observation_history, query_runs
-from tests.test_archive_hydrate import _ingested_stage, _seed_admitted_runs, _write_policy
+from tests.test_archive_hydrate import _seed_admitted_runs, _stage_and_ingest, _write_policy, make_fake_hub
 
 
 def _observe(stage: Path, sid: str) -> list[dict[str, object]]:
@@ -22,7 +22,7 @@ def _observe(stage: Path, sid: str) -> list[dict[str, object]]:
 
 
 def test_license_exclusion_removes_current_run_and_preserves_readmission_history(tmp_path: Path) -> None:
-    stage = _ingested_stage(tmp_path)
+    stage, discovery, results = _stage_and_ingest(make_fake_hub(tmp_path), tmp_path)
     hydrate.dedupe_admitted(stage, revision="a" * 40)
     history = _observe(stage, "sess-a")
     hydrate.apply_license_gate(
@@ -32,7 +32,9 @@ def test_license_exclusion_removes_current_run_and_preserves_readmission_history
     assert (entry["session_id"], entry["reason_code"]) == ("sess-a", "repo_identity_missing")
     assert query_runs(stage) == []
     assert label_observation_history(stage, "sess-a") == history
-    ledger = hydrate.build_import_ledger(stage, revision="a" * 40, source_commit="a" * 40)
+    ledger = hydrate.build_import_ledger(
+        stage, revision="a" * 40, source_commit="a" * 40, discovery=discovery, ingest_results=results,
+    )
     assert ledger["imported"] == []
     assert ledger["rejections"][0]["reason_code"] == "repo_identity_missing"
     with pytest.raises(ValueError, match="Unknown session"):
@@ -80,7 +82,7 @@ def test_rebuild_failure_preserves_complete_previous_population_and_history(tmp_
 
 
 def test_later_fixture_exclusion_removes_current_row_but_preserves_history(tmp_path: Path) -> None:
-    stage = _ingested_stage(tmp_path)
+    stage, discovery, results = _stage_and_ingest(make_fake_hub(tmp_path), tmp_path)
     hydrate.dedupe_admitted(stage, revision="a" * 40)
     history = _observe(stage, "sess-a")
     path = stage / "runs" / "sess-a" / "manifest.json"
@@ -97,7 +99,7 @@ def test_later_fixture_exclusion_removes_current_row_but_preserves_history(tmp_p
 
 
 def test_collision_restores_current_baseline_and_keeps_observation_history(tmp_path: Path) -> None:
-    stage = _ingested_stage(tmp_path)
+    stage, discovery, results = _stage_and_ingest(make_fake_hub(tmp_path), tmp_path)
     hydrate.dedupe_admitted(stage, revision="a" * 40)
     history = _observe(stage, "sess-a")
     path = stage / "runs" / "sess-a" / "trajectory.json"

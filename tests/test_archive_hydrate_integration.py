@@ -32,8 +32,8 @@ def _offline_enrichment(monkeypatch: pytest.MonkeyPatch) -> None:
 def _v2_curation_id(hub: FakeHub, tmp_path: Path) -> str:
     """Derive the resume prefix through the production license gate and policy binding."""
     stage = tmp_path / "identity-probe"
-    hydrate.download_snapshot(hub, revision=REVISION, stage_dir=stage / "downloads")
-    hydrate.ingest_bundles(stage, revision=REVISION)
+    discovery = hydrate.download_snapshot(hub, revision=REVISION, stage_dir=stage / "downloads")
+    hydrate.ingest_bundles(stage, revision=REVISION, discovery=discovery)
     hydrate.dedupe_admitted(stage, revision=REVISION)
     license_enrich.enrich_license_evidence(stage, resolver=_FakeLicenseResolver())
     hydrate.restamp_admitted_digests(stage, revision=REVISION)

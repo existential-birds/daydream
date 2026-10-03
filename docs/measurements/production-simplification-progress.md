@@ -10,8 +10,10 @@ contracts remain obligations. Internal signatures and module ownership may chang
 Baseline is `58cc88e4d7091b27afe1b2a6eec486504e255dfd`. Continuation began clean at
 `b98a9dd51fde81df5dc4534a85ab29a986f6a127`. GitHub still reports the same PR base,
 with no inherited upstream changes, and PR #1444 is open/draft. The latest pushed
-checkpoint is signed `da6e4f27cb855d6340e0c8a45fb60ea9e5efe8c9`; the fourteenth
-batch below is measured but still awaits the normal integrated hook gate.
+checkpoint is signed `07a8ff0dc9172f1279adb325763e244b4f112c60`. Its ordinary
+push gate passed 9718 tests, with 14 existing skips and 90.82% coverage; all
+required checks and both CodeQL analyses passed. The fifteenth integrated batch
+below is measured and focused-tested, pending its normal full hook gate.
 
 Count every owned Python file under daydream/, scripts/, and rl/daydream_review/,
 including published runtime templates and all new modules. Exclude vendored ATIF
@@ -37,11 +39,11 @@ Comments, docstrings, blanks, docs, and tests receive no source-reduction credit
 | 3d994245 | 362 | 108357 | 83028 | 491 | 603 | 2220 |
 | 95d1b315 | 362 | 108292 | 82966 | 491 | 602 | 2202 |
 | 5378e3da | 362 | 107920 | 82698 | 490 | 601 | 2190 |
-| Latest pushed da6e4f27 | 363 | 107691 | 82441 | 483 | 595 | 2139 |
-| Fourteenth frozen working batch | 363 | 107453 | 82249 | 484 | 594 | 2088 |
+| da6e4f27 | 363 | 107691 | 82441 | 483 | 595 | 2139 |
+| Latest pushed 07a8ff0d | 363 | 107453 | 82249 | 484 | 594 | 2088 |
 
-Latest pushed aggregate reduction is 5.004% physical and 3.608% source. The
-fourteenth frozen working batch removes 238 physical /192 source lines, including
+Latest pushed aggregate reduction is 5.214% physical and 3.833% source. The
+fourteenth committed batch removes 238 physical /192 source lines, including
 all native owners, callers and restored call layouts. It measures 5.214% physical
 and 3.833% source reduction; shortfalls remain 5426 physical /5275 source against
 102027 physical /76974 source. Continuation removes 3572 physical /2916 source.
@@ -706,3 +708,56 @@ Both affected full files pass after migration:22 tests in292.47s; scoped Ruff,
 mypy and diff checks pass. Independent read-only review confirms all five phase
 contracts/no-wrapper guard and exact-one/all-fixes publication assertions survive,
 with accepted-session binding assertions added. Production snapshot is unchanged.
+
+## Fifteenth integrated batch: native execution and hydration evidence
+
+The frozen integrated production inventory remains 363 files with the unchanged
+path hash. Physical LOC is 107380; pinned source LOC is 82175, high CC 484, high
+cognitive 594, clone LOC 2088. This batch removes 73 physical /74 source lines
+from the pushed fourteenth batch: 5.279% physical /3.919% source below baseline.
+Shortfalls remain 5353 physical /5201 source; no prototype or retired capability
+is credited. Improve and Benchmark remain supported. Full hook verification is
+pending; this is an integration checkpoint, not target completion.
+
+- Existing frozen CI evidence records now own strict scalar admission through
+  the existing Pydantic dependency. Manual duplicated scalar post-init/read checks
+  disappear; canonical receipt identity comparison, finite raw number checks,
+  provider normalization and fail-closed admission remain. Production removes
+  30 physical /37 source lines. Scalar subclasses normalize to builtins; ordinary
+  integer-versus-float wire identity remains. Exception str/repr/ordinary traceback
+  hide raw inputs; errors()/json() introspection still contains them. All current
+  logging/export callers use bounded str or generic failure, never introspection.
+  An independent review strengthened the escaped-credential regression, with
+  actual unsafe configuration RED and final safe configuration GREEN.
+- Hydration carries the actual frozen discovery and ingest results from producer
+  through preview/ledger/publication. Generated receipt re-reading, candidate
+  fallback and lenient secondary decoding disappear (40 physical /34 source).
+  Remote rediscovery, pinned digest/cache/resume, raw source validation, licenses,
+  SQL history and cache-before-ledger failure ordering remain. Deliberate behavior
+  correction: late replacement of generated metadata no longer changes actual
+  population counts or diagnostics. Two real CLI regression tests fail before
+  and pass after; 18/22 phase cases and 3/4 full operator comparisons are exact,
+  with the tampered generated-metadata cases explicitly qualified. Counted FakeHub
+  remains unchanged. Four new CLI cases add 125 test physical lines inclusively.
+- The existing captured run owner retains the GitHub execution capability beside
+  its backend input, removing parallel arguments from three internal dispatch
+  helpers (3 physical /3 source). Review, Improve and custom flows receive the
+  same captured objects. Public standalone entrypoints, ambient defaults, private
+  credential projections and authorization boundaries retain their contracts.
+
+All fourteen integrated paths match the independently reviewed prototype hashes.
+Integrated focused verification passed 347 CI/hydration/runner/Harbor cases, with
+one existing collection warning (86.38s); Ruff/mypy all fourteen paths and diff
+whitespace checks passed. A preliminary focused command used an incorrect test
+filename and exited 4 without running tests; the successful run used enumerated
+existing paths. The native execution factory suite additionally passed 4 cases in 3.14s.
+No commit/push hook has been bypassed.
+
+The broader native training population was rejected for eleven of fourteen
+transport/admission edge mismatches. Its initially retained narrow typed preview
+was also rejected after independent actual CLI checks: four malformed bronze
+verdict populations changed refusal to publication, and a noncanonical reward
+guard fault ceased to refuse. Thirty-one successful semantic CLI checks did not
+cover these failures. Neither training prototype is applied or counted; the real
+annotation reducer remains the shared validation authority. Further substantial
+internal redesign is required; difficult remaining work is not a blocker.

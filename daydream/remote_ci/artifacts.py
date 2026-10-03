@@ -183,7 +183,7 @@ def read_terminal_remote_ci_verdict(
     )
     policy_row = _mapping(payload.get("policy"), "policy")
     contexts = tuple(
-        RequiredContext(_required_text(_mapping(item, "context").get("context"), "context"),
+        RequiredContext(cast(str, _mapping(item, "context").get("context")),
                         cast(int | None, _mapping(item, "context").get("app_id")))
         for item in _sequence(policy_row.get("contexts"), "contexts")
     )

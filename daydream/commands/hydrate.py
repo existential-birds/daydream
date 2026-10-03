@@ -255,9 +255,11 @@ def _hydrate_hub_dry_run(config: Any, console: Any) -> int:
 
     try:
         client = _hydrate._make_client(config.source_repo)
-        source_commit, binding = _hydrate.prepare_hydration(config, client)
+        source_commit, binding, discovery, ingest_results = _hydrate.prepare_hydration(config, client)
         ledger = _hydrate.build_import_ledger(
             config.stage_dir, revision=source_commit, source_commit=source_commit,
+            discovery=discovery,
+            ingest_results=ingest_results,
             binding=binding,
         )
         license_admission = (

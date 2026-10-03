@@ -14,6 +14,7 @@ from typing import Any, cast
 
 from daydream.archive import hydrate_rules, sanitize
 from daydream.archive.hydrate_discovery import (
+    _Discovery,
     _is_bare_segment,
 )
 from daydream.archive.hydrate_rules import (
@@ -29,8 +30,6 @@ from daydream.archive.hydrate_stage import (
     _admitted_session_id,
     _bundle_dirs,
     _derivative_manifests,
-    _discovered_session_ids,
-    _download_discovery_block,
     _manifest_remote_fields,
     _move_dir,
     _read_manifest_dict,
@@ -550,6 +549,8 @@ def build_import_ledger(
     *,
     revision: str,
     source_commit: str,
+    discovery: _Discovery,
+    ingest_results: list[dict[str, str | None]],
     binding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Atomically persist admission accounting under the policy-bound curated prefix."""
@@ -559,18 +560,7 @@ def build_import_ledger(
     dedupe_ledger = _dedupe_dir(stage, _pre_identity_dir(stage, source_commit).name) / "dedupe.jsonl"
     dedupe_state = _DedupeLedger.load(dedupe_ledger)
 
-    ingest_results: list[dict[str, Any]] = []
-    ingest_path = stage / "downloads" / revision / "_ingest_results.json"
-    if ingest_path.is_file():
-        try:
-            loaded = json.loads(ingest_path.read_text(encoding="utf-8"))
-            ingest_results = list(loaded.get("results", []))
-        except (OSError, ValueError, AttributeError):
-            ingest_results = []
-
-    candidate_ids = _discovered_session_ids(stage, revision)
-    if candidate_ids is None:
-        candidate_ids = [str(e["session_id"]) for e in ingest_results]
+    candidate_ids = [session.session_id for session in discovery.sessions]
     if len(ingest_results) != len(candidate_ids):
         raise HydrationError(
             redact_text(
@@ -616,7 +606,6 @@ def build_import_ledger(
         }
         for entry in sorted(quarantined + excluded, key=lambda item: str(item["session_id"]))
     ]
-    discovery_block = _download_discovery_block(stage, revision)
     accounted = len(imported) + len(rejections)
     if accounted != len(candidate_ids):
         raise HydrationError(
@@ -639,12 +628,8 @@ def build_import_ledger(
         "rejections": rejections,
         "tallies": {
             "discovered": len(candidate_ids),
-            "run_shaped_manifests": int(
-                discovery_block.get("run_shaped_manifests", len(candidate_ids))
-            ),
-            "incomplete_manifests": [
-                str(item) for item in discovery_block.get("incomplete_manifests", [])
-            ],
+            "run_shaped_manifests": discovery.run_shaped_manifests,
+            "incomplete_manifests": list(discovery.incomplete_manifests),
             "imported": len(imported),
             "quarantined": len(quarantined),
             "excluded": len(excluded),
