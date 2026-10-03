@@ -13,7 +13,7 @@ from typing import Any, cast
 
 import pytest
 
-from daydream.agent import run_agent
+from daydream.agent import StructuredOutputFailure, run_agent
 from daydream.backends import Backend, ResultEvent, TextEvent
 from daydream.json_utils import extract_json
 from daydream.phases import phase_arbiter_review
@@ -181,6 +181,21 @@ async def test_arbiter_captures_structured_output_in_log_mode(tmp_path: Path, ma
     assert set(verdicts) == {1, 2}
     assert verdicts[1]["keep"] is True
     assert verdicts[2]["keep"] is False
+
+def test_rejection_diagnostic_names_type_and_content_free_reason() -> None:
+    failure = StructuredOutputFailure("prose", "malformed_output",
+                                      detail="candidate type list failed type at $")
+    error = ReviewOutputError(failure)
+    assert error.reason_code.value == "malformed_output"      # req 15: no new ReasonCode
+    assert "reviewer response did not satisfy its schema" in str(error)
+    assert "list" in str(error) and "type at $" in str(error)
+    assert '"module"' not in str(error) and "module" not in str(error)  # req 14: no content
+
+
+def test_rejection_diagnostic_without_detail_is_unchanged() -> None:
+    assert str(ReviewOutputError(StructuredOutputFailure("prose", "malformed_output"))) == \
+           "malformed_output: reviewer response did not satisfy its schema"
+
 
 async def test_pi_contract_fakes_gate_structured_output_on_the_requested_schema() -> None:
     """Both Pi fakes emit structured output only when output_schema was requested."""

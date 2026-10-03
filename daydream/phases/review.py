@@ -373,7 +373,13 @@ class ReviewOutputError(RuntimeError):
             else "missing_output" if output is None or isinstance(output, str) and not output.strip()
             else "malformed_output"
         )
-        super().__init__(f"{self.reason.value}: reviewer response did not satisfy its schema")
+        # Optional content-free diagnostic fragment from the host's schema-aware
+        # selection (candidate type + "<validator> at <json_path>"). It composes
+        # into the message but never into the typed reason vocabulary, and it still
+        # flows through the caller's redaction/bounding before being surfaced.
+        detail = getattr(output, "detail", None) if isinstance(output, StructuredOutputFailure) else None
+        message = f"{self.reason.value}: reviewer response did not satisfy its schema"
+        super().__init__(f"{message} ({detail})" if detail else message)
 
 
 # Deep-mode: per-stack fan-out

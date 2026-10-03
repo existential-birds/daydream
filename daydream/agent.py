@@ -35,7 +35,7 @@ from daydream.backends.codex import supervisor_shell_command
 from daydream.config import BUDGET_CLEANUP_GRACE_S
 from daydream.diagnostics import exception_text, sanitize_verbose_message
 from daydream.extensions import get_registry
-from daydream.json_utils import extract_json, extract_json_by_schema
+from daydream.json_utils import SchemaAwareSelection, extract_json, extract_json_by_schema
 from daydream.observability.spans import agent_scope, attempt_scope
 from daydream.outage_circuit import CIRCUIT_CLOSED, CIRCUIT_HALF_OPEN
 from daydream.prompt_budget import PreparedSanctionedInputs
@@ -241,13 +241,21 @@ def is_environmental_failure(test_output: str) -> bool:
 
 
 class StructuredOutputFailure(str):
-    """Text fallback carrying the host's rejected structured-output witness."""
+    """Text fallback carrying the host's rejected structured-output witness.
+
+    ``detail`` is an optional, already content-free diagnostic fragment: the
+    selected candidate's Python type name and its first schema error as
+    ``"<validator> at <json_path>"``. It never carries candidate content, so it
+    stays safe through the redaction/bounding path that surfaces it.
+    """
 
     reason: str
+    detail: str | None
 
-    def __new__(cls, text: str, reason: str) -> "StructuredOutputFailure":
+    def __new__(cls, text: str, reason: str, detail: str | None = None) -> "StructuredOutputFailure":
         value = super().__new__(cls, text)
         value.reason = reason
+        value.detail = detail
         return value
 
 
@@ -951,6 +959,7 @@ async def _run_agent(
 
     if output_schema is not None and structured_result is not None and _usable(structured_result):
         return structured_result, result_continuation, aborted_reason
+    selection: SchemaAwareSelection | None = None
     if output_schema is not None:
         raw = "".join(output_parts)
         # Fallback: robust extraction (prose-wrapped JSON, markdown fences) when
@@ -984,5 +993,13 @@ async def _run_agent(
     raw = "".join(output_parts)
     if output_schema is not None and require_full_schema:
         reason = "malformed_output" if structured_result is not None or raw.strip() else "missing_output"
-        return StructuredOutputFailure(raw, reason), result_continuation, aborted_reason
+        # Content-free rejection trace: the selected candidate's Python type name,
+        # its first schema error as "<validator> at <json_path>" (never the
+        # jsonschema message, which embeds candidate content), and how many spans
+        # the scan enumerated. Nothing here can inject model-authored text.
+        reject_detail: str | None = None
+        if reason == "malformed_output" and selection is not None and selection.rejected_type is not None:
+            reject_detail = (f"candidate type {selection.rejected_type} failed {selection.rejected_reason}"
+                             f"; {selection.candidate_count} candidate(s)")
+        return StructuredOutputFailure(raw, reason, reject_detail), result_continuation, aborted_reason
     return raw, result_continuation, aborted_reason
