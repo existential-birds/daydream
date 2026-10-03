@@ -13,6 +13,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from daydream.deep.adjudication_provenance import (
     PROVENANCE_FORMAT,
     RecordProvenance,
@@ -20,7 +22,7 @@ from daydream.deep.adjudication_provenance import (
     load_provenance,
     record_provenance,
 )
-from daydream.deep.adjudication_steps import _apply_adjudication_verdicts
+from daydream.deep.adjudication_steps import _apply_adjudication_verdicts, _bind_verdicts
 from daydream.deep.artifacts import DeepArtifact
 
 
@@ -44,7 +46,11 @@ def test_a_revision_that_changes_a_revisable_field_is_recorded(tmp_path: Path) -
     assert recorded["python:2"].targeted is True
     assert json.loads(DeepArtifact.ADJUDICATION_PROVENANCE.at(tmp_path).read_text())["format"] == PROVENANCE_FORMAT
 
-def test_apply_adjudication_verdicts_reports_confirmation_and_revision() -> None:
+@pytest.mark.parametrize("pass_name,id_field,fail_closed",
+                         [("arbiter", "arb_id", False), ("suppression", "sup_id", True)])
+def test_apply_adjudication_verdicts_reports_confirmation_and_revision(
+    pass_name: str, id_field: str, fail_closed: bool,
+) -> None:
     """A bound keep-verdict confirms; an unbound or missing one does not."""
     records = [{"uid": "python:1", "severity": "high", "confidence": "HIGH", "description": "a", "rationale": "r",
             "evidence": "e",
@@ -54,13 +60,17 @@ def test_apply_adjudication_verdicts_reports_confirmation_and_revision() -> None
             "evidence": "e",
         },
     ]
-    verdicts: dict[int, dict[str, Any]] = {1: {"arb_id": 1, "keep": True, "severity": "low"},
-        2: {"arb_id": 99, "keep": True},  # echoed id mismatch -> unconfirmed
+    verdicts: dict[int, dict[str, Any]] = {1: {id_field: 1, "keep": True, "severity": "low"},
+        2: {id_field: 99, "keep": True},  # echoed id mismatch -> unconfirmed
     }
-    _kept, outcomes = _apply_adjudication_verdicts(
-        records, [0, 1, 2], verdicts, pass_name="arbiter", id_field="arb_id",
-        fail_closed=False,
-    )
+    targets = tuple(record["uid"] for record in records)
+    bound = _bind_verdicts(targets, verdicts, id_field)
+    records.reverse()  # A current pool's order cannot change a snapshotted call binding.
+    with pytest.warns(UserWarning, match="returned no bound verdict"):
+        kept, outcomes = _apply_adjudication_verdicts(
+            records, targets, bound, pass_name=pass_name, fail_closed=fail_closed,
+        )
+    assert [record["uid"] for record in kept] == (["python:1"] if fail_closed else ["python:3", "python:2", "python:1"])
 
     by_uid = {o.uid: o for o in outcomes}
     assert by_uid["python:1"].verdict_bound is True

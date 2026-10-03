@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from daydream.agent import resolve_gate as agent_resolve_gate
 from daydream.run_context import (
     InteractionPolicy,
     RunContext,
@@ -36,11 +37,21 @@ def test_interaction_policy_is_frozen_and_keyword_only() -> None:
         InteractionPolicy("yes")  # type: ignore[call-arg]
 
 @pytest.mark.parametrize(("assume", "interactive", "safe_default", "expected"),
-    [("yes", True, False, True), ("no", True, True, False), (None, False, True, True), (None, True, False, None)],
+    [
+        ("yes", True, False, True),
+        ("yes", False, False, True),
+        ("no", True, True, False),
+        ("no", True, False, False),
+        ("no", False, False, False),
+        (None, False, True, True),
+        (None, False, False, False),
+        (None, True, False, None),
+    ],
 )
 def test_resolve_gate_remains_pure(assume: str | None, interactive: bool, safe_default: bool, expected: bool | None
 ) -> None:
     assert resolve_gate(assume=assume, interactive=interactive, safe_default=safe_default) is expected
+    assert agent_resolve_gate(assume=assume, interactive=interactive, safe_default=safe_default) is expected
 
 def test_nested_binding_restores_the_previous_context() -> None:
     outer = RunContext(InteractionPolicy(quiet=True))

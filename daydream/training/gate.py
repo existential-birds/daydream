@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-import random
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from daydream.json_utils import atomic_write_json
-from daydream.training.reward_model import _read_admitted_rows, score_comment
+from daydream.training.corpus import _is_admitted_outcome_gold
+from daydream.training.reward_model import score_comment
 
 _LABELS = {"accepted": 1.0, "rejected": 0.0}
 
@@ -47,20 +49,57 @@ class GateConfig:
 
 @dataclass(frozen=True)
 class FrozenSplit:
-    """Admitted train/held-out rows frozen before model training.
+    """Admit gold outcomes once, retaining immutable canonical train/held-out rows.
 
     The digest binds held-out ids and seed; fingerprint is its first eight
     characters. digest_path is a sidecar filename relative to the labels directory.
     held_out_fraction records the rate that determined the partition size.
     """
 
-    digest: str
-    fingerprint: str
     digest_path: str
-    train_rows: list[dict[str, Any]] = field(default_factory=list)
-    held_out_rows: list[dict[str, Any]] = field(default_factory=list)
+    train_rows: tuple[Mapping[str, Any], ...]
+    held_out_rows: tuple[Mapping[str, Any], ...]
+    digest: str = field(init=False)
     seed: int = 0
     held_out_fraction: float = 0.0
+
+    def __post_init__(self) -> None:
+        def admit(rows: tuple[Mapping[str, Any], ...]) -> tuple[Mapping[str, Any], ...]:
+            admitted = []
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    raise ValueError("outcome row must be an object")
+                row_id = row.get("comment_id") or row.get("session_id")
+                if not isinstance(row_id, str) or not row_id:
+                    raise ValueError("outcome row is missing a string 'comment_id'/'session_id'")
+                text = row.get("text")
+                if not isinstance(text, str):
+                    text = row.get("review_output")
+                if not isinstance(text, str):
+                    raise ValueError(f"row {row_id} is missing a string 'text'/'review_output'")
+                label = row.get("label") or row.get("outcome_label")
+                if not isinstance(label, str) or label not in _LABELS:
+                    raise ValueError(f"row {row_id} has non-gold label {label!r}")
+                if not _is_admitted_outcome_gold(
+                    label, bool(row.get("has_posterior", True)), row.get("labeler_policy_version"),
+                    bool(row.get("decisive_mix", False)), bool(row.get("decisive_only", True)),
+                    allowed_labels=frozenset(_LABELS),
+                ):
+                    raise ValueError(f"row {row_id} is refused by the gold-outcome gate")
+                admitted.append(MappingProxyType({"comment_id": row_id, "text": text, "label": label}))
+            return tuple(admitted)
+
+        object.__setattr__(self, "train_rows", admit(self.train_rows))
+        object.__setattr__(self, "held_out_rows", admit(self.held_out_rows))
+        if not self.held_out_rows:
+            raise ValueError("frozen split leaves no held-out rows")
+        if {row["label"] for row in (*self.train_rows, *self.held_out_rows)} != set(_LABELS):
+            raise ValueError("outcome population must contain both classes: accepted and rejected")
+        object.__setattr__(self, "digest", _split_digest([row["comment_id"] for row in self.held_out_rows], self.seed))
+
+    @property
+    def fingerprint(self) -> str:
+        return self.digest[:8]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -108,68 +147,27 @@ def _build_frozen_split(
     seed: int,
     held_out_fraction: float,
 ) -> FrozenSplit:
-    """Write the canonical split sidecar shared by label and projection producers."""
-    held_out_ids = [str(r["comment_id"]) for r in held_out_rows]
-    digest = _split_digest(held_out_ids, seed)
+    """Admit the pinned population before writing its canonical split sidecar."""
     sidecar_path = Path(labels_path).parent / (Path(labels_path).name + ".gate-split.json")
+    split = FrozenSplit(
+        digest_path=sidecar_path.name,
+        train_rows=tuple(train_rows),
+        held_out_rows=tuple(held_out_rows),
+        seed=seed,
+        held_out_fraction=held_out_fraction,
+    )
     atomic_write_json(
         sidecar_path,
         {
-            "digest": digest,
+            "digest": split.digest,
             "seed": seed,
             "held_out_fraction": held_out_fraction,
-            "held_out_ids": sorted(held_out_ids),
-            "train_ids": sorted(str(r["comment_id"]) for r in train_rows),
+            "held_out_ids": sorted(row["comment_id"] for row in split.held_out_rows),
+            "train_ids": sorted(row["comment_id"] for row in split.train_rows),
         },
         sort_keys=True,
     )
-    return FrozenSplit(
-        digest=digest,
-        fingerprint=digest[:8],
-        digest_path=sidecar_path.name,
-        train_rows=train_rows,
-        held_out_rows=held_out_rows,
-        seed=seed,
-        held_out_fraction=held_out_fraction,
-    )
-
-
-def freeze_split(
-    labels_path: str | Path, *, held_out_fraction: float, seed: int
-) -> FrozenSplit:
-    """Admit, sort, then deterministically shuffle labels before training.
-
-    The held-out fraction must be in (0, 1). Empty admitted input or an empty
-    held-out side raises ValueError; success writes the digest sidecar.
-    """
-    if not (0.0 < held_out_fraction < 1.0):
-        raise ValueError(
-            f"held_out_fraction must be in (0, 1) exclusive (got {held_out_fraction!r})"
-        )
-    labels_path = Path(labels_path)
-    rows = _read_admitted_rows(labels_path)
-    if not rows:
-        raise ValueError(f"labels file {labels_path} contains no admissible gold outcome rows")
-
-    ordered = sorted(rows, key=lambda r: str(r["comment_id"]))
-    shuffled = list(ordered)
-    random.Random(seed).shuffle(shuffled)
-    n_train = max(1, round((1.0 - held_out_fraction) * len(shuffled)))
-    train_rows = shuffled[:n_train]
-    held_out_rows = shuffled[n_train:]
-    if not held_out_rows:
-        raise ValueError(
-            f"split leaves no held-out rows ({len(shuffled)} admitted rows with "
-            f"held_out_fraction={held_out_fraction}); add rows or lower the fraction"
-        )
-
-    return _build_frozen_split(
-        labels_path,
-        train_rows=train_rows,
-        held_out_rows=held_out_rows,
-        seed=seed,
-        held_out_fraction=held_out_fraction,
-    )
+    return split
 
 
 def _evidence_digest(payload: dict[str, Any]) -> str:
@@ -179,19 +177,14 @@ def _evidence_digest(payload: dict[str, Any]) -> str:
 def evaluate_gate(model: Any, split: FrozenSplit | None, config: GateConfig) -> GateReport:
     """Measure separation, calibration, and label balance on held-out rows only.
 
-    Missing split/model evidence, empty holdout, invalid labels, or a single class
-    raises RuntimeError. Both configured thresholds must pass.
+    Missing split/model evidence or a single held-out class raises RuntimeError.
+    The split owns row admission and nonempty holdout; both thresholds must pass.
     """
     if split is None:
         raise RuntimeError(
             "gate evidence missing: no frozen split was supplied; freeze the split "
-            "with freeze_split() before training and pass it to evaluate_gate() — "
+            "from the admitted projection before training and pass it to evaluate_gate() — "
             "the gate refuses closed rather than evaluating without a held-out split"
-        )
-    if not split.held_out_rows:
-        raise RuntimeError(
-            f"gate evidence missing: frozen split {split.fingerprint} has an empty "
-            "held-out side; nothing to evaluate against"
         )
     score = getattr(model, "state_dict", None)
     if not callable(score):
@@ -203,13 +196,7 @@ def evaluate_gate(model: Any, split: FrozenSplit | None, config: GateConfig) -> 
     labels: list[float] = []
     scores: list[float] = []
     for row in split.held_out_rows:
-        label = str(row.get("label"))
-        if label not in _LABELS:
-            raise RuntimeError(
-                f"gate evidence missing: held-out row {row.get('comment_id')!r} has "
-                f"non-outcome label {label!r}; the gate requires accepted/rejected labels"
-            )
-        labels.append(_LABELS[label])
+        labels.append(_LABELS[row["label"]])
         scores.append(score_comment(model, str(row["text"])))
 
     accepted = [s for s, y in zip(scores, labels) if y == 1.0]
@@ -250,4 +237,4 @@ def evaluate_gate(model: Any, split: FrozenSplit | None, config: GateConfig) -> 
     )
 
 
-__all__ = ["FrozenSplit", "GateConfig", "GateReport", "evaluate_gate", "freeze_split"]
+__all__ = ["FrozenSplit", "GateConfig", "GateReport", "evaluate_gate"]

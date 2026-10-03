@@ -4,9 +4,8 @@ import hashlib
 import json
 import logging
 import shlex
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from daydream import agent, config as phase_config, git_ops, ui
 from daydream.agent import (
@@ -22,7 +21,6 @@ from daydream.backends import (
     ContinuationToken,
 )
 from daydream.extensions import get_registry
-from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.generated_files import (
     GENERATED_FILES_PROMPT_RULE,
     _changed_untracked_generated_files,
@@ -41,17 +39,17 @@ from daydream.phases.fix import (
 )
 from daydream.phases.handoff import _emit_failure_handoff
 from daydream.phases.inputs import _render_bash_allowlist, _tail_test_output, append_extended_facts
-from daydream.phases.test_evidence import TestAndHealResult, TestAttemptEvidence, phase_test_once
+from daydream.phases.test_evidence import phase_test_once
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
-from daydream.test_execution import (
-    TestRecipe,
-)
 from daydream.trajectory import (
     DaydreamPhase,
     get_current_recorder,
     maybe_fork,
 )
 from daydream.workspace import WorkContext
+
+if TYPE_CHECKING:
+    from daydream.deep.fix_state import FixCycleState
 
 _logger = logging.getLogger(__name__)
 
@@ -146,11 +144,13 @@ def _build_setup_investigator_prompt(test_output: str) -> str:
     )
 
 
-SETUP_INVESTIGATOR_SCHEMA: dict[str, Any] = strict_object({
-    "verdict": {"type": "string", "enum": ["correct", "replace"]},
-    "suggested_command": {"type": ["string", "null"]},
-    "reason": {"type": "string"},
-})
+SETUP_INVESTIGATOR_SCHEMA: dict[str, Any] = strict_object(
+    {
+        "verdict": {"type": "string", "enum": ["correct", "replace"]},
+        "suggested_command": {"type": ["string", "null"]},
+        "reason": {"type": "string"},
+    }
+)
 
 
 def _sanitize_suggested_command(raw: str) -> str:
@@ -287,10 +287,10 @@ def _reject_test_healing_generated_file_edits(
 
     if direct_violations:
         artifact = artifact_dir_for(
-            repo,
-            session=artifact_session,
-            allow_standalone=allow_standalone,
-        ) / "deep" / "generated-file-violations.json"
+        repo,
+        session=artifact_session,
+        allow_standalone=allow_standalone,
+    ) / "deep" / "generated-file-violations.json"
         try:
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text(
@@ -311,42 +311,34 @@ def _reject_test_healing_generated_file_edits(
 @bind_resolved_run_context
 async def phase_test_and_heal(
     backend: Backend,
-    work: WorkContext,
+    session: "FixCycleState",
     feedback_items: list[dict[str, Any]] | None = None,
-    config: Any = None,
     *,
-    session_id: str | None = None,
-    capture_tree_key: Callable[[], str] | None = None,
-    footprint: AuthorizedFixFootprint | None = None,
     artifact_session: ArtifactSession | None = None,
     allow_standalone: bool = False,
-    recipe: TestRecipe | None = None,
     run_context: RunContext | None = None,
-) -> TestAndHealResult:
+) -> bool:
     """Run bound test attempts and offer a bounded authorized heal after failure."""
     run_context = resolve_run_context(run_context)
-    if session_id is None or capture_tree_key is None or footprint is None:
-        raise TypeError(
-            "phase_test_and_heal requires session_id, capture_tree_key, and footprint"
-        )
     ui.print_phase_hero(agent.console, "AWAKEN", ui.phase_subtitle("AWAKEN"))
     ui.print_dim(agent.console, f"Model: {backend.model}")
 
-    retries_used = 0
-    attempts: list[TestAttemptEvidence] = []
+    session.test_retries = 0
+    session.test_ignored = False
+    session.test_attempts.clear()
     continuation: ContinuationToken | None = None
     # Feed redacted host-suite failures through the same environmental/healing
     # gate as agent-run failures on the next iteration.
     host_failure_output: str | None = None
 
     async def _launch_fix(output: str) -> bool:
-        nonlocal retries_used, continuation
+        nonlocal continuation
         # Snapshot each healing turn because deep's earlier batch guard cannot
         # protect existing generated files from subsequent test-healing edits.
         try:
-            snapshot = git_ops.stash_create(work.repo)
-            pre_untracked = set(git_ops.list_untracked(work.repo))
-            pre_untracked_contents = _snapshot_untracked_generated_files(work.repo, pre_untracked)
+            snapshot = git_ops.stash_create(session.work.repo)
+            pre_untracked = set(git_ops.list_untracked(session.work.repo))
+            pre_untracked_contents = _snapshot_untracked_generated_files(session.work.repo, pre_untracked)
             snapshot_captured = True
         except (GitError, OSError) as exc:
             ui.print_warning(agent.console, f"Could not snapshot tree before test-healing fix: {exc}")
@@ -355,23 +347,23 @@ async def phase_test_and_heal(
             pre_untracked_contents = {}
             snapshot_captured = False
         fix_prompt = get_registry().prompt("fix")(
-            output, feedback_items, repo=work.repo,
+            output, feedback_items, repo=session.work.repo,
             concise_mode=_backend_concise_fix_prompts(backend),
         )
-        fix_prompt = append_extended_facts(fix_prompt, recipe)
+        fix_prompt = append_extended_facts(fix_prompt, session.recipe)
         fix_prompt += _build_fix_scope_clause(
-            footprint.run_allowed_paths, footprint.run_allowed_paths
+            session.footprint.run_allowed_paths, session.footprint.run_allowed_paths
         )
         await agent.run_agent(
-            backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX,
+            backend, session.work.repo, fix_prompt, phase=DaydreamPhase.FIX,
             tool_call_budget=phase_config.DEFAULT_TOOL_CALL_BUDGET,
             wall_budget_s=phase_config.DEFAULT_WALL_BUDGET_S,
             run_context=run_context,
         )
-        retries_used += 1
+        session.test_retries += 1
         continuation = None
         guard_result = _reject_test_healing_generated_file_edits(
-            work.repo,
+            session.work.repo,
             snapshot=snapshot,
             snapshot_captured=snapshot_captured,
             pre_untracked=pre_untracked,
@@ -383,8 +375,8 @@ async def phase_test_and_heal(
 
     while True:
         agent.console.print()
-        if retries_used > 0:
-            ui.print_info(agent.console, f"Test retry {retries_used}")
+        if session.test_retries > 0:
+            ui.print_info(agent.console, f"Test retry {session.test_retries}")
         else:
             ui.print_info(agent.console, "Running test suite...")
 
@@ -396,20 +388,15 @@ async def phase_test_and_heal(
         else:
             evidence, continuation, output = await phase_test_once(
                 backend,
-                work,
-                config=config,
-                session_id=session_id,
-                capture_tree_key=capture_tree_key,
+                session,
                 continuation=continuation,
-                recipe=recipe,
                 run_context=run_context,
             )
-            attempts.append(evidence)
             test_passed = evidence.passed
 
         if test_passed:
             ui.print_success(agent.console, "Tests passed")
-            return TestAndHealResult(True, retries_used, True, False, tuple(attempts))
+            return True
 
         ui.print_warning(agent.console, "Tests may have failed or result is unclear.")
 
@@ -421,7 +408,7 @@ async def phase_test_and_heal(
                 "Test failure looks environmental (infrastructure unavailable); "
                 "skipping heal loop.",
             )
-            return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
+            return False
 
         # Unattended defaults abort without mutation. --yes allows one bounded
         # fix/retry, then aborts. Only interactive runs without an assumption show
@@ -431,26 +418,26 @@ async def phase_test_and_heal(
             interactive=run_context.policy.interactive,
             safe_default=False,
         )
-        if decision is False or (decision is True and retries_used > 0):
+        if decision is False or (decision is True and session.test_retries > 0):
             ui.print_error(
                 agent.console, "Tests failed", "Aborting heal loop (no further auto-retries)",
             )
             await _emit_failure_handoff(
                 backend,
-                work,
+                session.work,
                 output,
                 offer_clipboard=False,
                 artifact_session=artifact_session,
                 allow_standalone=allow_standalone,
                 run_context=run_context,
             )
-            return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
+            return False
         if decision is True:
             # Bounded auto fix-and-retry: launch one fix attempt, then loop.
             agent.console.print()
             ui.print_info(agent.console, "Launching agent to fix test failures (auto)...")
             if not await _launch_fix(output):
-                return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
+                return False
             continue
 
         ui.print_menu(agent.console, "What would you like to do?", [
@@ -471,7 +458,7 @@ async def phase_test_and_heal(
 
         if choice == "1":
             verdict = await _run_setup_investigator(
-                backend, work, output, run_context=run_context,
+                backend, session.work, output, run_context=run_context,
             )
 
             if verdict is None:
@@ -512,60 +499,54 @@ async def phase_test_and_heal(
                                 "Approved test command was not executable; "
                                 "retrying with the original command.",
                             )
-                            retries_used += 1
+                            session.test_retries += 1
                             continue
                         try:
                             evidence, _, alternate_output = await phase_test_once(
                                 backend,
-                                work,
-                                config=config,
-                                session_id=session_id,
-                                capture_tree_key=capture_tree_key,
+                                session,
                                 command_override=cmd,
-                                recipe=recipe,
                                 run_context=run_context,
                             )
                         except (OSError, ValueError) as exc:
                             ui.print_warning(agent.console, f"Approved test command could not be run: {exc}")
-                            retries_used += 1
+                            session.test_retries += 1
                             continue
-                        attempts.append(evidence)
                         if evidence.passed:
                             ui.print_success(agent.console, "Tests passed")
-                            return TestAndHealResult(
-                                True, retries_used, True, False, tuple(attempts)
-                            )
+                            return True
                         ui.print_warning(agent.console, "Approved test command failed.")
                         host_failure_output = alternate_output
                         continue
 
-            retries_used += 1
+            session.test_retries += 1
             continue
 
         elif choice == "2":
             agent.console.print()
             ui.print_info(agent.console, "Launching agent to fix test failures...")
             if not await _launch_fix(output):
-                return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
+                return False
             continue
 
         elif choice == "3":
             ui.print_warning(agent.console, "Ignoring test failures, continuing...")
-            return TestAndHealResult(False, retries_used, True, True, tuple(attempts))
+            session.test_ignored = True
+            return True
 
         elif choice == "4":
             ui.print_error(agent.console, "Aborted", "User requested abort")
             await _emit_failure_handoff(
                 backend,
-                work,
+                session.work,
                 output,
                 offer_clipboard=True,
                 artifact_session=artifact_session,
                 allow_standalone=allow_standalone,
                 run_context=run_context,
             )
-            return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
+            return False
 
         else:
             ui.print_warning(agent.console, f"Invalid choice '{choice}', aborting")
-            return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
+            return False

@@ -11,7 +11,7 @@ import pytest
 from daydream import git_ops
 from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
 from daydream.backends import ResultEvent
-from daydream.deep.fix_state import EvidenceKey, RetainedTreeSnapshot
+from daydream.deep.fix_state import EvidenceKey, RepairCandidate, RetainedTreeSnapshot, capture_retained_tree
 from daydream.deep.fix_steps import (
     _authorize_final_red_override,
     _persist_push_verdict,
@@ -27,7 +27,7 @@ from daydream.deep.orchestrator import _remote_ci_enabled
 from daydream.deep.remote_ci_steps import _resolve_remote_ci_target, _step_remote_ci
 from daydream.extensions.api import Stop
 from daydream.git_ops import GitError
-from daydream.phases import PushReceipt, TestAndHealResult, TestAttemptEvidence
+from daydream.phases import PushReceipt, TestAttemptEvidence
 from daydream.run_context import InteractionPolicy, RunContext
 from tests.deep_orchestrator.support import (
     _base_repo,
@@ -198,9 +198,11 @@ def _cross_item_fixture(tmp_path: Path,) -> tuple[Path, list[dict[str, Any]], An
 def test_fix_cycle_round_two_rejects_cross_item_retarget(tmp_path: Path) -> None:
     repo, items, ctx, state = _cross_item_fixture(tmp_path)
     ctx.data["iteration"] = 2
-    ctx.data["fix_outcomes"] = {
-        "item:a": {"issue_id": 1, "verdict": "wrong_target", "path": "c.py", "reason": "try the other item's file"}
-    }
+    state.candidate = RepairCandidate(
+        capture_retained_tree(state),
+        EvidenceKey("prior-tree", state.footprint.policy_revision),
+        {"item:a": {"issue_id": 1, "verdict": "wrong_target", "path": "c.py", "reason": "try the other item's file"}},
+    )
     dispatched = _round_dispatch_items(ctx, items)
     assert [item["item_uid"] for item in dispatched] == ["item:a"]
     assert dispatched[0]["file"] == "a.py"
@@ -210,19 +212,28 @@ def test_fix_cycle_round_two_rejects_cross_item_retarget(tmp_path: Path) -> None
     assert rejected[0].path == "c.py"
     assert rejected[0].round_number == 2
 
-def test_fix_cycle_tracks_last_dispatched_target_after_accepted_then_rejected_retarget(tmp_path: Path,) -> None:
+
+def test_fix_cycle_tracks_last_dispatched_target_after_accepted_then_rejected_retarget(
+    tmp_path: Path,
+) -> None:
     repo, items, ctx, state = _cross_item_fixture(tmp_path)
     ctx.data["iteration"] = 1
     assert [item["file"] for item in _round_dispatch_items(ctx, items)] == ["a.py", "c.py"]
     assert state.last_fix_target_by_uid == {"item:a": "a.py", "item:c": "c.py"}
     ctx.data["iteration"] = 2
-    ctx.data["fix_outcomes"] = {"item:a": {"issue_id": 1, "verdict": "wrong_target", "path": "b.py", "reason": "moved"}}
+    state.candidate = RepairCandidate(
+        capture_retained_tree(state),
+        EvidenceKey("prior-tree", state.footprint.policy_revision),
+        {"item:a": {"issue_id": 1, "verdict": "wrong_target", "path": "b.py", "reason": "moved"}},
+    )
     assert [item["file"] for item in _round_dispatch_items(ctx, items)] == ["b.py"]
     assert state.last_fix_target_by_uid["item:a"] == "b.py"
     ctx.data["iteration"] = 3
-    ctx.data["fix_outcomes"] = {
-        "item:a": {"issue_id": 1, "verdict": "wrong_target", "path": "c.py", "reason": "other item"}
-    }
+    state.candidate = RepairCandidate(
+        capture_retained_tree(state),
+        EvidenceKey("prior-tree", state.footprint.policy_revision),
+        {"item:a": {"issue_id": 1, "verdict": "wrong_target", "path": "c.py", "reason": "other item"}},
+    )
     assert [item["file"] for item in _round_dispatch_items(ctx, items)] == ["a.py"]
     assert state.last_fix_target_by_uid["item:a"] == "a.py"
 
@@ -259,7 +270,8 @@ async def test_resolved_verdict_uses_last_dispatched_target_not_raw_verifier_can
 
     assert backend.call_count == 1
     assert backend.read_only_calls == [True]
-    assert outcomes["item:a"]["path"] == "b.py"
+    assert outcomes.outcomes["item:a"]["path"] == "b.py"
+
 
 @pytest.mark.parametrize("prior_verdict", [None, "resolved", "unresolved", "wrong_target"])
 @pytest.mark.parametrize("final_verdict", ["unresolved", "wrong_target", "regressed"])
@@ -268,8 +280,16 @@ async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
 ) -> None:
 
     ctx, state, snapshot = _finalization_fixture(tmp_path)
-    ctx.data["fix_outcomes"] = ({"item:a": {"issue_id": 1, "verdict": prior_verdict}} if prior_verdict else {})
-    state.verifier_key = EvidenceKey("prior-tree", state.footprint.policy_revision)
+    state.candidate = RepairCandidate(
+        capture_retained_tree(state),
+        EvidenceKey("prior-tree", state.footprint.policy_revision),
+        {"item:a": {"issue_id": 1, "verdict": prior_verdict}} if prior_verdict else {},
+    )
+    state.candidate = RepairCandidate(
+        snapshot,
+        EvidenceKey("prior-tree", state.footprint.policy_revision),
+        {} if state.candidate is None else state.candidate.outcomes,
+    )
     evidence = _host_test_evidence(
         state, passed=True, input_tree_key=snapshot.tree_key, output_tree_key=snapshot.tree_key
     )
@@ -278,9 +298,15 @@ async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
     monkeypatch.setattr("daydream.deep.fix_state._strict_scope_and_scrub", lambda *_a, **_k: False)
     monkeypatch.setattr("daydream.deep.fix_state.capture_retained_tree", lambda *_a, **_k: snapshot)
 
-    async def _actionable(*_a: Any, **_k: Any) -> dict[str, dict[str, Any]]:
+    async def _actionable(*_a: Any, **_k: Any) -> RepairCandidate:
         calls["verify"] += 1
-        return {"item:a": {"issue_id": 1, "verdict": final_verdict, "reason": "still broken"}}
+        candidate = RepairCandidate(
+            snapshot,
+            EvidenceKey(snapshot.tree_key, state.footprint.policy_revision),
+            {"item:a": {"issue_id": 1, "verdict": final_verdict, "reason": "still broken"}},
+        )
+        state.candidate = candidate
+        return candidate
 
     async def _no_test(*_a: Any, **_k: Any) -> Any:
         calls["test"] += 1
@@ -289,17 +315,19 @@ async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
     monkeypatch.setattr("daydream.deep.fix_steps.verify_retained_tree", _actionable)
     monkeypatch.setattr("daydream.deep.fix_steps.phase_test_once", _no_test)
 
-    result = await finalize_retained_tree_after_test(ctx, TestAndHealResult(True, 0, True, False, (evidence,)),)
+    state.test_attempts = list((evidence,))
+    state.test_ignored = False
+    result = await finalize_retained_tree_after_test(ctx)
 
     if prior_verdict in {"unresolved", "wrong_target"} and final_verdict != "regressed":
         assert result is None
         assert calls == {"verify": 1, "test": 0}
-        assert state.latest_retained == snapshot
-        assert ctx.data["fix_outcomes"]["item:a"]["verdict"] == final_verdict
+        assert state.candidate.snapshot == snapshot
+        assert state.candidate.outcomes["item:a"]["verdict"] == final_verdict
         return
     assert isinstance(result, Stop) and result.exit_code == 1
     assert calls == {"verify": 1, "test": 0}
-    assert state.latest_retained is None
+    assert state.candidate is None
     failure = json.loads((ctx.data["dd"] / "stabilization-failed.json").read_text())
     assert failure["session_id"] == state.session_id
     assert "actionable" in failure["reason"]
@@ -327,7 +355,7 @@ async def test_terminal_red_after_heal_restores_unrelated_and_protected_state(
     ctx = _direct_fix_context(repo, items, changed_files={"a.py"})
     state = _direct_fix_state(ctx, items, {"a.py"})
 
-    async def _red_after_mutation(*_a: Any, **_k: Any) -> TestAndHealResult:
+    async def _red_after_mutation(*_a: Any, **_k: Any) -> bool:
         (repo / "a.py").write_text("A = 2\n")
         (repo / "unrelated.py").write_text("OWNER = 9\n")
         scratch.unlink()
@@ -337,7 +365,8 @@ async def test_terminal_red_after_heal_restores_unrelated_and_protected_state(
         key = "red-tree"
         attempt = _host_test_evidence(state, passed=False, input_tree_key=key, output_tree_key=key, command=("false",)
         )
-        return TestAndHealResult(False, 1, False, False, (attempt,))
+        state.test_attempts.append(attempt)
+        return False
 
     monkeypatch.setattr("daydream.deep.fix_steps.phase_test_and_heal", _red_after_mutation)
     result = await _step_test(ctx)
@@ -358,7 +387,11 @@ async def test_stabilization_stops_after_two_passes_without_third_or_heal(
 ) -> None:
 
     ctx, state, snapshot = _finalization_fixture(tmp_path)
-    state.verifier_key = EvidenceKey(snapshot.tree_key, state.footprint.policy_revision)
+    state.candidate = RepairCandidate(
+        snapshot,
+        EvidenceKey(snapshot.tree_key, state.footprint.policy_revision),
+        {} if state.candidate is None else state.candidate.outcomes,
+    )
     stale = _host_test_evidence(state, passed=False, input_tree_key="before-heal", output_tree_key="after-heal")
     guard_calls: list[int] = []
     test_calls = 0
@@ -381,12 +414,14 @@ async def test_stabilization_stops_after_two_passes_without_third_or_heal(
     monkeypatch.setattr("daydream.deep.fix_steps.phase_test_once", _one_test)
     monkeypatch.setattr(ctx, "backend_for", lambda _phase: object())
 
-    result = await finalize_retained_tree_after_test(ctx, TestAndHealResult(False, 1, True, True, (stale,)),)
+    state.test_attempts = list((stale,))
+    state.test_ignored = True
+    result = await finalize_retained_tree_after_test(ctx)
 
     assert isinstance(result, Stop) and result.exit_code == 1
     assert guard_calls == [1, 2]
     assert test_calls == 1
-    assert state.latest_retained is None
+    assert state.candidate is None
     assert (ctx.data["dd"] / "stabilization-failed.json").is_file()
 
     phase_states = derive_phase_states(ctx.work.repo, phase_events=[], session_id=state.session_id)
@@ -394,7 +429,9 @@ async def test_stabilization_stops_after_two_passes_without_third_or_heal(
     assert phase_states["test"]["status"] == "failed"
     assert derive_pipeline_status("complete", None, phase_states, runs_fix=True, runs_test=True) == "failed"
 
-async def test_stabilization_audit_write_failure_stops_before_retest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+
+async def test_stabilization_audit_write_failure_stops_before_retest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 
     ctx, state, snapshot = _finalization_fixture(tmp_path)
@@ -410,10 +447,12 @@ async def test_stabilization_audit_write_failure_stops_before_retest(tmp_path: P
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must not retest")),
     )
 
-    result = await finalize_retained_tree_after_test(ctx, TestAndHealResult(True, 0, True, False, (evidence,)),)
+    state.test_attempts = list((evidence,))
+    state.test_ignored = False
+    result = await finalize_retained_tree_after_test(ctx)
 
     assert isinstance(result, Stop) and result.exit_code == 1
-    assert state.latest_retained is None
+    assert state.candidate is None
     failure = json.loads((ctx.data["dd"] / "stabilization-failed.json").read_text())
     assert "audit disk full" in failure["reason"]
 
@@ -434,7 +473,11 @@ async def test_changed_tree_red_retest_requires_new_override(
     """A prior-tree red override cannot authorize a newly executed red result."""
 
     ctx, state, snapshot = _finalization_fixture(tmp_path)
-    state.verifier_key = EvidenceKey(snapshot.tree_key, state.footprint.policy_revision)
+    state.candidate = RepairCandidate(
+        snapshot,
+        EvidenceKey(snapshot.tree_key, state.footprint.policy_revision),
+        {} if state.candidate is None else state.candidate.outcomes,
+    )
     prior_override = _host_test_evidence(
         state, passed=False, input_tree_key="prior-input", output_tree_key="prior-output"
     )
@@ -451,7 +494,9 @@ async def test_changed_tree_red_retest_requires_new_override(
     monkeypatch.setattr("daydream.deep.fix_steps._authorize_final_red_override", lambda _ctx: new_override,)
     monkeypatch.setattr(ctx, "backend_for", lambda _phase: object())
 
-    result = await finalize_retained_tree_after_test(ctx, TestAndHealResult(False, 0, True, True, (prior_override,)),)
+    state.test_attempts = list((prior_override,))
+    state.test_ignored = True
+    result = await finalize_retained_tree_after_test(ctx)
 
     assert isinstance(result, Stop) is expect_stop
     if isinstance(result, Stop):
@@ -491,7 +536,8 @@ def test_persisted_test_verdict_carries_the_execution_identity(tmp_path: Path) -
         session_id=state.session_id, kind="host", command=("uv", "run", "pytest"), passed=True,
         input_tree_key="t", output_tree_key="t", identity=_identity(session_id=state.session_id),
     )
-    _persist_test_verdict(ctx, state, passed=True, ignored=False, attempts=[attempt])
+    state.test_attempts = [attempt]
+    _persist_test_verdict(ctx)
     payload = json.loads((repo / ".daydream" / "deep" / "test-verdict.json").read_text())
     assert payload["attempts"][0]["identity"]["argv"] == ["uv", "run", "pytest"]
     assert payload["attempts"][0]["identity"]["outcome"] == "passed"

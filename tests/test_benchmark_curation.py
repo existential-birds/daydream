@@ -16,13 +16,12 @@ import yaml
 from pydantic import ValidationError
 
 import daydream.benchmark as bm
-from daydream.benchmark import curation as cu, github_import as gi, snapshot as sn, storage
+from daydream.benchmark import curation as cu, github_import as gi, snapshot as sn
 from daydream.benchmark.curation import BAND_RANK, REASON_CODES, classify_evidence
 from daydream.benchmark.harbor import build
 from daydream.benchmark.schema import Curation, Finding, derive_finding_id
 from daydream.benchmark.storage import (
     atomic_write_json,
-    atomic_write_yaml,
     load_json_strict,
     load_yaml_strict,
 )
@@ -601,7 +600,7 @@ def test_get_case_attaches_evidence_projection(tmp_path: Path, fake_gh: FakeGh) 
     unmatched = {k: v for k, v in cand.items() if k != "evidence"}
     unmatched["source_id"] = "github:review:999"
     raw["candidates"].append(unmatched)
-    atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
+    (ws / "cases" / f"{case_id}.yaml").write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     view2 = cu.get_case(ws, case_id)
     assert "evidence" not in view2["candidates"][-1]   # unmatched source, absent
     assert "evidence" in view2["candidates"][0]        # matched source, still joined
@@ -623,7 +622,7 @@ def _reanchor_frozen_inline(ws: Path, case_id: str, *, authoring_commit: str) ->
     cand = next(c for c in raw["candidates"] if c["source_id"] == rec["source_id"])
     cand["exact_acceptable"] = False
     cand["not_exact_reason"] = "re-anchored"
-    atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
+    (ws / "cases" / f"{case_id}.yaml").write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     return str(rec["source_id"])
 
 
@@ -1011,7 +1010,7 @@ def test_prioritized_view_fails_open_without_facts(tmp_path: Path, fake_gh: Fake
     case_path = ws / "cases" / f"{case_id}.yaml"
     raw = load_yaml_strict(case_path)
     raw.pop("prioritization", None)
-    storage.atomic_write_yaml(case_path, raw)
+    (case_path).write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     view = cu.get_case(ws, case_id)
     cand_sid = view["candidates"][0]["source_id"]
     cand = next(e for e in view["prioritized_evidence"]["entries"] if e["source_id"] == cand_sid)

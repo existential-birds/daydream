@@ -6,6 +6,7 @@ import os
 import shlex
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -119,6 +120,7 @@ from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock
 from tests.harness.git_helpers import commit as git_commit, git, init_repo
+from tests.harness.repair import repair_session
 from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.review_result import merge_result, record_pool, review_scopes
 from tests.harness.trajectory import make_recorder, read_trajectory
@@ -162,7 +164,8 @@ def _execution_identity(
     return TestExecutionIdentity(
         session_id="s", argv=argv, cwd_relative=recipe.package.cwd_relative, runner=recipe.package.runner,
         interpreter=recipe.package.interpreter, config_digest=recipe.package.config_digest,
-        absent_components=recipe.package.absent_components, input_tree_key="t", output_tree_key=output_tree_key,
+        absent_components=recipe.package.absent_components,
+        input_tree_key=output_tree_key, output_tree_key=output_tree_key,
         head_sha=head_sha, branch=branch, kind="host", outcome=cast(Any, outcome),
     )
 
@@ -238,23 +241,9 @@ def _quiet_phase_ui(silence_console: Callable[..., None]) -> None:
 @pytest.fixture(autouse=True)
 def _supply_test_evidence_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     """Supply real identity and run-scope defaults to menu/prompt cases; preserve explicit overrides."""
-    implementation = phases.phase_test_and_heal
     fix_implementation = phases.phase_fix
     batched_implementation = phases.phase_fix_batched
     parallel_implementation = phases.phase_fix_parallel
-
-    async def _with_contract(*args: Any, **kwargs: Any) -> Any:
-        feedback = kwargs.get("feedback_items")
-        paths = frozenset(item["file"]
-            for item in (feedback or [])
-            if isinstance(item, dict) and isinstance(item.get("file"), str)
-        )
-        kwargs.setdefault("session_id", "unit-test-session")
-        kwargs.setdefault("capture_tree_key", lambda: "unit-test-tree")
-        kwargs.setdefault("footprint", AuthorizedFixFootprint(run_allowed_paths=paths, policy_revision=1),)
-        return await implementation(*args, **kwargs)
-
-    monkeypatch.setattr(phases, "phase_test_and_heal", _with_contract)
 
     def _contract_scope_kwargs(items: list[Any], kwargs: dict[str, Any]) -> None:
         changed = kwargs.pop("changed_files", None)
@@ -452,13 +441,6 @@ def _add_bare_origin(repo: Path) -> None:
     git(repo.parent, "init", "--bare", str(remote))
     git(repo, "remote", "add", "origin", str(remote))
 
-def _retained_commit_tree(repo: Path, paths: set[str]) -> dict[str, Any]:
-    """Supply real retained-tree evidence with the test's explicit authorized paths."""
-    return {
-        "retained_paths": frozenset(paths),
-        "retained_states": git_ops.snapshot_worktree_paths(repo, paths),
-        "initial_index": git_ops.snapshot_index(repo),
-    }
 
 @pytest.mark.asyncio
 async def test_phase_commit_push_excludes_preexisting_untracked_from_tree(
@@ -472,9 +454,9 @@ async def test_phase_commit_push_excludes_preexisting_untracked_from_tree(
     git_commit(git_repo, "baseline app.py")
     (git_repo / "app.py").write_text("x = 1\n")            # daydream change (tracked modification)
     (git_repo / "notes.txt").write_text("user scratch\n")  # pre-existing untracked
-    backend = ScriptedBackend()
-    ok = await phase_commit_push(backend, work, **_retained_commit_tree(work.repo, {"app.py"}),
-        run_context=RunContext(InteractionPolicy(assume="yes")))
+    session = repair_session(work, paths=frozenset({"app.py"}))
+    assert session.candidate is not None
+    ok = await phase_commit_push(session, run_context=RunContext(InteractionPolicy(assume="yes")))
     assert ok is not None
     # The commit exists and its tree has the daydream change but NOT notes.txt.
     committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
@@ -500,9 +482,13 @@ async def test_phase_commit_push_commits_exactly_the_prestaged_set_host_side(
     (git_repo / "helper.py").write_text("h = 1\n")         # daydream change
     (git_repo / "notes.txt").write_text("user scratch\n")  # pre-existing untracked
 
-    ok = await phase_commit_push(ScriptedBackend(), work, items=[{"file": "app.py", "description": "fix app"}],
-        **_retained_commit_tree(work.repo, {"app.py", "helper.py"}),
-        run_context=RunContext(InteractionPolicy(assume="yes")))
+    session = repair_session(work, paths=frozenset({"app.py", "helper.py"}))
+    assert session.candidate is not None
+    ok = await phase_commit_push(
+        session,
+        items=[{"file": "app.py", "description": "fix app"}],
+        run_context=RunContext(InteractionPolicy(assume="yes")),
+    )
     assert ok is not None
     committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
     assert sorted(committed) == ["app.py", "helper.py"]
@@ -531,9 +517,9 @@ async def test_phase_commit_push_excludes_daydream_run_artifacts_from_tree(
     (dd / "fix-failures.json").write_text("[]\n")
     (dd / "deep").mkdir(parents=True)
     (dd / "deep" / "fix-quality-gate.json").write_text("{}\n")
-    backend = ScriptedBackend()
-    ok = await phase_commit_push(backend, work, **_retained_commit_tree(work.repo, {"app.py"}),
-        run_context=RunContext(InteractionPolicy(assume="yes")))
+    session = repair_session(work, paths=frozenset({"app.py"}))
+    assert session.candidate is not None
+    ok = await phase_commit_push(session, run_context=RunContext(InteractionPolicy(assume="yes")))
     assert ok is not None
     committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
     assert "app.py" in committed
@@ -554,10 +540,9 @@ async def test_phase_commit_push_empty_retained_tree_does_not_commit_or_push(
     hook.chmod(0o755)
     backend = ScriptedBackend()
 
-    result = await phase_commit_push(
-        backend, make_work(repo), run_context=RunContext(InteractionPolicy(assume="yes")),
-        **_retained_commit_tree(repo, set()),
-    )
+    session = repair_session(make_work(repo), paths=frozenset(set()))
+    assert session.candidate is not None
+    result = await phase_commit_push(session, run_context=RunContext(InteractionPolicy(assume="yes")))
 
     assert result is None
     assert git_ops.head_sha(repo) == before
@@ -577,9 +562,13 @@ async def test_host_commit_push_verifies_remote_before_success(
     (work_repo / "fix.py").write_text("fixed\n")  # the daydream change
 
     work = make_work(work_repo)
+    session = repair_session(work, paths=frozenset({"fix.py"}))
+    assert session.candidate is not None
     ok = await phase_commit_push(
-        ScriptedBackend(), work, items=[{"file": "fix.py", "description": "fix bug"}],
-        **_retained_commit_tree(work.repo, {"fix.py"}), run_context=RunContext(InteractionPolicy(assume="yes")))
+        session,
+        items=[{"file": "fix.py", "description": "fix bug"}],
+        run_context=RunContext(InteractionPolicy(assume="yes")),
+    )
     assert ok is not None
     assert ok.pushed_repository is None
 
@@ -589,7 +578,9 @@ async def test_host_commit_push_verifies_remote_before_success(
     assert "fix.py: fix bug" in git(work_repo, "log", "-1", "--format=%B")
 
 @pytest.mark.asyncio
-async def test_push_receipt_uses_raw_github_remote_and_real_hook(tmp_path: Path, make_work: Callable[..., WorkContext],
+async def test_push_receipt_uses_raw_github_remote_and_real_hook(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
 ) -> None:
     """The ordinary real push returns its exact SHA/branch/GitHub identity."""
 
@@ -605,10 +596,9 @@ async def test_push_receipt_uses_raw_github_remote_and_real_hook(tmp_path: Path,
     hook.chmod(0o755)
     (repo / "app.py").write_text("x = 1\n")
 
-    result = await phase_commit_push(
-        ScriptedBackend(), make_work(repo),
-            **_retained_commit_tree(repo, {"app.py"}),
-        config=_hook_run_config(), run_context=RunContext(InteractionPolicy(assume="yes")))
+    session = repair_session(make_work(repo), config=_hook_run_config(), paths=frozenset({"app.py"}))
+    assert session.candidate is not None
+    result = await phase_commit_push(session, run_context=RunContext(InteractionPolicy(assume="yes")))
 
     assert result is not None
     assert result.remote == "origin"
@@ -619,7 +609,9 @@ async def test_push_receipt_uses_raw_github_remote_and_real_hook(tmp_path: Path,
     assert hook_marker.read_text() == "ran\n"
 
 @pytest.mark.asyncio
-async def test_push_rejects_remote_url_changed_by_real_hook(tmp_path: Path, make_work: Callable[..., WorkContext],
+async def test_push_rejects_remote_url_changed_by_real_hook(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
 ) -> None:
     """A hook cannot make verification attest a different configured remote."""
 
@@ -640,9 +632,9 @@ async def test_push_rejects_remote_url_changed_by_real_hook(tmp_path: Path, make
     (repo / "app.py").write_text("x = 1\n")
 
     with pytest.raises(PushAttemptError) as exc_info:
-        await phase_commit_push(ScriptedBackend(), make_work(repo),
-            **_retained_commit_tree(repo, {"app.py"}),
-            config=_hook_run_config(), run_context=RunContext(InteractionPolicy(assume="yes")))
+        session = repair_session(make_work(repo), config=_hook_run_config(), paths=frozenset({"app.py"}))
+        assert session.candidate is not None
+        await phase_commit_push(session, run_context=RunContext(InteractionPolicy(assume="yes")))
 
     assert exc_info.value.receipt.pushed_repository == "fork-user/widgets"
     assert git(repo, "config", "--get", "remote.origin.url") == replacement
@@ -661,9 +653,13 @@ async def test_push_failure_reported_as_failure_even_with_local_commit(
 
     work = make_work(work_repo)
     with pytest.raises(GitError):
+        session = repair_session(work, paths=frozenset({"fix.py"}))
+        assert session.candidate is not None
         await phase_commit_push(
-            ScriptedBackend(), work, items=[{"file": "fix.py", "description": "fix bug"}],
-            **_retained_commit_tree(work.repo, {"fix.py"}), run_context=RunContext(InteractionPolicy(assume="yes")))
+            session,
+            items=[{"file": "fix.py", "description": "fix bug"}],
+            run_context=RunContext(InteractionPolicy(assume="yes")),
+        )
     # The local commit was still created with the deterministic message.
     assert git(work_repo, "log", "-1", "--format=%B").startswith("fix:")
     out = capsys.readouterr().out
@@ -682,8 +678,9 @@ async def test_push_attempt_error_carries_exact_attempted_identity(
     (repo / "app.py").write_text("x = 1\n")
 
     with pytest.raises(git_ops.GitError) as exc_info:
-        await phase_commit_push(ScriptedBackend(), make_work(repo),
-            **_retained_commit_tree(repo, {"app.py"}), run_context=RunContext(InteractionPolicy(assume="yes")))
+        session = repair_session(make_work(repo), paths=frozenset({"app.py"}))
+        assert session.candidate is not None
+        await phase_commit_push(session, run_context=RunContext(InteractionPolicy(assume="yes")))
 
     assert type(exc_info.value).__name__ == "PushAttemptError"
     receipt = exc_info.value.receipt  # type: ignore[attr-defined]
@@ -702,9 +699,14 @@ async def test_push_verification_failure_surfaces_even_when_push_succeeds(
     (work_repo / "fix.py").write_text("fixed\n")
     work = make_work(work_repo)
     with pytest.raises(git_ops.GitError):
+        session = repair_session(work, paths=frozenset({"fix.py"}))
+        assert session.candidate is not None
         await phase_commit_push(
-            ScriptedBackend(), work, items=[{"file": "fix.py", "description": "fix bug"}],
-            **_retained_commit_tree(work.repo, {"fix.py"}), run_context=RunContext(InteractionPolicy(assume="yes")))
+            session,
+            items=[{"file": "fix.py", "description": "fix bug"}],
+            run_context=RunContext(InteractionPolicy(assume="yes")),
+        )
+
 
 @pytest.mark.asyncio
 async def test_phase_commit_push_requires_retained_tree_authority(
@@ -718,9 +720,10 @@ async def test_phase_commit_push_requires_retained_tree_authority(
     (git_repo / "notes.txt").write_text("user scratch\n")
     before = git(git_repo, "status", "--porcelain")
     head = git_ops.head_sha(git_repo)
-    with pytest.raises(TypeError, match="retained_paths, retained_states, and initial_index are required"):
-        await phase_commit_push(ScriptedBackend(), make_work(git_repo),
-        run_context=RunContext(InteractionPolicy(assume="yes")))
+    session = repair_session(make_work(git_repo))
+    session.candidate = None
+    with pytest.raises(ValueError, match="no verified retained tree"):
+        await phase_commit_push(session, run_context=RunContext(InteractionPolicy(assume="yes")))
     assert git(git_repo, "status", "--porcelain") == before
     assert git_ops.head_sha(git_repo) == head
     assert git(git_repo, "diff", "--cached") == ""
@@ -738,10 +741,13 @@ async def test_phase_commit_push_retains_authorized_new_files(
     (git_repo / "app.py").write_text("x = 1\n")                    # daydream change
     (git_repo / "generated.py").write_text("created by fix\n")     # fix-created NEW file
 
-    ok = await phase_commit_push(ScriptedBackend(), make_work(git_repo),
+    session = repair_session(make_work(git_repo), paths=frozenset({"app.py", "generated.py"}))
+    assert session.candidate is not None
+    ok = await phase_commit_push(
+        session,
         items=[{"file": "app.py", "description": "fix app"}],
-        **_retained_commit_tree(git_repo, {"app.py", "generated.py"}),
-        run_context=RunContext(InteractionPolicy(assume="yes")))
+        run_context=RunContext(InteractionPolicy(assume="yes")),
+    )
     assert ok is not None
     committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
     assert "app.py" in committed
@@ -795,9 +801,13 @@ async def test_hook_aware_push_runs_suite_exactly_once(
         (repo / "fix.py").write_text("fixed\n")  # the daydream change
 
         runs = _record_host_runs(monkeypatch, output="")
-        ok = await phase_commit_push(ScriptedBackend(), make_work(repo),
-            items=[{"file": "fix.py", "description": "fix bug"}], **_retained_commit_tree(repo, {"fix.py"}),
-            config=_hook_run_config(), run_context=RunContext(InteractionPolicy(assume="yes")))
+        session = repair_session(make_work(repo), config=_hook_run_config(), paths=frozenset({"fix.py"}))
+        assert session.candidate is not None
+        ok = await phase_commit_push(
+            session,
+            items=[{"file": "fix.py", "description": "fix bug"}],
+            run_context=RunContext(InteractionPolicy(assume="yes")),
+        )
         assert ok is not None
         assert len(runs) == expected_runs, (
             f"hook_present={hook_present}: expected {expected_runs} host run(s), got {len(runs)}"
@@ -823,9 +833,13 @@ async def test_hook_aware_push_red_suite_blocks_push(
     _record_host_runs(monkeypatch, exit_status=1, output="1 failed")
 
     with pytest.raises(RuntimeError, match="Pre-push validation"):
-        await phase_commit_push(ScriptedBackend(), make_work(repo),
-            items=[{"file": "fix.py", "description": "fix bug"}], **_retained_commit_tree(repo, {"fix.py"}),
-            config=_hook_run_config(), run_context=RunContext(InteractionPolicy(assume="yes")))
+        session = repair_session(make_work(repo), config=_hook_run_config(), paths=frozenset({"fix.py"}))
+        assert session.candidate is not None
+        await phase_commit_push(
+            session,
+            items=[{"file": "fix.py", "description": "fix bug"}],
+            run_context=RunContext(InteractionPolicy(assume="yes")),
+        )
     # Nothing was pushed: the remote still reports the baseline sha only.
     assert git(repo, "ls-remote", "origin", "refs/heads/main") == remote_head_before
     # The local commit exists but is unpushed.
@@ -849,20 +863,27 @@ async def test_phase_test_and_heal_honors_wall_budget_override(
 
     captured = _record_host_runs(monkeypatch)
 
-    result = await phases.phase_test_and_heal(ScriptedBackend(), make_work(tmp_path),
+    session = repair_session(
+        make_work(tmp_path),
         config=SimpleNamespace(
-            test_command="true", file_config=DaydreamFileConfig(test_command="true", test_command_wall_s=1234.0),
-        ), allow_standalone=True,
+            test_command="true",
+            file_config=DaydreamFileConfig(test_command="true", test_command_wall_s=1234.0),
+        ),
     )
-    assert result.passed is True
-    assert result.retries == 0
+    await phases.phase_test_and_heal(ScriptedBackend(), session, allow_standalone=True)
+    assert session.test_attempts[-1].passed is True
+    assert session.test_retries == 0
     assert captured[-1]["wall_budget_s"] == 1234.0
 
     # Unset: falls through to the orchestrator default.
-    await phases.phase_test_and_heal(ScriptedBackend(), make_work(tmp_path),
-        config=SimpleNamespace(test_command="true", file_config=DaydreamFileConfig(test_command="true"),),
-        allow_standalone=True,
+    session_2 = repair_session(
+        make_work(tmp_path),
+        config=SimpleNamespace(
+            test_command="true",
+            file_config=DaydreamFileConfig(test_command="true"),
+        ),
     )
+    await phases.phase_test_and_heal(ScriptedBackend(), session_2, allow_standalone=True)
     assert captured[-1]["wall_budget_s"] == TEST_WALL_BUDGET_S
 
 @pytest.mark.asyncio
@@ -870,7 +891,6 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
     _quiet_phase_ui: None,
 ) -> None:
-
 
     token = ContinuationToken(backend="codex", data={"thread_id": "th_test"})
     backend = ScriptedBackend(script=[
@@ -886,12 +906,12 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(
         {"id": 2, "description": "Missing import", "file": "src/utils.py", "line": 1},
     ]
 
-    result = await phases.phase_test_and_heal(
-        backend, make_work(tmp_path), feedback_items=feedback_items, allow_standalone=True,
-    )
+    session = repair_session(make_work(tmp_path), paths=frozenset(str(item["file"]) for item in feedback_items))
+    assert session.candidate is not None
+    await phases.phase_test_and_heal(backend, session, feedback_items=feedback_items, allow_standalone=True)
 
-    assert result.passed is True
-    assert result.retries == 1
+    assert session.test_attempts[-1].passed is True
+    assert session.test_retries == 1
     assert backend.call_count == 3
     assert backend.continuations[1] is None, "Fix call should start fresh with no continuation"
     assert backend.continuations[2] is None, "Retry after fix should start fresh"
@@ -913,8 +933,10 @@ async def test_phase_test_and_heal_aborts_when_generated_restore_fails(
     monkeypatch.setattr(
         "daydream.phases.testing._reject_test_healing_generated_file_edits", lambda *args, **kwargs: None,
     )
-    result = await phases.phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
-    assert (result.passed, result.retries, result.proceed) == (False, 1, False)
+    session = repair_session(make_work(tmp_path))
+    assert session.candidate is not None
+    result = await phases.phase_test_and_heal(backend, session, allow_standalone=True)
+    assert (session.test_attempts[-1].passed, session.test_retries, result) == (False, 1, False)
     assert backend.call_count == 2
 
 @pytest.mark.asyncio
@@ -937,12 +959,12 @@ async def test_phase_test_and_heal_fix_prompt_absolute_path_and_no_turn_cap(
 
     feedback_items = [{"id": 1, "description": "Bug", "file": "src/handler.py", "line": 10}]
 
-    result = await phases.phase_test_and_heal(
-        backend, make_work(tmp_path), feedback_items=feedback_items, allow_standalone=True,
-    )
+    session = repair_session(make_work(tmp_path), paths=frozenset(str(item["file"]) for item in feedback_items))
+    assert session.candidate is not None
+    await phases.phase_test_and_heal(backend, session, feedback_items=feedback_items, allow_standalone=True)
 
-    assert result.passed is True
-    assert result.retries == 1
+    assert session.test_attempts[-1].passed is True
+    assert session.test_retries == 1
     assert backend.call_count == 3
 
     fix_prompt = backend.prompts[1]
@@ -2089,9 +2111,10 @@ async def test_phase_commit_push_writes_daydream_trailers_host_side(
     git(tmp_path, "init", "--bare", "remote")
     git(repo, "remote", "add", "origin", str(bare))
 
-    backend = ScriptedBackend()
     work = make_work(repo, base_sha="ABC123", head_sha="DEF456")
-    await phase_commit_push(backend, work, **_retained_commit_tree(repo, {"app.py"}))
+    session = repair_session(work, paths=frozenset({"app.py"}))
+    assert session.candidate is not None
+    await phase_commit_push(session)
 
     message = git(repo, "log", "-1", "--format=%B")
     assert "Daydream-Run:" in message
@@ -2123,7 +2146,9 @@ async def test_declined_commit_still_runs_host_validation_before_success(
     repo = _init_plain_repo(tmp_path)
     work = make_work(repo)
     config = make_config(tmp_path, test_command="true")
-    await phase_commit_push(ScriptedBackend(), work, config=config)
+    session = repair_session(work, config=config)
+    assert session.candidate is not None
+    await phase_commit_push(session)
 
     assert calls, "validation must re-run the host test runner on decline"
     assert calls[0]["cwd"] == repo
@@ -2139,7 +2164,10 @@ async def test_declined_commit_surfaces_failed_validation(
     work = make_work(repo)
     config = make_config(tmp_path, test_command="false")
     with pytest.raises(RuntimeError, match="validation"):
-        await phase_commit_push(ScriptedBackend(), work, config=config)
+        session = repair_session(work, config=config)
+        assert session.candidate is not None
+        await phase_commit_push(session)
+
 
 @pytest.mark.asyncio
 async def test_declined_commit_without_configured_command_skips_validation(
@@ -2158,7 +2186,10 @@ async def test_declined_commit_without_configured_command_skips_validation(
     repo = _init_plain_repo(tmp_path)
     work = make_work(repo)
     config = make_config(tmp_path)
-    await phase_commit_push(ScriptedBackend(), work, config=config)
+    session = repair_session(work, config=config)
+    assert session.candidate is not None
+    await phase_commit_push(session)
+
 
 # phase_test_and_heal — option 1 setup-investigator wiring
 
@@ -2189,13 +2220,13 @@ async def test_approved_investigator_command_stays_host_side(
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "y")
     calls = _record_host_runs(monkeypatch, output=output)
 
-    result = await phases.phase_test_and_heal(
-        backend, make_work(tmp_path), feedback_items=None, allow_standalone=True,
-    )
+    session = repair_session(make_work(tmp_path), paths=frozenset())
+    assert session.candidate is not None
+    result = await phases.phase_test_and_heal(backend, session, feedback_items=None, allow_standalone=True)
 
-    assert result.passed is True
-    assert result.retries == 0
-    assert result.proceed is True
+    assert session.test_attempts[-1].passed is True
+    assert session.test_retries == 0
+    assert result is True
     assert [call["cmd"] for call in calls] == [argv]
     assert calls[0]["cwd"] == tmp_path
     assert len(backend.prompts) == 2
@@ -2213,7 +2244,6 @@ async def test_approved_investigator_backtick_only_command_is_skipped_not_crash(
 ) -> None:
     """A suggestion that sanitizes to empty argv is skipped with a warning."""
 
-
     backend = ScriptedBackend(script=[
         _FAIL_TURN, _structured_turn(_verdict("replace", "```", "verdict reason")), _PASS_TURN,
     ])
@@ -2221,13 +2251,13 @@ async def test_approved_investigator_backtick_only_command_is_skipped_not_crash(
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "y")
     calls = _record_host_runs(monkeypatch)
 
-    result = await phases.phase_test_and_heal(
-        backend, make_work(tmp_path), feedback_items=None, allow_standalone=True,
-    )
+    session = repair_session(make_work(tmp_path), paths=frozenset())
+    assert session.candidate is not None
+    result = await phases.phase_test_and_heal(backend, session, feedback_items=None, allow_standalone=True)
 
-    assert result.passed is True
-    assert result.retries == 1
-    assert result.proceed is True
+    assert session.test_attempts[-1].passed is True
+    assert session.test_retries == 1
+    assert result is True
     # No executable argv reaches the host runner.
     assert calls == []
 
@@ -2238,7 +2268,6 @@ async def test_phase_test_and_heal_spawn_error_routes_through_failure_gate(
 ) -> None:
     """Unspawnable commands enter the failure gate instead of escaping as subprocess errors."""
 
-
     async def boom(*_a: Any, **_k: Any) -> None:
         raise FileNotFoundError("no such file or directory: 'cd'")
 
@@ -2247,13 +2276,16 @@ async def test_phase_test_and_heal_spawn_error_routes_through_failure_gate(
     monkeypatch.setattr("daydream.phases.testing.resolve_gate", lambda **_k: False)
     config = make_config(tmp_path, test_command="cd server && npm test")
 
+    session = repair_session(make_work(tmp_path), config=config, paths=frozenset())
+    assert session.candidate is not None
     result = await phases.phase_test_and_heal(
-        ScriptedBackend(script=[]), make_work(tmp_path), feedback_items=None, config=config, allow_standalone=True,
+        ScriptedBackend(script=[]), session, feedback_items=None, allow_standalone=True
     )
 
-    assert result.passed is False
-    assert result.retries == 0
-    assert result.proceed is False
+    assert session.test_attempts[-1].passed is False
+    assert session.test_retries == 0
+    assert result is False
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("investigation", ["correct", "declined", "failed"])
@@ -2270,9 +2302,11 @@ async def test_unreplaced_test_command_retries_original_prompt(
     turn = (RuntimeError("scripted investigator failure"),) if investigation == "failed" else _structured_turn(verdict)
     backend = ScriptedBackend(script=[_FAIL_TURN, turn, _PASS_TURN])
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "n")
-    result = await phases.phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
-    assert result.passed is True
-    assert result.retries == 1
+    session = repair_session(make_work(tmp_path))
+    assert session.candidate is not None
+    await phases.phase_test_and_heal(backend, session, allow_standalone=True)
+    assert session.test_attempts[-1].passed is True
+    assert session.test_retries == 1
     assert len(backend.prompts) == 3
     assert "read-only setup-investigator" in backend.prompts[1]
     assert backend.prompts[2] == backend.prompts[0]
@@ -2282,10 +2316,8 @@ async def test_unreplaced_test_command_retries_original_prompt(
         assert any("Setup investigator failed" in message for message in warnings), warnings
 
 
-
-
-
 # phase_test_and_heal — option 4 failure-summarizer + handoff
+
 
 def test_minimal_handoff_separates_facts_from_unknown_cause() -> None:
     """The no-agent fallback mirrors the facts/hypotheses split and invents no cause."""
@@ -2342,9 +2374,17 @@ def _install_recorder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, on_wri
     monkeypatch.setattr("daydream.phases.handoff.maybe_fork", _noop_fork)
     return fake
 
-async def _run_option4_handoff(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_work: Callable[..., WorkContext],
-    turn: Sequence[AgentEvent | BaseException], *, recorder: bool = True, clipboard: bool = False,
-    prompt_fn: Callable[..., Any] | None = None, prepare: Callable[[ScriptedBackend, Any], None] | None = None,
+
+async def _run_option4_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    turn: Sequence[AgentEvent | BaseException],
+    *,
+    recorder: bool = True,
+    clipboard: bool = False,
+    prompt_fn: Callable[..., Any] | None = None,
+    prepare: Callable[[ScriptedBackend, Any], None] | None = None,
 ) -> tuple[ScriptedBackend, bool, int]:
     """Run choice 4 after optional preparation; return backend, success, and retry count."""
     fake_recorder = _install_recorder(monkeypatch, tmp_path) if recorder else None
@@ -2357,8 +2397,10 @@ async def _run_option4_handoff(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, 
     backend = ScriptedBackend(script=[_FAIL_TURN, turn])
     if prepare is not None:
         prepare(backend, fake_recorder)
-    result = await phases.phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True,)
-    return backend, result.passed, result.retries
+    session = repair_session(make_work(tmp_path))
+    assert session.candidate is not None
+    await phases.phase_test_and_heal(backend, session, allow_standalone=True)
+    return backend, session.test_attempts[-1].passed, session.test_retries
 
 
 @pytest.mark.asyncio
@@ -2560,7 +2602,6 @@ def test_resolve_handoff_paths_routes_complete_artifact_references(
         assert not path.exists(), "handoff references must survive the recorder's later flush"
 
 
-
 @pytest.mark.asyncio
 async def test_resolve_handoff_paths_roots_at_the_layout_run_directory(
     tmp_path: Path, make_work: Callable[..., WorkContext],
@@ -2643,12 +2684,12 @@ async def test_phase_test_and_heal_non_interactive_writes_handoff_without_menu(
     backend = ScriptedBackend(script=[_FAIL_TURN,
         _handoff_turn("# Handoff\n\nnon-interactive failure context"),
     ])
-    result = await phases.phase_test_and_heal(
-        backend, make_work(tmp_path), run_context=run_context, allow_standalone=True,
-    )
+    session = repair_session(make_work(tmp_path))
+    assert session.candidate is not None
+    await phases.phase_test_and_heal(backend, session, run_context=run_context, allow_standalone=True)
     # Took the abort/terminate path (choice "4" semantics, no mutation).
-    assert result.passed is False
-    assert result.retries == 0
+    assert session.test_attempts[-1].passed is False
+    assert session.test_retries == 0
     # The live handoff contains the summarizer body.
     expected = tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md"
     assert expected.is_file()
@@ -2675,11 +2716,11 @@ async def test_phase_test_and_heal_non_interactive_fallback_has_facts_hypotheses
     prompt_sentinel = Mock(side_effect=AssertionError("prompt_user must not be called in non-interactive mode"),)
     monkeypatch.setattr("daydream.run_context._prompt_user", prompt_sentinel)
     backend = ScriptedBackend(script=[_FAIL_TURN, (RuntimeError("scripted summarizer failure"),)])
-    result = await phases.phase_test_and_heal(
-        backend, make_work(tmp_path), run_context=run_context, allow_standalone=True,
-    )
-    assert result.passed is False
-    assert result.retries == 0
+    session = repair_session(make_work(tmp_path))
+    assert session.candidate is not None
+    await phases.phase_test_and_heal(backend, session, run_context=run_context, allow_standalone=True)
+    assert session.test_attempts[-1].passed is False
+    assert session.test_retries == 0
     body = (tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md").read_text(encoding="utf-8",)
     assert "## Verified facts" in body
     assert "## Hypotheses (unverified)" in body
@@ -2707,12 +2748,12 @@ async def test_phase_test_and_heal_yes_bounded_loop_exactly_one_auto_attempt(
         _FAIL_TURN,
         _handoff_turn("# Handoff\nauto-mode failure"),
     ])
-    result = await phases.phase_test_and_heal(
-        backend, make_work(tmp_path), run_context=run_context, allow_standalone=True,
-    )
+    session = repair_session(make_work(tmp_path))
+    assert session.candidate is not None
+    await phases.phase_test_and_heal(backend, session, run_context=run_context, allow_standalone=True)
     # Loop terminated after exactly one auto fix attempt.
-    assert result.passed is False
-    assert result.retries == 1
+    assert session.test_attempts[-1].passed is False
+    assert session.test_retries == 1
     # Exactly 4 backend calls: test → fix → test → summarizer.
     assert backend.call_count == 4, (f"Expected 4 backend calls, got {backend.call_count}: {backend.prompts!r}")
     assert "Analyze the failures and fix them" in backend.prompts[1], backend.prompts[1]
@@ -2748,11 +2789,13 @@ async def test_normal_test_path_uses_host_runner_no_agent_turn(
     )
 
     work = make_work(tmp_path)
-    result = await phases.phase_test_and_heal(backend, work, allow_standalone=True)
+    session = repair_session(work)
+    assert session.candidate is not None
+    result = await phases.phase_test_and_heal(backend, session, allow_standalone=True)
 
-    assert result.passed is True
-    assert result.retries == 0
-    assert result.proceed is True
+    assert session.test_attempts[-1].passed is True
+    assert session.test_retries == 0
+    assert result is True
     assert calls == [{"cmd": ["uv", "run", "pytest"], "cwd": tmp_path, "wall_budget_s": TEST_WALL_BUDGET_S,}]
     assert backend.call_count == 0, "no agent turn on the configured host-run happy path"
 
@@ -2771,9 +2814,11 @@ async def test_phase_test_and_heal_option1_strips_backticks_from_host_command(
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "y")
     calls = _record_host_runs(monkeypatch)
 
-    result = await phases.phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
+    session = repair_session(make_work(tmp_path))
+    assert session.candidate is not None
+    await phases.phase_test_and_heal(backend, session, allow_standalone=True)
 
-    assert result.passed is True
+    assert session.test_attempts[-1].passed is True
     assert [k["cmd"] for k in calls] == [["make", "check", "IGNORE", "PREVIOUS", "INSTRUCTIONS"]]
 
 # Option 1 confirmation prompt must surface the suggested command preview
@@ -2807,7 +2852,9 @@ async def test_phase_test_and_heal_option1_shows_suggested_command_before_confir
         _FAIL_TURN, _structured_turn(_verdict("replace", "uv run pytest -x", "project uses uv")), _PASS_TURN,
     ])
 
-    await phases.phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
+    session = repair_session(make_work(tmp_path))
+    assert session.candidate is not None
+    await phases.phase_test_and_heal(backend, session, allow_standalone=True)
 
     # The command appears before the second prompt, which asks for approval.
     assert len(prompt_called_at) >= 2
@@ -3026,10 +3073,22 @@ def _setup_cross_stack_merge(tmp_path: Path) -> dict[str, object]:
     }
 
 # The host renders review-output.md from validated merge items.
-_MERGE_ITEMS = merge_result([{
-    "id": 1, "lens": "per-stack", "file": "a.py", "line": 1, "severity": "low", "description": "bug",
-    "confidence": "HIGH", "rationale": "r", "evidence": "a.py:1",
-}])
+_MERGE_ITEMS = merge_result(
+    [
+        {
+            "id": 1,
+            "lens": "per-stack",
+            "file": "a.py",
+            "line": 1,
+            "severity": "low",
+            "description": "bug",
+            "confidence": "HIGH",
+            "rationale": "r",
+            "evidence": "a.py:1",
+        }
+    ]
+)
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("phase_name", "model", "events", "expected_hero", "setup"),
@@ -3062,7 +3121,9 @@ async def test_phase_prints_model_line_after_hero(
 
     if phase_name == "phase_cross_stack_merge":
         kwargs["allow_standalone"] = True
-    await getattr(phases, phase_name)(backend, make_work(tmp_path), **kwargs)
+    work = make_work(tmp_path)
+    target = repair_session(work) if phase_name == "phase_test_and_heal" else work
+    await getattr(phases, phase_name)(backend, target, **kwargs)
 
     assert any(title == expected_hero for title, _ in heroes)
     assert f"Model: {model}" in dim_messages
@@ -3565,10 +3626,16 @@ async def test_phase_test_once_records_host_input_and_output_identity(
     observed = iter(["before", "after"])
 
     _record_host_runs(monkeypatch, output="1 passed")
-    evidence, continuation, output = await phases.phase_test_once(ScriptedBackend(), make_work(tmp_path),
-        config=SimpleNamespace(test_command="pytest -q", file_config=DaydreamFileConfig(test_command="pytest -q"),),
-        session_id="session-1", capture_tree_key=lambda: next(observed),
+    session = repair_session(
+        make_work(tmp_path),
+        config=SimpleNamespace(
+            test_command="pytest -q",
+            file_config=DaydreamFileConfig(test_command="pytest -q"),
+        ),
+        session_id="session-1",
     )
+    monkeypatch.setattr(session, "capture_key", lambda: next(observed))
+    evidence, continuation, output = await phases.phase_test_once(ScriptedBackend(), session)
 
     assert evidence.session_id == "session-1"
     assert evidence.kind == "host"
@@ -3589,15 +3656,20 @@ async def test_phase_test_and_heal_records_each_agent_attempt_and_heal_scope(
     backend = ScriptedBackend(script=[_FAIL_TURN, _FIX_TURN, _PASS_TURN])
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *args, **kwargs: "2")
     keys = iter(["in-1", "out-1", "in-2", "out-2"])
-    result = await phases.phase_test_and_heal(
-        backend, make_work(tmp_path), feedback_items=feedback, session_id="session-2",
-        capture_tree_key=lambda: next(keys), footprint=footprint, allow_standalone=True,
+    session = repair_session(
+        make_work(tmp_path), session_id="session-2", paths=frozenset(str(item["file"]) for item in feedback)
     )
+    session.footprint = footprint
+    monkeypatch.setattr(session, "capture_key", lambda: next(keys))
+    await phases.phase_test_and_heal(backend, session, feedback_items=feedback, allow_standalone=True)
 
-    assert result.passed is True
-    assert result.ignored is False
-    assert [(a.input_tree_key, a.output_tree_key) for a in result.attempts] == [("in-1", "out-1"), ("in-2", "out-2"),]
-    assert all(a.kind == "agent" and a.command is None for a in result.attempts)
+    assert session.test_attempts[-1].passed is True
+    assert session.test_ignored is False
+    assert [(a.input_tree_key, a.output_tree_key) for a in session.test_attempts] == [
+        ("in-1", "out-1"),
+        ("in-2", "out-2"),
+    ]
+    assert all(a.kind == "agent" and a.command is None for a in session.test_attempts)
     heal_prompt = backend.prompts[1]
     assert "Authorized edit scope" in heal_prompt
     assert "a.py" in heal_prompt and "readme.md" in heal_prompt
@@ -3647,9 +3719,11 @@ async def test_strict_commit_stages_retained_paths_once_and_commits_staged_index
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("strict commit must not restage")),
     )
 
-    committed = await phase_commit_push(
-        ScriptedBackend(), make_work(repo), retained_paths=frozenset({"app.py"}), retained_states=retained_states,
-        initial_index=initial_index, run_context=RunContext(InteractionPolicy(assume="yes")))
+    session = repair_session(make_work(repo), paths=frozenset({"app.py"}))
+    assert session.candidate is not None
+    session.initial_index = initial_index
+    session.candidate = replace(session.candidate, snapshot=replace(session.candidate.snapshot, states=retained_states))
+    committed = await phase_commit_push(session, run_context=RunContext(InteractionPolicy(assume="yes")))
 
     assert committed is not None
     assert calls == {"stage": 1, "commit_staged": 1}
@@ -3677,9 +3751,14 @@ async def test_strict_commit_accepts_new_file_permissions_without_changing_owner
     retained = frozenset({"new.py"})
     before_states = git_ops.snapshot_worktree_paths(repo, ["new.py", "private.txt"])
 
-    assert (await phase_commit_push(ScriptedBackend(), make_work(repo), retained_paths=retained,
-        retained_states=git_ops.snapshot_worktree_paths(repo, retained), initial_index=initial_index,
-        run_context=RunContext(InteractionPolicy(assume="yes")))) is not None
+    session = repair_session(make_work(repo), paths=retained)
+    assert session.candidate is not None
+    session.initial_index = initial_index
+    session.candidate = replace(
+        session.candidate,
+        snapshot=replace(session.candidate.snapshot, states=git_ops.snapshot_worktree_paths(repo, retained)),
+    )
+    assert (await phase_commit_push(session, run_context=RunContext(InteractionPolicy(assume="yes")))) is not None
 
     assert git(repo, "show", "HEAD:new.py") == "new retained content"
     assert git_ops.snapshot_worktree_paths(repo, ["new.py", "private.txt"]) == before_states
@@ -3718,9 +3797,14 @@ async def test_strict_commit_preserves_non_utf8_retained_and_protected_paths(
     if native_retained:
         (repo / native).write_bytes(b"retained after\n")
 
-    assert (await phase_commit_push(ScriptedBackend(), make_work(repo), retained_paths=retained,
-        retained_states=git_ops.snapshot_worktree_paths(repo, retained), initial_index=initial_index,
-        run_context=RunContext(InteractionPolicy(assume="yes")))) is not None
+    session = repair_session(make_work(repo), paths=retained)
+    assert session.candidate is not None
+    session.initial_index = initial_index
+    session.candidate = replace(
+        session.candidate,
+        snapshot=replace(session.candidate.snapshot, states=git_ops.snapshot_worktree_paths(repo, retained)),
+    )
+    assert (await phase_commit_push(session, run_context=RunContext(InteractionPolicy(assume="yes")))) is not None
     assert (repo / native).read_bytes() == (
         b"retained after\n" if native_retained else b"private or retained\n"
     )
@@ -3728,9 +3812,13 @@ async def test_strict_commit_preserves_non_utf8_retained_and_protected_paths(
     assert git(repo, "diff", "--cached") == ""
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("artifact_path", "tracked", "preexisting", "must_block"),
-    [(".daydream/runtime.json", False, False, False), (".daydream/runtime.json", False, True, False),
-        (".review-output.md", False, True, False), (".daydreamish/runtime.json", False, False, True),
+@pytest.mark.parametrize(
+    ("artifact_path", "tracked", "preexisting", "must_block"),
+    [
+        (".daydream/runtime.json", False, False, False),
+        (".daydream/runtime.json", False, True, False),
+        (".review-output.md", False, True, False),
+        (".daydreamish/runtime.json", False, False, True),
         (".daydream/tracked.json", True, True, True),
     ],
 )
@@ -3765,9 +3853,13 @@ async def test_strict_commit_real_hook_distinguishes_runtime_artifacts_from_user
     hook.chmod(0o755)
 
     async def commit_retained() -> phases.PushReceipt | None:
-        return await phase_commit_push(
-            ScriptedBackend(), make_work(repo), retained_paths=frozenset({"app.py"}), retained_states=retained_states,
-            initial_index=initial_index, run_context=RunContext(InteractionPolicy(assume="yes")))
+        session = repair_session(make_work(repo), paths=frozenset({"app.py"}))
+        assert session.candidate is not None
+        session.initial_index = initial_index
+        session.candidate = replace(
+            session.candidate, snapshot=replace(session.candidate.snapshot, states=retained_states)
+        )
+        return await phase_commit_push(session, run_context=RunContext(InteractionPolicy(assume="yes")))
 
     if must_block:
         with pytest.raises(git_ops.GitError, match="push blocked"):
@@ -3806,10 +3898,17 @@ async def test_strict_commit_blocks_after_commit_hook_mutates_worktree_or_index(
 
     monkeypatch.setattr(git_ops, "commit_staged", _mutating_commit)
 
-    with pytest.raises(git_ops.GitError, match=r"Local commit [0-9a-f]+ was created.*push blocked",):
-        await phase_commit_push(
-            ScriptedBackend(), make_work(repo), retained_paths=frozenset({"app.py"}), retained_states=retained_states,
-            initial_index=initial_index, run_context=RunContext(InteractionPolicy(assume="yes")))
+    with pytest.raises(
+        git_ops.GitError,
+        match=r"Local commit [0-9a-f]+ was created.*push blocked",
+    ):
+        session = repair_session(make_work(repo), paths=frozenset({"app.py"}))
+        assert session.candidate is not None
+        session.initial_index = initial_index
+        session.candidate = replace(
+            session.candidate, snapshot=replace(session.candidate.snapshot, states=retained_states)
+        )
+        await phase_commit_push(session, run_context=RunContext(InteractionPolicy(assume="yes")))
 
     assert git(repo, "show", "HEAD:app.py") == "after"
     expected_worktree = "hook mutation\n" if hook_mutation == "worktree" else "after\n"
@@ -3952,14 +4051,8 @@ async def test_phase_fix_parallel_rolled_back_group_dispatch_is_failed(
 
 # --- Issue #172 Fix B extended: inline small diffs into intent / wonder ------
 
-_INLINE_TEST_DIFF = (
-    "diff --git a/x.py b/x.py\n"
-    "--- a/x.py\n"
-    "+++ b/x.py\n"
-    "@@ -1 +1 @@\n"
-    "-old\n"
-    "+new\n"
-)
+_INLINE_TEST_DIFF = "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n"
+
 
 def test_intent_prompt_inlines_small_diff() -> None:
     prompt = build_intent_prompt(
@@ -4073,9 +4166,10 @@ async def test_first_targeted_call_runs_in_the_resolved_package_cwd(
     config = make_config(repo, test_command="uv run pytest")
     recipe = resolve_test_recipe(config, config, repo_root=repo, cwd=api)
 
-    await phases.phase_test_once(
-        ScriptedBackend(), make_work(repo), config=config, session_id="s", capture_tree_key=lambda: "k", recipe=recipe,
-    )
+    session = repair_session(make_work(repo), config=config, recipe=recipe, session_id="s")
+    assert session.candidate is not None
+    monkeypatch.setattr(session, "capture_key", lambda: "k")
+    await phases.phase_test_once(ScriptedBackend(), session)
 
     assert len(calls) == 1
     assert calls[0]["cwd"] == api
@@ -4090,9 +4184,10 @@ async def test_repo_root_recipe_keeps_the_worktree_root_cwd(
     calls = _record_host_runs(monkeypatch)
     config = make_config(repo, test_command="true")
     recipe = resolve_test_recipe(config, config, repo_root=repo)
-    await phases.phase_test_once(
-        ScriptedBackend(), make_work(repo), config=config, session_id="s", capture_tree_key=lambda: "k", recipe=recipe,
-    )
+    session = repair_session(make_work(repo), config=config, recipe=recipe, session_id="s")
+    assert session.candidate is not None
+    monkeypatch.setattr(session, "capture_key", lambda: "k")
+    await phases.phase_test_once(ScriptedBackend(), session)
     assert calls[0]["cwd"] == repo
 
 @pytest.mark.asyncio
@@ -4107,9 +4202,10 @@ async def test_supplied_recipe_never_triggers_a_second_resolution(
     monkeypatch.setattr(
         "daydream.phases.test_evidence._canonical_test_cmd", lambda *a, **k: pytest.fail("second discovery"),
     )
-    await phases.phase_test_once(
-        ScriptedBackend(), make_work(repo), config=config, session_id="s", capture_tree_key=lambda: "k", recipe=recipe,
-    )
+    session = repair_session(make_work(repo), config=config, recipe=recipe, session_id="s")
+    assert session.candidate is not None
+    monkeypatch.setattr(session, "capture_key", lambda: "k")
+    await phases.phase_test_once(ScriptedBackend(), session)
 
 
 @pytest.mark.asyncio
@@ -4123,14 +4219,15 @@ async def test_declined_commit_reuses_matching_evidence_without_rerunning(
     work = make_work(repo)
     config = make_config(repo, test_command="true")
     recipe = resolve_test_recipe(config, config, repo_root=repo)
-    identity = _execution_identity(repo, recipe=recipe, argv=("true",))
+    session = repair_session(work, config=config, recipe=recipe)
+    assert session.candidate is not None
+    identity = _execution_identity(repo, recipe=recipe, argv=("true",), output_tree_key=session.capture_key())
     evidence = TestAttemptEvidence(session_id="s", kind="host", command=("true",), passed=True,
         input_tree_key=identity.output_tree_key, output_tree_key=identity.output_tree_key, identity=identity,
     )
 
-    result = await phase_commit_push(ScriptedBackend(), work, config=config, recipe=recipe, evidence=evidence,
-        retained_tree_key=identity.output_tree_key,
-    )
+    session.candidate = replace(session.candidate, test=evidence)
+    result = await phase_commit_push(session)
 
     assert result is None
     assert calls == [], "matching evidence must not re-run the canonical command"
@@ -4147,13 +4244,24 @@ async def test_declined_commit_with_stale_evidence_still_validates(
     repo = _init_plain_repo(tmp_path)
     config = make_config(repo, test_command="true")
     recipe = resolve_test_recipe(config, config, repo_root=repo)
-    identity = _execution_identity(repo, recipe=recipe, argv=("true",), output_tree_key="stale")
+    session = repair_session(make_work(repo), config=config, recipe=recipe)
+    assert session.candidate is not None
+    identity = _execution_identity(repo, recipe=recipe, argv=("true",), output_tree_key=session.capture_key())
+    identity = replace(identity, config_digest="stale")
 
-    await phase_commit_push(ScriptedBackend(), make_work(repo), config=config, recipe=recipe,
-        evidence=TestAttemptEvidence(session_id="s", kind="host", command=("true",), passed=True,
-            input_tree_key="stale", output_tree_key="stale", identity=identity,
-        ), retained_tree_key=identity.output_tree_key,
+    session.candidate = replace(
+        session.candidate,
+        test=TestAttemptEvidence(
+            session_id="s",
+            kind="host",
+            command=("true",),
+            passed=True,
+            input_tree_key=identity.output_tree_key,
+            output_tree_key=identity.output_tree_key,
+            identity=identity,
+        ),
     )
+    await phase_commit_push(session)
 
     assert len(calls) == 1 and calls[0]["cmd"] == ["true"]
 
@@ -4167,14 +4275,26 @@ async def test_declined_commit_with_red_evidence_still_raises(
     repo = _init_plain_repo(tmp_path)
     config = make_config(repo, test_command="false")
     recipe = resolve_test_recipe(config, config, repo_root=repo)
-    identity = _execution_identity(repo, recipe=recipe, argv=("false",), outcome="failed")
+    session = repair_session(make_work(repo), config=config, recipe=recipe)
+    assert session.candidate is not None
+    identity = _execution_identity(
+        repo, recipe=recipe, argv=("false",), outcome="failed", output_tree_key=session.capture_key()
+    )
 
     with pytest.raises(RuntimeError, match="validation"):
-        await phase_commit_push(ScriptedBackend(), make_work(repo), config=config, recipe=recipe,
-            evidence=TestAttemptEvidence(session_id="s", kind="host", command=("false",), passed=False,
-                input_tree_key=identity.output_tree_key, output_tree_key=identity.output_tree_key, identity=identity,
-            ), retained_tree_key=identity.output_tree_key,
+        session.candidate = replace(
+            session.candidate,
+            test=TestAttemptEvidence(
+                session_id="s",
+                kind="host",
+                command=("false",),
+                passed=False,
+                input_tree_key=identity.output_tree_key,
+                output_tree_key=identity.output_tree_key,
+                identity=identity,
+            ),
         )
+        await phase_commit_push(session)
 
 
 def _reuse_offer(identity: TestExecutionIdentity) -> TestAttemptEvidence:
@@ -4201,11 +4321,15 @@ async def test_hook_aware_push_reuses_evidence_but_still_runs_the_hook(
     runs = _record_host_runs(monkeypatch)
     config = _hook_run_config()
     recipe = resolve_test_recipe(config, config, repo_root=repo)
-    identity = _execution_identity(repo, recipe=recipe, argv=("true",))
-    ok = await phase_commit_push(ScriptedBackend(), work,
-        items=[{"file": "fix.py", "description": "fix bug"}], config=config, recipe=recipe,
-        evidence=_reuse_offer(identity), retained_tree_key=identity.output_tree_key,
-        **_retained_commit_tree(repo, {"fix.py"}), run_context=RunContext(InteractionPolicy(assume="yes")))
+    session = repair_session(work, config=config, recipe=recipe, paths=frozenset({"fix.py"}))
+    assert session.candidate is not None
+    identity = _execution_identity(repo, recipe=recipe, argv=("true",), output_tree_key=session.capture_key())
+    session.candidate = replace(session.candidate, test=_reuse_offer(identity))
+    ok = await phase_commit_push(
+        session,
+        items=[{"file": "fix.py", "description": "fix bug"}],
+        run_context=RunContext(InteractionPolicy(assume="yes")),
+    )
 
     assert ok is not None
     assert runs == [], "the redundant proactive suite run is the only thing removed"
@@ -4218,10 +4342,13 @@ async def test_hook_aware_push_reuses_evidence_but_still_runs_the_hook(
     (repo_two / "fix.py").write_text("fixed\n")
     baseline = _record_host_runs(monkeypatch, output="")
 
-    await phase_commit_push(ScriptedBackend(), make_work(repo_two),
+    session_2 = repair_session(make_work(repo_two), config=_hook_run_config(), paths=frozenset({"fix.py"}))
+    assert session_2.candidate is not None
+    await phase_commit_push(
+        session_2,
         items=[{"file": "fix.py", "description": "fix bug"}],
-        **_retained_commit_tree(repo_two, {"fix.py"}), config=_hook_run_config(),
-        run_context=RunContext(InteractionPolicy(assume="yes")))
+        run_context=RunContext(InteractionPolicy(assume="yes")),
+    )
 
     assert len(baseline) == 1, "the no-evidence baseline pays exactly one orchestrator run"
 
@@ -4238,13 +4365,17 @@ async def test_hook_failure_still_blocks_the_push_on_a_reuse_hit(
     runs = _record_host_runs(monkeypatch)
     config = _hook_run_config()
     recipe = resolve_test_recipe(config, config, repo_root=repo)
-    identity = _execution_identity(repo, recipe=recipe, argv=("true",))
+    session = repair_session(work, config=config, recipe=recipe, paths=frozenset({"fix.py"}))
+    assert session.candidate is not None
+    identity = _execution_identity(repo, recipe=recipe, argv=("true",), output_tree_key=session.capture_key())
 
     with pytest.raises((GitError, PushAttemptError)):
-        await phase_commit_push(ScriptedBackend(), work,
+        session.candidate = replace(session.candidate, test=_reuse_offer(identity))
+        await phase_commit_push(
+            session,
             items=[{"file": "fix.py", "description": "fix bug"}],
-            config=config, recipe=recipe, evidence=_reuse_offer(identity), retained_tree_key=identity.output_tree_key,
-            **_retained_commit_tree(repo, {"fix.py"}), run_context=RunContext(InteractionPolicy(assume="yes")))
+            run_context=RunContext(InteractionPolicy(assume="yes")),
+        )
     assert runs == []
 
 @pytest.mark.asyncio
@@ -4258,18 +4389,21 @@ async def test_matching_evidence_cannot_bypass_failed_commit_verification(
     runs = _record_host_runs(monkeypatch, output="")
     config = _hook_run_config()
     recipe = resolve_test_recipe(config, config, repo_root=repo)
-    identity = _execution_identity(repo, recipe=recipe, argv=("true",))
+    session = repair_session(make_work(repo), config=config, recipe=recipe, paths=frozenset({"fix.py"}))
+    assert session.candidate is not None
+    identity = _execution_identity(repo, recipe=recipe, argv=("true",), output_tree_key=session.capture_key())
 
     # A post-commit mutation invalidates an otherwise matching evidence offer.
     hook = repo / ".git" / "hooks" / "post-commit"
     hook.write_text("#!/bin/sh\nprintf 'hook mutation\n' > fix.py\n")
     hook.chmod(0o755)
     with pytest.raises(GitError, match="post-commit validation failed; push blocked"):
+        session.candidate = replace(session.candidate, test=_reuse_offer(identity))
         await phase_commit_push(
-            ScriptedBackend(), make_work(repo),
-            items=[{"file": "fix.py", "description": "fix bug"}], config=config, recipe=recipe,
-            evidence=_reuse_offer(identity), retained_tree_key=identity.output_tree_key,
-            **_retained_commit_tree(repo, {"fix.py"}), run_context=RunContext(InteractionPolicy(assume="yes")))
+            session,
+            items=[{"file": "fix.py", "description": "fix bug"}],
+            run_context=RunContext(InteractionPolicy(assume="yes")),
+        )
     assert runs == [], "failed commit verification must stop before reusing or rerunning tests"
     assert git(repo, "ls-remote", "origin", "refs/heads/main") == ""
     assert (repo / "fix.py").read_text() == "hook mutation\n"
@@ -4295,13 +4429,23 @@ async def test_a_reuse_decision_is_reported_and_persisted(
     deep.mkdir(parents=True)
     config = make_config(repo, test_command="true")
     recipe = resolve_test_recipe(config, config, repo_root=repo)
-    identity = _execution_identity(repo, recipe=recipe, argv=("true",))
+    session = repair_session(make_work(repo), config=config, recipe=recipe)
+    assert session.candidate is not None
+    identity = _execution_identity(repo, recipe=recipe, argv=("true",), output_tree_key=session.capture_key())
 
-    await phase_commit_push(ScriptedBackend(), make_work(repo), config=config, recipe=recipe,
-        evidence=TestAttemptEvidence(session_id="s", kind="host", command=("true",), passed=True,
-            input_tree_key=identity.output_tree_key, output_tree_key=identity.output_tree_key, identity=identity,
-        ), retained_tree_key=identity.output_tree_key,
+    session.candidate = replace(
+        session.candidate,
+        test=TestAttemptEvidence(
+            session_id="s",
+            kind="host",
+            command=("true",),
+            passed=True,
+            input_tree_key=identity.output_tree_key,
+            output_tree_key=identity.output_tree_key,
+            identity=identity,
+        ),
     )
+    await phase_commit_push(session)
 
     record = json.loads(DeepArtifact.EVIDENCE_REUSE.at(deep).read_text())
     gate = record["gates"]["declined-commit"]
@@ -4326,12 +4470,25 @@ async def test_a_mismatch_record_names_the_component(
     config = make_config(repo, test_command="true")
     recipe = resolve_test_recipe(config, config, repo_root=repo)
 
-    await phase_commit_push(ScriptedBackend(), make_work(repo), config=config, recipe=recipe,
-        evidence=TestAttemptEvidence(session_id="s", kind="host", command=("true",), passed=True,
-            input_tree_key="stale", output_tree_key="stale",
-            identity=_execution_identity(repo, recipe=recipe, argv=("true",), output_tree_key="stale"),
-        ), retained_tree_key="stale",
+    session = repair_session(make_work(repo), config=config, recipe=recipe)
+    assert session.candidate is not None
+    tree_key = session.capture_key()
+    session.candidate = replace(
+        session.candidate,
+        test=TestAttemptEvidence(
+            session_id="s",
+            kind="host",
+            command=("true",),
+            passed=True,
+            input_tree_key=tree_key,
+            output_tree_key=tree_key,
+            identity=replace(
+                _execution_identity(repo, recipe=recipe, argv=("true",), output_tree_key=tree_key),
+                input_tree_key="stale",
+            ),
+        ),
     )
+    await phase_commit_push(session)
 
     record = json.loads(DeepArtifact.EVIDENCE_REUSE.at(deep).read_text())
     gate = record["gates"]["declined-commit"]

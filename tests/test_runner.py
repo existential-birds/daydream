@@ -53,7 +53,7 @@ from daydream.extensions import get_registry
 from daydream.extensions.loader import build_registry
 from daydream.flows.engine import FlowContext
 from daydream.github_app import GitHubExecutionInput
-from daydream.phases import TestAndHealResult, TestAttemptEvidence
+from daydream.phases import TestAttemptEvidence
 from daydream.pr_review import PRInfo
 from daydream.run_artifacts import (
     _open_recorder,
@@ -1283,13 +1283,14 @@ async def test_fix_cycle_items_severity_ordered(
     async def _spy_fix_parallel(_b: Any, _w: Any, items: Any, **_k: Any) -> dict[str, Any]:
         order.append([item["severity"] for item in items])
         return {}
-    async def _noop_test(*_a: Any, **kwargs: Any) -> Any:
-        key = kwargs["capture_tree_key"]()
+    async def _noop_test(_backend: Any, session: Any, **_kwargs: Any) -> bool:
+        key = session.capture_key()
         attempt = TestAttemptEvidence(
-            session_id=kwargs["session_id"], kind="host", command=("true",), passed=True, input_tree_key=key,
+            session_id=session.session_id, kind="host", command=("true",), passed=True, input_tree_key=key,
             output_tree_key=key,
         )
-        return TestAndHealResult(True, 0, True, False, (attempt,))
+        session.test_attempts.append(attempt)
+        return True
     monkeypatch.setattr("daydream.deep.fix_steps.phase_fix_parallel", _spy_fix_parallel)
     monkeypatch.setattr("daydream.deep.fix_steps.phase_test_and_heal", _noop_test)
     monkeypatch.setattr("daydream.deep.fix_steps.phase_commit_push", _noop_commit)

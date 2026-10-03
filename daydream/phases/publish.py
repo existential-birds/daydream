@@ -3,14 +3,11 @@
 import os
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import daydream
 from daydream import agent, git_ops, ui
 from daydream.archive.git_safe import normalize_remote_url
-from daydream.backends import (
-    Backend,
-)
 from daydream.deep.artifacts import (
     DeepArtifact,
     deep_dir,
@@ -41,6 +38,9 @@ from daydream.trajectory import (
     host_phase_scope,
 )
 from daydream.workspace import WorkContext
+
+if TYPE_CHECKING:
+    from daydream.deep.fix_state import FixCycleState
 
 
 def require_empty_staged_index(work: WorkContext) -> git_ops.IndexSnapshot:
@@ -104,7 +104,9 @@ def _verify_strict_commit_and_worktree(
     precommit_states: tuple[git_ops.GitPathState, ...],
 ) -> None:
     """Fail closed when commit hooks alter the commit, index, or worktree."""
-    committed_paths = frozenset(git_ops.diff_name_only_strict(work.repo, sha_before, "HEAD"))
+    committed_paths = frozenset(
+        git_ops.diff_name_only_strict(work.repo, sha_before, "HEAD"),
+    )
     if committed_paths != retained_paths:
         raise GitError("Committed path set does not match the validated staged index")
     if git_ops.snapshot_commit_paths(work.repo, "HEAD", retained_paths) != staged_states:
@@ -271,14 +273,6 @@ class PushReceipt:
     pushed_repository: str | None
 
 
-@dataclass(frozen=True)
-class CommitPushResult:
-    """Host commit result and optional verified push receipt."""
-
-    committed: bool
-    push: PushReceipt | None
-
-
 class PushAttemptError(GitError):
     """A push or its exact remote-ref verification failed."""
 
@@ -287,45 +281,18 @@ class PushAttemptError(GitError):
         self.receipt = receipt
 
 
-def _validate_reuse_offer(
-    evidence: TestAttemptEvidence | None, retained_tree_key: str | None
-) -> None:
-    """Reject incomplete evidence/key pairs or keys that disagree with the evidence output."""
-    if (evidence is None) != (retained_tree_key is None):
-        raise ValueError(
-            "evidence and retained_tree_key must be supplied together; "
-            "a half-formed reuse offer is refused"
-        )
-    if evidence is None or retained_tree_key is None:
-        return
-    identity = evidence.identity
-    if identity is not None and identity.output_tree_key != retained_tree_key:
-        raise ValueError(
-            "retained_tree_key does not match the evidence's output tree key: "
-            f"{retained_tree_key!r} != {identity.output_tree_key!r}"
-        )
-
-
 @bind_resolved_run_context
 async def phase_commit_push(
-    backend: Backend,
-    work: WorkContext,
+    session: "FixCycleState",
     *,
-    config: Any = None,
     items: list[dict[str, Any]] | None = None,
-    retained_paths: frozenset[str] | None = None,
-    retained_states: tuple[git_ops.GitPathState, ...] | None = None,
-    initial_index: git_ops.IndexSnapshot | None = None,
-    recipe: TestRecipe | None = None,
-    evidence: TestAttemptEvidence | None = None,
-    retained_tree_key: str | None = None,
     run_context: RunContext | None = None,
 ) -> PushReceipt | None:
     """Gate and publish the retained tree through normal hooks and exact-state checks.
 
-    retained_paths, retained_states, and the empty initial_index snapshot are required
-    for staging. Optional findings shape the deterministic commit message. Evidence
-    and retained_tree_key must arrive together and agree; malformed offers fail.
+    The accepted session owns its verified candidate and initial empty index.
+    Optional findings shape the deterministic commit message. Current target and
+    matching test evidence are checked before any offer or publication is consumed.
 
     Declining leaves fixes uncommitted but still requires successful validation;
     validation errors propagate to the orchestrator's failed commit step. A push
@@ -333,11 +300,28 @@ async def phase_commit_push(
     the remote reports that exact commit. PushAttemptError retains the attempted
     receipt for the caller's audit when pushing or verification fails.
     """
-    del backend  # host-native commit: no agent turn (issue #726)
     run_context = resolve_run_context(run_context)
     agent.console.print()
     ui.print_info(agent.console, "Committing and pushing changes...")
-    _validate_reuse_offer(evidence, retained_tree_key)
+    candidate = session.candidate
+    if candidate is None:
+        raise ValueError("repair session has no verified retained tree")
+    snapshot = candidate.snapshot
+    evidence = candidate.test
+    retained_tree_key = snapshot.tree_key
+    if (
+        candidate.key.tree_key != retained_tree_key
+        or session.capture_key() != retained_tree_key
+        or candidate.key.policy_revision != session.footprint.policy_revision
+    ):
+        raise ValueError("repair target changed after retained-tree verification")
+    if evidence is not None and (
+        evidence.session_id != session.session_id
+        or evidence.input_tree_key != retained_tree_key
+        or evidence.output_tree_key != retained_tree_key
+        or (evidence.identity is not None and evidence.identity.output_tree_key != retained_tree_key)
+    ):
+        raise ValueError("test evidence does not match the verified retained tree")
 
     # Resolve both interaction axes here for every commit path: --yes commits,
     # unattended defaults decline, otherwise prompt with a decline default.
@@ -351,61 +335,61 @@ async def phase_commit_push(
         ui.print_dim(agent.console, "Skipping commit and push")
         # Declining commit still runs host tests; failures stop the run.
         await _validate_declined_fixes(
-            work,
-            config,
-            recipe=recipe,
+            session.work,
+            session.config,
+            recipe=session.recipe,
             evidence=evidence,
             retained_tree_key=retained_tree_key,
         )
         return None
 
-    if retained_paths is None or retained_states is None or initial_index is None:
-        raise TypeError("retained_paths, retained_states, and initial_index are required for committing")
-    sha_before = git_ops.head_sha(work.repo)
+    sha_before = git_ops.head_sha(session.work.repo)
     # Runtime output may change during host phases. Tracked and retained paths
     # remain protected even when their names belong to the runtime namespace.
-    precommit_paths = retained_paths | frozenset(
-        git_ops.changed_paths_z(work.repo, sha_before, include_runtime_artifacts=False)
+    precommit_paths = snapshot.paths | frozenset(
+        git_ops.changed_paths_z(session.work.repo, sha_before, include_runtime_artifacts=False)
     )
-    precommit_states = git_ops.snapshot_worktree_paths(work.repo, precommit_paths)
+    precommit_states = git_ops.snapshot_worktree_paths(session.work.repo, precommit_paths)
     staged_states = _stage_retained_once(
-        work, retained_paths=retained_paths, retained_states=retained_states, initial_index=initial_index,
+        session.work,
+        retained_paths=snapshot.paths,
+        retained_states=snapshot.states,
+        initial_index=session.initial_index,
     )
     if not staged_states:
         ui.print_info(agent.console, "Nothing to commit — no daydream changes")
         return None
 
     def _verify_strict(checked: str) -> None:
-        assert retained_paths is not None
         try:
             _verify_strict_commit_and_worktree(
-                work,
+                session.work,
                 sha_before=sha_before,
-                retained_paths=retained_paths,
+                retained_paths=snapshot.paths,
                 staged_states=staged_states,
                 precommit_paths=precommit_paths,
                 precommit_states=precommit_states,
             )
         except GitError as exc:
-            local_sha = git_ops.head_sha(work.repo)
+            local_sha = git_ops.head_sha(session.work.repo)
             raise GitError(
                 f"Local commit {local_sha} was created, but {checked} validation "
                 f"failed; push blocked: {exc}"
             ) from exc
 
     message = build_commit_message(
-        items=items or [], run_id=work.run_id, version=daydream.__version__,
+        items=items or [], run_id=session.work.run_id, version=daydream.__version__,
     )
     # Issue #726 task 12: the commit is its own trajectory phase, so the
     # manifest can time it and tell it apart from test/hook/push phases.
     async with host_phase_scope(DaydreamPhase.COMMIT):
-        git_ops.commit_staged(work.repo, message)
+        git_ops.commit_staged(session.work.repo, message)
     _verify_strict("post-commit")
 
     # Reuse may skip Daydream's proactive test run after strict verification.
     # The repository's actual pre-push hook always runs during push_branch.
-    if git_ops.has_executable_pre_push_hook(work.repo):
-        cmd = _canonical_test_cmd(config) if recipe is None else _recipe_command(recipe)
+    if git_ops.has_executable_pre_push_hook(session.work.repo):
+        cmd = _canonical_test_cmd(session.config) if session.recipe is None else _recipe_command(session.recipe)
         if cmd is None:
             ui.print_warning(
                 agent.console,
@@ -415,12 +399,12 @@ async def phase_commit_push(
             )
         else:
             reuse = _pre_push_reuse_decision(
-                work, recipe, evidence, retained_tree_key
+                session.work, session.recipe, evidence, retained_tree_key
             )
             if reuse is None or not reuse.reused:
                 # Record the hook's own phase in addition to test-execution events.
                 async with host_phase_scope(DaydreamPhase.HOOK_RUN):
-                    result = await _run_host_test_command(cmd, work, config, recipe=recipe)
+                    result = await _run_host_test_command(cmd, session.work, session.config, recipe=session.recipe)
                 if not result.passed:
                     raise RuntimeError(
                         "Pre-push validation failed: the configured test command "
@@ -433,14 +417,14 @@ async def phase_commit_push(
     # (issue #726 task 12).
     async with host_phase_scope(DaydreamPhase.PUSH):
         remote = "origin"
-        branch = git_ops.current_branch(work.repo)
+        branch = git_ops.current_branch(session.work.repo)
         if branch is None:
             raise GitError(
-                f"Cannot push: {work.repo} is in a detached-HEAD state "
+                f"Cannot push: {session.work.repo} is in a detached-HEAD state "
                 "with no current branch"
             )
-        sha = git_ops.head_sha(work.repo)
-        raw_remote = git_ops.remote_url(work.repo, remote)
+        sha = git_ops.head_sha(session.work.repo)
+        raw_remote = git_ops.remote_url(session.work.repo, remote)
         pushed_repository = None
         if raw_remote is not None:
             normalized_repository = normalize_remote_url(raw_remote)[0]
@@ -453,11 +437,11 @@ async def phase_commit_push(
             pushed_repository=pushed_repository,
         )
         try:
-            git_ops.push_branch(work.repo, branch, remote=remote)
+            git_ops.push_branch(session.work.repo, branch, remote=remote)
             if (
-                git_ops.current_branch(work.repo) != branch
-                or git_ops.head_sha(work.repo) != sha
-                or git_ops.remote_url(work.repo, remote) != raw_remote
+                git_ops.current_branch(session.work.repo) != branch
+                or git_ops.head_sha(session.work.repo) != sha
+                or git_ops.remote_url(session.work.repo, remote) != raw_remote
             ):
                 raise GitError(
                     "Push verification failed: local branch, HEAD, or configured "
@@ -466,7 +450,7 @@ async def phase_commit_push(
             # Success requires the remote to actually hold the exact SHA
             # captured before push.
             if not git_ops.remote_contains_commit(
-                work.repo, branch, sha, remote=remote
+                session.work.repo, branch, sha, remote=remote
             ):
                 raise GitError(
                     f"Push verification failed: remote {remote!r} does not report "

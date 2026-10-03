@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -54,7 +53,6 @@ from daydream.ui import print_error, print_info, print_success, print_warning
 if TYPE_CHECKING:
     from rich.console import Console
 
-    from daydream.findings import ArtifactFinding
 
 
 @bind_resolved_run_context
@@ -716,7 +714,7 @@ def post_findings_from_artifact(
     for finding in artifact.findings:
         if finding.fingerprint not in new_fingerprints:
             continue
-        issue = _issue_from_artifact_finding(finding)
+        issue = finding
         if finding.placement == "inline" and finding.line is not None:
             classified.inline.append(_inline_comment(issue, finding.line, renderers))
             classified.inline_issues.append(issue)
@@ -779,8 +777,3 @@ def post_findings_from_artifact(
         return 1
     print_success(console, f"Posted review: {result.review_url}")
     return 0
-
-
-def _issue_from_artifact_finding(finding: ArtifactFinding) -> ParsedIssue:
-    """Restore validated issue fields; artifact placement requires no local PR Git objects."""
-    return ParsedIssue(**{member.name: getattr(finding, member.name) for member in fields(ParsedIssue)})

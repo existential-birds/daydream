@@ -110,8 +110,8 @@ def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> 
     """
     deep_data = ctx.deep_data()
     iteration = deep_data.get("iteration")
-    outcomes = deep_data.get("fix_outcomes", {}) or {}
     state = FixCycleState.require(ctx)
+    outcomes = {} if state.candidate is None else state.candidate.outcomes
     if iteration in (None, 1) or not outcomes:
         initial_dispatch = [dict(i) for i in canonical]
         for item in initial_dispatch:

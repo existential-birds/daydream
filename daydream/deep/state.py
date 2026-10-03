@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from daydream.backends import ContinuationToken
     from daydream.deep.detection import StackAssignment
     from daydream.deep.diff import DeepDiffBoundInfo
-    from daydream.deep.fix_state import FixCycleState, RetainedTreeSnapshot
+    from daydream.deep.fix_state import FixCycleState
     from daydream.deep.latency import ArbiterPlan, LatencyRoute, RiskSummary
     from daydream.deep.records import RecordPool
     from daydream.deep.reuse_store import ReuseCache
@@ -54,8 +54,6 @@ class DeepData(TypedDict, total=False):
     fix_cycle_state: FixCycleState
     test_recipe: TestRecipe
     iteration: int
-    fix_outcomes: dict[str, dict[str, Any]]
-    fix_round_snapshot: RetainedTreeSnapshot
     push_receipt: PushReceipt
 
 

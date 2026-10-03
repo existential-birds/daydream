@@ -297,26 +297,44 @@ def test_arbiter_effort_override_is_codex_only(tmp_path: Path) -> None:
     assert getattr(claude.backend_for_effort("arbiter", "xhigh"), "reasoning_effort") is None
     assert getattr(claude.backend_for_effort("arbiter", "medium"), "reasoning_effort") is None
 
+@pytest.mark.parametrize("fault", ["complete", "missing", "unknown", "budget"])
 async def test_unsharded_arbiter_call_keeps_todays_xhigh_whatever_the_profile(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
 ) -> None:
     """Exercise actual unsharded dispatch with a default, explicit and non-Codex effort."""
     observed: list[Any] = []
 
     async def adjudicate(backend: Any, *_args: Any, **_kwargs: Any) -> tuple[dict[int, dict[str, Any]], None]:
         observed.append(getattr(backend, "reasoning_effort"))
-        return {}, None
+        assert [record["uid"] for record in _kwargs["selected_records"]] == ["python:2", "python:1"]
+        records.reverse()  # Concurrent callers cannot move the already-supplied local-ID binding.
+        from daydream.phases.adjudication import IncompleteVerdicts
+        result = {1: {"arb_id": 1, "keep": True}, 2: {"arb_id": 2, "keep": False}}
+        if fault == "missing":
+            del result[2]
+        elif fault == "unknown":
+            result[99] = {"arb_id": 99, "keep": False}
+        elif fault == "budget":
+            return IncompleteVerdicts("wall_budget_exceeded"), None
+        return result, None
 
     monkeypatch.setattr("daydream.deep.adjudication_steps.phase_arbiter_review", adjudicate)
     (tmp_path / "intent").write_text("intent")
-    plan = ArbiterPlan(False, (PlannedGroup("arbiter-group-0", (), "xhigh", "test"),), "test")
+    plan = ArbiterPlan(False, (PlannedGroup("arbiter-group-0", ("python:1", "python:2"), "xhigh", "test"),), "test")
     for backend, pin in (("codex", None), ("codex", "low"), ("claude", None)):
+        records = [{"uid": "python:1"}, {"uid": "python:2"}]
         ctx = _arbiter_flow_context(tmp_path, backend)
         ctx.config.latency_route = PROFILE_ROUTES["balanced"]
         ctx.config.reasoning_effort = pin
         ctx.data.update(dd=tmp_path, diff_path=tmp_path / "diff", intent_path=tmp_path / "intent",
                         alts_path=tmp_path / "alternatives", exploration_dir=None,
-                        review_coverage=review_coverage())
-        await _run_arbiter(ctx, ctx.deep_data(), plan, [], [], effort_pin=pin,
-                           targets_by_group={"arbiter-group-0": []})
+                        review_coverage=review_coverage(phases=("arbiter",)))
+        verdicts, _, _, count = await _run_arbiter(ctx, ctx.deep_data(), plan, [1, 0], records, effort_pin=pin)
+        expected = {} if fault == "budget" else {"python:2": {"arb_id": 1, "keep": True}}
+        if fault in {"complete", "unknown"}:
+            expected["python:1"] = {"arb_id": 2, "keep": False}
+        assert verdicts == expected
+        assert count == {"complete": 2, "missing": 1, "unknown": 3, "budget": 0}[fault]
+        assert ctx.data["review_coverage"].phases["arbiter"]["status"] == (
+            "complete" if fault == "complete" else "incomplete")
     assert observed == ["xhigh", "low", None]

@@ -10,7 +10,8 @@ contracts remain obligations. Internal signatures and module ownership may chang
 Baseline is `58cc88e4d7091b27afe1b2a6eec486504e255dfd`. Continuation began clean at
 `b98a9dd51fde81df5dc4534a85ab29a986f6a127`. GitHub still reports the same PR base,
 with no inherited upstream changes, and PR #1444 is open/draft. The latest pushed
-checkpoint is signed `5378e3dae53b14d0617594ac47965e1112e00a1f`.
+checkpoint is signed `da6e4f27cb855d6340e0c8a45fb60ea9e5efe8c9`; the fourteenth
+batch below is measured but still awaits the normal integrated hook gate.
 
 Count every owned Python file under daydream/, scripts/, and rl/daydream_review/,
 including published runtime templates and all new modules. Exclude vendored ATIF
@@ -35,14 +36,17 @@ Comments, docstrings, blanks, docs, and tests receive no source-reduction credit
 | d6e99b67 | 362 | 108526 | 83157 | 492 | 603 | 2235 |
 | 3d994245 | 362 | 108357 | 83028 | 491 | 603 | 2220 |
 | 95d1b315 | 362 | 108292 | 82966 | 491 | 602 | 2202 |
-| Latest pushed 5378e3da | 362 | 107920 | 82698 | 490 | 601 | 2190 |
+| 5378e3da | 362 | 107920 | 82698 | 490 | 601 | 2190 |
+| Latest pushed da6e4f27 | 363 | 107691 | 82441 | 483 | 595 | 2139 |
+| Fourteenth frozen working batch | 363 | 107453 | 82249 | 484 | 594 | 2088 |
 
-Latest pushed aggregate reduction is 4.802% physical and 3.308% source;
-continuation removes 3105 physical /2467 source lines. Targets remain at most
-102027 physical and 76974 source: pushed shortfalls are 5893 physical /5724 source.
-The twelfth batch removes 372 physical /268 source lines. The objective remains unmet;
-green gates and useful changes do not establish completion. The production inventory hash remains
-`76cc2585344c06d20088698af1466bab69e33436b8d4e3882a0511bd5590422f`.
+Latest pushed aggregate reduction is 5.004% physical and 3.608% source. The
+fourteenth frozen working batch removes 238 physical /192 source lines, including
+all native owners, callers and restored call layouts. It measures 5.214% physical
+and 3.833% source reduction; shortfalls remain 5426 physical /5275 source against
+102027 physical /76974 source. Continuation removes 3572 physical /2916 source.
+Targets remain unmet. Every new module is included; the inventory hash is
+`036bd5e167a222b8e1986c2f4e77a2733d8ebf9e92b75daa468ad226993c92fe`.
 
 ## Architectural responsibilities consolidated
 
@@ -101,24 +105,20 @@ green gates and useful changes do not establish completion. The production inven
 
 ## Verification and review record
 
-Every applied owner was independently reviewed and byte-compared against its
-reviewed prototype. Differential and actual workflow checks cover native subprocesses,
-loopback OTLP, SQL/history/ledger, real Git/origin and hooks, CLI acquisition,
-standalone verifier/wheel/runtime lock, plan landing/resume/custom builders, and
-archive publication. Current owner reviews are complete; historical unchanged draft
-areas have sampled broader review, not a claimed fresh exhaustive baseline review.
-Before final completion, review the full integrated baseline diff independently.
+Every applied owner has independent caller/contract review. The thirteenth full
+baseline review reconciled all 200 changed production paths and companion tests,
+with author complements reviewed separately. Fourteenth delta reviews cover native
+training, UID adjudication, accepted repair, native findings and root consolidations;
+current-byte integrated reconciliation and the ordinary full hook gate remain due.
+Differentials and real workflows cover subprocesses, OTLP, SQL/history/ledger,
+Git/origin/hooks, CLI acquisition, verifier/wheel/lock, plans/extensions and archives.
 
-All eleven checkpoint commits and pushes succeeded through ordinary hooks. The full
-hook suite includes locked sync/extras, Ruff, root and RL Vulture, root mypy,
-parallel branch-coverage pytest with unchanged 86% floor, Docker actionlint,
-coverage artifact, signatures and naming. Latest 95d1b315 passed 9591 tests,
-14 existing skips, 199 warnings, 604.38 seconds, and 90.68% branch coverage;
-root mypy checked 748 files. Earlier checkpoints passed respectively
-9330, 9340, 9363, 9401, 9430, 9443, 9464, 9471, 9529, and 9545 tests with 14 existing skips.
-Normal hook failures were fixed and retried: telemetry mixed event typing,
-obsolete payload-labeler test seam, and execution-input resolver spy migration.
-No bypass or weakened assertion/coverage threshold was used.
+All thirteen checkpoint commits and pushes succeeded through ordinary hooks. The
+latest da6e4f27 root gate passed 9699 tests, 14 existing skips, 200 warnings in
+653.98s, with 90.78% branch coverage against the unchanged 86% floor; mypy checked
+750 files. Locked sync/all extras, Ruff, root/RL Vulture, Docker actionlint, coverage,
+signatures and naming passed. Earlier failures were corrected and commands retried
+normally. No hook bypass, weakened assertions or lower coverage threshold was used.
 
 A broad archive run hit ENOSPC; only owned completed disposable test directories
 were removed and all affected tests rerun successfully. A coordinator outside
@@ -639,3 +639,55 @@ reconciled); Data complement→slice4,Flow slice5,Backend slice3. One slice1 lat
 import-only delta awaits owner recheck; all ten passes/global ranking still due.
 No new sweep candidate applied. Larger native ownership hypotheses remain partial
 with explicit caller/format obligations; modest estimates receive no target credit.
+
+
+## Fourteenth batch: one native population or accepted candidate per workflow
+
+User scope remains keep both Improve and Benchmark; retirement proposals remain
+unapplied with zero measurement credit. Full local sweep discovery reconciles all
+1024 tracked paths across ten substantive scout slices, no missing, duplicate or
+stale records. Global selection records all 24 dispositions; deeper investigations
+remain open. Durable inventory, review and selection: .git/daydream-deadcode-sweep/
+runs/pr1444-internal-redesign/. Discovery completion is not objective completion.
+
+Training admits one immutable FrozenSplit population: aliases/gold/policy and both
+classes are checked once, rows are copied and frozen, digest is derived. Fitting,
+counts and held-out scoring use that population, removing the labels-file re-reader
+and obsolete RNG split producer. Existing labels/split/model/report/checkpoint
+artifacts remain. All eight full CLI dry-run output files and three model scores
+match the prior implementation exactly. Independent review replayed 48 focused
+checks and source-mutation/forged-digest probes. Cost -78 source/-99 physical.
+
+Repair retains one accepted FixCycleState and RepairCandidate through verification,
+testing and publication, retiring detached argument bundles, test result DTO and
+context outcome/tree/history mirrors. UID outcomes, retained snapshot, evidence key
+and test attempt have one owner. Existing isolation, scope, fresh test/override,
+source/index/private bytes, normal commit/push hooks and remote binding remain.
+Worker's 657 focused checks pass with two existing optional skips; new registered
+flow cases exercise retry, host mutation/heal and hook/extension mutation refusal.
+Independent caller/assertion review found no material defect. Restored two unrelated
+call layouts after review; final production cost -72 source/-78 physical, test/support
+cost +414 physical. No code moved outside the inventory. Actual round rollback
+snapshot remains until its early security/error epoch can be proved redundant.
+
+Adjudication binds local arbiter/suppression ordinals immediately to ordered UIDs,
+retiring run-wide ordinal reindexing and group merge adapters. Unsharded actual
+admission order, raw missing/unknown IDs and verdict counts, per-group failure/resume
+and wire/provenance remain. Cost -28 source/-39 physical; 216 worker cases pass.
+Root's transient consumer migration failures were corrected, not skipped or weakened.
+
+Root uses the existing ParsedIssue owner for native ArtifactFinding and removes its
+posting rebuild; strict public schema and historical serialized order remain exact,
+including 288 byte-differential cases. Frozen callback projections and submission
+snapshots remain. Also removes ReviewCoverage terminal mirror, redundant footprint
+sorting map, unused hunk adapter and fixture-only YAML wrapper; actual transaction
+0600/readback coverage and full gate truth-table union remain. Cost -14 source/-22
+physical. Final root integrated focused suite: 712 passed, one existing skip, three
+warnings in 213.95s; restored state layouts: 23 passed. Ruff/mypy passed before hooks.
+
+Complete pinned fourteenth snapshot/report: /tmp/daydream-pr1444/fourteenth-final-*.
+363 files,107453 physical,82249 source,484 high CC,594 high cognitive,2088 clone LOC,
+3854 functions; same inventory hash. All restorations/new owners are counted.
+Source reduction 3.833%, physical 5.214%; target false. Normal full hook verification,
+committed-byte proof and same-PR update remain due. CI evidence and hydration native
+producer investigations continue in isolated prototypes while this batch is frozen.

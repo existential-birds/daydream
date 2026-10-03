@@ -96,7 +96,7 @@ class FlowContext:
         return self._backend(phase)
 
     def backend_for_effort(self, phase: str, effort: str) -> Backend:
-        """Resolve an effort-specific backend, preserving any runner-bound factory seam."""
+        """Resolve an effort-specific backend with this context's captured execution input."""
         return self._backend(phase, effort=effort)
 
     def strategy(self, stage: str) -> str:

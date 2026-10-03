@@ -89,7 +89,7 @@ def _seed_v1_workspace(tmp_path: Path) -> tuple[Any, ...]:
     case_id = f"pr-000101-{head_sha[:12]}"
     manifest = _seed_manifest()
     manifest["cases"] = [{"case_id": case_id, "pr_number": 101, "case_file": f"cases/{case_id}.yaml"}]
-    storage.atomic_write_yaml(ws / "benchmark.yaml", manifest)
+    (ws / "benchmark.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
     case_dir = ws / "cases"
     storage.ensure_private_dir(case_dir)
     case = _seed_v1_case()
@@ -99,7 +99,7 @@ def _seed_v1_workspace(tmp_path: Path) -> tuple[Any, ...]:
     case["snapshot"].update(original_base_sha=merge_base, requested_base_sha=requested_tip, original_head_sha=head_sha,
         base_tree_sha=base_tree, head_tree_sha=head_tree,
     )
-    storage.atomic_write_yaml(case_dir / f"{case_id}.yaml", case)
+    (case_dir / f"{case_id}.yaml").write_text(yaml.safe_dump(case, sort_keys=False), encoding="utf-8")
     return ws, case_id, _TITLE
 
 
@@ -130,7 +130,7 @@ def _write_legacy_unreplayable_case(ws: Path, case_id: str, *, schema_version: i
     if curation_state == "ready":
         curation["task_spec_sha256"] = "d" * 64
         curation["task_spec_approved_at"] = "2026-08-20T12:00:00Z"
-    storage.atomic_write_yaml(case_path, raw)
+    (case_path).write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     return case_path
 
 
@@ -155,7 +155,7 @@ def test_migrate_backfills_requested_base_sha_on_v1_ready_snapshot(tmp_path: Pat
     merge_base = raw["snapshot"]["original_base_sha"]
     raw["snapshot"]["original_base_sha"] = requested_tip
     del raw["snapshot"]["requested_base_sha"]
-    storage.atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
+    (ws / "cases" / f"{case_id}.yaml").write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
     report = migrate.migrate_workspace(ws)
     assert report.errors == []
@@ -179,7 +179,7 @@ def test_migrate_backfills_requested_base_sha_on_v2_ready_snapshot(tmp_path: Pat
     raw["snapshot"]["original_base_sha"] = requested_tip
     del raw["snapshot"]["requested_base_sha"]          # simulate pre-break v2
     del raw["snapshot"]["base_resolution"]
-    storage.atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
+    (ws / "cases" / f"{case_id}.yaml").write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
     report = migrate.migrate_workspace(ws)
     assert report.errors == []
@@ -208,7 +208,7 @@ def test_migrate_leaves_unreplayable_snapshot_without_backfill(tmp_path: Path) -
         "error": {"reason": "head_not_on_pr", "detail": "head sha not on PR"},
     }
     raw["curation"]["state"] = "unreplayable"
-    storage.atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
+    (ws / "cases" / f"{case_id}.yaml").write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     case_path = ws / "cases" / f"{case_id}.yaml"
     before = case_path.read_bytes()
 
@@ -319,7 +319,7 @@ def test_migrate_surfaces_invalid_case_without_rewriting(tmp_path: Path) -> None
     # corrupt the case: duplicate finding_id (uniqueness violated)
     raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     raw["curation"]["findings"].append(dict(raw["curation"]["findings"][0]))
-    storage.atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
+    (ws / "cases" / f"{case_id}.yaml").write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     report = migrate.migrate_workspace(ws)
     assert report.cases == []                        # no case rewritten
     assert any("duplicate" in e for e in report.errors)
@@ -334,7 +334,7 @@ def test_migrate_ready_provenance_failure_is_atomic(tmp_path: Path, failure: str
     else:
         raw = storage.load_yaml_strict(case_path)
         raw["snapshot"]["base_tree_sha"] = "f" * 40
-        storage.atomic_write_yaml(case_path, raw)
+        (case_path).write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     before = case_path.read_bytes()
 
     report = migrate.migrate_workspace(ws)
@@ -356,7 +356,7 @@ def test_migrate_imported_snapshot_preserves_sole_base_without_mirror(tmp_path: 
         "status": "imported", "policy": "final_pr_head", "requested_head": "final", "original_base_sha": base_tip,
         "original_head_sha": head_sha, "error": None,
     }
-    storage.atomic_write_yaml(case_path, raw)
+    (case_path).write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     shutil.rmtree(ws / "cache" / "repository.git")
 
     report = migrate.migrate_workspace(ws)
@@ -389,7 +389,7 @@ def test_upgrade_cli_error_returns_1(tmp_path: Path, capsys: pytest.CaptureFixtu
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
     raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     raw["schema_version"] = "bogus"
-    storage.atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
+    (ws / "cases" / f"{case_id}.yaml").write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     rc = _handle_benchmark_command(["upgrade", str(ws)])
     assert rc == 1
     assert "error" in capsys.readouterr().err

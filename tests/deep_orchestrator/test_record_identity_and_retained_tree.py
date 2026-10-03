@@ -11,6 +11,7 @@ from daydream import git_ops
 from daydream.deep.artifacts import deep_dir
 from daydream.deep.fix_state import FixCycleState, capture_retained_tree
 from daydream.fix_footprint import AuthorizedFixFootprint
+from daydream.run_config import RunConfig
 from tests.deep_orchestrator.support import (
     _fresh_uid_run,
     _high_record,
@@ -479,13 +480,14 @@ def test_retained_tree_uses_full_delta_identity_but_authorized_patch(tmp_path: P
     footprint = AuthorizedFixFootprint.build(repo, {"a.py"}, [item])
     index = git_ops.snapshot_index(repo)
     state = FixCycleState(
+        work=work_context(repo, run_id="s"), config=RunConfig(target=str(repo)), recipe=None,
         session_id="s", stable_ref=git_ops.head_sha(repo), stable_head=git_ops.head_sha(repo), initial_index=index,
         preexisting_untracked=protected, preexisting_gitlinks=(), footprint=footprint,
     )
     (repo / "a.py").write_text("A = 2\n")
-    first = capture_retained_tree(work_context(repo, run_id="s"), state)
+    first = capture_retained_tree(state)
     (repo / "c.py").write_text("C = 9\n")
-    second = capture_retained_tree(work_context(repo, run_id="s"), state)
+    second = capture_retained_tree(state)
     assert first.paths == second.paths == frozenset({"a.py"})
     assert b"c.py" not in second.recommended_patch
     assert first.tree_key != second.tree_key
@@ -508,12 +510,12 @@ def test_retained_tree_includes_preexisting_authorized_head_delta(tmp_path: Path
     item = {"id": 1, "item_uid": "item:1", "file": "b.py", "related_files": ["a.py"]}
     footprint = AuthorizedFixFootprint.build(repo, {"a.py"}, [item])
     state = FixCycleState(
+        work=work_context(repo, run_id="s"), config=RunConfig(target=str(repo)), recipe=None,
         session_id="s", stable_ref=stable_ref, stable_head=head, initial_index=git_ops.snapshot_index(repo),
         preexisting_untracked={}, preexisting_gitlinks=(), footprint=footprint,
     )
     (repo / "b.py").write_text("B = 2\n")
-    work = work_context(repo, run_id="s")
-    snapshot = capture_retained_tree(work, state)
+    snapshot = capture_retained_tree(state)
 
     assert snapshot.paths == frozenset({"a.py", "b.py"})
     assert {path.path for path in snapshot.states} == {"a.py", "b.py"}

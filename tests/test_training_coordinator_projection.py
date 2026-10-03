@@ -212,7 +212,7 @@ def test_stage0_uses_pinned_splits_even_when_records_are_in_other_files(tmp_path
         seed=0,
         held_out_fraction=HOLDOUT_RATE,
     )
-    expected_model = train_outcome_model(expected_labels, split=expected_split, seed=0)
+    expected_model = train_outcome_model(expected_split, seed=0)
 
     out = tmp_path / "out"
     run_pipeline(PipelineConfig(projection=proj_dir, out_dir=out, stages=("stage0",)), dry_run=False)

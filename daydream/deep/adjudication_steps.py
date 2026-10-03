@@ -75,63 +75,41 @@ from daydream.ui import print_warning
 
 def _apply_adjudication_verdicts(
     records: list[dict[str, Any]],
-    targets: list[int],
-    verdicts: dict[int, dict[str, Any]],
+    target_uids: tuple[str, ...],
+    verdicts: dict[str, dict[str, Any]],
     *,
     pass_name: str,
-    id_field: str,
     fail_closed: bool,
 ) -> tuple[list[dict[str, Any]], list[RecordProvenance]]:
-    """Apply positional agent verdicts using target UIDs snapshotted before mutation.
+    """Apply already-bound verdicts to admitted records, independent of pool order.
 
-    ``targets[k]`` corresponds to agent id k+1 in ``id_field``. Revise bound
-    findings without changing file/line; explicit keep:false drops them.
-    Missing UIDs/verdicts or mismatched ids warn: arbiter retains the original
-    (fail_closed=False), suppression drops it (True). UID-less drops use their
-    original positions. Unselected records pass through unchanged.
-
-    Return retained records plus per-target provenance recording the
-    original UID, binding, retention and materially revised fields.
+    Arbitration retains unresolved targets; suppression drops them. Only bound
+    keep-verdicts revise whitelisted fields or establish confirmed provenance.
     """
     import warnings
 
+    records_by_uid = {record_uid(record): record for record in records}
     outcomes: list[RecordProvenance] = []
     dropped: set[str] = set()
-    dropped_positions: set[int] = set()
     action = "dropping the unconfirmed record" if fail_closed else "retaining the original record unchanged"
-    # Keep the input list intact until every verdict is applied; revisions never alter UIDs.
-    for verdict_id, record_index in enumerate(targets, 1):
-        record = records[record_index]
-        uid = record_uid(record)
-        verdict = verdicts.get(verdict_id)
-        error = None
-        if not uid:
-            error = (f"target {id_field}={verdict_id} (record_index={record_index}) carries no uid, "
-                     "so its verdict cannot be bound to a record identity")
-        elif verdict is None:
-            error = f"returned no verdict for {id_field}={verdict_id} (record_index={record_index}, uid={uid})"
-        elif verdict.get(id_field) != verdict_id:
-            error = (f"verdict {id_field} mismatch: expected {id_field}={verdict_id} "
-                     f"but verdict contains {id_field}={verdict.get(id_field)!r} "
-                     f"(record_index={record_index}, uid={uid})")
-        bound = error is None
+    for uid in target_uids:
+        record = records_by_uid.get(uid)
+        verdict = verdicts.get(uid)
+        bound = bool(uid) and record is not None and verdict is not None
         kept = bool(verdict and verdict.get("keep", False)) if bound else not fail_closed
         revised: tuple[str, ...] = ()
-        if error is not None:
-            warnings.warn(f"{pass_name.capitalize()} {error}; {action}.", stacklevel=2)
+        if not bound:
+            warnings.warn(f"{pass_name.capitalize()} returned no bound verdict for uid={uid!r}; {action}.",
+                          stacklevel=2)
         elif kept:
-            assert verdict is not None
+            assert record is not None and verdict is not None
             before = dict(record)
             revise_finding_fields(record, verdict)
             revised = find_revision_delta(before, record)
         outcomes.append(RecordProvenance(uid, (pass_name,), bound, kept, revised))
         if not kept:
-            if uid:
-                dropped.add(uid)
-            else:
-                dropped_positions.add(record_index)
-    return [record for i, record in enumerate(records)
-            if record_uid(record) not in dropped and i not in dropped_positions], outcomes
+            dropped.add(uid)
+    return [record for record in records if record_uid(record) not in dropped], outcomes
 
 
 def _load_group_verdicts(
@@ -191,32 +169,16 @@ def _persist_group_verdicts(
     arbiter_group_complete_path(dd, group.group_id).write_text("")
 
 
-def _merge_group_verdicts(
-    plan: ArbiterPlan,
-    arbiter_targets: list[int],
-    group_verdicts: dict[str, dict[int, dict[str, Any]]],
-    targets_by_group: dict[str, list[int]],
-) -> dict[int, dict[str, Any]]:
-    """Translate group-local arb_id values into run-wide selection ordinals.
-
-    Use each group's original target indices so completion order and later
-    record compaction cannot change the binding.
-    """
-    positions = {index: offset + 1 for offset, index in enumerate(arbiter_targets)}
-    merged: dict[int, dict[str, Any]] = {}
-    for group in plan.groups:
-        target_indices = targets_by_group.get(group.group_id, ())
-        for local_id, verdict in group_verdicts.get(group.group_id, {}).items():
-            if local_id < 1 or local_id > len(target_indices):
-                continue
-            global_index = target_indices[local_id - 1]
-            position = positions.get(global_index)
-            if position is None:
-                continue
-            revised = dict(verdict)
-            revised["arb_id"] = position
-            merged[position] = revised
-    return merged
+def _bind_verdicts(
+    target_uids: tuple[str, ...], verdicts: dict[int, dict[str, Any]], id_field: str,
+) -> dict[str, dict[str, Any]]:
+    """Bind wire-local verdicts only to the snapshotted actual input identities."""
+    bound: dict[str, dict[str, Any]] = {}
+    for local_id, uid in enumerate(target_uids, 1):
+        verdict = verdicts.get(local_id)
+        if uid and verdict is not None and verdict.get(id_field) == local_id:
+            bound[uid] = verdict
+    return bound
 
 
 def _arbiter_groups_record(
@@ -266,11 +228,11 @@ def _review_context_kwargs(ctx: FlowContext, deep_data: DeepData, *, strategy: s
 
 
 def _record_verdict_coverage(coverage: ReviewCoverage, phase: str, target_count: int,
-                             verdicts: dict[int, dict[str, Any]], *, complete: bool = True) -> bool:
+                             verdicts: dict[int, dict[str, Any]]) -> bool:
     """All adjudication stages require one validated verdict for every target."""
     reason = (reason_for_budget(verdicts.budget_reason) if isinstance(verdicts, IncompleteVerdicts)
               else ReasonCode.EVIDENCE_INCOMPLETE
-              if not complete or set(verdicts) != set(range(1, target_count + 1)) else None)
+              if set(verdicts) != set(range(1, target_count + 1)) else None)
     coverage.record_phase(phase, "incomplete" if reason else "complete",
                           reasons=(reason,) if reason else (), noop=target_count == 0 and reason is None,
                           diagnostic=verdicts.budget_reason if isinstance(verdicts, IncompleteVerdicts) else None)
@@ -378,27 +340,26 @@ async def _run_arbiter(
     adjudicated: list[dict[str, Any]],
     *,
     effort_pin: str | None,
-    targets_by_group: dict[str, list[int]],
-) -> tuple[dict[int, dict[str, Any]], dict[str, bool], list[str]]:
+) -> tuple[dict[str, dict[str, Any]], dict[str, bool], list[str], int]:
     """Fan one arbiter call per incomplete group out under the run's ceiling.
 
-    Returns the merged verdict mapping (keyed by run-wide target ordinal), the
-    per-group ``reused`` flags, and the ids of groups whose call raised. A
-    group's exception is caught here rather than propagated: the run continues,
-    the group contributes no verdicts, and its targets retain their original
-    records (``_apply_adjudication_verdicts(..., fail_closed=False)``).
+    Bind each call's wire-local IDs to its actual input UIDs. Group exceptions
+    contribute no verdicts and remain incomplete; unresolved targets fail open.
+    Persisted receipts retain their group-local wire IDs and execution proof.
     """
+    target_uids = tuple(record_uid(adjudicated[i]) for i in arbiter_targets)
+    records_by_uid = {record_uid(record): record for record in adjudicated}
     contracts = {group["group_id"]: group["contract"]
                  for group in _arbiter_plan_component(ctx, deep_data, plan, effort_pin)["groups"]}
-    records_digests = {group.group_id: _digest([adjudicated[i] for i in targets_by_group[group.group_id]])
+    records_digests = {group.group_id: _digest([records_by_uid[uid] for uid in group.target_uids])
                        for group in plan.groups} if plan.sharded else {}
 
     async def invoke(group: PlannedGroup) -> dict[int, dict[str, Any]]:
         backend = _arbiter_backend(ctx, group, sharded=plan.sharded, effort_pin=effort_pin)
         verdicts, token = await phase_arbiter_review(
             backend, ctx.work,
-            selected_records=[adjudicated[i] for i in
-                              (targets_by_group[group.group_id] if plan.sharded else arbiter_targets)],
+            selected_records=([records_by_uid[uid] for uid in group.target_uids] if plan.sharded
+                              else [adjudicated[i] for i in arbiter_targets]),
             input_path=arbiter_group_input_path(deep_data["dd"], group.group_id) if plan.sharded else None,
             **_review_context_kwargs(ctx, deep_data, strategy=ctx.strategy("arbitration")),
             intent_authoritative=(deep_data.get("intent_authoritative") or False),
@@ -408,8 +369,12 @@ async def _run_arbiter(
         return verdicts
 
     if not plan.sharded:
+        # The invocation uses selection order, which can differ from the plan's
+        # concatenated partition order. Bind the actual input snapshot above.
         async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
-            return await invoke(plan.groups[0]), {plan.groups[0].group_id: False}, []
+            verdicts = await invoke(plan.groups[0])
+            _record_verdict_coverage(deep_data["review_coverage"], "arbiter", len(target_uids), verdicts)
+            return _bind_verdicts(target_uids, verdicts, "arb_id"), {plan.groups[0].group_id: False}, [], len(verdicts)
 
     dd = deep_data["dd"]
     group_verdicts: dict[str, dict[int, dict[str, Any]]] = {}
@@ -454,7 +419,7 @@ async def _run_arbiter(
 
                 def save_verdicts(planned: PlannedGroup, group_verdicts_call: dict[int, dict[str, Any]]) -> None:
                     if not _record_verdict_coverage(deep_data["review_coverage"], planned.group_id,
-                            len(targets_by_group[planned.group_id]), group_verdicts_call):
+                            len(planned.target_uids), group_verdicts_call):
                         failed_groups.append(planned.group_id)
                         if not isinstance(group_verdicts_call, IncompleteVerdicts):
                             group_verdicts[planned.group_id] = group_verdicts_call
@@ -481,11 +446,12 @@ async def _run_arbiter(
                     completed=save_verdicts, failed=record_failure,
                 )
 
-    return (
-        _merge_group_verdicts(plan, arbiter_targets, group_verdicts, targets_by_group),
-        reused,
-        failed_groups,
-    )
+    bound = {uid: verdict for group in plan.groups for uid, verdict in
+             _bind_verdicts(group.target_uids, group_verdicts.get(group.group_id, {}), "arb_id").items()}
+    complete = not failed_groups and set(bound) == set(target_uids)
+    deep_data["review_coverage"].record_phase("arbiter", "complete" if complete else "incomplete",
+        reasons=() if complete else (ReasonCode.EVIDENCE_INCOMPLETE,))
+    return bound, reused, failed_groups, len(bound)
 
 
 def _arbiter_store_payload(
@@ -618,7 +584,8 @@ async def _step_arbiter(ctx: FlowContext) -> None:
             )
             # Suppression exclusions use durable UIDs; indices shift and locations can collide.
             # Unidentified records are handled explicitly at the exclusion site.
-            arbitrated_ids = {uid for i in arbiter_targets if (uid := record_uid(adjudicated[i]))}
+            arbitrated_uids = tuple(record_uid(adjudicated[i]) for i in arbiter_targets)
+            arbitrated_ids = set(arbitrated_uids)
             arbiter_slice: dict[str, Any] = {
                 "sharded": False,
                 "reason": "no arbiter targets selected",
@@ -659,9 +626,6 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                 )
                 plan = arbiter_plan(route, groups, records=adjudicated, contested=contested)
                 deep_data["arbiter_plan"] = plan
-                targets_by_group = {
-                    group.group_id: list(group.target_indices) for group in groups
-                }
                 from daydream.run_config import _explicit_reasoning_effort_pin
 
                 effort_pin = _explicit_reasoning_effort_pin(config, "arbiter")
@@ -691,15 +655,14 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                         if precision_mode:
                             deep_data["review_coverage"].record_phase("suppression", "complete")
                         return
-                verdicts, reused, failed_groups = await _run_arbiter(
+                verdicts, reused, failed_groups, verdict_count = await _run_arbiter(
                     ctx, deep_data, plan, arbiter_targets, adjudicated,
-                    effort_pin=effort_pin, targets_by_group=targets_by_group,
+                    effort_pin=effort_pin,
                 )
-                adjudication_complete = not failed_groups
+                adjudication_complete = deep_data["review_coverage"].phases["arbiter"]["status"] == "complete"
                 adjudicated, arbiter_outcomes = _apply_adjudication_verdicts(
-                    adjudicated, arbiter_targets, verdicts,
+                    adjudicated, arbitrated_uids, verdicts,
                     pass_name="arbiter",
-                    id_field="arb_id",
                     fail_closed=False,
                 )
                 pool.replace(adjudicated)
@@ -718,13 +681,11 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                     "sharded": plan.sharded,
                     "reason": plan.reason,
                     "groups": _arbiter_groups_record(plan, effort_pin=effort_pin, reused=reused),
-                    "verdicts_applied": len(verdicts),
+                    "verdicts_applied": verdict_count,
                     "failed_groups": list(failed_groups),
                 }
-            adjudication_complete = _record_verdict_coverage(
-                deep_data["review_coverage"], "arbiter", len(arbiter_targets),
-                verdicts if arbiter_targets else {}, complete=adjudication_complete,
-            )
+            if not arbiter_targets:
+                deep_data["review_coverage"].record_phase("arbiter", "complete", noop=True)
             write_routing_record(dd, {"arbiter": arbiter_slice})
 
             # Precision-mode suppression pass (#232), OPT-IN: a skeptical second
@@ -746,6 +707,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                     suppression_exclude,
                 )
                 if suppression_targets:
+                    suppression_uids = tuple(record_uid(adjudicated[i]) for i in suppression_targets)
                     async with phase_scope(DaydreamPhase.DEEP, stage="suppression"):
                         sup_verdicts = await phase_suppression_review(
                             ctx.backend_for("suppression"),
@@ -754,9 +716,8 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                             **_review_context_kwargs(ctx, deep_data, strategy=ctx.strategy("suppression")),
                         )
                     adjudicated, suppression_outcomes = _apply_adjudication_verdicts(
-                        adjudicated, suppression_targets, sup_verdicts,
+                        adjudicated, suppression_uids, _bind_verdicts(suppression_uids, sup_verdicts, "sup_id"),
                         pass_name="suppression",
-                        id_field="sup_id",
                         fail_closed=True,
                     )
                     pool.replace(adjudicated)

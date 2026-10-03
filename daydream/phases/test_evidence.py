@@ -1,9 +1,8 @@
 """Test evidence for review and fix phases."""
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from daydream import agent, config as phase_config, git_ops, ui
 from daydream.agent import (
@@ -32,6 +31,9 @@ from daydream.trajectory import (
     DaydreamPhase,
 )
 from daydream.workspace import WorkContext
+
+if TYPE_CHECKING:
+    from daydream.deep.fix_state import FixCycleState
 
 # Deprecated unconfigured fallback: the host parses the final test summary.
 # The suite must finish in the turn; "still running" prose is a failure.
@@ -198,27 +200,13 @@ class TestAttemptEvidence:
     identity: TestExecutionIdentity | None = None
 
 
-@dataclass(frozen=True)
-class TestAndHealResult:
-    """Typed outcome of the bounded test-and-heal interaction."""
-
-    passed: bool
-    retries: int
-    proceed: bool
-    ignored: bool
-    attempts: tuple[TestAttemptEvidence, ...]
-
 @bind_resolved_run_context
 async def phase_test_once(
     backend: Backend,
-    work: WorkContext,
+    session: "FixCycleState",
     *,
-    config: Any,
-    session_id: str,
-    capture_tree_key: Callable[[], str],
     continuation: ContinuationToken | None = None,
     command_override: list[str] | None = None,
-    recipe: TestRecipe | None = None,
     run_context: RunContext | None = None,
 ) -> tuple[TestAttemptEvidence, ContinuationToken | None, str]:
     """Execute one test attempt and capture the supplied before/after tree identity.
@@ -230,17 +218,17 @@ async def phase_test_once(
     cmd: list[str] | None
     if command_override is not None:
         cmd = command_override
-    elif recipe is not None:
-        cmd = _recipe_command(recipe)
+    elif session.recipe is not None:
+        cmd = _recipe_command(session.recipe)
     else:
-        cmd = _canonical_test_cmd(config)
-    input_tree_key = capture_tree_key()
+        cmd = _canonical_test_cmd(session.config)
+    input_tree_key = session.capture_key()
     next_continuation: ContinuationToken | None = None
     identity: TestExecutionIdentity | None = None
     host_result: TestExecutionResult | None = None
     if cmd is not None:
         try:
-            host_result = await _run_host_test_command(cmd, work, config, recipe=recipe)
+            host_result = await _run_host_test_command(cmd, session.work, session.config, recipe=session.recipe)
         except (OSError, ValueError) as exc:
             output = f"The configured test command failed to run (spawn): {exc}"
             passed = False
@@ -248,7 +236,7 @@ async def phase_test_once(
             if host_result.timed_out:
                 ui.print_warning(
                     agent.console,
-                    f"Test command hit the {_test_command_wall_budget(config):g}s "
+                    f"Test command hit the {_test_command_wall_budget(session.config):g}s "
                     "wall budget and was killed.",
                 )
             output = host_result.merged_output
@@ -257,10 +245,10 @@ async def phase_test_once(
         command: tuple[str, ...] | None = tuple(cmd)
     else:
         prompt = f"Run the project's test suite. {_TEST_RUN_INSTRUCTIONS}"
-        prompt = append_extended_facts(prompt, recipe)
+        prompt = append_extended_facts(prompt, session.recipe)
         output, next_continuation, _ = await agent.run_agent(
             backend,
-            work.repo,
+            session.work.repo,
             prompt,
             continuation=continuation,
             phase=DaydreamPhase.TEST,
@@ -271,28 +259,26 @@ async def phase_test_once(
         passed = detect_test_success(output)
         kind = "agent"
         command = None
-    output_tree_key = capture_tree_key()
+    output_tree_key = session.capture_key()
     if kind == "host" and command is not None:
         identity = _host_test_identity(
-            session_id=session_id,
+            session_id=session.session_id,
             argv=command,
-            work=work,
-            recipe=recipe,
+            work=session.work,
+            recipe=session.recipe,
             input_tree_key=input_tree_key,
             output_tree_key=output_tree_key,
             result=host_result,
             passed=passed,
         )
-    return (
-        TestAttemptEvidence(
-            session_id=session_id,
+    evidence = TestAttemptEvidence(
+            session_id=session.session_id,
             kind=kind,
             command=command,
             passed=passed,
             input_tree_key=input_tree_key,
             output_tree_key=output_tree_key,
             identity=identity,
-        ),
-        next_continuation,
-        output,
-    )
+        )
+    session.test_attempts.append(evidence)
+    return evidence, next_continuation, output

@@ -30,7 +30,6 @@ from daydream.phases.merge import (
     phase_cross_stack_merge as phase_cross_stack_merge,
 )
 from daydream.phases.publish import (
-    CommitPushResult as CommitPushResult,
     PushAttemptError as PushAttemptError,
     PushReceipt as PushReceipt,
     build_commit_message as build_commit_message,
@@ -61,7 +60,6 @@ from daydream.phases.schemas import (
     SUPPRESSION_SCHEMA as SUPPRESSION_SCHEMA,
 )
 from daydream.phases.test_evidence import (
-    TestAndHealResult as TestAndHealResult,
     TestAttemptEvidence as TestAttemptEvidence,
     phase_test_once as phase_test_once,
     reuse_target as reuse_target,

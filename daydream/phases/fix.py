@@ -87,17 +87,12 @@ def group_items_by_footprint(
 
     roots = [find(i) for i in range(len(items))]
     grouped: dict[int, list[dict[str, Any]]] = {}
-    first_seen: dict[int, int] = {}
     for i, item in enumerate(items):
         r = roots[i]
-        if r not in grouped:
-            grouped[r] = []
-            first_seen[r] = i
-        grouped[r].append(item)
+        grouped.setdefault(r, []).append(item)
 
     result: list[tuple[str, list[dict[str, Any]]]] = []
-    for root in sorted(first_seen, key=lambda rt: first_seen[rt]):
-        grp = grouped[root]
+    for grp in grouped.values():
         key = grp[0].get("file") or "<no-file>"
         result.append((key, grp))
     return result

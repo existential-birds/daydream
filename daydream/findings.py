@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -76,8 +76,8 @@ class FindingsValidationError(Exception):
     """Artifact read/write size, parse, schema or event-binding validation failed."""
 
 
-@dataclass
-class ArtifactFinding:
+@dataclass(kw_only=True)
+class ArtifactFinding(ParsedIssue):
     """Validated finding with placement, identity and approval-gate provenance.
 
     Location and severity provenance preserve the current approval gate inputs.
@@ -85,18 +85,11 @@ class ArtifactFinding:
     Non-inline placements have no line; body remains raw until posting.
     """
 
-    fingerprint: str
-    path: str
-    line: int | None
+    fingerprint: str = field()
     placement: str
-    title: str
-    body: str
-    severity: str | None
-    confidence: str | None
-    is_cross_stack: bool
-    location_distrust: bool = False
-    severity_before_demotion: str | None = None
-    severity_off_vocabulary: bool = False
+    severity: str | None = field()
+    confidence: str | None = field()
+    is_cross_stack: bool = field()
 
 
 @dataclass
@@ -136,8 +129,19 @@ class FindingsArtifact:
 
 def _finding_dict(issue: ParsedIssue, *, placement: str, line: int | None) -> dict[str, Any]:
     """Map one classified issue onto an artifact finding entry."""
-    finding = {field.name: getattr(issue, field.name) for field in fields(ArtifactFinding)
-               if field.name not in {'placement', 'line'}}
+    # Retain the historical handoff order independently of native field inheritance.
+    finding = {name: getattr(issue, name) for name in (
+        "fingerprint",
+        "path",
+        "title",
+        "body",
+        "severity",
+        "confidence",
+        "is_cross_stack",
+        "location_distrust",
+        "severity_before_demotion",
+        "severity_off_vocabulary",
+    )}
     return {**finding, 'placement': placement, 'line': line}
 
 

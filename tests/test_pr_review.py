@@ -1310,7 +1310,7 @@ def test_artifact_off_vocabulary_severity_blocks_approval() -> None:
         severity=None,  # "critical" was folded to None by Phase A normalization
         confidence="HIGH", is_cross_stack=False, severity_off_vocabulary=True,
     )
-    issue = pr_review._issue_from_artifact_finding(finding)
+    issue = finding
     assert issue.severity is None
     assert issue.severity_off_vocabulary is True
     # The approval gate blocks on the off-vocabulary signal even with severity None.
@@ -1323,7 +1323,7 @@ def test_artifact_folding_to_none_not_off_vocabulary_does_not_block() -> None:
         fingerprint="f" * 64, path="a.py", line=10, placement="inline", title="t", body="b", severity=None,
         confidence="HIGH", is_cross_stack=False, severity_off_vocabulary=False,
     )
-    issue = pr_review._issue_from_artifact_finding(finding)
+    issue = finding
     assert pr_review._finding_blocks_approval(issue.severity, issue.location_distrust, issue.severity_off_vocabulary
     ) is False
 

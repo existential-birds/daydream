@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -13,18 +14,22 @@ from daydream.deep.artifacts import DeepArtifact
 from daydream.phases import TestAttemptEvidence, phase_commit_push
 from daydream.runner import run
 from daydream.test_execution import TestExecutionIdentity
-from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import (
     bare_remote as _bare_remote,
     git as _git,
     seed_feature_branch as _seed_feature_branch,
 )
+from tests.harness.repair import repair_session
 from tests.harness.stub_backend import StubBackend
 from tests.test_deep_orchestrator import MakeConfig, _silence
 
 
 async def _run_real_fix_flow(
-    tmp_path: Path, make_config: MakeConfig, monkeypatch: pytest.MonkeyPatch, *, test_command: str = "true",
+    tmp_path: Path,
+    make_config: MakeConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    test_command: str = "true",
 ) -> int:
     """Run a real fix and green host test to the caller's commit-evidence spy."""
     repo = tmp_path / "evidence-reuse-flow"
@@ -37,6 +42,7 @@ async def _run_real_fix_flow(
     _silence(monkeypatch)
     return await run(make_config(repo, assume="yes", output_mode="loop", test_command=test_command))
 
+
 @pytest.mark.asyncio
 async def test_the_retained_test_evidence_reaches_the_commit_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
@@ -47,8 +53,8 @@ async def test_the_retained_test_evidence_reaches_the_commit_gate(
     real_phase = phase_commit_push
 
     async def spy(*args: Any, **kwargs: Any) -> Any:
-        observed.append(kwargs.get("evidence"))
-        retained_keys.append(kwargs.get("retained_tree_key"))
+        observed.append(args[0].candidate.test)
+        retained_keys.append(args[0].candidate.snapshot.tree_key)
         return await real_phase(*args, **kwargs)
 
     monkeypatch.setattr("daydream.deep.fix_steps.phase_commit_push", spy)
@@ -62,33 +68,68 @@ async def test_the_retained_test_evidence_reaches_the_commit_gate(
     assert evidence.identity.output_tree_key  # bound to the retained tree
     assert retained_keys[0] == evidence.identity.output_tree_key
 
+
 @pytest.mark.asyncio
 async def test_a_half_formed_offer_is_refused(tmp_path: Path, make_work: Any, make_config: MakeConfig) -> None:
     """One half of the evidence/tree pair is a caller bug, not a silent fallback."""
     work = make_work(tmp_path / "half-formed")
     config = make_config(work.repo)
     evidence = TestAttemptEvidence(
-        session_id="s", kind="host", command=("true",), passed=True, input_tree_key="t", output_tree_key="t",
+        session_id="s",
+        kind="host",
+        command=("true",),
+        passed=True,
+        input_tree_key="t",
+        output_tree_key="t",
     )
-    with pytest.raises(ValueError, match="together"):
-        await phase_commit_push(ScriptedBackend(), work, config=config, evidence=evidence)
-    with pytest.raises(ValueError, match="together"):
-        await phase_commit_push(ScriptedBackend(), work, config=config, retained_tree_key="t")
+    with pytest.raises(ValueError, match="does not match|changed after"):
+        session = repair_session(work, config=config)
+        assert session.candidate is not None
+        session.candidate = replace(session.candidate, test=evidence)
+        await phase_commit_push(session)
+    with pytest.raises(ValueError, match="does not match|changed after"):
+        session_2 = repair_session(work, config=config)
+        assert session_2.candidate is not None
+        session_2.candidate = replace(session_2.candidate, snapshot=replace(session_2.candidate.snapshot, tree_key="t"))
+        await phase_commit_push(session_2)
+
 
 @pytest.mark.asyncio
 async def test_a_tree_key_mismatch_is_refused(tmp_path: Path, make_work: Any, make_config: MakeConfig) -> None:
     """A retained key that disagrees with the evidence names no valid offer."""
     work = make_work(tmp_path / "mismatch")
     config = make_config(work.repo)
-    identity = TestExecutionIdentity(session_id="s", argv=("true",), cwd_relative=".", runner=None, interpreter=None,
-        config_digest=None, absent_components=(), input_tree_key="t", output_tree_key="t",
-        head_sha="a" * 40, branch="feature", kind="host", outcome="passed",
+    identity = TestExecutionIdentity(
+        session_id="s",
+        argv=("true",),
+        cwd_relative=".",
+        runner=None,
+        interpreter=None,
+        config_digest=None,
+        absent_components=(),
+        input_tree_key="t",
+        output_tree_key="t",
+        head_sha="a" * 40,
+        branch="feature",
+        kind="host",
+        outcome="passed",
     )
-    evidence = TestAttemptEvidence(session_id="s", kind="host", command=("true",), passed=True,
-        input_tree_key="t", output_tree_key="t", identity=identity,
+    evidence = TestAttemptEvidence(
+        session_id="s",
+        kind="host",
+        command=("true",),
+        passed=True,
+        input_tree_key="t",
+        output_tree_key="t",
+        identity=identity,
     )
-    with pytest.raises(ValueError, match="does not match"):
-        await phase_commit_push(ScriptedBackend(), work, config=config, evidence=evidence, retained_tree_key="other",)
+    with pytest.raises(ValueError, match="does not match|changed after"):
+        session = repair_session(work, config=config)
+        assert session.candidate is not None
+        session.candidate = replace(session.candidate, test=evidence)
+        session.candidate = replace(session.candidate, snapshot=replace(session.candidate.snapshot, tree_key="other"))
+        await phase_commit_push(session)
+
 
 @pytest.mark.asyncio
 async def test_real_flow_skips_the_pre_push_suite_run_but_still_runs_the_hook(
@@ -122,14 +163,22 @@ async def test_real_flow_skips_the_pre_push_suite_run_but_still_runs_the_hook(
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     _silence(monkeypatch)
 
-    await run(make_config(repo, assume="yes", output_mode="loop", test_command=f"{sys.executable} {script} {counter}",)
+    await run(
+        make_config(
+            repo,
+            assume="yes",
+            output_mode="loop",
+            test_command=f"{sys.executable} {script} {counter}",
+        )
     )
 
-    assert counter.read_text() == "1", ("the TEST phase is the only orchestrator suite run; the commit gate "
+    assert counter.read_text() == "1", (
+        "the TEST phase is the only orchestrator suite run; the commit gate "
         "reused the matching evidence instead of re-running it"
     )
     assert hook_log.read_text().splitlines() == ["pre-push"]
     assert _git(remote, "rev-parse", "refs/heads/feature") == _git(repo, "rev-parse", "HEAD")
+
 
 @pytest.mark.asyncio
 async def test_the_pre_push_reuse_decision_is_persisted_in_the_real_flow(

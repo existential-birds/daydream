@@ -1996,7 +1996,7 @@ def test_fact_extraction_failure_records_unavailable_and_import_still_succeeds(
     before = load_json_strict(import_path)
     raw_case = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     raw_case["prioritization"]["extraction_version"] = 0
-    storage.atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw_case)
+    (ws / "cases" / f"{case_id}.yaml").write_text(yaml.safe_dump(raw_case, sort_keys=False), encoding="utf-8")
 
     # break the mirror; the refresh freeze re-populates it from the local bare origin
     shutil.rmtree(ws / "cache" / "repository.git")
@@ -2031,7 +2031,7 @@ def test_facts_absent_from_every_hash_surface(tmp_path: Path, fake_gh: FakeGh) -
 
     sid = case["candidates"][0]["source_id"]
     case["prioritization"]["candidates"][sid] = {"commit_relation": "non_ancestor", "anchor_delta": "deleted"}
-    storage.atomic_write_yaml(case_path, case)
+    (case_path).write_text(yaml.safe_dump(case, sort_keys=False), encoding="utf-8")
 
     assert gi._payload_sha256(load_json_strict(import_path)) == digest_before
     code_after, _ = validate_workspace(ws)
@@ -2097,7 +2097,7 @@ def test_facts_version_bump_alone_never_stales(tmp_path: Path, fake_gh: FakeGh) 
     raw = load_yaml_strict(case_path)
     raw["prioritization"]["extraction_version"] = 0            # simulate an older facts version
     raw["curation"]["state"] = "ready"
-    storage.atomic_write_yaml(case_path, raw)
+    (case_path).write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     origin_url = str(tmp_path / "origin_local.git")
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=origin_url) == 0
     refreshed = load_yaml_strict(case_path)

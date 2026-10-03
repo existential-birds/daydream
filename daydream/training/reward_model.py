@@ -13,15 +13,10 @@ import json
 import math
 import random
 from dataclasses import asdict, dataclass, replace
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-from daydream.training.corpus import _is_admitted_outcome_gold
 
 if TYPE_CHECKING:
     from daydream.training.gate import FrozenSplit
-
-_GOLD_LABELS = frozenset({"accepted", "rejected"})
 
 _FLOOR = 0.0
 _CEILING = 1.0
@@ -96,69 +91,6 @@ def _sigmoid(z: float) -> float:
     return ez / (1.0 + ez)
 
 
-def _read_admitted_rows(labels_path: str | Path) -> list[dict[str, Any]]:
-    """Read and admit gold accepted/rejected JSONL rows; refuse malformed or legacy rows.
-
-    Accept label/text/comment_id and outcome_label/review_output/session_id spellings.
-    Missing policy versions never receive a fallback. Explicit admission failures
-    remain failures; normalize admitted rows to canonical keys for training.
-    """
-    rows: list[dict[str, Any]] = []
-    with Path(labels_path).open("r", encoding="utf-8") as fh:
-        for lineno, line in enumerate(fh, start=1):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                row = json.loads(stripped)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"row {lineno} in {labels_path} is not valid JSON: {exc}") from exc
-            if not isinstance(row, dict):
-                raise ValueError(f"row {lineno} in {labels_path} is not a JSON object")
-            row_id = row.get("comment_id") or row.get("session_id")
-            if not isinstance(row_id, str) or not row_id:
-                raise ValueError(
-                    f"row {lineno} in {labels_path} is missing a string 'comment_id'/'session_id'"
-                )
-            text = row.get("text")
-            if not isinstance(text, str):
-                text = row.get("review_output")
-                if not isinstance(text, str):
-                    raise ValueError(
-                        f"row {row_id} in {labels_path} is missing a string 'text'/'review_output'"
-                    )
-            label = row.get("label") or row.get("outcome_label")
-            if label not in _GOLD_LABELS:
-                raise ValueError(
-                    f"row {row_id} in {labels_path} has non-gold label {label!r}; "
-                    f"expected one of {sorted(_GOLD_LABELS)}"
-                )
-            has_posterior = bool(row.get("has_posterior", True))
-            policy_version = row.get("labeler_policy_version")
-            decisive_mix = bool(row.get("decisive_mix", False))
-            decisive_only = bool(row.get("decisive_only", True))
-            admitted = _is_admitted_outcome_gold(
-                label, has_posterior, policy_version, decisive_mix, decisive_only,
-                allowed_labels=_GOLD_LABELS,
-            )
-            if not admitted:
-                raise ValueError(
-                    f"row {row_id} in {labels_path} is refused by the gold-outcome gate "
-                    f"(label={label!r}, has_posterior={has_posterior}, "
-                    f"labeler_policy_version={policy_version!r}, decisive_mix={decisive_mix}, "
-                    f"decisive_only={decisive_only}); refusing rather than silently admitting"
-                )
-            # Normalize a production-shape row (outcome_label/review_output/
-            # session_id) onto the canonical label/text/comment_id keys the
-            # training and split code reads, without mutating the caller's copy
-            # of the record.
-            row["comment_id"] = str(row_id)
-            row["text"] = text
-            row["label"] = label
-            rows.append(row)
-    return rows
-
-
 def _train_logistic(
     examples: list[tuple[dict[str, float], float]],
     *,
@@ -186,9 +118,8 @@ def _train_logistic(
 
 
 def train_outcome_model(
-    labels_path: str | Path,
-    *,
     split: FrozenSplit,
+    *,
     seed: int,
     epochs: int = 20,
     lr: float = 0.5,
@@ -196,28 +127,12 @@ def train_outcome_model(
 ) -> OutcomeModel:
     """Train on the frozen partition, measuring class balance and held-out accuracy.
 
-    Both classes must exist after admission or ValueError names the missing one.
-    The split is supplied by the gate; seed controls only the deterministic SGD
-    shuffle. Unreadable or refused input propagates before training.
+    The split owns immutable gold admission and both-class refusal; counts and
+    fitting use that same population. Seed controls only the deterministic SGD
+    shuffle, never the projection's frozen membership or row order.
     """
-    rows = _read_admitted_rows(labels_path)
-    if not rows:
-        raise ValueError(f"labels file {labels_path} contains no admissible gold outcome rows")
-
-    n_accepted = sum(1 for r in rows if r["label"] == "accepted")
-    n_rejected = len(rows) - n_accepted
-    missing: list[str] = []
-    if n_accepted == 0:
-        missing.append("accepted")
-    if n_rejected == 0:
-        missing.append("rejected")
-    if missing:
-        raise ValueError(
-            f"cannot train a two-class outcome model on a single class: labels file "
-            f"{labels_path} has no {missing[0]!r} rows after gold admission "
-            f"(accepted={n_accepted}, rejected={n_rejected}). C9: a positive-only "
-            "model cannot rank — training data must contain both classes."
-        )
+    rows = (*split.train_rows, *split.held_out_rows)
+    n_accepted = sum(row["label"] == "accepted" for row in rows)
 
     train_rows = split.train_rows
     held_out_rows = split.held_out_rows

@@ -94,12 +94,6 @@ def atomic_write_json(path: Path, data: Any, *, mode: int = 0o600) -> None:
     _atomic_write(path, payload, mode=mode)
 
 
-def atomic_write_yaml(path: Path, data: Any, *, mode: int = 0o600) -> None:
-    """Atomically write ``data`` as YAML to ``path`` with a strict mode."""
-    payload = yaml.safe_dump(data, sort_keys=False).encode("utf-8")
-    _atomic_write(path, payload, mode=mode)
-
-
 def ensure_private_dir(path: Path, mode: int = 0o700) -> None:
     """Create ``path`` (and any missing parents) with private ``0700`` modes."""
     missing: list[Path] = []

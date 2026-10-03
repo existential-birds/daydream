@@ -18,7 +18,7 @@ from daydream.deep.artifacts import (
     diff_key,
 )
 from daydream.deep.records import record_issues
-from daydream.phases import TestAndHealResult, TestAttemptEvidence
+from daydream.phases import TestAttemptEvidence
 from daydream.pr_review import PRInfo
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE, PR_DESCRIPTION_UNTRUSTED_FRAMING
 from daydream.review_profile import ResolvedProfile, build_default_profile, parse_profile
@@ -220,16 +220,14 @@ def _prime_merge_resume(
     persist_review_coverage(deep, coverage)
     return deep
 
-async def _ok(*_a: Any, **kwargs: Any) -> Any:
+async def _ok(_backend: Any, session: Any, **_kwargs: Any) -> bool:
     """Always-passing async test phase shared with archive data-capture tests."""
-    key = kwargs["capture_tree_key"]()
-    return TestAndHealResult(passed=True, retries=0, proceed=True, ignored=False,
-        attempts=(TestAttemptEvidence(
-                session_id=kwargs["session_id"], kind="agent", command=None, passed=True, input_tree_key=key,
-                output_tree_key=key,
-            ),
-        ),
-    )
+    key = session.capture_key()
+    session.test_attempts.append(TestAttemptEvidence(
+        session_id=session.session_id, kind="agent", command=None, passed=True,
+        input_tree_key=key, output_tree_key=key,
+    ))
+    return True
 
 async def _noop_commit(*_a: Any, **_k: Any) -> None:
     """Async no-op stand-in for phase_commit_push (see ``_ok`` on why it stays)."""

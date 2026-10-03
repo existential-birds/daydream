@@ -29,7 +29,7 @@ from daydream.backends import (
 )
 from daydream.backends.codex import CodexBackend
 from daydream.config_file import DaydreamFileConfig
-from daydream.phases import TestAndHealResult, TestAttemptEvidence
+from daydream.phases import TestAttemptEvidence
 from daydream.phases.review import ReviewOutputError
 from daydream.review_budget import ReviewLimits
 from daydream.run_config import RunConfig
@@ -92,7 +92,7 @@ def _install_deep_capture_backend(
         monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub,)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     if not real_internal_phases:
-        monkeypatch.setattr("daydream.deep.fix_steps.phase_test_and_heal", lambda *a, **k: _ok(**k),)
+        monkeypatch.setattr("daydream.deep.fix_steps.phase_test_and_heal", _ok)
         monkeypatch.setattr("daydream.deep.fix_steps.phase_commit_push", _noop_commit)
     return stub
 
@@ -121,15 +121,23 @@ async def _run_real_phases_deep(
     )
     return remote, exit_code
 
-async def _ok_with_heal_edit(target: Path, **kwargs: Any) -> Any:
-    before = kwargs["capture_tree_key"]()
+
+async def _ok_with_heal_edit(target: Path, session: Any, **_kwargs: Any) -> bool:
+    before = session.capture_key()
     (target / "heal_edit.py").write_text("def healed():\n    pass\n")
-    after = kwargs["capture_tree_key"]()
-    return TestAndHealResult(passed=True, retries=0, proceed=True, ignored=False,
-        attempts=(TestAttemptEvidence(session_id=kwargs["session_id"], kind="agent", command=None,
-            passed=True, input_tree_key=before, output_tree_key=after,
-        ),),
+    after = session.capture_key()
+    session.test_attempts.append(
+        TestAttemptEvidence(
+            session_id=session.session_id,
+            kind="agent",
+            command=None,
+            passed=True,
+            input_tree_key=before,
+            output_tree_key=after,
+        )
     )
+    return True
+
 
 async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_phase_state(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, no_ci_remote: NoCIRemote,
@@ -262,7 +270,8 @@ async def test_deep_heal_edit_lands_in_archived_recommended_patch(
     stub = _install_deep_capture_backend(multi_stack_target, monkeypatch)  # real_internal_phases=False
     stub.fix_edit_line = "# daydream recommended change\n"
     monkeypatch.setattr(
-        "daydream.deep.fix_steps.phase_test_and_heal", lambda *a, **k: _ok_with_heal_edit(multi_stack_target, **k),
+        "daydream.deep.fix_steps.phase_test_and_heal",
+        lambda *a, **k: _ok_with_heal_edit(multi_stack_target, a[1], **k),
     )
 
     exit_code = await run(_deep_run_config(multi_stack_target))

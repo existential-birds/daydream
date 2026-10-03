@@ -185,7 +185,7 @@ def _inject_body(ws: Path, case_id: str, body: str) -> None:
     raw["pull_request"] = dict(raw["pull_request"])
     raw["pull_request"]["body"] = body
     raw["pull_request"]["body_sha256"] = hashlib.sha256(body.encode("utf-8")).hexdigest()
-    storage.atomic_write_yaml(path, raw)
+    (path).write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
 
 def _compile(ws: Path) -> Any:
@@ -677,7 +677,7 @@ def test_ready_empty_gold_without_clean_attestation_does_not_compile(tmp_path: P
     curation["gold_status"] = None         # no clean label without attestation
     curation["task_spec_sha256"] = "d" * 64  # carry a digest so the clean gate is reached
     raw["curation"] = curation
-    storage.atomic_write_yaml(path, raw)
+    (path).write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     with pytest.raises(build.CompileError):
         build.compile_workspace(ws)
     assert not (ws / "harbor").exists()    # failed compile leaves no bundle
@@ -718,14 +718,14 @@ def test_compile_guards_marker_digest_against_raw_doc_injection(tmp_path: Path, 
     # content past the marker nor attest a wrong digest (fail-closed end-to-end
     # through compile_workspace).
     raw["pull_request"]["body_sha256"] = "c3d4" * 16
-    storage.atomic_write_yaml(case_path, raw)
+    (case_path).write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     with pytest.raises((CompileError, WorkspaceCorrupt)):
         compile_workspace(ws)
     # truthful digest passes the gate; the marker must still carry that
     # truthful digest rather than trusting a field the compiler does not
     # re-derive.
     raw["pull_request"]["body_sha256"] = hashlib.sha256(body.encode("utf-8")).hexdigest()
-    storage.atomic_write_yaml(case_path, raw)
+    (case_path).write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     lock = compile_workspace(ws)
     key = next(iter(lock["cases"]))
     instr = (ws / "harbor" / key / "instruction.md").read_text()
@@ -751,7 +751,7 @@ def test_compile_fails_closed_on_missing_pr_number(tmp_path: Path, fake_gh: Fake
     case_path = ws / "cases" / f"{case_id}.yaml"
     raw = storage.load_yaml_strict(case_path)
     del raw["pull_request"]["number"]
-    storage.atomic_write_yaml(case_path, raw)
+    (case_path).write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     with pytest.raises((CompileError, WorkspaceCorrupt)):
         compile_workspace(ws)
 
@@ -807,7 +807,7 @@ def test_harbor_bytes_identical_under_prioritization_fact_change(tmp_path: Path,
     raw = storage.load_yaml_strict(case_path)
     raw["prioritization"]["candidates"] = {}                   # arbitrary fact mutation
     raw["prioritization"]["extraction_version"] = 999
-    storage.atomic_write_yaml(case_path, raw)
+    (case_path).write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     lock_b = build.compile_workspace(ws)
     tree_b = _harbor_tree_bytes(ws)
     assert lock_a == lock_b and tree_a == tree_b
@@ -816,7 +816,7 @@ def test_harbor_bytes_identical_under_prioritization_fact_change(tmp_path: Path,
 
     raw = storage.load_yaml_strict(case_path)
     del raw["prioritization"]
-    storage.atomic_write_yaml(case_path, raw)
+    (case_path).write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     lock_c = build.compile_workspace(ws)
     tree_c = _harbor_tree_bytes(ws)
     assert lock_a == lock_c and tree_a == tree_c
@@ -832,7 +832,7 @@ def test_compiled_case_dirs_are_canonically_sorted_by_opaque_key(tmp_path: Path,
     tree_a = _harbor_tree_bytes(ws)
 
     manifest["cases"] = manifest["cases"][::-1]
-    storage.atomic_write_yaml(ws / "benchmark.yaml", manifest)
+    (ws / "benchmark.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
     build.compile_workspace(ws)
     tree_b = _harbor_tree_bytes(ws)
     assert tree_a == tree_b
@@ -988,7 +988,7 @@ def test_compile_rejects_when_a_case_is_not_compilable(tmp_path: Path, fake_gh: 
     raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     raw["curation"]["state"] = "stale"
     raw["curation"]["snapshot_attested"] = False
-    storage.atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
+    (ws / "cases" / f"{case_id}.yaml").write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     with pytest.raises(CompileError) as rejected:
         build.compile_workspace(ws)
     assert case_id in str(rejected.value)
@@ -1088,7 +1088,7 @@ def test_compile_uses_shared_model_gated_loader(tmp_path: Path, fake_gh: FakeGh,
     case_path = ws / "cases" / f"{case_id}.yaml"
     raw = storage.load_yaml_strict(case_path)
     raw["unexpected_case_field"] = "must be rejected"
-    storage.atomic_write_yaml(case_path, raw)
+    (case_path).write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
     with pytest.raises(WorkspaceCorrupt, match=f"case cases/{case_id}.yaml is not a valid case document"):
         build.compile_workspace(ws)
@@ -1139,7 +1139,7 @@ def test_compile_records_template_version_and_rejects_stale_task_spec(tmp_path: 
     raw["pull_request"]["title_sha256"] = hashlib.sha256(b"Changed after approval").hexdigest()
     # Retain the previously approved task-spec digest; the changed rendered
     # spec must not replace the compiled tree without fresh approval.
-    storage.atomic_write_yaml(case_path, raw)
+    (case_path).write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
     with pytest.raises(build.CompileError, match="task spec digest"):
         build.compile_workspace(ws)
@@ -1175,14 +1175,14 @@ def test_spec_change_forces_recompile(tmp_path: Path, fake_gh: FakeGh) -> None:
     raw["pull_request"]["title"] = "Changed title"
     # the case doc is model-validated on every read, so ship the truthful digest
     raw["pull_request"]["title_sha256"] = hashlib.sha256(b"Changed title").hexdigest()
-    storage.atomic_write_yaml(path, raw)
+    (path).write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     new_digest = hashlib.sha256(
         build.render_task_spec(storage.load_yaml_strict(path), instruction=build.ASSIGNMENT_TEXT)).hexdigest()
     raw2 = storage.load_yaml_strict(path)
     raw2["curation"] = dict(raw2["curation"])
     raw2["curation"]["state"] = "draft"
     raw2["curation"]["snapshot_attested"] = False
-    storage.atomic_write_yaml(path, raw2)
+    (path).write_text(yaml.safe_dump(raw2, sort_keys=False), encoding="utf-8")
     cu.CaseEditor(ws, case_id).mark_ready(head_sha=head_sha, task_spec_sha256=new_digest)
     lock2 = build.compile_workspace(ws)
     assert lock2["authoring_input_digest"] != lock1["authoring_input_digest"]   # R11: spec change forces recompile
@@ -1241,7 +1241,7 @@ def test_openrouter_policy_compiles_and_is_not_leak_flagged(tmp_path: Path, fake
     raw = storage.load_yaml_strict(ws / "benchmark.yaml")
     raw["privacy"]["reviewer_allowed_hosts"] = ["openrouter.ai"]
     raw["privacy"]["judge_allowed_hosts"] = ["openrouter.ai"]
-    storage.atomic_write_yaml(ws / "benchmark.yaml", raw)
+    (ws / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     lock = build.compile_workspace(ws)          # must not raise a leakage CompileError
     key = next(iter(lock["cases"]))
     doc = tomllib.loads((ws / "harbor" / key / "task.toml").read_bytes().decode())
@@ -1252,7 +1252,7 @@ def test_compile_rejects_disallowed_judge_host(tmp_path: Path, fake_gh: FakeGh) 
     ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
     raw = storage.load_yaml_strict(ws / "benchmark.yaml")
     raw["privacy"]["judge_allowed_hosts"] = ["no-dot-segment"]   # normalize_hostname rejects
-    storage.atomic_write_yaml(ws / "benchmark.yaml", raw)
+    (ws / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     with pytest.raises(build.CompileError):
         build.compile_workspace(ws)
 
@@ -1266,7 +1266,7 @@ def test_policy_change_alters_compiled_digest(tmp_path: Path, fake_gh: FakeGh) -
     digest_a = lock_a["files"][next(iter(lock_a["cases"])) + "/task.toml"]
     raw = storage.load_yaml_strict(ws / "benchmark.yaml")
     raw["privacy"]["reviewer_allowed_hosts"] = ["other.example"]
-    storage.atomic_write_yaml(ws / "benchmark.yaml", raw)
+    (ws / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     lock_b = build.compile_workspace(ws)
     digest_b = lock_b["files"][next(iter(lock_b["cases"])) + "/task.toml"]
     assert digest_a != digest_b

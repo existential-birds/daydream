@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from daydream import git_ops
 from daydream.config import REVIEW_OUTPUT_FILE
@@ -21,6 +21,10 @@ from daydream.json_utils import atomic_write_json
 from daydream.phases import TestAttemptEvidence
 from daydream.quote_scrub import scrub_smart_quotes_changed_files
 from daydream.workspace import WorkContext
+
+if TYPE_CHECKING:
+    from daydream.run_config import RunConfig
+    from daydream.test_execution import TestRecipe
 
 
 @dataclass(frozen=True)
@@ -42,10 +46,23 @@ class RetainedTreeSnapshot:
     recommended_patch: bytes
 
 
+@dataclass(frozen=True)
+class RepairCandidate:
+    """One captured retained target and the verification that admitted it."""
+
+    snapshot: RetainedTreeSnapshot
+    key: EvidenceKey
+    outcomes: dict[str, dict[str, Any]]
+    test: TestAttemptEvidence | None = None
+
+
 @dataclass
 class FixCycleState:
     """One accepted fix gate's stable policy, baseline, and evidence."""
 
+    work: WorkContext
+    config: RunConfig
+    recipe: TestRecipe | None
     session_id: str
     stable_ref: str
     stable_head: str
@@ -53,10 +70,23 @@ class FixCycleState:
     preexisting_untracked: dict[str, GitPathState]
     preexisting_gitlinks: tuple[GitPathState, ...]
     footprint: AuthorizedFixFootprint
-    latest_retained: RetainedTreeSnapshot | None = None
-    latest_test_evidence: TestAttemptEvidence | None = None
-    verifier_key: EvidenceKey | None = None
+    round_snapshot: RetainedTreeSnapshot | None = None
+    candidate: RepairCandidate | None = None
+    test_attempts: list[TestAttemptEvidence] = field(default_factory=list)
+    test_retries: int = 0
+    test_ignored: bool = False
     last_fix_target_by_uid: dict[str, str] = field(default_factory=dict)
+
+    def capture_key(self) -> str:
+        """Observe this accepted session's run-relative tree identity."""
+        return git_ops.tree_key(
+            git_ops.snapshot_worktree_delta(
+                self.work.repo,
+                self.stable_ref,
+                preexisting_untracked=self.preexisting_untracked,
+                preexisting_gitlinks=self.preexisting_gitlinks,
+            )
+        )
 
     @classmethod
     def require(cls, ctx: FlowContext) -> FixCycleState:
@@ -67,18 +97,7 @@ class FixCycleState:
         return state
 
 
-def _capture_full_delta_key(work: WorkContext, state: FixCycleState) -> str:
-    return git_ops.tree_key(
-        git_ops.snapshot_worktree_delta(
-            work.repo,
-            state.stable_ref,
-            preexisting_untracked=state.preexisting_untracked,
-            preexisting_gitlinks=state.preexisting_gitlinks,
-        )
-    )
-
-
-def capture_retained_tree(work: WorkContext, state: FixCycleState) -> RetainedTreeSnapshot:
+def capture_retained_tree(state: FixCycleState) -> RetainedTreeSnapshot:
     """Capture the authorized HEAD delta while keying the run-relative tree.
 
     ``stable_ref`` includes pre-gate tracked edits so it remains the authority
@@ -89,14 +108,14 @@ def capture_retained_tree(work: WorkContext, state: FixCycleState) -> RetainedTr
     names them; authorization cannot silently enroll that private draft in a
     commit. New related files created after the gate are still retained.
     """
-    changed = set(git_ops.changed_paths_z(work.repo, state.stable_head))
+    changed = set(git_ops.changed_paths_z(state.work.repo, state.stable_head))
     paths = frozenset(
         (changed & set(state.footprint.run_allowed_paths)) - set(state.preexisting_untracked)
     )
-    states = git_ops.snapshot_worktree_paths(work.repo, paths)
-    tree_key = _capture_full_delta_key(work, state)
+    states = git_ops.snapshot_worktree_paths(state.work.repo, paths)
+    tree_key = state.capture_key()
     recommended = git_ops.build_recommended_patch_strict(
-        work.repo, state.stable_head, paths
+        state.work.repo, state.stable_head, paths
     )
     return RetainedTreeSnapshot(
         paths=paths,
@@ -172,7 +191,7 @@ def _strict_scope_and_scrub(
     """Apply the run-wide guard and quote scrub, returning whether bytes changed."""
     deep_data = ctx.deep_data()
 
-    before = _capture_full_delta_key(ctx.work, state)
+    before = state.capture_key()
     generated_restores: list[str] = []
     for path in git_ops.changed_paths_z(ctx.work.repo, state.stable_ref):
         if path.startswith(".daydream/") or path == REVIEW_OUTPUT_FILE:
@@ -227,7 +246,7 @@ def _strict_scope_and_scrub(
         sorted(enforced.retained_paths),
         pre_fix_ref=state.stable_ref,
     )
-    after = _capture_full_delta_key(ctx.work, state)
+    after = state.capture_key()
     return bool(generated_restores) or enforced.mutated or before != after
 
 
@@ -242,7 +261,7 @@ def _enforce_terminal_confinement(
     try:
         _enforce_footprint(ctx, state, phase=phase, round_number=round_number)
         key = EvidenceKey(
-            _capture_full_delta_key(ctx.work, state),
+            state.capture_key(),
             state.footprint.policy_revision,
         )
         _write_footprint_audit(ctx, state, key)

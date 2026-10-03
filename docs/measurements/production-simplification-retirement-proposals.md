@@ -62,12 +62,12 @@ coverage floor or weaken guard verification. Run focused native workflows and al
 ordinary repository hooks. Obtain independent review of the integrated baseline
 diff, then remeasure every remaining/new production file and update the same PR.
 
-Against the current complete82441-source/107691-physical working measurement, deleting
-only the exclusive cone would arithmetically leave75257source/98873physical. This
-is a hypothetical scope estimate, not an implemented result or passing measurement.
-The committed PR measurement remains82698source/107920physical at5378e3da, and the
-completion criteria are still unmet. Final retirement measurements must include
-all caller changes, retained compatibility and any new production modules.
+The exclusive-cone counts above are historical feasibility evidence, not an
+implemented retirement diff. The user chose to retain both capabilities. Current
+internal-redesign totals and shortfalls are in production-simplification.json;
+no hypothetical cone subtraction contributes to those measurements. Any future
+scope decision would require complete caller/compatibility verification and a new
+measurement including every retained and new production module.
 
 ## Alternative: retire standalone Benchmark
 

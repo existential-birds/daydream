@@ -192,7 +192,7 @@ async def test_multi_group_arbiter_applies_every_verdict_and_records_per_group_e
     assert (deep / "adjudication-complete.marker").exists()
     # ARBITRATED is the stub arbiter's revised description prefix: its presence
     # proves `_apply_adjudication_verdicts` reconciled every group's verdicts
-    # back onto the run-wide target ordinals after the fan-out.
+    # back onto their snapshotted input UIDs after the fan-out.
     assert "ARBITRATED" in json.dumps(_merged_items(deep))
     assert not (deep / "arbiter-input.json").exists()
 

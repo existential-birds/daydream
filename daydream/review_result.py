@@ -259,7 +259,6 @@ class ReviewCoverage:
                     'reason_codes': [ReasonCode.COVERAGE_UNKNOWN.value], 'noop': False, 'usable_evidence': False}
             for phase in self.required_phases}
         self.diagnostics: dict[str, dict[str, str]] = {"scopes": {}, "phases": {}}
-        self._terminal: dict[str, Any] | None = None
         self._frozen_evidence: dict[str, Any] | None = None
 
     @property
@@ -271,10 +270,10 @@ class ReviewCoverage:
     @property
     def is_finalized(self) -> bool:
         """Whether the review boundary has frozen its terminal result."""
-        return self._terminal is not None
+        return self._frozen_evidence is not None
 
     def _mutable(self) -> None:
-        if self._terminal is not None:
+        if self._frozen_evidence is not None:
             raise ValueError('review coverage is frozen')
 
     def require_phase(self, phase: str) -> None:
@@ -313,8 +312,7 @@ class ReviewCoverage:
 
     def to_dict(self) -> dict[str, Any]:
         """Persist checked evidence, retaining the exact snapshot after finalization."""
-        if self._terminal is not None:
-            assert self._frozen_evidence is not None
+        if self._frozen_evidence is not None:
             return copy.deepcopy(self._frozen_evidence)
         return copy.deepcopy({'schema_version': 1, 'run_id': self.run_id,
             'analyzed_revision': self.revision.to_dict(),
@@ -359,10 +357,9 @@ class ReviewCoverage:
 
     def finalize(self, pipeline_state: str, *, projection_valid: bool = True) -> dict[str, Any]:
         """Freeze exactly once after all scope writers join and projection is validated."""
-        if self._terminal is not None:
+        if self._frozen_evidence is not None:
             raise ValueError('review coverage is already frozen')
         result = self._snapshot(self.to_dict(), pipeline_state, projection_valid)
         validate_terminal_result(result)
         self._frozen_evidence = self.to_dict()
-        self._terminal = copy.deepcopy(result)
         return copy.deepcopy(result)

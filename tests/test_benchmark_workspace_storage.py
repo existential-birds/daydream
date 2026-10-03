@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import pytest
+import yaml
 
 from daydream.benchmark.storage import (
     LockContentionError,
@@ -13,7 +14,6 @@ from daydream.benchmark.storage import (
     WorkspaceCorrupt,
     WorkspaceLock,
     atomic_write_json,
-    atomic_write_yaml,
     ensure_private_dir,
     load_json_strict,
     load_yaml_strict,
@@ -47,9 +47,11 @@ def test_atomic_write_json_0600_and_readback(tmp_path: Path) -> None:
     assert load_json_strict(dest) == {"k": 1}
     assert stat.S_IMODE(dest.stat().st_mode) == 0o600
 
-def test_atomic_write_yaml_0600_and_readback(tmp_path: Path) -> None:
+def test_transaction_yaml_0600_and_readback(tmp_path: Path) -> None:
     dest = tmp_path / "benchmark.yaml"
-    atomic_write_yaml(dest, {"schema_version": 1})
+    with Transaction(tmp_path, op_id="yaml-write", kind="write") as tx:
+        tx.stage(dest, yaml.safe_dump({"schema_version": 1}, sort_keys=False).encode("utf-8"))
+        tx.commit()
     assert load_yaml_strict(dest) == {"schema_version": 1}
     assert stat.S_IMODE(dest.stat().st_mode) == 0o600
 

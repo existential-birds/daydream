@@ -131,9 +131,9 @@ async def test_fix_verification_recaptures_an_invalid_retained_snapshot_from_rea
     ctx = _direct_fix_context(repo, [], changed_files={"a.py"})
     state = _direct_fix_state(ctx, [], {"a.py"})
     (repo / "a.py").write_text("A = 2\n")
-    ctx.data["fix_round_snapshot"] = object()
+    state.round_snapshot = None
     assert isinstance(await _step_fix_verify(ctx), BreakLoop)
-    assert isinstance(state.latest_retained, RetainedTreeSnapshot)
-    assert state.latest_retained.paths == frozenset({"a.py"})
-    assert "+A = 2" in state.latest_retained.verifier_patch
+    assert isinstance(state.candidate.snapshot, RetainedTreeSnapshot)
+    assert state.candidate.snapshot.paths == frozenset({"a.py"})
+    assert "+A = 2" in state.candidate.snapshot.verifier_patch
     assert (repo / "a.py").read_text() == "A = 2\n"

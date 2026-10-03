@@ -78,7 +78,7 @@ def _outcome_rows(
     """Capture gold labels in file order and their pinned training partitions.
 
     Preserve admission evidence and promote lineage.labeler_policy_version only
-    when absent at top level. Missing policy stays missing so model admission
+    when absent at top level. Missing policy stays missing so split admission
     refuses it; missing text or identity on a labeled row raises RuntimeError.
     """
     rows: list[dict[str, Any]] = []
@@ -256,8 +256,7 @@ def _run_stage0(
         held_out_fraction=float(cast(float, projection.lineage["holdout_rate"])),
     )
     model: OutcomeModel = train_outcome_model(
-        labels_path,
-        split=split,
+        split,
         seed=config.seed,
     )
     report = gate_mod.evaluate_gate(model, split, config.gate_config)

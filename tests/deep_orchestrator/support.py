@@ -437,7 +437,9 @@ def _direct_fix_context(repo: Path, items: list[dict[str, Any]], *, changed_file
 
 def _direct_fix_state(ctx: Any, items: list[dict[str, Any]], reviewed: set[str]) -> Any:
     footprint = AuthorizedFixFootprint.build(ctx.work.repo, reviewed, items)
-    state = FixCycleState(session_id="session-current", stable_ref=git_ops.head_sha(ctx.work.repo),
+    state = FixCycleState(
+        work=ctx.work, config=ctx.config, recipe=ctx.deep_data().get("test_recipe"),
+        session_id="session-current", stable_ref=git_ops.head_sha(ctx.work.repo),
         stable_head=git_ops.head_sha(ctx.work.repo), initial_index=git_ops.snapshot_index(ctx.work.repo),
         preexisting_untracked=git_ops.snapshot_untracked_paths(ctx.work.repo, include_runtime_artifacts=False),
         preexisting_gitlinks=git_ops.snapshot_worktree_gitlinks(ctx.work.repo), footprint=footprint,
@@ -493,7 +495,7 @@ def _finalization_fixture(tmp_path: Path) -> tuple[Any, Any, Any]:
     ctx = _direct_fix_context(repo, items, changed_files={"a.py"})
     state = _direct_fix_state(ctx, items, {"a.py"})
     (repo / "a.py").write_text("A = 2\n")
-    snapshot = capture_retained_tree(ctx.work, state)
+    snapshot = capture_retained_tree(state)
     return ctx, state, snapshot
 
 

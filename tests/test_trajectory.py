@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import signal
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -56,7 +57,7 @@ from daydream.trajectory import (
 )
 from daydream.trajectory.recorder import _safe_descriptor
 from daydream.ui import get_shutdown_panel, set_shutdown_panel
-from tests.harness.backend import ScriptedBackend
+from tests.harness.repair import repair_session
 from tests.harness.trajectory import (
     make_recorder,
     observe_metrics_and_result,
@@ -117,7 +118,6 @@ def children_for_dispatch(step: dict[str, Any], target_dir: Path,) -> list[dict[
     return [read_trajectory(target_dir / ".daydream" / ref["trajectory_path"]) for ref in dispatch_refs(step)]
 
 
-
 async def test_text_event_then_result_produces_one_agent_step(tmp_path: Path) -> None:
     """Behavior 1: One agent Step from a single TextEvent + ResultEvent."""
     traj = await _drive(tmp_path, TextEvent(text="Hello world"), ResultEvent(structured_output=None, continuation=None),
@@ -169,7 +169,6 @@ async def test_diagnostic_redaction_failure_persists_fixed_safe_record(tmp_path:
     assert secret not in json.dumps(records)
 
 
-
 async def test_text_event_chunks_coalesce_into_one_step(tmp_path: Path) -> None:
     """Behavior 2: Two TextEvents concatenate into one Step.message (D-03)."""
     traj = await _drive(tmp_path, TextEvent(text="Hello "), TextEvent(text="world"),
@@ -178,7 +177,6 @@ async def test_text_event_chunks_coalesce_into_one_step(tmp_path: Path) -> None:
     agent_steps = _agent_steps(traj)
     assert len(agent_steps) == 1
     assert agent_steps[0]["message"] == "Hello world"
-
 
 
 async def test_result_event_flushes_text_and_starts_new_step(recorder: TrajectoryRecorder) -> None:
@@ -197,7 +195,6 @@ async def test_result_event_flushes_text_and_starts_new_step(recorder: Trajector
     assert agent_steps[1]["message"] == "second chunk"
 
 
-
 async def test_tool_call_and_result_land_on_same_step(tmp_path: Path) -> None:
     """Behavior 3: ToolStartEvent + ToolResultEvent both land on same Step."""
     traj = await _drive(
@@ -210,8 +207,6 @@ async def test_tool_call_and_result_land_on_same_step(tmp_path: Path) -> None:
     step = agent_steps[0]
     assert step["tool_calls"][0]["tool_call_id"] == "tool-1"
     assert step["observation"]["results"][0]["source_call_id"] == "tool-1"
-
-
 
 
 async def _record_events(tmp_path: Path, *events: AgentEvent) -> tuple[Invocation, list[Step]]:
@@ -265,8 +260,8 @@ async def test_late_result_on_closed_step_carries_extra(tmp_path: Path) -> None:
     assert result.extra == {"is_error": True, "exit_code": 1, "status": "completed"}
 
 
-
 INCOMPLETE_CONTENT = "[interrupted: call did not complete before invocation ended]"
+
 
 @pytest.mark.parametrize("host_closed", [False, True], ids=["open-step", "closed-step"])
 async def test_finish_marks_in_flight_tool_on_its_host_step(tmp_path: Path, host_closed: bool) -> None:
@@ -297,7 +292,6 @@ async def test_late_result_before_finish_still_amends_normally(tmp_path: Path) -
     assert result.extra == {"is_error": False, "exit_code": 0, "status": "completed"}
 
 
-
 async def test_mark_aborted_stamps_stop_reason_on_closing_step(recorder: TrajectoryRecorder) -> None:
     """An aborted invocation closes cleanly with extra['stop_reason'] set."""
     async with recorder:
@@ -310,7 +304,6 @@ async def test_mark_aborted_stamps_stop_reason_on_closing_step(recorder: Traject
     agent_steps = _agent_steps(traj)
     assert len(agent_steps) == 1
     assert agent_steps[0]["extra"]["stop_reason"] == "budget_exceeded"
-
 
 
 async def test_user_step_omits_agent_only_fields(recorder: TrajectoryRecorder) -> None:
@@ -331,7 +324,6 @@ async def test_user_step_omits_agent_only_fields(recorder: TrajectoryRecorder) -
         assert forbidden not in user, f"User step must not carry agent-only field '{forbidden}'; got {user.keys()}"
 
 
-
 async def test_metrics_event_cached_tokens_is_subset_not_added(tmp_path: Path) -> None:
     """Behavior 5: MetricsEvent.cached_tokens is a SUBSET of prompt_tokens (D-15)."""
     metrics_event = MetricsEvent(
@@ -347,7 +339,6 @@ async def test_metrics_event_cached_tokens_is_subset_not_added(tmp_path: Path) -
     assert metrics["prompt_tokens"] == 500
     assert metrics["cached_tokens"] == 100
     assert metrics["completion_tokens"] == 80
-
 
 
 async def test_dispatch_failure_is_caught_and_run_continues(
@@ -384,7 +375,6 @@ async def test_dispatch_failure_is_caught_and_run_continues(
     assert "will-fail" not in agent_steps[0]["message"]
 
 
-
 async def test_recorder_writes_schema_valid_trajectory_on_clean_exit(recorder: TrajectoryRecorder,) -> None:
     """Behavior A: clean __aexit__ writes a JSON file passing daydream.atif.validate."""
     async with recorder:
@@ -394,7 +384,6 @@ async def test_recorder_writes_schema_valid_trajectory_on_clean_exit(recorder: T
 
     assert recorder.path.exists()
     assert atif_validate(recorder.path, validate_images=False) is True
-
 
 
 async def test_write_failure_degrades_with_warning(recorder: TrajectoryRecorder, monkeypatch: pytest.MonkeyPatch,
@@ -416,7 +405,6 @@ async def test_write_failure_degrades_with_warning(recorder: TrajectoryRecorder,
     assert any("Trajectory write failed" in m for m in warnings_emitted)
 
 
-
 async def test_final_metrics_totals_match_per_step_sum(recorder: TrajectoryRecorder) -> None:
     """Behavior D: FinalMetrics totals equal the sum of MetricsEvent values."""
     async with recorder:
@@ -436,7 +424,6 @@ async def test_final_metrics_totals_match_per_step_sum(recorder: TrajectoryRecor
     assert fm["total_cached_tokens"] == 30
     assert abs(fm["total_cost_usd"] - 0.003) < 1e-9
     assert fm["total_steps"] == len(traj["steps"])
-
 
 
 async def test_context_var_set_inside_and_cleared_after(recorder: TrajectoryRecorder) -> None:
@@ -786,7 +773,6 @@ async def test_fork_child_trajectory_id_distinct_from_root(tmp_path: Path) -> No
     assert (tmp_path / ".daydream" / ref["sibling_trajectory_ref"]) == child_path
 
 
-
 def test_now_iso_ends_with_z() -> None:
     """now_iso returns ISO 8601 string ending in 'Z' (Pitfall 2)."""
     ts = now_iso()
@@ -837,14 +823,12 @@ def test_invocation_has_no_parent_field() -> None:
     assert "parent" not in fields, f"Invocation must not carry a parent field in Phase 2 (D-08); got {fields}"
 
 
-
 def test_no_recorder_no_op_get_current_returns_none() -> None:
     """CORE-09: outside any recorder context, get_current_recorder is None."""
     assert get_current_recorder() is None
 
 
 # Fork / Sibling / Continuation tests (Phase 3, SUBA-01..09)
-
 
 
 async def test_fork_contextvar_isolation(recorder: TrajectoryRecorder) -> None:
@@ -857,7 +841,6 @@ async def test_fork_contextvar_isolation(recorder: TrajectoryRecorder) -> None:
             async with child.invocation(phase=DaydreamPhase.FIX) as inv:
                 observe_text_and_result(inv)
         assert get_current_recorder() is recorder
-
 
 
 async def test_sibling_inherits_session_id(recorder: TrajectoryRecorder) -> None:
@@ -876,7 +859,6 @@ async def test_sibling_inherits_session_id(recorder: TrajectoryRecorder) -> None
     assert parent_traj["session_id"] == recorder.session_id
 
 
-
 async def test_sibling_file_path_format(tmp_path: Path) -> None:
     """SUBA-06: Sibling path is <target>/.daydream/runs/<session_id>/trajectories/<descriptor>.json."""
     recorder = make_recorder(tmp_path)
@@ -888,7 +870,6 @@ async def test_sibling_file_path_format(tmp_path: Path) -> None:
     expected = tmp_path / ".daydream" / "runs" / recorder.session_id / "trajectories" / "deep-python.json"
     assert child.path == expected
     assert expected.exists()
-
 
 
 async def test_step_id_isolation_across_siblings(recorder: TrajectoryRecorder) -> None:
@@ -909,7 +890,6 @@ async def test_step_id_isolation_across_siblings(recorder: TrajectoryRecorder) -
     assert parent_ids == list(range(1, len(parent_ids) + 1))
     assert child_ids == list(range(1, len(child_ids) + 1))
     assert child_ids[0] == 1
-
 
 
 async def test_parent_metrics_include_children(recorder: TrajectoryRecorder) -> None:
@@ -939,7 +919,6 @@ async def test_parent_metrics_include_children(recorder: TrajectoryRecorder) -> 
     assert own == 100
 
 
-
 async def test_dispatch_step_uses_relative_path(recorder: TrajectoryRecorder) -> None:
     """Dispatch step subagent_trajectory_ref.trajectory_path is relative to .daydream."""
     async with recorder:
@@ -960,7 +939,6 @@ async def test_dispatch_step_uses_relative_path(recorder: TrajectoryRecorder) ->
     assert ref["trajectory_path"].endswith(".json")
 
 
-
 async def test_dispatch_step_noop_when_no_siblings(recorder: TrajectoryRecorder) -> None:
     """An empty declared fan-out adds no dispatch step."""
     async with recorder:
@@ -970,7 +948,6 @@ async def test_dispatch_step_noop_when_no_siblings(recorder: TrajectoryRecorder)
         async with trajectory_module.dispatch_scope(recorder, phase=DaydreamPhase.FIX, descriptors=[]) as dispatch:
             assert dispatch is None
         assert len(recorder.steps) == steps_before
-
 
 
 def test_safe_descriptor_slugification() -> None:
@@ -993,7 +970,6 @@ def test_safe_descriptor_rejects_degenerate_inputs() -> None:
         _safe_descriptor("   ")
 
 
-
 async def test_sequential_phases_single_file(tmp_path: Path) -> None:
     """SUBA-01: Three sequential invocations produce one file with continuous step_ids."""
     recorder = make_recorder(tmp_path)
@@ -1011,7 +987,6 @@ async def test_sequential_phases_single_file(tmp_path: Path) -> None:
 
     traj_dir = tmp_path / ".daydream" / "trajectories"
     assert not traj_dir.exists() or len(list(traj_dir.iterdir())) == 0
-
 
 
 async def test_fork_write_failure_degrades(tmp_path: Path) -> None:
@@ -1046,7 +1021,6 @@ async def test_fork_write_failure_degrades(tmp_path: Path) -> None:
     assert recorder.path.exists()
 
 
-
 async def test_fork_child_no_steps_no_file(tmp_path: Path) -> None:
     """Pitfall 6: Child with 0 steps writes no sibling file; parent has no registration."""
     recorder = make_recorder(tmp_path)
@@ -1060,7 +1034,6 @@ async def test_fork_child_no_steps_no_file(tmp_path: Path) -> None:
     assert not traj_dir.exists() or len(list(traj_dir.iterdir())) == 0
     root = read_trajectory(recorder.path)
     assert not any("sibling_trajectory_ref" in item for item in root["extra"]["subtrajectories"])
-
 
 
 async def test_multiple_forks_all_registered(recorder: TrajectoryRecorder) -> None:
@@ -1087,7 +1060,6 @@ async def test_multiple_forks_all_registered(recorder: TrajectoryRecorder) -> No
     assert len(results) == 3
     for r in results:
         assert len(r["subagent_trajectory_ref"]) == 1
-
 
 
 async def test_fork_validator_accepts_both(recorder: TrajectoryRecorder) -> None:
@@ -1161,7 +1133,6 @@ async def test_write_partial_failure_emits_warning_does_not_raise(
         recorder.write_partial()
 
     assert any("Partial trajectory write failed" in m for m in warnings_emitted)
-
 
 
 async def test_write_partial_captures_in_flight_invocation_steps(tmp_path: Path,) -> None:
@@ -1709,7 +1680,6 @@ def test_custom_run_flow_member_exists() -> None:
     assert DaydreamRunFlow("custom") is DaydreamRunFlow.CUSTOM
 
 
-
 async def test_fork_totals_fold_into_parent(recorder: TrajectoryRecorder) -> None:
     """Root final_metrics includes fork totals; the fork file keeps its own share."""
     async with recorder:
@@ -1855,7 +1825,6 @@ async def test_fork_child_inherits_backend_identity(tmp_path: Path) -> None:
     assert child_extra["review_backend"] == "codex"
     assert child_extra["fix_backend"] == "pi"
     assert child_extra["test_backend"] == "codex"
-
 
 
 async def test_host_phase_scope_records_duration_and_stop_reason(recorder: TrajectoryRecorder,) -> None:
@@ -2215,7 +2184,11 @@ def test_remote_ci_artifact_paths_are_named_under_deep_dir(tmp_path: Path) -> No
     assert DeepArtifact.REMOTE_CI_VERDICT.at(tmp_path) == tmp_path / "remote-ci-verdict.json"
     assert DeepArtifact.REMOTE_CI_HANDOFF.at(tmp_path) == tmp_path / "remote-ci-handoff.json"
 
-async def test_phase_commit_push_records_commit_phase_event(git_repo: Path, make_work: Any,) -> None:
+
+async def test_phase_commit_push_records_commit_phase_event(
+    git_repo: Path,
+    make_work: Any,
+) -> None:
     """Real-path: Publication's host-native commit emits a distinct ``commit``
     phase event with duration_ms + stop_reason (issue #726 task 12)."""
 
@@ -2229,13 +2202,14 @@ async def test_phase_commit_push_records_commit_phase_event(git_repo: Path, make
 
     rec = make_recorder(git_repo)
     async with rec:
-        ok = await phase_commit_push(
-            ScriptedBackend(), work,
-            run_context=RunContext(InteractionPolicy(assume="yes")),
-            retained_paths=frozenset({"app.py"}),
-            retained_states=git_ops.snapshot_worktree_paths(git_repo, {"app.py"}),
-            initial_index=git_ops.snapshot_index(git_repo),
+        session = repair_session(work, paths=frozenset({"app.py"}))
+        assert session.candidate is not None
+        session.initial_index = git_ops.snapshot_index(git_repo)
+        session.candidate = replace(
+            session.candidate,
+            snapshot=replace(session.candidate.snapshot, states=git_ops.snapshot_worktree_paths(git_repo, {"app.py"})),
         )
+        ok = await phase_commit_push(session, run_context=RunContext(InteractionPolicy(assume="yes")))
     assert ok is not None
     assert git_ops.remote_contains_commit(git_repo, ok.branch, ok.sha, remote=ok.remote)
 
