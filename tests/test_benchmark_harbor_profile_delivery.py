@@ -87,10 +87,7 @@ def test_ledger_entry_records_candidate_digest(tmp_path: Path) -> None:
     entry = led["runs"][0]
     assert entry["profile_digest"] == "abc123"
 
-def test_receipt_invalidation_inputs_include_candidate_digest() -> None:
-    sr = calibrate._load_judge_template()
-    inputs = calibrate._invalidation_inputs(_judge_env(DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST="xyz"), pairs=[], sr=sr)
-    assert "profile_digest" in inputs and inputs["profile_digest"] == "xyz"
+
 
 # Candidate-scoped receipts must satisfy oracle preflight; defaults retain the legacy shape.
 def test_calibrate_invalidation_inputs_folds_candidate_digest() -> None:
