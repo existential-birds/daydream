@@ -93,10 +93,17 @@ from daydream.phases.inputs import (
 from daydream.phases.publish import (
     _do_commit,
 )
+from daydream.phases.repair_outcome import (
+    RepairOutcome,
+    classify_repair_outcome,
+    repair_reason_code,
+)
 from daydream.phases.review_prompts import (
     _exploration_pointer,
 )
 from daydream.phases.test_evidence import (
+    RepairAttemptEvidence,
+    TestAndHealResult,
     _test_command_wall_budget,
 )
 from daydream.phases.testing import (
@@ -115,6 +122,7 @@ from daydream.prompts.authorial_intent import (
     PR_DESCRIPTION_UNTRUSTED_FRAMING,
 )
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+from daydream.review_result import ReasonCode
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.test_execution import TestExecutionIdentity, TestExecutionResult, resolve_test_recipe
 from daydream.trajectory import (
@@ -936,6 +944,69 @@ async def test_phase_test_and_heal_fix_prompt_absolute_path_and_no_turn_cap(
     assert "- src/handler.py" not in fix_prompt
     # No turn ceiling on any call, including the FIX run_agent call (2nd execute).
     assert backend.max_turns == [None, None, None]
+
+def _evidence(**overrides: Any) -> RepairAttemptEvidence:
+    """One fully-populated repair record; the caller overrides only what it asserts on."""
+    fields: dict[str, Any] = {
+        "job_id": "repair-job-1",
+        "execution_id": "repair-exec-1",
+        "run_id": "run-1",
+        "outcome": RepairOutcome.CANDIDATE_COMPLETE,
+        "abort_reason": None,
+        "backend_name": "claude",
+        "model": "claude-sonnet-4-5",
+        "execution_elapsed_s": 12.5,
+        "job_elapsed_s": 40.0,
+        "input_tree_key": "tree-in",
+        "output_tree_key": "tree-out",
+        "changed_paths": ("src/handler.py",),
+    }
+    fields.update(overrides)
+    return RepairAttemptEvidence(**fields)
+
+def test_repair_outcome_vocabulary_has_five_distinct_values() -> None:
+    """The five cases the issue names are separate members, not prose."""
+    values = {member.value for member in RepairOutcome}
+    assert values == {
+        "candidate_complete", "diagnosis_unresolved", "budget_interrupted",
+        "execution_error", "scope_blocked",
+    }
+
+def test_repair_outcome_maps_budget_interruption_to_existing_reason_code() -> None:
+    """Requirement 4: converge on ReasonCode; no new public stop reason."""
+    assert repair_reason_code("wall_budget_exceeded") is ReasonCode.HOST_WALL_BUDGET_EXHAUSTION
+    assert repair_reason_code("error_max_turns") is ReasonCode.MODEL_BUDGET_EXHAUSTION
+    assert repair_reason_code(None) is None
+
+@pytest.mark.parametrize(("abort_reason", "output", "expected"), [
+    ("wall_budget_exceeded", "PARTIAL-DIAGNOSIS-abc", RepairOutcome.BUDGET_INTERRUPTED),
+    (None, "", RepairOutcome.DIAGNOSIS_UNRESOLVED),
+    (None, "fixed it", RepairOutcome.DIAGNOSIS_UNRESOLVED),
+    ("backend_failure", "", RepairOutcome.EXECUTION_ERROR),
+])
+def test_host_interruption_outranks_model_claim_of_success(
+    abort_reason: str | None, output: str, expected: RepairOutcome,
+) -> None:
+    """Requirement 2: interruption wins; missing output is never success."""
+    assert classify_repair_outcome(abort_reason, output) is expected
+
+def test_test_and_heal_result_repairs_field_defaults_for_existing_callers() -> None:
+    """The defaulted field keeps all eight existing positional constructions valid."""
+    result = TestAndHealResult(True, 0, True, False, ())
+    assert result.repairs == ()
+
+def test_repair_attempt_evidence_payload_carries_identity_and_actual_paths() -> None:
+    """Requirement 1: the record alone distinguishes timeout from completion."""
+    payload = _evidence(
+        outcome=RepairOutcome.BUDGET_INTERRUPTED,
+        abort_reason="wall_budget_exceeded",
+        changed_paths=("src/handler.py",),
+    ).payload()
+    assert payload["outcome"] == "budget_interrupted"
+    assert payload["abort_reason"] == "wall_budget_exceeded"
+    assert payload["changed_paths"] == ["src/handler.py"]
+    assert payload["reason_code"] == "host_wall_budget_exhaustion"
+    assert payload["job_id"] and payload["execution_id"]
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("count", [1, 2], ids=["single", "batch"])
