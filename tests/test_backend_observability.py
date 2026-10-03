@@ -33,6 +33,7 @@ from daydream.trajectory import DaydreamPhase
 from tests.harness.claude_sdk import scripted_client
 from tests.harness.codex_replay import make_mock_process_from_fixture as codex_fixture
 from tests.harness.fake_cli_process import FakeCliProcess
+from tests.harness.osprey_jsonl import osprey_session
 from tests.harness.trajectory import make_recorder
 
 
@@ -270,21 +271,11 @@ async def test_codex_and_osprey_emit_no_generation_events() -> None:
     assert not any(isinstance(e, (GenerationStartEvent, GenerationEndEvent)) for e in codex_events)
     request = next(e for e in codex_events if isinstance(e, RequestEvent))
     assert isinstance(request.config, CodexRequestConfig)
-    osprey_body = [
-        {"event": "protocol", "version": 2},
-        {"event": "session_start", "session_id": "s-obs", "started_at": "2026-08-15T00:00:00Z",
-         "model": "custom-model", "provider": "openai-compatible"},
+    osprey_lines = [json.dumps(line) for line in osprey_session(
         {"event": "turn_start", "turn_id": "t1", "timestamp": "2026-08-15T00:00:01Z"},
         {"event": "text_delta", "content": "obs answer"},
         {"event": "turn_end", "turn_id": "t1", "usage_reported": False, "duration_ms": 5},
-        {"event": "session_end", "total_turns": 1, "session_wallclock_ms": 5,
-         "total_cost_usd": None, "total_prompt_tokens": 0, "total_completion_tokens": 0,
-         "total_cached_tokens": None, "total_cache_write_tokens": None,
-         "total_thinking_tokens": 0, "total_oom_kills": 0, "p50_turn_ms": 5,
-         "p99_turn_ms": 5, "avg_turn_cost_usd": None, "structured_output": None,
-         "verification": None, "outcome": "completed", "exit_code": 0},
-    ]
-    osprey_lines = [json.dumps(line) for line in osprey_body]
+    )]
     osprey_backend = OspreyBackend(model="custom-model", osprey_binary="fake")
     with patch(
         "daydream.backends._transport.asyncio.create_subprocess_exec",

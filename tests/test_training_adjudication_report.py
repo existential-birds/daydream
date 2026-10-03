@@ -6,6 +6,15 @@ import pytest
 from daydream.training.adjudication.report import build_report
 
 
+def _item(rid: str, disposition: str, profile: str = "pr_review", stack: str = "python",
+    raters: tuple[tuple[str, str], ...] = (),
+) -> dict[str, Any]:
+    return {"record_id": rid, "disposition": disposition, "profile": profile, "stack": stack,
+            "tier": "gold" if disposition in {"accepted", "rejected"} else "task-only",
+            "posterior_eligible": disposition in {"accepted", "rejected"},
+            "observations": [{"role": r, "disposition": d} for (r, d) in raters]}
+
+
 def test_report_separates_outcome_bearing_from_task_only_and_flags_as_of() -> None:
     items = [{"record_id": "r1", "disposition": "accepted", "profile": "pr_review",
          "stack": "python", "tier": "gold", "posterior_eligible": True,
@@ -30,24 +39,11 @@ def test_report_separates_outcome_bearing_from_task_only_and_flags_as_of() -> No
     assert gate["class_balance_ok"] is False  # sole outcome-bearing record is accepted-only
 
 def test_report_task_only_never_counts_toward_gate() -> None:
-    items = [{"record_id": f"r{i}", "disposition": "unanswered", "profile": "pr_review",
-         "stack": "python", "tier": "task-only", "posterior_eligible": False,
-         "observations": [], "evidence_after_as_of": False}
-        for i in range(5)
-    ]
+    items = [_item(f"r{i}", "unanswered") for i in range(5)]
     report = build_report(items)
     assert report["outcome_coverage"]["adjudicated"] == 0
     assert report["admission_gate"]["passes_80pct"] is False
     assert report["silver_task_only_count"] == 5
-
-
-def _item(rid: str, disposition: str, profile: str = "pr_review", stack: str = "python",
-    raters: tuple[tuple[str, str], ...] = (),
-) -> dict[str, Any]:
-    return {"record_id": rid, "disposition": disposition, "profile": profile, "stack": stack,
-            "tier": "gold" if disposition in {"accepted", "rejected"} else "task-only",
-            "posterior_eligible": disposition in {"accepted", "rejected"},
-            "observations": [{"role": r, "disposition": d} for (r, d) in raters]}
 
 
 def test_silver_task_only_never_counts_toward_outcome_coverage() -> None:
