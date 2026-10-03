@@ -896,6 +896,52 @@ async def test_error_turn_sets_retryable_via_classifier(error_message: Any, expe
                 pass
     assert exc_info.value.retryable is expected_retryable
 
+async def test_error_turn_carries_structured_retry_hint_from_the_provider_payload() -> None:
+    """The serialized OpenRouter 429 decodes to 10.0 on the backend's error hint.
+
+    Drives the real Pi protocol boundary (two real spawns) with only
+    create_subprocess_exec patched; a hand-built exception is not sufficient
+    coverage for the extraction contract (req 13).
+    """
+    error_msg = (
+        '429: {"message":"Temporary admission failure","code":429,'
+        '"metadata":{"headers":{"Retry-After":"10"}}}'
+    )
+    error_lines = [
+        '{"type":"session","sessionId":"pi_ses_429"}',
+        '{"type":"agent_start"}',
+        '{"type":"turn_start"}',
+        json.dumps({"type": "turn_end", "message": {"role": "assistant", "content": [],
+                                                    "stopReason": "error", "errorMessage": error_msg}}),
+    ]
+    healthy_lines = [
+        '{"type":"session","sessionId":"pi_ses_ok"}',
+        '{"type":"agent_start"}',
+        '{"type":"turn_start"}',
+        '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}',
+        '{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"done"}],'
+        '"usage":{"input":1,"output":1},"stopReason":"stop"}}',
+        '{"type":"agent_end","messages":[]}',
+    ]
+    backend = PiBackend(model="glm-5.2")
+    procs = [make_mock_process(error_lines), make_mock_process(healthy_lines)]
+    with patch(
+        "daydream.backends._transport.asyncio.create_subprocess_exec",
+        side_effect=lambda *a, **k: procs.pop(0),
+    ):
+        with pytest.raises(PiError) as exc_info:
+            async for _ in backend.execute(Path("/tmp"), "p"):
+                pass
+    assert exc_info.value.retry_after == 10.0
+    assert exc_info.value.retryable is True
+    # A healthy follow-up spawn proves the mock pair works and the ladder can recover.
+    with patch(
+        "daydream.backends._transport.asyncio.create_subprocess_exec",
+        side_effect=lambda *a, **k: procs.pop(0),
+    ):
+        events = [e async for e in backend.execute(Path("/tmp"), "p")]
+    assert any(getattr(e, "text", None) == "done" for e in events)
+
 @pytest.mark.parametrize(
     ("returncode", "output_lines", "expected_retryable"),
     [

@@ -726,8 +726,8 @@ async def _run_agent(
                         if not admission.allowed:
                             _emit_budget_stop("circuit_open")
                             raise
-                        # A server hint replaces jitter but cannot extend either budget; an oversized hint stops
-                        # recovery.
+                        # Honor server waits within recovery/deadline bounds; oversized hints stop recovery.
+                        hint = _retry_hint(exc)
                         delay, delay_stop = _plan_retry_delay(
                             attempt=attempt,
                             base_delay_s=base_delay,
@@ -736,14 +736,18 @@ async def _run_agent(
                             deadline_remaining_s=(
                                 None if effective_deadline is None else max(effective_deadline - clock.monotonic(), 0.0)
                             ),
-                            hint=_retry_hint(exc),
+                            hint=hint,
                         )
                         if delay_stop is not None:
                             _emit_budget_stop(delay_stop)
                             raise
+                        # A provider-advertised wait is distinguished in the notice so an
+                        # operator can tell a server-directed recovery from jitter backoff;
+                        # the printed value is the already-admitted delay, never the raw header.
+                        hint_note = " (server-advertised wait)" if hint is not None else ""
                         retry_msg = (
                             f"Backend error ({type(exc).__name__}), retrying "
-                            f"attempt {attempt + 2}/{exception_max_retries + 1} after {delay:.1f}s..."
+                            f"attempt {attempt + 2}/{exception_max_retries + 1} after {delay:.1f}s{hint_note}..."
                         )
                         await display.retry(retry_msg)
                         # The event-stream scope has already closed only this failed

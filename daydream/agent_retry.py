@@ -145,8 +145,9 @@ def _plan_retry_delay(
     deadline_remaining_s: float | None,
     hint: float | None,
 ) -> tuple[float, str | None]:
-    """Bound hint/jitter by exponential growth, maximum delay, recovery allowance, and deadline.
-    Server hints replace jitter; hints exceeding remaining budgets return retry_hint_exceeds_budget.
+    """Honor full server hints within recovery/deadline bounds; otherwise stop recovery.
+
+    Exponential growth and maximum delay cap fallback jitter only.
     """
     bounds = [
         bound
@@ -158,13 +159,16 @@ def _plan_retry_delay(
         )
         if bound is not None
     ]
+    if hint is not None:
+        if bounds and hint > min(bounds):
+            return 0.0, "retry_hint_exceeds_budget"
+        # A spent-but-not-none bound cannot turn an admitted hint negative.
+        return max(hint, 0.0), None
     cap = min(base_delay_s * (2 ** attempt), max_delay_s)
     if bounds:
         cap = min(cap, min(bounds))
     cap = max(cap, 0.0)
-    if hint is not None and bounds and hint > min(bounds):
-        return 0.0, "retry_hint_exceeds_budget"
-    return min(hint if hint is not None else _sample_retry_delay(cap), cap), None
+    return min(_sample_retry_delay(cap), cap), None
 
 
 @dataclass

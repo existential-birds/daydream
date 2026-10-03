@@ -11,7 +11,13 @@ from daydream.agent_retry import _coerce_retry_recovery_allowance
 from daydream.backends import BackendExecutionInput
 from daydream.backends.pi import PiError
 from daydream.config_file import _coerce_retry_recovery_allowance as file_coerce
-from daydream.retry_policy import FailureClass, classify_failure, decode_retry_recovery_allowance, derive_retry_summary
+from daydream.retry_policy import (
+    FailureClass,
+    classify_failure,
+    decode_retry_recovery_allowance,
+    derive_retry_summary,
+    parse_message_retry_hint,
+)
 
 
 def test_tool_policy_veto_is_permanent_and_never_retryable() -> None:
@@ -167,3 +173,43 @@ def test_a_refused_allowance_warning_names_the_source_and_the_value(caplog: pyte
     message = caplog.records[-1].message
     assert "retry_recovery_allowance_s=-1" in message
     assert "stays undeclared" in message
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        # Structured, status-prefixed (the issue's sanitized payload).
+        pytest.param(
+            '429: {"message":"Temporary admission failure","code":429,'
+            '"metadata":{"headers":{"Retry-After":"10"}}}', 10.0, id="issue-429",
+        ),
+        pytest.param('429: {"metadata":{"headers":{"retry-after":"7"}}}', 7.0, id="lowercase-key"),
+        pytest.param('429: {"metadata":{"headers":{"RETRY-AFTER":"7"}}}', 7.0, id="upper-key"),
+        pytest.param('429: {"metadata":{"headers":{"Retry-After":2.5}}}', 2.5, id="fractional-number"),
+        pytest.param('429: {"metadata":{"headers":{"Retry-After":10}}}', 10.0, id="bare-number"),
+        pytest.param('429: {"metadata":{"headers":{"Retry-After":"0"}}}', 0.0, id="zero-string"),
+        # Refusal: the shared decoder governs; never a second numeric rule.
+        pytest.param('429: {"metadata":{"headers":{"Retry-After":"-5"}}}', None, id="negative"),
+        pytest.param('429: {"metadata":{"headers":{"Retry-After":true}}}', None, id="boolean"),
+        pytest.param('429: {"metadata":{"headers":{"Retry-After":"nonsense"}}}', None, id="text"),
+        pytest.param(
+            '429: {"metadata":{"headers":{"Retry-After":"Wed, 21 Oct 2026 07:28:00 GMT"}}}',
+            None, id="http-date-out-of-scope",
+        ),
+        # Guarded shapes: no hint, no raise, text fallback stays live.
+        pytest.param('429: {"metadata":{"headers":"nope"}}', None, id="headers-not-mapping"),
+        pytest.param('429: {"metadata":"nope"}', None, id="metadata-not-mapping"),
+        pytest.param('429: {"code":429}', None, id="no-headers"),
+        pytest.param('429: {"metadata":{"headers":{"Retry-After":"10"}', None, id="malformed-json"),
+        # Preserved plain-text format (req 6): regex fallback.
+        pytest.param("503 Service Unavailable; retry-after: 30", 30.0, id="plain-text"),
+        pytest.param("503 retry-after 45", 45.0, id="plain-whitespace"),
+        pytest.param("503 Service Unavailable", None, id="no-hint-plain"),
+        pytest.param("", None, id="empty"),
+        # Structured precedence (Should-Have 2): structured wins over text, deterministically.
+        pytest.param(
+            '429: {"metadata":{"headers":{"Retry-After":"10"}}} retry-after: 99', 10.0, id="structured-wins",
+        ),
+    ],
+)
+def test_parse_message_retry_hint_reads_structured_headers(message: str, expected: float | None) -> None:
+    assert parse_message_retry_hint(message) == expected

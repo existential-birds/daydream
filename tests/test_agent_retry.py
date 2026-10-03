@@ -15,13 +15,41 @@ from daydream.agent import run_agent
 from daydream.agent_retry import _plan_retry_delay, _resolve_retry_settings, _retry_hint
 from daydream.backends import Backend, ResultEvent, RetryPolicy, TextEvent
 from daydream.backends._subprocess import StreamStalledError
-from daydream.backends.pi import PiError, _pi_error_category, _pi_retryable_for
+from daydream.backends.pi import PiBackend, PiError, _pi_error_category, _pi_retryable_for
 from daydream.config import DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
 from daydream.retry_policy import classify_failure
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
+from tests.harness.pi_replay import make_mock_process
 from tests.harness.trajectory import make_recorder
+
+# The sanitized provider 429 and the healthy follow-up, replayed through the real
+# Pi transport by the timing proofs below. Defined once and shared by both tests.
+_ERROR_MESSAGE = (
+    '429: {"message":"Temporary admission failure","code":429,'
+    '"metadata":{"headers":{"Retry-After":"10"}}}'
+)
+_ERROR_LINES = (
+    '{"type":"session","sessionId":"pi_ses_429"}',
+    '{"type":"agent_start"}',
+    '{"type":"turn_start"}',
+    json.dumps({
+        "type": "turn_end",
+        "message": {
+            "role": "assistant", "content": [], "stopReason": "error", "errorMessage": _ERROR_MESSAGE,
+        },
+    }),
+)
+_HEALTHY_LINES = (
+    '{"type":"session","sessionId":"pi_ses_ok"}',
+    '{"type":"agent_start"}',
+    '{"type":"turn_start"}',
+    '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}',
+    '{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"done"}],'
+    '"usage":{"input":1,"output":1},"stopReason":"stop"}}',
+    '{"type":"agent_end","messages":[]}',
+)
 
 
 def _fail_then_succeed(error: BaseException, *, text: str, partial: str | None = None, **attrs: Any) -> ScriptedBackend:
@@ -287,6 +315,29 @@ async def test_bounded_full_jitter_never_exceeds_the_cap(
         )
     assert slept == [pytest.approx(expected)]
 
+async def test_retry_notice_distinguishes_server_hint_from_jitter_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A wait granted by a provider hint is labelled differently from a jitter wait."""
+    import daydream.agent as agent_module
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=200)
+    monkeypatch.setattr(agent_module, "console", rec)
+    clock = FakeClock(monotonic_value=0.0).install(monkeypatch)
+    patch_retry_sleep(monkeypatch, clock)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
+    backend = ScriptedBackend(
+        events=[_HintError("503 Service Unavailable", retry_after=10.0)],
+        retry_attempts=1, retry_base_delay_s=1.0, retry_max_delay_s=4.0,
+    )
+    with pytest.raises(_HintError):
+        await run_agent(
+            backend, tmp_path, "go", phase=DaydreamPhase.FIX,
+            wall_budget_s=10_000.0, retry_recovery_allowance_s=300.0,
+        )
+    notice = rec.export_text()
+    assert "server" in notice.lower() or "advertised" in notice.lower()  # hint wait is labelled
+    assert notice.count("server-advertised wait") == 1  # the hint label is attached exactly once, never duplicated
+
 @pytest.mark.parametrize(
     ("retry_after", "expected_slept", "stop"),
     [
@@ -296,11 +347,11 @@ async def test_bounded_full_jitter_never_exceeds_the_cap(
         pytest.param(None, [30.0], None, id="absent-degrades-to-jitter"),
     ],
 )
-async def test_server_retry_hint_is_honoured_and_capped(
+async def test_server_retry_hint_is_honoured_or_stops_insufficient_budget(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, retry_after: float | None, expected_slept: list[float],
     stop: str | None,
 ) -> None:
-    """Server hints replace jitter within budget; cap-pinned jitter makes ignored hints observable."""
+    """Server hints replace jitter within budget; an unfittable hint stops the ladder."""
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
     slept = patch_retry_sleep(monkeypatch, fake)
     monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
@@ -521,17 +572,99 @@ def test_the_extracted_retry_delay_planner_clamps_to_every_bound(monkeypatch: py
         attempt=0, base_delay_s=10.0, max_delay_s=120.0,
         allowance_remaining_s=300.0, deadline_remaining_s=None, hint=7.0,
     ) == (7.0, None)
+    # A hint ABOVE the jitter cap (max_delay_s) but inside the budget is honoured
+    # in FULL: jitter bounds never shorten an admitted server wait (req 9, 16).
     assert _plan_retry_delay(
         attempt=0, base_delay_s=10.0, max_delay_s=120.0,
         allowance_remaining_s=300.0, deadline_remaining_s=None, hint=30.0,
-    ) == (10.0, None)
-    # No declared bound at all: the hint is honoured inside the cap, and nothing is
-    # fabricated when the server offers none.
+    ) == (30.0, None)
+    # No declared bound at all: the hint is honoured in full, nothing is invented.
     assert _plan_retry_delay(
         attempt=0, base_delay_s=10.0, max_delay_s=120.0,
         allowance_remaining_s=None, deadline_remaining_s=None, hint=45.0,
-    ) == (10.0, None)
+    ) == (45.0, None)
     assert _plan_retry_delay(
         attempt=0, base_delay_s=10.0, max_delay_s=120.0,
         allowance_remaining_s=None, deadline_remaining_s=None, hint=None,
     ) == (10.0, None)
+    # The issue's repro: hint exceeds BOTH the exponential cap (1s) and the
+    # configured jitter max (4s) yet fits both budgets — honoured in full.
+    assert _plan_retry_delay(
+        attempt=0, base_delay_s=1.0, max_delay_s=4.0,
+        allowance_remaining_s=60.0, deadline_remaining_s=60.0, hint=10.0,
+    ) == (10.0, None)
+    # Unfittable vs the remaining allowance: same insufficient-budget stop, 0 delay.
+    assert _plan_retry_delay(
+        attempt=0, base_delay_s=1.0, max_delay_s=4.0,
+        allowance_remaining_s=5.0, deadline_remaining_s=60.0, hint=10.0,
+    ) == (0.0, "retry_hint_exceeds_budget")
+    # A hint exactly at the remaining bound fits (not strictly greater).
+    assert _plan_retry_delay(
+        attempt=0, base_delay_s=1.0, max_delay_s=4.0,
+        allowance_remaining_s=10.0, deadline_remaining_s=60.0, hint=10.0,
+    ) == (10.0, None)
+    # A hint vs a spent deadline: the deadline is a zero bound, never negative.
+    assert _plan_retry_delay(
+        attempt=0, base_delay_s=30.0, max_delay_s=60.0,
+        allowance_remaining_s=300.0, deadline_remaining_s=0.0, hint=5.0,
+    ) == (0.0, "retry_hint_exceeds_budget")
+    # A hint vs a remaining deadline only (no allowance).
+    assert _plan_retry_delay(
+        attempt=0, base_delay_s=30.0, max_delay_s=60.0,
+        allowance_remaining_s=None, deadline_remaining_s=12.0, hint=45.0,
+    ) == (0.0, "retry_hint_exceeds_budget")
+
+
+async def test_run_agent_waits_a_server_hint_in_full_when_it_fits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The next attempt begins no earlier than the advertised delay, even when
+    the configured jitter maximum (4s) is smaller than the hint (10s)."""
+    clock = FakeClock(monotonic_value=0.0).install(monkeypatch)
+    slept = patch_retry_sleep(monkeypatch, clock)
+    procs = [make_mock_process(list(_ERROR_LINES)), make_mock_process(list(_HEALTHY_LINES))]
+    spawned: list[int] = []
+
+    async def _spawn(*_args: Any, **_kwargs: Any) -> Any:
+        spawned.append(1)
+        return procs.pop(0)
+
+    monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", _spawn)
+    backend = PiBackend(model="glm-5.2")
+    backend.retry_attempts = 1
+    backend.retry_base_delay_s = 1.0
+    backend.retry_max_delay_s = 4.0
+    out, _, _ = await run_agent(
+        cast(Backend, backend), tmp_path, "p", phase=DaydreamPhase.FIX,
+        wall_budget_s=10_000.0, retry_recovery_allowance_s=300.0,
+    )
+    assert out == "done"
+    assert len(spawned) == 2  # exactly one retry after the admission failure
+    assert slept == [pytest.approx(10.0)]  # the full hint, not the 1.0 jitter cap
+
+
+async def test_run_agent_stops_when_the_hint_exceeds_the_remaining_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unfittable hint: exactly one attempt, one stop reason, no second spawn."""
+    clock = FakeClock(monotonic_value=0.0).install(monkeypatch)
+    slept = patch_retry_sleep(monkeypatch, clock)
+    procs = [make_mock_process(list(_ERROR_LINES)), make_mock_process(list(_ERROR_LINES))]
+    spawned: list[int] = []
+
+    async def _spawn(*_args: Any, **_kwargs: Any) -> Any:
+        spawned.append(1)
+        return procs.pop(0)
+
+    monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", _spawn)
+    backend = PiBackend(model="glm-5.2")
+    backend.retry_attempts = 1
+    backend.retry_base_delay_s = 1.0
+    backend.retry_max_delay_s = 4.0
+    with pytest.raises(PiError):
+        await run_agent(
+            cast(Backend, backend), tmp_path, "p", phase=DaydreamPhase.FIX,
+            wall_budget_s=10_000.0, retry_recovery_allowance_s=5.0,  # hint 10 > 5
+        )
+    assert len(spawned) == 1  # no further attempt dispatched after the stop
+    assert slept == []  # no shortened wait is substituted
