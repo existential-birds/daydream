@@ -11,7 +11,7 @@ import pytest
 
 from daydream.commands import corpus as cli_corpus
 from daydream.training.adjudication import cli as adjudication_cli
-from daydream.training.adjudication.publish import publish_final_annotation_bundle
+from daydream.training.adjudication.publish import FinalAnnotationBundle, publish_final_annotation_bundle
 from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
 from tests.harness.adjudication import write_checkpoint_inputs
 from tests.harness.scripts import cli_main
@@ -81,7 +81,9 @@ def test_adjudicate_publication_commands_run_through_main(tmp_path: Path, monkey
     assert (destination / "preview-manifest.json").read_bytes() == manifest.read_bytes()
 
     bundle, curation_id = _final_bundle(tmp_path)
-    published = publish_final_annotation_bundle(hub, bundle)
+    published = publish_final_annotation_bundle(
+        hub, FinalAnnotationBundle.read(bundle), staging_parent=bundle.parent.resolve(),
+    )
     final_destination = tmp_path / "downloaded-final"
     assert cli_main(["corpus", "adjudicate", "download-final", "--curation-id", curation_id,
         "--snapshot-id", published["final_snapshot_id"], "--revision", published["hub_commit_sha"],

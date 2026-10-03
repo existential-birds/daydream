@@ -668,7 +668,7 @@ def handle_resume_state(argv: list[str]) -> int:
 def handle_publish_final(argv: list[str]) -> int:
     """Build and validate before Hub access; dry-run reports the gate without a client."""
     from daydream.training.adjudication.final_bundle import build_final_bundle, final_snapshot_id
-    from daydream.training.adjudication.publish import publish_final_annotation_bundle
+    from daydream.training.adjudication.publish import FinalAnnotationBundle, publish_final_annotation_bundle
 
     args = _build_adjudicate_parser().parse_args(["publish-final", *argv])
     bundle_dir = args.materialize_dir / "final-bundle"
@@ -681,7 +681,6 @@ def handle_publish_final(argv: list[str]) -> int:
             curation_bundle_dir=args.curation_bundle_dir,
             observations_path=args.state_dir / _OBSERVATIONS_FILENAME,
         )
-        complete_id, _digests = final_snapshot_id(bundle_dir)
     except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
         print_error(create_console(), "adjudicate publish-final failed", str(exc))
         return 1
@@ -690,6 +689,7 @@ def handle_publish_final(argv: list[str]) -> int:
             f"{disposition}={count}" for disposition, count in summary["disposition_counts"].items()
         )
         try:
+            complete_id, _digests = final_snapshot_id(bundle_dir)
             report = json.loads(
                 (bundle_dir / "coverage-report.json").read_text(encoding="utf-8")
             )
@@ -710,8 +710,9 @@ def handle_publish_final(argv: list[str]) -> int:
         )
         return 0
     try:
+        bundle = FinalAnnotationBundle.read(bundle_dir)
         client = _make_client(args.hub_repo)
-        result = publish_final_annotation_bundle(client, bundle_dir)
+        result = publish_final_annotation_bundle(client, bundle, staging_parent=bundle_dir.parent.resolve())
     except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
         print_error(create_console(), "adjudicate publish-final failed", str(exc))
         return 1

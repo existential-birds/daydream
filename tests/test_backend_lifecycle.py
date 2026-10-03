@@ -24,7 +24,6 @@ from daydream.backends.pi import (
     _PI_DEFAULT_RETRY_ATTEMPTS,
     PiBackend,
     PiError,
-    _pi_retry_attempts,
 )
 from tests.harness.fake_cli_process import FakeCliProcess
 from tests.harness.osprey_jsonl import osprey_session
@@ -122,13 +121,13 @@ def test_shared_nonnegative_float_parser(
      ("", _PI_DEFAULT_RETRY_ATTEMPTS), ("-1", _PI_DEFAULT_RETRY_ATTEMPTS)],
     ids=["default", "override", "empty-warns", "negative-warns"],
 )
-def test_pi_facades_delegate_to_the_shared_parsers(
+def test_pi_constructor_uses_shared_retry_admission(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, env_value: str | None, expected: int
 ) -> None:
     if env_value is not None:
         monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", env_value)
     with caplog.at_level(logging.WARNING):
-        assert _pi_retry_attempts() == expected
+        assert PiBackend().retry_attempts == expected
     if env_value not in (None, "5"):
         assert f"DAYDREAM_PI_RETRY_ATTEMPTS={env_value!r}" in caplog.text   # the warning still names the knob
 

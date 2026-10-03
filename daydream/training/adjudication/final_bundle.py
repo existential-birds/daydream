@@ -118,12 +118,18 @@ def final_snapshot_id(bundle_dir: Path) -> tuple[str, dict[str, str]]:
         raise ValueError(
             f"final bundle identity file set mismatch: missing={missing}, foreign={foreign}"
         )
-    digests: dict[str, str] = {}
+    payloads: dict[str, bytes] = {}
     for name in FINAL_IDENTITY_FILES:
         path = root / name
         if path.is_symlink() or not path.is_file():
             raise ValueError(f"final bundle identity input {name!r} must be a regular file")
-        digests[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        payloads[name] = path.read_bytes()
+    return semantic_identity(payloads)
+
+
+def semantic_identity(payloads: Mapping[str, bytes]) -> tuple[str, dict[str, str]]:
+    """Bind the seven-file identity and digest map to one captured byteset."""
+    digests = {name: hashlib.sha256(payloads[name]).hexdigest() for name in FINAL_IDENTITY_FILES}
     identity = _canonical(digests).encode("utf-8") + b"\n"
     return hashlib.sha256(identity).hexdigest(), dict(sorted(digests.items()))
 
@@ -322,12 +328,9 @@ def build_final_bundle(
 
     # 1. Both consumer views use the canonical merged records. Copying preview
     #    sessions here would discard imported/human decisions for projection.
-    _write_bundle_file(
-        out_dir, _ANNOTATIONS_FILENAME, (materialize_dir / _ANNOTATIONS_FILENAME).read_bytes()
-    )
-    _write_bundle_file(
-        out_dir, _SESSIONS_OUT_FILENAME, (materialize_dir / _ANNOTATIONS_FILENAME).read_bytes()
-    )
+    annotation_bytes = (materialize_dir / _ANNOTATIONS_FILENAME).read_bytes()
+    for name in (_ANNOTATIONS_FILENAME, _SESSIONS_OUT_FILENAME):
+        _write_bundle_file(out_dir, name, annotation_bytes)
     _write_bundle_file(out_dir, _MANIFEST_FILENAME, manifest_path.read_bytes())
     _write_bundle_file(out_dir, _POLICY_BINDING_FILENAME, policy_binding)
 

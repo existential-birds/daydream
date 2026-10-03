@@ -62,23 +62,6 @@ from daydream.retry_policy import classify_failure, parse_message_retry_hint
 # patch payloads) do not trip asyncio's "chunk is longer than limit" guard.
 _PI_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
 
-# Known AgentSessionEvent types. Used to decide whether the first
-# stdout line — the session header — also carries a dispatchable event type.
-_PI_EVENT_TYPES: frozenset[str] = frozenset(
-    {
-        "agent_start",
-        "agent_end",
-        "turn_start",
-        "turn_end",
-        "message_start",
-        "message_update",
-        "message_end",
-        "tool_execution_start",
-        "tool_execution_update",
-        "tool_execution_end",
-    }
-)
-
 # Read-only tool subset. Excludes the mutating edit/bash/write tools.
 _PI_READ_ONLY_TOOLS = "read,find,ls,grep"
 
@@ -201,24 +184,6 @@ def _warn_migration_mismatch_once(key: str, message: str, *args: object) -> None
     logger.warning(message, *args)
 
 
-def _pi_retry_attempts() -> int:
-    return _parsed_nonnegative_int(
-        os.environ, "DAYDREAM_PI_RETRY_ATTEMPTS", _PI_DEFAULT_RETRY_ATTEMPTS
-    )
-
-
-def _pi_retry_base_delay() -> float:
-    return _parsed_nonnegative_float(
-        os.environ, "DAYDREAM_PI_RETRY_BASE_DELAY_S", _PI_DEFAULT_RETRY_BASE_DELAY
-    )
-
-
-def _pi_retry_max_delay() -> float:
-    return _parsed_nonnegative_float(
-        os.environ, "DAYDREAM_PI_RETRY_MAX_DELAY_S", _PI_DEFAULT_RETRY_MAX_DELAY
-    )
-
-
 # Permanent conditions precede transient matches. Bare "provider" is too
 # broad ("provider rate limit"); credential/configuration tokens still match.
 _PERMANENT_TOKENS = (
@@ -295,19 +260,6 @@ def _pi_error_category(message: str) -> str:
     return "UNKNOWN"
 
 
-class _PiFailureFacts(Exception):
-    """Classifier probe carrying Pi's category + message and no opt-in flag."""
-
-    def __init__(self, message: str, category: str) -> None:
-        super().__init__(message)
-        self.category = category
-
-
-def _pi_retryable_for(*, category: str, message: str) -> bool:
-    """Use run_agent's shared failure classifier to keep retryability consistent."""
-    return classify_failure(_PiFailureFacts(message, category)).retries_allowed
-
-
 class PiError(Exception):
     """Raised when a Pi turn fails (e.g. ``stopReason == "error"``)."""
 
@@ -315,13 +267,13 @@ class PiError(Exception):
         self,
         message: str,
         *,
-        retryable: bool = False,
+        retryable: bool | None = None,
         category: str = "UNKNOWN",
         retry_after: float | None = None,
     ):
         super().__init__(message)
-        self.retryable = retryable
         self.category = category
+        self.retryable = classify_failure(self).retries_allowed if retryable is None else retryable
         self.retry_after = retry_after
 
 
@@ -343,19 +295,6 @@ def _render_tool_result(result: Any) -> str:
         return content
     # Last resort — preserve the payload rather than dropping the observation.
     return json.dumps(result, ensure_ascii=False) if result else ""
-
-
-def _extract_usage(message: dict[str, Any]) -> dict[str, Any]:
-    """Extract optional input/output/cacheRead/cacheWrite tokens and cost_total from a Pi assistant message."""
-    usage = message.get("usage") or {}
-    cost = usage.get("cost") or {}
-    return {
-        "input": usage.get("input"),
-        "output": usage.get("output"),
-        "cacheRead": usage.get("cacheRead"),
-        "cacheWrite": usage.get("cacheWrite"),
-        "cost_total": cost.get("total"),
-    }
 
 
 def _schema_instruction(schema: dict[str, Any]) -> str:
@@ -422,9 +361,15 @@ class PiBackend:
             self.fanout_concurrency = resolve_fanout_concurrency(
                 "DAYDREAM_PI_FANOUT_CONCURRENCY", _PI_DEFAULT_FANOUT_CONCURRENCY
             )
-            self.retry_attempts = _pi_retry_attempts()
-            self.retry_base_delay_s = _pi_retry_base_delay()
-            self.retry_max_delay_s = _pi_retry_max_delay()
+            self.retry_attempts = _parsed_nonnegative_int(
+                os.environ, "DAYDREAM_PI_RETRY_ATTEMPTS", _PI_DEFAULT_RETRY_ATTEMPTS,
+            )
+            self.retry_base_delay_s = _parsed_nonnegative_float(
+                os.environ, "DAYDREAM_PI_RETRY_BASE_DELAY_S", _PI_DEFAULT_RETRY_BASE_DELAY,
+            )
+            self.retry_max_delay_s = _parsed_nonnegative_float(
+                os.environ, "DAYDREAM_PI_RETRY_MAX_DELAY_S", _PI_DEFAULT_RETRY_MAX_DELAY,
+            )
         self._transports: list[CliTransport] = []
 
     async def execute(
@@ -716,12 +661,9 @@ class PiBackend:
                         if isinstance(val, str) and val:
                             session_id = val
                             break
-                    # If the header also carries a dispatchable event type, fall
-                    # through; otherwise it is a pure header — skip.
-                    if event.get("type") not in _PI_EVENT_TYPES:
-                        continue
-
                 event_type = event.get("type", "")
+                if event_type is not None and not isinstance(event_type, str):
+                    raise PiError("Pi event type must be a string", category="PROTOCOL")
 
                 if event_type == "agent_start":
                     pass  # Lifecycle marker; nothing to emit.
@@ -839,12 +781,12 @@ class PiBackend:
                     if stop_reason is not None:
                         saw_finish_reason = True
                         finish_reason = stop_reason
-                    usage = _extract_usage(msg)
-                    inp = usage["input"]
-                    outp = usage["output"]
-                    cached = usage["cacheRead"]
-                    created = usage["cacheWrite"]
-                    cost = usage["cost_total"]
+                    usage = msg.get("usage") or {}
+                    cost = (usage.get("cost") or {}).get("total")
+                    inp = usage.get("input")
+                    outp = usage.get("output")
+                    cached = usage.get("cacheRead")
+                    created = usage.get("cacheWrite")
                     if isinstance(inp, int):
                         inp += (cached if isinstance(cached, int) else 0) + (created if isinstance(created, int) else 0)
                         total_input = (total_input or 0) + inp
@@ -885,7 +827,6 @@ class PiBackend:
                         category = _pi_error_category(error_msg)
                         raise PiError(
                             error_msg,
-                            retryable=_pi_retryable_for(category=category, message=error_msg),
                             category=category,
                             retry_after=parse_message_retry_hint(error_msg),
                         )

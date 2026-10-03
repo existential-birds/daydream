@@ -11,7 +11,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, Mapping, cast, overload
+from typing import Any, Mapping, cast
 
 from daydream.archive.index import normalize_as_of
 from daydream.archive.sanitize import _derivative_digest
@@ -39,7 +39,6 @@ from daydream.training.exclusion import EXCLUSION_PATH
 __all__ = [
     "BatchArtifacts",
     "BuildFrozenCorpusConfig",
-    "project_findings",
     "read_batch_artifacts",
     "build_frozen_corpus",
 ]
@@ -353,37 +352,6 @@ def _read_trajectory_documents(bundle_dir: Path, artifact_relpath: str) -> list[
     if isinstance(parsed, list):
         return [doc for doc in parsed if isinstance(doc, dict)]
     raise ValueError(f"bundle {bundle_dir}: {artifact_relpath} is not a trajectory object")
-
-
-@overload
-def project_findings(session: Mapping[str, object], *, return_adjudication: Literal[False] = False) -> list[Record]: ...
-
-
-@overload
-def project_findings(
-    session: Mapping[str, object], *, return_adjudication: Literal[True]
-) -> tuple[list[Record], list[Record]]: ...
-
-
-def project_findings(
-    session: Mapping[str, object], *, return_adjudication: bool = False
-) -> list[Record] | tuple[list[Record], list[Record]]:
-    """Project one segmented session's per-finding resolutions into records.
-
-    Returns the record list, or ``(records, adjudication_entries)`` when
-    ``return_adjudication`` is true. Raises ``ValueError`` naming the
-    session and the offending key on a malformed resolution.
-    """
-    records: list[Record] = []
-    adjudication: list[Record] = []
-    for finding in FindingRecord.from_session(session):
-        records.append(finding.project())
-        if finding.tier == "task-only":
-            adjudication.append(finding.adjudication())
-
-    if return_adjudication:
-        return records, adjudication
-    return records
 
 
 def _license_decision_distribution(

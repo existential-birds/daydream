@@ -9,8 +9,7 @@ from __future__ import annotations
 import logging
 import math
 import tomllib
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -23,74 +22,6 @@ from daydream.retry_policy import (
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class DaydreamFileConfig:
-    """Merged policy: CLI globals > file phase settings > file globals > defaults.
-
-    Malformed scalars become unset; counts reject booleans and budgets reject
-    non-finite values. Zero nonnegative bounds remain meaningful. Repository
-    settings never supply operator destinations or credentials. Profile and
-    risk-category vocabulary validation belongs to their runtime resolvers.
-    """
-
-    model: str | None = None
-    backend: str | None = None
-    reasoning_effort: str | None = None
-    latency_profile: str | None = None
-    phases: dict[str, dict[str, str]] = field(default_factory=dict)
-    shallow_fanout_threshold: int | None = None
-    precision_mode: bool | None = None
-    approve_on_clean: bool | None = None
-    scope_issue_filing: bool | None = None
-    group_max_wall_s: float | None = None
-    group_max_serial_items: int | None = None
-    retry_recovery_allowance_s: float | None = None
-    deep_shard_enabled: bool | None = None
-    deep_shard_max_files: int | None = None
-    deep_shard_max_bytes: int | None = None
-    deep_shard_fanout_cap: int | None = None
-    deep_shard_frontier_max: int | None = None
-    review_cache_enabled: bool | None = None
-    review_cache_max_entries: int | None = None
-    review_cache_max_bytes: int | None = None
-    review_cache_max_age_days: int | None = None
-    verify_all: bool | None = None
-    extra_risk_categories: list[str] = field(default_factory=list)
-    quality_gate_enabled: bool | None = None
-    quality_gate_erosion_delta: float | None = None
-    quality_gate_verbosity_delta: float | None = None
-    quality_gate_erosion_absolute: float | None = None
-    quality_gate_verbosity_absolute: float | None = None
-    supervisor: str | None = None
-    supervisor_deny_globs: list[str] = field(default_factory=list)
-    tool_supervisor: str | None = None
-    tool_bash_deny: list[str] = field(default_factory=list)
-    improve_service_roots: list[str] = field(default_factory=list)
-    improve_service_groups: dict[str, list[str]] = field(default_factory=dict)
-    improve_partition_max_files: int | None = None
-    improve_max_partition_groups: int | None = None
-    improve_github_publish_issues: bool = False
-    review_profile: Path | None = None
-    diagram_mode: str | None = None
-    diagram_min_code_files: int | None = None
-    diagram_min_modules: int | None = None
-    diagram_min_branch_points: int | None = None
-    diagram_service_roots: list[str] = field(default_factory=list)
-    test_command: str | None = None
-    test_command_wall_s: float | None = None
-    test_required_suites: list[str] = field(default_factory=list)
-
-    def phase_model(self, phase: str) -> str | None:
-        """Return the configured model for a phase."""
-        return self.phases.get(phase, {}).get("model")
-
-    def phase_backend(self, phase: str) -> str | None:
-        """Return the configured backend for a phase."""
-        return self.phases.get(phase, {}).get("backend")
-
-    def phase_reasoning_effort(self, phase: str) -> str | None:
-        """Return the configured reasoning effort for a phase."""
-        return self.phases.get(phase, {}).get("reasoning_effort")
 
 
 def load_toml_or_empty(path: Path) -> dict[str, Any]:
@@ -246,54 +177,74 @@ def _coerce_review_profile_path(raw: Any) -> Path | None:
 
 
 
-# Fields with identical lenient decoding share one policy; special/nested fields stay explicit.
-_ROOT_DECODERS: dict[Callable[[Any], Any], tuple[str, ...]] = {
-    _coerce_string: (
-        "latency_profile",
-        "test_command",
-    ),
-    _coerce_phases: (
-        "phases",
-    ),
-    _coerce_optional_bool: (
-        "precision_mode",
-        "approve_on_clean",
-        "scope_issue_filing",
-        "deep_shard_enabled",
-        "review_cache_enabled",
-        "verify_all",
-        "quality_gate_enabled",
-    ),
-    _coerce_non_negative_float: (
-        "group_max_wall_s",
-        "quality_gate_erosion_delta",
-        "quality_gate_verbosity_delta",
-        "quality_gate_erosion_absolute",
-        "quality_gate_verbosity_absolute",
-    ),
-    _coerce_non_negative_int: (
-        "group_max_serial_items",
-        "deep_shard_max_files",
-        "deep_shard_max_bytes",
-        "deep_shard_fanout_cap",
-        "deep_shard_frontier_max",
-        "review_cache_max_entries",
-        "review_cache_max_bytes",
-        "review_cache_max_age_days",
-    ),
-    _coerce_review_profile_path: (
-        "review_profile",
-    ),
-    _coerce_string_list: (
-        "extra_risk_categories",
-        "supervisor_deny_globs",
-        "tool_bash_deny",
-        "test_required_suites",
-    ),
-    _coerce_positive_float: (
-        "test_command_wall_s",
-    ),
-}
+@dataclass(frozen=True)
+class DaydreamFileConfig:
+    """Merged policy: CLI globals > file phase settings > file globals > defaults.
+
+    Malformed scalars become unset; counts reject booleans and budgets reject
+    non-finite values. Zero nonnegative bounds remain meaningful. Repository
+    settings never supply operator destinations or credentials. Profile and
+    risk-category vocabulary validation belongs to their runtime resolvers.
+    """
+
+    model: str | None = None
+    backend: str | None = None
+    reasoning_effort: str | None = None
+    latency_profile: str | None = field(default=None, metadata={"decode": _coerce_string})
+    phases: dict[str, dict[str, str]] = field(default_factory=dict, metadata={"decode": _coerce_phases})
+    shallow_fanout_threshold: int | None = None
+    precision_mode: bool | None = field(default=None, metadata={"decode": _coerce_optional_bool})
+    approve_on_clean: bool | None = field(default=None, metadata={"decode": _coerce_optional_bool})
+    scope_issue_filing: bool | None = field(default=None, metadata={"decode": _coerce_optional_bool})
+    group_max_wall_s: float | None = field(default=None, metadata={"decode": _coerce_non_negative_float})
+    group_max_serial_items: int | None = field(default=None, metadata={"decode": _coerce_non_negative_int})
+    retry_recovery_allowance_s: float | None = None
+    deep_shard_enabled: bool | None = field(default=None, metadata={"decode": _coerce_optional_bool})
+    deep_shard_max_files: int | None = field(default=None, metadata={"decode": _coerce_non_negative_int})
+    deep_shard_max_bytes: int | None = field(default=None, metadata={"decode": _coerce_non_negative_int})
+    deep_shard_fanout_cap: int | None = field(default=None, metadata={"decode": _coerce_non_negative_int})
+    deep_shard_frontier_max: int | None = field(default=None, metadata={"decode": _coerce_non_negative_int})
+    review_cache_enabled: bool | None = field(default=None, metadata={"decode": _coerce_optional_bool})
+    review_cache_max_entries: int | None = field(default=None, metadata={"decode": _coerce_non_negative_int})
+    review_cache_max_bytes: int | None = field(default=None, metadata={"decode": _coerce_non_negative_int})
+    review_cache_max_age_days: int | None = field(default=None, metadata={"decode": _coerce_non_negative_int})
+    verify_all: bool | None = field(default=None, metadata={"decode": _coerce_optional_bool})
+    extra_risk_categories: list[str] = field(default_factory=list, metadata={"decode": _coerce_string_list})
+    quality_gate_enabled: bool | None = field(default=None, metadata={"decode": _coerce_optional_bool})
+    quality_gate_erosion_delta: float | None = field(default=None, metadata={"decode": _coerce_non_negative_float})
+    quality_gate_verbosity_delta: float | None = field(default=None, metadata={"decode": _coerce_non_negative_float})
+    quality_gate_erosion_absolute: float | None = field(default=None, metadata={"decode": _coerce_non_negative_float})
+    quality_gate_verbosity_absolute: float | None = field(default=None, metadata={"decode": _coerce_non_negative_float})
+    supervisor: str | None = None
+    supervisor_deny_globs: list[str] = field(default_factory=list, metadata={"decode": _coerce_string_list})
+    tool_supervisor: str | None = None
+    tool_bash_deny: list[str] = field(default_factory=list, metadata={"decode": _coerce_string_list})
+    improve_service_roots: list[str] = field(default_factory=list)
+    improve_service_groups: dict[str, list[str]] = field(default_factory=dict)
+    improve_partition_max_files: int | None = None
+    improve_max_partition_groups: int | None = None
+    improve_github_publish_issues: bool = False
+    review_profile: Path | None = field(default=None, metadata={"decode": _coerce_review_profile_path})
+    diagram_mode: str | None = None
+    diagram_min_code_files: int | None = None
+    diagram_min_modules: int | None = None
+    diagram_min_branch_points: int | None = None
+    diagram_service_roots: list[str] = field(default_factory=list)
+    test_command: str | None = field(default=None, metadata={"decode": _coerce_string})
+    test_command_wall_s: float | None = field(default=None, metadata={"decode": _coerce_positive_float})
+    test_required_suites: list[str] = field(default_factory=list, metadata={"decode": _coerce_string_list})
+
+    def phase_model(self, phase: str) -> str | None:
+        """Return the configured model for a phase."""
+        return self.phases.get(phase, {}).get("model")
+
+    def phase_backend(self, phase: str) -> str | None:
+        """Return the configured backend for a phase."""
+        return self.phases.get(phase, {}).get("backend")
+
+    def phase_reasoning_effort(self, phase: str) -> str | None:
+        """Return the configured reasoning effort for a phase."""
+        return self.phases.get(phase, {}).get("reasoning_effort")
 
 
 def load_file_config(root: Path) -> DaydreamFileConfig:
@@ -337,7 +288,8 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         raw_improve_publish if isinstance(raw_improve_publish, bool) else False
     )
     return DaydreamFileConfig(
-        **{name: decode(merged.get(name)) for decode, names in _ROOT_DECODERS.items() for name in names},
+        **{item.name: item.metadata["decode"](merged.get(item.name))
+           for item in fields(DaydreamFileConfig) if "decode" in item.metadata},
         model=str(model) if model is not None else None,
         backend=str(backend) if backend is not None else None,
         reasoning_effort=str(reasoning_effort) if reasoning_effort is not None else None,

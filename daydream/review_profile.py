@@ -11,8 +11,22 @@ import json
 import os
 import tomllib
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Annotated, Any, Literal
+
+from pydantic import (
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
+from pydantic.dataclasses import dataclass as validated_dataclass
 
 from daydream import severity
 from daydream.improve.prompts import AUDIT_PLAYBOOK_SECTIONS
@@ -25,11 +39,6 @@ class ProfileError(Exception):
         self.kind = kind
         self.source = source
         super().__init__(f"invalid review profile: {kind} (source: {source})")
-
-
-# Severity is lowercase; confidence follows the uppercase finding schema.
-_SEVERITY_LEVELS: frozenset[str] = frozenset(severity.CANONICAL_LEVELS)
-_CONFIDENCE_LEVELS: frozenset[str] = frozenset(("HIGH", "MEDIUM", "LOW"))
 
 
 # Profiles tune strategy and bounded pipeline fields, never the host evaluator,
@@ -64,50 +73,105 @@ HOST_OWNED_KEYS: frozenset[str] = frozenset(
     }
 )
 
-@dataclass(frozen=True)
+@validated_dataclass(frozen=True, config=ConfigDict(extra="forbid"))
 class Strategy:
     """Stage strategy text and its copied/authored provenance."""
 
-    content: str
-    source: str
+    content: StrictStr = ""
+    source: StrictStr = ""
 
 
-@dataclass(frozen=True)
+@validated_dataclass(frozen=True, config=ConfigDict(extra="forbid"))
 class Arbitration:
     """Bounded arbitration settings."""
 
-    enabled: bool = True
-    min_severity: str = "high"
-    contested_location: bool = True
+    enabled: StrictBool = True
+    min_severity: Annotated[
+        severity.SeverityLevel, BeforeValidator(lambda value: "high" if value is None else value)
+    ] = "high"
+    contested_location: StrictBool = True
 
 
-@dataclass(frozen=True)
+def _class_sequence(value: Any) -> Any:
+    """Profile class selections accept arrays and tuples, never iterable coercion."""
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("class selection must be an array of strings")
+    return value
+
+
+@validated_dataclass(frozen=True, config=ConfigDict(extra="forbid"))
 class Suppression:
     """Precision suppression settings; disabled unless explicitly enabled."""
 
-    enabled: bool = False
-    severity_classes: tuple[str, ...] = ("low",)
-    confidence_classes: tuple[str, ...] = ("LOW",)
+    enabled: StrictBool = False
+    severity_classes: Annotated[tuple[severity.SeverityLevel, ...], BeforeValidator(_class_sequence)] = ("low",)
+    confidence_classes: Annotated[
+        tuple[Literal["HIGH", "MEDIUM", "LOW"], ...], BeforeValidator(_class_sequence)
+    ] = ("LOW",)
+
+    def __post_init__(self) -> None:
+        if self.enabled and not self.confidence_classes:
+            raise ValueError("suppression: enabled but empty confidence class selection")
 
 
-@dataclass(frozen=True)
+@validated_dataclass(frozen=True, config=ConfigDict(extra="forbid"))
 class Pipeline:
     """Bounded pipeline policy with production defaults."""
 
-    structural_enabled: bool = True
+    structural_enabled: StrictBool = True
     arbitration: Arbitration = field(default_factory=Arbitration)
     suppression: Suppression = field(default_factory=Suppression)
-    review_wall_budget_s: int = 2700
+    review_wall_budget_s: Annotated[StrictInt, Field(ge=0)] = 2700
+
+    @model_validator(mode="before")
+    @classmethod
+    def _toml_fields(cls, value: Any) -> Any:
+        """The file contract is flat; the admitted owner groups each policy once.
+
+        Dataclass constructors and replace() supply ArgsKwargs and retain their
+        nested domain signature. Only file dictionaries use the flat spelling.
+        """
+        if not isinstance(value, dict):
+            return value
+        arbitration = ("enabled", "min_severity", "contested_location")
+        suppression = ("enabled", "severity_classes", "confidence_classes")
+        scalars = ("structural_enabled", "review_wall_budget_s")
+        allowed = {
+            *scalars, *(f"arbitration_{key}" for key in arbitration), *(f"suppression_{key}" for key in suppression)
+        }
+        unknown = set(value) - allowed
+        if unknown:
+            raise ValueError(f"pipeline: unknown key `{sorted(unknown)[0]}`")
+        return {
+            **{key: value[key] for key in scalars if key in value},
+            "arbitration": {key: value[f"arbitration_{key}"] for key in arbitration if f"arbitration_{key}" in value},
+            "suppression": {key: value[f"suppression_{key}"] for key in suppression if f"suppression_{key}" in value},
+        }
 
 
-@dataclass(frozen=True)
+@validated_dataclass(frozen=True, config=ConfigDict(extra="forbid"))
 class ReviewProfile:
     """Versioned per-run strategies and pipeline policy."""
 
-    schema_version: int = 1
-    name: str = ""
+    schema_version: Annotated[StrictInt, Field(ge=1, le=1)] = 1
+    name: StrictStr = ""
     strategies: dict[str, Strategy] = field(default_factory=dict)
     pipeline: Pipeline = field(default_factory=Pipeline)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _deny_host_settings(cls, value: Any) -> Any:
+        """Host policy denial precedes unknown-field validation at both file scopes."""
+        if isinstance(value, dict):
+            scopes = [("", value)]
+            strategies = value.get("strategies")
+            if isinstance(strategies, dict):
+                scopes.extend((f"strategies.{key}: ", raw) for key, raw in strategies.items() if isinstance(raw, dict))
+            for prefix, raw in scopes:
+                host_owned = set(raw) & HOST_OWNED_KEYS
+                if host_owned:
+                    raise ValueError(f"{prefix}host-owned key `{sorted(host_owned)[0]}` cannot be set by a profile")
+        return value
 
     def to_canonical_dict(self) -> dict[str, object]:
         """Project defaulted semantics, excluding strategy provenance and source formatting."""
@@ -413,156 +477,12 @@ def parse_profile(toml_text: str, *, source: str = "<string>") -> ReviewProfile:
     except tomllib.TOMLDecodeError as exc:
         raise ProfileError(f"TOML parse failure: {exc}", source) from exc
 
-    _TOP_LEVEL_KEYS = frozenset({"schema_version", "name", "strategies", "pipeline"})
-
-    # Report host-owned keys before generic unknown keys.
-    host_owned = set(data) & HOST_OWNED_KEYS
-    if host_owned:
-        raise ProfileError(
-            f"host-owned key `{sorted(host_owned)[0]}` cannot be set by a profile",
-            source,
-        )
-
-    unknown = set(data) - _TOP_LEVEL_KEYS
-    if unknown:
-        raise ProfileError(f"unknown top-level key `{sorted(unknown)[0]}`", source)
-
-    schema_version = data.get("schema_version", 1)
-    if not isinstance(schema_version, int) or isinstance(schema_version, bool):
-        raise ProfileError("schema_version must be an integer", source)
-    if schema_version != 1:
-        raise ProfileError(
-            f"unsupported schema_version {schema_version} (only 1 is supported)",
-            source,
-        )
-    name = data.get("name", "")
-    if not isinstance(name, str):
-        raise ProfileError("name must be a string", source)
-
-    strategies: dict[str, Strategy] = {}
-    raw_strategies = data.get("strategies", {})
-    if not isinstance(raw_strategies, dict):
-        raise ProfileError("strategies must be a table", source)
-    for key, raw in raw_strategies.items():
-        if not isinstance(raw, dict):
-            raise ProfileError(f"strategies.{key} must be a table", source)
-        host_owned = set(raw) & HOST_OWNED_KEYS
-        if host_owned:
-            raise ProfileError(
-                f"strategies.{key}: host-owned key `{sorted(host_owned)[0]}` "
-                "cannot be set by a profile",
-                source,
-            )
-        unknown = set(raw) - {"content", "source"}
-        if unknown:
-            raise ProfileError(
-                f"strategies.{key}: unknown key `{sorted(unknown)[0]}`", source
-            )
-        content = raw.get("content", "")
-        strat_source = raw.get("source", "")
-        if not isinstance(content, str) or not isinstance(strat_source, str):
-            raise ProfileError(f"strategies.{key}", source)
-        strategies[key] = Strategy(content=content, source=strat_source)
-
-    pipeline = _parse_pipeline(data.get("pipeline", {}), source=source)
-
-    return ReviewProfile(
-        schema_version=schema_version,
-        name=name,
-        strategies=strategies,
-        pipeline=pipeline,
-    )
-
-
-def _parse_pipeline(data: object, *, source: str) -> Pipeline:
-    """Parse the bounded pipeline section (R3 fail-closed, defaults for omitted fields)."""
-    if not isinstance(data, dict):
-        raise ProfileError("pipeline must be a table", source)
-    _PIPELINE_KEYS = frozenset(
-        {
-            "review_wall_budget_s",
-            "structural_enabled",
-            "arbitration_enabled",
-            "arbitration_min_severity",
-            "arbitration_contested_location",
-            "suppression_enabled",
-            "suppression_severity_classes",
-            "suppression_confidence_classes",
-        }
-    )
-    unknown = set(data) - _PIPELINE_KEYS
-    if unknown:
-        raise ProfileError(f"pipeline: unknown key `{sorted(unknown)[0]}`", source)
-    defaults = Pipeline()
-
-    def _bool(key: str, fallback: bool) -> bool:
-        value = data.get(key, fallback)
-        if not isinstance(value, bool):
-            raise ProfileError(f"pipeline.{key} must be a boolean", source)
-        return value
-
-    def _int(key: str, fallback: int) -> int:
-        value = data.get(key, fallback)
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise ProfileError(f"pipeline.{key} must be an integer", source)
-        if value < 0:
-            raise ProfileError(f"pipeline.{key} must not be negative", source)
-        return value
-
-    def _severity_classes(
-        key: str, fallback: tuple[str, ...], allowed: frozenset[str]
-    ) -> tuple[str, ...]:
-        value = data.get(key, fallback)
-        if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
-            raise ProfileError(f"pipeline.{key} must be an array of strings", source)
-        bad = [item for item in value if item not in allowed]
-        if bad:
-            raise ProfileError(
-                f"pipeline.{key}: invalid class `{sorted(set(bad))[0]}`", source
-            )
-        return tuple(value)
-
-    arbitration = Arbitration(
-        enabled=_bool("arbitration_enabled", defaults.arbitration.enabled),
-        min_severity=defaults.arbitration.min_severity,
-        contested_location=_bool(
-            "arbitration_contested_location", defaults.arbitration.contested_location
-        ),
-    )
-    severity = data.get("arbitration_min_severity")
-    if severity is not None:
-        if not isinstance(severity, str) or severity not in _SEVERITY_LEVELS:
-            raise ProfileError(
-                f"pipeline.arbitration_min_severity must be one of "
-                f"{sorted(_SEVERITY_LEVELS)}",
-                source,
-            )
-        arbitration = replace(arbitration, min_severity=severity)
-    suppression = Suppression(
-        enabled=_bool("suppression_enabled", defaults.suppression.enabled),
-        severity_classes=_severity_classes(
-            "suppression_severity_classes",
-            defaults.suppression.severity_classes,
-            _SEVERITY_LEVELS,
-        ),
-        confidence_classes=_severity_classes(
-            "suppression_confidence_classes",
-            defaults.suppression.confidence_classes,
-            _CONFIDENCE_LEVELS,
-        ),
-    )
-    if suppression.enabled and not suppression.confidence_classes:
-        raise ProfileError(
-            "pipeline.suppression: enabled but empty confidence class selection",
-            source,
-        )
-
-    return Pipeline(
-        review_wall_budget_s=_int("review_wall_budget_s", defaults.review_wall_budget_s),
-        structural_enabled=_bool("structural_enabled", defaults.structural_enabled),
-        arbitration=arbitration,
-        suppression=suppression,
-    )
+    try:
+        return TypeAdapter(ReviewProfile).validate_python(data)
+    except ValidationError as exc:
+        error = exc.errors(include_url=False, include_input=False)[0]
+        location = ".".join(str(part) for part in error["loc"])
+        raise ProfileError(f"{location}: {error['msg']}", source) from exc
 
 
 @dataclass(frozen=True)

@@ -17,7 +17,7 @@ from daydream.archive.index import append_label_observation, label_observation_h
 from daydream.archive.manifest import Manifest
 from daydream.training.adjudication import cli as adjudication_cli
 from daydream.training.adjudication.final_bundle import final_snapshot_id
-from daydream.training.adjudication.publish import publish_final_annotation_bundle
+from daydream.training.adjudication.publish import FinalAnnotationBundle, publish_final_annotation_bundle
 from tests.fixtures.training.build_hub_snapshot import (
     PublicationHubs,
     build_publication_hubs,
@@ -180,7 +180,10 @@ def test_ordinary_checkpoint_survives_total_vm_loss_and_final_cli_download(
         try:
             assert final_snapshot_id(bundle)[0] != expected_final_id
             with pytest.raises(ValueError, match=filename.replace(".", r"\.")):
-                publish_final_annotation_bundle(hubs.annotations, bundle)
+                publish_final_annotation_bundle(
+                    hubs.annotations, FinalAnnotationBundle.read(bundle),
+                    staging_parent=bundle.parent.resolve(),
+                )
             assert len(hubs.annotations.commit_order) == commit_count
         finally:
             path.write_bytes(original)

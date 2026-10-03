@@ -40,14 +40,12 @@ from daydream.reviews.models import (
 )
 from daydream.reviews.rendering import (
     ReviewRenderers as ReviewRenderers,
-    build_payload_for_event as build_payload_for_event,
     format_comment_body as format_comment_body,
     resolve_review_renderers as resolve_review_renderers,
 )
 from daydream.reviews.submission import (
     ClassifiedReviewPlan as ClassifiedReviewPlan,
     GitHubReviewTransport as GitHubReviewTransport,
-    _review_payload_dict as _review_payload_dict,
     post_classified_review as post_classified_review,
 )
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
@@ -554,33 +552,6 @@ def _is_clean_review(classified: ClassifiedIssues, approve_on_clean: bool) -> bo
             issue.severity_before_demotion,
         )
         for issue in classified.all_issues()
-    )
-
-
-def build_payload(
-    pr: PRInfo,
-    classified: ClassifiedIssues,
-    *,
-    run_info: str,
-    renderers: ReviewRenderers,
-    approve_on_clean: bool = False,
-    diagram_blocks: str | None = None,
-) -> dict[str, Any]:
-    """Build the legacy dictionary payload after applying the approval gate."""
-    event = (
-        ReviewEvent.APPROVE
-        if _is_clean_review(classified, approve_on_clean)
-        else ReviewEvent.COMMENT
-    )
-    return _review_payload_dict(
-        build_payload_for_event(
-            pr,
-            classified,
-            event=event,
-            run_info=run_info,
-            renderers=renderers,
-            diagram_blocks=diagram_blocks,
-        )
     )
 
 

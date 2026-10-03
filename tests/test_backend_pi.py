@@ -46,10 +46,6 @@ from daydream.backends.pi import (
     PiError,
     _is_retryable_exit_code,
     _pi_error_category,
-    _pi_retry_attempts,
-    _pi_retry_base_delay,
-    _pi_retry_max_delay,
-    _pi_retryable_for,
     _render_tool_result,
     _schema_instruction,
 )
@@ -762,7 +758,7 @@ def test_overload_throttle_and_capacity_messages_stay_retryable(message: str) ->
     """
     category = _pi_error_category(message)
     assert category == "SERVER_ERROR"
-    assert _pi_retryable_for(category=category, message=message) is True
+    assert PiError(message, category=category).retryable is True
 
 def test_backend_execution_input_parses_the_retry_recovery_allowance(tmp_path: Path) -> None:
     source = {"HOME": str(tmp_path), "PATH": "/run/bin"}
@@ -782,7 +778,6 @@ def test_backend_execution_input_parses_the_retry_recovery_allowance(tmp_path: P
 def test_pi_error_carries_the_retry_hint_from_the_error_message() -> None:
     error = PiError(
         "503 Service Unavailable; retry-after: 30",
-        retryable=_pi_retryable_for(category="SERVER_ERROR", message="503 Service Unavailable; retry-after: 30"),
         category=_pi_error_category("503 Service Unavailable; retry-after: 30"),
         retry_after=parse_message_retry_hint("503 Service Unavailable; retry-after: 30"),
     )
@@ -793,7 +788,7 @@ def test_pi_error_carries_the_retry_hint_from_the_error_message() -> None:
     ["503 status code (no body)", "Stream ended without finish_reason", "request timeout while waiting for response"],
 )
 def test_pi_transient_failures_are_retryable(message: str) -> None:
-    assert _pi_retryable_for(category=_pi_error_category(message), message=message) is True
+    assert PiError(message, category=_pi_error_category(message)).retryable is True
 
 @pytest.mark.parametrize(
     "lines",
@@ -862,7 +857,7 @@ async def test_pi_stream_timeout_is_retryable() -> None:
     ],
 )
 def test_is_retryable_error_message(message: Any, expected: Any) -> None:
-    assert _pi_retryable_for(category=_pi_error_category(message), message=message) is expected
+    assert PiError(message, category=_pi_error_category(message)).retryable is expected
 
 # _is_retryable_exit_code
 
@@ -964,38 +959,38 @@ async def test_nonzero_exit_sets_retryable_via_exit_code(
 # Retry env knobs
 
 @pytest.mark.parametrize(
-    ("env_var", "parse", "env_value", "expected", "warn_fragment"),
+    ("env_var", "attribute", "env_value", "expected", "warn_fragment"),
     [
-        ("DAYDREAM_PI_RETRY_ATTEMPTS", _pi_retry_attempts, None, _PI_DEFAULT_RETRY_ATTEMPTS, None),
-        ("DAYDREAM_PI_RETRY_ATTEMPTS", _pi_retry_attempts, "5", 5, None),
+        ("DAYDREAM_PI_RETRY_ATTEMPTS", "retry_attempts", None, _PI_DEFAULT_RETRY_ATTEMPTS, None),
+        ("DAYDREAM_PI_RETRY_ATTEMPTS", "retry_attempts", "5", 5, None),
         (
-            "DAYDREAM_PI_RETRY_ATTEMPTS", _pi_retry_attempts, "", _PI_DEFAULT_RETRY_ATTEMPTS,
+            "DAYDREAM_PI_RETRY_ATTEMPTS", "retry_attempts", "", _PI_DEFAULT_RETRY_ATTEMPTS,
             f"is not a valid integer; using default {_PI_DEFAULT_RETRY_ATTEMPTS}",
-        ), ("DAYDREAM_PI_RETRY_BASE_DELAY_S", _pi_retry_base_delay, None, _PI_DEFAULT_RETRY_BASE_DELAY, None),
-        ("DAYDREAM_PI_RETRY_BASE_DELAY_S", _pi_retry_base_delay, "0.5", 0.5, None),
+        ), ("DAYDREAM_PI_RETRY_BASE_DELAY_S", "retry_base_delay_s", None, _PI_DEFAULT_RETRY_BASE_DELAY, None),
+        ("DAYDREAM_PI_RETRY_BASE_DELAY_S", "retry_base_delay_s", "0.5", 0.5, None),
         (
-            "DAYDREAM_PI_RETRY_BASE_DELAY_S", _pi_retry_base_delay, "nan", _PI_DEFAULT_RETRY_BASE_DELAY,
+            "DAYDREAM_PI_RETRY_BASE_DELAY_S", "retry_base_delay_s", "nan", _PI_DEFAULT_RETRY_BASE_DELAY,
             f"is not finite; using default {_PI_DEFAULT_RETRY_BASE_DELAY:g}",
         ),
         (
-            "DAYDREAM_PI_RETRY_BASE_DELAY_S", _pi_retry_base_delay, "inf", _PI_DEFAULT_RETRY_BASE_DELAY,
+            "DAYDREAM_PI_RETRY_BASE_DELAY_S", "retry_base_delay_s", "inf", _PI_DEFAULT_RETRY_BASE_DELAY,
             f"is not finite; using default {_PI_DEFAULT_RETRY_BASE_DELAY:g}",
         ),
         (
-            "DAYDREAM_PI_RETRY_BASE_DELAY_S", _pi_retry_base_delay, "", _PI_DEFAULT_RETRY_BASE_DELAY,
+            "DAYDREAM_PI_RETRY_BASE_DELAY_S", "retry_base_delay_s", "", _PI_DEFAULT_RETRY_BASE_DELAY,
             f"is not a valid float; using default {_PI_DEFAULT_RETRY_BASE_DELAY:g}",
-        ), ("DAYDREAM_PI_RETRY_MAX_DELAY_S", _pi_retry_max_delay, None, _PI_DEFAULT_RETRY_MAX_DELAY, None),
-        ("DAYDREAM_PI_RETRY_MAX_DELAY_S", _pi_retry_max_delay, "45.5", 45.5, None),
+        ), ("DAYDREAM_PI_RETRY_MAX_DELAY_S", "retry_max_delay_s", None, _PI_DEFAULT_RETRY_MAX_DELAY, None),
+        ("DAYDREAM_PI_RETRY_MAX_DELAY_S", "retry_max_delay_s", "45.5", 45.5, None),
         (
-            "DAYDREAM_PI_RETRY_MAX_DELAY_S", _pi_retry_max_delay, "not-a-float", _PI_DEFAULT_RETRY_MAX_DELAY,
+            "DAYDREAM_PI_RETRY_MAX_DELAY_S", "retry_max_delay_s", "not-a-float", _PI_DEFAULT_RETRY_MAX_DELAY,
             f"is not a valid float; using default {_PI_DEFAULT_RETRY_MAX_DELAY:g}",
         ),
         (
-            "DAYDREAM_PI_RETRY_MAX_DELAY_S", _pi_retry_max_delay, "-1", _PI_DEFAULT_RETRY_MAX_DELAY,
+            "DAYDREAM_PI_RETRY_MAX_DELAY_S", "retry_max_delay_s", "-1", _PI_DEFAULT_RETRY_MAX_DELAY,
             f"is negative; using default {_PI_DEFAULT_RETRY_MAX_DELAY:g}",
         ),
         (
-            "DAYDREAM_PI_RETRY_MAX_DELAY_S", _pi_retry_max_delay, "", _PI_DEFAULT_RETRY_MAX_DELAY,
+            "DAYDREAM_PI_RETRY_MAX_DELAY_S", "retry_max_delay_s", "", _PI_DEFAULT_RETRY_MAX_DELAY,
             f"is not a valid float; using default {_PI_DEFAULT_RETRY_MAX_DELAY:g}",
         ),
     ],
@@ -1006,12 +1001,12 @@ async def test_nonzero_exit_sets_retryable_via_exit_code(
     ],
 )
 def test_pi_retry_env_knobs(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, env_var: str, parse: Callable[[], int | float],
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, env_var: str, attribute: str,
     env_value: str | None, expected: Any, warn_fragment: str | None,
 ) -> None:
     if env_value is not None:
         monkeypatch.setenv(env_var, env_value)
-    assert parse() == pytest.approx(expected)
+    assert getattr(PiBackend(), attribute) == pytest.approx(expected)
     if warn_fragment is not None:
         assert warn_fragment in caplog.text
 
@@ -1376,3 +1371,54 @@ async def test_prompt_attachment_removed_after_write_failure(tmp_path: Path, mon
         async for _ in PiBackend(model="fixture").execute(tmp_path, "write failure prompt"):
             pass
     assert not list(tmp_path.glob("daydream-pi-prompt-*"))
+
+
+@pytest.mark.parametrize("header_type", ["session", "unknown-native-notice", None])
+async def test_native_session_header_flows_through_single_event_dispatch(header_type: str | None) -> None:
+    header = {"type": header_type, "session_id": "header-session"}
+    message = {"type": "message_end", "message": {
+        "role": "assistant", "content": [{"type": "text", "text": "admitted reply"}],
+    }}
+    events, _ = await replay_process(
+        PiBackend(model="fixture-model"), make_mock_process([json.dumps(header), json.dumps(message)]),
+        Path("/tmp"), "prompt",
+    )
+    assert [event.text for event in events if isinstance(event, TextEvent)] == ["admitted reply"]
+    result = next(event for event in events if isinstance(event, ResultEvent))
+    assert result.session_id == "header-session"
+    assert result.continuation is not None and result.continuation.data["session_id"] == "header-session"
+
+
+async def test_first_native_record_can_also_be_a_dispatchable_message() -> None:
+    message = {"type": "message_end", "sessionId": "first-message-session", "message": {
+        "role": "assistant", "content": [{"type": "text", "text": "first-line reply"}],
+    }}
+    events, _ = await replay_process(
+        PiBackend(model="fixture-model"), make_mock_process([json.dumps(message)]), Path("/tmp"), "prompt",
+    )
+    assert [event.text for event in events if isinstance(event, TextEvent)] == ["first-line reply"]
+    assert next(event for event in events if isinstance(event, ResultEvent)).session_id == "first-message-session"
+
+
+@pytest.mark.parametrize("invalid_type", [[], {}, 1, True])
+async def test_malformed_native_event_type_fails_closed_with_fixed_protocol_error(invalid_type: object) -> None:
+    with pytest.raises(PiError, match="Pi event type must be a string") as error:
+        await replay_process(
+            PiBackend(model="fixture-model"), make_mock_process([json.dumps({"type": invalid_type})]),
+            Path("/tmp"), "prompt",
+        )
+    assert error.value.category == "PROTOCOL" and not error.value.retryable
+
+
+@pytest.mark.parametrize("message, category, expected", [
+    ("opaque failure", "UNKNOWN", False), ("provider rate limit", "RATE_LIMIT", True),
+    ("503 Service Unavailable", "SERVER_ERROR", True), ("timed out", "TIMEOUT", True),
+    ("terminated", "STREAM_DROP", True), ("model not found with 503", "SERVER_ERROR", False),
+    ("schema validation with 429", "RATE_LIMIT", False),
+])
+def test_native_error_owns_category_based_retry_inference_and_preserves_explicit_flags(
+    message: str, category: str, expected: bool,
+) -> None:
+    assert PiError(message, category=category).retryable is expected
+    assert PiError(message, category=category, retryable=False).retryable is False
+    assert PiError(message, category=category, retryable=True).retryable is True

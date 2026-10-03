@@ -105,8 +105,9 @@ checks; 227 finding-owner checks and a 960-case exact semantic differential;
 checks; 201 backend/protocol/runtime/real-visibility checks and 4,000 byte-identical
 native argv differentials; 36 readback/replay checks including real loopback A/B/A.
 Required mypy passes all 747 source files; Ruff passes. Independent reviews of each
-owner and the integrated diff found no material issue. Full normal pre-push gate
-is pending for this checkpoint. Provisional final batch measurement is 84,225
+owner and the integrated diff found no material issue. Signed checkpoint `7f8bc913` passed the normal pre-commit and pre-push hooks:
+9,363 passed, 14 skipped, 90.47% branch coverage; every required check passed.
+The committed batch measurement is 84,225
 source / 109,892 physical / 362 files: 1.522% source / 3.063% physical reduction,
 leaving 7,251 source / 7,865 physical lines above the targets. Exact owned inventory
 and source counts include every new module; no upstream baseline advance exists.
@@ -133,3 +134,62 @@ tests. It found no material regression or weakened gate in inspected changes.
 Its identified artifact reciprocal-ownership issue was resolved and verified.
 Unchanged extracted functions are explicitly classified as moved code, not
 eliminated complexity. The production-target shortfall remains outstanding.
+
+## Fourth batch integrated
+
+- Configuration decode registration lives beside the frozen root field declarations;
+  a separate name/policy registry disappears. Special/nested coercion and precedence
+  remain explicit. Pinned source 268→221 (-47), physical 361→313 (-48); CC unchanged.
+  108 real CLI/config tests, mypy and Ruff pass; 2,000 seeded old/new outcomes match.
+  Independent flow review found no issue.
+- The unused build_payload façade and its imported forwards disappear. Actual review
+  submission still owns typed event/payload/approval rendering. Production/docs/registry
+  reachability found only test callers. Existing golden payload and real submission
+  checks now invoke those actual owners; no implementation moved to tests. Source
+  680→654 (-26), physical 895→866 (-29). 173 checks, Ruff/mypy and flow review pass.
+- Pi dispatch owns the one native event vocabulary. PiError admits omitted retry
+  inference directly; the probe exception and mirrored failure facts disappear.
+  Usage construction drops a throwaway mapping. Source 730→693 (-37), physical
+  932→873 (-59); CC unchanged. 335 checks pass with one existing skip; 15,000 failure
+  cases and 357 native replays are equivalent. Ruff/mypy and flow review pass.
+- ReviewProfile/Pipeline frozen domain owners admit concrete field constraints and
+  defaults; the manual parallel parser disappears. Arbiter selectors consume admitted
+  Arbitration/Suppression policy rather than normalize it again. Three-file source
+  1,338→1,241 (-97), physical 1,695→1,590 (-105); high CC 9→8, cognitive 9→7. 2,904
+  exact profile/digest oracle outcomes and 198 affected checks pass; Ruff/mypy/Vulture
+  and backend review pass.
+- FinalAnnotationBundle binds immutable semantic bytes, captured identity/digests and
+  canonical publication/reconstruction envelope. Receipt closure and repeated wire
+  assembly disappear; hash-only dry-run remains separate from strict publication
+  admission. The unsupported boolean-routed project_findings façade disappears, with
+  callers using FindingRecord views directly. Five-file source 2,814→2,767 (-47),
+  physical 3,383→3,331 (-52); high CC 18→16, cognitive 22→21. 338 checks and 30 exact
+  remote/download receipt oracle outcomes pass. Backend review caught mutable-buffer
+  admission; strict bytes-only admission and a no-Hub-access regression fixed it.
+  Reviewer rechecked successfully. Source-deletion/replacement and corrupted-envelope
+  checks preserve capture ownership and fail-before-stage behavior.
+
+Current coherent batch net: 254 production source / 293 physical lines removed,
+including all new owners and callers. Aggregate target remains far unmet. Full owned
+snapshot /tmp/daydream-pr1444/fourth-final includes all 362 production files and the
+unchanged inventory hash. Independent integrated review reproduced every owned byte and all pinned counts,
+confirmed target arithmetic and found no material regression, hidden path or weakened
+check. Normal signed commit/push verification is pending; workers are in read-only
+assessment during that gate.
+
+Next coherent opportunity: benchmark curation's callback mutation machinery and
+raw/model reparse, using one concrete locked CaseEditor for the existing workflow.
+Data owns curation/import callers after integration freeze lifts. Backend traces
+prompt-selection/capture and structured telemetry ownership; flow traces finding
+state/cache/persistence across review modes. None yet demonstrates a defensible
+300-line net reduction. Unsupported private test seams are not automatic public
+compatibility obligations; essential validation, security, diagnostics, durability,
+wire formats, resume and supported extension behavior remain required.
+
+Fourth integrated aggregate: 83971 source / 109599 physical; 1.819% source / 3.321% physical reduction. Remaining shortfall: 6997 source / 7572 physical lines. No inherited upstream change; PR base remains the recorded baseline.
+
+Fourth checkpoint normal push initially stopped at mypy: one test-only legacy
+payload import in test_training_labeler_signals.py was missed. The test now uses
+the actual typed renderer and transport serializer; all footer assertions remain.
+35 focused tests, Ruff/mypy and independent flow review pass. Ordinary signed amend
+and full normal push gate retry follow; no hooks are bypassed.

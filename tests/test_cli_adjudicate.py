@@ -11,7 +11,11 @@ from daydream.training.adjudication.final_bundle import final_snapshot_id
 from daydream.training.adjudication.materialize import run_materialize
 from daydream.training.adjudication.observations import append_observation
 from daydream.training.adjudication.preview import run_preview
-from daydream.training.adjudication.publish import AnnotationHubClient, publish_final_annotation_bundle
+from daydream.training.adjudication.publish import (
+    AnnotationHubClient,
+    FinalAnnotationBundle,
+    publish_final_annotation_bundle,
+)
 from daydream.training.labeler_versions import (
     ADJUDICATION_LABELER_VERSION,
     REPLY_CLASSIFIER_VERSION,
@@ -412,7 +416,9 @@ def test_cli_download_final_installs_exact_success_revision(
 
     hub = _wired_hub(monkeypatch)
     bundle, curation_id = _final_bundle(tmp_path)
-    published = publish_final_annotation_bundle(hub, bundle)
+    published = publish_final_annotation_bundle(
+        hub, FinalAnnotationBundle.read(bundle), staging_parent=bundle.parent.resolve(),
+    )
     destination = tmp_path / "downloaded"
 
     assert handle_adjudicate(_download_final_argv(
@@ -432,7 +438,9 @@ def test_cli_download_final_rejects_existing_destination_before_download(
 
     hub = _wired_hub(monkeypatch)
     bundle, curation_id = _final_bundle(tmp_path)
-    published = publish_final_annotation_bundle(hub, bundle)
+    published = publish_final_annotation_bundle(
+        hub, FinalAnnotationBundle.read(bundle), staging_parent=bundle.parent.resolve(),
+    )
     hub.downloaded_revision_log.clear()
     destination = tmp_path / "downloaded"
     if destination_kind == "file":

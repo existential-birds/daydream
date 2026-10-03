@@ -14,7 +14,9 @@ from __future__ import annotations
 import json
 import re
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping, Protocol, runtime_checkable
 
 from daydream.archive.hydrate import (
@@ -26,6 +28,7 @@ from daydream.archive.hydrate import (
     RepoInfo,
 )
 from daydream.training.adjudication.final_bundle import (
+    _LINEAGE_PIN_FIELDS,
     _PUBLICATION_MANIFEST_FILENAME,
     _SUCCESS_FILENAME,
     _SUMS_FILENAME,
@@ -33,6 +36,7 @@ from daydream.training.adjudication.final_bundle import (
     FULL_BUNDLE_FILES,
     _bundle_input_names,
     _validate_policy_binding,
+    semantic_identity,
 )
 from daydream.training.adjudication.materialize import _MANIFEST_FILENAME
 from daydream.training.adjudication.publication_files import (
@@ -51,6 +55,7 @@ from daydream.training.labeler_versions import ANNOTATION_SNAPSHOT_SCHEMA_VERSIO
 from daydream.trajectory import redact_text
 
 __all__ = [
+    "FinalAnnotationBundle",
     "download_final_annotation_bundle",
     "publish_annotation_state",
     "publish_final_annotation_bundle",
@@ -540,13 +545,7 @@ def _validate_final_semantics(payloads: Mapping[str, bytes]) -> tuple[str, str]:
         curation_id=curation_id,
         source_hub_commit=source,
     )
-    lineage_fields = {
-        "curation_id",
-        "sanitized_hub_commit",
-        "snapshot_id",
-        "labeler_version",
-        "rubric_version",
-        "classifier_version",
+    lineage_fields = set(_LINEAGE_PIN_FIELDS) | {
         "schema_version",
         "batch_fileset_digest",
         "as_of",
@@ -559,10 +558,7 @@ def _validate_final_semantics(payloads: Mapping[str, bytes]) -> tuple[str, str]:
     if lineage.get("schema_version") != expected_schema:
         raise ValueError("lineage.json: unsupported producer schema")
     if (
-        lineage.get("curation_id") != curation_id
-        or lineage.get("sanitized_hub_commit") != source
-        or lineage.get("snapshot_id") != source_snapshot_id
-        or any(lineage.get(field) != preview[field] for field in shared_pins)
+        any(lineage.get(field) != preview[field] for field in _LINEAGE_PIN_FIELDS)
         or lineage.get("as_of") != ("" if preview["as_of"] is None else preview["as_of"])
     ):
         raise ValueError("lineage.json: producer pin linkage mismatch")
@@ -573,40 +569,69 @@ def _validate_final_semantics(payloads: Mapping[str, bytes]) -> tuple[str, str]:
     return curation_id, source_snapshot_id
 
 
-def _prepare_final_bundle(bundle_dir: Path) -> tuple[str, str, str, dict[str, bytes]]:
-    local_names = _bundle_input_names(bundle_dir)
-    if local_names != set(FINAL_IDENTITY_FILES):
-        raise ValueError("final publication input must contain exactly the seven semantic files")
-    payloads: dict[str, bytes] = {}
-    for name in FINAL_IDENTITY_FILES:
-        path = bundle_dir / name
-        if path.is_symlink() or not path.is_file():
-            raise ValueError(f"final bundle identity input {name!r} must be a regular file")
-        payloads[name] = _read_regular_file(path, label=name)
-    # Bind identity, validation, checksums, and upload to one captured byteset.
-    # A concurrent local edit must not separate an immutable ID from its data.
-    digests = {name: _digest(data) for name, data in payloads.items()}
-    final_id = _digest(_canonical_json_bytes(digests))
-    for name, data in payloads.items():
-        _scan_for_secrets(name, data)
-    curation_id, source_snapshot_id = _validate_final_semantics(payloads)
-    publication = _canonical_json_bytes(
-        {
-            "schema_version": _PUBLICATION_SCHEMA,
-            "curation_id": curation_id,
-            "source_snapshot_id": source_snapshot_id,
-            "final_snapshot_id": final_id,
-            "files": digests,
-        }
-    )
-    _scan_for_secrets(_PUBLICATION_MANIFEST_FILENAME, publication)
-    payloads[_PUBLICATION_MANIFEST_FILENAME] = publication
-    sums = "".join(
-        f"{_digest(data)}  {name}\n" for name, data in sorted(payloads.items())
-    ).encode("utf-8")
-    _scan_for_secrets(_SUMS_FILENAME, sums)
-    payloads[_SUMS_FILENAME] = sums
-    return curation_id, source_snapshot_id, final_id, payloads
+@dataclass(frozen=True, init=False)
+class FinalAnnotationBundle:
+    """Validated semantic bytes and their immutable publication envelope.
+
+    Both publication and reconstruction derive identity, canonical manifest,
+    and checksums from this captured byteset. Disk edits cannot change it.
+    Hash-only dry-run inspection retains its separate admission policy.
+    """
+
+    curation_id: str
+    final_snapshot_id: str
+    files: Mapping[str, bytes]
+
+    def __init__(self, semantic: Mapping[str, bytes]) -> None:
+        if set(semantic) != set(FINAL_IDENTITY_FILES):
+            raise ValueError("final publication input must contain exactly the seven semantic files")
+        payloads = dict(semantic)
+        for name, data in payloads.items():
+            if not isinstance(data, bytes):
+                raise ValueError(f"{name}: final semantic payload must be immutable bytes")
+            _scan_for_secrets(name, data)
+        curation_id, source_snapshot_id = _validate_final_semantics(payloads)
+        final_id, digests = semantic_identity(payloads)
+        publication = _canonical_json_bytes(
+            {
+                "schema_version": _PUBLICATION_SCHEMA,
+                "curation_id": curation_id,
+                "source_snapshot_id": source_snapshot_id,
+                "final_snapshot_id": final_id,
+                "files": digests,
+            }
+        )
+        _scan_for_secrets(_PUBLICATION_MANIFEST_FILENAME, publication)
+        payloads[_PUBLICATION_MANIFEST_FILENAME] = publication
+        sums = "".join(
+            f"{_digest(data)}  {name}\n" for name, data in sorted(payloads.items())
+        ).encode("utf-8")
+        _scan_for_secrets(_SUMS_FILENAME, sums)
+        payloads[_SUMS_FILENAME] = sums
+        object.__setattr__(self, "curation_id", curation_id)
+        object.__setattr__(self, "final_snapshot_id", final_id)
+        object.__setattr__(self, "files", MappingProxyType(payloads))
+
+    @classmethod
+    def read(cls, bundle_dir: Path) -> FinalAnnotationBundle:
+        root = Path(bundle_dir)
+        if root.is_symlink():
+            raise ValueError("final bundle must be a real directory")
+        try:
+            root = root.resolve(strict=True)
+        except OSError as exc:
+            raise ValueError(f"final bundle cannot be resolved: {exc}") from None
+        if not root.is_dir():
+            raise ValueError("final bundle must be a real directory")
+        if _bundle_input_names(root) != set(FINAL_IDENTITY_FILES):
+            raise ValueError("final publication input must contain exactly the seven semantic files")
+        payloads: dict[str, bytes] = {}
+        for name in FINAL_IDENTITY_FILES:
+            path = root / name
+            if path.is_symlink() or not path.is_file():
+                raise ValueError(f"final bundle identity input {name!r} must be a regular file")
+            payloads[name] = _read_regular_file(path, label=name)
+        return cls(payloads)
 
 
 def _prefix_names(remote_files: set[str], prefix: str) -> set[str]:
@@ -696,31 +721,28 @@ def _commit_payloads(
             raise HubUnavailableError(redact_text(f"{operation} commit failed: {exc}")) from None
 
 
-def _verify_data_commit(
-    client: AnnotationHubClient, data_oid: str, prefix: str, payloads: Mapping[str, bytes],
-) -> None:
+def _verify_data_commit(client: AnnotationHubClient, data_oid: str, bundle: FinalAnnotationBundle) -> None:
     """Verify a success marker's complete data set at its immutable parent commit."""
     revision = _pin_repository(client, revision=data_oid)
     _verify_prefix(
         client, revision=revision, remote_files=_list_remote(client, revision),
-        prefix=prefix, expected=payloads,
+        prefix=_final_prefix(bundle.curation_id, bundle.final_snapshot_id), expected=bundle.files,
     )
 
 
 def _verified_existing_success(
     client: AnnotationHubClient,
+    bundle: FinalAnnotationBundle,
     *,
     revision: str,
     remote_files: set[str],
-    prefix: str,
-    final_id: str,
-    data_payloads: Mapping[str, bytes],
 ) -> dict[str, Any]:
     """Verify both committed prefixes and return their publication receipt."""
+    prefix = _final_prefix(bundle.curation_id, bundle.final_snapshot_id)
     marker_path = f"{prefix}{_SUCCESS_FILENAME}"
     marker_bytes = _download_remote(client, marker_path, revision)
-    data_oid = _parse_success(marker_bytes, final_id=final_id)
-    expected_success = {**data_payloads, _SUCCESS_FILENAME: marker_bytes}
+    data_oid = _parse_success(marker_bytes, final_id=bundle.final_snapshot_id)
+    expected_success = {**bundle.files, _SUCCESS_FILENAME: marker_bytes}
     _verify_prefix(
         client,
         revision=revision,
@@ -728,45 +750,29 @@ def _verified_existing_success(
         prefix=prefix,
         expected=expected_success,
     )
-    _verify_data_commit(client, data_oid, prefix, data_payloads)
+    _verify_data_commit(client, data_oid, bundle)
     return {
         "hub_commit_sha": revision,
         "data_commit_sha": data_oid,
-        "final_snapshot_id": final_id,
+        "final_snapshot_id": bundle.final_snapshot_id,
         "prefix": prefix,
-        "files": sorted([*data_payloads, _SUCCESS_FILENAME]),
+        "files": sorted([*bundle.files, _SUCCESS_FILENAME]),
     }
 
 
 def publish_final_annotation_bundle(
     client: AnnotationHubClient,
-    bundle_dir: Path,
+    bundle: FinalAnnotationBundle,
+    *,
+    staging_parent: Path,
 ) -> dict[str, Any]:
-    """Publish and verify a complete semantic bundle in data then success commits."""
-    bundle_dir = Path(bundle_dir)
-    if bundle_dir.is_symlink():
-        raise ValueError("final bundle must be a real directory")
-    try:
-        bundle_dir = bundle_dir.resolve(strict=True)
-    except OSError as exc:
-        raise ValueError(f"final bundle cannot be resolved: {exc}") from None
-    if not bundle_dir.is_dir():
-        raise ValueError("final bundle must be a real directory")
-    curation_id, _source_snapshot_id, final_id, data_payloads = _prepare_final_bundle(bundle_dir)
+    """Publish captured validated bytes in data then success commits."""
+    curation_id = bundle.curation_id
+    final_id = bundle.final_snapshot_id
+    data_payloads = bundle.files
     prefix = _final_prefix(curation_id, final_id)
     commit_message = f"daydream annotation final data {curation_id} {final_id}"
     _scan_for_secrets("final commit message", commit_message.encode("utf-8"))
-
-    def verified_receipt(revision: str, remote_files: set[str]) -> dict[str, Any]:
-        """Re-verify an already-committed success prefix and return its receipt."""
-        return _verified_existing_success(
-            client,
-            revision=revision,
-            remote_files=remote_files,
-            prefix=prefix,
-            final_id=final_id,
-            data_payloads=data_payloads,
-        )
 
     data_oid: str | None = None
     for _attempt in range(_ATOMIC_ATTEMPTS):
@@ -774,7 +780,9 @@ def publish_final_annotation_bundle(
         remote_files = _list_remote(client, current)
         names = _prefix_names(remote_files, prefix)
         if _SUCCESS_FILENAME in names:
-            return verified_receipt(current, remote_files)
+            return _verified_existing_success(
+                client, bundle, revision=current, remote_files=remote_files,
+            )
         if names:
             _verify_prefix(
                 client,
@@ -788,13 +796,13 @@ def publish_final_annotation_bundle(
         try:
             data_oid = _commit_payloads(
                 client, {f"{prefix}{name}": data for name, data in data_payloads.items()},
-                staging_parent=bundle_dir.parent, parent=current,
+                staging_parent=staging_parent, parent=current,
                 message=commit_message, operation="final annotation",
             )
         except HubConcurrentUpdateError:
             continue
         _validate_oid(data_oid, what="final annotation revision")
-        _verify_data_commit(client, data_oid, prefix, data_payloads)
+        _verify_data_commit(client, data_oid, bundle)
         break
     if data_oid is None:
         raise HubUnavailableError("final data publication could not win the concurrent-update race")
@@ -804,7 +812,9 @@ def publish_final_annotation_bundle(
         remote_files = _list_remote(client, current)
         names = _prefix_names(remote_files, prefix)
         if _SUCCESS_FILENAME in names:
-            return verified_receipt(current, remote_files)
+            return _verified_existing_success(
+                client, bundle, revision=current, remote_files=remote_files,
+            )
         _verify_prefix(
             client,
             revision=current,
@@ -818,7 +828,7 @@ def publish_final_annotation_bundle(
         try:
             success_oid = _commit_payloads(
                 client, {f"{prefix}{_SUCCESS_FILENAME}": marker},
-                staging_parent=bundle_dir.parent, parent=current,
+                staging_parent=staging_parent, parent=current,
                 message=success_message, operation="final annotation",
             )
         except HubConcurrentUpdateError:
@@ -826,7 +836,9 @@ def publish_final_annotation_bundle(
         _validate_oid(success_oid, what="final annotation revision")
         pinned_success = _pin_repository(client, revision=success_oid)
         success_files = _list_remote(client, pinned_success)
-        return verified_receipt(pinned_success, success_files)
+        return _verified_existing_success(
+            client, bundle, revision=pinned_success, remote_files=success_files,
+        )
     raise HubUnavailableError("final success publication could not win the concurrent-update race")
 
 
@@ -855,54 +867,18 @@ def download_final_annotation_bundle(
         name: _download_remote(client, f"{prefix}{name}", pinned)
         for name in sorted(names)
     }
-    publication = _parse_json_object(
-        _PUBLICATION_MANIFEST_FILENAME,
-        downloaded[_PUBLICATION_MANIFEST_FILENAME],
-    )
-    semantic = {name: downloaded[name] for name in FINAL_IDENTITY_FILES}
-    expected_curation, source_snapshot = _validate_final_semantics(semantic)
-    if expected_curation != curation_id:
+    _parse_json_object(_PUBLICATION_MANIFEST_FILENAME, downloaded[_PUBLICATION_MANIFEST_FILENAME])
+    bundle = FinalAnnotationBundle({name: downloaded[name] for name in FINAL_IDENTITY_FILES})
+    if bundle.curation_id != curation_id:
         raise HydrationError("final semantic bundle curation mismatch")
-    if set(publication) != {
-        "schema_version",
-        "curation_id",
-        "source_snapshot_id",
-        "final_snapshot_id",
-        "files",
-    } or publication.get("schema_version") != _PUBLICATION_SCHEMA:
-        raise HydrationError("final publication manifest field set or schema mismatch")
-    if (
-        publication.get("final_snapshot_id") != final_id
-        or publication.get("curation_id") != curation_id
-        or publication.get("source_snapshot_id") != source_snapshot
-    ):
-        raise HydrationError("final publication manifest identity mismatch")
-    digests = {name: _digest(data) for name, data in semantic.items()}
-    if publication.get("files") != digests:
-        raise HydrationError("final publication manifest digest map mismatch")
-    expected_publication = _canonical_json_bytes(publication)
-    if downloaded[_PUBLICATION_MANIFEST_FILENAME] != expected_publication:
-        raise HydrationError("final publication manifest is not canonically encoded")
-    derived_id = _digest(_canonical_json_bytes(digests))
-    if derived_id != final_id:
+    if bundle.final_snapshot_id != final_id:
         raise HydrationError("final semantic bundle identity mismatch")
-    expected_sums = "".join(
-        f"{_digest(data)}  {name}\n"
-        for name, data in sorted(
-            {**semantic, _PUBLICATION_MANIFEST_FILENAME: downloaded[_PUBLICATION_MANIFEST_FILENAME]}.items()
-        )
-    ).encode("utf-8")
-    if downloaded[_SUMS_FILENAME] != expected_sums:
+    if downloaded[_PUBLICATION_MANIFEST_FILENAME] != bundle.files[_PUBLICATION_MANIFEST_FILENAME]:
+        raise HydrationError("final publication manifest identity, field set, encoding or digest map mismatch")
+    if downloaded[_SUMS_FILENAME] != bundle.files[_SUMS_FILENAME]:
         raise HydrationError("final SHA256SUMS mismatch")
     data_oid = _parse_success(downloaded[_SUCCESS_FILENAME], final_id=final_id)
-    _verify_data_commit(
-        client, data_oid, prefix,
-        {
-            **semantic,
-            _PUBLICATION_MANIFEST_FILENAME: downloaded[_PUBLICATION_MANIFEST_FILENAME],
-            _SUMS_FILENAME: expected_sums,
-        },
-    )
+    _verify_data_commit(client, data_oid, bundle)
 
     _install_staging(destination, downloaded, error_label="final bundle installation failed")
     return {

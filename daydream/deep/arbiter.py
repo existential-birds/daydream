@@ -10,15 +10,14 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from daydream.deep.dependency import co_locate_groups
 from daydream.deep.records import record_uid, stack_name_from_uid
-from daydream.severity import CANONICAL_LEVELS, SEVERITY_RANK
+from daydream.severity import SEVERITY_RANK
 
-# Canonical confidence vocabulary (uppercase HIGH|MEDIUM|LOW schema enum,
-# mirroring ``review_profile._CONFIDENCE_LEVELS``).
-_CONFIDENCE_LEVELS: frozenset[str] = frozenset(("HIGH", "MEDIUM", "LOW"))
+if TYPE_CHECKING:
+    from daydream.review_profile import Arbitration, Suppression
 
 
 def _severity(record: dict[str, Any]) -> str:
@@ -31,16 +30,6 @@ def _confidence(record: dict[str, Any]) -> str:
     """Normalize a record's confidence to an uppercase string ("" when absent)."""
     value = record.get("confidence")
     return value.upper() if isinstance(value, str) else ""
-
-
-def _at_or_above(min_severity: str) -> frozenset[str]:
-    """Return canonical levels at least as severe as the validated threshold."""
-    if min_severity not in SEVERITY_RANK:
-        raise ValueError(
-            f"min_severity must be one of {', '.join(CANONICAL_LEVELS)}; got {min_severity!r}"
-        )
-    rank = SEVERITY_RANK[min_severity]
-    return frozenset(level for level, level_rank in SEVERITY_RANK.items() if level_rank <= rank)
 
 
 def contested_indices(
@@ -84,24 +73,26 @@ def contested_indices(
 
 def select_arbiter_targets(
     records: list[dict[str, Any]],
-    min_severity: str = "high",
-    contested_location: bool = True,
+    policy: Arbitration,
+    *,
     contested_only: Iterable[int] = (),
 ) -> list[int]:
     """Return sorted unique indices qualifying by severity or contested location.
 
     Records in contested_only skip severity selection but remain eligible through
-    contested_indices. Missing severity cannot qualify by severity. A noncanonical minimum raises ValueError.
+    contested_indices. Missing severity cannot qualify by severity. The profile owner
+    has already admitted the threshold and contested-location policy.
     """
     if any(not stack_name_from_uid(record_uid(record)) for record in records):
         raise ValueError("Arbiter records require scope UIDs")
     severity_exempt = set(contested_only)
-    eligible = _at_or_above(min_severity)
+    rank = SEVERITY_RANK[policy.min_severity]
+    eligible = {level for level, level_rank in SEVERITY_RANK.items() if level_rank <= rank}
     selected = {
         i for i, record in enumerate(records)
         if i not in severity_exempt and _severity(record) in eligible
     }
-    if contested_location:
+    if policy.contested_location:
         selected.update(contested_indices(records, contested_only=severity_exempt))
 
     return sorted(selected)
@@ -201,33 +192,19 @@ def partition_arbiter_targets(
 
 def select_suppression_targets(
     records: list[dict[str, Any]],
+    policy: Suppression,
     exclude: Iterable[int] = (),
-    severity_classes: tuple[str, ...] = ("low",),
-    confidence_classes: tuple[str, ...] = ("LOW",),
 ) -> list[int]:
     """Select records matching a severity or confidence class, except excluded indices.
 
     Callers exclude arbiter targets to keep high-severity/contested findings out.
-    Classes are case-normalized and validated; results retain record order.
+    The profile owner has already admitted canonical class selections. Record
+    severity and confidence remain case-normalized; results retain record order.
     """
-    classes = frozenset(cls.lower() for cls in severity_classes)
-    unknown = classes - frozenset(CANONICAL_LEVELS)
-    if unknown:
-        raise ValueError(
-            f"severity_classes must be a subset of {', '.join(sorted(CANONICAL_LEVELS))}; "
-            f"got unknown value(s): {', '.join(sorted(unknown))}"
-        )
-    confidence = frozenset(cnf.upper() for cnf in confidence_classes)
-    unknown_conf = confidence - _CONFIDENCE_LEVELS
-    if unknown_conf:
-        raise ValueError(
-            f"confidence_classes must be a subset of {', '.join(sorted(_CONFIDENCE_LEVELS))}; "
-            f"got unknown value(s): {', '.join(sorted(unknown_conf))}"
-        )
     excluded = set(exclude)
     return [
         i for i, record in enumerate(records)
         if i not in excluded and (
-            _confidence(record) in confidence or _severity(record) in classes
+            _confidence(record) in policy.confidence_classes or _severity(record) in policy.severity_classes
         )
     ]

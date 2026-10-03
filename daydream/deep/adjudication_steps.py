@@ -603,8 +603,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
 
             arbiter_targets = select_arbiter_targets(
                 adjudicated,
-                min_severity=ctx.pipeline().arbitration.min_severity,
-                contested_location=ctx.pipeline().arbitration.contested_location,
+                ctx.pipeline().arbitration,
                 contested_only=structural_range,
             )
             # Suppression exclusions use durable UIDs; indices shift and locations can collide.
@@ -733,9 +732,8 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                 ]
                 suppression_targets = select_suppression_targets(
                     adjudicated,
+                    ctx.pipeline().suppression,
                     suppression_exclude,
-                    severity_classes=ctx.pipeline().suppression.severity_classes,
-                    confidence_classes=ctx.pipeline().suppression.confidence_classes,
                 )
                 if suppression_targets:
                     async with phase_scope(DaydreamPhase.DEEP, stage="suppression"):

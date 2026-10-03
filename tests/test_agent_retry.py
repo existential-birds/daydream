@@ -15,7 +15,7 @@ from daydream.agent import run_agent
 from daydream.agent_retry import _plan_retry_delay, _resolve_retry_settings, _retry_hint
 from daydream.backends import Backend, ResultEvent, RetryPolicy, TextEvent
 from daydream.backends._subprocess import StreamStalledError
-from daydream.backends.pi import PiBackend, PiError, _pi_error_category, _pi_retryable_for
+from daydream.backends.pi import PiBackend, PiError, _pi_error_category
 from daydream.config import DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
 from daydream.retry_policy import classify_failure
 from daydream.trajectory import DaydreamPhase
@@ -83,8 +83,7 @@ def _always_raises(error: BaseException) -> ScriptedBackend:
         pytest.param(
             lambda: _fail_then_succeed(
                 PiError(
-                    "terminated",
-                    retryable=_pi_retryable_for(category=_pi_error_category("terminated"), message="terminated"),
+                    "terminated", category=_pi_error_category("terminated"),
                 ), text="Review complete after retry",
             ), "Review complete after retry", id="stream-drop",
         ),
