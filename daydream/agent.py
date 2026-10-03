@@ -35,7 +35,7 @@ from daydream.backends.codex import supervisor_shell_command
 from daydream.config import BUDGET_CLEANUP_GRACE_S
 from daydream.diagnostics import exception_text, sanitize_verbose_message
 from daydream.extensions import get_registry
-from daydream.json_utils import extract_json
+from daydream.json_utils import extract_json, extract_json_by_schema
 from daydream.observability.spans import agent_scope, attempt_scope
 from daydream.outage_circuit import CIRCUIT_CLOSED, CIRCUIT_HALF_OPEN
 from daydream.prompt_budget import PreparedSanctionedInputs
@@ -954,14 +954,33 @@ async def _run_agent(
     if output_schema is not None:
         raw = "".join(output_parts)
         # Fallback: robust extraction (prose-wrapped JSON, markdown fences) when
-        # structured output failed. The parsed value must pass the same
-        # salvage-tolerant gate as the success path (see _salvageable); callers
-        # that salvage wholesale downstream opt out via
-        # validate_structured_output=False.
+        # structured output failed. Selection is schema-driven rather than
+        # size-driven — the last candidate this same gate admits wins — so
+        # incidental prose JSON ahead of a real answer (e.g. a trailing
+        # `{"issues": []}` after a bracket list) resolves to the answer, never to
+        # the largest span. The selected value must still pass the same
+        # salvage-tolerant gate as the success path (see _salvageable).
+        #
+        # The selector discriminates only when that gate discriminates. A caller
+        # that opts out via validate_structured_output=False has a vacuous gate,
+        # where "last admitted candidate" degenerates to the innermost span and
+        # would hand back a nested record instead of the intended object; those
+        # callers keep largest-span extraction. Everything else narrows to the
+        # last candidate its own gate admits, which never widens what is
+        # accepted.
         if raw.strip():
-            parsed = extract_json(raw)
-            if parsed is not None and _usable(parsed):
-                return parsed, result_continuation, aborted_reason
+            selected: Any = None
+            if validate_structured_output:
+                selection = extract_json_by_schema(
+                    raw,
+                    schema=output_schema,
+                    accept=_validates_schema if require_full_schema else _salvageable,
+                )
+                selected = selection.value
+            else:
+                selected = extract_json(raw)
+            if selected is not None and _usable(selected):
+                return selected, result_continuation, aborted_reason
     raw = "".join(output_parts)
     if output_schema is not None and require_full_schema:
         reason = "malformed_output" if structured_result is not None or raw.strip() else "missing_output"

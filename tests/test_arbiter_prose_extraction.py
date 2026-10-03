@@ -13,11 +13,14 @@ from typing import Any, cast
 
 import pytest
 
+from daydream.agent import run_agent
 from daydream.backends import Backend, ResultEvent, TextEvent
 from daydream.json_utils import extract_json
 from daydream.phases import phase_arbiter_review
 from daydream.phases.review import ReviewOutputError
+from daydream.phases.schemas import PER_STACK_RECORD_SCHEMA
 from daydream.run_context import InteractionPolicy, RunContext
+from daydream.trajectory import DaydreamPhase
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 
@@ -66,6 +69,36 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
 def _pi_like_backend(message: str) -> ScriptedBackend:
     """Mirrors the pi backend: structured_output = extract_json(final text), gated on the schema."""
     return _split_text_backend(message, extract_json(message))
+
+
+def _prose_only_backend(message: str) -> ScriptedBackend:
+    """No structured output at all, so run_agent's text fallback is the only path."""
+
+    def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
+        return [TextEvent(text=message),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+
+    return ScriptedBackend(responder=respond, model="glm-5.2")
+
+
+# The issue-1445 message shape: incidental prose JSON (the dependency-impact list
+# the old prompt asked for) followed by the real answer, an empty issues array.
+PROSE_WITH_INCIDENTAL_JSON = (
+    'The dependency impact: ["module", "moduleVersion", "surface"] were inspected. '
+    'No defects established. {"issues": []}'
+)
+
+
+async def test_host_fallback_returns_empty_result_under_strict_gate() -> None:
+    """A completed review that established no defect persists the empty result, not the prose list."""
+    result, _, _ = await run_agent(
+        cast(Backend, _prose_only_backend(PROSE_WITH_INCIDENTAL_JSON)), Path("/tmp"), "review",
+        phase=DaydreamPhase.DEEP, output_schema=PER_STACK_RECORD_SCHEMA,
+        require_full_schema=True, persist_session=False, tool_call_budget=4, wall_budget_s=60,
+    )
+    assert result == {"issues": []}
+
 
 async def test_arbiter_extracts_findings_from_prose_wrapped_message(
     tmp_path: Path, make_work: Callable[..., WorkContext],
