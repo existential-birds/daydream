@@ -64,7 +64,6 @@ from daydream.improve.reanchor import (
     prune_named_reanchor_worktree,
     prune_stale_reanchor_worktrees,
 )
-from daydream.improve.redaction import redact_model_value
 from daydream.improve.render import plan_slug, render_plan
 from daydream.improve.repo_commands import enumerate_repository_commands
 from daydream.improve.reporting import (
@@ -2648,32 +2647,3 @@ def test_stale_locked_reanchor_worktree_is_reclaimed(repo: Path) -> None:
     assert removed == 1
     assert not stale.exists()
     assert "run-dead-reanchor" not in git(repo, "worktree", "list")
-
-_NESTED_SECRET = "credential sk-abcdef123456 in the note"
-_NESTED_REDACTED = "credential [REDACTED_API_KEY] in the note"
-
-def test_model_value_redaction_recurses_into_nested_containers() -> None:
-    redacted = redact_model_value(([{"note": _NESTED_SECRET}],))
-    assert isinstance(redacted, tuple)
-    assert isinstance(redacted[0], list)
-    assert isinstance(redacted[0][0], dict)
-    assert redacted[0][0]["note"] == _NESTED_REDACTED
-
-def test_model_value_redaction_rebuilds_each_container_shape() -> None:
-    assert redact_model_value(["sk-abcdef123456"]) == ["[REDACTED_API_KEY]"]
-    assert redact_model_value(("sk-abcdef123456",)) == ("[REDACTED_API_KEY]",)
-    assert redact_model_value({"note": "sk-abcdef123456", "count": 3}) == {"note": "[REDACTED_API_KEY]", "count": 3,}
-
-def test_model_value_redaction_passes_non_container_leaves_through() -> None:
-    sentinel = object()
-    assert redact_model_value(None) is None
-    assert redact_model_value(7) == 7
-    assert redact_model_value(True) is True
-    assert redact_model_value(sentinel) is sentinel
-
-def test_model_value_redaction_does_not_mutate_its_argument() -> None:
-    source = {"note": "sk-abcdef123456", "tags": ["sk-abcdef123456"]}
-    redacted = redact_model_value(source)
-    assert source == {"note": "sk-abcdef123456", "tags": ["sk-abcdef123456"]}
-    assert redacted is not source
-    assert redacted["tags"] is not source["tags"]

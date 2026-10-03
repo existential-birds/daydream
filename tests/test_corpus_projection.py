@@ -223,7 +223,7 @@ def test_load_bundle_admission_gate_passes_wellformed_bundle(tmp_path: Path) -> 
     loaded = load_curated_bundle(bundle_dir)  # no raise
     assert all(b.repo_slug for b in loaded.admitted)
 
-def test_repeated_annotation_snapshot_session_does_not_fabricate_duplicates(tmp_path: Path) -> None:
+def test_repeated_annotation_snapshot_session_does_not_fabricate_duplicates(tmp_path: Path, bundle_dir: Path) -> None:
     # The merge path prefixes a NEW session's fingerprints so distinct
     # sessions don't collide (the snapshot is keyed by fingerprint globally),
     # but the prefix used to toggle on file-emptiness — so re-calling the
@@ -232,7 +232,6 @@ def test_repeated_annotation_snapshot_session_does_not_fabricate_duplicates(tmp_
     # _load_snapshot only rejects duplicates within a single read, so both
     # rows projected as distinct records. A repeated session must be an
     # idempotent no-op instead.
-    bundle_dir = _write_bundle(tmp_path)
     _write_annotations_snapshot(bundle_dir, session_id="sess-a", dispositions=["accepted", "rejected"])
     snap = _write_annotations_snapshot(bundle_dir, session_id="sess-a", dispositions=["accepted", "rejected"])
     rows = _read_jsonl(snap)
@@ -247,11 +246,10 @@ def test_repeated_annotation_snapshot_session_does_not_fabricate_duplicates(tmp_
 
 
 @pytest.fixture
-def existing_bundle_fixture(tmp_path: Path) -> tuple[Path, list[dict[str, Any]], dict[str, str]]:
+def existing_bundle_fixture(bundle_dir: Path) -> tuple[Path, list[dict[str, Any]], dict[str, str]]:
     """The standard curated-bundle + annotation-bundle pair the two-bundle
     contract tests build on: bundle dir, the annotation rows (as JSON), and
     the linkage kwargs (curation id / hub commit)."""
-    bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
     rows = _read_jsonl(snap)
     manifest = json.loads((bundle_dir / "curation-manifest.json").read_text())
@@ -291,8 +289,7 @@ def test_bundle_batch_tolerates_absent_new_fields() -> None:
     assert batch.repo_slug is None
     assert batch.license_evidence is None
 
-def test_load_bundle_requires_success_marker(tmp_path: Path) -> None:
-    bundle_dir = _write_bundle(tmp_path)
+def test_load_bundle_requires_success_marker(bundle_dir: Path) -> None:
     (bundle_dir / "_SUCCESS").unlink()
     with pytest.raises(BundleError, match="_SUCCESS"):
         load_curated_bundle(bundle_dir)
@@ -302,8 +299,7 @@ def test_load_bundle_rejects_digest_mismatch(tmp_path: Path) -> None:
     with pytest.raises(BundleError, match="digest mismatch"):
         load_curated_bundle(bundle_dir)
 
-def test_load_bundle_rejects_incompatible_schema_version(tmp_path: Path) -> None:
-    bundle_dir = _write_bundle(tmp_path)
+def test_load_bundle_rejects_incompatible_schema_version(bundle_dir: Path) -> None:
     manifest_path = bundle_dir / "curation-manifest.json"
     doc = json.loads(manifest_path.read_text())
     doc["schema_version"] = "999"
@@ -313,8 +309,7 @@ def test_load_bundle_rejects_incompatible_schema_version(tmp_path: Path) -> None
     with pytest.raises(BundleError, match="schema_version"):
         load_curated_bundle(bundle_dir)
 
-def test_load_bundle_uses_relative_paths_only(tmp_path: Path) -> None:
-    bundle_dir = _write_bundle(tmp_path)
+def test_load_bundle_uses_relative_paths_only(bundle_dir: Path) -> None:
     loaded = load_curated_bundle(bundle_dir)
     assert isinstance(loaded, CuratedBundle)
     for batch in loaded.admitted:
@@ -322,8 +317,7 @@ def test_load_bundle_uses_relative_paths_only(tmp_path: Path) -> None:
         assert ".." not in Path(batch.artifact_relpath).parts
         assert (bundle_dir / batch.artifact_relpath).exists()
 
-def test_load_bundle_rejects_missing_batches_file(tmp_path: Path) -> None:
-    bundle_dir = _write_bundle(tmp_path)
+def test_load_bundle_rejects_missing_batches_file(bundle_dir: Path) -> None:
     (bundle_dir / "batches" / "sess-a" / "trajectory.json").unlink()
     with pytest.raises(BundleError, match="missing artifact"):
         load_curated_bundle(bundle_dir)
@@ -497,8 +491,7 @@ def test_run_level_contested_aggregate_never_erases_split() -> None:
 
 # Task 9: summary + full lineage + adjudication report
 
-def test_build_summary_and_lineage_are_complete(tmp_path: Path) -> None:
-    bundle_dir = _write_bundle(tmp_path)
+def test_build_summary_and_lineage_are_complete(tmp_path: Path, bundle_dir: Path) -> None:
     _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected", "ambiguous"])
     summary = build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "out"))
     assert set(summary) >= {"records_by_type", "records_by_tier", "records_by_split", "caps", "exclusions_by_reason"}
@@ -575,8 +568,7 @@ def test_schema_validation_accepts_evolved_v2_records(
     for rec in _read_jsonl(tmp_path / "out" / "corpus.jsonl"):
         jsonschema.validate(rec, schema)  # no raise
 
-def test_projected_records_carry_profile_and_stack_provenance(tmp_path: Path) -> None:
-    bundle_dir = _write_bundle(tmp_path)
+def test_projected_records_carry_profile_and_stack_provenance(tmp_path: Path, bundle_dir: Path) -> None:
     _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
     build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "out"))
     records = _read_jsonl(tmp_path / "out" / "corpus.jsonl")
@@ -586,12 +578,11 @@ def test_projected_records_carry_profile_and_stack_provenance(tmp_path: Path) ->
                                    "profile_source_kind": "builtin", "profile_digest": "d" * 64}
         assert "stack" in rec  # schema-required provenance key, never dropped
 
-def test_evidence_after_as_of_findings_never_emit_gold(tmp_path: Path) -> None:
+def test_evidence_after_as_of_findings_never_emit_gold(tmp_path: Path, bundle_dir: Path) -> None:
     """The emission boundary honors the canonical harvest's flag: a decisive
     finding with evidence after the pin's as_of emits silver (outcome_label
     None), never gold, into corpus.jsonl — the ``evidence_after_as_of``
     policy is enforced, not just recorded."""
-    bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted"])
     rows = _read_jsonl(snap)
     for row in rows:
@@ -610,8 +601,7 @@ def test_evidence_after_as_of_findings_never_emit_gold(tmp_path: Path) -> None:
 
 # Frozen-corpus loader surface (stacks.py)
 
-def test_v2_loader_loads_projected_manifest_fail_closed(tmp_path: Path) -> None:
-    bundle_dir = _write_bundle(tmp_path)
+def test_v2_loader_loads_projected_manifest_fail_closed(tmp_path: Path, bundle_dir: Path) -> None:
     _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
     summary = build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "proj"))
     assert summary["emitted"] >= 1
@@ -669,10 +659,9 @@ def test_emitted_records_validate_against_shipped_schema(tmp_path: Path) -> None
             errors = list(validator.iter_errors(rec))
             assert not errors, (name, errors)
 
-def test_one_record_per_finding_across_segments(tmp_path: Path) -> None:
+def test_one_record_per_finding_across_segments(tmp_path: Path, bundle_dir: Path) -> None:
     # The snapshot resolutions are session-scoped, so one finding must never
     # fan out into per-segment copies that could land in different splits.
-    bundle_dir = _write_bundle(tmp_path)
     _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"], n_siblings=2)
     out = tmp_path / "proj"
     build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out))
@@ -684,11 +673,10 @@ def test_one_record_per_finding_across_segments(tmp_path: Path) -> None:
         by_fp.setdefault(str(rec["finding_fingerprint"]), []).append(rec)
     assert all(len(v) == 1 for v in by_fp.values())
 
-def test_task_only_findings_are_adjudication_only_not_training(tmp_path: Path) -> None:
+def test_task_only_findings_are_adjudication_only_not_training(tmp_path: Path, bundle_dir: Path) -> None:
     # Non-decisive findings are report output only (D8): excluded from
     # corpus.jsonl and the split manifests, and counted as excluded in
     # lineage/summary — the membership and the accounting must agree.
-    bundle_dir = _write_bundle(tmp_path)
     _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "ambiguous"])
     out = tmp_path / "proj"
     summary = build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out))
@@ -707,8 +695,7 @@ def test_task_only_findings_are_adjudication_only_not_training(tmp_path: Path) -
 # ---------------------------------------------------------------------------
 
 
-def test_cli_build_v2_projects_real_bundle(tmp_path: Path) -> None:
-    bundle_dir = _write_bundle(tmp_path)
+def test_cli_build_v2_projects_real_bundle(tmp_path: Path, bundle_dir: Path) -> None:
     snap = _write_annotations_snapshot(bundle_dir)
     rc = cli_main(["corpus", "build", "--bundle-root", str(bundle_dir),
                    "--annotation-bundle-root", str(snap.parent),
@@ -863,12 +850,11 @@ def test_build_lineage_pins_license_policy_and_decisions(
     }
     assert lineage["license_decision_distribution"] == {"admitted": 1}
 
-def test_multi_session_repo_license_decisions_all_recorded(tmp_path: Path,) -> None:
+def test_multi_session_repo_license_decisions_all_recorded(tmp_path: Path, bundle_dir: Path) -> None:
     # Two admitted batches sharing one repo_slug must both appear in the
     # lineage's license_decisions and the license report: the decisions dict
     # is session-scoped (keyed by session_id), so a repo_slug-keyed collapse
     # would silently drop one decision while the distribution counts both.
-    bundle_dir = _write_bundle(tmp_path)
     manifest = json.loads((bundle_dir / "curation-manifest.json").read_text())
     for batch in manifest["batches"]:
         batch["status"] = "admitted"
@@ -1020,14 +1006,13 @@ def test_end_to_end_clean_mixed_repo_publishes(
         assert lineage["license_decision"]["repo_slug"] == "owner/repo-a"
         assert lineage["license_decision"]["policy_version"] == "1"
 
-def test_gold_accepted_record_carries_finding_text_and_task_identity(tmp_path: Path,) -> None:
+def test_gold_accepted_record_carries_finding_text_and_task_identity(tmp_path: Path, bundle_dir: Path) -> None:
     """A bundle whose admitted batch carries findings.json / diff.patch /
     manifest.json (git head_sha / code_context base_sha) enriches the
     gold-accepted record
     additively: localized finding text + its sha256, and a task_identity
     block threading the git shas and the batch's content-addressed diff
     pointer. The diff body round-trips via diff_ref."""
-    bundle_dir = _write_bundle(tmp_path)
     batch_dir = bundle_dir / "batches" / "sess-a"
     # Producer-realistic manifest: head SHA under "git", base SHA under
     # "code_context" (archive/manifest.py:374-387).

@@ -163,6 +163,12 @@ def _frozen_target(tmp_path: Path) -> Path:
     target.mkdir()
     return target
 
+@pytest.fixture
+def target(tmp_path: Path) -> Path:
+    """A frozen artifact root isolated from the archive directory."""
+    return _frozen_target(tmp_path)
+
+
 def _findings_route(live_root: Path, name: str = "findings.json") -> RoutedDestination:
     """The registered ``--findings-out`` route the strict bundle relocates."""
     private = live_root / ".explicit" / "0000" / name
@@ -1719,10 +1725,9 @@ def test_persisted_repository_identities_remain_canonical_lowercase(
         assert states["remote_ci"]["status"] == "partial"
 
 def test_archive_rejects_repository_identity_the_producer_cannot_create(
-    tmp_path: Path, archive_dir: Path, make_config: MakeConfig,
+    target: Path, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
     """Archive success cannot admit a slug rejected by the verdict producer."""
-    target = _frozen_target(tmp_path)
     oversized = f"{'a' * 100}/{'b' * 102}"
     with pytest.raises(ValueError, match="repository"):
         RemoteCITarget(target_dir=target, base_repository=oversized, base_ref="main", head_repository=oversized,
@@ -1806,9 +1811,8 @@ def test_remote_advisory_failure_is_detail_not_hard_failure(tmp_path: Path) -> N
     assert remote["details"]["advisory_failures"] == ["Optional Linux"]
 
 def test_archive_required_success_with_pending_advisory_is_succeeded(
-    tmp_path: Path, archive_dir: Path, make_config: MakeConfig,
+    target: Path, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
-    target = _frozen_target(tmp_path)
     recorder = _MockRecorder(session_id="advisory-pending-session")
     config = make_config(target, archive=True, pr_repo="example/project", pr_number=42)
     advisory = CIObservation(
@@ -1996,9 +2000,8 @@ def test_successful_push_rejects_malformed_or_stale_remote_artifact(
 
 @pytest.mark.parametrize(("remote_status", "expected_status"), [("passed", "succeeded"), ("failed", "failed")],)
 def test_archive_run_persists_registry_gated_push_and_remote_states(
-    tmp_path: Path, archive_dir: Path, make_config: MakeConfig, remote_status: str, expected_status: str,
+    target: Path, archive_dir: Path, make_config: MakeConfig, remote_status: str, expected_status: str,
 ) -> None:
-    target = _frozen_target(tmp_path)
     recorder = _MockRecorder(session_id="registry-gated-session")
     config = make_config(target, archive=True, pr_repo="ExAmPlE/PrOjEcT", pr_number=42,)
     _write_deep(target, "test-verdict.json", {"session_id": recorder.session_id, "passed": True},)
@@ -2020,12 +2023,11 @@ def test_archive_run_persists_registry_gated_push_and_remote_states(
     assert manifest["pipeline_status"] == expected_status
 
 def test_frozen_mapping_push_and_remote_phase_starts_are_partial_without_artifacts(
-    tmp_path: Path, archive_dir: Path, make_config: MakeConfig,
+    target: Path, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
     """Only frozen event mappings drive these phase states; the live recorder has no
     events.
     """
-    target = _frozen_target(tmp_path)
     recorder = make_recorder(target, run_flow=DaydreamRunFlow.NORMAL)
     phase_events = [_phase_start_event(phase.value, recorder.session_id, timestamp="2026-09-06T12:00:00Z")
         for phase in (DaydreamPhase.PUSH, DaydreamPhase.REMOTE_CI)
@@ -2151,9 +2153,8 @@ def test_merge_without_identity_ignores_invalid_utf8_artifacts(tmp_path: Path, a
     )
     assert states["merge"] == {"ran": True, "status": "unknown"}
 
-def test_current_archive_survives_invalid_utf8_fix_failures(tmp_path: Path, archive_dir: Path, make_config: MakeConfig,
+def test_current_archive_survives_invalid_utf8_fix_failures(target: Path, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
-    target = _frozen_target(tmp_path)
     session_id = "current-corrupt-fix-sidecar"
     recorder = _MockRecorder(session_id=session_id)
     deep = target / ".daydream" / "deep"
@@ -2179,9 +2180,8 @@ def test_current_archive_survives_invalid_utf8_fix_failures(tmp_path: Path, arch
     assert [row["session_id"] for row in query_runs(archive_dir)] == [session_id]
 
 def test_start_at_fix_archive_does_not_require_or_inherit_merge(
-    tmp_path: Path, archive_dir: Path, make_config: MakeConfig,
+    target: Path, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
-    target = _frozen_target(tmp_path)
     session_id = "fix-resume-session"
     recorder = _MockRecorder(session_id=session_id)
     _write_deep(target, "merged-items.json", {"items": [{"id": 1}]})
@@ -2203,9 +2203,8 @@ def test_start_at_fix_archive_does_not_require_or_inherit_merge(
     assert manifest["pipeline_status"] == "succeeded"
 
 def test_archive_retains_malformed_frozen_merge_evidence_as_unknown(
-    tmp_path: Path, archive_dir: Path, make_config: MakeConfig,
+    target: Path, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
-    target = _frozen_target(tmp_path)
     session_id = "malformed-merge-session"
     recorder = _MockRecorder(session_id=session_id)
     _write_deep(target, "merged-items.json", {"items": [{"id": 1}]})
@@ -2219,9 +2218,8 @@ def test_archive_retains_malformed_frozen_merge_evidence_as_unknown(
     assert manifest["phase_states"]["merge"] == {"ran": True, "status": "unknown"}
     assert manifest["pipeline_status"] == "partial"
 
-def test_archive_rejects_frozen_root_from_another_session(tmp_path: Path, archive_dir: Path, make_config: MakeConfig,
+def test_archive_rejects_frozen_root_from_another_session(target: Path, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
-    target = _frozen_target(tmp_path)
     recorder = _MockRecorder(session_id="current-session")
     payload = {"session_id": "other-session", "trajectory_id": recorder.session_id, "steps": [], "extra": {},
         "final_metrics": {},
@@ -2241,10 +2239,9 @@ def test_archive_rejects_frozen_root_from_another_session(tmp_path: Path, archiv
     assert not (archive_dir / "runs" / recorder.session_id).exists()
 
 def test_archive_rejects_a_sibling_document_from_another_session(
-    tmp_path: Path, archive_dir: Path, make_config: MakeConfig,
+    target: Path, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
     """The root is valid: bundle projection must reject the foreign fork without publishing a partial archive."""
-    target = _frozen_target(tmp_path)
     recorder = _MockRecorder(session_id="current-session")
     root = _write_snapshot(recorder).documents[0]
     foreign = json.dumps({"session_id": "other-session", "trajectory_id": "fork-1"}).encode()
@@ -2329,9 +2326,8 @@ def test_stale_or_malformed_stabilization_failure_is_neutral(tmp_path: Path, pay
     assert states["test"] == {"ran": True, "status": "succeeded"}
 
 def test_archive_manifest_fails_matching_stabilization_session(
-    tmp_path: Path, archive_dir: Path, make_config: MakeConfig
+    target: Path, archive_dir: Path, make_config: MakeConfig
 ) -> None:
-    target = _frozen_target(tmp_path)
     session_id = "stabilization-session"
     _write_deep(target, "merged-items.json", {"items": [{"id": 1}]})
     _write_deep(target, "test-verdict.json", {"session_id": session_id, "passed": True})
@@ -2417,8 +2413,7 @@ def test_non_deep_flow_ignores_stale_deep_artifacts(tmp_path: Path) -> None:
     states = pipeline.derive_phase_states(tmp_path, phase_events=[], runs_merge=False, runs_fix=False, runs_test=False)
     assert all(s == {"ran": False, "status": "absent"} for s in states.values())
 
-def test_merge_failed_archives_failed_pipeline(tmp_path: Path, archive_dir: Path, make_config: MakeConfig) -> None:
-    target = _frozen_target(tmp_path)
+def test_merge_failed_archives_failed_pipeline(target: Path, archive_dir: Path, make_config: MakeConfig) -> None:
     _write_deep(target, "merged-items.json", {"items": []})
     _write_review_coverage(target)
     _write_deep(target, "test-verdict.json", {"passed": False, "retries": 0, "ignored": False})
@@ -2562,10 +2557,9 @@ def test_append_label_observation_rejects_non_iso_observed_at(tmp_path: Path) ->
     assert label_observation_history(tmp_path, "sess-bad") == []
 
 def test_diagram_flow_does_not_inherit_a_prior_deep_run_pipeline_state(
-    tmp_path: Path, archive_dir: Path, make_config: MakeConfig,
+    target: Path, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
     """Diagram runs retain old deep files on disk; flow capabilities must prevent their attribution."""
-    target = _frozen_target(tmp_path)
     _write_deep(target, "merged-items.json", {"items": []})
     _write_review_coverage(target)
     _write_deep(target, "test-verdict.json", {"passed": False, "retries": 0, "ignored": False})
@@ -2598,9 +2592,8 @@ def test_diagram_flow_does_not_inherit_a_prior_deep_run_pipeline_state(
     assert "per_stack_review_backend" not in m["run"]
 
 def test_diagram_flow_does_not_evaluate_stale_review_artifacts(
-    tmp_path: Path, archive_dir: Path, make_config: MakeConfig,
+    target: Path, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
-    target = _frozen_target(tmp_path)
     _write_deep(target, "merged-items.json", {"items": [{"file": "src/old.py", "line": 1, "confidence": "HIGH"}]},)
     recorder = _MockRecorder(session_id="diagram-no-eval-session", run_flow=DaydreamRunFlow.DIAGRAM)
 

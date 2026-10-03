@@ -1605,27 +1605,30 @@ async def test_phase_understand_intent_rejects_budget_truncated_summary(
             branch="feat/login",
         )
 
+async def _run_intent_correction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
+) -> tuple[ScriptedBackend, str, Path, str]:
+    """Run the signup->login correction harness shared by the two correction tests."""
+    backend = ScriptedBackend(script=[(TextEvent(text="This PR adds a signup page."), _RESULT),
+        (TextEvent(text="This PR adds a login page with OAuth support."), _RESULT),
+    ])
+    correction = "No, it's a login page with OAuth, not signup"
+    responses = iter([correction, "y"])  # First: correction, second: confirm.
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: next(responses))
+    diff_file = tmp_path / "diff.patch"
+    diff_file.write_text("diff --git ...")
+    result = await phase_understand_intent(
+        backend, make_work(tmp_path), diff_path=diff_file, log="abc1234 add login", branch="feat/login",
+    )
+    return backend, result, diff_file, correction
+
+
 @pytest.mark.asyncio
 async def test_phase_understand_intent_correction_then_confirm(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
     _quiet_phase_ui: None,
 ) -> None:
-
-
-    backend = ScriptedBackend(script=[(TextEvent(text="This PR adds a signup page."), _RESULT),
-        (TextEvent(text="This PR adds a login page with OAuth support."), _RESULT),
-    ])
-
-    # First: correction, second: confirm.
-    responses = iter(["No, it's a login page with OAuth, not signup", "y"])
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: next(responses))
-
-    diff_file = tmp_path / "diff.patch"
-    diff_file.write_text("diff --git ...")
-
-    result = await phase_understand_intent(
-        backend, make_work(tmp_path), diff_path=diff_file, log="abc1234 add login", branch="feat/login",
-    )
+    backend, result, _diff_file, _correction = await _run_intent_correction(tmp_path, monkeypatch, make_work)
 
     assert backend.call_count == 2
     assert "login" in result.lower()
@@ -1777,22 +1780,7 @@ async def test_phase_understand_intent_correction_prompt_keeps_no_pr_no_skill_di
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
     _quiet_phase_ui: None,
 ) -> None:
-
-
-    backend = ScriptedBackend(script=[(TextEvent(text="This PR adds a signup page."), _RESULT),
-        (TextEvent(text="This PR adds a login page with OAuth support."), _RESULT),
-    ])
-
-    correction = "No, it's a login page with OAuth, not signup"
-    responses = iter([correction, "y"])
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: next(responses))
-
-    diff_file = tmp_path / "diff.patch"
-    diff_file.write_text("diff --git ...")
-
-    result = await phase_understand_intent(
-        backend, make_work(tmp_path), diff_path=diff_file, log="abc1234 add login", branch="feat/login",
-    )
+    backend, result, diff_file, correction = await _run_intent_correction(tmp_path, monkeypatch, make_work)
 
     assert len(backend.prompts) == 2
     # Initial prompt carries the full directive set.

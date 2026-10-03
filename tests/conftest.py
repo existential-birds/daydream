@@ -81,6 +81,14 @@ def git_repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def bundle_dir(tmp_path: Path) -> Path:
+    """A minimal curated corpus-projection bundle written under tmp_path."""
+    from tests.test_corpus_projection import _write_bundle
+
+    return _write_bundle(tmp_path)
+
+
+@pytest.fixture
 def feature_branch_repo(tmp_path: Path) -> Path:
     """Clean feature branch with a committed Python diff and no review output file."""
     repo = _make_repo_with_main(tmp_path, name="loop_project")

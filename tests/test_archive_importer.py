@@ -105,6 +105,22 @@ def test_missing_fallback_fields_raises(tmp_path: Path) -> None:
 def _seed_run(root: Path) -> None:
     upsert_run(root, make_manifest(session_id=SID, repo_slug="org/repo", head_sha="b" * 40, base_sha="a" * 40,),)
 
+@pytest.fixture
+def source_root(tmp_path: Path) -> Path:
+    """Seeded "backup" run root under tmp_path."""
+    root = tmp_path / "backup"
+    root.mkdir()
+    _seed_run(root)
+    return root
+
+@pytest.fixture
+def target(tmp_path: Path) -> Path:
+    """Seeded "target" run root under tmp_path."""
+    root = tmp_path / "target"
+    root.mkdir()
+    _seed_run(root)
+    return root
+
 def read_label_rows(root: Path) -> list[dict[str, Any]]:
     """Read all observation columns through a read-only SQLite connection."""
     conn = sqlite3.connect(f"file:{root / 'index.db'}?mode=ro", uri=True)
@@ -410,18 +426,12 @@ def _seed_generation(root: Path, *, observed_at: str, evidence_sha: str, labels:
         source="auto", observed_at=observed_at,
     )
 
-def test_bitemporal_history_preserved(tmp_path: Path) -> None:
-    source_root = tmp_path / "backup"
-    source_root.mkdir()
-    _seed_run(source_root)
+def test_bitemporal_history_preserved(tmp_path: Path, source_root: Path, target: Path) -> None:
     for at, sha, labels in ((_OBSERVED_A, "e" * 64, ["accepted"]), (_OBSERVED_B, "f" * 64, ["rejected"]),
         ("2026-05-03T00:00:00+00:00", "0" * 64, ["accepted"]),
     ):
         _seed_generation(source_root, observed_at=at, evidence_sha=sha, labels=labels)
     imported = read_label_rows(source_root)
-    target = tmp_path / "target"
-    target.mkdir()
-    _seed_run(target)
     merged = merge_imported_observations(target, [_row_with_digest(r) for r in imported])
 
     assert merged["appended"] == 3
@@ -431,20 +441,14 @@ def test_bitemporal_history_preserved(tmp_path: Path) -> None:
     assert hist[0]["labels"] == json.dumps(["accepted"])  # verbatim
     assert hist[1]["labels"] == json.dumps(["rejected"])
 
-def test_newer_existing_observation_never_displaced(tmp_path: Path) -> None:
+def test_newer_existing_observation_never_displaced(tmp_path: Path, source_root: Path, target: Path) -> None:
     # The target already holds a newer auto observation; importing an older
     # auto generation appends it but the precedence projection (recency within
     # source class) keeps the newer row as the winner in the denormalized
     # runs cache — import must never bypass the projection (M3).
-    target = tmp_path / "target"
-    target.mkdir()
-    _seed_run(target)
     newer_at = "2026-06-01T00:00:00+00:00"
     _seed_generation(target, observed_at=newer_at, evidence_sha="f" * 64, labels=["accepted"])
 
-    source_root = tmp_path / "backup"
-    source_root.mkdir()
-    _seed_run(source_root)
     _seed_generation(source_root, observed_at=_OBSERVED_A, evidence_sha="e" * 64, labels=["rejected"])
     imported = [_row_with_digest(r) for r in read_label_rows(source_root)]
     merged = merge_imported_observations(target, imported)
@@ -460,15 +464,9 @@ def test_newer_existing_observation_never_displaced(tmp_path: Path) -> None:
     assert run["labeled_at"] == newer_at
     assert run["outcome_labels"] == json.dumps(["accepted"])
 
-def test_idempotent_reimport_dedupes_auto_rows(tmp_path: Path) -> None:
-    source_root = tmp_path / "backup"
-    source_root.mkdir()
-    _seed_run(source_root)
+def test_idempotent_reimport_dedupes_auto_rows(tmp_path: Path, source_root: Path, target: Path) -> None:
     _seed_generation(source_root, observed_at=_OBSERVED_A, evidence_sha="e" * 64, labels=["accepted"])
     imported = [_row_with_digest(r) for r in read_label_rows(source_root)]
-    target = tmp_path / "target"
-    target.mkdir()
-    _seed_run(target)
     merge_imported_observations(target, imported)
     before = label_observation_history(target, SID)
     merged_again = merge_imported_observations(target, imported)
@@ -476,13 +474,10 @@ def test_idempotent_reimport_dedupes_auto_rows(tmp_path: Path) -> None:
     assert merged_again["deduped"] == 1
     assert label_observation_history(target, SID) == before
 
-def test_drift_fails_closed_before_any_write(tmp_path: Path) -> None:
+def test_drift_fails_closed_before_any_write(tmp_path: Path, target: Path) -> None:
     # A row whose immutable payload changed between inventory and merge is
     # rejected with a ValueError naming the row; nothing is written (M9
     # fail-closed, mirroring the canonical-harvest drift gate).
-    target = tmp_path / "target"
-    target.mkdir()
-    _seed_run(target)
     row = _auto_observation_row()
     tampered = _row_with_digest(row)
     tampered["labels"] = ["smuggled"]
@@ -490,15 +485,9 @@ def test_drift_fails_closed_before_any_write(tmp_path: Path) -> None:
         merge_imported_observations(target, [tampered])
     assert label_observation_history(target, SID) == []
 
-def test_dry_run_plans_without_writing(tmp_path: Path) -> None:
-    source_root = tmp_path / "backup"
-    source_root.mkdir()
-    _seed_run(source_root)
+def test_dry_run_plans_without_writing(tmp_path: Path, source_root: Path, target: Path) -> None:
     _seed_generation(source_root, observed_at=_OBSERVED_A, evidence_sha="e" * 64, labels=["accepted"])
     imported = [_row_with_digest(r) for r in read_label_rows(source_root)]
-    target = tmp_path / "target"
-    target.mkdir()
-    _seed_run(target)
     merged = merge_imported_observations(target, imported, dry_run=True)
     assert merged["dry_run"] is True
     assert len(merged["planned"]) == 1
@@ -507,13 +496,10 @@ def test_dry_run_plans_without_writing(tmp_path: Path) -> None:
     assert merged["planned"][0]["source"] == "auto"
     assert label_observation_history(target, SID) == []
 
-def test_human_source_appended_verbatim(tmp_path: Path) -> None:
+def test_human_source_appended_verbatim(tmp_path: Path, target: Path) -> None:
     # Human evidence keeps its source class and explicit observed_at: the
     # writer never dedupes human rows (S0-1) and the bitemporal stamp is
     # preserved exactly.
-    target = tmp_path / "target"
-    target.mkdir()
-    _seed_run(target)
     row = {"session_id": SID, "source": "human", "observed_at": _OBSERVED_B, "labels": ["rejected"], "pr_state": None,
         "labeler_version": HUMAN_LABELER_VERSION, "evidence_sha": None, "rubric_json": None, "valid_at": _OBSERVED_B,
         "reward_version": None, "reward_json": None, "composite_reward": None, "reviewer_logins": None,
@@ -531,29 +517,20 @@ def test_human_source_appended_verbatim(tmp_path: Path) -> None:
 @pytest.mark.parametrize(("field", "bad_value"),
     [("observed_at", "not-an-iso-stamp"), ("observed_at", "2026-05-01T00:00:00"), ("valid_at", "not-a-valid-time"),],
 )
-def test_bad_timestamp_fails_closed_before_any_write(tmp_path: Path, field: str, bad_value: str) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    _seed_run(target)
+def test_bad_timestamp_fails_closed_before_any_write(tmp_path: Path, field: str, bad_value: str, target: Path) -> None:
     row = _auto_observation_row()
     row[field] = bad_value
     with pytest.raises(ValueError, match=SID):
         merge_imported_observations(target, [_row_with_digest(row)])
     assert label_observation_history(target, SID) == []
 
-def test_idempotent_reimport_dedupes_human_rows(tmp_path: Path) -> None:
+def test_idempotent_reimport_dedupes_human_rows(tmp_path: Path, source_root: Path, target: Path) -> None:
     """Identical human imports must use the primary-key no-op, without shifting observation time."""
-    source_root = tmp_path / "backup"
-    source_root.mkdir()
-    _seed_run(source_root)
     append_label_observation(
         source_root, SID, labels=["rejected"], pr_state=None, labeler_version=HUMAN_LABELER_VERSION, evidence_sha=None,
         valid_at=_OBSERVED_B, source="human", observed_at=_OBSERVED_B,
     )
     imported = [_row_with_digest(r) for r in read_label_rows(source_root)]
-    target = tmp_path / "target"
-    target.mkdir()
-    _seed_run(target)
     merge_imported_observations(target, imported)
     before = label_observation_history(target, SID)
     merged_again = merge_imported_observations(target, imported)
@@ -561,31 +538,22 @@ def test_idempotent_reimport_dedupes_human_rows(tmp_path: Path) -> None:
     assert merged_again["deduped"] == 1
     assert label_observation_history(target, SID) == before
 
-def test_policy_axis_generations_survive_merge(tmp_path: Path) -> None:
+def test_policy_axis_generations_survive_merge(tmp_path: Path, source_root: Path, target: Path) -> None:
     """Both importer and writer dedupe must preserve generations differing only in policy version."""
-    source_root = tmp_path / "backup"
-    source_root.mkdir()
-    _seed_run(source_root)
     for at, policy in ((_OBSERVED_A, "980-policy-r1"), (_OBSERVED_B, "9999-policy-r2")):
         append_label_observation(source_root, SID, labels=["accepted"], pr_state=None, labeler_version="980-rubric-r2",
             evidence_sha="c" * 64, valid_at="2026-04-30T00:00:00+00:00", source="auto", observed_at=at,
             labeler_policy_version=policy,
         )
     imported = [_row_with_digest(r) for r in read_label_rows(source_root)]
-    target = tmp_path / "target"
-    target.mkdir()
-    _seed_run(target)
     merged = merge_imported_observations(target, imported)
     assert merged["appended"] == 2
     hist = label_observation_history(target, SID)
     assert len(hist) == 2
     assert {r["labeler_policy_version"] for r in hist} == {"980-policy-r1", "9999-policy-r2"}
 
-def test_legacy_sentinel_merge_stores_null_policy_and_legacy(tmp_path: Path) -> None:
+def test_legacy_sentinel_merge_stores_null_policy_and_legacy(tmp_path: Path, target: Path) -> None:
     """Store excluded legacy versions as NULL policy so the corpus gold gate also rejects them."""
-    target = tmp_path / "target"
-    target.mkdir()
-    _seed_run(target)
     row = _auto_observation_row(labeler_policy_version=STALE_LEGACY)
     merged = merge_imported_observations(target, [_row_with_digest(row)])
     assert merged["appended"] == 1
