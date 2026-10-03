@@ -35,7 +35,13 @@ from daydream.deep.artifacts import (
     deep_dir,
 )
 from daydream.deep.detection import StackAssignment
-from daydream.deep.prompts import build_per_stack_prompt
+from daydream.deep.prompts import (
+    build_arbiter_prompt,
+    build_generic_fallback_prompt,
+    build_merge_prompt,
+    build_per_stack_prompt,
+    build_structural_prompt,
+)
 from daydream.deep.verify_selection import SelectionConfig
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.git_ops import GitError, IndexSnapshot, WorktreeRollbackSnapshot
@@ -1978,9 +1984,92 @@ def _per_stack_prompt(**overrides: Any) -> str:
     args.update(overrides)
     return build_per_stack_prompt(**args)
 
-def test_review_prompt_includes_dependency_impact(tmp_path: Path) -> None:
-    prompt = _per_stack_prompt(exploration_dir=tmp_path)
-    assert "Dependency Impact" in prompt
+_GEN_STRATEGY = _rp.build_default_profile().strategies["discovery.generic_fallback"].content
+
+_FOOTER_BUILDERS = ["per-stack", "structural", "generic-fallback", "arbiter", "merge"]
+
+# Every phrase that orders a *separate output section* rather than prose inside the
+# required JSON object. Markers are scoped to output emission ("before the JSON",
+# "that summarizes") because the same builders legitimately say "read the full
+# enclosing symbol or configuration section before judging it".
+_SEPARATE_OUTPUT_SECTION_MARKERS = (
+    "Begin your review output with",
+    "Start your review output with",
+    "section that summarizes",
+    "before the JSON",
+)
+
+
+def _build_full_review_prompt(builder_name: str) -> str:
+    """Compose the full prompt of one review builder with minimal valid arguments."""
+    profile = _rp.build_default_profile()
+    strategy = profile.strategies[
+        {"per-stack": "discovery.per_stack", "structural": "discovery.structural",
+         "generic-fallback": "discovery.generic_fallback", "arbiter": "arbitration",
+         "merge": "merge"}[builder_name]
+    ].content
+    if builder_name == "per-stack":
+        return _per_stack_prompt(strategy=strategy)
+    if builder_name == "structural":
+        return build_structural_prompt(
+            strategy=strategy, files=["a.py"], diff_path=Path("/tmp/diff.patch"),
+            intent_path=Path("/tmp/intent.md"), alternatives_path=Path("/tmp/alternatives.json"),
+            output_path=Path("/tmp/review.md"), cwd=Path("/tmp"),
+        )
+    if builder_name == "generic-fallback":
+        return build_generic_fallback_prompt(
+            strategy=strategy, files=["a.py"], diff_path=Path("/tmp/diff.patch"),
+            intent_path=Path("/tmp/intent.md"), alternatives_path=Path("/tmp/alternatives.json"),
+            output_path=Path("/tmp/review.md"), cwd=Path("/tmp"),
+        )
+    if builder_name == "arbiter":
+        return build_arbiter_prompt(
+            strategy=strategy, arbiter_input_path=Path("/tmp/arb.json"),
+            diff_path=Path("/tmp/diff.patch"), intent_path=Path("/tmp/intent.md"),
+            alternatives_path=Path("/tmp/alternatives.json"), cwd=Path("/tmp"),
+        )
+    return build_merge_prompt(
+        strategy=strategy, per_stack_records_paths=[Path("/tmp/r.jsonl")],
+        intent_path=Path("/tmp/intent.md"), alternatives_path=Path("/tmp/alternatives.json"),
+        dedup_candidates_path=Path("/tmp/dedup.json"),
+    )
+
+
+@pytest.mark.parametrize("builder", [
+    lambda **kw: _per_stack_prompt(**kw),
+    lambda **kw: build_generic_fallback_prompt(
+        strategy=_GEN_STRATEGY, files=["a.py"], diff_path=Path("/tmp/diff.patch"),
+        intent_path=Path("/tmp/intent.md"), alternatives_path=Path("/tmp/alternatives.json"),
+        output_path=Path("/tmp/review.md"), cwd=Path("/tmp"),
+        exploration_dir=Path("/tmp"), **kw),
+], ids=["per-stack", "generic-fallback"])
+def test_dependency_impact_is_an_investigation_method_not_output_section(builder: Callable[..., str]) -> None:
+    prompt = builder()
+    assert "Dependency Impact" in prompt                          # capability label kept
+    assert "call chain" in prompt or "call-chain" in prompt        # trace requirement kept
+    assert "file:symbol" in prompt                                # inline reference kept
+    assert "investigation method, not extra output" in prompt     # the CONFIG_FLOW_TRACE pattern
+    assert "Begin your review output with" not in prompt          # no separate-section order
+    assert "Start your" not in prompt
+
+@pytest.mark.parametrize("builder_name", _FOOTER_BUILDERS)
+def test_no_review_builder_asks_for_a_separate_output_section(builder_name: str) -> None:
+    """Sweep the whole review builder class, not just per-stack (#1445).
+
+    Every builder that composes review output — the three that append the shared
+    host-managed artifact footer plus the arbiter and merge builders — is composed
+    here, so no builder can reintroduce an instruction to emit a separate section
+    beside the required JSON object.
+    """
+    prompt = _build_full_review_prompt(builder_name)
+    for forbidden in _SEPARATE_OUTPUT_SECTION_MARKERS:
+        assert forbidden not in prompt, f"{builder_name} asks for a separate output section: {forbidden!r}"
+    # The dependency-impact guidance, where present, is always an investigation
+    # method — never a demand for prose beyond the required JSON object.
+    if "Dependency Impact" in prompt:
+        assert "investigation method, not extra output" in prompt
+        assert "Return only the JSON object required by the output schema" in prompt
+
 
 def test_review_prompt_distinguishes_convention_cases(tmp_path: Path) -> None:
     prompt = _per_stack_prompt(exploration_dir=tmp_path)

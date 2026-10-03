@@ -7,10 +7,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from jsonschema import Draft202012Validator
-
 from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent, TurnEndEvent
-from daydream.json_utils import extract_json
+from daydream.json_utils import extract_json_by_schema, validates_schema
 from daydream.prompt_budget import truncate_utf8_to_budget
 
 
@@ -64,7 +62,7 @@ class ReviewEvidence:
         self.clipped = False
 
     def valid(self, value: Any) -> bool:
-        return self.schema is not None and not any(Draft202012Validator(self.schema).iter_errors(value))
+        return self.schema is not None and validates_schema(value, self.schema)
 
     def observe(self, event: AgentEvent) -> None:
         if isinstance(event, ToolStartEvent):
@@ -100,9 +98,10 @@ class ReviewEvidence:
         elif isinstance(event, TextEvent):
             self.text = truncate_utf8_to_budget(self.text + event.text, 48000, "[text truncated]")
         elif isinstance(event, TurnEndEvent):
-            parsed = extract_json(self.text)
-            if self.valid(parsed):
-                self.checkpoint = parsed
+            if self.schema is not None:
+                parsed = extract_json_by_schema(self.text, schema=self.schema, accept=validates_schema).value
+                if self.valid(parsed):
+                    self.checkpoint = parsed
             self.text = ""
         elif isinstance(event, ResultEvent) and self.valid(event.structured_output):
             self.checkpoint = event.structured_output

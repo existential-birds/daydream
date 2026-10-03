@@ -64,7 +64,7 @@ from daydream.backends._transport import (
     teardown,
 )
 from daydream.config import DEFAULT_PI_MODEL
-from daydream.json_utils import extract_json
+from daydream.json_utils import extract_json, extract_json_by_schema, validates_schema
 from daydream.retry_policy import classify_failure, parse_message_retry_hint
 
 # Mirror Codex's generous stdout cap so large JSONL events (big file reads,
@@ -407,6 +407,10 @@ class PiBackend:
     supports_finalization = True
     supports_tools_disabled = True
     supports_review_instructions = True
+    # Honors a caller's validate_structured_output=False by keeping largest-span
+    # extraction instead of applying schema-aware selection, matching the host
+    # fallback in agent.py.
+    supports_structured_output_opt_out = True
     concise_fix_prompts = True  # DeepSeek produces verbose reasoning in fix prompts
 
     def __init__(
@@ -465,6 +469,7 @@ class PiBackend:
         finalization: bool = False,
         review_instructions: str | None = None,
         tools_disabled: bool = False,
+        validate_structured_output: bool = True,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Yield Pi events; a turn error raises PiError and nonempty agents are unsupported.
 
@@ -964,7 +969,19 @@ class PiBackend:
             returncode = await reap(transport)
 
             if output_schema and last_assistant_text:
-                structured_result = extract_json(last_assistant_text)
+                if validate_structured_output:
+                    # Schema-aware selection: the last candidate the per-stack schema
+                    # admits wins, so an incidental larger span cannot displace a valid
+                    # (possibly empty) result.
+                    structured_result = extract_json_by_schema(
+                        last_assistant_text, schema=output_schema, accept=validates_schema
+                    ).value
+                else:
+                    # A caller that opts out of validation owns fail-closed checking
+                    # itself, so schema-aware selection would only narrow the value it
+                    # receives ("last admitted" degenerates to the innermost span).
+                    # Keep largest-span extraction, as the host fallback does.
+                    structured_result = extract_json(last_assistant_text)
             for terminal in terminal_events():
                 yield terminal
 

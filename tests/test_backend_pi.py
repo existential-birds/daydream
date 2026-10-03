@@ -54,6 +54,7 @@ from daydream.backends.pi import (
     _schema_instruction,
 )
 from daydream.config import DEFAULT_PI_MODEL
+from daydream.phases.schemas import PER_STACK_RECORD_SCHEMA
 from daydream.retry_policy import parse_message_retry_hint
 from daydream.runner import run
 from daydream.trajectory import DaydreamPhase
@@ -250,6 +251,16 @@ async def test_structured_output() -> None:
     request = next(e for e in events if isinstance(e, RequestEvent))
     assert "JSON schema" in request.prompt
     assert json.dumps(schema) in request.prompt
+
+async def test_structured_output_selects_schema_valid_empty_result() -> None:
+    """A schema-valid empty result wins over an incidental larger array (issue #1445)."""
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process_from_fixture("issue1445_empty_results.jsonl")
+    events, _ = await replay_process(backend, mock_proc, Path("/tmp"), "Parse",
+                                     output_schema=PER_STACK_RECORD_SCHEMA)
+    result_events = [e for e in events if isinstance(e, ResultEvent)]
+    assert len(result_events) == 1
+    assert result_events[0].structured_output == {"issues": []}
 
 async def test_multi_turn_emits_turn_end_per_turn_and_aggregates_cost() -> None:
     events = await _collect_events(PiBackend(model="glm-5.2"), "Two turns", fixture="multi_turn.jsonl")

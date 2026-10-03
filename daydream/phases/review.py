@@ -9,7 +9,6 @@ import anyio
 from daydream import agent, config as phase_config, git_ops, review_profile as _rp, ui
 from daydream.agent import (
     StructuredOutputFailure,
-    _validates_schema,
     resolve_gate,
 )
 from daydream.artifact_visibility import (
@@ -44,6 +43,7 @@ from daydream.deep.review_reuse import ReviewReuseUnit
 from daydream.diagnostics import exception_text
 from daydream.extensions import Registry, get_registry
 from daydream.hunk_index import load_hunk_index
+from daydream.json_utils import validates_schema
 from daydream.phases.inputs import (
     _budgeted_exploration_inputs,
     _inlineable_diff,
@@ -323,7 +323,7 @@ async def phase_alternative_review(
     if budget_reason:
         raise ReviewBudgetExceeded("Alternatives", budget_reason, result)
 
-    if not isinstance(result, dict) or not _validates_schema(result, ALTERNATIVE_REVIEW_SCHEMA):
+    if not isinstance(result, dict) or not validates_schema(result, ALTERNATIVE_REVIEW_SCHEMA):
         raise ReviewOutputError(result)
     issues = cast(list[dict[str, Any]], result["issues"])
 
@@ -361,7 +361,7 @@ def valid_record_artifact(
         if scope != scope_id or not ordinal.isascii() or not ordinal.isdigit() or ordinal.startswith('0'):
             return False
     cleaned = [{key: field for key, field in issue.items() if key != "uid"} for issue in issues]
-    return _validates_schema({"issues": cleaned}, PER_STACK_RECORD_SCHEMA)
+    return validates_schema({"issues": cleaned}, PER_STACK_RECORD_SCHEMA)
 
 
 class ReviewOutputError(RuntimeError):
@@ -373,7 +373,13 @@ class ReviewOutputError(RuntimeError):
             else "missing_output" if output is None or isinstance(output, str) and not output.strip()
             else "malformed_output"
         )
-        super().__init__(f"{self.reason.value}: reviewer response did not satisfy its schema")
+        # Optional content-free diagnostic fragment from the host's schema-aware
+        # selection (candidate type + "<validator> at <json_path>"). It composes
+        # into the message but never into the typed reason vocabulary, and it still
+        # flows through the caller's redaction/bounding before being surfaced.
+        detail = getattr(output, "detail", None) if isinstance(output, StructuredOutputFailure) else None
+        message = f"{self.reason.value}: reviewer response did not satisfy its schema"
+        super().__init__(f"{message} ({detail})" if detail else message)
 
 
 # Deep-mode: per-stack fan-out
@@ -588,13 +594,13 @@ async def phase_per_stack_reviews(
                         diagnostic=f"{type(e).__name__}: {exception_text(e) or '(unavailable)'}")
                     return
                 if budget_reason:
-                    partial_valid = _validates_schema(structured, PER_STACK_RECORD_SCHEMA)
+                    partial_valid = validates_schema(structured, PER_STACK_RECORD_SCHEMA)
                     status = ("uncovered" if budget_reason == "pipeline_budget_exceeded" and not partial_valid
                               else "incomplete")
                     coverage.record_scope(stack_name, status, reasons=(reason_for_budget(budget_reason),),
                                           partial_evidence=partial_valid,
                                           diagnostic=f"budget exhausted: {budget_reason}")
-                if not _validates_schema(structured, PER_STACK_RECORD_SCHEMA):
+                if not validates_schema(structured, PER_STACK_RECORD_SCHEMA):
                     if not budget_reason:
                         error = ReviewOutputError(structured)
                         coverage.record_scope(stack_name, "failed", reasons=(error.reason,), diagnostic=str(error))

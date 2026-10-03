@@ -1,7 +1,7 @@
 """Prose brackets must not hijack arbiter JSON extraction.
 
 A Pi response can mention metadata["sender"]["login"] before its fenced
-findings object. Extraction must choose the largest balanced JSON span.
+findings object. Extraction must select the candidate the requested schema admits.
 Tests drive phase_arbiter_review through run_agent with only the backend
 mocked, applying the real Pi text-to-structured-output contract.
 """
@@ -13,11 +13,14 @@ from typing import Any, cast
 
 import pytest
 
+from daydream.agent import StructuredOutputFailure, run_agent
 from daydream.backends import Backend, ResultEvent, TextEvent
-from daydream.json_utils import extract_json
+from daydream.json_utils import extract_json_by_schema, validates_schema
 from daydream.phases import phase_arbiter_review
 from daydream.phases.review import ReviewOutputError
+from daydream.phases.schemas import PER_STACK_RECORD_SCHEMA
 from daydream.run_context import InteractionPolicy, RunContext
+from daydream.trajectory import DaydreamPhase
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 
@@ -64,8 +67,47 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 
 def _pi_like_backend(message: str) -> ScriptedBackend:
-    """Mirrors the pi backend: structured_output = extract_json(final text), gated on the schema."""
-    return _split_text_backend(message, extract_json(message))
+    """Mirrors the pi backend: schema-aware selection over the final text, gated on the schema."""
+
+    def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
+        structured = extract_json_by_schema(
+            message, schema=output_schema, accept=validates_schema
+        ).value if output_schema else None
+        return [TextEvent(text=message),
+            ResultEvent(structured_output=structured, continuation=None),
+        ]
+
+    return ScriptedBackend(responder=respond, model="glm-5.2")
+
+
+def _prose_only_backend(message: str) -> ScriptedBackend:
+    """No structured output at all, so run_agent's text fallback is the only path."""
+
+    def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
+        return [TextEvent(text=message),
+            ResultEvent(structured_output=None, continuation=None),
+        ]
+
+    return ScriptedBackend(responder=respond, model="glm-5.2")
+
+
+# The issue-1445 message shape: incidental prose JSON (the dependency-impact list
+# the old prompt asked for) followed by the real answer, an empty issues array.
+PROSE_WITH_INCIDENTAL_JSON = (
+    'The dependency impact: ["module", "moduleVersion", "surface"] were inspected. '
+    'No defects established. {"issues": []}'
+)
+
+
+async def test_host_fallback_returns_empty_result_under_strict_gate() -> None:
+    """A completed review that established no defect persists the empty result, not the prose list."""
+    result, _, _ = await run_agent(
+        cast(Backend, _prose_only_backend(PROSE_WITH_INCIDENTAL_JSON)), Path("/tmp"), "review",
+        phase=DaydreamPhase.DEEP, output_schema=PER_STACK_RECORD_SCHEMA,
+        require_full_schema=True, persist_session=False, tool_call_budget=4, wall_budget_s=60,
+    )
+    assert result == {"issues": []}
+
 
 async def test_arbiter_extracts_findings_from_prose_wrapped_message(
     tmp_path: Path, make_work: Callable[..., WorkContext],
@@ -148,6 +190,21 @@ async def test_arbiter_captures_structured_output_in_log_mode(tmp_path: Path, ma
     assert set(verdicts) == {1, 2}
     assert verdicts[1]["keep"] is True
     assert verdicts[2]["keep"] is False
+
+def test_rejection_diagnostic_names_type_and_content_free_reason() -> None:
+    failure = StructuredOutputFailure("prose", "malformed_output",
+                                      detail="candidate type list failed type at $")
+    error = ReviewOutputError(failure)
+    assert error.reason_code.value == "malformed_output"      # req 15: no new ReasonCode
+    assert "reviewer response did not satisfy its schema" in str(error)
+    assert "list" in str(error) and "type at $" in str(error)
+    assert '"module"' not in str(error) and "module" not in str(error)  # req 14: no content
+
+
+def test_rejection_diagnostic_without_detail_is_unchanged() -> None:
+    assert str(ReviewOutputError(StructuredOutputFailure("prose", "malformed_output"))) == \
+           "malformed_output: reviewer response did not satisfy its schema"
+
 
 async def test_pi_contract_fakes_gate_structured_output_on_the_requested_schema() -> None:
     """Both Pi fakes emit structured output only when output_schema was requested."""
