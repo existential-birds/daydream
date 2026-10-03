@@ -64,13 +64,24 @@ def _confidence_and_convention_instructions() -> str:
 
 
 def _dependency_impact_instructions() -> str:
-    """Prompt language for QUAL-01 cross-file dependency surfacing in review output."""
+    """Prompt language for QUAL-01 cross-file dependency surfacing during review.
+
+    This is an investigation method, not an output section: asking the model to
+    prepend a prose section produced incidental text outside the required JSON
+    object and was directly implicated in the empty-result extraction defect
+    (issue #1445). The heading is kept only as a stable capability label.
+    """
     return (
         "## Dependency Impact\n\n"
-        "Begin your review output with a 'Dependency Impact' section that summarizes the "
-        "call-chain analysis from the Exploration Context dependencies above before listing "
-        "any issues. When an individual issue's rationale cites a dependency, include the "
-        "file:symbol reference inline within that issue."
+        "Apply dependency-impact analysis to every changed symbol listed in the Exploration "
+        "Context dependencies above:\n"
+        "  1. Trace the call chain from each changed symbol through its dependents, so a "
+        "defect is judged by what it actually breaks downstream rather than by how its own "
+        "body reads.\n"
+        "  2. When an individual issue's rationale cites a dependency, include the "
+        "file:symbol reference inline within that issue.\n"
+        "  This is an investigation method, not extra output: report only substantiated "
+        "findings inside the required schema."
     )
 
 
