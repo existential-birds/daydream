@@ -5,6 +5,7 @@ Git-backed symbol fallback requires tracked content."""
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,9 @@ from daydream.deep.diagram_grounding import (
     ground_flowchart,
     ground_sequence,
 )
-from daydream.deep.diagram_types import CandidateRoot
+from daydream.deep.diagram_schema import coerce_flowchart_spec, coerce_sequence_spec
+from daydream.deep.diagram_types import CandidateRoot, FlowchartSpec, SequenceSpec
+from daydream.reviews.diagrams import validate_diagram_payload
 from daydream.tree_sitter_index import definitions_in_file
 from tests.harness.git_helpers import commit, git, init_repo
 
@@ -139,14 +142,14 @@ def symbols(repo: Path) -> RepoSymbols:
     return RepoSymbols(repo)
 
 
-def check_for(report: GroundingReport, element: str, ref: str) -> ElementCheck:
+def check_for(report: GroundingReport[Any], element: str, ref: str) -> ElementCheck:
     """Return the one check with this element type and ref."""
     matches = [c for c in report.elements if c.element == element and c.ref == ref]
     assert len(matches) == 1, f"{element}/{ref}: {matches}"
     return matches[0]
 
 
-def reasons(report: GroundingReport) -> dict[str, str | None]:
+def reasons(report: GroundingReport[Any]) -> dict[str, str | None]:
     """Return ``{"element:ref": reason}`` for every failing check."""
     return {f"{c.element}:{c.ref}": c.reason for c in report.ungrounded()}
 
@@ -154,7 +157,7 @@ def reasons(report: GroundingReport) -> dict[str, str | None]:
 # --- Spec builders -----------------------------------------------------------
 
 
-def base_sequence() -> dict[str, Any]:
+def base_sequence() -> SequenceSpec:
     """A fully groundable three-message sequence spec over the fixture repo."""
     return {"participants": [{"name": "Client", "kind": "external", "files": [], "service": None},
             {"name": "API", "kind": "internal", "files": ["pkg/api.py"], "service": None},
@@ -173,7 +176,7 @@ def base_sequence() -> dict[str, Any]:
     }
 
 
-def base_flowchart() -> dict[str, Any]:
+def base_flowchart() -> FlowchartSpec:
     """A fully groundable eight-node flowchart over ``pkg/flow.py``."""
     return {"root": {"file": "pkg/flow.py", "name": "resolve_identity", "line": 1},
         "nodes": [{"id": "N1", "kind": "start", "label": "resolve identity",
@@ -201,14 +204,14 @@ def base_flowchart() -> dict[str, Any]:
     }
 
 
-def run_sequence(repo: Path, symbols: RepoSymbols, spec: dict[str, Any]) -> GroundingReport:
+def run_sequence(repo: Path, symbols: RepoSymbols, spec: SequenceSpec) -> GroundingReport[SequenceSpec]:
     """Ground ``spec`` as a sequence diagram against the fixture repo."""
     return ground_sequence(spec, repo_root=repo, hunk_ranges=HUNKS, symbols=symbols,)
 
 
 def run_flowchart(
-    repo: Path, symbols: RepoSymbols, spec: dict[str, Any], *, candidate_roots: list[CandidateRoot] | None = None,
-) -> GroundingReport:
+    repo: Path, symbols: RepoSymbols, spec: FlowchartSpec, *, candidate_roots: list[CandidateRoot] | None = None,
+) -> GroundingReport[FlowchartSpec]:
     """Ground ``spec`` as a flowchart against the fixture repo."""
     return ground_flowchart(spec, repo_root=repo, hunk_ranges=HUNKS,
         candidate_roots=[FLOW_ROOT, BIG_ROOT] if candidate_roots is None else candidate_roots, symbols=symbols,
@@ -274,7 +277,7 @@ def test_spec_final_key_sets_match_the_schemas(repo: Path, symbols: RepoSymbols)
     # Extra keys a model might volunteer must not survive into spec_final.
     spec["participants"][1]["notes"] = "ignored"
     spec["messages"][0]["confidence"] = "high"
-    sequence = run_sequence(repo, symbols, spec).spec_final
+    sequence = run_sequence(repo, symbols, coerce_sequence_spec(spec)).spec_final
 
     assert set(sequence) == {"participants", "messages", "blocks"}
     for participant in sequence["participants"]:
@@ -293,6 +296,7 @@ def test_spec_final_key_sets_match_the_schemas(repo: Path, symbols: RepoSymbols)
 
     flowchart = run_flowchart(repo, symbols, base_flowchart()).spec_final
     assert set(flowchart) == {"root", "nodes", "edges"}
+    assert flowchart["root"] is not None
     assert set(flowchart["root"]) == {"file", "name", "line"}
     for node in flowchart["nodes"]:
         assert set(node) == {"id", "kind", "label", "evidence"}
@@ -445,25 +449,25 @@ def test_sequence_external_misused_by_sourcing_a_later_message(repo: Path, symbo
     assert check_for(report, "message", "0").reason == "EVIDENCE_NOT_IN_SOURCE_PARTICIPANT"
 
 def test_sequence_malformed_elements(repo: Path, symbols: RepoSymbols) -> None:
-    spec = base_sequence()
+    spec: dict[str, Any] = dict(base_sequence())
     spec["participants"].append({"name": "Ghost", "kind": "spectral", "files": [], "service": None})
     spec["participants"].append({"name": "API", "kind": "internal", "files": ["pkg/api.py"], "service": None})
     spec["messages"].append("not a message")
     spec["messages"].append({**base_sequence()["messages"][1], "kind": "telepathy"})
     spec["blocks"].append({"kind": "whenever", "branches": [{"condition": "x"}]})
-    report = run_sequence(repo, symbols, spec)
-
-    assert check_for(report, "participant", "Ghost").reason == "MALFORMED_ELEMENT"
-    # The duplicate name is rejected, not silently allowed to shadow the first.
-    assert [c.reason for c in report.elements if c.element == "participant"].count("MALFORMED_ELEMENT") == 2
-    assert check_for(report, "message", "3").reason == "MALFORMED_ELEMENT"
-    assert check_for(report, "message", "4").reason == "MALFORMED_ELEMENT"
-    assert check_for(report, "block", "b0").reason == "MALFORMED_ELEMENT"
-    assert check_for(report, "branch", "b0.0").reason == "MALFORMED_ELEMENT"
+    admitted = coerce_sequence_spec(spec)
+    assert admitted == base_sequence()
+    # The author boundary salvages valid content without allowing duplicate
+    # participants to shadow the first declaration.
+    report = run_sequence(repo, symbols, admitted)
+    assert all(check.grounded for check in report.elements)
+    assert report.spec_final == base_sequence()
+    assert report.omit_reasons == []
 
 def test_sequence_token_strength_fallback_for_a_language_without_a_grammar(repo: Path, symbols: RepoSymbols) -> None:
     """Ruby has no tree-sitter grammar here, so a callee is proven by token only."""
-    spec = {"participants": [{"name": "Caller", "kind": "internal", "files": ["pkg/caller.rb"], "service": None},
+    spec: SequenceSpec = {
+        "participants": [{"name": "Caller", "kind": "internal", "files": ["pkg/caller.rb"], "service": None},
             {"name": "Legacy", "kind": "internal", "files": ["pkg/legacy.rb"], "service": None},
         ], "messages": [{"from": "Caller", "to": "Legacy", "label": "resolve legacy", "kind": "call", "changed": True,
                 "evidence": {"file": "pkg/caller.rb", "line": 2, "symbol": "resolve_legacy"},
@@ -578,7 +582,8 @@ def test_sequence_floor_too_few_messages(repo: Path, symbols: RepoSymbols) -> No
     assert len(report.spec_final["messages"]) == 2
 
 def test_sequence_floor_too_few_participants(repo: Path, symbols: RepoSymbols) -> None:
-    spec = {"participants": [{"name": "API", "kind": "internal", "files": ["pkg/api.py"], "service": None}],
+    spec: SequenceSpec = {
+        "participants": [{"name": "API", "kind": "internal", "files": ["pkg/api.py"], "service": None}],
         "messages": [{"from": "API", "to": "API", "label": f"self step {index}", "kind": "self", "changed": True,
                 "evidence": {"file": "pkg/api.py", "line": 4, "symbol": "handle"},
             }
@@ -598,7 +603,7 @@ def test_sequence_floor_no_changed_interaction(repo: Path, symbols: RepoSymbols)
 # --- Sequence caps -----------------------------------------------------------
 
 
-def _wide_sequence(count: int) -> dict[str, Any]:
+def _wide_sequence(count: int) -> SequenceSpec:
     """A groundable spec with ``count`` participants chained by one call each."""
     return {"participants": [
             {"name": f"P{index:02d}", "kind": "internal", "files": [f"pkg/p{index:02d}.py"], "service": None}
@@ -725,6 +730,7 @@ def test_flowchart_node_symbol_snap_stays_inside_the_root(repo: Path, symbols: R
 
 def test_flowchart_node_outside_root(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
+    assert spec["root"] is not None
     spec["root"]["end_line"] = 999  # A model-supplied range cannot extend the candidate.
     # Line 13 is inside verify_jwt, not inside the root function.
     spec["nodes"][6]["evidence"]["line"] = 13
@@ -737,7 +743,7 @@ def test_flowchart_node_outside_root(repo: Path, symbols: RepoSymbols) -> None:
 
 
 def test_flowchart_executable_nodes_reject_non_executable_lines(repo: Path, symbols: RepoSymbols) -> None:
-    spec = {"root": {"file": "pkg/non_executable.py", "name": "classify", "line": 1},
+    spec: FlowchartSpec = {"root": {"file": "pkg/non_executable.py", "name": "classify", "line": 1},
         "nodes": [{"id": "N1", "kind": "start", "label": "describe the flow",
                 "evidence": {"file": "pkg/non_executable.py", "line": 2, "symbol": None},
             }, {"id": "N2", "kind": "process", "label": "perform the work",
@@ -767,18 +773,27 @@ def test_flowchart_executable_nodes_reject_non_executable_lines(repo: Path, symb
 
 
 def test_flowchart_malformed_nodes_and_edges(repo: Path, symbols: RepoSymbols) -> None:
-    spec = base_flowchart()
+    spec: dict[str, Any] = dict(base_flowchart())
     spec["nodes"].append({**spec["nodes"][6], "kind": "hologram", "id": "N9"})
     spec["nodes"].append(spec["nodes"][0])  # duplicate id
     spec["nodes"].append("not a node")
     spec["edges"].append({"from": "N7", "to": "N8", "label": "duplicate ref"})
     spec["edges"].append({"from": "", "to": "N1", "label": None})
-    report = run_flowchart(repo, symbols, spec)
-
-    assert check_for(report, "node", "N9").reason == "MALFORMED_ELEMENT"
-    malformed = [c for c in report.elements if c.reason == "MALFORMED_ELEMENT"]
-    assert {c.element for c in malformed} == {"node", "edge"}
-    assert len(malformed) == 5
+    admitted = coerce_flowchart_spec(spec)
+    assert admitted["nodes"] == base_flowchart()["nodes"]
+    assert admitted["edges"] == [
+        *base_flowchart()["edges"],
+        {"from": "N7", "to": "N8", "label": "duplicate ref"},
+    ]
+    report = run_flowchart(repo, symbols, admitted)
+    # Repeated edge references remain a semantic grounding rejection, unlike
+    # malformed shapes discarded by the author boundary.
+    malformed = [check for check in report.elements if check.reason == "MALFORMED_ELEMENT"]
+    assert len(malformed) == 1
+    assert malformed[0].element == "edge"
+    assert malformed[0].ref == "N7->N8"
+    assert report.spec_final == base_flowchart()
+    assert report.omit_reasons == []
 
 def test_flowchart_multiple_start(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
@@ -896,7 +911,7 @@ def test_flowchart_unlabeled_decision_edges_cascade_into_an_omission(repo: Path,
 # --- Flowchart caps ----------------------------------------------------------
 
 
-def _tall_flowchart(*, end_last: bool) -> dict[str, Any]:
+def _tall_flowchart(*, end_last: bool) -> FlowchartSpec:
     """Exceed the node cap; end_last makes trimming remove the sole terminal node."""
     process_lines = list(range(4, _BIG_LAST_STATEMENT + 1))[: DIAGRAM_MAX_NODES + 1]
     end_node = {"id": "NEND", "kind": "end", "label": "return",
@@ -959,7 +974,7 @@ def test_flowchart_node_cap_never_trims_the_start_node(repo: Path, symbols: Repo
 # --- Vocabulary contracts ----------------------------------------------------
 
 def test_every_emitted_reason_code_is_declared(repo: Path, symbols: RepoSymbols) -> None:
-    specs: list[GroundingReport] = []
+    specs: list[GroundingReport[Any]] = []
     broken_sequence = base_sequence()
     broken_sequence["participants"][0]["files"] = ["pkg/api.py"]
     broken_sequence["participants"][2]["files"] = ["pkg/gone.py"]
@@ -1022,3 +1037,105 @@ def test_source_grounding_retains_bad_install_keyword_fallback(
     assert evidence.branch_line(sources, "pkg/flow.py", 2)
     assert evidence.terminal_line(sources, "pkg/flow.py", 3)
     assert not evidence.executable_line(sources, "pkg/flow.py", 1)
+
+
+def test_author_path_admission_and_grounding_preserve_captured_input(repo: Path, symbols: RepoSymbols) -> None:
+    authored = base_sequence()
+    authored["participants"][1]["files"] = ["./pkg/api.py", "pkg/api.py"]
+    authored["messages"][1]["evidence"]["file"] = "./pkg/api.py"
+    authored["messages"][1]["evidence"]["line"] = 4
+    received = copy.deepcopy(authored)
+
+    admitted = coerce_sequence_spec(authored)
+    assert admitted["participants"][1]["files"] == ["pkg/api.py", "pkg/api.py"]
+    assert admitted["messages"][1]["evidence"]["file"] == "pkg/api.py"
+    before_ground = copy.deepcopy(admitted)
+    first = run_sequence(repo, symbols, admitted)
+    second = run_sequence(repo, symbols, admitted)
+
+    assert first == second
+    assert first.omit_reasons == []
+    assert first.spec_final["messages"][1]["evidence"]["line"] == 5
+    assert admitted == before_ground
+    assert authored == received
+
+
+def test_author_message_salvage_binds_block_indices_before_grounding(repo: Path, symbols: RepoSymbols) -> None:
+    authored: dict[str, Any] = dict(base_sequence())
+    authored["messages"].insert(0, {"kind": "invalid"})
+    authored["blocks"] = [{
+        "kind": "opt",
+        "branches": [{
+            "condition": "token missing",
+            "evidence": {"file": "pkg/flow.py", "line": 2},
+            "messages": [0, 1, 2, 3, 3, "2", 100],
+        }],
+    }]
+
+    admitted = coerce_sequence_spec(authored)
+    assert admitted["messages"] == base_sequence()["messages"]
+    assert admitted["blocks"][0]["branches"][0]["messages"] == [0, 1, 2]
+    report = run_sequence(repo, symbols, admitted)
+    assert report.omit_reasons == []
+    assert all(check.grounded for check in report.elements)
+    assert report.spec_final["blocks"][0]["branches"][0]["messages"] == [0, 1, 2]
+
+
+def test_flowchart_grounding_preserves_admitted_proposal_when_pruning(repo: Path, symbols: RepoSymbols) -> None:
+    admitted = coerce_flowchart_spec(base_flowchart())
+    admitted["nodes"][6]["evidence"]["file"] = "pkg/ghost.py"
+    captured = copy.deepcopy(admitted)
+    first = run_flowchart(repo, symbols, admitted)
+    second = run_flowchart(repo, symbols, admitted)
+    assert first == second
+    assert check_for(first, "node", "N7").reason == "FILE_MISSING"
+    assert "N7" not in {node["id"] for node in first.spec_final["nodes"]}
+    assert admitted == captured
+
+
+@pytest.mark.parametrize("variant", ["empty-name", "empty-service", "alias", "float-index", "padded-condition"])
+def test_strict_artifact_posting_retains_canonical_sequence_refusals(repo: Path, variant: str) -> None:
+    spec = base_sequence()
+    spec["blocks"] = [{"kind": "opt", "branches": [{
+        "condition": "token missing", "evidence": {"file": "pkg/flow.py", "line": 2}, "messages": [0, 1, 2],
+    }]}]
+    if variant == "empty-name":
+        spec["participants"][1]["name"] = ""
+        for message in spec["messages"]:
+            for endpoint in ("from", "to"):
+                if message[endpoint] == "API":
+                    message[endpoint] = ""
+    elif variant == "empty-service":
+        spec["participants"][1]["service"] = ""
+    elif variant == "alias":
+        spec["participants"][1]["files"].insert(0, "./pkg/api.py")
+    elif variant == "float-index":
+        spec["blocks"][0]["branches"][0]["messages"] = [0, 1, 2.0]
+    else:
+        spec["blocks"][0]["branches"][0]["condition"] = " token missing "
+    payload: dict[str, Any] = {"results": {"sequence": {
+        "status": "rendered", "reason": None, "omit_reasons": [], "spec_final": spec,
+    }}}
+    problem = validate_diagram_payload(payload, target_dir=repo, head_sha=git(repo, "rev-parse", "HEAD").strip())
+    assert problem == "sequence diagram evidence is not grounded in immutable head"
+
+
+def test_strict_artifact_posting_preserves_whitespace_and_repeated_integer_indices(repo: Path) -> None:
+    spec = base_sequence()
+    spec["participants"][1]["name"] = " "
+    spec["participants"][1]["service"] = " "
+    for message in spec["messages"]:
+        for endpoint in ("from", "to"):
+            if message[endpoint] == "API":
+                message[endpoint] = " "
+    spec["messages"][1]["label"] = " "
+    spec["blocks"] = [{"kind": "opt", "branches": [{
+        "condition": "token missing", "evidence": {"file": "pkg/flow.py", "line": 2}, "messages": [0, 1, 2, 2],
+    }]}]
+    captured = copy.deepcopy(spec)
+    payload: dict[str, Any] = {"results": {"sequence": {
+        "status": "rendered", "reason": None, "omit_reasons": [], "spec_final": spec,
+    }}}
+    problem = validate_diagram_payload(payload, target_dir=repo, head_sha=git(repo, "rev-parse", "HEAD").strip())
+    assert problem is None
+    assert spec == captured

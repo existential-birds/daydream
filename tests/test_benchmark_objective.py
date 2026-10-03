@@ -5,12 +5,14 @@ Task 2: per-task reward parsing and failure classification.
 Task 3: full compatibility-identity binding and the compile-lock cross-check.
 Task 4: count-derived metrics equal the authoritative scoring.
 """
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from daydream.benchmark import storage
 from daydream.benchmark.harbor import objective, run as run_mod, verifier_core
 from tests.test_benchmark_run import _seed_compiled_lock
 
@@ -42,7 +44,8 @@ def _env(**over: Any) -> Any:
 
 
 def _append(ws: Path, run_id: Any='run-1') -> None:
-    run_mod.ledger_append_running(ws, run_id=run_id, compiled_lock_sha256=run_mod._compiled_lock_sha256(ws),
+    run_mod.ledger_append_running(
+        ws, run_id=run_id, compiled_lock_sha256=storage.sha256_file(ws / "harbor" / "benchmark.lock.json"),
         job_dir=str((ws / "harbor" / "jobs" / run_id).resolve()),
     )
 
@@ -50,7 +53,8 @@ def _append(ws: Path, run_id: Any='run-1') -> None:
 def _complete_ws(tmp_path: Path, run_id: Any="run-1", trials: Any=None) -> Any:
     """A complete, consistent run whose ledger lock hash matches the seed lock."""
     ws = _ws(tmp_path)
-    run_mod.ledger_append_running(ws, run_id=run_id, compiled_lock_sha256=run_mod._compiled_lock_sha256(ws),
+    run_mod.ledger_append_running(
+        ws, run_id=run_id, compiled_lock_sha256=storage.sha256_file(ws / "harbor" / "benchmark.lock.json"),
         job_dir=str((ws / "harbor" / "jobs" / run_id).resolve()),
     )
     run_mod.ledger_mark(ws, run_id, state="complete")
@@ -152,7 +156,7 @@ def test_objective_binds_full_compatibility_identity(tmp_path: Path) -> None:
     assert ident.judge_model == "m"              # from _env
     assert ident.daydream_wheel_sha256 == "c" * 64
     assert ident.daydream_version == "0.1.0"
-    assert ident.compiled_lock_sha256 == run_mod._compiled_lock_sha256(ws)
+    assert ident.compiled_lock_sha256 == storage.sha256_file(ws / "harbor" / "benchmark.lock.json")
     assert ident.attempts == 3
 
 def test_objective_rejects_identity_disagreement(tmp_path: Path) -> None:
@@ -214,7 +218,8 @@ def _complete_ws_at(tmp_path: Path, name: Any, run_id: Any, trials: Any, digest:
     """
     ws = _ws(tmp_path / name)
     _seed_compiled_lock(ws, wheel=wheel or _WHEEL)
-    run_mod.ledger_append_running(ws, run_id=run_id, compiled_lock_sha256=run_mod._compiled_lock_sha256(ws),
+    run_mod.ledger_append_running(
+        ws, run_id=run_id, compiled_lock_sha256=storage.sha256_file(ws / "harbor" / "benchmark.lock.json"),
         job_dir=str((ws / "harbor" / "jobs" / run_id).resolve()), profile_digest=digest,
     )
     run_mod.ledger_mark(ws, run_id, state="complete")
@@ -436,3 +441,27 @@ def test_native_objective_cli_failed_admission_preserves_existing_output(
     assert captured.out == ""
     assert "missing" in captured.err
     assert output.read_bytes() == b"existing approved result\n"
+
+
+def test_completed_identity_uses_the_lock_bytes_admitted_by_its_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws = _complete_ws(tmp_path)
+    lock_path = ws / "harbor" / "benchmark.lock.json"
+    admitted = lock_path.read_bytes()
+    replacement = json.loads(admitted)
+    replacement["daydream"] = {"version": "replacement", "sha256": "b" * 64}
+    read_bytes = Path.read_bytes
+
+    def replace_after_capture(path: Path) -> bytes:
+        payload = read_bytes(path)
+        if path == lock_path:
+            lock_path.write_text(json.dumps(replacement))
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", replace_after_capture)
+    result = objective.read_completed_run(ws, "run-1", env=_env())
+    assert result.identity is not None
+    assert result.identity.daydream_wheel_sha256 == "c" * 64
+    assert result.identity.daydream_version == "0.1.0"
+    assert result.identity.compiled_lock_sha256 == hashlib.sha256(admitted).hexdigest()

@@ -8,7 +8,7 @@ import hashlib
 import importlib.metadata
 import json
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, TypeGuard
@@ -46,32 +46,6 @@ class Objective:
 
 
 @dataclass(frozen=True)
-class CompatibilityIdentity:
-    """Compatibility fields bound from recorded ledger, lock, runtime, and scorer sources.
-    Missing reviewer effort remains None; attribution is never inferred.
-    """
-
-    objective_schema_version: int
-    profile_schema_version: int
-    profile_name: str
-    profile_digest: str | None
-    daydream_version: str
-    daydream_wheel_sha256: str
-    compiled_lock_sha256: str
-    harbor_version: str
-    reviewer_backend: str
-    reviewer_model: str
-    reviewer_base_url: str
-    reviewer_effort: str | None
-    judge_provider: str
-    judge_model: str
-    judge_host: str
-    verifier_template_sha256: str
-    threshold: float
-    attempts: int
-
-
-@dataclass(frozen=True)
 class SuiteEntry:
     """One exact completion referenced by a suite manifest."""
 
@@ -79,7 +53,7 @@ class SuiteEntry:
     run_id: str
 
 
-def identity_to_dict(identity: CompatibilityIdentity) -> dict[str, object]:
+def identity_to_dict(identity: run_mod.CompatibilityIdentity) -> dict[str, object]:
     """Project the identity dataclass consistently; repository and benchmark ids are
     intentionally excluded.
     """
@@ -96,7 +70,7 @@ class SuiteObjective:
     objective: Objective
     experiment_id: str
     profile_digest: str | None
-    identity: CompatibilityIdentity
+    identity: run_mod.CompatibilityIdentity
     diagnostics: list[dict[str, object]] = field(default_factory=list)
 
 
@@ -108,7 +82,7 @@ class CompletedRun:
     mode: str
     state: str
     # Full compatibility identity from authoritative sources.
-    identity: CompatibilityIdentity | None = None
+    identity: run_mod.CompatibilityIdentity | None = None
     # Per-task reward rows (flattened).
     task_rows: list[dict[str, object] | None] = field(default_factory=list)
     # Count-derived objective.
@@ -164,10 +138,6 @@ def read_completed_run(
     )
 
 
-# The schema version recorded in ``CompatibilityIdentity.objective_schema_version``.
-_OBJECTIVE_SCHEMA_VERSION = 1
-
-
 def objective_to_json(run: CompletedRun) -> dict[str, object]:
     """Emit only opaque run identity and metrics, dropping filesystem and evidence content.
     No repository slug, PR number, source path, text, reasoning, or source code is
@@ -205,7 +175,7 @@ def objective_to_json(run: CompletedRun) -> dict[str, object]:
     return {
         "run_id": run.run_id,
         "mode": run.mode,
-        "schema_version": _OBJECTIVE_SCHEMA_VERSION,
+        "schema_version": run_mod.OBJECTIVE_SCHEMA_VERSION,
         "identity": identity_json,
         "objective": objective_dict,
     }
@@ -223,7 +193,7 @@ def _canonical_suite_manifest(entries: list[SuiteEntry]) -> dict[str, object]:
 
 
 def _suite_experiment_id(
-    entries: list[SuiteEntry], identity: CompatibilityIdentity
+    entries: list[SuiteEntry], identity: run_mod.CompatibilityIdentity
 ) -> str:
     """Stable SHA-256 over the canonicalized manifest plus the shared identity."""
     payload = {
@@ -254,7 +224,7 @@ def aggregate_suite(
             raise ObjectiveError(f"suite entry #{index} failed: {exc}") from exc
         resolved.append((entry, run))
 
-    identities: list[CompatibilityIdentity | None] = [r.identity for _, r in resolved]
+    identities: list[run_mod.CompatibilityIdentity | None] = [r.identity for _, r in resolved]
     if any(identity is None for identity in identities):
         raise ObjectiveError(
             "suite entries must each bind a compatibility identity for pooling"
@@ -298,8 +268,6 @@ def aggregate_suite(
 def _suite_label(entries: list[SuiteEntry]) -> str:
     return "-".join(f"{e.workspace.name}:{e.run_id}" for e in entries)
 
-
-_PROFILE_SCHEMA_VERSION = 1
 
 _SUITE_SCHEMA_VERSION = 1
 
@@ -347,83 +315,33 @@ def validate_suite_manifest(manifest: dict[str, Any]) -> list[SuiteEntry]:
 
 def _bind_identity(
     workspace: Path, entry: dict[str, Any], run_id: str, env: dict[str, Any]
-) -> CompatibilityIdentity:
-    """Bind identity only from authoritative artifacts, requiring the ledger exact lock
-    digest. Unreadable, missing, malformed, or mismatched provenance raises
-    ObjectiveError.
-    """
-    ledger_digest = entry.get("compiled_lock_sha256")
+) -> run_mod.CompatibilityIdentity:
+    """Require the ledger's exact lock, retaining historical recorded attribution."""
+    effective = dict(env)
+    for attribute, setting in (
+        ("profile_digest", "DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST"),
+        ("reviewer_backend", "DAYDREAM_REVIEW_BACKEND"),
+        ("reviewer_model", "DAYDREAM_REVIEW_MODEL"),
+        ("reviewer_base_url", "DAYDREAM_REVIEW_BASE_URL"),
+        ("judge_provider", "DAYDREAM_JUDGE_PROVIDER"),
+        ("judge_model", "DAYDREAM_JUDGE_MODEL"),
+    ):
+        if entry.get(attribute):
+            effective[setting] = entry[attribute]
     try:
-        disk_digest = run_mod._compiled_lock_sha256(workspace)
-    except OSError as exc:
-        raise ObjectiveError(
-            f"run {run_id!r}: cannot hash compiled lock at "
-            f"{workspace / 'harbor' / 'benchmark.lock.json'}: {exc}"
-        ) from exc
-    if ledger_digest != disk_digest:
+        host = entry.get("judge_host") or (
+            calibrate._judge_host_from_env(env) if env.get("DAYDREAM_JUDGE_PROVIDER") else ""
+        )
+        identity = run_mod.CompatibilityIdentity.capture(workspace, env=effective, judge_host=host)
+        attempts = int(identity.attempts)
+    except (run_mod.RunError, ValueError, TypeError, importlib.metadata.PackageNotFoundError) as exc:
+        raise ObjectiveError(f"run {run_id!r}: cannot bind compiled identity: {exc}") from exc
+    if entry.get("compiled_lock_sha256") != identity.compiled_lock_sha256:
         raise ObjectiveError(
             f"run {run_id!r} ledger compiled_lock_sha256 disagrees with the "
             f"on-disk compiled lock at {workspace / 'harbor' / 'benchmark.lock.json'}"
         )
-
-    try:
-        wheel_version, wheel_sha = run_mod._compiled_daydream_wheel(workspace)
-    except run_mod.RunError as exc:
-        raise ObjectiveError(f"run {run_id!r}: {exc}") from exc
-
-    try:
-        harbor_version = ".".join(
-            str(importlib.metadata.version("harbor")).split(".")[:2]
-        )
-    except importlib.metadata.PackageNotFoundError as exc:  # pragma: no cover
-        raise ObjectiveError(f"run {run_id!r}: harbor package metadata not found") from exc
-
-    judge_template = calibrate._load_judge_template()
-    profile_digest = entry.get("profile_digest") or env.get(
-        "DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST"
-    )
-    try:
-        attempts = int(run_mod._compiled_job_config(workspace).get("n_attempts", 1))
-    except (run_mod.RunError, ValueError, TypeError) as exc:
-        raise ObjectiveError(
-            f"run {run_id!r}: cannot read compiled harbor-job.yaml at "
-            f"{workspace / 'harbor' / 'harbor-job.yaml'}: {exc}"
-        ) from exc
-
-    return CompatibilityIdentity(
-        objective_schema_version=_OBJECTIVE_SCHEMA_VERSION,
-        profile_schema_version=_PROFILE_SCHEMA_VERSION,
-        profile_name="",
-        profile_digest=str(profile_digest) if profile_digest else None,
-        daydream_version=str(wheel_version),
-        daydream_wheel_sha256=str(wheel_sha),
-        compiled_lock_sha256=str(ledger_digest),
-        harbor_version=harbor_version,
-        reviewer_backend=entry.get("reviewer_backend")
-        or env.get("DAYDREAM_REVIEW_BACKEND")
-        or "",
-        reviewer_model=entry.get("reviewer_model")
-        or env.get("DAYDREAM_REVIEW_MODEL")
-        or "",
-        reviewer_base_url=entry.get("reviewer_base_url")
-        or env.get("DAYDREAM_REVIEW_BASE_URL")
-        or "",
-        # Recorded at run-append time; absent -> None (never fabricated).
-        reviewer_effort=entry.get("reviewer_effort"),
-        judge_provider=entry.get("judge_provider")
-        or env.get("DAYDREAM_JUDGE_PROVIDER")
-        or "",
-        judge_model=entry.get("judge_model") or env.get("DAYDREAM_JUDGE_MODEL") or "",
-        judge_host=entry.get("judge_host")
-        or (
-            calibrate._judge_host_from_env(env)
-            if env.get("DAYDREAM_JUDGE_PROVIDER")
-            else ""
-        ),
-        verifier_template_sha256=calibrate._render_judge_prompt_digest(judge_template),
-        threshold=verifier_core.CONFIDENCE_THRESHOLD,
-        attempts=attempts,
-    )
+    return replace(identity, attempts=attempts, reviewer_effort=entry.get("reviewer_effort"))
 
 
 # The integer count keys a scored task must carry as JSON integers (mirrors

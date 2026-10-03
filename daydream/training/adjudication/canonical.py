@@ -49,15 +49,16 @@ class AnnotationDriftError(ValueError):
         self.requeued_record_ids = requeued_record_ids
 
 
-def read_jsonl(path: Path, *, missing: str, invalid: str) -> list[dict[str, Any]]:
+def read_jsonl(path: Path, *, missing: str, invalid: str) -> tuple[list[dict[str, Any]], bytes]:
     if not path.is_file():
         raise FileNotFoundError(missing)
     try:
+        payload = path.read_bytes()
         return [
             json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
+            for line in payload.decode("utf-8").splitlines()
             if line.strip()
-        ]
+        ], payload
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"{invalid} at {path}: {exc}") from exc
 
@@ -71,25 +72,26 @@ def _load_materialized_records(materialize_dir: Path) -> list[dict[str, Any]]:
             f"first): {records_path}"
         ),
         invalid="unreadable materialized snapshot",
-    )
+    )[0]
 
 
-def _read_manifest(manifest_path: Path) -> dict[str, Any]:
+def _read_manifest(manifest_path: Path) -> tuple[dict[str, Any], bytes]:
     if not manifest_path.is_file():
         raise FileNotFoundError(
             f"preview manifest not found (run `corpus adjudicate materialize` first): "
             f"{manifest_path}"
         )
     try:
-        pin: dict[str, Any] = json.loads(manifest_path.read_text(encoding="utf-8"))
+        payload = manifest_path.read_bytes()
+        pin: dict[str, Any] = json.loads(payload.decode("utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"unreadable preview manifest at {manifest_path}: {exc}") from exc
-    return pin
+    return pin, payload
 
 
 def _load_pin(materialize_dir: Path) -> dict[str, Any]:
     manifest_path = materialize_dir / _MANIFEST_FILENAME
-    pin = _read_manifest(manifest_path)
+    pin, _payload = _read_manifest(manifest_path)
     labeler_version = pin.get("labeler_version")
     if not isinstance(labeler_version, str) or not labeler_version:
         raise ValueError(f"preview manifest at {manifest_path} is missing 'labeler_version'")

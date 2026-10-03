@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import math
 from bisect import bisect_right
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, cast
+
+from tree_sitter import Language, Query, QueryCursor
 
 from daydream._tree_sitter_safety import TreeSitterBadVersionError, assert_tree_sitter_safe
 from daydream.generated_files import is_generated_file
@@ -134,7 +137,7 @@ def _function_quality(func: Any) -> tuple[int, set[int]]:
                 name = target.text.decode()
                 if not name.startswith("_"):
                     assignments.append((name, node.start_point.row))
-    flagged = _trivial_wrapper(func) or set()
+    flagged: set[int] = set()
     flagged.update(
         row for name, row in assignments
         if len(references[name]) - bisect_right(references[name], row) == 1
@@ -206,7 +209,7 @@ def _file_quality_from_tree(
     # Erosion: pooled cyclomatic mass of functions with CC > 10.
     functions = [node for node in _iter_tree(root) if node.type == "function_definition"]
     metrics: list[tuple[int, int, float]] = []  # (cc, sloc, mass)
-    flagged = _identity_comprehension_lines(root) | _empty_list_guard_lines(root) | _nested_ladder_lines(root)
+    flagged = _syntactic_quality_lines(root) | _empty_list_guard_lines(root) | _nested_ladder_lines(root)
     for func in functions:
         cc, function_flags = _function_quality(func)
         flagged |= function_flags
@@ -242,225 +245,163 @@ def _file_quality_from_tree(
     }
 
 
-def _comprehension_body(node: Any) -> Any | None:
-    """Find a comprehension's output expression, skipping container delimiters."""
-    for child in node.children:
-        if child.type not in ("[", "]", "{", "}", "(", ")"):
-            return child
-    return None
+# Native grammar owns the complete wrapper and identity-comprehension shapes.
+# Match counts reject any unmatched child rather than admitting a partial query.
+_SYNTACTIC_QUALITY_QUERY = """
+(function_definition
+  parameters: [
+    (parameters "(" ")")
+    (parameters "("
+      [(identifier) @parameter (typed_parameter . (identifier) @parameter)]
+      ("," [(identifier) @parameter (typed_parameter . (identifier) @parameter)])*
+      ","? ")")
+  ] @parameters
+  body: (block
+    . (expression_statement (string))? @docstring .
+    (return_statement (call
+      function: (identifier)
+      arguments: [
+        (argument_list "(" ")")
+        (argument_list "(" (identifier) @argument
+          ("," (identifier) @argument)* ","? ")")
+      ] @arguments)) .) @body) @wrapper
+
+((list_comprehension
+  . (identifier) @value .
+  (for_in_clause . left: (identifier) @variable . right: (_) .) .) @identity
+  (#eq? @value @variable))
+((set_comprehension
+  . (identifier) @value .
+  (for_in_clause . left: (identifier) @variable . right: (_) .) .) @identity
+  (#eq? @value @variable))
+((generator_expression
+  . (identifier) @value .
+  (for_in_clause . left: (identifier) @variable . right: (_) .) .) @identity
+  (#eq? @value @variable))
+"""
 
 
-def _identity_comprehension_lines(root: Any) -> set[int]:
-    """Flag a single unfiltered generator whose output is exactly its loop variable."""
+@lru_cache(maxsize=1)
+def _syntactic_quality_query(language: Language) -> Query:
+    """Compile the fixed native grammar once for the admitted Python language."""
+    return Query(language, _SYNTACTIC_QUALITY_QUERY)
+
+
+def _syntactic_quality_lines(root: Any) -> set[int]:
+    """Flag complete native wrappers and unfiltered identity comprehensions."""
+    from daydream.tree_sitter_index import get_parser
+
+    parser = get_parser("python")
+    if parser is None:
+        return set()
     flagged: set[int] = set()
-    for node in _iter_tree(root):
-        if node.type not in _COMPREHENSION_TYPES:
-            continue
-        for_clauses = [child for child in node.children if child.type == "for_in_clause"]
-        if len(for_clauses) != 1:
-            continue
-        target = for_clauses[0].child_by_field_name("left")
-        if target is None or target.type != "identifier":
-            continue
-        has_filter = any(
-            child.type == "if_clause"
-            or (child.type == "for_in_clause" and any(grandchild.type == "if_clause" for grandchild in child.children))
-            for child in node.children
-        )
-        if has_filter:
-            continue
-        body = _comprehension_body(node)
-        if body is not None and body.text == target.text:
-            flagged.update(range(node.start_point.row, node.end_point.row + 1))
+    query = _syntactic_quality_query(parser.language)
+    for _pattern, captures in QueryCursor(query).matches(root):
+        if "wrapper" in captures:
+            parameters = captures.get("parameter", [])
+            arguments = captures.get("argument", [])
+            if len(parameters) != captures["parameters"][0].named_child_count:
+                continue
+            if len(arguments) != captures["arguments"][0].named_child_count:
+                continue
+            if len(captures["body"][0].children) != 1 + len(captures.get("docstring", [])):
+                continue
+            if [node.text for node in parameters] != [node.text for node in arguments]:
+                continue
+            node = captures["wrapper"][0]
+        else:
+            node = captures["identity"][0]
+        flagged.update(range(node.start_point.row, node.end_point.row + 1))
     return flagged
 
 
-def _empty_guard_variable(if_node: Any) -> str | None:
-    """The variable tested by ``len(x) == 0`` or ``not x``, else ``None``."""
-    cond = if_node.child_by_field_name("condition")
-    if cond is None:
-        return None
-    if cond.type == "not_operator":
-        arg = cond.child_by_field_name("argument")
-        if arg is not None and arg.type == "identifier":
-            return str(arg.text.decode())
-        return None
-    if cond.type == "comparison_operator":
-        call = None
-        zero = None
-        for child in cond.children:
-            if child.type == "call":
-                call = child
-            elif child.type == "integer":
-                zero = child
-        if call is None or zero is None or zero.text.decode().strip() != "0":
-            return None
-        return _len_call_argument(call)
-    return None
+_EMPTY_GUARD_QUERY = r"""
+(for_statement right: (identifier) @collection body: (block) @body) @loop
+(while_statement condition: (_) @condition body: (block) @body) @loop
+(if_statement condition: (not_operator argument: (identifier) @collection)) @guard
+(if_statement condition: (comparison_operator) @condition) @guard
+((call function: (identifier) @function arguments: (argument_list) @arguments) @length
+  (#eq? @function "len"))
+(assignment left: (identifier) @collection) @mutation
+(augmented_assignment left: (identifier) @collection) @mutation
+(call function: (attribute object: (identifier) @collection)) @mutation
+"""
 
 
-def _len_call_argument(node: Any) -> str | None:
-    """The single argument name of a ``len(x)`` call, else ``None``."""
-    if node is None or node.type != "call":
-        return None
-    fn = node.child_by_field_name("function")
-    args = node.child_by_field_name("arguments")
-    if fn is None or fn.type != "identifier" or fn.text.decode() != "len" or args is None:
-        return None
-    arg_ids = [child for child in args.children if child.type == "identifier"]
-    if len(arg_ids) == 1:
-        return str(arg_ids[0].text.decode())
-    return None
-
-
-def _empty_guard_collection(condition: Any) -> str | None:
-    """Recognize while x, while len(x), or while len(x) > 0 as nonempty proofs.
-
-    Passing x to another predicate proves nothing.
-    """
-    if condition is None:
-        return None
-    if condition.type == "identifier":
-        return str(condition.text.decode())
-    name = _len_call_argument(condition)
-    if name is not None:
-        return name
-    if condition.type == "comparison_operator":
-        operands = list(condition.children)
-        if len(operands) == 3 and operands[1].type == ">":
-            left, _, right = operands
-            if right.type == "integer" and right.text.decode().strip() == "0":
-                return _len_call_argument(left)
-    return None
-
-
-def _statement_mutates(node: Any, name: str) -> bool:
-    """Treat collection method calls or reassignment as invalidating nonempty proofs."""
-    for sub in _iter_tree(node):
-        if sub.type in ("assignment", "augmented_assignment"):
-            target = sub.child_by_field_name("left")
-            if target is not None and target.type == "identifier" and target.text.decode() == name:
-                return True
-        if sub.type == "call":
-            fn = sub.child_by_field_name("function")
-            if fn is not None and fn.type == "attribute":
-                obj = fn.child_by_field_name("object")
-                if obj is not None and obj.type == "identifier" and obj.text.decode() == name:
-                    return True
-    return False
+@lru_cache(maxsize=1)
+def _empty_guard_query(language: Language) -> Query:
+    """Compile the fixed nonempty-proof grammar for the admitted Python language."""
+    return Query(language, _EMPTY_GUARD_QUERY)
 
 
 def _empty_list_guard_lines(root: Any) -> set[int]:
-    """Flag empty guards only while the enclosing loop's nonempty proof still holds.
+    """Flag direct empty guards until a preceding statement may mutate the collection.
 
-    Any intervening possible mutation makes the guard meaningful.
+    Native capture owns loop, guard, call and mutation shapes. The sequential
+    reducer still decides when a loop's nonempty proof has been invalidated.
     """
-    flagged: set[int] = set()
-    for node in _iter_tree(root):
-        if node.type not in ("for_statement", "while_statement"):
-            continue
-        body = node.child_by_field_name("body")
-        if body is None:
-            continue
-        if node.type == "for_statement":
-            iterable = node.child_by_field_name("right")
-            if iterable is None or iterable.type != "identifier":
-                continue
-            guarded = iterable.text.decode()
+    from daydream.tree_sitter_index import get_parser
+
+    parser = get_parser("python")
+    if parser is None:
+        return set()
+    matches = QueryCursor(_empty_guard_query(parser.language)).matches(root)
+    lengths: dict[int, str] = {}
+    guards: dict[int, str] = {}
+    loops: list[dict[str, list[Any]]] = []
+    mutations: dict[str, list[int]] = {}
+    comparisons: list[tuple[Any, Any]] = []
+    for _pattern, captures in matches:
+        if "length" in captures:
+            arguments = captures["arguments"][0]
+            identifiers = [node for node in arguments.children if node.type == "identifier"]
+            if len(identifiers) == 1:
+                lengths[captures["length"][0].id] = cast(bytes, identifiers[0].text).decode()
+        elif "loop" in captures:
+            loops.append(captures)
+        elif "guard" in captures:
+            guard = captures["guard"][0]
+            if "collection" in captures:
+                guards[guard.id] = cast(bytes, captures["collection"][0].text).decode()
+            else:
+                comparisons.append((guard, captures["condition"][0]))
         else:
-            guarded = _empty_guard_collection(node.child_by_field_name("condition"))
-            if guarded is None:
-                continue
+            mutations.setdefault(cast(bytes, captures["collection"][0].text).decode(), []).append(
+                captures["mutation"][0].start_byte
+            )
+    for guard, comparison in comparisons:
+        calls = [node for node in comparison.children if node.type == "call"]
+        integers = [node for node in comparison.children if node.type == "integer"]
+        if calls and integers and cast(bytes, integers[-1].text).decode().strip() == "0":
+            name = lengths.get(calls[-1].id)
+            if name is not None:
+                guards[guard.id] = name
+    flagged: set[int] = set()
+    for captures in loops:
+        body = captures["body"][0]
+        if "collection" in captures:
+            name = cast(bytes, captures["collection"][0].text).decode()
+        else:
+            condition = captures["condition"][0]
+            name = cast(bytes, condition.text).decode() if condition.type == "identifier" else lengths.get(condition.id)
+            if name is None and condition.type == "comparison_operator":
+                operands = list(condition.children)
+                if (
+                    len(operands) == 3
+                    and operands[1].type == ">"
+                    and cast(bytes, operands[2].text).decode().strip() == "0"
+                ):
+                    name = lengths.get(operands[0].id) if operands[2].type == "integer" else None
+        if name is None:
+            continue
         mutated = False
         for child in body.children:
-            if child.type == "if_statement":
-                guard_var = _empty_guard_variable(child)
-                if guard_var == guarded and not mutated:
-                    flagged.update(range(child.start_point.row, child.end_point.row + 1))
-            if _statement_mutates(child, guarded):
+            if guards.get(child.id) == name and not mutated:
+                flagged.update(range(child.start_point.row, child.end_point.row + 1))
+            if any(child.start_byte <= start < child.end_byte for start in mutations.get(name, [])):
                 mutated = True
     return flagged
 
-
-def _return_value(return_node: Any) -> Any | None:
-    """The expression a ``return`` yields (the ``return`` keyword is a token)."""
-    for child in return_node.children:
-        if child.type != "return":
-            return child
-    return None
-
-
-def _param_definitions(params: Any) -> list[tuple[str, bool]] | None:
-    """Return ordered names/default flags, or None for splats and positional/keyword separators."""
-    definitions: list[tuple[str, bool]] = []
-    for child in params.children:
-        if child.type in (",", "(", ")"):
-            continue
-        if child.type == "identifier":
-            definitions.append((child.text.decode(), False))
-        elif child.type == "typed_parameter":
-            name = next((c for c in child.children if c.type == "identifier"), None)
-            if name is None:
-                return None
-            definitions.append((name.text.decode(), False))
-        elif child.type in ("default_parameter", "typed_default_parameter"):
-            name = child.child_by_field_name("name")
-            if name is None or name.type != "identifier":
-                return None
-            definitions.append((name.text.decode(), True))
-        else:
-            return None
-    return definitions
-
-
-def _forwarded_argument_names(args: Any) -> list[str] | None:
-    """Accept only plain positional identifiers; other argument forms are nontrivial."""
-    names: list[str] = []
-    for child in args.children:
-        if child.type in (",", "(", ")"):
-            continue
-        if child.type == "identifier":
-            names.append(child.text.decode())
-        else:
-            return None
-    return names
-
-
-def _is_docstring_statement(node: Any) -> bool:
-    """An ``expression_statement`` whose whole content is a string literal."""
-    if node.type != "expression_statement":
-        return False
-    contents = [child for child in node.children if child.type != ";"]
-    return len(contents) == 1 and contents[0].type == "string"
-
-
-def _trivial_wrapper(func: Any) -> set[int] | None:
-    """Flag a body consisting of return other(same args), ignoring its leading docstring."""
-    body = func.child_by_field_name("body")
-    if body is None:
-        return None
-    statements = list(body.children)
-    if statements and _is_docstring_statement(statements[0]):
-        statements = statements[1:]
-    if len(statements) != 1 or statements[0].type != "return_statement":
-        return None
-    value = _return_value(statements[0])
-    if value is None or value.type != "call":
-        return None
-    fn_name = value.child_by_field_name("function")
-    args = value.child_by_field_name("arguments")
-    params = func.child_by_field_name("parameters")
-    if fn_name is None or fn_name.type != "identifier" or args is None or params is None:
-        return None
-    param_defs = _param_definitions(params)
-    arg_names = _forwarded_argument_names(args)
-    if param_defs is None or arg_names is None:
-        return None
-    if any(has_default for _, has_default in param_defs):
-        return None
-    if [name for name, _ in param_defs] != arg_names:
-        return None
-    return set(range(func.start_point.row, func.end_point.row + 1))
 
 
 def _direct_nested_ifs(if_node: Any) -> list[Any]:

@@ -55,20 +55,7 @@ from daydream.training.labeler_versions import (
 )
 from daydream.ui import create_console, print_error, print_success
 
-__all__ = [
-    "handle_adjudicate",
-    "handle_build",
-    "handle_download_final",
-    "handle_export",
-    "handle_harvest_snapshot",
-    "handle_label",
-    "handle_materialize",
-    "handle_publish_final",
-    "handle_publish_state",
-    "handle_report",
-    "handle_resume_state",
-    "handle_show",
-]
+__all__ = ["handle_adjudicate"]
 
 _ANNOTATION_HUB_REPO = "existentialbirds/daydream-trajectories"
 
@@ -193,12 +180,15 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="adjudicate_subverb", required=True)
 
     p_build = sub.add_parser("build", help="Build the adjudication queue from a hydrated index.")
+    p_build.set_defaults(handler=_handle_build)
     _add_paths(p_build, "index-root", "state-dir")
 
     p_show = sub.add_parser("show", help="Show unresolved queue items grouped by disposition.")
+    p_show.set_defaults(handler=_handle_show)
     _add_paths(p_show, "state-dir")
 
     p_label = sub.add_parser("label", help="Record human observation(s) for queue item(s).")
+    p_label.set_defaults(handler=_handle_label)
     _add_paths(p_label, "state-dir")
     target = p_label.add_mutually_exclusive_group(required=True)
     target.add_argument("--record-id", type=str, default=None, metavar="HEX",
@@ -220,6 +210,7 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
     p_export = sub.add_parser(
         "export", help="Merge the preview ledger + observations into the projector export shape."
     )
+    p_export.set_defaults(handler=_handle_export)
     _add_paths(p_export, "index-root", "state-dir")
     p_export.add_argument("--out", type=Path, default=None, metavar="PATH",
                           help="Export JSONL path (required unless --dry-run)")
@@ -229,6 +220,7 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
     p_report = sub.add_parser(
         "report", help="Print adjudication coverage, class balance, inter-rater, strata."
     )
+    p_report.set_defaults(handler=_handle_report)
     _add_paths(p_report, "index-root", "state-dir")
     p_report.add_argument("--conflicts", action="store_true",
                           help="List disagreeing-rater findings oldest-first instead of the report")
@@ -240,6 +232,7 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
         "materialize",
         help="Materialize the preview annotation snapshot (sessions.jsonl + manifest).",
     )
+    p_materialize.set_defaults(handler=_handle_materialize)
     _add_paths(p_materialize, "index-root", "out-dir")
     _add_pin_flags(p_materialize)
 
@@ -247,6 +240,7 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
         "publish-state",
         help="Publish adjudication state additively to the private Hub.",
     )
+    p_publish.set_defaults(handler=_handle_publish_state)
     _add_paths(p_publish, "state-dir", "manifest")
     _add_hub_repo(p_publish)
 
@@ -254,6 +248,7 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
         "resume-state",
         help="Restore published adjudication state onto a fresh VM (digest-verified).",
     )
+    p_resume.set_defaults(handler=_handle_resume_state)
     resume_identity = p_resume.add_mutually_exclusive_group(required=True)
     resume_identity.add_argument("--curation-id", type=str, metavar="ID",
                                  help="Stable curation identity used to discover the checkpoint")
@@ -270,6 +265,7 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
         "harvest-snapshot",
         help="Canonical harvest: drift gate, precedence merge, label_observations append.",
     )
+    p_harvest.set_defaults(handler=_handle_harvest_snapshot)
     _add_paths(p_harvest, "index-root", "materialize-dir", "archive-dir")
     p_harvest.add_argument("--state-dir", type=Path, required=True, metavar="PATH",
                            help="Adjudication state directory (observations.jsonl source)")
@@ -278,6 +274,7 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
         "publish-final",
         help="Construct and publish the final annotation bundle (immutable snapshot).",
     )
+    p_publish_final.set_defaults(handler=_handle_publish_final)
     _add_paths(p_publish_final, "index-root", "materialize-dir", "state-dir", "archive-dir", "curation-bundle-dir")
     _add_hub_repo(p_publish_final)
     p_publish_final.add_argument("--dry-run", action="store_true",
@@ -287,6 +284,7 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
         "download-final",
         help="Download and verify an exact final annotation success revision.",
     )
+    p_download_final.set_defaults(handler=_handle_download_final)
     p_download_final.add_argument("--curation-id", type=str, required=True, metavar="ID",
                                   help="Stable curation identity")
     p_download_final.add_argument("--snapshot-id", type=str, required=True, metavar="ID",
@@ -302,6 +300,7 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
         "import-local-observations",
         help="Import surviving local archive/backup label-observation histories.",
     )
+    p_import.set_defaults(handler=_handle_import_local_observations)
     p_import.add_argument("--archive-root", type=Path, action="append", required=True,
                           metavar="PATH",
                           help="Source archive/backup root holding index.db (repeatable)")
@@ -327,10 +326,9 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def handle_build(argv: list[str]) -> int:
+def _handle_build(args: argparse.Namespace) -> int:
     """Handle ``corpus adjudicate build --index-root <path> --state-dir <path>``."""
 
-    args = _build_adjudicate_parser().parse_args(["build", *argv])
     try:
         raw = _load_sessions_for_index(args.index_root)
     except ValueError as exc:
@@ -360,10 +358,9 @@ def handle_build(argv: list[str]) -> int:
     return 0
 
 
-def handle_show(argv: list[str]) -> int:
+def _handle_show(args: argparse.Namespace) -> int:
     """Handle ``corpus adjudicate show --state-dir <path>``."""
 
-    args = _build_adjudicate_parser().parse_args(["show", *argv])
     try:
         queue = _load_queue(args.state_dir)
     except ValueError as exc:
@@ -384,10 +381,9 @@ def handle_show(argv: list[str]) -> int:
     return 0
 
 
-def handle_label(argv: list[str]) -> int:
+def _handle_label(args: argparse.Namespace) -> int:
     """Handle ``corpus adjudicate label --state-dir <path> ...``."""
 
-    args = _build_adjudicate_parser().parse_args(["label", *argv])
     try:
         queue = _load_queue(args.state_dir)
     except ValueError as exc:
@@ -448,16 +444,12 @@ def _load_sessions_for_index(index_root: Path) -> list[dict[str, Any]]:
     sessions_path = index_root / _SESSIONS_OUT_FILENAME
     if not sessions_path.is_file():
         raise ValueError(f"hydrated index sessions file not found: {sessions_path}")
-    return read_jsonl(sessions_path, missing="", invalid="unreadable hydrated index")
+    return read_jsonl(sessions_path, missing="", invalid="unreadable hydrated index")[0]
 
 
-def handle_export(argv: list[str]) -> int:
+def _handle_export(args: argparse.Namespace) -> int:
     """Handle ``corpus adjudicate export --index-root <path> --state-dir <path>``."""
 
-    parser = _build_adjudicate_parser()
-    args = parser.parse_args(["export", *argv])
-    if not args.dry_run and args.out is None:
-        parser.error("--out is required unless --dry-run")
     ledger_path = args.state_dir / _PREVIEW_LEDGER_FILENAME
     try:
         # Regenerate the ledger on every run: a re-export after a snapshot
@@ -515,10 +507,9 @@ def _report_items(
     return adjudicated_items(items, observations, as_of=as_of)
 
 
-def handle_report(argv: list[str]) -> int:
+def _handle_report(args: argparse.Namespace) -> int:
     """Handle ``corpus adjudicate report --index-root <path> --state-dir <path>``."""
 
-    args = _build_adjudicate_parser().parse_args(["report", *argv])
     try:
         enriched = _report_items(args.index_root, args.state_dir, as_of=args.as_of)
     except ValueError as exc:
@@ -578,11 +569,9 @@ def _print_conflicts(enriched: list[dict[str, Any]]) -> None:
             )
 
 
-def handle_materialize(argv: list[str]) -> int:
+def _handle_materialize(args: argparse.Namespace) -> int:
     """Handle ``corpus adjudicate materialize --index-root <path> --out-dir <path> ...``."""
 
-    parser = _build_adjudicate_parser()
-    args = parser.parse_args(["materialize", *argv])
     try:
         pin = _pin_from_args(args)
         summary = run_materialize(args.index_root, args.out_dir, pin=pin)
@@ -598,10 +587,9 @@ def handle_materialize(argv: list[str]) -> int:
     return 0
 
 
-def handle_publish_state(argv: list[str]) -> int:
+def _handle_publish_state(args: argparse.Namespace) -> int:
     """Handle ``corpus adjudicate publish-state --state-dir <path> --manifest <path>``."""
 
-    args = _build_adjudicate_parser().parse_args(["publish-state", *argv])
     try:
         client = _make_client(args.hub_repo)
         summary = publish_annotation_state(client, args.state_dir, manifest=args.manifest)
@@ -617,10 +605,9 @@ def handle_publish_state(argv: list[str]) -> int:
     return 0
 
 
-def handle_resume_state(argv: list[str]) -> int:
+def _handle_resume_state(args: argparse.Namespace) -> int:
     """Handle stable-curation checkpoint discovery and verified restoration."""
 
-    args = _build_adjudicate_parser().parse_args(["resume-state", *argv])
     try:
         curation_id = args.curation_id
         expected_snapshot_id = args.snapshot_id
@@ -659,12 +646,11 @@ def handle_resume_state(argv: list[str]) -> int:
     return 0
 
 
-def handle_publish_final(argv: list[str]) -> int:
+def _handle_publish_final(args: argparse.Namespace) -> int:
     """Build and validate before Hub access; dry-run reports the gate without a client."""
     from daydream.training.adjudication.final_bundle import build_final_bundle, final_snapshot_id
     from daydream.training.adjudication.publish import FinalAnnotationBundle, publish_final_annotation_bundle
 
-    args = _build_adjudicate_parser().parse_args(["publish-final", *argv])
     bundle_dir = args.materialize_dir / "final-bundle"
     try:
         summary = build_final_bundle(
@@ -719,11 +705,10 @@ def handle_publish_final(argv: list[str]) -> int:
     return 0
 
 
-def handle_download_final(argv: list[str]) -> int:
+def _handle_download_final(args: argparse.Namespace) -> int:
     """Handle a pinned clean-room download of a final annotation bundle."""
     from daydream.training.adjudication.publish import download_final_annotation_bundle
 
-    args = _build_adjudicate_parser().parse_args(["download-final", *argv])
     try:
         client = _make_client(args.hub_repo)
         result = download_final_annotation_bundle(
@@ -744,10 +729,9 @@ def handle_download_final(argv: list[str]) -> int:
     return 0
 
 
-def handle_harvest_snapshot(argv: list[str]) -> int:
+def _handle_harvest_snapshot(args: argparse.Namespace) -> int:
     """Handle ``corpus adjudicate harvest-snapshot --index-root --materialize-dir ...``."""
 
-    args = _build_adjudicate_parser().parse_args(["harvest-snapshot", *argv])
     try:
         summary = run_canonical_harvest(
             args.index_root,
@@ -800,20 +784,13 @@ def _publish_import_state(
     return {"prefix": published["prefix"], "uploaded": published["uploaded"]}
 
 
-def handle_import_local_observations(argv: list[str]) -> int:
+def _handle_import_local_observations(args: argparse.Namespace) -> int:
     """Import linked histories through pre-write validation and redaction gates.
 
     The hydrated archive owns imported label history; state_dir holds finding
     observations, scan/report/ledger files, and optional publish staging.
     Dry-run validates and reports without writing. JSON mode suppresses progress."""
 
-    parser = _build_adjudicate_parser()
-    args = parser.parse_args(["import-local-observations", *argv])
-    if args.publish:
-        if args.dry_run:
-            parser.error("--publish cannot be combined with --dry-run")
-        if args.manifest is None:
-            parser.error("--publish requires --manifest")
     console = create_console()
     try:
         inventory = _inventory_import_roots(args.archive_root, console=None if args.json else console)
@@ -912,27 +889,16 @@ def handle_import_local_observations(argv: list[str]) -> int:
     return 0
 
 
-_HANDLERS = {
-    "build": handle_build,
-    "show": handle_show,
-    "label": handle_label,
-    "export": handle_export,
-    "report": handle_report,
-    "materialize": handle_materialize,
-    "publish-state": handle_publish_state,
-    "resume-state": handle_resume_state,
-    "harvest-snapshot": handle_harvest_snapshot,
-    "publish-final": handle_publish_final,
-    "download-final": handle_download_final,
-    "import-local-observations": handle_import_local_observations,
-}
-
 
 def handle_adjudicate(argv: list[str]) -> int:
-    """Dispatch a known sub-verb; argparse rejects bare or unknown invocations."""
-    if not argv:
-        _build_adjudicate_parser().parse_args([])
-    subverb, rest = argv[0], argv[1:]
-    if subverb not in _HANDLERS:
-        _build_adjudicate_parser().parse_args([subverb])
-    return int(_HANDLERS[subverb](rest))
+    """Parse and dispatch through argparse's admitted subcommand."""
+    parser = _build_adjudicate_parser()
+    args = parser.parse_args(argv)
+    if args.adjudicate_subverb == "export" and not args.dry_run and args.out is None:
+        parser.error("--out is required unless --dry-run")
+    if args.adjudicate_subverb == "import-local-observations" and args.publish:
+        if args.dry_run:
+            parser.error("--publish cannot be combined with --dry-run")
+        if args.manifest is None:
+            parser.error("--publish requires --manifest")
+    return int(args.handler(args))

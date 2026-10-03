@@ -270,47 +270,20 @@ def task_spec_approval(case_doc: dict[str, Any]) -> TaskSpecApproval:
     )
 
 
-def _flatten_finding(finding: dict[str, Any]) -> vc.FindingContent:
-    """Project content/location through the verifier canonical finding parser. Locationless
-    findings emit explicit nulls; partially populated locations raise CompileError.
-    Provenance never enters the gold artifact.
-    """
-    location = finding.get("location")
-    if location is not None and not isinstance(location, dict):
-        raise CompileError(f"finding {finding.get('finding_id')} has an invalid location")
-    if not location:
-        path = start_line = end_line = None
-    else:
-        path = location.get("path")
-        start_line = location.get("start_line")
-        end_line = location.get("end_line")
-    try:
-        return vc.parse_finding_content({
-            "title": finding.get("title"),
-            "body": finding.get("body"),
-            "severity": finding.get("severity"),
-            "path": path,
-            "start_line": start_line,
-            "end_line": end_line,
-        })
-    except vc.VerifierError as exc:
-        raise CompileError(
-            f"finding {finding.get('finding_id')} is invalid: {exc}"
-        ) from exc
+def _flatten_finding(finding: schema.Finding) -> vc.FindingContent:
+    """Project admitted content into the dependency-closed scorer vocabulary."""
+    location = finding.location
+    return vc.FindingContent(
+        title=finding.title, body=finding.body, severity=finding.severity,
+        path=location.path if location is not None else None,
+        start_line=location.start_line if location is not None else None,
+        end_line=location.end_line if location is not None else None,
+    )
 
 
-def _gold_finding_ids(key: str, finding: dict[str, Any]) -> str:
-    """Derive canonical finding ids salted with the opaque compiled task key, excluding
-    authoring ids.
-    """
-    return schema.derive_finding_id(finding, case_id=key)
-
-
-def build_gold_list(findings: list[dict[str, Any]], *, key: str) -> list[dict[str, Any]]:
-    """Return provenance-free gold sorted by opaque-task-bound finding id; reject partial
-    locations.
-    """
-    flat = [(_flatten_finding(f), _gold_finding_ids(key, f)) for f in findings]
+def build_gold_list(findings: list[schema.Finding], *, key: str) -> list[dict[str, Any]]:
+    """Return provenance-free gold from admitted findings, sorted by opaque task-bound id."""
+    flat = [(_flatten_finding(f), schema.derive_finding_id(f, case_id=key)) for f in findings]
     flat.sort(key=lambda item: item[1])
     result = [{"finding_id": fid, **flattened.to_dict()} for flattened, fid in flat]
     try:
@@ -320,13 +293,13 @@ def build_gold_list(findings: list[dict[str, Any]], *, key: str) -> list[dict[st
     return result
 
 
-def build_oracle_artifact(opaque_key: str, findings: list[dict[str, Any]]) -> dict[str, Any]:
+def build_oracle_artifact(opaque_key: str, findings: list[schema.Finding]) -> dict[str, Any]:
     """Build candidate-shaped oracle content using opaque task identity and base/head refs.
     Sort by gold finding id, then derive candidate ids with canonical content and
     per-tuple ordinals. Normalize nullable tuple fields exactly as the verifier does;
     never expose gold-only finding ids in candidate entries.
     """
-    flat = [(_flatten_finding(f), f["finding_id"]) for f in findings]
+    flat = [(_flatten_finding(f), f.finding_id) for f in findings]
     flat.sort(key=lambda item: item[1])
     # Candidate ids are derived from canonical content + an occurrence ordinal
     # (mirrors the verifier's own per-content dedup ordinal), so the compiled
@@ -485,59 +458,52 @@ _ROOT_README = (
 )
 
 
-def _is_compilable(curation: dict[str, Any]) -> bool:
-    """Eligible iff ready AND snapshot-attested (findings-ready or clean-ready)."""
-    if not (curation.get("state") == "ready" and curation.get("snapshot_attested")):
-        return False
-    # Use mark_ready's gold-status rule: empty findings require clean attestation.
-    return schema.derive_gold_status(schema.Curation(**curation)) is not None
-
-
-def _authoring_input_digest(case_docs: dict[str, Any], manifest: schema.BenchmarkManifest) -> str:
+def _authoring_input_digest(case_docs: dict[str, schema.CaseDocument], manifest: schema.BenchmarkManifest) -> str:
     """Deterministic sha256 over the authoring inputs (no timestamps)."""
     payload: dict[str, Any] = {}
     for case in manifest.cases:
         case_id = case.case_id
         if not case_id or case_id not in case_docs:
             continue
-        raw = case_docs[case_id]
-        pull_request = raw.get("pull_request") or {}
-        curation = raw.get("curation") or {}
-        snapshot = raw.get("snapshot") or {}
+        doc = case_docs[case_id]
+        pull_request = doc.pull_request
+        curation = doc.curation
+        snapshot = doc.snapshot
         payload[case_id] = {
-            "title": str(pull_request.get("title") or ""),
-            "body": str(pull_request.get("body") or ""),
+            "title": pull_request.title,
+            "body": pull_request.body or "",
             "findings": build_gold_list(
-                curation.get("findings") or [], key=derive_task_key(case_id)
+                curation.findings, key=derive_task_key(case_id)
             ),
-            "base": snapshot.get("original_base_sha"),
-            "requested_base_sha": snapshot.get("requested_base_sha"),
-            "head": snapshot.get("original_head_sha"),
-            "bundle_sha256": snapshot.get("bundle_sha256"),
-            "task_spec_sha256": task_spec_digest(raw),
+            "base": snapshot.original_base_sha,
+            "requested_base_sha": snapshot.requested_base_sha,
+            "head": snapshot.original_head_sha,
+            "bundle_sha256": snapshot.bundle_sha256 if isinstance(snapshot, schema.SnapshotReady) else None,
+            "task_spec_sha256": task_spec_digest(doc.model_dump(mode="json")),
         }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def _write_task_spec(stage: Path, case_doc: dict[str, Any]) -> str:
+def _write_task_spec(stage: Path, case_doc: schema.CaseDocument) -> str:
     """Require rendered Task.md to match the curator-approved digest before writing; return
     that digest.
     """
-    task_spec_bytes = render_task_spec(case_doc, instruction=ASSIGNMENT_TEXT)
-    approval = task_spec_approval(case_doc)
-    if approval.state != "current":
+    task_spec_bytes = render_task_spec(case_doc.model_dump(mode="json"), instruction=ASSIGNMENT_TEXT)
+    digest = hashlib.sha256(task_spec_bytes).hexdigest()
+    approved = case_doc.curation.task_spec_sha256
+    if case_doc.curation.state != "ready" or digest != approved:
         raise CompileError(
-            f"case {case_doc.get('case_id')} task spec digest "
-            f"{approval.current_sha256} != approved {approval.approved_sha256}"
+            f"case {case_doc.case_id} task spec digest "
+            f"{digest} != approved {approved}"
         )
     (stage / "Task.md").write_bytes(task_spec_bytes)
-    return approval.current_sha256
+    return digest
 
 
 def _compile_case(
     stage: Path,
     ws: Path,
-    case_doc: dict[str, Any],
+    case_doc: schema.CaseDocument,
     repo_slug: str,
     *,
     runtime_lock: bytes,
@@ -549,20 +515,21 @@ def _compile_case(
     remain separate in task.toml. Its locked digest makes network-policy changes
     invalidate prior Oracle receipts.
     """
-    case_id = case_doc["case_id"]
+    case_id = case_doc.case_id
     key = derive_task_key(case_id)
     case_stage = stage / key
     case_stage.mkdir(parents=True, exist_ok=True)
-    pull_request = case_doc.get("pull_request") or {}
-    snapshot = case_doc.get("snapshot") or {}
-    curation = case_doc.get("curation") or {}
-    findings = curation.get("findings") or []
+    pull_request = case_doc.pull_request
+    snapshot = case_doc.snapshot
+    if not isinstance(snapshot, schema.SnapshotReady):
+        raise CompileError(f"case {case_id} ready snapshot missing bundle_file/bundle_sha256")
+    findings = case_doc.curation.findings
 
     # The hidden evaluation contract: byte-deterministic render, verified
     # against the human-approved digest before any bytes are written (R10/R8).
     task_spec_sha256 = _write_task_spec(case_stage, case_doc)
 
-    instruction = f"{ASSIGNMENT_TEXT}\n\n{bounded_pr_context(pull_request)}\n"
+    instruction = f"{ASSIGNMENT_TEXT}\n\n{bounded_pr_context(pull_request.model_dump(mode="json"))}\n"
     (case_stage / "instruction.md").write_text(instruction)
     (case_stage / "README.md").write_text(_CASE_README)
     from daydream.benchmark.harbor.package import (
@@ -593,10 +560,8 @@ def _compile_case(
     if wheel is not None:
         shutil.copyfile(wheel, case_stage / "environment" / wheel.name)
 
-    bundle_rel = snapshot.get("bundle_file")
-    expected = snapshot.get("bundle_sha256")
-    if not bundle_rel or not expected:
-        raise CompileError(f"case {case_id} ready snapshot missing bundle_file/bundle_sha256")
+    bundle_rel = snapshot.bundle_file
+    expected = snapshot.bundle_sha256
     bundle_src = storage.resolve_authoring_path(ws, bundle_rel)
     if not bundle_src.is_file():
         raise CompileError(f"case {case_id} missing bundle {bundle_rel}")
@@ -658,18 +623,16 @@ def _compile_case(
     if wheel is not None:
         files[f"environment/{wheel.name}"] = hashlib.sha256(wheel.read_bytes()).hexdigest()
 
-    number = pull_request.get("number")
-    if type(number) is not int:
-        raise CompileError(f"case {case_id} missing or malformed PR number: {number!r}")
+    number = pull_request.number
 
     return {
         "key": key,
         "case_id": case_id,
         "pr_number": number,
         "repository": repo_slug,
-        "original_base_sha": snapshot.get("original_base_sha"),
-        "requested_base_sha": snapshot.get("requested_base_sha"),
-        "original_head_sha": snapshot.get("original_head_sha"),
+        "original_base_sha": snapshot.original_base_sha,
+        "requested_base_sha": snapshot.requested_base_sha,
+        "original_head_sha": snapshot.original_head_sha,
         "bundle_sha256": bundle_sha256,
         "gold_sha256": gold_sha256,
         "oracle_sha256": oracle_sha256,
@@ -737,21 +700,24 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict[str, Any
         # errors become CompileError. Render only the persisted, validated allowlists.
         reviewer_hosts = list(manifest.privacy.reviewer_allowed_hosts)
         judge_hosts = list(manifest.privacy.judge_allowed_hosts)
-        case_docs: dict[str, dict[str, Any]] = {}
+        case_docs: dict[str, schema.CaseDocument] = {}
         for case_file, doc in workspace.load_case_documents(root, manifest).items():
-            dumped = doc.model_dump(mode="json")
-            case_id = dumped["case_id"]
-            if (dumped.get("curation") or {}).get("state") == "excluded":
-                case_docs[case_id] = dumped
+            case_id = doc.case_id
+            case_docs[case_id] = doc
+            curation = doc.curation
+            if curation.state == "excluded":
                 continue
-            if not _is_compilable(dumped.get("curation") or {}):
-                curation = dumped.get("curation") or {}
+            if (curation.state != "ready" or not curation.snapshot_attested
+                    or schema.derive_gold_status(curation) is None):
                 raise CompileError(
-                    f"case {case_id} is not compilable (state {curation.get('state')}, "
-                    f"findings {len(curation.get('findings') or [])}, "
-                    f"clean_attested {bool(curation.get('clean_attested'))})"
+                    f"case {case_id} is not compilable (state {curation.state}, "
+                    f"findings {len(curation.findings)}, "
+                    f"clean_attested {curation.clean_attested})"
                 )
-            case_docs[case_id] = dumped
+            try:
+                doc.validate_gold()
+            except ValueError as exc:
+                raise CompileError(f"case {case_id}: {exc}") from None
 
         stage = root / "cache" / "harbor-build-stage"
         if stage.exists():
@@ -770,7 +736,7 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict[str, Any
                         f"case {case_id} index row has no matching case document "
                         "(row case_id disagrees with the case document's own case_id)"
                     )
-                if (case_doc.get("curation") or {}).get("state") == "excluded":
+                if case_doc.curation.state == "excluded":
                     continue
                 row = _compile_case(
                     stage,

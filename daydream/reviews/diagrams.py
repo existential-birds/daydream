@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import jsonschema
 
 from daydream import git_ops
 from daydream.config import DIAGRAM_KINDS
 from daydream.git_ops import INHERIT_GITHUB_AUTH, GitError, GitHubAuth, PathAbsentError
-from daydream.repository_paths import valid_repository_file_path
+from daydream.repository_paths import strip_dot_slash, valid_repository_file_path
 from daydream.reviews.identity import DAYDREAM_FOOTER, diagram_marker
 from daydream.reviews.models import PRInfo
 from daydream.ui import print_error, print_success, print_warning
@@ -18,6 +18,7 @@ from daydream.ui import print_error, print_success, print_warning
 if TYPE_CHECKING:
     from rich.console import Console
 
+    from daydream.deep.diagram_types import SequenceSpec
     from daydream.findings import FindingsArtifact
 
 
@@ -267,10 +268,28 @@ def _diagram_head_evidence_problem(
                 snapshot_path.parent.mkdir(parents=True, exist_ok=True)
                 snapshot_path.write_bytes(source)
 
+            # Strict wire schemas admit empty names, empty service strings,
+            # path aliases and integral floats. Those are not the canonical
+            # sequence values the old grounding projection compared to the
+            # original artifact. Preserve that refusal here without applying
+            # the author's tolerant text stripping or duplicate-index salvage.
+            if any(
+                not participant["name"]
+                or participant["service"] == ""
+                or any(strip_dot_slash(path) != path for path in participant["files"])
+                for participant in spec["participants"]
+            ) or any(
+                branch["condition"].strip() != branch["condition"]
+                or any(not isinstance(index, int) for index in branch["messages"])
+                for block in spec["blocks"]
+                for branch in block["branches"]
+            ):
+                return "sequence diagram evidence is not grounded in immutable head"
+
             from daydream.deep.diagram_grounding import RepoSymbols, ground_sequence
 
             report = ground_sequence(
-                spec,
+                cast("SequenceSpec", spec),
                 repo_root=snapshot_root,
                 hunk_ranges={},
                 symbols=RepoSymbols(snapshot_root),

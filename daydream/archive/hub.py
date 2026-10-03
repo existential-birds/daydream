@@ -25,7 +25,10 @@ _UPLOAD_RETRY_MAX_DELAY_S = 120.0
 
 
 def resolve_hub_repo(config: RunConfig) -> str | None:
-    """Resolve the dataset ID from CLI config, then ``DAYDREAM_TRAJECTORY_HUB_REPO``."""
+    """Resolve the dataset ID from CLI config, then ``DAYDREAM_TRAJECTORY_HUB_REPO``.
+
+    Empty values are unset; target-checkout file config cannot select a destination.
+    """
     if config.trajectory_hub_repo:
         return config.trajectory_hub_repo
     env = os.environ.get("DAYDREAM_TRAJECTORY_HUB_REPO")
@@ -35,7 +38,15 @@ def resolve_hub_repo(config: RunConfig) -> str | None:
 
 
 def upload_run_bundle(run_dir: Path, repo_id: str, session_id: str) -> bool:
-    """Upload the complete bundle to dataset ``repo_id`` under ``session_id``."""
+    """Upload the complete bundle to dataset ``repo_id`` under ``session_id``.
+
+    Return True on success; skips and failures warn and return False. Missing
+    ``HF_TOKEN`` or the optional Hub dependency skips upload. New repos are private;
+    existing visibility is retained, with a warning before uploading to a public repo.
+    Blocking secrets or scanner errors refuse upload with value-free diagnostics;
+    advisory name/template matches are reported and allow upload. Concurrent commit
+    conflicts retry up to three total attempts with exponential backoff.
+    """
     if not os.environ.get("HF_TOKEN"):
         _warn(f"Skip HF upload of {session_id}: HF_TOKEN not set (set it to upload run bundles)")
         return False

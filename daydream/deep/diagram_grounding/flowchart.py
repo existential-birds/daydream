@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -12,40 +13,13 @@ from daydream.config import (
 from daydream.deep.diagram_grounding import evidence
 from daydream.deep.diagram_grounding.models import ElementCheck, GroundingReport
 from daydream.deep.diagram_types import (
-    NODE_KINDS,
     CandidateRoot,
-    as_dict as _as_dict,
+    FlowchartSpec,
     as_int as _norm_line,
-    as_list as _as_list,
-    as_optional_str as _norm_optional_str,
 )
 from daydream.repository_paths import strip_dot_slash
 
 _MIN_NODES = 4
-
-
-def _normalize_node(raw: dict[str, Any]) -> dict[str, Any]:
-    """Return the schema-shaped flowchart node for ``spec_final``."""
-    citation = _as_dict(raw.get("evidence"))
-    return {
-        "id": evidence.norm_str(raw.get("id")),
-        "kind": evidence.norm_str(raw.get("kind")),
-        "label": evidence.norm_str(raw.get("label")),
-        "evidence": {
-            "file": strip_dot_slash(evidence.norm_str(citation.get("file"))),
-            "line": _norm_line(citation.get("line")),
-            "symbol": _norm_optional_str(citation.get("symbol")),
-        },
-    }
-
-
-def _normalize_edge(raw: dict[str, Any]) -> dict[str, Any]:
-    """Return the schema-shaped flowchart edge for ``spec_final``."""
-    return {
-        "from": evidence.norm_str(raw.get("from")),
-        "to": evidence.norm_str(raw.get("to")),
-        "label": _norm_optional_str(raw.get("label")),
-    }
 
 
 def _match_candidate(
@@ -76,9 +50,6 @@ def _ground_node(
 ) -> ElementCheck:
     """Check one flowchart node and rewrite its evidence line on a snap."""
     check = ElementCheck("node", record["id"], True)
-    if record["kind"] not in NODE_KINDS:
-        check.grounded, check.reason = False, "MALFORMED_ELEMENT"
-        return check
     citation = record["evidence"]
     file, line, reason = evidence.check_location(
         repo_root, sources, citation["file"], citation["line"]
@@ -205,21 +176,23 @@ def _rejected_root(root: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 def ground_flowchart(
-    spec: dict[str, Any],
+    spec: FlowchartSpec,
     *,
     repo_root: Path,
     hunk_ranges: dict[str, list[tuple[int, int]]],
     candidate_roots: list[CandidateRoot],
     symbols: evidence.RepoSymbols,
-) -> GroundingReport:
+) -> GroundingReport[FlowchartSpec]:
     """Ground, prune, cap and floor-test a proposal rooted in an eligible changed function.
 
-    The root must match candidate_roots and still overlap a changed hunk, including
+    Consume a proposal admitted by coerce_flowchart_spec. Scalar shape and node-ID
+    admission belong to that boundary. The root must match candidate_roots and
+    still overlap a changed hunk, including
     on repair turns. A rejected root yields no nodes or edges.
     """
+    spec = copy.deepcopy(spec)
     sources = evidence.SourceCache(repo_root)
-    raw_root = spec.get("root")
-    root: dict[str, Any] | None = _as_dict(raw_root) if isinstance(raw_root, dict) else None
+    root = spec["root"]
     candidate = _match_candidate(root, candidate_roots) if root is not None else None
     root_name = evidence.norm_str(root.get("name")) if root is not None else ""
     root_ref = root_name or "<no-root>"
@@ -242,24 +215,9 @@ def ground_flowchart(
     node_checks: list[ElementCheck] = []
     nodes: dict[str, dict[str, Any]] = {}
     node_order: list[str] = []
-    seen_ids: set[str] = set()
     start_seen = False
-    for position, raw_node in enumerate(_as_list(spec.get("nodes"))):
-        if not isinstance(raw_node, dict):
-            node_checks.append(
-                ElementCheck("node", f"<malformed:{position}>", False, "MALFORMED_ELEMENT")
-            )
-            continue
-        record = _normalize_node(raw_node)
+    for record in spec["nodes"]:
         node_id = record["id"]
-        if not node_id or node_id in seen_ids:
-            node_checks.append(
-                ElementCheck(
-                    "node", node_id or f"<unnamed:{position}>", False, "MALFORMED_ELEMENT"
-                )
-            )
-            continue
-        seen_ids.add(node_id)
         check = _ground_node(
             repo_root,
             sources,
@@ -284,18 +242,12 @@ def ground_flowchart(
     edges: list[tuple[str, dict[str, Any]]] = []
     seen_refs: set[str] = set()
     decision_labels: dict[str, set[str]] = {}
-    for position, raw_edge in enumerate(_as_list(spec.get("edges"))):
-        record = _normalize_edge(_as_dict(raw_edge))
+    for record in spec["edges"]:
         ref = f"{record['from']}->{record['to']}"
-        if (
-            not isinstance(raw_edge, dict)
-            or not record["from"]
-            or not record["to"]
-            or ref in seen_refs
-        ):
+        if ref in seen_refs:
             edge_checks.append(
                 ElementCheck(
-                    "edge", ref if record["from"] or record["to"] else f"<malformed:{position}>",
+                    "edge", ref,
                     False,
                     "MALFORMED_ELEMENT",
                 )
@@ -340,7 +292,7 @@ def ground_flowchart(
     )
 
     # --- assemble ------------------------------------------------------------
-    spec_final: dict[str, Any] = {
+    spec_final: FlowchartSpec = {
         "root": root_final,
         "nodes": [
             {

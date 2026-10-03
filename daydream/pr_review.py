@@ -44,7 +44,6 @@ from daydream.reviews.rendering import (
     resolve_review_renderers as resolve_review_renderers,
 )
 from daydream.reviews.submission import (
-    ClassifiedReviewPlan as ClassifiedReviewPlan,
     GitHubReviewTransport as GitHubReviewTransport,
     post_classified_review as post_classified_review,
 )
@@ -311,22 +310,15 @@ def snap_to_hunk(
 
     The pre-report location validator owns citation authority. This final placement
     check uses the live diff so GitHub receives a valid changed line."""
-    # Shared two-sided boundary-distance primitive (same as the pre-report
-    # validator) so posting and the validator agree on what ``in hunk`` /
-    # ``near boundary`` means (issue #745).
-    from daydream.hunk_index import range_distance
+    from daydream.hunk_index import nearest_hunk
 
-    best: int | None = None
-    best_dist = tolerance + 1
-    for start, end in hunks:
-        if start <= line <= end:
-            return line
-        dist = range_distance(line, start, end)
-        candidate = start if line < start else end
-        if dist <= tolerance and dist < best_dist:
-            best = candidate
-            best_dist = dist
-    return best
+    check = nearest_hunk(line, hunks)
+    if check.in_hunk:
+        return line
+    if check.distance is None or not check.distance <= tolerance or check.nearest_hunk is None:
+        return None
+    start, end = check.nearest_hunk
+    return start if line < start else end
 
 
 def classify(
@@ -577,7 +569,7 @@ async def _post(
         print_info(console, "Skipped posting to PR.")
         return PostStatus.NOTHING_TO_POST
 
-    plan = ClassifiedReviewPlan.from_classified(
+    result = post_classified_review(
         pr,
         classified,
         event=ReviewEvent.APPROVE if clean else ReviewEvent.COMMENT,
@@ -585,9 +577,6 @@ async def _post(
         renderers=renderers,
         diagram_blocks=diagram_blocks,
         review_warnings=review_warnings,
-    )
-    result = post_classified_review(
-        plan,
         transport=GitHubReviewTransport(target_dir=target_dir, auth=auth),
     )
     if result.folded_file_level:
@@ -760,7 +749,7 @@ def post_findings_from_artifact(
         )
         return 0
 
-    submission_plan = ClassifiedReviewPlan.from_classified(
+    result = post_classified_review(
         pr,
         classified,
         event=ReviewEvent.APPROVE if can_approve else ReviewEvent.COMMENT,
@@ -770,9 +759,6 @@ def post_findings_from_artifact(
         renderers=renderers,
         diagram_blocks=diagram_blocks,
         review_warnings=review_warnings,
-    )
-    result = post_classified_review(
-        submission_plan,
         transport=GitHubReviewTransport(target_dir=target_dir, auth=auth),
     )
     if result.folded_file_level:

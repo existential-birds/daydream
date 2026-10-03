@@ -7,12 +7,13 @@ import hashlib
 import shutil
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 from typing import Any, cast
 
-import pydantic
 import pytest
 import yaml
+from pydantic import ValidationError
 
 import daydream.benchmark as bm
 from daydream.benchmark import curation as cu, github_import as gi, snapshot as sn, storage
@@ -862,7 +863,7 @@ def test_curation_ready_requires_task_spec_sha256() -> None:
                          "location": None, "provenance": {"kind": "historical", "source_ids": ["s"]}}
     findings = [Finding(**f)]
     assert Curation(**base, findings=findings, task_spec_sha256="d" * 64).task_spec_sha256 == "d" * 64
-    with pytest.raises(pydantic.ValidationError):
+    with pytest.raises(ValidationError):
         Curation(**base, findings=findings, task_spec_sha256=None)
     # non-ready states (draft/stale) may be unset
     draft = Curation(state="draft", snapshot_attested=False, clean_attested=False,
@@ -1122,10 +1123,32 @@ def test_case_editor_replacement_repairs_a_malformed_source_finding(tmp_path: Pa
     finding_id = raw["curation"]["findings"][0]["finding_id"]
     raw["curation"]["findings"][0]["body"] = ""
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
-    with pytest.raises(pydantic.ValidationError):
+    with pytest.raises(cu.CurationError):
         editor.validate()
     editor.replace_findings(finding_id, replacements=[{"title": "Repaired", "body": "valid replacement"}])
     repaired = load_yaml_strict(path)["curation"]["findings"]
     assert len(repaired) == 1 and repaired[0]["body"] == "valid replacement"
     assert repaired[0]["finding_id"] != finding_id
     editor.validate()
+
+
+def test_case_native_admission_diagnostic_does_not_print_private_record_inputs(
+    tmp_path: Path, fake_gh: FakeGh,
+) -> None:
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh)
+    cu.CaseEditor(ws, case_id).add_findings(findings=[{"title": "Valid", "body": "Admitted finding"}])
+    path = ws / "cases" / f"{case_id}.yaml"
+    raw = load_yaml_strict(path)
+    raw["pull_request"]["body"] = "PRIVATE_PR_CONTEXT_SENTINEL"
+    raw["pull_request"]["body_sha256"] = hashlib.sha256(raw["pull_request"]["body"].encode()).hexdigest()
+    raw["curation"]["findings"][0]["body"] = "sk-NATIVE_PRIVATE_FINDING_CANARY\0"
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    before = path.read_bytes()
+    with pytest.raises(cu.CurationError) as error:
+        cu.CaseEditor(ws, case_id).validate()
+    assert "body" in str(error.value)
+    diagnostic = "".join(traceback.format_exception(error.value))
+    assert "PRIVATE_PR_CONTEXT_SENTINEL" not in diagnostic
+    assert "sk-NATIVE_PRIVATE_FINDING_CANARY" not in diagnostic
+    assert "input_value" not in str(error.value)
+    assert path.read_bytes() == before

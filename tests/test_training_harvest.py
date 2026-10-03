@@ -1407,7 +1407,10 @@ def test_native_harvest_captures_one_comments_population_for_both_scopes(
     def api(_repo: Path, endpoint: str, **_kwargs: Any) -> Any:
         calls.append(endpoint)
         if endpoint.endswith("/reviews"):
-            return []
+            return [
+                {"user": {"login": "alice"}, "state": "APPROVED"},
+                {"user": {"login": "octobot[bot]"}, "state": "COMMENTED"},
+            ]
         if endpoint.endswith("/comments"):
             return first if calls.count(endpoint) == 1 else later
         return {"merged": True, "merged_at": "2026-09-02T00:00:00Z"}
@@ -1417,7 +1420,9 @@ def test_native_harvest_captures_one_comments_population_for_both_scopes(
         _typed_row(_pr_row(run_dir, "s1")), repo_resolution=None, base_sha_status="unavailable",
     )
     assert calls == ["repos/o/r/pulls/7", "repos/o/r/pulls/7/reviews", "repos/o/r/pulls/7/comments"]
-    assert evidence.reviewer_logins == ("amelia", "outside-reviewer")
+    assert evidence.reviewer_logins == ("alice", "amelia", "outside-reviewer")
+    assert "octobot[bot]" not in evidence.reviewer_logins
+    assert first[0]["user"]["login"] not in evidence.reviewer_logins
     assert evidence.rubric.comment_resolution == CommentResolutionSignal(total=1, replied=1, unresolved=0)
     assert evidence.rubric.per_finding_resolutions is not None
     assert evidence.rubric.per_finding_resolutions[0].disposition == "accepted"

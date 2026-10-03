@@ -569,26 +569,6 @@ def local_commit_applied_signal(
     return LocalCommitAppliedSignal(verdict="rejected")
 
 
-def reviewer_logins_signal(
-    row: dict[str, Any],
-    *,
-    gh_api: Callable[..., Any],
-) -> list[str]:
-    """Return sorted human reviewers and authors replying to Daydream threads.
-
-    Union formal-review authors with reply authors; exclude bot logins and
-    anyone who authored a Daydream-footer comment. merged_by does not qualify.
-    Missing PR identity returns []; GitHub failures propagate."""
-    repo = row.get("pr_repo")
-    number = row.get("pr_number")
-    if repo is None or number is None:
-        return []
-
-    reviews = gh_api(repo, f"repos/{repo}/pulls/{number}/reviews", paginate=True)
-    comments = gh_api(repo, f"repos/{repo}/pulls/{number}/comments", paginate=True)
-    return reviewer_logins_from_comments(reviews, comments)
-
-
 def reviewer_logins_from_comments(
     reviews: list[dict[str, Any]], comments: list[dict[str, Any]],
 ) -> list[str]:

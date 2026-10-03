@@ -12,21 +12,6 @@ from daydream.run_config import RunConfig
 class _HelpAllAction(argparse.Action):
     """Rebuild and print full help while preserving the ordinary parser semantics."""
 
-    def __init__(  # noqa: A002 - `help` is argparse.Action's API parameter name
-        self,
-        option_strings: list[str],
-        dest: str = argparse.SUPPRESS,
-        default: Any = argparse.SUPPRESS,
-        help: str | None = None,
-    ):
-        super().__init__(
-            option_strings=option_strings,
-            dest=dest,
-            default=default,
-            nargs=0,
-            help=help,
-        )
-
     def __call__(
         self,
         parser: argparse.ArgumentParser,
@@ -55,6 +40,8 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
     parser.add_argument(
         "--help-all",
         action=_HelpAllAction,
+        nargs=0,
+        default=argparse.SUPPRESS,
         help="Show all flags, including advanced ones, then exit.",
     )
 

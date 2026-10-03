@@ -262,12 +262,16 @@ class PlanWriteSession:
         writer_failed = stage == "transport"
         failure = "PLAN_WRITER_FAILED" if writer_failed else "PLAN_VALIDATION_FAILED"
         detail = codes[0] if writer_failed else ",".join(codes)
-        self._entries[number] = plan_index._blocked_entry(
+        status = f"BLOCKED ({failure}: {detail})"
+        self._entries[number] = plan_index._index_entry(
             number=number,
+            slug="",
+            title=finding.get("title") or "Selected finding",
             fingerprint=reservation.fingerprint,
             finding=finding,
-            status=f"BLOCKED ({failure}: {detail})",
+            status=status,
             planned_at=self._planned_at,
+            host_blocked=plan_index._HOST_BLOCKED_STATUS.fullmatch(status) is not None,
         )
         self._failed.append((reservation.index, finding))
         self._diagnostics.append(

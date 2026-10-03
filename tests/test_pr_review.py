@@ -65,10 +65,10 @@ def _inline(path: str = "a.py", line: int = 10, body: str = "x") -> InlineReview
     return InlineReviewComment(path=path, line=line, side="RIGHT", body=body)
 
 
-def _recording_fake_submit(captured: dict[str, pr_review.ClassifiedReviewPlan],) -> Any:
-    def fake_submit(plan: pr_review.ClassifiedReviewPlan, *, transport: review_submission.ReviewTransport
+def _recording_fake_submit(captured: dict[str, Any],) -> Any:
+    def fake_submit(pr: PRInfo, classified: pr_review.ClassifiedIssues, **kwargs: Any
     ) -> review_models.ClassifiedReviewResult:
-        captured["plan"] = plan
+        captured.update(pr=pr, classified=classified, **kwargs)
         return review_models.ClassifiedReviewResult(status=pr_review.SubmissionStatus.POSTED,
             review_url="https://github.com/acme/widgets/pull/42#pullrequestreview-1",
             posted_file_level=(), folded_file_level=(), final_review_posted=True, safe_error=None,
@@ -827,7 +827,7 @@ async def test_post_succeeds_and_prints_url(monkeypatch: pytest.MonkeyPatch, tmp
     monkeypatch.setattr(
         pr_review, "classify", lambda *_a, **_k: pr_review.ClassifiedIssues(inline=[_inline(line=1)], body_only=[],),
     )
-    captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
+    captured: dict[str, Any] = {}
     fake_submit = _recording_fake_submit(captured)
     monkeypatch.setattr(pr_review, "post_classified_review", fake_submit)
     successes: list[str] = []
@@ -839,8 +839,8 @@ async def test_post_succeeds_and_prints_url(monkeypatch: pytest.MonkeyPatch, tmp
         run_context=_assumed_context("yes"), renderers=BUILTIN_RENDERERS,
         run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
     )
-    assert captured["plan"].pr.head_sha == pr.head_sha
-    assert captured["plan"].event is pr_review.ReviewEvent.COMMENT
+    assert captured["pr"].head_sha == pr.head_sha
+    assert captured["event"] is pr_review.ReviewEvent.COMMENT
     assert successes and "pullrequestreview" in successes[0]
     assert status == pr_review.PostStatus.POSTED
 
@@ -853,7 +853,7 @@ async def test_post_payload_approves_when_clean_and_enabled(monkeypatch: pytest.
             inline_issues=[ParsedIssue(path="a.py", line=1, title="t", body="b", confidence="LOW", severity="low",)],
         ),
     )
-    captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
+    captured: dict[str, Any] = {}
     fake_submit = _recording_fake_submit(captured)
     monkeypatch.setattr(pr_review, "post_classified_review", fake_submit)
     monkeypatch.setattr(pr_review, "print_success", lambda *_a, **_k: None)
@@ -864,7 +864,7 @@ async def test_post_payload_approves_when_clean_and_enabled(monkeypatch: pytest.
         approve_on_clean=True, run_context=_assumed_context("yes"), renderers=BUILTIN_RENDERERS,
         run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
     )
-    assert captured["plan"].event is pr_review.ReviewEvent.APPROVE
+    assert captured["event"] is pr_review.ReviewEvent.APPROVE
     assert status == pr_review.PostStatus.POSTED
 
 @pytest.mark.asyncio
@@ -877,7 +877,7 @@ async def test_post_warns_with_preserved_payload_path_on_failure(
     )
     err = "GitHub review submission failed (request payload preserved at /tmp/x.json)"
     monkeypatch.setattr(pr_review, "post_classified_review",
-        lambda _plan, *, transport: review_models.ClassifiedReviewResult(
+        lambda _pr, _classified, **_kwargs: review_models.ClassifiedReviewResult(
             status=pr_review.SubmissionStatus.FAILED, review_url=None, posted_file_level=(), folded_file_level=(),
             final_review_posted=False, safe_error=err,
         ),
@@ -926,7 +926,7 @@ async def test_post_skipped_when_user_declines(monkeypatch: pytest.MonkeyPatch, 
     )
     submit_called = False
 
-    def fake_submit(_plan: pr_review.ClassifiedReviewPlan, *, transport: review_submission.ReviewTransport
+    def fake_submit(_pr: PRInfo, _classified: pr_review.ClassifiedIssues, **_kwargs: Any
     ) -> review_models.ClassifiedReviewResult:
         nonlocal submit_called
         submit_called = True
@@ -969,7 +969,7 @@ async def test_post_review_from_report_empty_items_posts_diagram(
     blocks = "<details><summary><h3>Flowchart</h3></summary>\nX\n</details>"
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
     monkeypatch.setattr(pr_review, "classify", lambda *_a, **_k: pr_review.ClassifiedIssues())
-    captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
+    captured: dict[str, Any] = {}
     fake_submit = _recording_fake_submit(captured)
     monkeypatch.setattr(pr_review, "post_classified_review", fake_submit)
     monkeypatch.setattr(pr_review, "print_success", lambda *_a, **_k: None)
@@ -982,8 +982,8 @@ async def test_post_review_from_report_empty_items_posts_diagram(
     )
 
     assert status == pr_review.PostStatus.POSTED
-    assert captured["plan"].event is pr_review.ReviewEvent.COMMENT
-    assert captured["plan"].diagram_blocks == blocks
+    assert captured["event"] is pr_review.ReviewEvent.COMMENT
+    assert captured["diagram_blocks"] == blocks
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failed_reviewer", [False, True], ids=["phase-budget", "provider-failure"])
@@ -994,7 +994,7 @@ async def test_incomplete_live_review_posts_even_without_findings_and_cannot_app
     merged.write_text(json.dumps({"items": []}))
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
     monkeypatch.setattr(pr_review, "classify", lambda *_a, **_k: pr_review.ClassifiedIssues())
-    captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
+    captured: dict[str, Any] = {}
     monkeypatch.setattr(pr_review, "post_classified_review", _recording_fake_submit(captured))
     warnings: tuple[str, ...] = ("Alternatives: wall_budget_exceeded",)
     if failed_reviewer:
@@ -1008,8 +1008,8 @@ async def test_incomplete_live_review_posts_even_without_findings_and_cannot_app
         post=True, approve_on_clean=True, review_warnings=warnings, renderers=BUILTIN_RENDERERS, run_info="test run",
     )
     assert status == pr_review.PostStatus.POSTED
-    assert captured["plan"].event is pr_review.ReviewEvent.COMMENT
-    assert captured["plan"].review_warnings == warnings
+    assert captured["event"] is pr_review.ReviewEvent.COMMENT
+    assert captured["review_warnings"] == warnings
 
 
 def _commit_file(repo: Path, path: str, contents: str, message: str) -> str:

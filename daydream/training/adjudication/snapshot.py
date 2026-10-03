@@ -148,22 +148,28 @@ class FindingRecord:
             f"{record_type}:{self.fingerprint}",
         )
         return {
-            "record_id": identity, "record_type": record_type,
-            "session_id": self.session_id, "trajectory_id": self.trajectory_id,
-            "task_segment": self.segment_id, "finding_fingerprint": self.fingerprint,
-            "tier": tier, "disposition": self.resolution.get("disposition"),
+            "record_id": identity,
+            "record_type": record_type,
+            "session_id": self.session_id,
+            "trajectory_id": self.trajectory_id,
+            "task_segment": self.segment_id,
+            "finding_fingerprint": self.fingerprint,
+            "tier": tier,
+            "disposition": self.resolution.get("disposition"),
             "outcome_label": (
                 self.resolution.get("disposition")
                 if record_type == "outcome-finding" and tier == "gold" else None
             ),
             "evidence": self.evidence,
-            "profile": provenance["profile"], "stack": provenance["stack"],
+            "profile": provenance["profile"],
+            "stack": provenance["stack"],
         }
 
     def adjudication(self) -> dict[str, Any]:
         disposition = self.resolution.get("disposition")
         return {
-            "fingerprint": self.fingerprint, "disposition": disposition,
+            "fingerprint": self.fingerprint,
+            "disposition": disposition,
             "evidence": self.evidence,
             "exclusion_reason": (
                 f"non-decisive disposition {disposition!r} — missing decisive "
@@ -186,12 +192,17 @@ class FindingRecord:
                 profile = None
         reopened = prior is not None and prior.get("role") in HUMAN_ROLES and reopen_on_digest_change(prior, digest)
         return {
-            "record_id": self.record_id, "fingerprint": str(self.fingerprint),
+            "record_id": self.record_id,
+            "fingerprint": str(self.fingerprint),
             "disposition": self.resolution["disposition"],
-            "evidence": self.evidence, "evidence_digest": digest,
-            "session_id": str(self.session_id), "trajectory_id": str(self.trajectory_id),
-            "segment_id": str(self.segment_id), "profile": str(profile) if profile is not None else None,
-            "stack": provenance["stack"], "status": "reopened" if reopened else "open",
+            "evidence": self.evidence,
+            "evidence_digest": digest,
+            "session_id": str(self.session_id),
+            "trajectory_id": str(self.trajectory_id),
+            "segment_id": str(self.segment_id),
+            "profile": str(profile) if profile is not None else None,
+            "stack": provenance["stack"],
+            "status": "reopened" if reopened else "open",
             "rubric_version": rubric_version,
             "prior_disposition": str(prior["disposition"]) if reopened and prior is not None else None,
             "review_required": bool(prior.get("review_required", False)) if prior is not None else False,
@@ -200,9 +211,13 @@ class FindingRecord:
     @classmethod
     def from_annotation(cls, row: Mapping[str, Any]) -> FindingRecord:
         keys = ("fingerprint", "disposition", "evidence", "evidence_digest", "profile", "stack")
-        return cls(row.get("session_id"), row.get("trajectory_id"), row.get("segment_id"),
-                   {key: row[key] for key in keys if key in row},
-                   {key: value for key, value in row.items() if key not in keys})
+        return cls(
+            row.get("session_id"),
+            row.get("trajectory_id"),
+            row.get("segment_id"),
+            {key: row[key] for key in keys if key in row},
+            {key: value for key, value in row.items() if key not in keys},
+        )
 
     def canonical(self, *, project_conflict: bool = False) -> dict[str, Any]:
         """Project conflicts to ambiguous in both annotation views to prevent gold.
@@ -240,8 +255,10 @@ class FindingRecord:
                     metadata["review_required"] = True
                     resolution["disposition"] = "ambiguous"
                 if (
-                    resolved["role"] in HUMAN_ROLES and resolved["disposition"] in DECISIVE_DISPOSITIONS
-                    and not resolved["conflict"] and not resolved["review_required"]
+                    resolved["role"] in HUMAN_ROLES
+                    and resolved["disposition"] in DECISIVE_DISPOSITIONS
+                    and not resolved["conflict"]
+                    and not resolved["review_required"]
                 ):
                     resolution["disposition"] = resolved["disposition"]
                     metadata["human_labeler"], metadata["human_role"] = resolved["labeler"], resolved["role"]

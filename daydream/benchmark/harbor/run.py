@@ -17,6 +17,7 @@ import tomllib
 import urllib.parse
 import uuid
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -182,29 +183,6 @@ def _pre_run_summary(workspace: Path, *, env: dict[str, Any]) -> str:
             "reviewer spend is time-bounded (a per-turn timeout), not a strict dollar cap",
         ]
     )
-
-
-def _compiled_lock_sha256(workspace: Path) -> str:
-    """sha256 of the compiled ``harbor/benchmark.lock.json`` bytes."""
-    return hashlib.sha256(_compiled_lock_path(workspace).read_bytes()).hexdigest()
-
-
-def _compiled_daydream_wheel(workspace: Path) -> tuple[str, str]:
-    """Require recorded version/SHA-256 from the compiled lock; absent or malformed
-    provenance raises.
-    """
-    path = _compiled_lock_path(workspace)
-    lock = _read_compiled_lock(workspace)
-    if not isinstance(lock, dict):
-        raise RunError(f"compiled lock at {path} must be a mapping")
-    day = lock.get("daydream")
-    if not isinstance(day, dict) or not isinstance(day.get("version"), str) \
-            or not isinstance(day.get("sha256"), str):
-        raise RunError(
-            f"compiled lock at {path} is missing its 'daydream' wheel block "
-            "(version/sha256)"
-        )
-    return day["version"], day["sha256"]
 
 
 LEDGER_SUPPORTED_STATES = ("running", "complete", "cleanup_pending", "cleaned")
@@ -481,42 +459,106 @@ def _environment_from_trial(trial: Path) -> dict[str, Any]:
     }
 
 
-def _current_state_mapping(
-    workspace: Path, *, compiled_lock_sha256: str, env: dict[str, Any],
-) -> dict[str, Any]:
-    """The current Oracle/Harbor state an oracle receipt must match."""
-    version = importlib.metadata.version("harbor")
-    major_minor = ".".join(str(version).split(".")[:2])
-    sr = calibrate._load_judge_template()
-    config = _compiled_job_config(workspace)
-    mapping = {
-        "compiled_lock_sha256": compiled_lock_sha256,
-        "harbor_version": major_minor,
-        "judge_provider": env.get("DAYDREAM_JUDGE_PROVIDER") or "",
-        "judge_model": env.get("DAYDREAM_JUDGE_MODEL") or "",
-        "judge_host": calibrate._judge_host_from_env(env),
-        "reviewer_backend": env.get("DAYDREAM_REVIEW_BACKEND") or "",
-        "reviewer_model": env.get("DAYDREAM_REVIEW_MODEL") or "",
-        "reviewer_base_url": env.get("DAYDREAM_REVIEW_BASE_URL") or "",
-        "verifier_template_sha256": calibrate._render_judge_prompt_digest(sr),
-        "threshold": verifier_core.CONFIDENCE_THRESHOLD,
-        "attempts": config.get("n_attempts", 1),
-    }
-    # Bind exact wheel version/digest from the lock; malformed provenance is fatal.
-    wheel_version, wheel_sha = _compiled_daydream_wheel(workspace)
-    mapping["daydream_version"] = wheel_version
-    mapping["daydream_wheel_sha256"] = wheel_sha
-    # Bind receipt and gate to the tested profile; absence preserves legacy bytes.
-    digest = env.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST")
-    if digest:
-        mapping["profile_digest"] = str(digest)
-    # Bind receipt and run gate to identical effort; unset effort is an empty string.
-    mapping["reviewer_effort"] = env.get("DAYDREAM_REVIEW_EFFORT") or ""
-    return mapping
+OBJECTIVE_SCHEMA_VERSION = 1
+PROFILE_SCHEMA_VERSION = 1
 
+
+@dataclass(frozen=True)
+class CompatibilityIdentity:
+    """Compatibility fields bound from recorded ledger, lock, runtime, and scorer sources.
+    Missing reviewer effort remains None; attribution is never inferred.
+    """
+
+    objective_schema_version: int
+    profile_schema_version: int
+    profile_name: str
+    profile_digest: str | None
+    daydream_version: str
+    daydream_wheel_sha256: str
+    compiled_lock_sha256: str
+    harbor_version: str
+    reviewer_backend: str
+    reviewer_model: str
+    reviewer_base_url: str
+    reviewer_effort: str | None
+    judge_provider: str
+    judge_model: str
+    judge_host: str
+    verifier_template_sha256: str
+    threshold: float
+    attempts: int
+
+    @staticmethod
+    def capture(workspace: Path, *, env: dict[str, Any], judge_host: str | None = None) -> CompatibilityIdentity:
+        """Bind native lock digest and wheel identity to one local byte observation."""
+        path = _compiled_lock_path(workspace)
+        try:
+            raw = path.read_bytes()
+            lock = json.loads(raw)
+        except (OSError, ValueError) as exc:
+            raise RunError(f"cannot read compiled lock at {path}: {exc}") from exc
+        if not isinstance(lock, dict):
+            raise RunError(f"compiled lock at {path} must be a mapping")
+        day = lock.get("daydream")
+        if not isinstance(day, dict) or not isinstance(day.get("version"), str) \
+                or not isinstance(day.get("sha256"), str):
+            raise RunError(
+                f"compiled lock at {path} is missing its 'daydream' wheel block "
+                "(version/sha256)"
+            )
+        wheel_version, wheel_sha = day["version"], day["sha256"]
+        config = _compiled_job_config(workspace)
+        digest = env.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST")
+        return CompatibilityIdentity(
+            objective_schema_version=OBJECTIVE_SCHEMA_VERSION,
+            profile_schema_version=PROFILE_SCHEMA_VERSION,
+            profile_name="",
+            profile_digest=str(digest) if digest else None,
+            daydream_version=str(wheel_version),
+            daydream_wheel_sha256=str(wheel_sha),
+            compiled_lock_sha256=hashlib.sha256(raw).hexdigest(),
+            harbor_version=".".join(str(importlib.metadata.version("harbor")).split(".")[:2]),
+            reviewer_backend=env.get("DAYDREAM_REVIEW_BACKEND") or "",
+            reviewer_model=env.get("DAYDREAM_REVIEW_MODEL") or "",
+            reviewer_base_url=env.get("DAYDREAM_REVIEW_BASE_URL") or "",
+            reviewer_effort=env.get("DAYDREAM_REVIEW_EFFORT") or "",
+            judge_provider=env.get("DAYDREAM_JUDGE_PROVIDER") or "",
+            judge_model=env.get("DAYDREAM_JUDGE_MODEL") or "",
+            judge_host=judge_host if judge_host is not None else (
+                calibrate._judge_host_from_env(env) if env.get("DAYDREAM_JUDGE_PROVIDER") else ""
+            ),
+            verifier_template_sha256=calibrate._render_judge_prompt_digest(calibrate._load_judge_template()),
+            threshold=verifier_core.CONFIDENCE_THRESHOLD,
+            attempts=config.get("n_attempts", 1),
+        )
+
+    def oracle_state(self) -> dict[str, Any]:
+        """The existing receipt view omits objective-only metadata and absent profiles."""
+        values = {
+            name: getattr(self, name)
+            for name in (
+                "compiled_lock_sha256",
+                "harbor_version",
+                "judge_provider",
+                "judge_model",
+                "judge_host",
+                "reviewer_backend",
+                "reviewer_model",
+                "reviewer_base_url",
+                "verifier_template_sha256",
+                "threshold",
+                "attempts",
+                "daydream_version",
+                "daydream_wheel_sha256",
+            )
+        }
+        if self.profile_digest is not None:
+            values["profile_digest"] = self.profile_digest
+        values["reviewer_effort"] = self.reviewer_effort
+        return values
 
 def _default_run_gate(
-    workspace: Path, *, env: dict[str, Any], compiled_lock_sha256: str,
+    workspace: Path, *, identity: CompatibilityIdentity,
 ) -> str | None:
     """Gate a default (non-Oracle) run behind a matching Oracle receipt."""
     receipt_path = workspace / "harbor" / "oracle-receipt.json"
@@ -528,9 +570,7 @@ def _default_run_gate(
         return f"malformed oracle receipt at {receipt_path}: {exc}"
     if not isinstance(receipt, dict):
         return f"malformed oracle receipt at {receipt_path}"
-    current = _current_state_mapping(
-        workspace=workspace, compiled_lock_sha256=compiled_lock_sha256, env=env,
-    )
+    current = identity.oracle_state()
     for key, value in current.items():
         if receipt.get(key) != value:
             label = key.replace("_", " ")
@@ -608,10 +648,11 @@ def run_run(
             return 1
 
     # 4. Default (non-Oracle) runs gate on a prior Oracle receipt first.
-    compiled_lock_sha = _compiled_lock_sha256(workspace)
+    identity = CompatibilityIdentity.capture(workspace, env=env, judge_host=calibrate._judge_host_from_env(env))
+    compiled_lock_sha = identity.compiled_lock_sha256
     if not oracle:
         gate_reason = _default_run_gate(
-            workspace, env=env, compiled_lock_sha256=compiled_lock_sha,
+            workspace, identity=identity,
         )
         if gate_reason is not None:
             print(gate_reason, file=sys.stderr)
@@ -664,9 +705,7 @@ def run_run(
                 ledger_mark(workspace, run_id, state="cleanup_pending",
                             environments=environments)
                 return returncode or 1
-            receipt = _current_state_mapping(
-                workspace, compiled_lock_sha256=compiled_lock_sha, env=env,
-            )
+            receipt = identity.oracle_state()
             receipt["result_dir"] = str(actual_dir.resolve())
             receipt["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
             storage.atomic_write_json(

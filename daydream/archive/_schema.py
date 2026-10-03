@@ -26,7 +26,13 @@ class Column(NamedTuple):
 
 
 class RunColumn(Column):
-    """A runs column in canonical fresh-database order."""
+    """A runs column in canonical fresh-database order.
+
+    The declaration generates CREATE, additive migration, and UPSERT SQL.
+    Upgraded column order is unconstrained: migrations and reads use names.
+    Observation-owned columns stay outside metadata upserts; SQL triggers also
+    reapply the human-first label winner after metadata or observation writes.
+    """
 
 
 RUNS_COLUMNS: tuple[RunColumn, ...] = (

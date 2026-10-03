@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, TypedDict
 
 
 def as_list(value: Any) -> list[Any]:
@@ -24,6 +24,22 @@ def as_int(value: Any) -> int:
 def as_optional_str(value: Any) -> str | None:
     """Return ``value`` when it is a non-empty string, else ``None``."""
     return value if isinstance(value, str) and value else None
+
+
+class SequenceSpec(TypedDict):
+    """Schema-shaped, admitted sequence proposal or grounded final graph."""
+
+    participants: list[dict[str, Any]]
+    messages: list[dict[str, Any]]
+    blocks: list[dict[str, Any]]
+
+
+class FlowchartSpec(TypedDict):
+    """Schema-shaped flowchart; None marks an unusable author root."""
+
+    root: dict[str, Any] | None
+    nodes: list[dict[str, Any]]
+    edges: list[dict[str, Any]]
 
 
 # Ordered kind vocabularies shared by schema enums, grounding, and rendering.

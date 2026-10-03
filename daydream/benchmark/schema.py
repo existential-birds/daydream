@@ -98,7 +98,12 @@ SourceId = Annotated[str, Field(pattern=_SOURCE_ID_RE)]
 
 
 def normalize_hostname(raw: str) -> str:
-    """Normalize a DNS hostname, stripping scheme/credentials/port/query path."""
+    """Normalize a DNS hostname, stripping scheme/credentials/port/query path.
+
+    Lowers the host, drops ``<scheme>://``, ``user:pass@``, ``:port`` and a
+    trailing ``/path``. Rejects empty strings, wildcards, embedded whitespace,
+    and a result with no dot-bearing host segment.
+    """
     if not isinstance(raw, str):
         raise ValueError(f"hostname must be a string, got {raw!r}")
     host = raw
@@ -732,7 +737,11 @@ class PrioritizationCandidate(_StrictModel):
 
 
 class PrioritizationFacts(_StrictModel):
-    """Additive per-case prioritization facts (schema_version stays 2)."""
+    """Additive per-case prioritization facts (schema_version stays 2).
+
+    Written once at case materialization/refresh; all new data stays out of
+    every hash surface.
+    """
 
     extraction_version: int
     head_sha: Sha40
@@ -841,6 +850,25 @@ class CaseDocument(_StrictModel):
         if requested is not None and requested != self.pull_request.base.sha:
             raise ValueError("snapshot requested_base_sha must match pull_request.base.sha")
         return self
+
+    def validate_gold(self) -> None:
+        """Admit gold for curation/publication; stale inspection retains prior findings."""
+        if len(self.curation.findings) > 50:
+            raise ValueError("exceeds 50 gold findings")
+        candidates = {candidate.source_id: candidate for candidate in self.candidates}
+        for finding in self.curation.findings:
+            if finding.provenance.kind != "historical":
+                continue
+            source_id = finding.provenance.source_ids[0]
+            candidate = candidates.get(source_id)
+            if candidate is None:
+                raise ValueError(f"historical finding references unknown candidate {source_id}")
+            if (candidate.title, candidate.body, candidate.location) != (
+                finding.title, finding.body, finding.location,
+            ):
+                raise ValueError(
+                    f"historical finding source {source_id} does not byte-match its candidate projection"
+                )
 
 
 def derive_gold_status(curation: Curation) -> str | None:

@@ -289,12 +289,18 @@ def _arbiter_backend(ctx: FlowContext, group: PlannedGroup, *, sharded: bool, ef
 def _adjudication_contract(ctx: FlowContext, state: DeepData, phase: str, backend: Backend,
                            effort: str | None, schema: dict[str, Any], strategy: str) -> str:
     """Bind the actual execution and the source context seen by adjudication."""
-    return _digest({'backend': type(backend).__qualname__, 'model': backend.model,
-        'effort': getattr(backend, 'reasoning_effort', None), 'requested_effort': effort, 'schema': schema,
+    return _digest({
+        'backend': type(backend).__qualname__,
+        'model': backend.model,
+        'effort': getattr(backend, 'reasoning_effort', None),
+        'requested_effort': effort,
+        'schema': schema,
         'profile': phase_identity_for(ctx, phase).profile_digest,
-        'strategy': ctx.strategy(strategy), 'intent_authoritative': (state.get("intent_authoritative") or False),
+        'strategy': ctx.strategy(strategy),
+        'intent_authoritative': (state.get("intent_authoritative") or False),
         'revision': state["review_coverage"].revision.to_dict(),
-        'grounding': {**_loop_grounding(state), 'intent': digest_or_absent(state["intent_path"].read_text())}})
+        'grounding': {**_loop_grounding(state), 'intent': digest_or_absent(state["intent_path"].read_text())},
+    })
 
 
 def _arbiter_plan_component(ctx: FlowContext, state: DeepData, plan: ArbiterPlan,
@@ -593,12 +599,15 @@ async def _step_arbiter(ctx: FlowContext) -> None:
             from daydream.run_config import _resolved_reasoning_effort
 
             captured_route = deep_data.get("latency_route")
-            completion_contract: dict[str, Any] = {'plan': None, 'precision_mode': precision_mode,
+            completion_contract: dict[str, Any] = {
+                'plan': None,
+                'precision_mode': precision_mode,
                 'profile': phase_identity_for(ctx, 'arbiter').profile_digest,
                 'route': asdict(captured_route) if captured_route is not None else None,
                 'suppression': _adjudication_contract(ctx, deep_data, 'suppression',
                     ctx.backend_for('suppression'), _resolved_reasoning_effort(config, 'suppression'),
-                    SUPPRESSION_SCHEMA, 'suppression') if precision_mode else None}
+                    SUPPRESSION_SCHEMA, 'suppression') if precision_mode else None,
+            }
             if config.start_at == 'merge' and _completed_adjudication(ctx, deep_data, completion_contract):
                 return
 

@@ -467,27 +467,6 @@ def _index_row(
     )
 
 
-def _blocked_entry(
-    *,
-    number: int,
-    fingerprint: str,
-    finding: dict[str, Any],
-    status: str,
-    planned_at: str,
-) -> PlanIndexEntry:
-    """Record a blocked attempt without consulting rejected planner metadata."""
-    return _index_entry(
-        number=number,
-        slug="",
-        title=finding.get("title") or "Selected finding",
-        fingerprint=fingerprint,
-        finding=finding,
-        planned_at=planned_at,
-        status=status,
-        host_blocked=_HOST_BLOCKED_STATUS.fullmatch(status) is not None,
-    )
-
-
 def _index_entry(
     *,
     number: int,

@@ -365,25 +365,22 @@ async def _run_diagram_kind(
     deep_data = ctx.deep_data()
     schema = SEQUENCE_SPEC_SCHEMA if kind == "sequence" else FLOWCHART_SPEC_SCHEMA
 
-    def _ground(spec: dict[str, Any]) -> Any:
+    def _ground(raw: dict[str, Any]) -> Any:
         if kind == "sequence":
-            report = ground_sequence(
-                spec,
+            return ground_sequence(
+                coerce_sequence_spec(raw),
                 repo_root=ctx.work.repo,
                 hunk_ranges=hunk_ranges,
                 symbols=symbols,
             )
         else:
-            report = ground_flowchart(
-                spec,
+            return ground_flowchart(
+                coerce_flowchart_spec(raw),
                 repo_root=ctx.work.repo,
                 hunk_ranges=hunk_ranges,
                 candidate_roots=eligibility.candidate_roots,
                 symbols=symbols,
             )
-        return report
-
-    coerce = coerce_sequence_spec if kind == "sequence" else coerce_flowchart_spec
 
     diff_path: Path = deep_data["diff_path"]
     exploration_dir = deep_data.get("exploration_dir")
@@ -470,8 +467,7 @@ async def _run_diagram_kind(
     if not isinstance(structured, dict):
         return _diagram_result("failed", "no structured output produced", advisory=advisory)
 
-    spec = coerce(structured)
-    report = _ground(spec)
+    report = _ground(structured)
 
     # Exactly one repair turn, and only when the session can be resumed: a
     # fresh session would have to re-derive the whole spec from scratch, which
@@ -503,8 +499,7 @@ async def _run_diagram_kind(
             return turn
         repaired_output, _, repair_budget = turn
         if not repair_budget and isinstance(repaired_output, dict):
-            spec = coerce(repaired_output)
-            report = _ground(spec)
+            report = _ground(repaired_output)
 
     omit_reasons = list(report.omit_reasons)
     mermaid: str | None = None

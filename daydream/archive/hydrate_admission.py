@@ -350,8 +350,14 @@ def _append_dedupe_entry(
 ) -> None:
     """Append one JSONL record to the dedupe ledger (same shape as sanitize progress)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    entry = {"session_id": sid, "status": status, "reason_code": reason_code,
-             "content_digest": digest, "revision": str(revision), "at": now_iso_utc()}
+    entry = {
+        "session_id": sid,
+        "status": status,
+        "reason_code": reason_code,
+        "content_digest": digest,
+        "revision": str(revision),
+        "at": now_iso_utc(),
+    }
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry) + "\n")
 

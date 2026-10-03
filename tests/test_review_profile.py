@@ -163,3 +163,18 @@ def test_host_policy_denial_precedes_unknown_policy_fields(scope: str) -> None:
     with pytest.raises(rp.ProfileError, match="host-owned.*backend.*profile") as error:
         rp.parse_profile(text, source="owner.toml")
     assert error.value.source == "owner.toml"
+
+
+@pytest.mark.parametrize("profile", [
+    'backend = "api_key=PROFILE-PRIVATE-CANARY"',
+    '[pipeline]\nreview_wall_budget_s = "api_key=PROFILE-PRIVATE-CANARY"',
+    '[strategies.intent]\ncontent = ["api_key=PROFILE-PRIVATE-CANARY"]',
+])
+def test_profile_admission_traceback_does_not_expose_private_input(profile: str) -> None:
+    import traceback
+
+    with pytest.raises(rp.ProfileError) as error:
+        rp.parse_profile(profile, source="operator-profile.toml")
+    rendered = "".join(traceback.format_exception(error.value))
+    assert "PROFILE-PRIVATE-CANARY" not in rendered
+    assert "operator-profile.toml" in rendered

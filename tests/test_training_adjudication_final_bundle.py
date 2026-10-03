@@ -5,6 +5,7 @@ or hand-authored lineage.
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -288,3 +289,54 @@ def test_complete_seven_file_bundle_passes_existing_public_consumer(tmp_path: Pa
     lineage, annotations = _verify_annotation_bundle(out, load_curated_bundle(index_root), index_root)
     assert lineage["curation_id"] == _CURATION_ID
     assert annotations == (out / "annotations.jsonl").read_bytes()
+
+
+@pytest.mark.parametrize("name", ["annotations.jsonl", "preview-manifest.json"])
+def test_final_bundle_binds_parsed_inputs_and_emitted_bytes_to_one_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str,
+) -> None:
+    index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
+    run_canonical_harvest(index_root, mat, archive_dir)
+    source = mat / name
+    original = source.read_bytes()
+    if name == "annotations.jsonl":
+        replacement = b""
+    else:
+        changed = json.loads(original)
+        changed["classifier_version"] = "replacement-policy"
+        replacement = (json.dumps(changed, sort_keys=True) + "\n").encode("utf-8")
+    replaced = False
+    read_bytes = Path.read_bytes
+    read_text = Path.read_text
+
+    def replace_after_capture(path: Path) -> None:
+        nonlocal replaced
+        if path == source and not replaced:
+            path.write_bytes(replacement)
+            replaced = True
+
+    def capture_bytes(path: Path) -> bytes:
+        result = read_bytes(path)
+        replace_after_capture(path)
+        return result
+
+    def capture_text(path: Path, *args: Any, **kwargs: Any) -> str:
+        result = read_text(path, *args, **kwargs)
+        replace_after_capture(path)
+        return result
+
+    out = tmp_path / "final-bundle"
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_bytes", capture_bytes)
+        patch.setattr(Path, "read_text", capture_text)
+        result = build_final_bundle(
+            index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out,
+        )
+    assert replaced
+    assert (out / name).read_bytes() == original
+    annotations = [json.loads(line) for line in (out / "annotations.jsonl").read_bytes().splitlines()
+                   if line.strip()]
+    assert result["record_count"] == len(annotations)
+    manifest = json.loads((out / "preview-manifest.json").read_bytes())
+    lineage = json.loads((out / "lineage.json").read_bytes())
+    assert lineage["classifier_version"] == manifest["classifier_version"]

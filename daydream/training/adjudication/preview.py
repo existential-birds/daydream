@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from daydream.archive.hydrate import HubUnavailableError, RepoInfo, resolve_source_revision
+from daydream.archive.hydrate import _FULL_SHA_RE, HubUnavailableError, MovingBranchError
 from daydream.json_utils import canonical_json as _canonical
 from daydream.training.adjudication.observations import load_observations, prior_adjudications
 from daydream.training.adjudication.queue import build_queue
@@ -20,32 +20,6 @@ _SESSIONS_OUT_FILENAME = "sessions.jsonl"
 _REVISION_FILENAME = "index-revision.txt"
 
 _ITEM_KEYS = ("disposition", "evidence_digest", "fingerprint", "record_id", "status")
-
-
-class _LocalIndexClient:
-    """Reuse source-revision policy for a local index.
-
-    A full SHA is already pinned; an empty revision list makes symbolic refs
-    raise MovingBranchError. This client never downloads or uploads."""
-
-    def repo_info(self, revision: str | None = None) -> RepoInfo:
-        return RepoInfo(sha=revision or "", private=True)
-
-    def list_repo_files(self, revision: str | None = None) -> list[str]:
-        return []
-
-    def download_file(self, path_in_repo: str, revision: str | None = None) -> bytes:
-        raise HubUnavailableError(f"local index has no downloadable file {path_in_repo!r}")
-
-    def upload_files(self, mapping: dict[str | Path, Path], commit_message: str) -> None:
-        raise HubUnavailableError("local index client never uploads")
-
-    @property
-    def repo_private(self) -> bool:
-        return True
-
-    def list_revisions(self) -> list[str]:
-        return []
 
 
 def preview_ledger_digest(ledger: dict[str, Any]) -> str:
@@ -71,13 +45,16 @@ def _load_sessions(index_root: Path) -> tuple[list[dict[str, Any]], str]:
     index_revision = hashlib.sha256(source_bytes).hexdigest()
     revision_file = index_root / _REVISION_FILENAME
     if revision_file.is_file():
-        # Delegate pinned-revision resolution to hydrate.py's resolver: a
-        # moving branch/tag raises MovingBranchError, a full SHA passes through.
+        # A local revision pin has no remote authority to resolve symbolic refs.
         raw_revision = revision_file.read_text(encoding="utf-8").strip()
         if raw_revision:
-            index_revision = resolve_source_revision(
-                _LocalIndexClient(), raw_revision, exploratory=False
-            )
+            if _FULL_SHA_RE.fullmatch(raw_revision.lower()) is None:
+                raise MovingBranchError(
+                    f"ref {raw_revision!r} is a moving branch/tag, not a pinned commit; pass "
+                    "exploratory=True to accept it (output is non-canonical), or pin an "
+                    "exact 40-char commit SHA"
+                )
+            index_revision = raw_revision.lower()
     return sessions, index_revision
 
 

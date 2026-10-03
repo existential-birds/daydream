@@ -830,3 +830,52 @@ def test_evidence_line_constraints_reject_nonpositive_values(line: Any) -> None:
 def test_native_scalar_constraints_preserve_python_string_admission() -> None:
     source = Source.model_validate({"provider": "github", "hostname": b"github.com", "repository": "OWNER/REPO"})
     assert source.hostname == "github.com"
+
+
+@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("tamper", ["unknown-source", "rewritten-content"])
+def test_case_native_admission_requires_historical_candidate_content(version: int, tamper: str) -> None:
+    raw = _valid_case_dict()
+    raw["schema_version"] = version
+    finding = raw["curation"]["findings"][0]
+    finding["provenance"] = {"kind": "historical", "source_ids": ["github:inline_comment:1"]}
+    if tamper == "rewritten-content":
+        raw["candidates"] = [{
+            "source_id": "github:inline_comment:1", "title": "Original review content",
+            "body": finding["body"], "severity": None, "location": finding["location"],
+            "exact_acceptable": True, "not_exact_reason": None,
+        }]
+    case = CaseDocument.model_validate(raw)
+    with pytest.raises(ValueError, match="historical finding"):
+        case.validate_gold()
+
+
+def test_native_case_gold_admission_enforces_the_scorer_population_cap() -> None:
+    raw = _valid_case_dict()
+    template = raw["curation"]["findings"][0]
+    raw["curation"]["findings"] = []
+    for i in range(51):
+        finding = {**template, "title": f"Unique finding {i}"}
+        finding["finding_id"] = derive_finding_id(finding, case_id=raw["case_id"])
+        raw["curation"]["findings"].append(finding)
+    case = CaseDocument.model_validate(raw)
+    with pytest.raises(ValueError, match="exceeds 50 gold findings"):
+        case.validate_gold()
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_stale_case_inspection_preserves_prior_gold_without_admitting_it(version: int) -> None:
+    raw = _valid_case_dict()
+    raw["schema_version"] = version
+    finding = raw["curation"]["findings"][0]
+    finding["provenance"] = {"kind": "historical", "source_ids": ["github:inline_comment:1"]}
+    raw["curation"].update(state="stale", snapshot_attested=False, task_spec_sha256=None)
+    raw["candidates"] = [{
+        "source_id": "github:inline_comment:1", "title": "Refreshed candidate content",
+        "body": finding["body"], "severity": None, "location": finding["location"],
+        "exact_acceptable": True, "not_exact_reason": None,
+    }]
+    case = CaseDocument.model_validate(raw)
+    assert case.curation.findings[0].title == finding["title"]
+    with pytest.raises(ValueError, match="does not byte-match"):
+        case.validate_gold()

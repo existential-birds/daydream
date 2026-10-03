@@ -145,7 +145,7 @@ def _require_regular_input(root: Path, name: str) -> Path:
     return path
 
 
-def _load_materialized_records(materialize_dir: Path) -> list[dict[str, Any]]:
+def _load_materialized_records(materialize_dir: Path) -> tuple[list[dict[str, Any]], bytes]:
     annotations_path = materialize_dir / _ANNOTATIONS_FILENAME
     return read_jsonl(
         annotations_path,
@@ -157,12 +157,12 @@ def _load_materialized_records(materialize_dir: Path) -> list[dict[str, Any]]:
     )
 
 
-def _load_manifest(materialize_dir: Path) -> dict[str, Any]:
+def _load_manifest(materialize_dir: Path) -> tuple[dict[str, Any], bytes]:
     manifest_path = materialize_dir / _MANIFEST_FILENAME
-    manifest = _read_manifest(manifest_path)
+    manifest, payload = _read_manifest(manifest_path)
     if not isinstance(manifest, dict):
         raise ValueError(f"preview manifest at {manifest_path} is not a JSON object")
-    return manifest
+    return manifest, payload
 
 
 def _lineage_field(manifest: Mapping[str, Any], field: str, manifest_path: Path) -> str:
@@ -304,10 +304,10 @@ def build_final_bundle(
     _require_regular_input(materialize_dir, _ANNOTATIONS_FILENAME)
     _require_regular_input(materialize_dir, _SESSIONS_OUT_FILENAME)
     _require_regular_input(materialize_dir, _MANIFEST_FILENAME)
-    records = _load_materialized_records(materialize_dir)
+    records, annotation_bytes = _load_materialized_records(materialize_dir)
     _load_sessions_records(materialize_dir)
     manifest_path = materialize_dir / _MANIFEST_FILENAME
-    manifest = _load_manifest(materialize_dir)
+    manifest, manifest_bytes = _load_manifest(materialize_dir)
     preview_curation = _lineage_field(manifest, "curation_id", manifest_path)
     preview_source = _lineage_field(manifest, "source_hub_commit", manifest_path)
     preview_sanitized = _lineage_field(manifest, "sanitized_hub_commit", manifest_path)
@@ -328,10 +328,9 @@ def build_final_bundle(
 
     # 1. Both consumer views use the canonical merged records. Copying preview
     #    sessions here would discard imported/human decisions for projection.
-    annotation_bytes = (materialize_dir / _ANNOTATIONS_FILENAME).read_bytes()
     for name in (_ANNOTATIONS_FILENAME, _SESSIONS_OUT_FILENAME):
         _write_bundle_file(out_dir, name, annotation_bytes)
-    _write_bundle_file(out_dir, _MANIFEST_FILENAME, manifest_path.read_bytes())
+    _write_bundle_file(out_dir, _MANIFEST_FILENAME, manifest_bytes)
     _write_bundle_file(out_dir, _POLICY_BINDING_FILENAME, policy_binding)
 
     # 2. label-observations.jsonl: the archive's per-session observation

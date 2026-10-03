@@ -15,23 +15,23 @@
     "inventory_sha256": "da1ec8cc60740f71f9b15b35db6afc44b0a5d97c10c1c5654a5d29b59481f846"
   },
   "after": {
-    "files": 362,
-    "physical_loc": 107920,
-    "inventory_sha256": "76cc2585344c06d20088698af1466bab69e33436b8d4e3882a0511bd5590422f",
-    "source_loc": 82698,
-    "clone_loc": 2190,
-    "high_cc_functions": 490,
-    "high_cog_functions": 601
+    "files": 363,
+    "physical_loc": 107691,
+    "inventory_sha256": "036bd5e167a222b8e1986c2f4e77a2733d8ebf9e92b75daa468ad226993c92fe",
+    "source_loc": 82441,
+    "clone_loc": 2139,
+    "high_cc_functions": 483,
+    "high_cog_functions": 595
   },
-  "physical_reduction_percent": 4.802,
-  "source_reduction_percent": 3.308,
+  "physical_reduction_percent": 5.004,
+  "source_reduction_percent": 3.608,
   "requested_physical_reduction_percent": 10,
   "target_met": false,
   "requested_source_reduction_percent": 10,
   "physical_target_max": 102027,
   "source_target_max": 76974,
-  "physical_shortfall_loc": 5893,
-  "source_shortfall_loc": 5724,
+  "physical_shortfall_loc": 5664,
+  "source_shortfall_loc": 5467,
   "reproduction": "docs/measurements/production-simplification-reproduce.md",
   "continuation_start": {
     "commit": "b98a9dd51fde81df5dc4534a85ab29a986f6a127",
@@ -40,8 +40,8 @@
     "source_loc": 85165
   },
   "continuation_reduction": {
-    "physical_loc": 3105,
-    "source_loc": 2467
+    "physical_loc": 3334,
+    "source_loc": 2724
   },
   "upstream": {
     "pr_base_verified": "58cc88e4d7091b27afe1b2a6eec486504e255dfd",

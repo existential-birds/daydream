@@ -27,6 +27,10 @@ from daydream.repository_paths import (
 WORKING_DIRECTORY_SCHEMA: dict[str, Any] = text_schema(
     min_length=1,
     max_length=REPOSITORY_FILE_PATH_MAX_LENGTH,
+    # Three spellings: ".", a relative path (optionally ./-prefixed), or an
+    # absolute in-repo path. The anchor-free segment core is embedded directly
+    # (no \A/\Z slicing); the ./-prefix stays out of the absolute alternative
+    # so "/./foo" is not schema-legal.
     pattern=rf"^(?:\.|(?:\./)?{REPOSITORY_FILE_PATH_SEGMENTS}|/{REPOSITORY_FILE_PATH_SEGMENTS})$",
 )
 LINE_ANCHOR_SCHEMA: dict[str, Any] = strict_object({

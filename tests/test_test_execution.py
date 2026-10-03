@@ -332,3 +332,40 @@ def test_only_a_passed_host_outcome_is_reusable(outcome: str) -> None:
 
 def test_an_agent_outcome_is_never_reusable() -> None:
     assert _identity(kind="agent").reusable is False
+
+
+@pytest.mark.parametrize(("name", "initial", "replacement"), [
+    ("pyproject.toml", b'[project]\nrequires-python = ">=3.12"\n', b'[project]\nrequires-python = ">=3.13"\n'),
+    (".python-version", b"3.12\r\n", b"3.13\r\n"),
+])
+def test_package_interpreter_and_digest_use_the_same_observed_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, initial: bytes, replacement: bytes,
+) -> None:
+    from collections.abc import Iterator
+    from contextlib import contextmanager
+    from typing import Any
+
+    (tmp_path / "setup.cfg").write_text("[metadata]\nname = captured-input\n")
+    target = tmp_path / name
+    target.write_bytes(initial)
+    admitted = resolve_package(tmp_path, tmp_path)
+    native_open = Path.open
+    replaced = False
+
+    @contextmanager
+    def changing_open(path: Path, *args: Any, **kwargs: Any) -> Iterator[Any]:
+        nonlocal replaced
+        with native_open(path, *args, **kwargs) as stream:
+            yield stream
+        if path == target and not replaced:
+            replaced = True
+            with native_open(target, "wb") as stream:
+                stream.write(replacement)
+
+    monkeypatch.setattr(Path, "open", changing_open)
+    captured = resolve_package(tmp_path, tmp_path)
+    assert replaced and target.read_bytes() == replacement
+    assert captured == admitted
+    next_capture = resolve_package(tmp_path, tmp_path)
+    assert next_capture.interpreter != admitted.interpreter
+    assert next_capture.config_digest != admitted.config_digest

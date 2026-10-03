@@ -8,7 +8,8 @@ from __future__ import annotations
 import codecs
 import json
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -179,6 +180,28 @@ def range_distance(line: int, start: int, end: int) -> int:
     if line < start:
         return start - line
     return line - end
+
+
+
+@dataclass
+class LocationCheck:
+    """Selected inclusive hunk and its boundary distance for one citation."""
+
+    in_hunk: bool
+    nearest_hunk: tuple[int, int] | None
+    distance: int | None
+
+
+def nearest_hunk(line: int, ranges: Iterable[tuple[int, int]]) -> LocationCheck:
+    """Keep the first positive-distance tie and the last containing hunk."""
+    best: tuple[int, int] | None = None
+    best_distance: int | None = None
+    for start, end in ranges:
+        distance = range_distance(line, start, end)
+        if best_distance is None or distance < best_distance or distance == 0:
+            best = (start, end)
+            best_distance = distance
+    return LocationCheck(best_distance == 0, best, best_distance)
 
 
 def head_side_ranges(parsed: dict[str, dict[str, Any]]) -> list[tuple[int, int]]:

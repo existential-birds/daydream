@@ -482,7 +482,7 @@ def parse_profile(toml_text: str, *, source: str = "<string>") -> ReviewProfile:
     except ValidationError as exc:
         error = exc.errors(include_url=False, include_input=False)[0]
         location = ".".join(str(part) for part in error["loc"])
-        raise ProfileError(f"{location}: {error['msg']}", source) from exc
+        raise ProfileError(f"{location}: {error['msg']}", source) from None
 
 
 @dataclass(frozen=True)

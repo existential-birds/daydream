@@ -493,20 +493,11 @@ def prioritized_evidence(raw: dict[str, Any]) -> dict[str, Any]:
 
 # derivation + validation
 
-MAX_GOLD_FINDINGS = 50
-
-
 def _curation_model(curation: dict[str, Any]) -> schema.Curation:
     """Parse curation without derived gold_mode or the task-spec approval audit timestamp."""
     return schema.Curation(
         **{k: v for k, v in curation.items() if k not in ("gold_mode", "task_spec_approved_at")}
     )
-
-
-def _snapshot_head(raw: dict[str, Any]) -> str | None:
-    """The 40-hex head SHA the case's snapshot was frozen at, or None."""
-    snapshot_doc = raw.get("snapshot") or {}
-    return snapshot_doc.get("original_head_sha")
 
 
 def _projection_matches(candidate: dict[str, Any], finding: dict[str, Any]) -> bool:
@@ -692,68 +683,33 @@ class CaseEditor:
                 )
                 tx.commit()
 
-    def _validate_location(self, raw: dict[str, Any], finding: dict[str, Any]) -> None:
-        """Validate the finding range against the frozen bundle head, independently of the mirror."""
-        location = finding.get("location")
-        if location is None:
-            return
-        if not _snapshot_head(raw):
-            raise CurationError("finding has a location but the snapshot carries no frozen head")
-        path = location.get("path")
-        start = location.get("start_line")
-        end = location.get("end_line")
-        if start is None or end is None:
-            raise CurationError(
-                f"finding location {path!r} is missing start_line and/or end_line"
-            )
-        line_count = _head_file_line_count(self.root, raw.get("snapshot") or {}, path)
-        if start < 1:
-            raise CurationError(f"finding location start_line {start} must be >= 1")
-        if end > line_count:
-            raise CurationError(
-                f"finding location {path!r} end_line {end} exceeds the head file's "
-                f"line count {line_count}"
-            )
-
-
     def _validate(self, raw: dict[str, Any]) -> None:
-        """Validate service rules before the full schema; preserve CurationError versus ValidationError."""
-        curation = raw.get("curation") or {}
-        findings = curation.get("findings") or []
-
-        if len(findings) > MAX_GOLD_FINDINGS:
-            raise CurationError(f"case {self.case_id} exceeds 50 gold findings")
-        ids = [f.get("finding_id") for f in findings]
-        for fid in set(ids):
-            if ids.count(fid) > 1:
-                raise CurationError(f"case {self.case_id} has duplicate finding {fid}")
-
-        # ready => snapshot_attested and stale => not-attested are enforced by the
-        # schema Curation._consistent validator.
-        candidates = raw.get("candidates") or []
-        for finding in findings:
-            self._validate_location(raw, finding)
-            provenance = finding.get("provenance") or {}
-            if provenance.get("kind") == "historical":
-                srcs = provenance.get("source_ids") or []
-                if len(srcs) != 1:
-                    raise CurationError(
-                        f"case {self.case_id} historical finding must reference exactly one source"
-                    )
-                src = srcs[0]
-                cand = next((c for c in candidates if c.get("source_id") == src), None)
-                if cand is None:
-                    raise CurationError(f"historical finding references unknown candidate {src}")
-                if not _projection_matches(cand, finding):
-                    raise CurationError(
-                        f"historical finding source {src} does not byte-match its candidate projection"
-                    )
-
-        schema.CaseDocument(**_schema_ready(raw))
+        """Admit the complete case, then check located findings against frozen Git bytes."""
+        try:
+            case = schema.CaseDocument.model_validate(_schema_ready(raw))
+            case.validate_gold()
+        except ValueError as exc:
+            if isinstance(exc, ValidationError):
+                error = exc.errors(include_input=False, include_context=False)[0]
+                field = ".".join(str(part) for part in error["loc"]) or "case"
+                message = f"{field}: {error['msg']}"
+            else:
+                message = str(exc)
+            raise CurationError(f"case {self.case_id}: {message}") from None
+        for finding in case.curation.findings:
+            location = finding.location
+            if location is None:
+                continue
+            line_count = _head_file_line_count(self.root, raw.get("snapshot") or {}, location.path)
+            if location.end_line > line_count:
+                raise CurationError(
+                    f"finding location {location.path!r} end_line {location.end_line} exceeds the head file's "
+                    f"line count {line_count}"
+                )
 
 
     def validate(self) -> None:
-        """Read and validate one case without writing; propagate service and schema errors unchanged."""
+        """Read and validate one case without writing, with bounded curation diagnostics."""
         raw = _load_case(self.root, self.case_id)
         self._validate(raw)
         return None
@@ -844,7 +800,7 @@ class CaseEditor:
             curation = raw.setdefault("curation", {})
             # Single-sourced empty-gold eligibility: derive_gold_status is None
             # exactly when the gold set is empty and never clean-attested -- the
-            # same derived status harbor/build._is_compilable trusts.
+            # same derived status the native compiler trusts.
             if schema.derive_gold_status(_curation_model(curation)) is None:
                 raise CurationError(
                     f"case {self.case_id} cannot be marked ready with an empty gold findings set "

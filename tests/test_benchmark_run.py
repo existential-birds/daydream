@@ -319,15 +319,15 @@ def test_gate_blocks_on_compiled_lock_mismatch(tmp_path: Path) -> None:
     changed = {"schema_version": 1, "cases": {}, "touched": True, "daydream": _WHEEL}
     (ws / "harbor" / "benchmark.lock.json").write_text(json.dumps(changed))
     reason = run_mod._default_run_gate(
-        ws, env=_env(), compiled_lock_sha256=hashlib.sha256(json.dumps(changed).encode()).hexdigest(),
+        ws, identity=run_mod.CompatibilityIdentity.capture(ws, env=_env()),
     )
     assert reason is not None
     assert "compiled lock" in reason
 
 def test_gate_passes_when_inputs_match(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
-    _, lock_sha = _seed_passing_oracle_receipt(ws)
-    reason = run_mod._default_run_gate(ws, env=_env(), compiled_lock_sha256=lock_sha)
+    _seed_passing_oracle_receipt(ws)
+    reason = run_mod._default_run_gate(ws, identity=run_mod.CompatibilityIdentity.capture(ws, env=_env()))
     assert reason is None
 
 def test_run_oracle_writes_receipt_and_running_to_complete(tmp_path: Path) -> None:
@@ -488,7 +488,7 @@ def test_parse_job_results_records_env_when_reward_missing(tmp_path: Path) -> No
 
 def test_current_state_mapping_includes_effort_and_wheel_digest(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
-    m = run_mod._current_state_mapping(workspace=ws, compiled_lock_sha256="a" * 64, env=_env())
+    m = run_mod.CompatibilityIdentity.capture(ws, env=_env()).oracle_state()
     assert m["daydream_wheel_sha256"] == "c" * 64
     assert m["daydream_version"] == "0.1.0"
     assert "reviewer_effort" in m
@@ -517,17 +517,15 @@ def test_ledger_records_reviewer_effort(
 
 def test_default_run_accepts_old_receipt_with_legacy_calibration_field(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
-    lock_sha = _compiled_lock_sha(ws)
-    receipt = run_mod._current_state_mapping(ws, compiled_lock_sha256=lock_sha, env=_env())
+    receipt = run_mod.CompatibilityIdentity.capture(ws, env=_env()).oracle_state()
     receipt["calibration_receipt_sha256"] = "0" * 64  # legacy extra field
     (ws / "harbor" / "oracle-receipt.json").write_text(json.dumps(receipt))
-    reason = run_mod._default_run_gate(ws, env=_env(), compiled_lock_sha256=lock_sha)
+    reason = run_mod._default_run_gate(ws, identity=run_mod.CompatibilityIdentity.capture(ws, env=_env()))
     assert reason is None  # legacy field is ignored, not compared
 
 def test_oracle_receipt_has_no_calibration_state(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
-    lock_sha = _compiled_lock_sha(ws)
-    mapping = run_mod._current_state_mapping(ws, compiled_lock_sha256=lock_sha, env=_env())
+    mapping = run_mod.CompatibilityIdentity.capture(ws, env=_env()).oracle_state()
     assert "calibration_receipt_sha256" not in mapping
 
 def test_oracle_writes_receipt_without_calibration_file(tmp_path: Path) -> None:
@@ -543,6 +541,30 @@ def test_oracle_writes_receipt_without_calibration_file(tmp_path: Path) -> None:
 
 def test_default_run_still_blocks_without_oracle_receipt(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
-    lock_sha = _compiled_lock_sha(ws)
-    reason = run_mod._default_run_gate(ws, env=_env(), compiled_lock_sha256=lock_sha)
+    reason = run_mod._default_run_gate(ws, identity=run_mod.CompatibilityIdentity.capture(ws, env=_env()))
     assert reason is not None and "no matching oracle receipt" in reason
+
+
+def test_oracle_receipt_retains_the_identity_admitted_before_execution(tmp_path: Path) -> None:
+    ws = _ws(tmp_path)
+    lock_path = ws / "harbor" / "benchmark.lock.json"
+    admitted_digest = _compiled_lock_sha(ws)
+    create_results = _reward_spawn(ws)
+
+    def replace_after_execution(cmd: list[str], *, cwd: Path, env: dict[str, str]) -> dict[str, Any]:
+        result: dict[str, Any] = create_results(cmd, cwd=cwd, env=env)
+        replacement = json.loads(lock_path.read_text())
+        replacement["daydream"] = {"version": "replacement", "sha256": "b" * 64}
+        lock_path.write_text(json.dumps(replacement))
+        return result
+
+    assert run_mod.run_run(
+        ws, oracle=True, yes=True, env=_env(), spawn=replace_after_execution, docker_ok=_docker_ok,
+    ) == 0
+    receipt = json.loads((ws / "harbor" / "oracle-receipt.json").read_text())
+    assert receipt["compiled_lock_sha256"] == admitted_digest
+    assert receipt["daydream_version"] == "0.1.0"
+    assert receipt["daydream_wheel_sha256"] == "c" * 64
+    changed = run_mod.CompatibilityIdentity.capture(ws, env=_env())
+    reason = run_mod._default_run_gate(ws, identity=changed)
+    assert reason is not None and "compiled lock" in reason

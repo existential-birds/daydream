@@ -71,7 +71,11 @@ def _copy_snapshot_bundle(
     artifact_provenance: ArtifactEvidenceProvenance,
     run_dir: Path,
 ) -> None:
-    """Assemble an archive only from frozen tree and immutable document bytes."""
+    """Assemble an archive only from frozen tree and immutable document bytes.
+
+    The registered findings destination is relocated from its live write path
+    into the frozen tree; public output paths are never reconstructed.
+    """
     from daydream.artifact_visibility import OutputLabel
 
     recorder_provenance = run.recorder_provenance
@@ -106,7 +110,13 @@ def _manifest_state(
     run: ArchiveRunSnapshot,
     frozen_extra: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Derive the status, fix, and pipeline manifest fields for one run tree."""
+    """Derive the status, fix, and pipeline manifest fields for one run tree.
+
+    Derivation is gated to the phases this registered flow can execute, and
+    every sidecar read is session-bound, so a non-deep or interrupted run never
+    adopts prior state. The ``derive_*`` helpers never raise on absent or
+    malformed artifacts, so this can never abort an archive.
+    """
     from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
     from daydream.retry_policy import derive_retry_summary
 
@@ -337,7 +347,12 @@ def _read_fix_leftover_untracked(target_dir: Path) -> list[str] | None:
 def _read_session_bound_json_artifact(
     target_dir: Path, session_id: str | None, resolver: Callable[[Path], Path]
 ) -> dict[str, Any] | None:
-    """Read a deep sidecar only when its ``session_id`` matches this run."""
+    """Read a deep sidecar only when its ``session_id`` matches this run.
+
+    Return ``None`` for absent, empty, malformed, unbound, or stale artifacts,
+    or when this run has no session ID. Prior runs' sidecars cannot be attributed
+    to the current run. ``resolver`` receives ``<target_dir>/.daydream/deep``.
+    """
     if session_id is None:
         return None
     data: dict[str, Any] | None = _read_json_artifact(
@@ -368,7 +383,10 @@ def _project_documents(
     *,
     session_id: str,
 ) -> None:
-    """Project the exact frozen trajectory bytes into one archive bundle."""
+    """Project the exact frozen trajectory bytes into one archive bundle.
+
+    ``session_id`` additionally binds every document to the archived run.
+    """
     root_path = run_document_path(run_dir)
     root_path.unlink(missing_ok=True)
     shutil.rmtree(siblings_directory(run_dir), ignore_errors=True)
@@ -402,7 +420,13 @@ def _copy_run_artifacts(
     diagram_only: bool,
     findings_src: Path | None,
 ) -> None:
-    """Copy one run's non-trajectory artifacts to the archive run directory."""
+    """Copy one run's non-trajectory artifacts to the archive run directory.
+
+    Diagram-only runs retain prior deep-review state in the tree, so they
+    archive only ``diagram.json`` and ``diagram.md`` from that directory, and
+    neither the review output nor the recommended patch. Missing files are
+    silently skipped.
+    """
     daydream_dir = target_dir / ".daydream"
     deep_dir = daydream_dir / "deep"
     if diagram_only:

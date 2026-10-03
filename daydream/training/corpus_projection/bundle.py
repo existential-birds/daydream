@@ -129,7 +129,7 @@ def load_curated_bundle(root: Path) -> CuratedBundle:
     # (schema-pinned ``curated/<curation-id>/``) is what SHA256SUMS relpaths
     # are written relative to, so checksum resolution must see it.
     for _name, _payload in _verified_payloads(root, str(doc["publication_prefix"])):
-        pass
+        del _payload
 
     bundle = CuratedBundle(
         curation_id=doc["curation_id"],

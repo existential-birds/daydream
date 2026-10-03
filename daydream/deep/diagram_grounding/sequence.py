@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,52 +15,11 @@ from daydream.config import (
 from daydream.deep.diagram_grounding import evidence
 from daydream.deep.diagram_grounding.models import ElementCheck, GroundingReport
 from daydream.deep.diagram_types import (
-    BLOCK_KINDS,
-    MESSAGE_KINDS,
-    PARTICIPANT_KINDS,
-    as_dict as _as_dict,
-    as_int as _norm_line,
-    as_list as _as_list,
-    as_optional_str as _norm_optional_str,
+    SequenceSpec,
 )
-from daydream.repository_paths import strip_dot_slash
 
 _MIN_MESSAGES = 3
 _MIN_PARTICIPANTS = 2
-
-
-def _require(record: dict[str, Any] | None) -> dict[str, Any]:
-    """Return ``record``, asserting it is present (grounded messages always are)."""
-    assert record is not None
-    return record
-
-
-def _normalize_participant(raw: dict[str, Any]) -> dict[str, Any]:
-    """Return the schema-shaped participant for ``spec_final``."""
-    files = [file for file in _as_list(raw.get("files")) if isinstance(file, str)]
-    return {
-        "name": evidence.norm_str(raw.get("name")),
-        "kind": evidence.norm_str(raw.get("kind")),
-        "files": [strip_dot_slash(file) for file in files],
-        "service": _norm_optional_str(raw.get("service")),
-    }
-
-
-def _normalize_message(raw: dict[str, Any]) -> dict[str, Any]:
-    """Return the schema-shaped message for ``spec_final``."""
-    citation = _as_dict(raw.get("evidence"))
-    return {
-        "from": evidence.norm_str(raw.get("from")),
-        "to": evidence.norm_str(raw.get("to")),
-        "label": evidence.norm_str(raw.get("label")),
-        "kind": evidence.norm_str(raw.get("kind")),
-        "changed": bool(raw.get("changed")),
-        "evidence": {
-            "file": strip_dot_slash(evidence.norm_str(citation.get("file"))),
-            "line": _norm_line(citation.get("line")),
-            "symbol": evidence.norm_str(citation.get("symbol")),
-        },
-    }
 
 
 def _ground_participants(
@@ -75,17 +35,8 @@ def _ground_participants(
     """
     checks: list[ElementCheck] = []
     accepted: dict[str, dict[str, Any]] = {}
-    seen: set[str] = set()
-    for raw in participants:
-        record = _normalize_participant(raw)
+    for record in participants:
         name = record["name"]
-        ref = name or f"<unnamed:{len(checks)}>"
-        if not name or record["kind"] not in PARTICIPANT_KINDS or name in seen:
-            checks.append(
-                ElementCheck("participant", ref, False, "MALFORMED_ELEMENT")
-            )
-            continue
-        seen.add(name)
         reason: str | None = None
         if record["kind"] == "external":
             later = [i for i in source_indices.get(name, []) if i != 0]
@@ -136,9 +87,6 @@ def _ground_message(
 ) -> ElementCheck:
     """Check one message and rewrite its evidence line on a successful snap."""
     check = ElementCheck("message", str(index), True)
-    if record["kind"] not in MESSAGE_KINDS:
-        check.grounded, check.reason = False, "MALFORMED_ELEMENT"
-        return check
     # An unknown or ungrounded endpoint is not a separate reason code: the
     # message fails on the endpoint that cannot hold its evidence (source) or
     # cannot own its callee (target), which is what the repair turn must fix.
@@ -218,20 +166,11 @@ def _ground_branch(
     sources: evidence.SourceCache,
     hunk_ranges: dict[str, list[tuple[int, int]]],
     ref: str,
-    raw: Any,
-    message_count: int,
+    record: dict[str, Any],
 ) -> tuple[ElementCheck, dict[str, Any]]:
     """Check one block branch, returning its check and its ``spec_final`` payload."""
-    record = _as_dict(raw)
-    citation = _as_dict(record.get("evidence"))
-    condition = evidence.norm_str(record.get("condition")).strip()
-    indices = [
-        index
-        for index in _as_list(record.get("messages"))
-        if isinstance(index, int)
-        and not isinstance(index, bool)
-        and 0 <= index < message_count
-    ]
+    citation = record["evidence"]
+    condition = record["condition"]
     file, line, reason = evidence.check_location(
         repo_root, sources, citation.get("file"), citation.get("line")
     )
@@ -242,7 +181,7 @@ def _ground_branch(
     payload = {
         "condition": condition,
         "evidence": {"file": file, "line": line},
-        "messages": indices,
+        "messages": record["messages"],
     }
     return check, payload
 
@@ -287,47 +226,39 @@ def _assemble_blocks(
 
 
 def ground_sequence(
-    spec: dict[str, Any],
+    spec: SequenceSpec,
     *,
     repo_root: Path,
     hunk_ranges: dict[str, list[tuple[int, int]]],
     symbols: evidence.RepoSymbols,
-) -> GroundingReport:
+) -> GroundingReport[SequenceSpec]:
     """Ground against head-tree citations and changed hunks, then prune, cap and floor-test.
 
-    Malformed entries become failed checks. spec_final has exactly the schema keys;
-    render it only when omit_reasons is empty. Share symbols across repair turns.
+    Consume an admitted proposal from coerce_sequence_spec. Shape and message-index
+    admission belongs to that boundary; source grounding owns the checks here.
+    Render spec_final only when omit_reasons is empty. Share symbols across repairs.
     """
+    spec = copy.deepcopy(spec)
     sources = evidence.SourceCache(repo_root)
-    raw_participants = _as_list(spec.get("participants"))
-    raw_messages = _as_list(spec.get("messages"))
-    raw_blocks = _as_list(spec.get("blocks"))
+    participants = spec["participants"]
+    messages = spec["messages"]
+    blocks = spec["blocks"]
 
     # Participant checks need to know which messages each name sources, so the
     # external-actor rule is decidable before any message is adjudicated.
-    normalized_messages: list[dict[str, Any] | None] = [
-        _normalize_message(raw) if isinstance(raw, dict) else None
-        for raw in raw_messages
-    ]
     source_indices: dict[str, list[int]] = {}
-    for index, record in enumerate(normalized_messages):
-        if record is not None:
-            source_indices.setdefault(record["from"], []).append(index)
+    for index, record in enumerate(messages):
+        source_indices.setdefault(record["from"], []).append(index)
 
     participant_checks, accepted = _ground_participants(
         repo_root,
         sources,
-        [raw for raw in raw_participants if isinstance(raw, dict)],
+        participants,
         source_indices,
     )
 
     message_checks: list[ElementCheck] = []
-    for index, record in enumerate(normalized_messages):
-        if record is None:
-            message_checks.append(
-                ElementCheck("message", str(index), False, "MALFORMED_ELEMENT")
-            )
-            continue
+    for index, record in enumerate(messages):
         message_checks.append(
             _ground_message(
                 repo_root,
@@ -336,7 +267,7 @@ def ground_sequence(
                 hunk_ranges,
                 index,
                 record,
-                normalized_messages[index - 1] if index else None,
+                messages[index - 1] if index else None,
                 message_checks[index - 1] if index else None,
                 accepted,
             )
@@ -345,25 +276,10 @@ def ground_sequence(
     block_checks: list[ElementCheck] = []
     branch_checks: list[ElementCheck] = []
     kept_blocks: list[_KeptBlock] = []
-    for block_index, raw_block in enumerate(raw_blocks):
+    for block_index, record in enumerate(blocks):
         block_ref = f"b{block_index}"
-        record = _as_dict(raw_block)
-        kind = evidence.norm_str(record.get("kind"))
-        raw_branches = _as_list(record.get("branches"))
-        if not isinstance(raw_block, dict) or kind not in BLOCK_KINDS:
-            block_checks.append(
-                ElementCheck("block", block_ref, False, "MALFORMED_ELEMENT")
-            )
-            for branch_index in range(len(raw_branches)):
-                branch_checks.append(
-                    ElementCheck(
-                        "branch",
-                        f"{block_ref}.{branch_index}",
-                        False,
-                        "MALFORMED_ELEMENT",
-                    )
-                )
-            continue
+        kind = record["kind"]
+        raw_branches = record["branches"]
         surviving: list[dict[str, Any]] = []
         for branch_index, raw_branch in enumerate(raw_branches):
             check, payload = _ground_branch(
@@ -372,7 +288,6 @@ def ground_sequence(
                 hunk_ranges,
                 f"{block_ref}.{branch_index}",
                 raw_branch,
-                len(normalized_messages),
             )
             branch_checks.append(check)
             if check.grounded:
@@ -396,8 +311,8 @@ def ground_sequence(
         name
         for index in kept_messages
         for name in (
-            _require(normalized_messages[index])["from"],
-            _require(normalized_messages[index])["to"],
+            messages[index]["from"],
+            messages[index]["to"],
         )
     }
     kept_participants = [name for name in accepted if name in used]
@@ -407,16 +322,16 @@ def ground_sequence(
     kept_messages = [
         index
         for index in kept_messages
-        if _require(normalized_messages[index])["from"] in participant_set
-        and _require(normalized_messages[index])["to"] in participant_set
+        if messages[index]["from"] in participant_set
+        and messages[index]["to"] in participant_set
     ][:DIAGRAM_MAX_MESSAGES]
     final_positions = {index: pos for pos, index in enumerate(kept_messages)}
     final_blocks = _assemble_blocks(kept_blocks[:DIAGRAM_MAX_BLOCKS], final_positions)
 
     # --- assemble ------------------------------------------------------------
-    spec_final: dict[str, Any] = {
+    spec_final: SequenceSpec = {
         "participants": [accepted[name] for name in kept_participants],
-        "messages": [_require(normalized_messages[index]) for index in kept_messages],
+        "messages": [messages[index] for index in kept_messages],
         "blocks": [
             {
                 "kind": block.kind,

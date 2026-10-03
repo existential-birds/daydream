@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from daydream.benchmark import schema
 from daydream.benchmark.harbor import build, candidate, verifier_core, verifier_core as vc
 from daydream.benchmark.harbor.build import _copy_assets
 from daydream.benchmark.harbor.package import template_text
@@ -38,6 +39,13 @@ def copied_verifier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ModuleTy
     monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
     return module
+
+
+def _admitted_findings(rows: list[dict[str, Any]]) -> list[schema.Finding]:
+    """Construct native admitted compiler inputs with explicit fixture provenance."""
+    return [schema.Finding.model_validate({
+        "provenance": {"kind": "authored", "source_ids": []}, **row,
+    }) for row in rows]
 
 
 def _finding_content() -> dict[str, Any]:
@@ -106,8 +114,8 @@ def test_host_built_artifacts_match_copied_verifier(copied_verifier: ModuleType)
         {"finding_id": "b" * 64, "title": "Missing access check", "body": "No authorization",
          "severity": None, "location": None},
     ]
-    gold = build.build_gold_list(findings, key=key)
-    oracle = build.build_oracle_artifact(key, findings)
+    gold = build.build_gold_list(_admitted_findings(findings), key=key)
+    oracle = build.build_oracle_artifact(key, _admitted_findings(findings))
     for artifact in (candidate_artifact, oracle, candidate.build_candidate_artifact(key, [])):
         expected = [asdict(f) for f in verifier_core.validate_candidate_artifact(artifact)]
         assert [asdict(f) for f in copied_verifier.validate_candidate_artifact(artifact)] == expected

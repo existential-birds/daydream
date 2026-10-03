@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from daydream.deep.diagram_types import FlowchartSpec, SequenceSpec
+
 # --- Vocabulary --------------------------------------------------------------
 
 # Reason codes shared by both kinds. Every one names a fact about the cited
@@ -95,7 +97,7 @@ class ElementCheck:
 
 
 @dataclass
-class GroundingReport:
+class GroundingReport[Spec: SequenceSpec | FlowchartSpec]:
     """One diagram kind's check/prune/cap/floor result.
 
     Elements retain proposal order within each type. Render only when omit_reasons
@@ -104,7 +106,7 @@ class GroundingReport:
     """
 
     elements: list[ElementCheck]
-    spec_final: dict[str, Any]
+    spec_final: Spec
     omit_reasons: list[str]
     rejected: str | None
 

@@ -6,20 +6,10 @@ Posting separately rechecks placement against the live branch diff.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
-from daydream.hunk_index import range_distance
+from daydream.hunk_index import LocationCheck as LocationCheck, nearest_hunk
 from daydream.pr_review import HUNK_TOLERANCE
-
-
-@dataclass
-class LocationCheck:
-    """Three-field boolean/int check for one finding location."""
-
-    in_hunk: bool
-    nearest_hunk: tuple[int, int] | None
-    distance: int | None
 
 
 def validate_finding(
@@ -32,28 +22,8 @@ def validate_finding(
     Distance is zero inside a hunk. Missing files return no hunk or distance.
     """
     info = index.get(file)
-    if info is None:
-        return LocationCheck(False, None, None)
-
-    hunks = info.get("hunks") or []
-    in_hunk = False
-    best: tuple[int, int] | None = None
-    best_dist: int | None = None
-    for start, end in ((h["new_start"], h["new_end"]) for h in hunks):
-        dist = range_distance(line, start, end)
-        if dist == 0:
-            in_hunk = True
-            best = (start, end)
-            best_dist = 0
-            continue
-        if best_dist is None or dist < best_dist:
-            best_dist = dist
-            best = (start, end)
-    return LocationCheck(
-        in_hunk=in_hunk,
-        nearest_hunk=best,
-        distance=0 if in_hunk else best_dist,
-    )
+    ranges = () if info is None else ((h["new_start"], h["new_end"]) for h in info.get("hunks") or [])
+    return nearest_hunk(line, ranges)
 
 
 def validate_records(

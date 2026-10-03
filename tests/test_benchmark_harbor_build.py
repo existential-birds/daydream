@@ -12,8 +12,9 @@ from typing import Any, cast
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
-from daydream.benchmark import curation as cu, github_import as gi, snapshot, storage, storage as _storage
+from daydream.benchmark import curation as cu, github_import as gi, schema, snapshot, storage, storage as _storage
 from daydream.benchmark.cli import _handle_benchmark_command
 from daydream.benchmark.harbor import build, verifier_core as vc
 from daydream.benchmark.harbor.build import CompileError, compile_workspace
@@ -33,6 +34,13 @@ REPO = Path(__file__).resolve().parents[1]
 # import-time ``os.environ`` snapshot would shadow call-time
 # ``GIT_CONFIG_*`` entries added by tests after import.
 _BUNDLE_ENV: dict[str, str] = {"GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z"}
+
+
+def _admitted_findings(rows: list[dict[str, Any]]) -> list[schema.Finding]:
+    """Construct native admitted compiler inputs with explicit fixture provenance."""
+    return [schema.Finding.model_validate({
+        "provenance": {"kind": "authored", "source_ids": []}, **row,
+    }) for row in rows]
 
 
 def _pr_header(number: int = 101, *, base_sha: str = "b" * 40, head_sha: str = "a" * 40) -> dict[str, Any]:
@@ -329,7 +337,7 @@ def test_build_gold_list_is_provenance_free() -> None:
          "location": {"path": "src/render.py", "start_line": 10, "end_line": 14},
          "provenance": {"kind": "authored", "source_ids": []}},
     ]
-    gold = build.build_gold_list(findings, key="case-key")
+    gold = build.build_gold_list(_admitted_findings(findings), key="case-key")
     # compiled gold ids are the task-key-scoped digests, not the raw workspace ids
     def _id(f: dict[str, Any]) -> Any:
         loc = f["location"]
@@ -343,14 +351,14 @@ def test_build_gold_list_is_provenance_free() -> None:
     assert gold[0]["path"] == "src/render.py" and gold[0]["start_line"] == 10
 
 def test_build_gold_list_clean_is_empty() -> None:
-    assert build.build_gold_list([], key="case-key") == []
+    assert build.build_gold_list(_admitted_findings([]), key="case-key") == []
 
 def test_build_gold_list_accepts_locationless_and_emits_nulls() -> None:
     key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
     finding = {"finding_id": "a" * 64, "title": "T", "body": "B", "severity": None,
         "location": None, "provenance": {"kind": "authored", "source_ids": []},
     }
-    gold = build.build_gold_list([finding], key=key)
+    gold = build.build_gold_list(_admitted_findings([finding]), key=key)
     assert len(gold) == 1
     entry = gold[0]
     assert set(entry) == {"finding_id", "title", "body", "severity", "path", "start_line", "end_line"}
@@ -363,11 +371,11 @@ def test_build_gold_list_accepts_locationless_and_emits_nulls() -> None:
     assert entry["finding_id"] != "a" * 64
 
 def test_build_gold_list_rejects_partially_populated_location() -> None:
-    with pytest.raises(CompileError):
-        build.build_gold_list([{"finding_id": "a" * 64, "title": "T", "body": "B", "severity": None,
+    with pytest.raises(ValidationError):
+        build.build_gold_list(_admitted_findings([{"finding_id": "a" * 64, "title": "T", "body": "B", "severity": None,
             "location": {"path": "src/a.py", "start_line": None, "end_line": None},
             "provenance": {"kind": "authored", "source_ids": []},
-        }], key=build.derive_task_key("pr-000101-1a2b3c4d5e6f"))
+        }]), key=build.derive_task_key("pr-000101-1a2b3c4d5e6f"))
 
 @pytest.mark.parametrize(("field", "value"),
     [("title", ""), ("body", "bad\x00body"), ("severity", "critical"),
@@ -382,11 +390,11 @@ def test_build_gold_and_oracle_reject_invalid_finding_content(field: str, value:
     }
     finding[field] = value
     key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
-    with pytest.raises(build.CompileError):
+    with pytest.raises(ValidationError):
         if oracle:
-            build.build_oracle_artifact(key, [finding])
+            build.build_oracle_artifact(key, _admitted_findings([finding]))
         else:
-            build.build_gold_list([finding], key=key)
+            build.build_gold_list(_admitted_findings([finding]), key=key)
 
 @pytest.mark.parametrize(("present", "location"),
     [(False, None), (True, None), (True, {}), (True, {"path": None}), (True, {"start_line": None, "end_line": None})],
@@ -395,8 +403,13 @@ def test_gold_and_oracle_preserve_locationless_inputs(present: bool, location: o
     finding: dict[str, Any] = {"finding_id": "a" * 64, "title": "T", "body": "B", "severity": None}
     if present:
         finding["location"] = location
-    [gold] = build.build_gold_list([finding], key="case-locationless")
-    [oracle] = build.build_oracle_artifact("case-locationless", [finding])["findings"]
+    if present and location is not None:
+        with pytest.raises(ValidationError) as error:
+            _admitted_findings([finding])
+        assert error.value.errors()[0]["loc"][0] == "location"
+        return
+    [gold] = build.build_gold_list(_admitted_findings([finding]), key="case-locationless")
+    [oracle] = build.build_oracle_artifact("case-locationless", _admitted_findings([finding]))["findings"]
     for parsed in (gold, oracle):
         assert (parsed["path"], parsed["start_line"], parsed["end_line"]) == (None, None, None)
 
@@ -411,8 +424,10 @@ def test_build_gold_and_oracle_cap(oracle: bool, count: int, accepted: bool) -> 
     key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
     def build_artifact() -> list[dict[str, Any]]:
         if oracle:
-            return cast(list[dict[str, Any]], build.build_oracle_artifact(key, findings)["findings"])
-        return build.build_gold_list(findings, key=key)
+            return cast(
+                list[dict[str, Any]], build.build_oracle_artifact(key, _admitted_findings(findings))["findings"],
+            )
+        return build.build_gold_list(_admitted_findings(findings), key=key)
 
     if accepted:
         assert len(build_artifact()) == count
@@ -422,10 +437,10 @@ def test_build_gold_and_oracle_cap(oracle: bool, count: int, accepted: bool) -> 
 
 def test_build_oracle_artifact_locationless_passes_validation() -> None:
     key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
-    art = build.build_oracle_artifact(key, [{
+    art = build.build_oracle_artifact(key, _admitted_findings([{
         "finding_id": "a" * 64, "title": "Cache", "body": "collides", "severity": None,
         "location": None, "provenance": {"kind": "historical", "source_ids": ["github:review:1"]},
-    }])
+    }]))
     entry = art["findings"][0]
     assert entry["path"] is None and entry["start_line"] is None and entry["end_line"] is None
     assert set(entry) == {"candidate_id", "title", "body", "severity", "path", "start_line", "end_line"}
@@ -440,7 +455,7 @@ def test_build_oracle_artifact_passes_validation_and_derives_candidate_ids() -> 
          "provenance": {"kind": "authored", "source_ids": []}},
     ]
     key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
-    art = build.build_oracle_artifact(key, findings)
+    art = build.build_oracle_artifact(key, _admitted_findings(findings))
     assert art["schema_version"] == 1 and art["case_id"] == key
     assert art["base_ref"] == "base" and art["head_ref"] == "head"
     # findings are ordered by finding_id ascending; ordinal = position in that order
@@ -463,7 +478,7 @@ def test_build_oracle_artifact_passes_validation_and_derives_candidate_ids() -> 
 
 def test_build_oracle_artifact_clean_has_empty_findings() -> None:
     key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
-    art = build.build_oracle_artifact(key, [])
+    art = build.build_oracle_artifact(key, _admitted_findings([]))
     assert art["findings"] == []
     assert vc.validate_candidate_artifact(art) == []
 
@@ -626,12 +641,14 @@ def test_compile_lock_records_requested_base_sha(tmp_path: Path, fake_gh: FakeGh
     assert row["original_base_sha"] == case_doc["snapshot"]["original_base_sha"]
 
     manifest = load_benchmark_manifest(ws)
-    case_docs = {case_id: case_doc}
+    admitted = schema.CaseDocument.model_validate(schema._schema_ready(case_doc))
+    case_docs = {case_id: admitted}
     assert build._authoring_input_digest(case_docs, manifest) == lock["authoring_input_digest"]
     # sensitivity: requested_base_sha must fold into the payload -- a digest that
     # dropped the field would stay byte-identical when only that value moves
-    moved = dict(case_doc, snapshot=dict(case_doc["snapshot"]))
-    moved["snapshot"]["requested_base_sha"] = "0" * 40
+    moved = admitted.model_copy(update={
+        "snapshot": admitted.snapshot.model_copy(update={"requested_base_sha": "0" * 40}),
+    })
     assert build._authoring_input_digest({case_id: moved}, manifest) != lock["authoring_input_digest"]
 
 def test_clean_attested_draft_does_not_compile(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -1014,9 +1031,11 @@ def _run_oracle(sr_module: Any, tmp_path: Path, fake_gh: FakeGh,
     if make_finding is not None:
         gold = json.loads((case / "tests" / "golden-review.json").read_bytes())
         finding = make_finding(key, gold)
-        _restamp_gold(case, json.dumps(build.build_gold_list([finding], key=key), indent=1).encode("utf-8"))
+        _restamp_gold(
+            case, json.dumps(build.build_gold_list(_admitted_findings([finding]), key=key), indent=1).encode("utf-8"),
+        )
         (case / "solution" / "golden-review.json").write_bytes(
-            json.dumps(build.build_oracle_artifact(key, [finding])).encode("utf-8")
+            json.dumps(build.build_oracle_artifact(key, _admitted_findings([finding]))).encode("utf-8")
         )
     out = tmp_path / "out"
     reward = sr_module.run_verifier(
@@ -1278,3 +1297,30 @@ def test_compiled_stage_carries_canonical_module_and_metric_loads_it(tmp_path: P
         capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(out.read_text())["total_tp"] == 1
+
+
+@pytest.mark.parametrize("tamper", ["unknown-source", "rewritten-content"])
+def test_compile_rejects_forged_historical_gold_without_replacing_prior_tasks(
+    tmp_path: Path, fake_gh: FakeGh, tamper: str,
+) -> None:
+    ws, case_id, _head = _seed_ready_workspace(tmp_path, fake_gh)
+    build.compile_workspace(ws)
+    prior = {path.relative_to(ws / "harbor"): path.read_bytes()
+             for path in (ws / "harbor").rglob("*") if path.is_file()}
+    path = ws / "cases" / f"{case_id}.yaml"
+    raw = storage.load_yaml_strict(path)
+    finding = raw["curation"]["findings"][0]
+    if tamper == "unknown-source":
+        finding["provenance"]["source_ids"] = ["github:inline_comment:999"]
+    else:
+        finding["body"] = "FORGED_PRIVATE_GOLD_CONTENT"
+        finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
+    raw["curation"]["task_spec_sha256"] = build.task_spec_digest(raw)
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    with pytest.raises(CompileError) as error:
+        build.compile_workspace(ws)
+    assert "historical finding" in str(error.value)
+    assert "FORGED_PRIVATE_GOLD_CONTENT" not in str(error.value)
+    assert {p.relative_to(ws / "harbor"): p.read_bytes()
+            for p in (ws / "harbor").rglob("*") if p.is_file()} == prior

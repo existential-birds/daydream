@@ -13,6 +13,7 @@ import pytest
 from daydream import cli
 from daydream.archive import hydrate
 from daydream.archive._schema import RUNS_COLUMNS
+from daydream.archive.hydrate_client import FakeHub
 from daydream.archive.index import append_label_observation, label_observation_history, query_runs, upsert_run
 from daydream.training.adjudication import cli as adjudication_cli
 from daydream.training.adjudication.final_bundle import final_snapshot_id
@@ -22,7 +23,6 @@ from tests.fixtures.training.build_hub_snapshot import (
     build_publication_hubs,
     install_external_license_resolver,
 )
-from tests.harness.hub import FakeHub
 
 
 def _run_cli(argv: list[str], capsys: pytest.CaptureFixture[str]) -> str:

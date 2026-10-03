@@ -100,15 +100,15 @@ RUST_IMPORT_QUERY = """
 
 # Symbol captures also control generic-stem reverse-import eligibility.
 PYTHON_DEF_QUERY = """
-(function_definition) @def
-(class_definition) @def
+(function_definition) @def @function
+(class_definition) @def @class
 """
 
 RUST_DEF_QUERY = """
-(function_item) @def
-(struct_item) @def
-(enum_item) @def
-(trait_item) @def
+(function_item) @def @function
+(struct_item) @def @class
+(enum_item) @def @class
+(trait_item) @def @class
 (impl_item) @def
 """
 # impl_item has no name and is skipped. Keep the symbol query stable: widening
@@ -116,35 +116,35 @@ RUST_DEF_QUERY = """
 # Diagram queries deliberately cover more definitions and use their own kinds.
 # TS, TSX, and JS share the TypeScript grammars.
 TYPESCRIPT_DIAGRAM_DEF_QUERY = """
-(function_declaration name: (identifier)) @def
-(generator_function_declaration name: (identifier)) @def
-(function_signature name: (identifier)) @def
-(method_definition name: (property_identifier)) @def
-(method_signature name: (property_identifier)) @def
-(class_declaration name: (type_identifier)) @def
-(abstract_class_declaration name: (type_identifier)) @def
-(interface_declaration name: (type_identifier)) @def
-(type_alias_declaration name: (type_identifier)) @def
-(enum_declaration name: (identifier)) @def
-(variable_declarator name: (identifier) value: [(arrow_function) (function_expression)]) @def
+(function_declaration name: (identifier)) @def @function
+(generator_function_declaration name: (identifier)) @def @function
+(function_signature name: (identifier)) @def @function
+(method_definition name: (property_identifier)) @def @function
+(method_signature name: (property_identifier)) @def @function
+(class_declaration name: (type_identifier)) @def @class
+(abstract_class_declaration name: (type_identifier)) @def @class
+(interface_declaration name: (type_identifier)) @def @class
+(type_alias_declaration name: (type_identifier)) @def @type
+(enum_declaration name: (identifier)) @def @class
+(variable_declarator name: (identifier) value: [(arrow_function) (function_expression)]) @def @function
 """
 
 GO_DIAGRAM_DEF_QUERY = """
-(function_declaration name: (identifier)) @def
-(method_declaration name: (field_identifier)) @def
-(type_spec name: (type_identifier)) @def
-(type_alias name: (type_identifier)) @def
+(function_declaration name: (identifier)) @def @function
+(method_declaration name: (field_identifier)) @def @function
+(type_spec name: (type_identifier)) @def @type
+(type_alias name: (type_identifier)) @def @type
 """
 
 RUST_DIAGRAM_DEF_QUERY = """
-(function_item) @def
-(function_signature_item) @def
-(struct_item) @def
-(enum_item) @def
-(trait_item) @def
-(union_item) @def
-(type_item) @def
-(mod_item) @def
+(function_item) @def @function
+(function_signature_item) @def @function
+(struct_item) @def @class
+(enum_item) @def @class
+(trait_item) @def @class
+(union_item) @def @class
+(type_item) @def @type
+(mod_item) @def @module
 """
 
 
@@ -186,54 +186,6 @@ def _definition_kind(node_type: str) -> str:
     return "class"
 
 
-# Kind buckets for the diagram definition queries. Kept separate from
-# :func:`_definition_kind`, whose ``else: return "class"`` fallback would stamp
-# ``method_definition``/``variable_declarator``/``type_spec`` as ``"class"``.
-_DIAGRAM_FUNCTION_NODES = frozenset(
-    {
-        "function_definition",
-        "function_declaration",
-        "generator_function_declaration",
-        "function_signature",
-        "method_definition",
-        "method_signature",
-        "method_declaration",
-        "variable_declarator",
-        "function_item",
-        "function_signature_item",
-    }
-)
-_DIAGRAM_CLASS_NODES = frozenset(
-    {
-        "class_definition",
-        "class_declaration",
-        "abstract_class_declaration",
-        "interface_declaration",
-        "enum_declaration",
-        "struct_item",
-        "enum_item",
-        "trait_item",
-        "union_item",
-    }
-)
-_DIAGRAM_TYPE_NODES = frozenset(
-    {"type_alias_declaration", "type_spec", "type_alias", "type_item"}
-)
-
-
-def _diagram_definition_kind(node_type: str) -> str:
-    """Classify diagram definitions; unknown captures remain usable as "other"."""
-    if node_type in _DIAGRAM_FUNCTION_NODES:
-        return "function"
-    if node_type in _DIAGRAM_CLASS_NODES:
-        return "class"
-    if node_type in _DIAGRAM_TYPE_NODES:
-        return "type"
-    if node_type == "mod_item":
-        return "module"
-    return "other"
-
-
 def _captures(parser: Parser, source: bytes, query_string: str) -> dict[str, list[Node]]:
     tree = parser.parse(source)
     if parser.language is None:
@@ -241,18 +193,24 @@ def _captures(parser: Parser, source: bytes, query_string: str) -> dict[str, lis
     return QueryCursor(Query(parser.language, query_string)).captures(tree.root_node)
 
 
-def extract_definitions(
+def _captured_definitions(
     parser: Parser,
     source: bytes,
     query_string: str,
     *,
-    kind_for: Callable[[str], str] = _definition_kind,
+    kind_for: Callable[[str], str] | None = None,
 ) -> list[dict[str, object]]:
     """Return captured {name, line, end_line, kind} records with 1-based lines.
 
+    Native captures own declared kinds; an explicit callback takes precedence.
     Unnamed captures are skipped. Parse, query, or record failures return []."""
     try:
         captures = _captures(parser, source, query_string)
+        kinds = {
+            node.id: kind
+            for kind in ("function", "class", "type", "module")
+            for node in captures.get(kind, [])
+        }
         result: list[dict[str, object]] = []
         for node in captures.get("def", []):
             name_node = node.child_by_field_name("name")
@@ -263,12 +221,29 @@ def extract_definitions(
                     "name": name_node.text.decode("utf-8", errors="replace"),
                     "line": node.start_point[0] + 1,
                     "end_line": node.end_point[0] + 1,
-                    "kind": kind_for(node.type),
+                    "kind": (
+                        kind_for(node.type)
+                        if kind_for is not None
+                        else kinds[node.id]
+                    ),
                 }
             )
         return result
     except Exception:
         return []
+
+
+def extract_definitions(
+    parser: Parser,
+    source: bytes,
+    query_string: str,
+    *,
+    kind_for: Callable[[str], str] = _definition_kind,
+) -> list[dict[str, object]]:
+    """Return named captures using the caller's node-type kind policy."""
+    if kind_for is None:
+        return []
+    return _captured_definitions(parser, source, query_string, kind_for=kind_for)
 
 
 def extract_imports(parser: Parser, source: bytes, query_string: str) -> list[str]:
@@ -315,6 +290,4 @@ def definitions_in_file(repo_root: Path, path: str) -> list[dict[str, object]]:
     parser = get_parser(language_id)
     if parser is None:
         return []
-    return extract_definitions(
-        parser, source, query_string, kind_for=_diagram_definition_kind
-    )
+    return _captured_definitions(parser, source, query_string)

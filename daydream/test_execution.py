@@ -13,7 +13,9 @@ import shlex
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal
+
+from pydantic import BeforeValidator, Field, TypeAdapter
 
 from daydream.backends._subprocess import terminate_process
 from daydream.json_utils import atomic_write_json, dataclass_payload, read_json_object
@@ -63,6 +65,25 @@ def _select_raw_test_command(
         return cli_value, "cli"
     return getattr(config, "test_command", None), "config"
 
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    """Require a JSON array containing only strings."""
+    if isinstance(value, list) and all(isinstance(entry, str) for entry in value):
+        return tuple(value)
+    raise ValueError("expected an array of strings")
+
+
+
+def _admit_recipe_command(raw: Any) -> Any:
+    """Persisted unresolved commands require a value key but never admit its contents."""
+    if not isinstance(raw, dict):
+        return raw
+    value, source = raw["value"], raw["source"]
+    return {**raw, "value": None if source == "unresolved" else _string_tuple(value)}
+
+
+_RecipeString = Annotated[str, Field(strict=True)]
+_RecipeStrings = Annotated[tuple[str, ...], BeforeValidator(_string_tuple)]
 
 @dataclass(frozen=True)
 class ResolvedFact:
@@ -145,11 +166,11 @@ class PackageResolution:
     absent_components, never a placeholder.
     """
 
-    cwd_relative: str
-    runner: str | None
-    interpreter: str | None
-    config_digest: str | None
-    absent_components: tuple[str, ...]
+    cwd_relative: _RecipeString
+    runner: _RecipeString | None
+    interpreter: _RecipeString | None
+    config_digest: _RecipeString | None
+    absent_components: _RecipeStrings
 
 
 def _nearest_package_dir(repo_root: Path, cwd_relative: str) -> Path:
@@ -163,70 +184,50 @@ def _nearest_package_dir(repo_root: Path, cwd_relative: str) -> Path:
         current = current.parent
 
 
-def _resolve_runner(package_dir: Path) -> str | None:
-    """Return the first lockfile-named package manager present, else ``None``."""
-    for name, runner in _RUNNER_LOCKFILES:
-        if (package_dir / name).exists():
-            return runner
-    return None
+def _package_input_text(payload: bytes) -> str:
+    """Preserve text-file newline translation while hashing the exact admitted bytes."""
+    return payload.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _resolve_interpreter(package_dir: Path) -> str | None:
-    """Read ``.python-version`` first, then the manifest's ``requires-python``."""
-    pinned = package_dir / _PYTHON_VERSION_FILE
-    if pinned.exists():
-        try:
-            value = pinned.read_text(encoding="utf-8").strip()
-        except OSError:
-            return None
-        return value or None
-    manifest = package_dir / "pyproject.toml"
-    if manifest.exists():
-        try:
-            data = tomllib.loads(manifest.read_text(encoding="utf-8"))
-        except (OSError, tomllib.TOMLDecodeError):
-            return None
-        value = data.get("project", {}).get("requires-python")
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
-def _config_input_names(package_dir: Path, runner: str | None) -> tuple[str, ...]:
-    """Return sorted present manifests, selected runner lockfile and Python pin.
-
-    Existence, not file type, determines membership: malformed directory inputs
-    must become named digest misses rather than silently disappearing.
-    """
+def _package_inputs(package_dir: Path, cwd_relative: str) -> PackageResolution:
+    """Derive interpreter and digest from one bounded per-file input observation."""
     names = [name for name in _PACKAGE_MANIFESTS if (package_dir / name).exists()]
-    if runner is not None:
-        for name, _ in _RUNNER_LOCKFILES:
-            if (package_dir / name).exists():
-                names.append(name)
-                break
-    if (package_dir / _PYTHON_VERSION_FILE).exists():
+    selected = next(((name, runner) for name, runner in _RUNNER_LOCKFILES if (package_dir / name).exists()), None)
+    if selected is not None:
+        names.append(selected[0])
+    pinned = (package_dir / _PYTHON_VERSION_FILE).exists()
+    if pinned:
         names.append(_PYTHON_VERSION_FILE)
-    return tuple(sorted(set(names)))
-
-
-def _config_digest(
-    package_dir: Path, names: tuple[str, ...]
-) -> tuple[str | None, tuple[str, ...]]:
-    """Hash each name + NUL + bytes into a canonical map digest.
-
-    An unreadable input returns None and its name. An empty map is a real identity.
-    """
+    interpreter: str | None = None
     entries: dict[str, str] = {}
-    for name in names:
+    absent: tuple[str, ...] = ()
+    for name in sorted(set(names)):
         try:
             payload = (package_dir / name).read_bytes()
         except OSError:
-            return None, (name,)
-        entries[name] = hashlib.sha256(
-            name.encode("utf-8") + b"\0" + payload
-        ).hexdigest()
+            if not absent:
+                absent = (name,)
+            continue
+        if name == _PYTHON_VERSION_FILE:
+            interpreter = _package_input_text(payload).strip() or None
+        elif name == "pyproject.toml" and not pinned:
+            try:
+                data = tomllib.loads(_package_input_text(payload))
+            except tomllib.TOMLDecodeError:
+                pass
+            else:
+                value = data.get("project", {}).get("requires-python")
+                if isinstance(value, str) and value.strip():
+                    interpreter = value.strip()
+        entries[name] = hashlib.sha256(name.encode("utf-8") + b"\0" + payload).hexdigest()
     canonical = json.dumps(entries, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest(), ()
+    return PackageResolution(
+        cwd_relative=cwd_relative,
+        runner=None if selected is None else selected[1],
+        interpreter=interpreter,
+        config_digest=None if absent else hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        absent_components=absent,
+    )
 
 
 def resolve_package(repo_root: Path, start: Path) -> PackageResolution:
@@ -244,18 +245,7 @@ def resolve_package(repo_root: Path, start: Path) -> PackageResolution:
         )
     cwd_relative = canonicalize_working_directory(repo_root, relative)
     package_dir = _nearest_package_dir(repo_root, cwd_relative)
-    runner = _resolve_runner(package_dir)
-    interpreter = _resolve_interpreter(package_dir)
-    config_digest, absent = _config_digest(
-        package_dir, _config_input_names(package_dir, runner)
-    )
-    return PackageResolution(
-        cwd_relative=cwd_relative,
-        runner=runner,
-        interpreter=interpreter,
-        config_digest=config_digest,
-        absent_components=absent,
-    )
+    return _package_inputs(package_dir, cwd_relative)
 
 
 @dataclass
@@ -320,7 +310,7 @@ class TestExecutionIdentity:
 class RecipeCandidate:
     """A suggestion from the closed manifest runner set, never an authoritative command."""
 
-    argv: tuple[str, ...]
+    argv: _RecipeStrings
     provenance: Literal["manifest"]
 
 
@@ -328,9 +318,9 @@ class RecipeCandidate:
 class TestRecipe:
     """Command, package and suite facts resolved once for all consumers in a run."""
 
-    command: ResolvedFact
+    command: Annotated[ResolvedFact, BeforeValidator(_admit_recipe_command)]
     package: PackageResolution
-    declared: tuple[str, ...]
+    declared: _RecipeStrings
     candidate: RecipeCandidate | None
 
     # Not a pytest test class despite the name prefix.
@@ -372,67 +362,21 @@ def resolve_test_recipe(
     )
 
 
-def _string_tuple(value: object) -> tuple[str, ...]:
-    """Require a JSON array containing only strings."""
-    if isinstance(value, list) and all(isinstance(entry, str) for entry in value):
-        return tuple(value)
-    raise ValueError("expected an array of strings")
-
-
 def recipe_to_payload(recipe: TestRecipe) -> dict[str, Any]:
     """Persist every recipe field as a JSON-safe value, including its format version."""
     return {"format_version": RECIPE_FORMAT, **dataclass_payload(recipe)}
 
 
+
+_RECIPE_ADAPTER = TypeAdapter(TestRecipe)
+
+
 def _recipe_from_payload(payload: dict[str, Any]) -> TestRecipe | None:
-    """Validate all untrusted fields; malformed payloads yield None, never a partial recipe."""
+    """Admit persisted native records; malformed input never supplies a partial recipe."""
     try:
-        command_payload = payload["command"]
-        package_payload = payload["package"]
-        if not all(isinstance(part, dict) for part in (command_payload, package_payload)):
-            return None
-        command_source = command_payload["source"]
-        command_values = command_payload["value"]
-        if command_source == "unresolved":
-            command = ResolvedFact(value=None, source="unresolved")
-        elif command_source in ("cli", "config", "admitted", "derived"):
-            command = ResolvedFact(value=_string_tuple(command_values), source=cast(FactSource, command_source))
-        else:
-            return None
-
-        optional_strings = {
-            name: package_payload[name] for name in ("runner", "interpreter", "config_digest")
-        }
-        if any(value is not None and not isinstance(value, str) for value in optional_strings.values()):
-            return None
-        cwd_relative = package_payload["cwd_relative"]
-        if not isinstance(cwd_relative, str):
-            return None
-        package = PackageResolution(
-            cwd_relative=cwd_relative,
-            absent_components=_string_tuple(package_payload["absent_components"]),
-            **optional_strings,
-        )
-
-        declared = _string_tuple(payload["declared"])
-
-        candidate: RecipeCandidate | None = None
-        candidate_payload = payload.get("candidate")
-        if candidate_payload is not None:
-            if not isinstance(candidate_payload, dict):
-                return None
-            candidate_argv = _string_tuple(candidate_payload["argv"])
-            if candidate_payload["provenance"] != "manifest":
-                return None
-            candidate = RecipeCandidate(argv=candidate_argv, provenance="manifest")
+        return _RECIPE_ADAPTER.validate_python({**payload, "candidate": payload.get("candidate")})
     except (KeyError, TypeError, ValueError):
         return None
-    return TestRecipe(
-        command=command,
-        package=package,
-        declared=declared,
-        candidate=candidate,
-    )
 
 
 def persist_test_recipe(deep_dir: Path, recipe: TestRecipe) -> Path:

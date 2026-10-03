@@ -165,6 +165,8 @@ def _load_import_index(index_root: Path) -> tuple[
     Never authorize unrelated backup rows: eligible parents come from current source
     findings, triplet aliases must be unique, and missing run metadata fails closed.
     Sessions-only snapshots retain digest-less and run-anchor fallback behavior.
+    Prefer run head_sha to match archive evidence_sha. The reply-digest fallback
+    intentionally remains ambiguous: the archive never stored that anchor.
     """
     from daydream.archive.sanitize import _derivative_digest
     from daydream.training.adjudication.materialize import index_sessions
@@ -201,14 +203,19 @@ def _load_import_index(index_root: Path) -> tuple[
     for session in sessions:
         sid = str(session["session_id"])
         run_dir = run_directory(index_root, sid)
-        hydrated[sid] = {"derivative_digest": _derivative_digest(run_dir) if run_dir.is_dir() else None,
-                         "record_id": sid}
+        hydrated[sid] = {
+            "derivative_digest": _derivative_digest(run_dir) if run_dir.is_dir() else None,
+            "record_id": sid,
+        }
         anchor = runs.get(sid, {}).get("head_sha")
-        findings[sid] = [{
-            "record_id": finding.record_id,
-            "evidence_sha": str(anchor) if anchor else reply_evidence_digest(finding.evidence),
-            "fingerprint": finding.fingerprint,
-        } for finding in FindingRecord.from_session(session)]
+        findings[sid] = [
+            {
+                "record_id": finding.record_id,
+                "evidence_sha": str(anchor) if anchor else reply_evidence_digest(finding.evidence),
+                "fingerprint": finding.fingerprint,
+            }
+            for finding in FindingRecord.from_session(session)
+        ]
     return sessions, runs, hydrated, aliases, findings
 
 

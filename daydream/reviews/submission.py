@@ -1,7 +1,7 @@
 """Submit an authorized review through an explicit GitHub write capability.
 
 File comments are posted in order; failed comments are folded into the final
-review body. A plan snapshots findings before any network write.
+review body. The operation captures findings before any network write.
 """
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from daydream.reviews.models import (
     ClassifiedIssues,
     ClassifiedReviewResult,
     FileCommentPayload,
-    InlineReviewComment,
     ParsedIssue,
     PRInfo,
     ReviewEvent,
@@ -24,49 +23,6 @@ from daydream.reviews.models import (
     SubmissionStatus,
 )
 from daydream.reviews.rendering import ReviewRenderers, build_payload_for_event, format_comment_body
-
-
-@dataclass(frozen=True)
-class ClassifiedReviewPlan:
-    """Immutable, authorized input to the shared review write operation."""
-
-    pr: PRInfo
-    inline: tuple[InlineReviewComment, ...]
-    inline_issues: tuple[ParsedIssue, ...]
-    file_level: tuple[ParsedIssue, ...]
-    body_only: tuple[ParsedIssue, ...]
-    event: ReviewEvent
-    run_info: str
-    renderers: ReviewRenderers
-    diagram_blocks: str | None
-    review_warnings: tuple[str, ...] = ()
-
-    @classmethod
-    def from_classified(
-        cls,
-        pr: PRInfo,
-        classified: ClassifiedIssues,
-        *,
-        event: ReviewEvent,
-        run_info: str,
-        renderers: ReviewRenderers,
-        diagram_blocks: str | None = None,
-        review_warnings: tuple[str, ...] = (),
-    ) -> ClassifiedReviewPlan:
-        """Snapshot a mutable classified review after the caller authorizes it."""
-        return cls(
-            pr=pr,
-            inline=tuple(classified.inline),
-            inline_issues=tuple(replace(issue) for issue in classified.inline_issues),
-            file_level=tuple(replace(issue) for issue in classified.file_level),
-            body_only=tuple(replace(issue) for issue in classified.body_only),
-            event=event,
-            run_info=run_info,
-            renderers=renderers,
-            diagram_blocks=diagram_blocks,
-            review_warnings=review_warnings,
-        )
-
 
 
 class ReviewTransport(Protocol):
@@ -143,41 +99,49 @@ class GitHubReviewTransport:
 
 
 def post_classified_review(
-    plan: ClassifiedReviewPlan,
+    pr: PRInfo,
+    classified: ClassifiedIssues,
     *,
+    event: ReviewEvent,
+    run_info: str,
+    renderers: ReviewRenderers,
     transport: ReviewTransport,
+    diagram_blocks: str | None = None,
+    review_warnings: tuple[str, ...] = (),
 ) -> ClassifiedReviewResult:
-    """Submit ordered file comments, fold failures, then post one final review."""
+    """Capture authorized findings before ordered writes, fold failures, then post one review."""
+    classified = ClassifiedIssues(
+        inline=list(classified.inline),
+        inline_issues=[replace(issue) for issue in classified.inline_issues],
+        file_level=[replace(issue) for issue in classified.file_level],
+        body_only=[replace(issue) for issue in classified.body_only],
+    )
     posted: list[ParsedIssue] = []
     folded: list[ParsedIssue] = []
-    for finding in plan.file_level:
+    for finding in classified.file_level:
         payload = FileCommentPayload(
-            commit_id=plan.pr.head_sha,
+            commit_id=pr.head_sha,
             path=finding.path,
             subject_type="file",
-            body=format_comment_body(finding, "file_level", plan.renderers),
+            body=format_comment_body(finding, "file_level", renderers),
         )
-        if transport.post_file_comment(plan.pr, payload):
+        if transport.post_file_comment(pr, payload):
             posted.append(finding)
         else:
             folded.append(finding)
 
-    final_classified = ClassifiedIssues(
-        inline=list(plan.inline),
-        inline_issues=list(plan.inline_issues),
-        file_level=list(posted),
-        body_only=[*plan.body_only, *folded],
-    )
+    classified.file_level = posted
+    classified.body_only.extend(folded)
     review_payload = build_payload_for_event(
-        plan.pr,
-        final_classified,
-        event=plan.event,
-        run_info=plan.run_info,
-        renderers=plan.renderers,
-        diagram_blocks=plan.diagram_blocks,
-        review_warnings=plan.review_warnings,
+        pr,
+        classified,
+        event=event,
+        run_info=run_info,
+        renderers=renderers,
+        diagram_blocks=diagram_blocks,
+        review_warnings=review_warnings,
     )
-    review_result = transport.post_review(plan.pr, review_payload)
+    review_result = transport.post_review(pr, review_payload)
     posted_review = review_result.review_url is not None
     return ClassifiedReviewResult(
         status=SubmissionStatus.POSTED if posted_review else SubmissionStatus.FAILED,

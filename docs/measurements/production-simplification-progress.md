@@ -10,7 +10,7 @@ contracts remain obligations. Internal signatures and module ownership may chang
 Baseline is `58cc88e4d7091b27afe1b2a6eec486504e255dfd`. Continuation began clean at
 `b98a9dd51fde81df5dc4534a85ab29a986f6a127`. GitHub still reports the same PR base,
 with no inherited upstream changes, and PR #1444 is open/draft. The latest pushed
-checkpoint is signed `95d1b31557d5d9478c491f069ed98b8636c2a871`.
+checkpoint is signed `5378e3dae53b14d0617594ac47965e1112e00a1f`.
 
 Count every owned Python file under daydream/, scripts/, and rl/daydream_review/,
 including published runtime templates and all new modules. Exclude vendored ATIF
@@ -34,13 +34,13 @@ Comments, docstrings, blanks, docs, and tests receive no source-reduction credit
 | 2f35025b | 362 | 108612 | 83232 | 492 | 604 | 2240 |
 | d6e99b67 | 362 | 108526 | 83157 | 492 | 603 | 2235 |
 | 3d994245 | 362 | 108357 | 83028 | 491 | 603 | 2220 |
-| Latest pushed 95d1b315 | 362 | 108292 | 82966 | 491 | 602 | 2202 |
-| Frozen twelfth, gates pending | 362 | 107920 | 82698 | 490 | 601 | 2190 |
+| 95d1b315 | 362 | 108292 | 82966 | 491 | 602 | 2202 |
+| Latest pushed 5378e3da | 362 | 107920 | 82698 | 490 | 601 | 2190 |
 
-Latest pushed aggregate reduction is 4.474% physical and 2.994% source;
-continuation removes 2733 physical /2199 source lines. Targets remain at most
-102027 physical and 76974 source: pushed shortfalls are 6265 physical /5992 source.
-The eleventh batch removes 65 physical /62 source lines. The objective remains unmet;
+Latest pushed aggregate reduction is 4.802% physical and 3.308% source;
+continuation removes 3105 physical /2467 source lines. Targets remain at most
+102027 physical and 76974 source: pushed shortfalls are 5893 physical /5724 source.
+The twelfth batch removes 372 physical /268 source lines. The objective remains unmet;
 green gates and useful changes do not establish completion. The production inventory hash remains
 `76cc2585344c06d20088698af1466bab69e33436b8d4e3882a0511bd5590422f`.
 
@@ -376,3 +376,266 @@ Annotation consumption retains its final loop payload reference until admission
 finishes; this minor memory hygiene observation is deferred to the next batch and
 receives no deletion credit. It never creates a full-corpus payload map. Cache
 receipt retention still costs the sum of one entry's admitted payload bytes.
+
+## Twelfth checkpoint complete; thirteenth active
+
+Signed 5378e3dae53b14d0617594ac47965e1112e00a1f passed the ordinary commit/push
+hooks with locked dependency sync/extras, Ruff, both whole Vulture scans, mypy
+(748 files), 9623 tests /14 existing skips /201 warnings in 612.62 seconds,
+90.71% branch coverage against unchanged 86%, Docker actionlint, coverage artifact,
+signatures and naming. No hook or verification bypass. Both independent full
+report reproductions and current integrated reviews closed without material
+findings. All 362 committed Git paths/bytes equal the frozen report snapshot and
+live checkout; proof /tmp/daydream-pr1444/twelfth-committed-bytes.json. Same PR
+head 5378e3da/base 58cc88e4 open/draft and description rewritten to actual evidence.
+The pending-gate notes above record the pre-commit state, superseded by this result.
+
+Fresh outside prototypes remain uncredited until integrated and remeasured:
+- Review posting operation eliminates ClassifiedReviewPlan and its parallel four
+  finding collections. One native ClassifiedIssues capture precedes all external
+  writes. Full caller cost -36 source /-43 physical; 256 complete mutation/order/
+  outcome comparisons match and 216 real workflow checks pass. Independent review
+  runs; transport capability, authorization and privacy boundaries remain.
+- Captured Harbor compatibility identity removes a second wheel/lock observation
+  and parallel receipt/objective constructors: provisional -22 source /-43 physical.
+  Actual A/B identity attribution is corrected; the separate confirmed-task tree
+  launch replacement race remains unresolved, not claimed fixed.
+- Full native diagram ownership and quality grammar ownership are being costed
+  across all declarations/callers. Local schema/query deletion estimates earn no
+  credit; opaque-string counting, generated code and moved source are forbidden.
+
+Next checkpoint should accumulate several reviewed coherent changes before full
+repository gates. Additional field/type owner or CLI boundary opportunities must
+remove repeated representations/validation rather than add decoder registries.
+
+Thirteenth applied owners (not yet aggregate-gated or committed):
+- Native review submission operation removes ClassifiedReviewPlan and captures
+  detached findings before ordered writes: -36 source /-43 physical, 256 exact
+  mutation/outcome cases, 216 integrated workflows, Ruff/mypy2, independent review.
+- Harbor compatibility identity is one captured execution owner through receipt
+  and objective attribution: -22 source /-43 physical, 100 exact cases, two old
+  replacement-race failures corrected, 103 integrated workflows and static checks.
+  Mutable task-tree launch race remains separately unresolved; no claim of sealing it.
+- Native quality Query replaces seven hand-coded grammar decoders: -63 source /
+  -41 physical, 2685 complete metrics exact, paired 2.43s versus 3.04s after fixing
+  the uncached prototype's 4.3x regression. 172 integrated workflows, Ruff/mypy2
+  and independent exact-byte closure; no opaque grammar packing or scope change.
+- Hunk indexing owns one nearest-boundary selection, preserving first positive
+  ties/last containing ranges and distinct posting/demotion policy: -14 source /
+  -14 physical, 12004 exact check/snap/citation/demotion outputs, 180 integrated
+  workflows, Ruff/mypy3 and independent review. A malformed later tuple can now
+  refuse after an earlier direct hit; actual parsed typed-pair input is unchanged.
+- Annotation verified-file loop releases its final byte buffer immediately:
+  zero source/physical credit, 84 corpus workflows and static checks pass.
+
+Native test-input owners are applied with exact independently reviewed bytes:
+- Persisted TestRecipe field declarations now own admission; four nested manual
+  constructors disappear. PackageResolution captures selected inputs once for
+  interpreter and digest, eliminating four separate readers. Full combined cost
+  -49 source /-56 physical; 2075 recipe and 336 package complete outcomes match.
+  Two actual open/replace races fail before and pass after; 352 integrated checks
+  /3 existing skips pass in 99.71s. Ruff/mypy2 and independent applied closure pass.
+- Native grounded diagram types own admitted specs across authoring/grounding/
+  report/render/posting: -97 source /-95 physical across eight inventoried files.
+  An independent review caught privileged raw stored-artifact acceptance drift;
+  concrete raw-wire checks restore it after the same head acquisition. 702 full
+  authoring and 1013 immutable-head posting outcomes match; 289 outside checks
+  plus static checks pass. Independent applied-byte closure is clean; integrated
+  workflow rerun settles separately. Original -109 estimate is superseded.
+
+Second thirteenth complete working-tree snapshot: 362 files, 107628 physical /
+82417 source, 487 high CC /599 high cognitive, clone LOC 2165, functions3860.
+Inventory hash remains 76cc2585344c06d20088698af1466bab69e33436b8d4e3882a0511bd5590422f.
+This uncommitted batch removes 292 physical /281 source; aggregate reductions
+are 5.061% physical /3.634% source. Required shortfalls remain 5601 physical /
+5443 source, target false. Snapshot/meta/raw pinned report are under
+/tmp/daydream-pr1444/thirteenth-second-*; PR artifact remains the committed
+5378 measurement until integrated gates and committed-byte proof. Native gold
+publication admission and remaining quality grammar capture remain outside
+pending complete proof/static/independent review. No provisional credit.
+
+Thirteenth additional applied owners, all independently reviewed with guarded
+prototype-to-checkout byte comparison and focused integrated checks:
+- CaseDocument native gold admission now serves curation mutation and compilation;
+  stale historical read/status/refresh remains supported. The global read-time gate
+  was rejected. Complete cost -34 source/-59 physical; 541 integrated checks pass.
+  Forged source provenance and content are refused before staged publication.
+- Native quality guard queries remove four grammar walkers: -21 source/-18 physical,
+  8062 complete metric comparisons and 192 integrated checks pass. High CC drops
+  six to four and high cognitive eight to five, while total cognitive mass rises;
+  no blanket cognitive-complexity improvement is claimed.
+- Native tree-sitter kind captures remove three private kind sets and classifiers
+  while preserving exported default/custom classification: -23 source/-27 physical,
+  307 same-tree complete comparisons, 120 ordering cases and 221 integrated checks.
+  Native capture ordering remains unchanged; separately parsed trees were an invalid
+  ordering comparator. Total cognitive mass increases slightly.
+- Adjudication Argparse actions own command admission, removing its independent
+  subverb routing table and twelve argv adapters. Captured JSONL and manifest bytes
+  now remain the emitted authority, fixing parse-A/publish-B substitution races.
+  The obsolete independently acquiring reviewer bridge disappears; actual harvest
+  qualification coverage remains. Combined -44 source/-53 physical, 800 exact CLI
+  outcomes, 323 integrated checks and static checks pass. The byte-capture correction
+  itself adds one source line and is included in the net cost.
+- Native Improve block publication directly owns index construction, deleting a
+  one-use wrapper: -14 source/-17 physical; 27 unchanged real-Git checks pass.
+- Native Argparse Action owns the full-help constructor, deleting its pass-through
+  initializer: -12 source/-13 physical; 100 exact parser outcomes and 175 integrated
+  CLI checks pass.
+- Grounded diagram integrated rerun also passes 289 checks in 63.72 seconds.
+
+Third thirteenth complete working snapshot: 362 files, 107441 physical/82269 source,
+483 high CC/594 high cognitive, clone LOC2126 and functions3851. Full pinned JSON
+report and snapshot/meta: /tmp/daydream-pr1444/thirteenth-third-*. Inventory remains
+76cc2585344c06d20088698af1466bab69e33436b8d4e3882a0511bd5590422f. Batch net reduction
+is 479 physical/429 source; aggregate reductions 5.224% physical/3.809% source.
+Required shortfalls remain 5414 physical/5295 source: objective false. No full
+integrated gate or committed measurement is yet claimed for this batch. Negative
+private invocation (+12 source/+16 physical) and captured-source DTO (+36 source/
++45 physical) prototypes remain unapplied; forwarding/lazy-view owners must remove
+more than their native capture, reset and public-adapter obligations cost.
+
+## Higher-level redesign requested
+
+User steering: simplify how Daydream works, rather than continue isolated helper
+cuts. Local outside prototypes are paused and uncredited. The reviewed native
+local-preview SHA admission applied before that steering removes the invented
+local Hub client: -10 source/-23 physical, 83 integrated checks; high cognitive
+one to two is an explicit tradeoff. Third aggregate measurement predates that
+application. Hydration native producer/ledger prototype remains outside pending
+review of failure order and late-receipt substitution semantics.
+
+Higher-level working model is request -> acquired evidence -> admitted findings
+-> authorized repair -> verified publication. Built-in Deep/shallow/diagram and
+Improve already share the registry flow engine. Replacing that engine would
+mostly relocate existing policy. Three coherent axes are under assessment:
+- Training carries one admitted FindingRecord population from acquisition through
+  materialization/adjudication and corpus projection. Session-shaped intermediate
+  state and immediate rubric JSON serialization/parsing can disappear, while
+  existing formats remain serializers at supported boundaries. Benchmark case
+  authoring and maintainer label harvesting retain their genuinely distinct rules.
+- Repair owns retry decisions and evidence-after-mutation across fix verdicts,
+  test healing and publication. A new owner only helps if states/decisions actually
+  disappear; three loops currently encode different supported obligations.
+- Completed run evidence owns publication as directly as possible. Source artifact
+  detach, external live streaming and crash recovery are actual contracts.
+
+A universal run-owned repository was considered as a broader execution model,
+but cloning alone cannot remove source/sibling restoration: all four fixing
+backends do not currently prove root confinement, and shell commands can still
+address source paths. Improve excludes untracked/ignored files whereas fix/tests
+need protected drafts/support files; hooks can mutate the verified tree. Any
+implementation must prove these obligations rather than delete them. Likewise a
+mandatory single ATIF/raw-event journal would conflate privacy-redacted telemetry,
+returned model content and capped finalization evidence, or add unbounded capture.
+No such replacement is applied or credited. Clarification about proposing public
+capability retirement is pending; original supported-behavior constraints govern
+independent implementation meanwhile.
+
+User answered: also propose retiring capabilities. The concrete proposal is at
+production-simplification-retirement-proposals.md; no removal authorized yet.
+Recommended Improve exclusive cone28files7184source8818physical. Alternative
+Benchmark exclusive cone29files10174source13374physical. Pi is required by the
+checked-in online-RL renderer configuration, so removing it is not recommended
+with training retained. Shared service discovery, historical wire readers and
+independent Git preparation are not counted as retired. Awaiting user scope
+choice before any feature deletion; existing authorized verification continues.
+
+Fourth complete working snapshot includes native local-preview admission:
+362files107418physical82259source,483highCC595highcognitive,2126cloneLOC,3845functions.
+Inventory hash unchanged; batch removes502physical439source. Aggregate reductions
+5.245%physical3.821%source; shortfalls5391physical5285source, objective false.
+/tmp/daydream-pr1444/thirteenth-fourth-* holds full pinned snapshot/meta/report.
+Ordinary make check started on this unchanged integrated production checkout;
+no result is yet claimed. Fresh independent integrated review/reproduction run.
+
+Fourth measurement independently reproduced by both Flow and Data: complete pinned
+SCB JSON, all 362 inventory paths and every production byte match. Data's independent
+cross-owner review found no material issue and ran 318 checks successfully (21.16s).
+The first ordinary integrated `make check` stopped at mypy: a submission test used
+an unexported facade annotation. It now imports the actual native result type from
+reviews.models; focused mypy passes. Full ordinary check restarted; no full result
+is claimed until it settles. No production bytes or measured totals changed.
+
+User scope decision: KEEP BOTH Improve and Benchmark; continue internal redesign.
+Retirement remains proposal-only and receives zero measurement credit. An isolated
+detached candidate under /tmp/daydream-pr1444/improve-retirement-candidate explored
+complete Improve callers/config/registration closure; it remains unapplied and is
+not a supported replacement. No shared production capability was deleted.
+
+Full baseline independent review is now partitioned across all changed production
+paths and companion tests, with own-authored hunks assigned to another reviewer.
+Backend found profile native admission retaining private raw values in its exception
+cause. Three actual parser-to-traceback canaries failed before the fix; suppressing
+the ValidationError cause retains the bounded public error/source and all admission.
+Focused profile checks pass 45 tests; independent exact fix review is clean. The
+full check started before this one-line fix, so a subsequent normal gate must cover
+the final integrated bytes. Source/physical totals are unchanged; frozen production
+byte proofs will be refreshed before commit.
+
+Full ordinary integrated check before the later privacy fix completed successfully:
+9696 passed, 14 existing skips, 199 warnings, 831.61s; coverage90.78% against unchanged
+86% floor. Locked dependencies/all extras, Ruff, both Vulture scans, mypy750, Docker
+actionlint, coverage artifact and naming passed. Later native profile privacy fix:
+45 focused checks3.27s, independent exact review clean. Final hook gate remains due.
+
+Full-baseline independent review exposed lost archive design rationale and newly
+packed finding/adjudication/dedupe fields. Restored eight meaningful privacy/session/
+column-projection explanations (+41physical), and expanded introduced multi-field
+wire mappings/guards (+32source/+32physical). Full module ASTs are identical to HEAD
+for these formatting corrections; independent review closed them clean. The seven
+original archive/hub explanations are copied exactly; RunColumn is adapted to the
+native SQL winner triggers. Pre-existing compact mappings in local_history.py are
+unchanged from baseline and earn no PR reduction credit; avoid unrelated churn.
+
+Sixth complete working snapshot:362files107491physical82291source,483highCC595highCog,
+2126cloneLOC3845functions; inventory hash unchanged. Batch net -429physical/-407source
+from5378, including all corrective costs. Source target short5317, physicalshort5464;
+objectivefalse. Full pinned snapshot/meta/report: /tmp/daydream-pr1444/thirteenth-sixth-*.
+Measurement artifact now represents these provisional working bytes; committed PR
+is still5378 until ordinary commit/push and committed-byte proof complete.
+
+Additional repository-wide simplification discovery uses the local deadcode-sweep
+skill. Durable state: .git/daydream-deadcode-sweep/runs/pr1444-internal-redesign/.
+1024 Git-tracked paths partitioned into ten disjoint native scout slices, all owned
+hashes and initially unvisited statuses recorded. Data/Flow scouts start slices1/2;
+Backend starts slice3 after full baseline review closes. Remaining slices run in
+waves using existing agents. This is INCOMPLETE discovery, not a completed sweep.
+No new sweep finding may be applied before every slice has substantive triage.
+Existing outside native finding/repair prototypes are paused, partial or modest
+and uncredited. Keep Improve/Benchmark and all supported capabilities throughout.
+
+Full baseline review also restored hostname normalization, working-directory schema
+spellings and PrioritizationFacts hash-exclusion invariants (+13physical), plus the
+import evidence-anchor fallback rationale and readable hydrated/finding projection
+(+7physical/+5source). Import executable AST unchanged. Seventh complete working
+snapshot:362files107511physical82296source;483highCC595highCog2126cloneLOC3845functions.
+Inventory unchanged; batch5378→working -409physical/-402source. Target remains false:
+physical short5484/source short5322. Full pinned seventh snapshot/meta/report under
+/tmp/daydream-pr1444/thirteenth-seventh-*. These are provisional working bytes;
+committed PR remains5378 pending ordinary final hooks and exact committed proof.
+
+Independent full-baseline review exposed a previously moved test double: original
+counted archive/hydrate_client.py→tests/harness/hub.py. Restored the verified current
+FakeHub bytes to the original counted path and removed the harness copy; migrated
+seven test/fixture imports only. No implementation or assertion changed. All135
+focused native consumers pass3.16s; Backend independently closes exact bytes/callers.
+No moved-out inventory reduction credit remains. Fresh eighth full measurement:
+363files107691physical82441source,483CC595Cog2139cloneLOC3858functions; inventorySHA
+036bd5e167a222b8e1986c2f4e77a2733d8ebf9e92b75daa468ad226993c92fe.
+Aggregate5.004%physical3.608%source; targets remain false (short5664physical5467source).
+Batch5378→working now -229physical/-257source, after all corrective costs. Full pinned
+eighth snapshot/meta/report outside/tmp/daydream-pr1444. Existing full gate preceded
+profile privacy and relocation corrections; final ordinary hook gate remains due.
+
+Full-baseline reviewers Flow/Data have closed assigned scopes. Backend closed142
+production and91 companion test/fixture paths; five own-authored boundaries/tests
+are explicitly qualified pending Data complement (flows/engine,deep/orchestrator,
+diagram_grounding/evidence,reviews/diagrams,artifacts/ledger). No self-approval is
+accepted. Resolved findings: profile private cause, lost design rationale, packed
+wire formatting and moved fixture credit. Supplemental restored FakeHub reviewed.
+
+Local sweep planned triage slices1/2 complete (126/96 unique substantive records
+reconciled); Data complement→slice4,Flow slice5,Backend slice3. One slice1 later
+import-only delta awaits owner recheck; all ten passes/global ranking still due.
+No new sweep candidate applied. Larger native ownership hypotheses remain partial
+with explicit caller/format obligations; modest estimates receive no target credit.

@@ -21,10 +21,13 @@ from daydream.deep.diagram_types import (
     MESSAGE_KINDS,
     NODE_KINDS,
     PARTICIPANT_KINDS,
+    FlowchartSpec,
+    SequenceSpec,
 )
 from daydream.output_schema import array_schema, record_array_schema, strict_object
 from daydream.repository_paths import (
     REPOSITORY_FILE_PATH_SCHEMA as _REPOSITORY_FILE_PATH_SCHEMA,
+    strip_dot_slash,
     valid_repository_file_path,
 )
 
@@ -124,12 +127,12 @@ FLOWCHART_SPEC_SCHEMA: dict[str, Any] = strict_object(
 )
 
 
-def _empty_sequence_spec() -> dict[str, Any]:
+def _empty_sequence_spec() -> SequenceSpec:
     """Return a fresh, schema-valid, empty sequence spec."""
     return {"participants": [], "messages": [], "blocks": []}
 
 
-def _empty_flowchart_spec() -> dict[str, Any]:
+def _empty_flowchart_spec() -> FlowchartSpec:
     """Return the unusable-spec sentinel; its None root intentionally fails the schema."""
     return {"root": None, "nodes": [], "edges": []}
 
@@ -178,7 +181,7 @@ def _paths(value: Any) -> list[str]:
         path = _path(entry)
         if path is not None and path not in out:
             out.append(path)
-    return out
+    return [strip_dot_slash(path) for path in out]
 
 
 def _evidence(value: Any, *, symbol: Literal["required", "optional", "absent"]) -> dict[str, Any] | None:
@@ -189,7 +192,7 @@ def _evidence(value: Any, *, symbol: Literal["required", "optional", "absent"]) 
     line = _index(value.get("line"), minimum=1)
     if file is None or line is None:
         return None
-    evidence: dict[str, Any] = {"file": file, "line": line}
+    evidence: dict[str, Any] = {"file": strip_dot_slash(file), "line": line}
     if symbol == "absent":
         return evidence
     symbol_text = _text(value.get("symbol"))
@@ -314,7 +317,7 @@ def _coerce_blocks(value: Any, *, remap: dict[int, int]) -> list[dict[str, Any]]
     return out
 
 
-def coerce_sequence_spec(value: Any) -> dict[str, Any]:
+def coerce_sequence_spec(value: Any) -> SequenceSpec:
     """Drop malformed entries and remap branch indices into a schema-valid sequence spec."""
     if not isinstance(value, dict):
         return _empty_sequence_spec()
@@ -327,7 +330,7 @@ def coerce_sequence_spec(value: Any) -> dict[str, Any]:
 
 
 def _coerce_root(value: Any) -> dict[str, Any] | None:
-    return _record(
+    root = _record(
         value,
         {
             "file": _path,
@@ -336,6 +339,9 @@ def _coerce_root(value: Any) -> dict[str, Any] | None:
         },
         required=("file", "name", "line"),
     )
+    if root is not None:
+        root["file"] = strip_dot_slash(root["file"])
+    return root
 
 
 def _coerce_nodes(value: Any) -> list[dict[str, Any]]:
@@ -365,7 +371,7 @@ def _coerce_edges(value: Any) -> list[dict[str, Any]]:
     )
 
 
-def coerce_flowchart_spec(value: Any) -> dict[str, Any]:
+def coerce_flowchart_spec(value: Any) -> FlowchartSpec:
     """Drop malformed entries; an unusable root becomes the schema-invalid None sentinel."""
     if not isinstance(value, dict):
         return _empty_flowchart_spec()

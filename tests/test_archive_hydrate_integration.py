@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from daydream.archive import hydrate, hydrate_rules, license_enrich
+from daydream.archive.hydrate_client import FakeHub
 from daydream.archive.index import query_runs
 from daydream.archive.license_enrich import _PUBLISHED_CACHE_NAME
 from tests.fixtures.training.build_hub_snapshot import (
@@ -20,7 +21,6 @@ from tests.fixtures.training.build_hub_snapshot import (
     build_pinned_snapshot,
     build_snapshot,
 )
-from tests.harness.hub import FakeHub
 from tests.test_archive_hydrate import _fake_resolver, _FakeLicenseResolver, _write_policy
 
 REVISION = SNAPSHOT_REVISION  # 40-hex pinned by the fixture builder
