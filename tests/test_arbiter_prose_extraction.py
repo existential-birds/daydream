@@ -1,7 +1,7 @@
 """Prose brackets must not hijack arbiter JSON extraction.
 
 A Pi response can mention metadata["sender"]["login"] before its fenced
-findings object. Extraction must choose the largest balanced JSON span.
+findings object. Extraction must select the candidate the requested schema admits.
 Tests drive phase_arbiter_review through run_agent with only the backend
 mocked, applying the real Pi text-to-structured-output contract.
 """
@@ -15,7 +15,7 @@ import pytest
 
 from daydream.agent import StructuredOutputFailure, run_agent
 from daydream.backends import Backend, ResultEvent, TextEvent
-from daydream.json_utils import extract_json
+from daydream.json_utils import extract_json_by_schema, validates_schema
 from daydream.phases import phase_arbiter_review
 from daydream.phases.review import ReviewOutputError
 from daydream.phases.schemas import PER_STACK_RECORD_SCHEMA
@@ -67,8 +67,17 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 
 def _pi_like_backend(message: str) -> ScriptedBackend:
-    """Mirrors the pi backend: structured_output = extract_json(final text), gated on the schema."""
-    return _split_text_backend(message, extract_json(message))
+    """Mirrors the pi backend: schema-aware selection over the final text, gated on the schema."""
+
+    def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
+        structured = extract_json_by_schema(
+            message, schema=output_schema, accept=validates_schema
+        ).value if output_schema else None
+        return [TextEvent(text=message),
+            ResultEvent(structured_output=structured, continuation=None),
+        ]
+
+    return ScriptedBackend(responder=respond, model="glm-5.2")
 
 
 def _prose_only_backend(message: str) -> ScriptedBackend:

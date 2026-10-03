@@ -191,17 +191,9 @@ def extract_json(text: str) -> Any:
     if not text or not text.strip():
         return None
 
-    cleaned = text.strip()
-
-    # Strip markdown code fences: ```json\n...\n``` or ```\n...\n```
-    if cleaned.startswith("```"):
-        lines = cleaned.split("\n")
-        # Drop the opening fence line (may include language tag like "json")
-        lines = lines[1:]
-        # Drop the closing fence line
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        cleaned = "\n".join(lines).strip()
+    # Strip surrounding whitespace and markdown code fences
+    # (```json\n...\n``` or ```\n...\n```) through the shared helper.
+    cleaned = _strip_json_fences(text)
 
     # Fast path — the entire text is valid JSON.
     try:
@@ -260,7 +252,13 @@ class SchemaAwareSelection:
 
 
 def _strip_json_fences(text: str) -> str:
-    """Strip surrounding whitespace and markdown code fences, as ``extract_json`` does."""
+    """Strip surrounding whitespace and markdown code fences.
+
+    The single source of truth for the candidate-set precondition shared by
+    ``extract_json`` and ``extract_json_by_schema``: the opening fence line
+    (which may carry a language tag like ``json``) and the closing fence line
+    are dropped, leaving the payload.
+    """
     cleaned = text.strip()
     if not cleaned.startswith("```"):
         return cleaned

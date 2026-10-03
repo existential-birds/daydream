@@ -264,6 +264,24 @@ def _validates_schema(value: Any, schema: dict[str, Any]) -> bool:
     return not any(Draft202012Validator(schema).iter_errors(value))
 
 
+def _select_by_schema(text: str, schema: dict[str, Any], *, require_full_schema: bool) -> SchemaAwareSelection:
+    """Select one candidate with the run's own gate, strictly preferring full validity.
+
+    ``_salvageable`` is deliberately loose — any object carrying the schema's
+    required keys qualifies — so under a "last admitted candidate wins" rule it
+    would let a later incidental object (e.g. an evidence digest that merely
+    lists issues) displace the real answer. Scanning with the strict gate first
+    keeps a fully valid candidate authoritative; the salvage scan only runs when
+    nothing validates, so this never widens what is accepted, only reorders it.
+    """
+    if require_full_schema:
+        return extract_json_by_schema(text, schema=schema, accept=_validates_schema)
+    strict = extract_json_by_schema(text, schema=schema, accept=_validates_schema)
+    if strict.value is not None:
+        return strict
+    return extract_json_by_schema(text, schema=schema, accept=_salvageable)
+
+
 def _salvageable(value: Any, schema: dict[str, Any]) -> bool:
     """Accept full schema validity or a shape downstream consumers can salvage.
 
@@ -968,7 +986,9 @@ async def _run_agent(
         # incidental prose JSON ahead of a real answer (e.g. a trailing
         # `{"issues": []}` after a bracket list) resolves to the answer, never to
         # the largest span. The selected value must still pass the same
-        # salvage-tolerant gate as the success path (see _salvageable).
+        # salvage-tolerant gate as the success path (see _salvageable) — and, under
+        # the last-admitted-wins rule, a fully schema-valid candidate outranks any
+        # merely salvageable one (see _select_by_schema).
         #
         # The selector discriminates only when that gate discriminates. A caller
         # that opts out via validate_structured_output=False has a vacuous gate,
@@ -980,11 +1000,7 @@ async def _run_agent(
         if raw.strip():
             selected: Any = None
             if validate_structured_output:
-                selection = extract_json_by_schema(
-                    raw,
-                    schema=output_schema,
-                    accept=_validates_schema if require_full_schema else _salvageable,
-                )
+                selection = _select_by_schema(raw, output_schema, require_full_schema=require_full_schema)
                 selected = selection.value
             else:
                 selected = extract_json(raw)
