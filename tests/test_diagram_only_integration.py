@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from daydream.config import DIAGRAM_MAX_NODES
 from daydream.deep import diagram_steps
 from daydream.findings import write_findings_artifact
 from daydream.pr_review import diagram_marker, parse_diagram_markers, validate_diagram_payload
+from daydream.reviews.models import PRInfo
 from daydream.runner import run
 from tests.harness import diagram_repos as dr
 from tests.harness.console import collapse_panel_text
@@ -284,6 +286,47 @@ async def test_findings_out_rejects_a_moved_head_before_diagram_export(
     panel = collapse_panel_text(capsys)
     assert base[:12] in panel and git_ops.head_sha(target)[:12] in panel
     assert "re-run against the new head" in panel
+
+
+async def test_findings_out_binds_a_diagram_artifact_to_the_analyzed_checkout(
+    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The artifact names the analyzed commit even after the served head moves."""
+    target = dr.build_branch_heavy_repo(tmp_path)
+    head = git_ops.head_sha(target)
+    fake_gh.serve_open_pr(target)
+    lookups: list[str] = []
+    pinned = PRInfo(7, head, head, "main", "feature", "acme", "widgets",
+                    "https://github.com/acme/widgets/pull/7")
+    served = pinned
+
+    def lookup(*_a: Any, **_k: Any) -> PRInfo:
+        lookups.append(served.head_sha)
+        return served
+
+    monkeypatch.setattr("daydream.pr_review.find_pr_by_number", lookup)
+    artifact_path = tmp_path / "findings.json"
+    # Mid-run force-push to an ancestor that is present in the local object DB:
+    # every lookup after capture sees the superseded head.
+    original = StubBackend.execute
+
+    async def execute(self: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal served
+        served = replace(pinned, head_sha=git(target, "rev-parse", "main"))
+        async for event in original(self, *args, **kwargs):
+            yield event
+    monkeypatch.setattr(StubBackend, "execute", execute)
+
+    exit_code, _ = await diagram_run(
+        target, diagram="flowchart", specs={"flowchart": [dr.flowchart_spec()]},
+        findings_out=str(artifact_path), pr_number=7,
+    )
+
+    assert exit_code == 0
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert artifact["head_sha"] == head
+    assert git_ops.show(target, artifact["head_sha"], "app/pipeline.py")
+    assert lookups == [head], "the PR is resolved once, at run start"
 
 
 async def test_phase_b_reposts_a_diagram_artifact_without_any_checkout(

@@ -699,6 +699,7 @@ async def _step_post_diagram(ctx: FlowContext) -> Stop:
     deep_state = DeepState(ctx.data)
     from daydream.git_ops import GitError
     from daydream.pr_review import (
+        PRInfo,
         _resolve_pr,
         diagram_comment_kinds,
         post_diagram_comment_to_pr,
@@ -710,25 +711,23 @@ async def _step_post_diagram(ctx: FlowContext) -> Stop:
     payload: dict[str, Any] = diagrams.get("payload") or {}
 
     if ctx.config.findings_out is not None:
-        from daydream.pr_review import find_open_pr, find_pr_by_number, resolve_review_renderers
+        from daydream.pr_review import resolve_review_renderers
         from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
 
         run_info = render_live_run_info(LiveRunInfoSource(get_current_recorder(), ctx.artifacts))
         if run_info.diagnostic is not None:
             print_warning(console, run_info.diagnostic)
-        try:
-            pr = (find_pr_by_number(ctx.work.repo, ctx.config.pr_number, auth=ctx.github_execution.auth)
-                  if ctx.config.pr_number is not None
-                  else find_open_pr(ctx.work.repo, auth=ctx.github_execution.auth))
-        except GitError as exc:
-            print_error(console, "Findings Artifact", f"cannot resolve target PR: {exc}")
-            return Stop(1)
-        if pr is None:
+        # The artifact declares the commit this run analysed, so its identity is
+        # the one captured at run start -- never a fresh lookup, which would
+        # relabel an analysis of one checkout with a later PR head.
+        pr = ctx.data.get("analyzed_pr")
+        if not isinstance(pr, PRInfo):
             print_error(
                 console,
                 "Findings Artifact",
-                "no PR resolvable for --findings-out — the artifact must declare its "
-                "target (pass --pr-number or open a PR for this branch)",
+                "no captured PR identity for --findings-out — the artifact must "
+                "declare the commit it analysed; re-run the diagram flow so the "
+                "PR is captured at run start",
             )
             return Stop(1)
         return Stop(
