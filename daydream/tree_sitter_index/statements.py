@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
+from dataclasses import dataclass
 
 from tree_sitter import Node
 
@@ -292,16 +293,6 @@ def branch_statement_lines(language_id: str, source: bytes) -> list[int]:
     return sorted(lines)
 
 
-def _source_line(source: bytes, line: int) -> str:
-    """Return the 1-based ``line`` of ``source`` as text, or ``""`` if absent."""
-    if line < 1:
-        return ""
-    rows = source.split(b"\n")
-    if line > len(rows):
-        return ""
-    return rows[line - 1].decode("utf-8", errors="replace")
-
-
 def _terminal_call_name(node: Node) -> str | None:
     """Return the callee text of a call ``node``, or None when unreadable."""
     callee = node.child_by_field_name("function")
@@ -317,74 +308,63 @@ def _is_bare_string_statement(node: Node) -> bool:
     return len(contents) == 1 and contents[0].type in {"string", "string_literal"}
 
 
-def is_executable_statement_line(
-    language_id: str | None, source: bytes, line: int
-) -> bool:
-    """Whether a 1-based line starts a statement, including function heads.
+@dataclass(frozen=True)
+class StatementLines:
+    """Grounding memberships captured by one native source traversal."""
 
-    Bare strings cannot ground actions. Unknown languages, unavailable parsers,
-    and parse failures return False; unsafe parser versions still raise."""
-    statement_types = EXECUTABLE_STATEMENT_NODE_TYPES.get(language_id or "")
-    parser = get_parser(language_id) if language_id else None
-    if statement_types is None or parser is None:
-        return False
-    try:
-        tree = parser.parse(source)
-        return any(
-            node.type in statement_types
-            and node.start_point[0] + 1 == line
-            and not _is_bare_string_statement(node)
-            for node in _walk(tree.root_node)
-        )
-    except Exception:
-        return False
+    executable: frozenset[int]
+    branches: frozenset[int]
+    terminals: frozenset[int]
 
 
-def is_branch_line(language_id: str | None, source: bytes, line: int) -> bool:
-    """Whether a 1-based line opens a branch, including switch container heads.
+def statement_lines(language_id: str | None, source: bytes) -> StatementLines:
+    """Capture executable, branch-head and terminal lines once.
 
-    Unlike branch counts, membership includes both containers and cases. Unknown
-    or failed parsers use a keyword fallback; unsafe parser versions still raise."""
-    branch_types = BRANCH_NODE_TYPES.get(language_id or "")
-    parser = get_parser(language_id) if language_id else None
-    if branch_types is None or parser is None:
-        return bool(_BRANCH_KEYWORD_RE.match(_source_line(source, line)))
-    try:
-        tree = parser.parse(source)
-        for node in _walk(tree.root_node):
-            if node.type in branch_types and node.start_point[0] + 1 == line:
-                return True
-    except Exception:
-        return bool(_BRANCH_KEYWORD_RE.match(_source_line(source, line)))
-    return False
-
-
-def is_terminal_line(language_id: str | None, source: bytes, line: int) -> bool:
-    """Whether a 1-based line returns, raises, or calls an exit/panic function.
-
-    Calls and Rust macros require exact terminal names. Unknown or failed parsers
-    use a keyword fallback; unsafe parser versions still raise."""
-    terminal_types = TERMINAL_NODE_TYPES.get(language_id or "")
-    parser = get_parser(language_id) if language_id else None
-    if terminal_types is None or parser is None:
-        return bool(_TERMINAL_KEYWORD_RE.match(_source_line(source, line)))
-    call_types = _CALL_NODE_TYPES.get(language_id or "", frozenset())
-    call_names = TERMINAL_CALL_NAMES.get(language_id or "", frozenset())
-    try:
-        tree = parser.parse(source)
-        for node in _walk(tree.root_node):
-            if node.start_point[0] + 1 != line:
-                continue
-            if node.type in terminal_types:
-                return True
-            if node.type in call_types and _terminal_call_name(node) in call_names:
-                return True
-            if node.type == "macro_invocation":
-                macro = node.child_by_field_name("macro")
-                if macro is not None and macro.text is not None:
-                    name = macro.text.decode("utf-8", errors="replace").strip()
-                    if name in TERMINAL_MACRO_NAMES:
-                        return True
-    except Exception:
-        return bool(_TERMINAL_KEYWORD_RE.match(_source_line(source, line)))
-    return False
+    Unavailable/failed parsing retains keyword fallback only for branches and
+    terminals; executable grounding remains fail-closed. Unsafe versions raise.
+    Branch membership includes switch containers, unlike branch-count policy.
+    """
+    executable: set[int] = set()
+    branches: set[int] = set()
+    terminals: set[int] = set()
+    language = language_id or ""
+    parser = get_parser(language) if language else None
+    if parser is not None and language in EXECUTABLE_STATEMENT_NODE_TYPES:
+        statement_types = EXECUTABLE_STATEMENT_NODE_TYPES.get(language, frozenset())
+        branch_types = BRANCH_NODE_TYPES.get(language, frozenset())
+        terminal_types = TERMINAL_NODE_TYPES.get(language, frozenset())
+        call_types = _CALL_NODE_TYPES.get(language, frozenset())
+        call_names = TERMINAL_CALL_NAMES.get(language, frozenset())
+        try:
+            tree = parser.parse(source)
+            for node in _walk(tree.root_node):
+                line = node.start_point[0] + 1
+                if node.type in statement_types and not _is_bare_string_statement(node):
+                    executable.add(line)
+                if node.type in branch_types:
+                    branches.add(line)
+                if node.type in terminal_types:
+                    terminals.add(line)
+                elif node.type in call_types and _terminal_call_name(node) in call_names:
+                    terminals.add(line)
+                elif node.type == "macro_invocation":
+                    macro = node.child_by_field_name("macro")
+                    if macro is not None and macro.text is not None:
+                        name = macro.text.decode("utf-8", errors="replace").strip()
+                        if name in TERMINAL_MACRO_NAMES:
+                            terminals.add(line)
+            return StatementLines(
+                frozenset(executable), frozenset(branches), frozenset(terminals),
+            )
+        except Exception:
+            pass
+    rows = [row.decode("utf-8", errors="replace") for row in source.split(b"\n")]
+    return StatementLines(
+        frozenset(),
+        frozenset(
+            line for line, row in enumerate(rows, 1) if _BRANCH_KEYWORD_RE.match(row)
+        ),
+        frozenset(
+            line for line, row in enumerate(rows, 1) if _TERMINAL_KEYWORD_RE.match(row)
+        ),
+    )

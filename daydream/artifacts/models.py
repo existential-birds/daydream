@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
+
+from pydantic import ConfigDict, StrictInt, StrictStr
 
 _SCHEMA_VERSION = 1
 _DAYDREAM = ".daydream"
@@ -220,20 +222,22 @@ class TrajectoryOutputRoute:
 
 @dataclass(frozen=True)
 class _DestinationRecord:
-    record_id: str
-    requested: str
-    base: str
-    relative: str
+    __pydantic_config__: ClassVar[ConfigDict] = ConfigDict(extra="forbid")
+
+    record_id: StrictStr
+    requested: StrictStr
+    base: StrictStr
+    relative: StrictStr
     label: OutputLabel
     delivery: DestinationDelivery
     expected_kind: Literal["file", "directory"]
     baseline_state: Literal["absent", "file", "directory"]
     baseline: tuple[ArtifactManifestEntry, ...]
-    missing_parents: tuple[str, ...]
-    expected_dev: int | None = None
-    expected_ino: int | None = None
-    prepared_sha256: str | None = None
-    installed_sha256: str | None = None
+    missing_parents: tuple[StrictStr, ...]
+    expected_dev: StrictInt | None = None
+    expected_ino: StrictInt | None = None
+    prepared_sha256: StrictStr | None = None
+    installed_sha256: StrictStr | None = None
     published: tuple[ArtifactManifestEntry, ...] = ()
 
 

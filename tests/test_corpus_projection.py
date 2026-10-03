@@ -8,12 +8,14 @@ import pytest
 from jsonschema import Draft202012Validator
 
 import daydream.archive.hydrate_rules as hydrate_rules
+from daydream.archive import hydrate, license_enrich
 from daydream.archive.hydrate_rules import (
     REASON_CODE_LICENSE_EVIDENCE_MISSING,
     REASON_CODE_REPO_IDENTITY_MISSING,
 )
 from daydream.archive.sanitize import _derivative_digest
 from daydream.commands.corpus import _CORPUS_SUBVERBS
+from daydream.training.adjudication.materialize import run_materialize
 from daydream.training.adjudication.snapshot import FindingRecord
 from daydream.training.corpus_projection.bundle import (
     BundleBatch,
@@ -31,7 +33,15 @@ from daydream.training.corpus_projection.segments import segment
 from daydream.training.corpus_projection.tiers import GoldGateError, classify_tier
 from daydream.training.exclusion import EXCLUSION_PATH
 from daydream.training.stacks import load_dataset_v2
+from tests.fixtures.training.build_hub_snapshot import (
+    PINNED_REVISION,
+    SNAPSHOT_REVISION,
+    build_pinned_snapshot,
+    build_snapshot,
+)
 from tests.harness.scripts import cli_main
+from tests.test_archive_hydrate import _FakeLicenseResolver
+from tests.test_archive_hydrate_integration import _config, run_pinned_fixture_hydration
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -1083,3 +1093,92 @@ def test_corpus_build_verb_gone() -> None:
     """
     assert "build" in _CORPUS_SUBVERBS
     assert "build-v2" not in _CORPUS_SUBVERBS
+
+
+def test_native_published_decision_ledger_projects_only_admitted_payloads(tmp_path: Path) -> None:
+    hub = build_pinned_snapshot()
+    summary = run_pinned_fixture_hydration(tmp_path, hub=hub)
+    assert summary.verified and summary.verify_admitted == 2
+    bundle_dir = tmp_path / "stage" / "curated" / summary.curation_id
+    bundle = load_curated_bundle(bundle_dir)
+    assert {batch.session_id for batch in bundle.admitted} == {"pin-declared", "pin-enrich"}
+    rejected = [batch for batch in bundle.batches if batch.status != "admitted"]
+    assert {batch.session_id for batch in rejected} == {"pin-c5", "pin-gpl", "pin-unknown"}
+    assert all(not (bundle_dir / batch.artifact_relpath).exists() for batch in rejected)
+    prefix = f"curated/{summary.curation_id}/"
+    assert not any(path.startswith((prefix + "excluded/", prefix + "quarantine/")) for path in hub.files)
+
+    preview = tmp_path / "preview"
+    pin = dict(
+        curation_id=summary.curation_id, sanitized_hub_commit=PINNED_REVISION,
+        source_hub_commit=PINNED_REVISION, archive_index_digest=hashlib.sha256(
+            (tmp_path / "stage" / "index.db").read_bytes()
+        ).hexdigest(), evidence_observed_at="2026-05-20T00:00:00+00:00", as_of="",
+        labeler_version="v1", rubric_version="v1", classifier_version="v1",
+    )
+    assert run_materialize(tmp_path / "stage", preview, pin=pin)["record_count"] == 2
+    rows = _read_jsonl(preview / "sessions.jsonl")
+    ann_dir = _write_annotation_bundle(
+        tmp_path / "annotations", rows, curation_id=summary.curation_id,
+        sanitized_commit=PINNED_REVISION, batch_fileset_digest=_derivative_digest(bundle_dir),
+    )
+    out_dir = tmp_path / "projected"
+    projection = build_frozen_corpus(BuildFrozenCorpusConfig(
+        out_dir=out_dir, bundle_dir=bundle_dir, annotation_bundle_dir=ann_dir,
+        license_policy_path=tmp_path / "license-policy.json", emit_process_traces=True,
+    ))
+    records = _read_jsonl(out_dir / "corpus.jsonl")
+    assert projection["total"] == 4 and (out_dir / "_SUCCESS").is_file()
+    assert {record["session_id"] for record in records} == {"pin-declared", "pin-enrich"}
+    assert {record["record_type"] for record in records} == {"process-trace", "task-only"}
+    assert all(record["outcome_label"] is None for record in records)
+
+
+@pytest.mark.parametrize("status", ["excluded", "quarantined"])
+@pytest.mark.parametrize("field", ["artifact_relpath", "manifest_relpath"])
+@pytest.mark.parametrize("path", ["/private/hidden", "excluded/../hidden", ""])
+def test_nonadmitted_decision_paths_still_require_valid_schema(
+    tmp_path: Path, status: str, field: str, path: str
+) -> None:
+    bundle_dir = _write_bundle(tmp_path)
+    manifest_path = bundle_dir / "curation-manifest.json"
+    doc = json.loads(manifest_path.read_text())
+    doc["batches"][1]["status"] = status
+    doc["batches"][1][field] = path
+    manifest_path.write_text(json.dumps(doc))
+    _write_sumsums(bundle_dir)
+    with pytest.raises(BundleError, match=field):
+        load_curated_bundle(bundle_dir)
+
+
+@pytest.mark.parametrize("failure", ["missing", "tampered"])
+def test_nonadmitted_checksum_files_remain_verified(tmp_path: Path, failure: str) -> None:
+    bundle_dir = _write_bundle(tmp_path)
+    nonadmitted = bundle_dir / "batches" / "sess-b" / "trajectory.json"
+    if failure == "missing":
+        nonadmitted.unlink()
+    else:
+        nonadmitted.write_bytes(b"replaced private payload")
+    with pytest.raises(BundleError, match="missing artifact|digest mismatch"):
+        load_curated_bundle(bundle_dir)
+
+
+def test_native_collision_decision_does_not_require_unpublished_quarantine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub = build_snapshot()
+    monkeypatch.setattr(license_enrich, "_make_license_resolver", lambda: _FakeLicenseResolver())
+    stage = tmp_path / "stage"
+    hydrate.run_hydrate_hub(_config(stage), client=hub)
+    hub.mutate_bundle(SNAPSHOT_REVISION, "sess-a", b'{"tampered": true}')
+    (stage / "downloads" / SNAPSHOT_REVISION / "bundles" / "sess-a" / "manifest.json").unlink()
+    summary = hydrate.run_hydrate_hub(_config(stage), client=hub)
+    assert summary.verified
+    bundle_dir = stage / "curated" / summary.curation_id
+    bundle = load_curated_bundle(bundle_dir)
+    collided = [batch for batch in bundle.batches if batch.session_id == "sess-a"]
+    assert len(collided) == 1 and collided[0].status == "quarantined"
+    assert collided[0].reason_code == hydrate_rules.REASON_CODE_IDENTITY_COLLISION
+    assert collided[0].artifact_relpath == "quarantine/sess-a.conflict"
+    assert not (bundle_dir / collided[0].artifact_relpath).exists()
+    assert {batch.session_id for batch in bundle.admitted} == {"sess-b", "sess-c"}

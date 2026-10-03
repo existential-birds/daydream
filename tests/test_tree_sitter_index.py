@@ -16,9 +16,8 @@ from daydream.tree_sitter_index import (
     definitions_in_file,
     detect_affected_files,
     get_parser,
-    is_branch_line,
-    is_terminal_line,
     language_for_path,
+    statement_lines,
     statements,
 )
 from daydream.tree_sitter_index.imports import _MAX_IMPORTERS
@@ -576,17 +575,11 @@ def _node_types(language_id: str, source: bytes) -> set[str]:
 
 
 def _terminal_lines(language_id: str | None, source: bytes) -> list[int]:
-    rows = source.split(b"\n")
-    return [n + 1 for n in range(len(rows)) if is_terminal_line(language_id, source, n + 1)]
+    return sorted(statement_lines(language_id, source).terminals)
 
 
 def _executable_lines(language_id: str | None, source: bytes) -> list[int]:
-    rows = source.split(b"\n")
-    return [
-        n + 1
-        for n in range(len(rows))
-        if tree_sitter_index.is_executable_statement_line(language_id, source, n + 1)
-    ]
+    return sorted(statement_lines(language_id, source).executable)
 
 
 def _defs(repo_root: Path, path: str) -> set[tuple[str, int, int, str]]:
@@ -868,24 +861,24 @@ def test_branch_table_entries_all_occur_in_probe_sources(language_id: str) -> No
         ("rust", 21),  # match v {
     ],
 )
-def test_is_branch_line_reports_switch_container_lines(language_id: str, line: int) -> None:
+def test_branch_membership_reports_switch_container_lines(language_id: str, line: int) -> None:
     """Container lines count as branches even when the count query reports cases."""
     source = {"python": PYTHON_CF, "typescript": TYPESCRIPT_CF, "go": GO_CF, "rust": RUST_CF}[language_id]
-    assert is_branch_line(language_id, source, line) is True
+    assert (line in statement_lines(language_id, source).branches) is True
     assert line not in branch_statement_lines(language_id, source)
 
-def test_is_branch_line_false_for_a_plain_statement() -> None:
-    assert is_branch_line("python", PYTHON_CF, 1) is False
-    assert is_branch_line("python", PYTHON_CF, 42) is False
+def test_branch_membership_false_for_a_plain_statement() -> None:
+    assert (1 in statement_lines("python", PYTHON_CF).branches) is False
+    assert (42 in statement_lines("python", PYTHON_CF).branches) is False
 
-def test_is_branch_line_falls_back_to_keyword_regex() -> None:
+def test_branch_membership_falls_back_to_keyword_regex() -> None:
     elixir = b"defmodule M do\n  if x do\n    1\n  end\nend\n"
     for language_id in (None, "elixir"):
-        assert is_branch_line(language_id, elixir, 2) is True
-        assert is_branch_line(language_id, elixir, 3) is False
+        assert (2 in statement_lines(language_id, elixir).branches) is True
+        assert (3 in statement_lines(language_id, elixir).branches) is False
     # Out-of-range and non-positive lines are answers, not errors.
-    assert is_branch_line(None, elixir, 999) is False
-    assert is_branch_line(None, elixir, 0) is False
+    assert (999 in statement_lines(None, elixir).branches) is False
+    assert (0 in statement_lines(None, elixir).branches) is False
 
 def test_executable_statement_line_rejects_python_non_code_lines() -> None:
     source = (
@@ -896,11 +889,11 @@ def test_executable_statement_line_rejects_python_non_code_lines() -> None:
         b"    result = compute()\n"
     )
 
-    assert tree_sitter_index.is_executable_statement_line("python", source, 1)
-    assert not tree_sitter_index.is_executable_statement_line("python", source, 2)
-    assert not tree_sitter_index.is_executable_statement_line("python", source, 3)
-    assert not tree_sitter_index.is_executable_statement_line("python", source, 4)
-    assert tree_sitter_index.is_executable_statement_line("python", source, 5)
+    assert (1 in statement_lines("python", source).executable)
+    assert 2 not in statement_lines("python", source).executable
+    assert 3 not in statement_lines("python", source).executable
+    assert 4 not in statement_lines("python", source).executable
+    assert (5 in statement_lines("python", source).executable)
 
 @pytest.mark.parametrize("language_id", ["typescript", "tsx", "javascript"])
 def test_executable_statement_lines_typescript_grammars(language_id: str) -> None:
@@ -971,11 +964,11 @@ def test_executable_statement_line_fails_closed_without_a_parser(monkeypatch: py
     monkeypatch.setattr(statements, "get_parser", lambda _language_id: None)
     source = b"def resolve():\n    result = compute()\n"
 
-    assert not tree_sitter_index.is_executable_statement_line("python", source, 2)
-    assert not tree_sitter_index.is_executable_statement_line("elixir", b"  work()\n", 1)
-    assert not tree_sitter_index.is_executable_statement_line(None, b"  work()\n", 1)
-    assert not tree_sitter_index.is_executable_statement_line(None, source, 0)
-    assert not tree_sitter_index.is_executable_statement_line(None, source, 999)
+    assert 2 not in statement_lines("python", source).executable
+    assert 1 not in statement_lines("elixir", b"  work()\n").executable
+    assert 1 not in statement_lines(None, b"  work()\n").executable
+    assert 0 not in statement_lines(None, source).executable
+    assert 999 not in statement_lines(None, source).executable
 
 @pytest.mark.parametrize("language_id", sorted(tree_sitter_index.EXECUTABLE_STATEMENT_NODE_TYPES))
 def test_executable_statement_node_types_exist_in_grammar(language_id: str) -> None:
@@ -1017,16 +1010,16 @@ def test_terminal_lines_rust_return_exit_abort_and_panic_macros() -> None:
 def test_terminal_lines_rust_ignores_non_panic_macros() -> None:
     # macro_invocation alone is far too broad to be a terminal: `println!` (27)
     # must not match, which is what makes the TERMINAL_MACRO_NAMES check load-bearing.
-    assert is_terminal_line("rust", RUST_CF, 27) is False
+    assert (27 in statement_lines("rust", RUST_CF).terminals) is False
     assert "println" not in TERMINAL_MACRO_NAMES
     assert TERMINAL_MACRO_NAMES == frozenset({"panic", "unreachable", "todo", "unimplemented"})
 
-def test_is_terminal_line_falls_back_to_keyword_regex() -> None:
+def test_terminal_membership_falls_back_to_keyword_regex() -> None:
     elixir = b"defmodule M do\n  raise \"no\"\n  x = 1\nend\n"
     for language_id in (None, "elixir"):
-        assert is_terminal_line(language_id, elixir, 2) is True
-        assert is_terminal_line(language_id, elixir, 3) is False
-    assert is_terminal_line(None, elixir, 999) is False
+        assert (2 in statement_lines(language_id, elixir).terminals) is True
+        assert (3 in statement_lines(language_id, elixir).terminals) is False
+    assert (999 in statement_lines(None, elixir).terminals) is False
 
 @pytest.mark.parametrize("language_id", sorted(TERMINAL_NODE_TYPES))
 def test_terminal_table_entries_all_occur_in_probe_sources(language_id: str) -> None:
@@ -1048,3 +1041,46 @@ def test_terminal_table_entries_all_occur_in_probe_sources(language_id: str) -> 
                 callees.add(callee.text.decode())
     assert TERMINAL_NODE_TYPES[language_id] - present == set()
     assert TERMINAL_CALL_NAMES[language_id] - callees == set()
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "parse"])
+def test_statement_index_preserves_keyword_fallback(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    class BrokenParser:
+        def parse(self, source: bytes) -> None:
+            raise RuntimeError("native parser failed")
+
+    monkeypatch.setattr(
+        statements, "get_parser", lambda _language: None if failure == "unavailable" else BrokenParser()
+    )
+    captured = statement_lines("python", b"def run():\n    if ready:\n        return 1\n")
+    assert captured.executable == frozenset()
+    assert captured.branches == frozenset({2})
+    assert captured.terminals == frozenset({3})
+
+
+def test_statement_index_rejects_unsafe_native_parser(monkeypatch: pytest.MonkeyPatch) -> None:
+    from daydream._tree_sitter_safety import TreeSitterBadVersionError
+
+    monkeypatch.delitem(_PARSER_CACHE, "python", raising=False)
+    monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
+    with pytest.raises(TreeSitterBadVersionError, match="0.26.0"):
+        statement_lines("python", b"if ready:\n    return 1\n")
+
+
+def test_statement_index_retains_unknown_language_fallback_with_cached_parser(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    native = get_parser("python")
+    assert native is not None
+    monkeypatch.setitem(_PARSER_CACHE, "unknown", native)
+    captured = statement_lines("unknown", b"if ready:\n    return 1\n")
+    assert captured.branches == frozenset({1})
+    assert captured.terminals == frozenset({2})
+    assert captured.executable == frozenset()
+
+
+def test_statement_policy_languages_cover_native_grammars() -> None:
+    assert set(tree_sitter_index.EXECUTABLE_STATEMENT_NODE_TYPES) == set(BRANCH_NODE_TYPES)
+    assert set(BRANCH_NODE_TYPES) == set(TERMINAL_NODE_TYPES)

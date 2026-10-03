@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
-from typing import Any, cast
+
+from pydantic import TypeAdapter, ValidationError
 
 from daydream.artifacts import filesystem
 from daydream.artifacts.models import (
     _PUBLIC_LABELS,
     _SCHEMA_VERSION,
     ArtifactVisibilityError,
-    DestinationDelivery,
-    OutputLabel,
     _DestinationRecord,
 )
 
@@ -72,6 +71,8 @@ _DESTINATION_KEYS = frozenset(
 )
 
 
+_DESTINATION_ADMISSION = TypeAdapter(_DestinationRecord)
+
 def _load_destination_records(transaction: Path, *, include_published: bool) -> tuple[_DestinationRecord, ...]:
     raw_destinations = filesystem._load_ledger(
         transaction / "destinations.json",
@@ -84,38 +85,35 @@ def _load_destination_records(transaction: Path, *, include_published: bool) -> 
         if not isinstance(raw, dict) or set(raw) != _DESTINATION_KEYS:
             raise ArtifactVisibilityError("artifact destination registry is malformed")
         index = raw["index"]
-        record_id = raw["record_id"]
-        requested = raw["requested"]
-        base = raw["base"]
-        relative = raw["relative"]
-        label_value = raw["label"]
-        delivery_value = raw["delivery"]
-        expected_kind = raw["expected_kind"]
-        baseline_state = raw["baseline_state"]
-        missing_raw = raw["missing_parents"]
-        expected_dev = raw["expected_dev"]
-        expected_ino = raw["expected_ino"]
-        prepared_sha256 = raw["prepared_sha256"]
-        installed_sha256 = raw["installed_sha256"]
         if (
             type(index) is not int
             or index != expected_index
-            or not isinstance(record_id, str)
-            or record_id != f"destination-{index:04d}"
-            or not isinstance(requested, str)
-            or not isinstance(base, str)
-            or not isinstance(relative, str)
-            or not isinstance(missing_raw, list)
-            or not all(isinstance(value, str) for value in missing_raw)
-            or expected_kind not in ("file", "directory")
-            or baseline_state not in ("absent", "file", "directory")
-            or not all(value is None or type(value) is int for value in (expected_dev, expected_ino))
-            or not all(value is None or filesystem._is_sha256(value) for value in (prepared_sha256, installed_sha256))
+            or not isinstance(raw["missing_parents"], list)
+            or not all(isinstance(raw[name], str) for name in ("label", "delivery"))
+            or not all(raw[name] is None or type(raw[name]) is int for name in ("expected_dev", "expected_ino"))
         ):
             raise ArtifactVisibilityError("artifact destination registry is malformed")
+        try:
+            record = _DESTINATION_ADMISSION.validate_python(
+                {
+                    **{key: value for key, value in raw.items() if key != "index"},
+                    "baseline": (),
+                }
+            )
+        except ValidationError:
+            raise ArtifactVisibilityError("artifact destination registry is malformed") from None
+        if (
+            record.record_id != f"destination-{index:04d}"
+            or not all(
+                value is None or filesystem._is_sha256(value)
+                for value in (record.prepared_sha256, record.installed_sha256)
+            )
+        ):
+            raise ArtifactVisibilityError("artifact destination registry is malformed")
+        relative = record.relative
         filesystem._validate_relative_name(relative)
-        requested_path = Path(requested)
-        base_path = Path(base)
+        requested_path = Path(record.requested)
+        base_path = Path(record.base)
         if (
             not requested_path.is_absolute()
             or filesystem._absolute_lexical(requested_path) != requested_path
@@ -124,12 +122,7 @@ def _load_destination_records(transaction: Path, *, include_published: bool) -> 
             or base_path / relative != requested_path
         ):
             raise ArtifactVisibilityError("artifact destination registry is malformed")
-        try:
-            label = OutputLabel(label_value)
-            delivery = DestinationDelivery(delivery_value)
-        except (TypeError, ValueError) as exc:
-            raise ArtifactVisibilityError("artifact destination registry is malformed") from exc
-        if label in _PUBLIC_LABELS:
+        if record.label in _PUBLIC_LABELS:
             raise ArtifactVisibilityError("artifact destination registry is malformed")
         baseline = filesystem._parse_manifest(transaction / f"destination-{index:04d}-baseline-manifest.json")
         published = (
@@ -141,25 +134,18 @@ def _load_destination_records(transaction: Path, *, include_published: bool) -> 
             relative, published
         ):
             raise ArtifactVisibilityError("artifact destination manifest identity is malformed")
-        if baseline_state == "absent" and baseline:
+        if record.baseline_state == "absent" and baseline:
             raise ArtifactVisibilityError("artifact destination baseline identity is malformed")
         root_entry = filesystem._entry_at(baseline, relative)
-        if baseline_state != "absent" and (root_entry is None or root_entry.kind != baseline_state):
+        if record.baseline_state != "absent" and (root_entry is None or root_entry.kind != record.baseline_state):
             raise ArtifactVisibilityError("artifact destination baseline identity is malformed")
-        missing_parents = tuple(cast(list[str], missing_raw))
-        for missing in missing_parents:
+        for missing in record.missing_parents:
             filesystem._validate_relative_name(missing)
             if Path(missing) not in Path(relative).parents:
                 raise ArtifactVisibilityError("artifact destination parent identity is malformed")
         if any(filesystem._overlaps(requested_path, Path(existing.requested)) for existing in result):
             raise ArtifactVisibilityError("artifact destination registry contains overlapping paths")
-        # Shape and field invariants have all been checked above. Keep the
-        # persisted field names when constructing the record instead of
-        # maintaining a second positional serialization order.
-        values = {key: value for key, value in raw.items() if key != "index"}
-        values.update(label=label, delivery=delivery, baseline=baseline,
-                      missing_parents=missing_parents, published=published)
-        result.append(_DestinationRecord(**cast(dict[str, Any], values)))
+        result.append(replace(record, baseline=baseline, published=published))
     return tuple(result)
 
 

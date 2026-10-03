@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -13,11 +12,10 @@ from daydream.deep.diagram_types import (
 from daydream.git_ops import GitError, grep_fixed_matches
 from daydream.repository_paths import path_is_confined, strip_dot_slash, valid_repository_file_path
 from daydream.tree_sitter_index import (
+    StatementLines,
     definitions_in_file,
-    is_branch_line,
-    is_executable_statement_line,
-    is_terminal_line,
     language_for_path,
+    statement_lines,
 )
 
 # Snap order for ``SYMBOL_NOT_ON_LINE``: nearest line first, the line above
@@ -151,6 +149,7 @@ class SourceCache:
         self._repo_root = repo_root
         self._bytes: dict[str, bytes | None] = {}
         self._lines: dict[str, list[str]] = {}
+        self._statements: dict[str, StatementLines] = {}
 
     def read(self, path: str) -> bytes | None:
         """Return the file's bytes, or None when it is missing or unreadable."""
@@ -180,6 +179,18 @@ class SourceCache:
         """Return the 1-based ``line``, or ``""`` when out of range."""
         rows = self.lines(path)
         return rows[line - 1] if 1 <= line <= len(rows) else ""
+
+
+    def statements(self, path: str) -> StatementLines:
+        """Capture source memberships, retaining keyword fallback on a bad install."""
+        if path not in self._statements:
+            source = self.read(path) or b""
+            try:
+                captured = statement_lines(language_for_path(path), source)
+            except Exception:
+                captured = statement_lines(None, source)
+            self._statements[path] = captured
+        return self._statements[path]
 
 
 def norm_str(value: Any) -> str:
@@ -259,28 +270,14 @@ def snap_symbol(
     return None
 
 
-def language_line(
-    sources: SourceCache,
-    file: str,
-    line: int,
-    predicate: Callable[[str | None, bytes, int], bool],
-) -> bool:
-    """Run a tree-sitter line *predicate*, falling back to its ``None``-language path."""
-    source = sources.read(file) or b""
-    try:
-        return predicate(language_for_path(file), source, line)
-    except Exception:
-        return predicate(None, source, line)
-
-
 def branch_line(sources: SourceCache, file: str, line: int) -> bool:
     """Whether ``file:line`` opens a control-flow branch (fail-open on a bad install)."""
-    return language_line(sources, file, line, is_branch_line)
+    return line in sources.statements(file).branches
 
 
 def terminal_line(sources: SourceCache, file: str, line: int) -> bool:
     """Whether ``file:line`` ends a control-flow path (fail-open on a bad install)."""
-    return language_line(sources, file, line, is_terminal_line)
+    return line in sources.statements(file).terminals
 
 
 def reply_line(sources: SourceCache, file: str, line: int) -> bool:
@@ -302,4 +299,4 @@ def reply_definition(
 
 def executable_line(sources: SourceCache, file: str, line: int) -> bool:
     """Whether ``file:line`` starts an executable statement."""
-    return language_line(sources, file, line, is_executable_statement_line)
+    return line in sources.statements(file).executable

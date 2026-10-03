@@ -2928,3 +2928,81 @@ def test_index_preserves_legacy_and_canonical_block_precedence(tmp_path: Path) -
     upsert_run(tmp_path, {"session_id": "legacy", "outcome_labels": '["flat"]'})
     row = query_runs(tmp_path, "session_id = ?", ("legacy",))[0]
     assert row["outcome_labels"] == '["flat"]'
+
+
+@pytest.mark.parametrize("population", ["upsert", "replace", "readmit"])
+def test_run_metadata_reuses_winning_history_without_rewriting_observations(
+    tmp_path: Path, population: str
+) -> None:
+    from daydream.archive.index import replace_run_inventory
+
+    row = make_manifest(session_id="history-owner", outcome_labels='["merged"]')
+    upsert_run(tmp_path, row)
+    append_label_observation(
+        tmp_path, "history-owner", labels=["accepted"], pr_state=None, labeler_version="human",
+        evidence_sha=None, source="human", rubric_json='{"human":true}', composite_reward=0.75,
+        has_posterior=True, observed_at="2026-01-01T00:00:00+00:00",
+    )
+    append_label_observation(
+        tmp_path, "history-owner", labels=["rejected"], pr_state=None, labeler_version="auto",
+        evidence_sha="later", composite_reward=0.1, observed_at="2026-02-01T00:00:00+00:00",
+    )
+    history = label_observation_history(tmp_path, "history-owner")
+    if population == "readmit":
+        replace_run_inventory(tmp_path, [])
+        assert query_runs(tmp_path) == []
+        with pytest.raises(ValueError, match="Unknown session"):
+            append_label_observation(
+                tmp_path, "history-owner", labels=["rejected"], pr_state=None,
+                labeler_version="auto", evidence_sha="orphan",
+            )
+    if population == "upsert":
+        upsert_run(tmp_path, row)
+    else:
+        replace_run_inventory(tmp_path, [row])
+    cached = query_runs(tmp_path)[0]
+    assert cached["outcome_labels"] == '["accepted"]'
+    assert cached["rubric_json"] == '{"human":true}'
+    assert cached["composite_reward"] == 0.75 and cached["has_posterior"] == 1
+    assert cached["labeled_at"] == "2026-01-01T00:00:00+00:00"
+    assert label_observation_history(tmp_path, "history-owner") == history
+    assert not append_label_observation(
+        tmp_path, "history-owner", labels=["rejected"], pr_state=None,
+        labeler_version="auto", evidence_sha="later", composite_reward=0.1,
+        observed_at="2026-02-01T00:00:00+00:00",
+    )
+    assert query_runs(tmp_path)[0]["outcome_labels"] == '["accepted"]'
+
+
+def test_label_projection_install_repairs_legacy_cache_once(tmp_path: Path) -> None:
+    upsert_run(tmp_path, make_manifest(session_id="legacy-cache"))
+    append_label_observation(
+        tmp_path, "legacy-cache", labels=["accepted"], pr_state=None, labeler_version="human",
+        evidence_sha=None, source="human", observed_at="2026-01-01T00:00:00+00:00",
+    )
+    history = label_observation_history(tmp_path, "legacy-cache")
+    # Existing schema-v8 databases lack insert projections. The old metadata
+    # writer reset their winning-label cache while leaving history intact.
+    with sqlite3.connect(tmp_path / "index.db") as conn:
+        conn.execute("DROP TRIGGER project_runs_labels")
+        conn.execute("DROP TRIGGER project_label_observations_labels")
+        conn.execute("UPDATE runs SET outcome_labels = '[]', labeled_at = NULL WHERE session_id = 'legacy-cache'")
+    assert query_runs(tmp_path)[0]["outcome_labels"] == '["accepted"]'
+    assert label_observation_history(tmp_path, "legacy-cache") == history
+
+
+def test_failed_metadata_population_rolls_back_history_projection(tmp_path: Path) -> None:
+    from daydream.archive.index import replace_run_inventory
+
+    good = make_manifest(session_id="rollback-cache")
+    upsert_run(tmp_path, good)
+    append_label_observation(
+        tmp_path, "rollback-cache", labels=["accepted"], pr_state=None,
+        labeler_version="human", evidence_sha=None, source="human",
+    )
+    before = query_runs(tmp_path)
+    history = label_observation_history(tmp_path, "rollback-cache")
+    with pytest.raises(sqlite3.IntegrityError):
+        replace_run_inventory(tmp_path, [good, make_manifest(session_id="invalid", archived_at=None)])
+    assert query_runs(tmp_path) == before
+    assert label_observation_history(tmp_path, "rollback-cache") == history

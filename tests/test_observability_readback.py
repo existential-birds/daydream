@@ -1052,3 +1052,65 @@ def test_replay_full_hermetic_run_writes_labeled_receipt(
     assert fake_hh.requests and fake_ls.requests
     # Replay must restore the host clock for subsequent worker tests.
     assert time.time_ns is _replay._stdlib_real_time_ns
+
+
+def test_replay_receipt_retains_original_admitted_input_bytes(
+    tmp_path: Path, fake_vendors: tuple[FakeVendorServer, FakeVendorServer],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = tmp_path / "admitted.jsonl"
+    fixture.write_bytes(REPLAY_FIXTURE.read_bytes())
+    manifest = tmp_path / "manifest.json"
+    manifest.write_bytes((FIXTURES / "replay-manifest.json").read_bytes())
+    original_fixture = fixture.read_bytes()
+    original_manifest = manifest.read_bytes()
+    fake_pi = _fake_pi_script(tmp_path)
+    probe = _replay._validate_fake_pi
+
+    def replace_inputs_after_native_probe(*args: Any, **kwargs: Any) -> None:
+        probe(*args, **kwargs)
+        fixture.write_bytes(b"replacement fixture not admitted")
+        manifest.write_bytes(b"replacement manifest not admitted")
+
+    monkeypatch.setattr(_replay, "_validate_fake_pi", replace_inputs_after_native_probe)
+    receipt_path = tmp_path / "receipt.json"
+    repo = _public_fixture_repo(tmp_path)
+    assert _replay.run_replay(
+        manifest_path=manifest, fixture_path=fixture, repo_path=repo,
+        fake_pi=fake_pi, receipt_path=receipt_path,
+    ) == 0
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt["fixture_sha256"] == hashlib.sha256(original_fixture).hexdigest()
+    assert receipt["manifest_sha256"] == hashlib.sha256(original_manifest).hexdigest()
+    assert fixture.read_bytes() == b"replacement fixture not admitted"
+    assert manifest.read_bytes() == b"replacement manifest not admitted"
+    assert receipt["model_call_count"] == receipt["operational_cost_usd"] == 0
+
+
+@pytest.mark.parametrize("kind", ["bytes", "bool", "int", "wrong_string", "misbound_string"])
+def test_replay_native_wire_marker_requires_exact_string_binding(kind: str) -> None:
+    from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+
+    request = ExportTraceServiceRequest()
+    resource = request.resource_spans.add()
+    resource.scope_spans.add().spans.add(name="marker-admission", parent_span_id=b"parent00")
+    marker = resource.resource.attributes.add(key="daydream.acceptance.kind")
+    if kind == "bytes":
+        marker.value.bytes_value = b"sanitized_protocol_replay"
+    elif kind == "bool":
+        marker.value.bool_value = True
+    elif kind == "int":
+        marker.value.int_value = 1
+    else:
+        marker.value.string_value = "wrong"
+    if kind == "misbound_string":
+        unrelated = resource.resource.attributes.add(key="unrelated")
+        unrelated.value.string_value = "sanitized_protocol_replay"
+    receiver = _replay._OtlpReceiver()
+    try:
+        receiver.batches.append(request.SerializeToString())
+        spans, resources = receiver.decoded()
+        with pytest.raises(_replay.ReplayValidationError, match="missing from exported resource"):
+            _replay._require_local_wire_success(spans, resources)
+    finally:
+        receiver.stop()

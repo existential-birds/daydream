@@ -574,7 +574,7 @@ def _prior_import_state(root: Path, raw: dict[str, Any], number: int) -> _PriorI
 def _import_one_pr(
     root: Path,
     raw: dict[str, Any],
-    repo: str,
+    verified: schema.PreflightLedger,
     number: int,
     requested_heads: list[str],
     *,
@@ -594,7 +594,7 @@ def _import_one_pr(
         include_changed_files = any(head != "final" for head in materialize_heads)
         doc = fetch_and_normalize(
             root,
-            repo,
+            verified,
             number,
             include_changed_files=include_changed_files,
         )
@@ -633,7 +633,7 @@ def _import_one_pr(
         # _stamp_fetched's cases[] rewrite keeps every curated case indexed.
         cases, bundle_rels = _case_materialize(
             doc, number, materialize_heads, import_file,
-            root=root, repo_slug=repo, origin_url=origin_url,
+            root=root, repo_slug=verified.repository, origin_url=origin_url,
             prior=prior,
             changed_ids=changed_ids, task_input_changed=task_input_changed,
         )
@@ -704,9 +704,9 @@ def run_import_prs(
     exit_code = 0
     with storage.WorkspaceLock(root):
         storage.recover_startup(root)
-        preflight(root, len(pr_numbers))
+        verified = preflight(root, len(pr_numbers))
         raw = storage.load_yaml_strict(root / "benchmark.yaml")
-        repo = raw.get("source", {}).get("repository") or ""
+        repo = verified.repository
         if origin_url is _UNSET_ORIGIN:
             origin_url = f"https://github.com/{repo}.git" if repo else None
         effective_origin: str | None = (
@@ -714,35 +714,21 @@ def run_import_prs(
         )
         for number in pr_numbers:
             if _import_one_pr(
-                root, raw, repo, number, requested_by_pr[number], refresh=refresh, origin_url=effective_origin
+                root, raw, verified, number, requested_by_pr[number], refresh=refresh, origin_url=effective_origin
             ):
                 exit_code = 1
     return exit_code
 
 
-def _repository_block(root: Path, owner_repo: str) -> dict[str, Any]:
-    """Use preflight-resolved identity, with a private fallback only when no workspace manifest exists."""
-    try:
-        raw = storage.load_yaml_strict(root / "benchmark.yaml")
-        source = raw.get("source") or {}
-        visibility = source.get("visibility", "unresolved")
-        return {
-            "id": source.get("repository_id") or "",
-            "name_with_owner": source.get("repository") or owner_repo,
-            "visibility": "public" if visibility == "public" else "private",
-        }
-    except Exception:
-        return {"id": "", "name_with_owner": owner_repo, "visibility": "private"}
-
-
 def fetch_and_normalize(
     root: Path,
-    owner_repo: str,
+    verified: schema.PreflightLedger,
     number: int,
     *,
     include_changed_files: bool = False,
 ) -> schema.ImportDocument:
     """Fetch the full PR header and all REST/GraphQL review evidence."""
+    owner_repo = verified.repository
     header = _fetch_with_retry(root, owner_repo, number)
     changed_files = None
     if include_changed_files:
@@ -789,7 +775,11 @@ def fetch_and_normalize(
     }
     import_doc = {
         "schema_version": 1,
-        "repository": _repository_block(root, owner_repo),
+        "repository": {
+            "id": verified.repository_id or "",
+            "name_with_owner": owner_repo,
+            "visibility": verified.visibility,
+        },
         "pull_request": pull_request,
         "evidence": record_dicts,
     }

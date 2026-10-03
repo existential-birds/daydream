@@ -9,6 +9,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from typing import AbstractSet, Any, Literal, NamedTuple, cast, overload
 
@@ -162,38 +163,42 @@ def changed_paths(mirror_repo: Path, base_sha: str, head_sha: str) -> frozenset[
         timeout=30,
     )
     git_process._require_ok(proc, "git diff --name-status failed")
-    raw = proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
-    if not raw:
-        return frozenset()
-    if not raw.endswith(b"\0"):
+    return frozenset(path for _, paths in _name_status_records(proc.stdout) for path in paths)
+
+
+def _name_status_records(stdout: str | bytes) -> Iterator[tuple[str, tuple[str, ...]]]:
+    """Admit complete Git -z name/status records, retaining exact old/new names."""
+    raw = stdout if isinstance(stdout, bytes) else stdout.encode()
+    if raw and not raw.endswith(b"\0"):
         raise git_ops.GitError("git diff --name-status returned a truncated NUL record")
-    fields = raw[:-1].split(b"\0")
+    fields = raw[:-1].split(b"\0") if raw else []
     if any(field == b"" for field in fields):
         raise git_ops.GitError("git diff --name-status returned an empty field")
-
-    paths: set[str] = set()
     index = 0
     while index < len(fields):
         status = fields[index]
         if status[:1] in (b"R", b"C"):
+            score = status[1:].lstrip(b"0")
             if (
                 len(status) < 2
                 or not status[1:].isdigit()
-                or int(status[1:]) > 100
-                or index + 2 >= len(fields)
+                or len(score) > 3
+                or (len(score) == 3 and score > b"100")
             ):
                 raise git_ops.GitError("git diff --name-status returned a malformed rename/copy record")
-            record_paths = fields[index + 1:index + 3]
-            index += 3
+            count = 2
         elif status in (b"A", b"D", b"M", b"T", b"U", b"X", b"B"):
-            if index + 1 >= len(fields):
-                raise git_ops.GitError("git diff --name-status returned a malformed one-path record")
-            record_paths = fields[index + 1:index + 2]
-            index += 2
+            count = 1
         else:
             raise git_ops.GitError("git diff --name-status returned an unsupported status record")
-        paths.update(path.decode("utf-8", errors="surrogateescape") for path in record_paths)
-    return frozenset(paths)
+        if index + count >= len(fields):
+            raise git_ops.GitError("git diff --name-status returned a malformed path record")
+        paths = tuple(
+            path.decode("utf-8", errors="surrogateescape")
+            for path in fields[index + 1:index + count + 1]
+        )
+        yield status.decode("ascii"), paths
+        index += count + 1
 
 
 def _classify_diff(name_status: str | bytes, numstat: str | bytes) -> AnchorDiff:
@@ -201,7 +206,6 @@ def _classify_diff(name_status: str | bytes, numstat: str | bytes) -> AnchorDiff
     include both paths; deletions, modifications, and binary numstat markers populate
     their respective buckets.
     """
-    fields = _nul_fields(name_status)
     # numstat -z records are NUL-terminated with tab-separated fields:
     # add, del, path (add/del are "-" for binary content).
     nfields = _nul_fields(numstat)
@@ -213,24 +217,13 @@ def _classify_diff(name_status: str | bytes, numstat: str | bytes) -> AnchorDiff
     renames: set[str] = set()
     modified: set[str] = set()
     deleted: set[str] = set()
-    j = 0
-    while j < len(fields):
-        status = fields[j]
+    for status, paths in _name_status_records(name_status):
         if status.startswith(("R", "C")):
-            if j + 2 >= len(fields):
-                break
-            renames.add(fields[j + 1])
-            renames.add(fields[j + 2])
-            j += 3
+            renames.update(paths)
+        elif status == "D":
+            deleted.add(paths[0])
         else:
-            if j + 1 >= len(fields):
-                break
-            path = fields[j + 1]
-            if status == "D":
-                deleted.add(path)
-            else:
-                modified.add(path)
-            j += 2
+            modified.add(paths[0])
     return AnchorDiff(
         renames=frozenset(renames),
         binary=frozenset(binary),
@@ -379,21 +372,10 @@ def derive_authoring_path(mirror_repo: Path, authoring_sha: str, path: str, mapp
             "history-unavailable",
             f"git diff --name-status -M {authoring_sha} {mapped_sha} failed in {mirror_repo}: {stderr.strip()}",
         )
-    # Capture NUL-framed bytes and surrogateescape-decode non-UTF-8 paths.
-    fields = _nul_fields(trace.stdout)
-    matches: list[str] = []
-    i = 0
-    while i < len(fields):
-        status = fields[i]
-        if status.startswith("R"):
-            if i + 2 >= len(fields):
-                break
-            old, new = fields[i + 1], fields[i + 2]
-            if new == path:
-                matches.append(old)
-            i += 3
-        else:
-            i += 2
+    matches = [
+        paths[0] for status, paths in _name_status_records(trace.stdout)
+        if status.startswith("R") and paths[1] == path
+    ]
     if len(matches) == 1:
         return matches[0]
     raise AnchorDerivationError(

@@ -768,3 +768,43 @@ def test_unsupported_version_is_rejected_before_github_writes(fake_gh: FakeGh, t
     path.write_text(json.dumps(data))
     assert cli_main(_post_argv(path) + ["--approve-on-clean"]) == 1
     assert fake_gh.calls("POST") == []
+
+
+def test_flowchart_captures_one_index_from_frozen_head(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream import tree_sitter_index
+    from daydream.tree_sitter_index import StatementLines
+
+    source = b"def run():\n    return 1\n"
+    path = git_repo / "a.py"
+    path.write_bytes(source)
+    git(git_repo, "add", "a.py")
+    head = commit(git_repo, "admitted diagram source")
+    path.write_bytes(b"def run():\n    work()\n")
+    seen: list[bytes] = []
+    native = tree_sitter_index.statement_lines
+
+    def capture(language: str | None, payload: bytes) -> StatementLines:
+        seen.append(payload)
+        return native(language, payload)
+
+    monkeypatch.setattr(tree_sitter_index, "statement_lines", capture)
+    assert validate_diagram_payload(_flowchart_payload(), target_dir=git_repo, head_sha=head) is None
+    assert seen == [source.rstrip(b"\n")]
+    assert path.read_bytes() == b"def run():\n    work()\n"
+
+
+def test_flowchart_posting_rejects_unsafe_parser_installation(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream import _tree_sitter_safety as safety
+    from daydream.tree_sitter_index.runtime import _PARSER_CACHE
+
+    (git_repo / "a.py").write_text("def run():\n    return 1\n")
+    git(git_repo, "add", "a.py")
+    head = commit(git_repo, "diagram source")
+    monkeypatch.delitem(_PARSER_CACHE, "python", raising=False)
+    monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
+    problem = validate_diagram_payload(_flowchart_payload(), target_dir=git_repo, head_sha=head)
+    assert problem == "flowchart diagram evidence line 1 is not a valid start node in immutable head: a.py"

@@ -987,3 +987,38 @@ def test_reason_and_omit_vocabularies_are_disjoint_and_complete() -> None:
     assert "NO_END" in OMIT_REASONS and "NO_END" not in REASON_CODES
     assert "MULTIPLE_START" in REASON_CODES
     assert REASON_CODES.isdisjoint(OMIT_REASONS)
+
+
+def test_source_grounding_captures_memberships_once(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from daydream.deep.diagram_grounding import evidence
+    from daydream.tree_sitter_index import StatementLines, statement_lines
+
+    native = statement_lines
+    captured: list[bytes] = []
+
+    def capture(language: str | None, source: bytes) -> StatementLines:
+        captured.append(source)
+        return native(language, source)
+
+    monkeypatch.setattr(evidence, "statement_lines", capture)
+    sources = evidence.SourceCache(repo)
+    assert evidence.executable_line(sources, "pkg/flow.py", 1)
+    assert evidence.branch_line(sources, "pkg/flow.py", 2)
+    assert evidence.terminal_line(sources, "pkg/flow.py", 3)
+    assert not evidence.terminal_line(sources, "pkg/flow.py", 5)
+    assert captured == [_FLOW_PY.encode()]
+
+
+def test_source_grounding_retains_bad_install_keyword_fallback(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream import _tree_sitter_safety as safety
+    from daydream.deep.diagram_grounding import evidence
+    from daydream.tree_sitter_index.runtime import _PARSER_CACHE
+
+    monkeypatch.delitem(_PARSER_CACHE, "python", raising=False)
+    monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
+    sources = evidence.SourceCache(repo)
+    assert evidence.branch_line(sources, "pkg/flow.py", 2)
+    assert evidence.terminal_line(sources, "pkg/flow.py", 3)
+    assert not evidence.executable_line(sources, "pkg/flow.py", 1)

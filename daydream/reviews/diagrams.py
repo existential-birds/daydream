@@ -217,11 +217,10 @@ def _diagram_head_evidence_problem(
 ) -> str | None:
     """Return a problem when a rendered diagram citation is absent at the head SHA."""
     from daydream.tree_sitter_index import (
+        StatementLines,
         definitions_in_file,
-        is_branch_line,
-        is_executable_statement_line,
-        is_terminal_line,
         language_for_path,
+        statement_lines,
     )
 
     def unreadable(path: str, exc: GitError) -> str:
@@ -299,23 +298,26 @@ def _diagram_head_evidence_problem(
         ), None)
         if definitions and root_end is None:
             return "flowchart root is not a function in immutable head"
+        source_lines: dict[str, StatementLines] = {}
         for node in spec["nodes"]:
             evidence = node["evidence"]
             problem = check(evidence)
             if problem is not None:
                 return problem
-            source = "\n".join(head.lines(evidence["file"])).encode()
-            language = language_for_path(evidence["file"])
             line = evidence["line"]
             if isinstance(root_end, int) and not root["line"] <= line <= root_end:
                 return "flowchart diagram node lies outside its root in immutable head"
             try:
-                grounded = (
-                    is_terminal_line(language, source, line)
-                    if node["kind"] == "end"
-                    else is_branch_line(language, source, line)
-                    if node["kind"] == "decision"
-                    else is_executable_statement_line(language, source, line)
+                path = evidence["file"]
+                if path not in source_lines:
+                    source_lines[path] = statement_lines(
+                        language_for_path(path), "\n".join(head.lines(path)).encode(),
+                    )
+                captured = source_lines[path]
+                grounded = line in (
+                    captured.terminals if node["kind"] == "end"
+                    else captured.branches if node["kind"] == "decision"
+                    else captured.executable
                 )
             except Exception:
                 grounded = False

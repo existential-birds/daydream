@@ -49,6 +49,11 @@ _PR_HEADER = {"number": 101, "url": "https://github.com/o/r/pull/101", "html_url
     "user": {"login": "alice", "type": "User"}, "changed_files": 0,
 }
 
+_FETCH_IDENTITY = schema.PreflightLedger(
+    last_verified_at="2026-01-01T00:00:00Z", repository="o/r",
+    repository_id=None, visibility="private", matched=True,
+)
+
 _REPO_ID = "R_kgDOABC123"
 _REPO_VIEW = {"id": _REPO_ID, "nameWithOwner": "o/r", "url": "https://github.com/o/r", "visibility": "PRIVATE",
     "defaultBranchRef": {"name": "main"},
@@ -89,7 +94,7 @@ def test_fetch_persists_complete_pr_header(tmp_path: Path, fake_gh: FakeGh) -> N
     header["closed_at"] = "2026-01-02T00:00:00Z"
     fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
     _seed_empty_rest(fake_gh)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    doc = gi.fetch_and_normalize(ws, _FETCH_IDENTITY, 101)
     pr = doc.pull_request
     assert pr.body == "fixes the cache\n\nand tests"
     assert pr.html_url == "https://github.com/o/r/pull/101"
@@ -110,7 +115,7 @@ def test_fetch_changed_files_persists_complete_rename_union(tmp_path: Path, fake
     )
     _seed_empty_rest(fake_gh)
 
-    doc = gi.fetch_and_normalize(ws, "o/r", 101, include_changed_files=True)
+    doc = gi.fetch_and_normalize(ws, _FETCH_IDENTITY, 101, include_changed_files=True)
 
     assert doc.pull_request.changed_files == ["src/a:b.py", "src/new name.py", r"src\old.py"]
     calls = fake_gh.calls("GET", "repos/o/r/pulls/101/files")
@@ -133,13 +138,13 @@ def test_fetch_changed_files_fails_closed_on_incomplete_or_malformed_inventory(
     fake_gh.set_response("GET", "repos/o/r/pulls/101/files", rows)
     _seed_empty_rest(fake_gh)
     with pytest.raises(git_ops.GitError, match="changed.files|inventory|3000"):
-        gi.fetch_and_normalize(ws, "o/r", 101, include_changed_files=True)
+        gi.fetch_and_normalize(ws, _FETCH_IDENTITY, 101, include_changed_files=True)
 
 def test_final_only_fetch_does_not_request_changed_files(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws = _fetch_workspace(tmp_path)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
     _seed_empty_rest(fake_gh)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    doc = gi.fetch_and_normalize(ws, _FETCH_IDENTITY, 101)
     assert doc.pull_request.changed_files is None
     assert fake_gh.calls("GET", "repos/o/r/pulls/101/files") == []
 
@@ -178,7 +183,7 @@ def test_import_body_shape_preserved(tmp_path: Path, fake_gh: FakeGh, body_field
     header["body"] = body_field
     fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
     _seed_empty_rest(fake_gh)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    doc = gi.fetch_and_normalize(ws, _FETCH_IDENTITY, 101)
     assert doc.pull_request.body == expected
     assert doc.pull_request.body_sha256 == hashlib.sha256(expected.encode("utf-8")).hexdigest()
 
@@ -196,7 +201,7 @@ def test_import_merged_state_distinction(
     header["closed_at"] = closed_at
     fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
     _seed_empty_rest(fake_gh)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    doc = gi.fetch_and_normalize(ws, _FETCH_IDENTITY, 101)
     pr = doc.pull_request
     assert pr.state == state
     assert (pr.merged_at is not None) == expect_merged
@@ -208,7 +213,7 @@ def test_import_no_comments_pr(tmp_path: Path, fake_gh: FakeGh) -> None:
     header["body"] = "no comments here"
     fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
     _seed_empty_rest(fake_gh)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    doc = gi.fetch_and_normalize(ws, _FETCH_IDENTITY, 101)
     assert doc.evidence == [] and doc.pull_request.body == "no comments here"
 
 def test_payload_digest_spans_header_and_evidence(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -220,7 +225,7 @@ def test_payload_digest_spans_header_and_evidence(tmp_path: Path, fake_gh: FakeG
         header["body"] = "b"
         fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
         _seed_empty_rest(fake_gh)
-        return gi.fetch_and_normalize(ws, "o/r", 101)
+        return gi.fetch_and_normalize(ws, _FETCH_IDENTITY, 101)
     a = fetch_with("Fix cache")
     b = fetch_with("Fix cache EDITED")            # header-only change, same evidence
     assert a.fetch.payload_sha256 != b.fetch.payload_sha256
@@ -239,7 +244,7 @@ def test_fetch_normalizes_all_rest_evidence(tmp_path: Path, fake_gh: FakeGh) -> 
              "html_url": "https://github.com/o/r/pull/101#issuecomment-9"},
         ],
     )
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    doc = gi.fetch_and_normalize(ws, _FETCH_IDENTITY, 101)
     kinds = {e.kind for e in doc.evidence}
     assert kinds == {"review", "inline_comment", "issue_comment"}
     assert doc.evidence[0].source_id == "github:review:1"
@@ -276,7 +281,7 @@ def test_graphql_threads_and_replies_normalized(tmp_path: Path, fake_gh: FakeGh)
               "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/o/r/pull/101#discussion_r11"},
          ]}},
     ])
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    doc = gi.fetch_and_normalize(ws, _FETCH_IDENTITY, 101)
     by_db = {e.database_id: e for e in doc.evidence}
     root, reply = by_db[10], by_db[11]
     assert root.kind == "inline_comment" and root.source_id == "github:inline_comment:10"
@@ -299,7 +304,7 @@ def test_rest_inline_normalization_retains_original_range(tmp_path: Path, fake_g
     )
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
     fake_gh._write_threads([])
-    doc_gi = gi.fetch_and_normalize(ws, "o/r", 101)
+    doc_gi = gi.fetch_and_normalize(ws, _FETCH_IDENTITY, 101)
     rec = {e.database_id: e for e in doc_gi.evidence}[1]
     assert rec.original_start_line == 4
     assert rec.original_commit_id == "a" * 40
@@ -319,7 +324,7 @@ def test_graphql_thread_maps_original_start_line(tmp_path: Path, fake_gh: FakeGh
               "url": "https://github.com/o/r/pull/101#discussion_r1"},
          ]}},
     ])
-    doc_gi = gi.fetch_and_normalize(ws, "o/r", 101)
+    doc_gi = gi.fetch_and_normalize(ws, _FETCH_IDENTITY, 101)
     rec = {e.database_id: e for e in doc_gi.evidence}[1]
     assert rec.kind == "inline_comment"
     assert rec.original_start_line == 4
@@ -523,7 +528,7 @@ def test_candidate_projection_right_file_body_left(tmp_path: Path, fake_gh: Fake
     )
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
     fake_gh._write_threads([])
-    doc_gi = gi.fetch_and_normalize(ws, "o/r", 101)
+    doc_gi = gi.fetch_and_normalize(ws, _FETCH_IDENTITY, 101)
     # Direct fetch/project bypasses materialization, so supply its normally derived anchor.
     _set_anchor(
         {e.database_id: e for e in doc_gi.evidence}[1], commit_id="a" * 40, path="a.py", start_line=4, end_line=5,
@@ -1520,7 +1525,7 @@ def test_graphql_threads_replies_collect_past_100(tmp_path: Path, fake_gh: FakeG
     fake_gh._write_threads([{"id": "thread_9", "isResolved": False,
         "isOutdated": False, "subjectType": "LINE", "path": "a.py", "line": 4,
         "side": "RIGHT", "comments": {"nodes": comments[:100]}}], number=101)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    doc = gi.fetch_and_normalize(ws, _FETCH_IDENTITY, 101)
     replies = [e for e in doc.evidence if 2000 <= e.database_id <= 2250]
     assert len(replies) == 250
     assert len({e.database_id for e in replies}) == 250        # no dup
@@ -1541,7 +1546,7 @@ def test_reconcile_inline_and_thread_into_one_record(tmp_path: Path, fake_gh: Fa
              "author": {"login": "dave", "type": "User"}, "createdAt": "2026-01-01T00:00:00Z",
              "url": "https://github.com/o/r/pull/101#discussion_r10"}]}}],
         number=101)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    doc = gi.fetch_and_normalize(ws, _FETCH_IDENTITY, 101)
     by_db = {e.database_id: e for e in doc.evidence}
     rec = by_db[10]
     assert rec.kind == "inline_comment"
@@ -1565,11 +1570,11 @@ def test_evidence_order_deterministic_across_page_sizes(tmp_path: Path, fake_gh:
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", comments)
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
     fake_gh._write_threads([], number=101)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    doc = gi.fetch_and_normalize(ws, _FETCH_IDENTITY, 101)
     # deterministic order: sorted by (database_id, created_at)
     assert [e.database_id for e in doc.evidence] == [1, 7, 30]
     payload = doc.fetch.payload_sha256
-    doc2 = gi.fetch_and_normalize(ws, "o/r", 101)     # refetch: identical digest
+    doc2 = gi.fetch_and_normalize(ws, _FETCH_IDENTITY, 101)     # refetch: identical digest
     assert doc2.fetch.payload_sha256 == payload
 
 def test_outdated_root_not_exact_acceptable_via_joined_record(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -1587,7 +1592,7 @@ def test_outdated_root_not_exact_acceptable_via_joined_record(tmp_path: Path, fa
              "author": {"login": "dave", "type": "User"}, "createdAt": "2026-01-01T00:00:00Z",
              "url": "https://github.com/o/r/pull/101#discussion_r40"}]}}],
         number=101)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    doc = gi.fetch_and_normalize(ws, _FETCH_IDENTITY, 101)
     # Supply a valid anchor so only the joined outdated flag denies exact acceptance.
     _set_anchor({e.database_id: e for e in doc.evidence}[40], commit_id="a" * 40, path="a.py", start_line=4, end_line=5)
     cands = {c.source_id: c for c in gi.project_candidates(doc, head_sha="a" * 40)}
@@ -1609,7 +1614,7 @@ def test_fixture_matrix_evidence_preserved_and_historical(tmp_path: Path, fake_g
          "body": "question", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
          "html_url": "https://github.com/o/r/pull/101#issuecomment-9"}])
     fake_gh._write_threads([], number=101)
-    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    doc = gi.fetch_and_normalize(ws, _FETCH_IDENTITY, 101)
     kinds = {e.kind for e in doc.evidence}
     assert kinds == {"review", "inline_comment", "issue_comment"}   # nothing dropped
     assert any(e.is_bot for e in doc.evidence)                        # bot actor retained
@@ -2171,3 +2176,30 @@ def test_preflight_process_errors_are_private_before_direct_or_cli_reporting(
         argv = calls[-1]
         assert any(a.startswith("credential.helper=") for a in argv)
         assert "https://github.com/o/r.git" in argv and credential not in " ".join(argv)
+
+
+def test_import_retains_preflight_repository_identity_through_acquisition(
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws = _preflight_workspace(tmp_path, fake_gh)
+    fetch = gi._fetch_with_retry
+
+    def replace_manifest_after_fetch(root: Path, repo: str, number: int) -> dict[str, Any]:
+        header = fetch(root, repo, number)
+        manifest = storage.load_yaml_strict(root / "benchmark.yaml")
+        manifest["source"].update(
+            repository="other/repository", repository_id="R_changed", visibility="public",
+        )
+        (root / "benchmark.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+        return header
+
+    monkeypatch.setattr(gi, "_fetch_with_retry", replace_manifest_after_fetch)
+    assert gi.run_import_prs(ws, [101], origin_url=None) == 0
+    imported = storage.load_json_strict(ws / "imports" / "pr-000101.json")
+    assert imported["repository"] == {
+        "id": _REPO_ID, "name_with_owner": "o/r", "visibility": "private",
+    }
+    assert storage.load_yaml_strict(ws / "benchmark.yaml")["source"]["repository"] == "o/r"
+    ledger = storage.load_json_strict(ws / "runtime" / "preflight.json")
+    assert ledger["repository_id"] == imported["repository"]["id"]
+    assert (ws / "runtime" / "preflight.json").stat().st_mode & 0o777 == 0o600

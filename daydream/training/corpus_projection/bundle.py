@@ -126,8 +126,13 @@ def load_curated_bundle(root: Path) -> CuratedBundle:
     # are written relative to, so checksum resolution must see it.
     _verify_sha256sums(root, str(doc["publication_prefix"]))
 
-    batches = tuple(BundleBatch(**b) for b in doc["batches"])
-    for batch in batches:
+    bundle = CuratedBundle(
+        curation_id=doc["curation_id"],
+        source_hub_commit=doc["source_hub_commit"],
+        batches=tuple(BundleBatch(**b) for b in doc["batches"]),
+    )
+    # Non-admitted rows record decisions; only admitted payloads are published.
+    for batch in bundle.admitted:
         _validate_relpath(root, batch.artifact_relpath, "artifact_relpath")
         if batch.manifest_relpath is not None:
             _validate_relpath(root, batch.manifest_relpath, "manifest_relpath")
@@ -136,9 +141,7 @@ def load_curated_bundle(root: Path) -> CuratedBundle:
     # decision was made at hydration; this boundary refuses bundles that
     # predate the gate. Only admitted content is blocked; quarantined and
     # excluded rows are non-admitted by construction.
-    for batch in batches:
-        if batch.status != "admitted":
-            continue
+    for batch in bundle.admitted:
         if not batch.repo_slug or not batch.repo_slug.strip():
             raise BundleError(
                 f"bundle {root}: admitted batch {batch.session_id!r}: "
@@ -151,8 +154,4 @@ def load_curated_bundle(root: Path) -> CuratedBundle:
                 f"{REASON_CODE_LICENSE_EVIDENCE_MISSING}"
             )
 
-    return CuratedBundle(
-        curation_id=doc["curation_id"],
-        source_hub_commit=doc["source_hub_commit"],
-        batches=batches,
-    )
+    return bundle

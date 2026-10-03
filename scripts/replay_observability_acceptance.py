@@ -22,6 +22,7 @@ tool content, credentials, endpoints, or exception text in the receipt.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -40,8 +41,9 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import anyio
-from google.protobuf.json_format import MessageToDict
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+from opentelemetry.proto.resource.v1.resource_pb2 import Resource
+from opentelemetry.proto.trace.v1.trace_pb2 import Span
 
 from daydream.agent import run_agent
 from daydream.backends.pi import PiBackend
@@ -77,9 +79,12 @@ def _restore_env_or_pop(name: str, previous: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _load_manifest(path: Path, *, expected_kind: str = "sanitized_protocol_replay") -> dict[str, Any]:
+def _load_manifest(
+    path: Path, *, expected_kind: str = "sanitized_protocol_replay"
+) -> tuple[dict[str, Any], bytes]:
     try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
+        raw = path.read_bytes()
+        manifest = json.loads(raw.decode("utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ReplayValidationError(f"Unreadable replay manifest: {exc}") from None
     if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
@@ -95,10 +100,10 @@ def _load_manifest(path: Path, *, expected_kind: str = "sanitized_protocol_repla
         raise ReplayValidationError("Replay manifest fixture pin (sha256/bytes) is required")
     if not isinstance(manifest.get("public_repo_allowlist"), list):
         raise ReplayValidationError("Replay manifest public_repo_allowlist is required")
-    return manifest
+    return manifest, raw
 
 
-def _validate_fixture(path: Path, fixture_pin: dict[str, Any]) -> None:
+def _validate_fixture(path: Path, fixture_pin: dict[str, Any]) -> bytes:
     """Byte/hash pin plus structural identity; unexpected content fails closed."""
     try:
         raw = path.read_bytes()
@@ -121,6 +126,7 @@ def _validate_fixture(path: Path, fixture_pin: dict[str, Any]) -> None:
         first = json.loads(lines[0])
         if first.get("sessionId") != identity["session_id"]:
             raise ReplayValidationError("Sanitized fixture session identity does not match the manifest pin")
+    return raw
 
 
 def _git(args: list[str], *, cwd: Path) -> str:
@@ -270,20 +276,19 @@ class _OtlpReceiver:
         self._server.server_close()
         self._thread.join(timeout=2)
 
-    def decoded(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def decoded(self) -> tuple[list[Span], list[Resource]]:
         """Return (spans, resources) decoded from the captured protobuf batches."""
         with self._lock:
             raw_batches = list(self.batches)
-        spans: list[dict[str, Any]] = []
-        resources: list[dict[str, Any]] = []
+        spans: list[Span] = []
+        resources: list[Resource] = []
         for batch in raw_batches:
             request = ExportTraceServiceRequest()
             request.ParseFromString(batch)
-            decoded = MessageToDict(request)
-            for resource in decoded.get("resourceSpans", []):
-                resources.append(resource.get("resource", {}))
-                for scope in resource.get("scopeSpans", []):
-                    spans.extend(scope.get("spans", []))
+            for resource in request.resource_spans:
+                resources.append(resource.resource)
+                for scope in resource.scope_spans:
+                    spans.extend(scope.spans)
         return spans, resources
 
 
@@ -334,40 +339,22 @@ def _pin_replay_clock(pinned_first_end_ns: int) -> Callable[[], None]:
 # ---------------------------------------------------------------------------
 
 
-def _any_value(value: Any) -> Any:
-    """Normalize an OTLP proto-json AnyValue (int64 arrives as a string)."""
-    if not isinstance(value, dict):
-        return value
-    if "stringValue" in value:
-        return value["stringValue"]
-    if "boolValue" in value:
-        return value["boolValue"]
-    if "intValue" in value:
-        raw = value["intValue"]
-        try:
-            return int(raw) if isinstance(raw, str) else raw
-        except (TypeError, ValueError):
-            return raw
-    if "doubleValue" in value:
-        return value["doubleValue"]
-    return None
-
-
-def _span_attrs(span: dict[str, Any]) -> dict[str, Any]:
+def _span_attrs(span: Span | Resource) -> dict[str, Any]:
+    """Read the captured native scalar attributes, retaining last-key ownership."""
     attrs: dict[str, Any] = {}
-    for item in span.get("attributes", []):
-        if not isinstance(item, dict):
-            continue
-        key = item.get("key")
-        if not isinstance(key, str):
-            continue
-        attrs[key] = _any_value(item.get("value"))
+    for item in span.attributes:
+        kind = item.value.WhichOneof("value")
+        attrs[item.key] = (
+            getattr(item.value, kind)
+            if kind in ("string_value", "bool_value", "int_value", "double_value")
+            else None
+        )
     return attrs
 
 
 async def _run_traced(
     manifest: dict[str, Any], repo: Path, fake_pi: Path
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[bytes]]:
+) -> tuple[list[Span], list[Resource], list[bytes]]:
     """Run one real traced invocation with only Pi spawning faked.
 
     Own the bounded loopback receiver; return spans, resources, and raw wire batches.
@@ -421,17 +408,20 @@ async def _run_traced(
     return spans, resources, list(receiver.batches)
 
 
-def _require_local_wire_success(spans: list[dict[str, Any]], resources: list[dict[str, Any]]) -> dict[str, Any]:
+def _require_local_wire_success(spans: list[Span], resources: list[Resource]) -> dict[str, Any]:
     """Local generic OTLP wire success + exact wire reconciliation facts."""
     if not spans:
         raise ReplayValidationError("Local OTLP wire captured no spans: local wire success required")
     # The admitted resource marker must be on the exported resource.
-    resource_attrs = [
-        item.get("key") for resource in resources for item in resource.get("attributes", []) if isinstance(item, dict)
-    ]
-    if "daydream.acceptance.kind" not in resource_attrs or "sanitized_protocol_replay" not in str(resources):
+    marker_present = any(
+        item.key == "daydream.acceptance.kind"
+        and item.value.WhichOneof("value") == "string_value"
+        and item.value.string_value == "sanitized_protocol_replay"
+        for resource in resources for item in resource.attributes
+    )
+    if not marker_present:
         raise ReplayValidationError("daydream.acceptance.kind=sanitized_protocol_replay missing from exported resource")
-    roots = [span for span in spans if not span.get("parentSpanId")]
+    roots = [span for span in spans if not span.parent_span_id]
     if len(roots) != 1:
         raise ReplayValidationError("Local OTLP wire must contain exactly one root span")
     root_attrs = _span_attrs(roots[0])
@@ -475,7 +465,7 @@ def _require_local_wire_success(spans: list[dict[str, Any]], resources: list[dic
     return {
         "run_id": run_id,
         "session_id": session_id,
-        "root_span_id": roots[0].get("spanId"),
+        "root_span_id": base64.b64encode(roots[0].span_id).decode() if roots[0].span_id else None,
         "generation_count": len(generations),
         "billing_owner": str(owner),
     }
@@ -497,7 +487,7 @@ def run_replay(
 ) -> int:
     """Validate every gate BEFORE any send, then run the actual trace once."""
     try:
-        manifest = _load_manifest(manifest_path)
+        manifest, manifest_raw = _load_manifest(manifest_path)
     except ReplayValidationError as exc:
         print(f"verdict=fail gate=manifest detail={exc}")
         return 1
@@ -509,12 +499,12 @@ def run_replay(
         print(f"verdict=fail gate=authorization detail={exc}")
         return 1
     try:
-        _validate_fixture(fixture_path, manifest["fixture"])
+        fixture_raw = _validate_fixture(fixture_path, manifest["fixture"])
         _validate_repo(repo_path, manifest["public_repo_allowlist"])
         _validate_fake_pi(
             fake_pi,
             str(manifest.get("fake_pi_identity_marker", "")),
-            fixture_raw=fixture_path.read_bytes(),
+            fixture_raw=fixture_raw,
             timeout_s=probe_timeout_s,
         )
     except ReplayValidationError as exc:
@@ -563,8 +553,8 @@ def run_replay(
         "ended_at": ended_iso,
         "model_call_count": 0,
         "operational_cost_usd": 0,
-        "fixture_sha256": hashlib.sha256(fixture_path.read_bytes()).hexdigest(),
-        "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        "fixture_sha256": hashlib.sha256(fixture_raw).hexdigest(),
+        "manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
         "local_otlp_wire_sha256": wire_hashes,
         "local_otlp_root_span_id": facts["root_span_id"],
         "generation_count": facts["generation_count"],

@@ -150,6 +150,30 @@ _CREATE_LABEL_OBSERVATIONS_TABLE = _create_table_sql(
     table_constraints=("PRIMARY KEY (session_id, observed_at)",),
 )
 
+# Both observation append and metadata re-admission must expose the same winner.
+_REFRESH_RUN_LABELS_SQL = f"""
+UPDATE runs SET (outcome_labels, labeled_at, rubric_json, composite_reward, has_posterior) = (
+    SELECT labels, observed_at, rubric_json, composite_reward, has_posterior
+    FROM label_observations WHERE session_id = runs.session_id
+    ORDER BY {_PRECEDENCE_ORDER} LIMIT 1
+) WHERE EXISTS (SELECT 1 FROM label_observations WHERE session_id = runs.session_id)
+"""
+
+
+def _install_label_projection(conn: sqlite3.Connection) -> None:
+    """Own human-first label projection on append and current-run re-admission."""
+    installed = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'project_runs_labels'"
+    ).fetchone()
+    for table in ("runs", "label_observations"):
+        conn.execute(f"""
+            CREATE TRIGGER IF NOT EXISTS project_{table}_labels AFTER INSERT ON {table}
+            BEGIN {_REFRESH_RUN_LABELS_SQL} AND session_id = NEW.session_id; END
+        """)
+    if installed is None:
+        conn.execute(_REFRESH_RUN_LABELS_SQL)
+
+
 _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_runs_repo_slug ON runs(repo_slug)",
     "CREATE INDEX IF NOT EXISTS idx_runs_archived_at ON runs(archived_at)",

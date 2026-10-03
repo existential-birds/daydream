@@ -98,7 +98,7 @@ def _persist_identity(root: Path, repo_slug: str, repository_id: str, visibility
             tx.commit()
 
 
-def preflight(root: Path, pr_count: int) -> None:
+def preflight(root: Path, pr_count: int) -> schema.PreflightLedger:
     """Run fixed-order binary, authentication, identity, and access checks."""
     root = Path(root)
     if shutil.which("git") is None or shutil.which("gh") is None:
@@ -165,6 +165,7 @@ def preflight(root: Path, pr_count: int) -> None:
     print(f"repository visibility: {visibility}")
     print(f"requested PR count: {pr_count}")
     print(f"local destination: {root / 'imports'}")
+    return ledger
 
 
 class ImportTargetError(Exception):

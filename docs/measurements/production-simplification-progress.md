@@ -10,9 +10,9 @@ contracts remain obligations. Internal signatures and module ownership may chang
 Baseline is `58cc88e4d7091b27afe1b2a6eec486504e255dfd`. Continuation began clean at
 `b98a9dd51fde81df5dc4534a85ab29a986f6a127`. GitHub still reports the same PR base,
 with no inherited upstream changes, and PR #1444 is open/draft. The latest pushed
-checkpoint is signed `d6e99b67eaea6f9c15e588bf40f8ebc5e91384d0`.
+checkpoint is signed `3d994245f72277779321d2e5a7b8eb3262a84806`.
 
-Count every owned Python file under daydream/, scripts/, and the RL package,
+Count every owned Python file under daydream/, scripts/, and rl/daydream_review/,
 including published runtime templates and all new modules. Exclude vendored ATIF
 and RL tests exactly as the baseline method does. Physical LOC uses str.splitlines;
 source LOC uses Python 3.12 and pinned scb-check 0.2.0 --report --include-all.
@@ -32,15 +32,14 @@ Comments, docstrings, blanks, docs, and tests receive no source-reduction credit
 | 4d2967f6 | 362 | 108842 | 83415 | 493 | 604 | 2252 |
 | 25d1ac7c | 362 | 108776 | 83349 | 492 | 604 | 2240 |
 | 2f35025b | 362 | 108612 | 83232 | 492 | 604 | 2240 |
-| Latest pushed d6e99b67 | 362 | 108526 | 83157 | 492 | 603 | 2235 |
-| Tenth frozen working snapshot | 362 | 108357 | 83028 | 491 | 603 | 2220 |
+| d6e99b67 | 362 | 108526 | 83157 | 492 | 603 | 2235 |
+| Latest pushed 3d994245 | 362 | 108357 | 83028 | 491 | 603 | 2220 |
 
-Latest pushed aggregate reduction is 4.268% physical and 2.771% source;
-continuation removes 2499 physical /2008 source lines. Targets remain at most
-102027 physical and 76974 source: pushed shortfalls are 6499 physical /6183 source.
-The frozen next batch removes 169 physical /129 source lines. It is not yet
-a pushed checkpoint. Its remaining shortfalls are 6330 physical /6054 source. The objective remains unmet; green gates and useful changes
-do not establish completion. The production inventory hash remains
+Latest pushed aggregate reduction is 4.417% physical and 2.922% source;
+continuation removes 2668 physical /2137 source lines. Targets remain at most
+102027 physical and 76974 source: pushed shortfalls are 6330 physical /6054 source.
+The tenth batch removes 169 physical /129 source lines. The objective remains unmet;
+green gates and useful changes do not establish completion. The production inventory hash remains
 `76cc2585344c06d20088698af1466bab69e33436b8d4e3882a0511bd5590422f`.
 
 ## Architectural responsibilities consolidated
@@ -108,13 +107,13 @@ archive publication. Current owner reviews are complete; historical unchanged dr
 areas have sampled broader review, not a claimed fresh exhaustive baseline review.
 Before final completion, review the full integrated baseline diff independently.
 
-All nine checkpoint commits and pushes succeeded through ordinary hooks. The full
+All ten checkpoint commits and pushes succeeded through ordinary hooks. The full
 hook suite includes locked sync/extras, Ruff, root and RL Vulture, root mypy,
 parallel branch-coverage pytest with unchanged 86% floor, Docker actionlint,
-coverage artifact, signatures and naming. Latest d6e99b67 passed 9529 tests,
-14 existing skips, 200 warnings, 624.22 seconds, and 90.62% branch coverage;
+coverage artifact, signatures and naming. Latest 3d994245 passed 9545 tests,
+14 existing skips, 202 warnings, 602.28 seconds, and 90.65% branch coverage;
 root mypy checked 748 files. Earlier checkpoints passed respectively
-9330, 9340, 9363, 9401, 9430, 9443, 9464, and 9471 tests with 14 existing skips.
+9330, 9340, 9363, 9401, 9430, 9443, 9464, 9471, and 9529 tests with 14 existing skips.
 Normal hook failures were fixed and retried: telemetry mixed event typing,
 obsolete payload-labeler test seam, and execution-input resolver spy migration.
 No bypass or weakened assertion/coverage threshold was used.
@@ -124,7 +123,7 @@ were removed and all affected tests rerun successfully. A coordinator outside
 proof accidentally recreated the shared virtual environment; locked extras were
 restored immediately and the ninth full ordinary gate passed on Python 3.12.13.
 
-## Tenth batch under integration
+## Tenth batch pushed through normal hooks
 
 - FindingContent owns content validation and closed projection across five native
   host/runtime modules. Gold/candidate objects feed judge and scoring directly;
@@ -138,7 +137,7 @@ restored immediately and the ninth full ordinary gate passed on Python 3.12.13.
   replacement now produces distinct scores; already admitted tasks retain A while
   future loads re-admit B. Actual spawned worker transfer and intrinsic-only reuse
   regressions pass. Cost -9 source/-19 physical; 40 exact reward differentials,
-  55 focused tests and required normal make rl-check:199 passed,2 existing skips,
+  55 focused tests and required normal make rl-check:199 passed, 2 existing skips,
   160.59 seconds, lock/sync/Ruff/mypy all pass.
 - RFT native replay admission owns flat identity validation. One input-byte read
   binds sampled rows and result/header checksum; replacement cannot label A winners
@@ -167,8 +166,9 @@ restored immediately and the ninth full ordinary gate passed on Python 3.12.13.
   remain meaningful.
 
 Ruff, scoped mypy, root Vulture, applied-byte reviews and diff checks pass for these
-owners. Full final hook verification and committed-byte aggregate checks remain
-required for the next checkpoint. Broader proposals stay outside the shared checkout.
+owners. The tenth normal hook suite passed; all 362 committed production paths and bytes
+match its independently reproduced complete report. Fresh integrated checks remain
+required after subsequent production changes. Broader proposals stay outside the shared checkout.
 
 ## Remaining opportunities and rejected directions
 
@@ -192,3 +192,80 @@ HTTP/gRPC obligations; combining rollback/healing policies that differ on author
 and errors; generated schema replacements retaining repair/admission converters.
 Distinct billing, terminal coverage, phase lifetimes, public extension dictionaries,
 read-only capture, exact path, and crash-recovery policies remain essential.
+
+## Tenth checkpoint normal-hook result
+
+Signed 3d994245 committed and pushed through ordinary hooks. Full lock/sync/extras,
+Ruff, both Vulture scans, mypy 748, Docker actionlint, coverage artifact, signatures
+and naming passed. Root: 9545 passed, 14 existing skips, 202 warnings, 602.28 seconds,
+90.65% branch coverage against unchanged 86% floor. Required separate RL gate: 199
+passed, 2 existing skips, 160.59 seconds, locked sync/Ruff/mypy passed. Two independent
+reviews reproduced the full aggregate JSON and all 362 production paths/bytes; root
+compared every committed Git production byte too. GitHub head matches 3d994245,
+base remains 58cc88e4, PR #1444 remains open/draft. No bypasses or weakened gates.
+Freeze released for independently reviewed next-owner work.
+
+## Eleventh batch in progress
+
+- StatementLines captures one native immutable-head membership index per source,
+  replacing three per-point predicate APIs and language/line dispatch. Four
+  production modules cost -13 source / -22 physical; 1213 point-query outcomes
+  and 50 real Git captures match, 339 integrated checks pass. High complexity
+  counts stay unchanged; total cognitive mass increases by 118. Independently
+  reviewed and applied-byte closed.
+- CuratedBundle admits content only for the existing admitted population, while
+  retaining syntax admission for all rows and verification of every listed SHA.
+  Native hydration legitimately publishes no excluded payload: the old loader
+  incorrectly required it. Actual hydration/materialize/project workflows and
+  malformed-path/tampered-listed-file regressions pass. Cost -2 source / -1
+  physical; 155 integrated checks pass; independent review and bytes are clean.
+- Snapshot consumers share one strict NUL name/status stream parser. Three
+  traversal implementations disappear without a new DTO or mode router. Real
+  anchor/ancestry/Unicode/whitespace rename outcomes match; malformed/truncated
+  streams now consistently refuse rather than infer. Cost -19 source / -18
+  physical; high cognitive count -1; 277 integrated tests pass. Reviewed and
+  applied-byte closed.
+- GitHub preflight returns its existing admitted PreflightLedger; acquisition
+  and normalization retain that repository identity instead of rereading a
+  replaceable manifest behind a catch-all fallback. The public CLI and legacy
+  empty-ID schema remain. Cost -6 source / -9 physical; 144 complete native
+  import documents/digests match and 264 integrated checks pass. Actual manifest
+  replacement regression fails before and passes after; 0600 verification ledger
+  remains. Backend review clean; applied bytes equal prototype.
+
+- Native destination record declarations admit persisted field types, eliminating
+  the extraction/type-check/construction mirror. Exact raw keys/index/list shape,
+  enum-byte/integer-subclass rejection, path/manifest/identity/overlap guards and
+  exact-base private projection remain. TypeAdapter is confined to persisted
+  admission; ordinary stdlib dataclass constructors stay unchanged. Cost -11
+  source / -10 physical; 261 complete native outcomes match and 253 integrated
+  checks pass with one existing skip. Reviewed and exact applied bytes closed.
+- Replay uses native protobuf evidence and captures admitted fixture/manifest
+  bytes through probe and receipt, removing JSON/scalar re-decoding and later
+  hash rereads. Cost -8 source / -10 physical; 65 native comparisons and 42 actual
+  operator checks pass. Exact key/string/value marker admission intentionally
+  rejects malformed/misbound markers formerly accepted by substring matching.
+  Actual input replacement regression fails before and passes after. Reviewed
+  and applied-byte closed.
+- SQLite owns observation-to-run winner projection at both insertion boundaries.
+  Duplicate Python cache mutation disappears; metadata upsert/readmission cannot
+  erase the cached human winner while leaving history intact. Existing columns,
+  no-history manifest defaults, unknown-session/dedup/collision/rollback and
+  read-only clients remain. This correction costs -3 source / +5 physical;
+  12 exact history differentials and 515 integrated checks pass. Independently
+  reviewed and applied-byte closed.
+
+Complete frozen eleventh inventory: 362 files, 108292 physical / 82966 source,
+491 high CC / 602 high cognitive, clone LOC 2202; unchanged inventory hash.
+This batch removes 65 physical / 62 source lines. Aggregate reductions are
+4.474% physical / 2.994% source; continuation removes 2733 physical / 2199 source.
+Shortfalls remain 6265 physical / 5992 source, target false. Complete independent
+report/byte/integrated review and ordinary hooks are in progress. Pushed PR stays
+at the tenth checkpoint until they pass; no ready-for-review claim.
+
+The full authored native-model prototype is rejected: all nine caller modules
+cost +8 source / +63 physical after preserving schema descriptions, nullable
+provider wire, integral float author hashes, redacted display projection, complete
+failed diagnostics and raw repair. The earlier isolated schema -35 estimate earns
+no credit. New cache evidence capture and annotation acquisition leads remain
+outside the checkout while this checkpoint is frozen.

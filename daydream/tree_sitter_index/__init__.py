@@ -30,8 +30,7 @@ from .statements import (
     TERMINAL_CALL_NAMES as TERMINAL_CALL_NAMES,
     TERMINAL_MACRO_NAMES as TERMINAL_MACRO_NAMES,
     TERMINAL_NODE_TYPES as TERMINAL_NODE_TYPES,
+    StatementLines as StatementLines,
     branch_statement_lines as branch_statement_lines,
-    is_branch_line as is_branch_line,
-    is_executable_statement_line as is_executable_statement_line,
-    is_terminal_line as is_terminal_line,
+    statement_lines as statement_lines,
 )

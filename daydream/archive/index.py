@@ -30,6 +30,7 @@ from daydream.archive._schema import (
     LABEL_OBSERVATION_NAMES,
     RUNS_COLUMNS,
     SCHEMA_VERSION,
+    _install_label_projection,
     _migrate_label_observations_schema,
     _migrate_schema,
     _recreate_label_observations_if_stale,
@@ -117,6 +118,7 @@ def _get_connection(archive_dir: Path) -> sqlite3.Connection:
         for idx_sql in _CREATE_INDEXES:
             conn.execute(idx_sql)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    _install_label_projection(conn)
     conn.commit()
     return conn
 
@@ -345,27 +347,6 @@ def append_label_observation(
                 if existing is not None and tuple(existing) == row_body:
                     return False
                 observed_dt += timedelta(microseconds=1)
-        # Refresh from the human-first winner, which may differ from the newly inserted
-        # row.
-        winner = conn.execute(
-            f"SELECT labels, observed_at, rubric_json, composite_reward, has_posterior "
-            f"FROM label_observations WHERE session_id = ? "
-            f"ORDER BY {_PRECEDENCE_ORDER} LIMIT 1",
-            (session_id,),
-        ).fetchone()
-        conn.execute(
-            "UPDATE runs SET outcome_labels = ?, labeled_at = ?, rubric_json = ?, composite_reward = ?, "
-            "has_posterior = ? "
-            "WHERE session_id = ?",
-            (
-                winner["labels"],
-                winner["observed_at"],
-                winner["rubric_json"],
-                winner["composite_reward"],
-                winner["has_posterior"],
-                session_id,
-            ),
-        )
         conn.commit()
         return True
 

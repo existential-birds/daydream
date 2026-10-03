@@ -787,3 +787,47 @@ def test_anchor_delta_shared_classification_runs_whole_tree_diffs_once(tmp_path:
     assert sn.anchor_delta(m, base, heads["edit"], _anchor("wide.py", 1, 5, base)) == "unchanged"
     assert len([a for a in probes if "--name-status" in a]) == 2
     assert len([a for a in probes if "--numstat" in a]) == 2
+
+
+@pytest.mark.parametrize("stdout", [
+    b"M\0a.py", b"M\0\0", b"R100\0old.py\0", b"R101\0old.py\0new.py\0",
+    b"R100\0old.py\0new.py\0junk\0", b"Z\0a.py\0",
+    b"R" + b"9" * 5000 + b"\0old.py\0new.py\0",
+])
+def test_anchor_classification_refuses_invalid_name_status_frames(stdout: bytes) -> None:
+    with pytest.raises(GitError, match="name-status"):
+        sn._classify_diff(stdout, b"")
+
+
+def test_anchor_delta_refuses_truncated_captured_tree_diff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mirror, base, _orphan, heads = _delta_mirror(tmp_path)
+    original = git_process._run_git
+
+    def truncate(repo: Any, args: list[str], **kwargs: Any) -> Any:
+        result = original(repo, args, **kwargs)
+        if "--name-status" in args:
+            return subprocess.CompletedProcess(result.args, result.returncode, result.stdout[:-1], result.stderr)
+        return result
+
+    monkeypatch.setattr(git_process, "_run_git", truncate)
+    assert sn.anchor_delta(mirror, base, heads["edit"], _anchor("wide.py", 10, 10, base)) == "unavailable"
+
+
+def test_authoring_rename_refuses_truncated_trace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    origin, authoring, head = _seed_rename_origin(tmp_path)
+    snapshot.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head], origin_url=origin)
+    original = git_process._run_git
+
+    def truncate(repo: Any, args: list[str], **kwargs: Any) -> Any:
+        result = original(repo, args, **kwargs)
+        if "--name-status" in args:
+            return subprocess.CompletedProcess(result.args, result.returncode, result.stdout[:-1], result.stderr)
+        return result
+
+    monkeypatch.setattr(git_process, "_run_git", truncate)
+    with pytest.raises(GitError, match="name-status"):
+        snapshot.derive_authoring_path(snapshot.mirror(tmp_path), authoring, "new.py", head)
