@@ -11,6 +11,7 @@ from daydream.backends import Backend, ContinuationToken
 from daydream.deep.artifacts import deep_dir
 from daydream.deep.records import record_uid
 from daydream.extensions import get_registry
+from daydream.json_utils import validates_schema
 from daydream.phases.inputs import _prepare_existing_phase_inputs, append_extended_facts
 from daydream.phases.schemas import ARBITER_SCHEMA, SUPERVISE_SCHEMA, SUPPRESSION_SCHEMA
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
@@ -169,7 +170,7 @@ async def _adjudicate(
     if budget_reason:
         ui.print_warning(agent.console, f"{mode.label} budget exhausted; continuing with incomplete adjudication.")
         return _IncompleteAdjudication(budget_reason), None
-    if not isinstance(result, dict) or not agent._validates_schema(result, mode.schema):
+    if not isinstance(result, dict) or not validates_schema(result, mode.schema):
         from daydream.phases.review import ReviewOutputError
         raise ReviewOutputError(result)
     return result[mode.result_key], continuation

@@ -4,7 +4,8 @@ Pins the schema-aware selection contract at every structured-output boundary
 that combines span extraction with a strict gate.  Each test names the merged
 finding it closes:
 
-* ``test_strict_gate_has_one_implementation`` -- finding item:3 (LOW).
+* ``test_strict_gate_has_one_implementation`` -- finding item:3 (LOW); the
+  private alias it originally pinned was removed by round 2's item:1.
 * ``test_review_evidence_*``                      -- finding item:2 (MEDIUM).
 * ``test_agent_prefers_a_fully_valid_*``          -- finding item:5 (LOW).
 """
@@ -33,10 +34,18 @@ _INLINE_GATE_BODIES = (
 
 
 def test_strict_gate_has_one_implementation() -> None:
-    """item:3 -- agent's private predicate IS the json_utils helper, not a copy."""
+    """item:3 -- the strict gate is implemented once, in the lowest layer.
+
+    Round 2 (item:1) removed the private alias this test used to pin, so the
+    invariant is now asserted directly: no module carries a second spelling and
+    no module re-implements the gate inline.
+    """
     import daydream.json_utils as json_utils
 
-    assert agent_module._validates_schema is json_utils.validates_schema
+    assert json_utils.validates_schema({"a": 1}, {"type": "object"})
+    assert not hasattr(agent_module, "_validates_schema"), (
+        "the alias is a second spelling; consumers import the public helper"
+    )
     for module in (agent_module, review_evidence_module):
         assert module.__file__ is not None, f"{module.__name__} has no source file"
         source = pathlib.Path(module.__file__).read_text()

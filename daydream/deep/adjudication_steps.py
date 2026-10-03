@@ -10,7 +10,7 @@ from typing import Any
 
 import anyio
 
-from daydream.agent import _validates_schema, console
+from daydream.agent import console
 from daydream.backends import Backend, effective_fanout_concurrency
 from daydream.deep.adjudication_provenance import (
     RecordProvenance,
@@ -54,6 +54,7 @@ from daydream.deep.routing_record import write_routing_record
 from daydream.deep.settings import _resolve_opt_in
 from daydream.deep.state import DeepState
 from daydream.flows.engine import FlowContext
+from daydream.json_utils import validates_schema
 from daydream.output_schema import strict_object
 from daydream.phases import (
     phase_arbiter_review,
@@ -164,7 +165,7 @@ def _load_group_verdicts(
     ids = range(1, len(group.target_uids) + 1)
     if not isinstance(raw, dict) or set(raw) != {str(i) for i in ids}:
         return None
-    if not _validates_schema({'findings': list(raw.values())}, ARBITER_SCHEMA):
+    if not validates_schema({'findings': list(raw.values())}, ARBITER_SCHEMA):
         return None
     if any(raw[str(i)]['arb_id'] != i for i in ids):
         return None
@@ -337,7 +338,7 @@ def _completed_adjudication(ctx: FlowContext, state: DeepState, contract: dict[s
     if (plan is None) != state.review_coverage.phases['arbiter']['noop']:
         return False
     if plan is not None:
-        if not _validates_schema(plan, _PLAN_PROOF_SCHEMA):
+        if not validates_schema(plan, _PLAN_PROOF_SCHEMA):
             return False
         from daydream.run_config import _explicit_reasoning_effort_pin
 

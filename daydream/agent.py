@@ -263,15 +263,6 @@ class StructuredOutputFailure(str):
         return value
 
 
-#: Backwards-compatible alias for :func:`daydream.json_utils.validates_schema`.
-#: The strict gate is
-#: implemented exactly once, in ``json_utils``; every structured-output boundary
-#: shares that predicate, so tightening it cannot silently diverge between two
-#: spellings.  All in-repo consumers use the public helper directly; this name
-#: remains only as a re-export for external callers of the old private path.
-_validates_schema = validates_schema
-
-
 def _select_by_schema(text: str, schema: dict[str, Any], *, require_full_schema: bool) -> SchemaAwareSelection:
     """Select one candidate with the run's own gate, strictly preferring full validity.
 
@@ -640,6 +631,10 @@ async def _run_agent(
                         execute_kwargs["tools_disabled"] = True
                     if review_instructions and getattr(backend, "supports_review_instructions", False):
                         execute_kwargs["review_instructions"] = review_instructions
+                    if not validate_structured_output and getattr(
+                        backend, "supports_structured_output_opt_out", False
+                    ):
+                        execute_kwargs["validate_structured_output"] = False
                     if not persist_session:
                         execute_kwargs["persist_session"] = False
                     event_iter = backend.execute(

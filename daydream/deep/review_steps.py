@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 import anyio
 
 from daydream import git_ops
-from daydream.agent import _validates_schema, console
+from daydream.agent import console
 from daydream.artifact_visibility import artifact_dir_for
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.artifacts import (
@@ -51,6 +51,7 @@ from daydream.deep.settings import fold_default_alternatives, fresh_ttt
 from daydream.deep.state import DeepState
 from daydream.extensions.api import Stop
 from daydream.flows.engine import FlowContext
+from daydream.json_utils import validates_schema
 from daydream.phases import (
     phase_alternative_review,
     phase_per_stack_reviews,
@@ -528,13 +529,13 @@ async def _wonder(ctx: FlowContext) -> None:
                     except ReviewBudgetExceeded as exc:
                         phase.finish(LifecycleStatus.PARTIAL, LifecycleReasonCode.DOMAIN_FAILURE)
                         wonder_complete = False
-                        wonder_usable = _validates_schema(exc.partial_result, ALTERNATIVE_REVIEW_SCHEMA)
+                        wonder_usable = validates_schema(exc.partial_result, ALTERNATIVE_REVIEW_SCHEMA)
                         deep_state.review_coverage.record_phase("alternatives", "incomplete",
                             reasons=(reason_for_budget(exc.reason),), usable_evidence=wonder_usable,
                             diagnostic=exc.reason)
                         print_warning(console, f"{exc}; continuing with completed reviewers' findings.")
                         alt_issues = (exc.partial_result["issues"]
-                                      if _validates_schema(exc.partial_result, ALTERNATIVE_REVIEW_SCHEMA) else [])
+                                      if validates_schema(exc.partial_result, ALTERNATIVE_REVIEW_SCHEMA) else [])
 
         if decision.outcome not in {"skip", "folded"} and wonder_complete:
             wonder_usable = True
