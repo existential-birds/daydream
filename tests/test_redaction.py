@@ -347,6 +347,7 @@ def test_redact_value_recurses_redacts_keys_and_values_without_mutating() -> Non
     assert "[REDACTED" in json.dumps(out)           # a marker replaced it
     assert out["items"] == ["[REDACTED_API_KEY]", 42, None]  # scalars preserved
     assert out["flag"] is True and out[1] == "non-string-key"  # non-string keys untouched
+    assert redact_value(("sk-" + "x" * 16,)) == ("[REDACTED_API_KEY]",)  # tuple rebuilt
 
 
 @pytest.mark.parametrize("sensitive_key", [

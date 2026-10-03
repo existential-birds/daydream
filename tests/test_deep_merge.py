@@ -23,6 +23,16 @@ from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.review_result import merge_result
 
 
+def _empty_merge_inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Create the empty records/alternatives files the empty-merge guard consumes."""
+    dd = deep_dir(tmp_path, allow_standalone=True)
+    records = dd / "stack-python-records.json"
+    records.write_text('{"issues": []}')
+    alternatives = dd / "alternatives.json"
+    alternatives.write_text("[]")
+    return dd, records, alternatives
+
+
 @pytest.mark.parametrize("payload", [[], {"issues": []}])
 async def test_empty_merge_host_noop_requires_current_record_envelope(
     tmp_path: Path, make_work: Callable[..., WorkContext], payload: object,
@@ -52,11 +62,7 @@ async def test_empty_merge_host_noop_requires_current_record_envelope(
 async def test_empty_merge_requires_completed_inputs_and_builtin_contract(
     tmp_path: Path, make_work: Callable[..., WorkContext], monkeypatch: pytest.MonkeyPatch, input_kind: str,
 ) -> None:
-    dd = deep_dir(tmp_path, allow_standalone=True)
-    records = dd / "stack-python-records.json"
-    records.write_text('{"issues": []}')
-    alternatives = dd / "alternatives.json"
-    alternatives.write_text("[]")
+    dd, records, alternatives = _empty_merge_inputs(tmp_path)
     strategy: str | None = None
     if input_kind == "nonempty-records":
         records.write_text('[{"id": 1, "description": "review finding"}]')
@@ -90,11 +96,7 @@ async def test_empty_merge_requires_completed_inputs_and_builtin_contract(
 async def test_empty_merge_keeps_structural_findings_and_clears_stale_outputs(
     tmp_path: Path, make_work: Callable[..., WorkContext],
 ) -> None:
-    dd = deep_dir(tmp_path, allow_standalone=True)
-    records = dd / "stack-python-records.json"
-    records.write_text('{"issues": []}')
-    alternatives = dd / "alternatives.json"
-    alternatives.write_text("[]")
+    dd, records, alternatives = _empty_merge_inputs(tmp_path)
     structural = dd / "stack-structure-records.json"
     structural.write_text(json.dumps({"issues": [{
         "id": 42, "uid": "structure:42", "item_uid": "stable-structural-item", "file": "design.py", "line": 0,
@@ -131,11 +133,7 @@ async def test_empty_merge_keeps_structural_findings_and_clears_stale_outputs(
 async def test_empty_merge_exposes_failed_stack_coverage(
     tmp_path: Path, make_work: Callable[..., WorkContext], capsys: pytest.CaptureFixture[str],
 ) -> None:
-    dd = deep_dir(tmp_path, allow_standalone=True)
-    records = dd / "stack-python-records.json"
-    records.write_text('{"issues": []}')
-    alternatives = dd / "alternatives.json"
-    alternatives.write_text("[]")
+    dd, records, alternatives = _empty_merge_inputs(tmp_path)
     backend = ScriptedBackend(events=[AssertionError("empty merge must not dispatch")])
 
     await phase_cross_stack_merge(

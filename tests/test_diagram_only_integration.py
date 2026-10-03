@@ -84,6 +84,12 @@ def _diagram_target(tmp_path: Path, fake_gh: FakeGh) -> Path:
     return target
 
 
+@pytest.fixture
+def target(tmp_path: Path, fake_gh: FakeGh) -> Path:
+    """A cross-module repo with an open PR served by the fake gh."""
+    return _diagram_target(tmp_path, fake_gh)
+
+
 def _diagram_phase_end(target: Path) -> dict[str, Any]:
     paths = list((target / ".daydream" / "runs").glob("*/trajectory.json"))
     assert len(paths) == 1
@@ -188,10 +194,10 @@ async def test_second_diagram_run_minimizes_only_its_own_kind(
 
 # --- Spec test 7 (diagram-only half): omission notice -----------------------
 
-async def test_omitted_kind_posts_an_omission_notice(tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any],
+async def test_omitted_kind_posts_an_omission_notice(
+    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], target: Path,
 ) -> None:
     """An explicit request that grounds to nothing explains its omission."""
-    target = _diagram_target(tmp_path, fake_gh)
     thin = dr.sequence_spec()
     thin["messages"] = thin["messages"][:2]
 
@@ -367,10 +373,9 @@ def test_phase_b_rejects_invalid_spec_references(kind: str, mutate: Callable[[di
 # --- Spec test 14 (diagram-only half): agent error exits 1 ------------------
 
 async def test_agent_error_in_diagram_only_mode_exits_one(
-    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any],
+    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], target: Path,
 ) -> None:
     """The diagram IS the deliverable here, so a failed kind fails the run."""
-    target = _diagram_target(tmp_path, fake_gh)
 
     exit_code, _ = await diagram_run(
         target, diagram="sequence", specs={"sequence": [dr.sequence_spec()]}, fail=frozenset({"sequence"}),
@@ -447,10 +452,9 @@ async def test_findings_artifact_carries_the_advisory_omission_diagnostic(
     assert result["advisory"]["admitted_bytes"] < result["advisory"]["allowance_bytes"]
 
 def test_actual_cli_diagram_only_timing_success_persists_succeeded_lifecycle(
-    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, target: Path,
 ) -> None:
     """The public CLI records the successful diagram it actually delivers."""
-    target = _diagram_target(tmp_path, fake_gh)
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, target)
     stub.diagram_specs = {"sequence": [dr.sequence_spec()]}
@@ -465,10 +469,9 @@ def test_actual_cli_diagram_only_timing_success_persists_succeeded_lifecycle(
     assert _diagram_phase_end(target)["status"] == "succeeded"
 
 def test_actual_cli_diagram_only_timing_failure_persists_failed_lifecycle(
-    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, target: Path,
 ) -> None:
     """The public CLI preserves failure telemetry before returning one."""
-    target = _diagram_target(tmp_path, fake_gh)
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, target)
     stub.diagram_fail = frozenset({"sequence"})
@@ -483,6 +486,7 @@ def test_actual_cli_diagram_only_timing_failure_persists_failed_lifecycle(
 
 async def test_returned_failure_in_diagram_only_mode_exits_one(
     tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], monkeypatch: pytest.MonkeyPatch,
+    target: Path,
 ) -> None:
     """A returned failed result follows the same diagram-only exit path."""
 
@@ -492,7 +496,6 @@ async def test_returned_failure_in_diagram_only_mode_exits_one(
         }
 
     monkeypatch.setattr(diagram_steps, "_run_diagram_kind", _return_failure)
-    target = _diagram_target(tmp_path, fake_gh)
 
     exit_code, _ = await diagram_run(target, diagram="sequence",)
 
@@ -538,10 +541,9 @@ async def test_pr_lookup_failure_in_diagram_only_mode_exits_one_with_diagnostic(
 # --- Regression (a): prior deep artifacts survive ---------------------------
 
 async def test_diagram_only_run_preserves_prior_deep_artifacts(
-    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any],
+    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], target: Path,
 ) -> None:
     """Diagram mode must bypass the default fresh-review cleanup of prior deep artifacts."""
-    target = _diagram_target(tmp_path, fake_gh)
     deep = target / ".daydream" / "deep"
     deep.mkdir(parents=True)
     (deep / "merged-items.json").write_text('{"items": []}', encoding="utf-8")
@@ -562,12 +564,11 @@ async def test_diagram_only_run_preserves_prior_deep_artifacts(
 # --- Regression (b): recorder + manifest label the run honestly -------------
 
 async def test_diagram_run_flow_label_and_manifest_backends(
-    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], archive_dir: Path,
+    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], archive_dir: Path, target: Path,
 ) -> None:
     """Record diagram flow labels and omit fix/test backends.
 
     Mislabeling as TTT would make archive capture inherit stale merged items."""
-    target = _diagram_target(tmp_path, fake_gh)
 
     exit_code, _ = await diagram_run(target, diagram="sequence", specs={"sequence": [dr.sequence_spec()]}, archive=True,
     )
@@ -615,10 +616,9 @@ async def test_empty_diff_in_diagram_mode_exits_zero(tmp_path: Path, diagram_run
     assert not (target / ".daydream" / "deep" / "diagram.json").exists()
 
 async def test_diagram_only_on_the_base_branch_is_not_a_wrong_branch_error(
-    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any],
+    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], target: Path,
 ) -> None:
     """Diagram mode neither fixes nor commits, so the base branch is allowed."""
-    target = _diagram_target(tmp_path, fake_gh)
     git(target, "checkout", "main")
 
     exit_code, _ = await diagram_run(target, diagram="sequence")
@@ -632,7 +632,7 @@ async def test_diagram_only_on_the_base_branch_is_not_a_wrong_branch_error(
 
 async def test_review_findings_artifact_carries_diagrams_and_phase_b_renders_them(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., Any],
-    silence_console: Callable[..., None],
+    silence_console: Callable[..., None], target: Path,
 ) -> None:
     """Deep findings-out carries diagrams through two-phase CI publication."""
 
@@ -642,7 +642,6 @@ async def test_review_findings_artifact_carries_diagrams_and_phase_b_renders_the
         silence_console(module)
     silence(monkeypatch)
 
-    target = _diagram_target(tmp_path, fake_gh)
     stub = install_stub_backend(monkeypatch, target)
     stub.diagram_specs = {"sequence": [dr.sequence_spec()]}
     artifact_path = tmp_path / "review-findings.json"

@@ -59,6 +59,12 @@ def _target(tmp_path: Path) -> RemoteCITarget:
     )
 
 
+@pytest.fixture
+def target(tmp_path: Path) -> RemoteCITarget:
+    """A RemoteCITarget rooted at tmp_path."""
+    return _target(tmp_path)
+
+
 def _binding(target: RemoteCITarget, **overrides: object) -> PRCIBinding:
     values: dict[str, object] = {
         "pr_number": target.pr_number, "pr_url": target.pr_url, "base_repository": target.base_repository,
@@ -114,8 +120,7 @@ def _snapshot(target: RemoteCITarget, *, policy: RequiredPolicy = RequiredPolicy
         head_observations=head, merge_observations=merge,
     )
 
-def test_parse_pr_ci_binding_preserves_full_fixed_identity(tmp_path: Path) -> None:
-    target = _target(tmp_path)
+def test_parse_pr_ci_binding_preserves_full_fixed_identity(target: RemoteCITarget) -> None:
     binding = parse_pr_ci_binding(_pr_row(target), target)
 
     assert binding == PRCIBinding(
@@ -132,9 +137,8 @@ def test_parse_pr_ci_binding_preserves_full_fixed_identity(tmp_path: Path) -> No
         {"base": {"ref": "other", "repo": {"full_name": "example/project"}}},
     ],
 )
-def test_parse_pr_ci_binding_rejects_identity_or_schema_mismatch(tmp_path: Path, replacement: dict[str, object]
+def test_parse_pr_ci_binding_rejects_identity_or_schema_mismatch(target: RemoteCITarget, replacement: dict[str, object]
 ) -> None:
-    target = _target(tmp_path)
     with pytest.raises(ValueError):
         parse_pr_ci_binding(_pr_row(target, **replacement), target)
 
@@ -280,8 +284,7 @@ def test_active_workflow_parser_rejects_unknown_or_malformed_rows(rows: object) 
     with pytest.raises(ValueError):
         parse_active_workflows(rows)
 
-def test_evaluate_pinned_context_requires_exact_check_name_and_app(tmp_path: Path) -> None:
-    target = _target(tmp_path)
+def test_evaluate_pinned_context_requires_exact_check_name_and_app(target: RemoteCITarget) -> None:
     policy = RequiredPolicy((RequiredContext("Build", 7),), True)
     snapshot = _snapshot(target, policy=policy,
         head=(_observation("Build", "pass", app_id=8), _observation("build", "pass", app_id=7),
@@ -293,8 +296,7 @@ def test_evaluate_pinned_context_requires_exact_check_name_and_app(tmp_path: Pat
     assert verdict.status == "missing"
     assert verdict.missing_contexts == ("Build (app 7)",)
 
-def test_evaluate_unpinned_context_requires_all_latest_matching_producers(tmp_path: Path) -> None:
-    target = _target(tmp_path)
+def test_evaluate_unpinned_context_requires_all_latest_matching_producers(target: RemoteCITarget) -> None:
     snapshot = _snapshot(target, policy=RequiredPolicy((RequiredContext("Build", None),), False),
         head=(_observation("Build", "pass", app_id=7), _observation("bUiLd", "fail", source="status", app_id=None),),
     )
@@ -303,8 +305,7 @@ def test_evaluate_unpinned_context_requires_all_latest_matching_producers(tmp_pa
     assert verdict.status == "failed"
     assert verdict.failing_contexts == ("Build",)
 
-def test_evaluate_required_pending_and_deadlines(tmp_path: Path) -> None:
-    target = _target(tmp_path)
+def test_evaluate_required_pending_and_deadlines(target: RemoteCITarget) -> None:
     snapshot = _snapshot(target, policy=RequiredPolicy((RequiredContext("Build", None),), False),
         head=(_observation("Build", "pending"),),
     )
@@ -312,8 +313,7 @@ def test_evaluate_required_pending_and_deadlines(tmp_path: Path) -> None:
     assert evaluate_remote_ci(snapshot, elapsed=1_799.999, stable_polls=1, limits=RemoteCILimits()).status == "pending"
     assert evaluate_remote_ci(snapshot, elapsed=1_800, stable_polls=1, limits=RemoteCILimits()).status == "timed_out"
 
-def test_evaluate_missing_required_or_active_workflow_at_discovery(tmp_path: Path) -> None:
-    target = _target(tmp_path)
+def test_evaluate_missing_required_or_active_workflow_at_discovery(target: RemoteCITarget) -> None:
     required = _snapshot(target, policy=RequiredPolicy((RequiredContext("Build", None),), False),)
     workflow = _snapshot(target, workflows=({"id": 1, "name": "CI", "path": "ci.yml", "state": "active"},),)
 
@@ -328,8 +328,7 @@ def test_evaluate_no_ci_needs_discovery_deadline_and_two_stable_polls(tmp_path: 
     assert evaluate_remote_ci(snapshot, elapsed=120, stable_polls=1, limits=RemoteCILimits()).status == "pending"
     assert evaluate_remote_ci(snapshot, elapsed=120, stable_polls=2, limits=RemoteCILimits()).status == "no_ci"
 
-def test_evaluate_advisory_failure_and_pending_do_not_block_pass(tmp_path: Path) -> None:
-    target = _target(tmp_path)
+def test_evaluate_advisory_failure_and_pending_do_not_block_pass(target: RemoteCITarget) -> None:
     snapshot = _snapshot(target, policy=RequiredPolicy((RequiredContext("Build", 7),), True),
         head=(_observation("Build", "pass", app_id=7), _observation("Advisory failure", "fail", app_id=8),
             _observation("Advisory pending", "pending", app_id=9),
@@ -342,8 +341,7 @@ def test_evaluate_advisory_failure_and_pending_do_not_block_pass(tmp_path: Path)
         ("Advisory failure", "fail"), ("Advisory pending", "pending"),
     ]
 
-def test_evaluate_policyless_observations_need_all_terminal(tmp_path: Path) -> None:
-    target = _target(tmp_path)
+def test_evaluate_policyless_observations_need_all_terminal(target: RemoteCITarget) -> None:
     pending = _snapshot(target, head=(_observation("Advisory", "pending"),))
     terminal = _snapshot(target, head=(_observation("Advisory green", "pass"), _observation("Advisory red", "fail"),),)
 
@@ -351,8 +349,7 @@ def test_evaluate_policyless_observations_need_all_terminal(tmp_path: Path) -> N
     assert evaluate_remote_ci(pending, elapsed=1_800, stable_polls=2, limits=RemoteCILimits()).status == "timed_out"
     assert evaluate_remote_ci(terminal, elapsed=10, stable_polls=2, limits=RemoteCILimits()).status == "passed"
 
-def test_evaluate_selects_merge_globally_and_empty_merge_falls_back_to_head(tmp_path: Path) -> None:
-    target = _target(tmp_path)
+def test_evaluate_selects_merge_globally_and_empty_merge_falls_back_to_head(target: RemoteCITarget) -> None:
     policy = RequiredPolicy((RequiredContext("Build", 7),), False)
     binding = _binding(target, merge_sha=MERGE_SHA)
     green_head = (_observation("Build", "pass", app_id=7),)
@@ -369,14 +366,12 @@ def test_evaluate_selects_merge_globally_and_empty_merge_falls_back_to_head(tmp_
     assert (merged.status, merged.evidence_sha) == ("failed", MERGE_SHA)
     assert (fallback.status, fallback.evidence_sha) == ("passed", PUSHED_SHA)
 
-def test_evaluate_closed_or_changed_fixed_identity_is_superseded(tmp_path: Path) -> None:
-    target = _target(tmp_path)
+def test_evaluate_closed_or_changed_fixed_identity_is_superseded(target: RemoteCITarget) -> None:
     snapshot = _snapshot(target, binding=_binding(target, state="closed"))
 
     assert evaluate_remote_ci(snapshot, elapsed=1, stable_polls=1, limits=RemoteCILimits()).status == "superseded"
 
-def test_verdict_payload_is_session_sha_and_full_pr_identity_bound(tmp_path: Path) -> None:
-    target = _target(tmp_path)
+def test_verdict_payload_is_session_sha_and_full_pr_identity_bound(target: RemoteCITarget) -> None:
     snapshot = _snapshot(target, head=(_observation("Build", "pass"),))
     verdict = evaluate_remote_ci(snapshot, elapsed=12.5, stable_polls=2, limits=RemoteCILimits())
     payload = remote_ci_verdict_payload(
@@ -401,8 +396,7 @@ def test_verdict_payload_is_session_sha_and_full_pr_identity_bound(tmp_path: Pat
     assert "target_dir" not in json.dumps(payload)
     assert "must not persist" not in json.dumps(payload)
 
-def test_verdict_writer_atomically_replaces_prior_json(tmp_path: Path) -> None:
-    target = _target(tmp_path)
+def test_verdict_writer_atomically_replaces_prior_json(tmp_path: Path, target: RemoteCITarget) -> None:
     verdict = evaluate_remote_ci(_snapshot(target), elapsed=120, stable_polls=2, limits=RemoteCILimits())
     path = tmp_path / "deep" / "remote-ci-verdict.json"
     path.parent.mkdir()
@@ -428,8 +422,7 @@ def test_verdict_payload_persists_applied_polling_limits(tmp_path: Path) -> None
     assert polling["required_stable_polls"] == 3
     assert polling["discovery_deadline"] == 104.5
 
-def test_handoff_payload_is_only_for_non_success_and_preserves_identity(tmp_path: Path) -> None:
-    target = _target(tmp_path)
+def test_handoff_payload_is_only_for_non_success_and_preserves_identity(target: RemoteCITarget) -> None:
     failed = evaluate_remote_ci(_snapshot(target, policy=RequiredPolicy((RequiredContext("Build", 10),), False),
             head=(_observation("Build", "fail"),),
         ), elapsed=12, stable_polls=1, limits=RemoteCILimits(),
@@ -471,8 +464,7 @@ def test_pre_target_unavailable_uses_null_identity_without_placeholder() -> None
     assert handoff["target"] is None
     assert "super-secret-value" not in json.dumps(payload)
 
-def test_pending_factory_preserves_target_without_claiming_observed_ci(tmp_path: Path,) -> None:
-    target = _target(tmp_path)
+def test_pending_factory_preserves_target_without_claiming_observed_ci(target: RemoteCITarget,) -> None:
     verdict = pending_remote_ci_verdict(target)
     payload = remote_ci_verdict_payload(
         verdict, session_id="session-pending", poll_count=0, started_at="2026-09-06T12:00:00Z",
@@ -576,8 +568,7 @@ async def _run_scripted_waiter(target: RemoteCITarget,
     return verdict, clock, fetcher, emitted
 
 @pytest.mark.asyncio
-async def test_waiter_delayed_registration_and_success_switches_absolute_budget(tmp_path: Path,) -> None:
-    target = _target(tmp_path)
+async def test_waiter_delayed_registration_and_success_switches_absolute_budget(target: RemoteCITarget,) -> None:
     empty = _snapshot(target)
     policy = RequiredPolicy((RequiredContext("Build", 10),), True)
     pending = _snapshot(target, policy=policy, head=(_observation("Build", "pending"),))
@@ -591,8 +582,10 @@ async def test_waiter_delayed_registration_and_success_switches_absolute_budget(
     assert fetcher.deadlines == [120.0, 120.0, 1800.0, 1800.0]
 
 @pytest.mark.asyncio
-async def test_waiter_explicit_start_is_the_authoritative_artifact_and_budget_deadline(tmp_path: Path,) -> None:
-    target = _target(tmp_path)
+async def test_waiter_explicit_start_is_the_authoritative_artifact_and_budget_deadline(
+    tmp_path: Path,
+    target: RemoteCITarget,
+) -> None:
     clock = _Clock()
     clock.value = 25.0
     fetcher = _ScriptedFetcher([_snapshot(target)] * 4)
@@ -626,8 +619,7 @@ async def test_waiter_rejects_nonfinite_or_future_explicit_start(tmp_path: Path,
         )
 
 @pytest.mark.asyncio
-async def test_waiter_policy_and_merge_changes_reset_two_poll_stability(tmp_path: Path) -> None:
-    target = _target(tmp_path)
+async def test_waiter_policy_and_merge_changes_reset_two_poll_stability(target: RemoteCITarget) -> None:
     policy_a = RequiredPolicy((RequiredContext("Build", 10),), False)
     policy_b = RequiredPolicy((RequiredContext("Build", 10), RequiredContext("Lint", 11)), False)
     green_a = _snapshot(target, policy=policy_a, head=(_observation("Build", "pass"),))
@@ -649,8 +641,7 @@ async def test_waiter_policy_and_merge_changes_reset_two_poll_stability(tmp_path
         assert [item.status for item in emitted] == ["pending", "pending", "passed"]
 
 @pytest.mark.asyncio
-async def test_waiter_allows_initial_stale_head_then_supersedes_after_binding(tmp_path: Path) -> None:
-    target = _target(tmp_path)
+async def test_waiter_allows_initial_stale_head_then_supersedes_after_binding(target: RemoteCITarget) -> None:
     stale = _snapshot(target, binding=_binding(target, head_sha="4" * 40))
     green = _snapshot(target, head=(_observation("Build", "pass"),))
     verdict, _, _, _ = await _run_scripted_waiter(target, [stale, green, green], limits=RemoteCILimits(poll_seconds=1),
@@ -664,8 +655,7 @@ async def test_waiter_allows_initial_stale_head_then_supersedes_after_binding(tm
     assert [item.status for item in emitted] == ["pending", "superseded"]
 
 @pytest.mark.asyncio
-async def test_waiter_classifies_exact_deadlines_from_last_complete_snapshot(tmp_path: Path,) -> None:
-    target = _target(tmp_path)
+async def test_waiter_classifies_exact_deadlines_from_last_complete_snapshot(target: RemoteCITarget,) -> None:
     cases = [(_snapshot(target), 120.0, "no_ci"),
         (_snapshot(target, policy=RequiredPolicy((RequiredContext("Build", 10),), False),), 120.0, "missing",),
         (_snapshot(target, policy=RequiredPolicy((RequiredContext("Build", 10),), False),
@@ -683,8 +673,7 @@ async def test_waiter_classifies_exact_deadlines_from_last_complete_snapshot(tmp
         assert all(deadline <= expected_deadline for deadline in fetcher.deadlines)
 
 @pytest.mark.asyncio
-async def test_waiter_advisory_observation_does_not_extend_missing_required_discovery(tmp_path: Path,) -> None:
-    target = _target(tmp_path)
+async def test_waiter_advisory_observation_does_not_extend_missing_required_discovery(target: RemoteCITarget,) -> None:
     snapshot = _snapshot(target, policy=RequiredPolicy((RequiredContext("Build", 10),), False),
         head=(_observation("Advisory", "pending", app_id=11),),
     )
@@ -697,8 +686,9 @@ async def test_waiter_advisory_observation_does_not_extend_missing_required_disc
     assert fetcher.deadlines == [120.0, 120.0]
 
 @pytest.mark.asyncio
-async def test_waiter_incomplete_first_poll_is_unavailable_and_later_uses_last_complete(tmp_path: Path,) -> None:
-    target = _target(tmp_path)
+async def test_waiter_incomplete_first_poll_is_unavailable_and_later_uses_last_complete(
+    target: RemoteCITarget,
+) -> None:
     def expire(budget: GitHubRequestBudget) -> RemoteCISnapshot:
         clock.value = budget.deadline
         budget.next_timeout()
@@ -722,8 +712,7 @@ async def test_waiter_incomplete_first_poll_is_unavailable_and_later_uses_last_c
     assert fetcher.calls == 2
 
 @pytest.mark.asyncio
-async def test_waiter_api_error_is_bounded_unavailable(tmp_path: Path) -> None:
-    target = _target(tmp_path)
+async def test_waiter_api_error_is_bounded_unavailable(target: RemoteCITarget) -> None:
     emitted: list[RemoteCIVerdict] = []
     verdict = await wait_for_remote_ci(
         target, fetcher=_ScriptedFetcher([GitError("secret=top-secret")]), monotonic=lambda: 0.0,

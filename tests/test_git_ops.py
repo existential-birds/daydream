@@ -42,6 +42,12 @@ from tests.harness.git_helpers import (
 )
 
 
+@pytest.fixture
+def repo(git_repo: Path) -> Path:
+    """Return the git_repo fixture under the local name repo."""
+    return git_repo
+
+
 def _patch_subprocess_run(
     monkeypatch: pytest.MonkeyPatch, *, returncode: int = 0, stdout: str = "", stderr: str = "",
 ) -> None:
@@ -62,8 +68,7 @@ def _topic_repo(tmp_path: Path) -> Path:
     _git(repo, "checkout", "-b", "topic")
     return repo
 
-def test_resolve_diff_merge_base_prefers_present_origin_ref(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_resolve_diff_merge_base_prefers_present_origin_ref(repo: Path) -> None:
     base = _git(repo, "rev-parse", "HEAD")
     write_and_stage(repo, "upstream.py", "UPSTREAM = 1\n")
     remote_tip = _commit(repo, "remote advancement")
@@ -76,8 +81,7 @@ def test_resolve_diff_merge_base_prefers_present_origin_ref(tmp_path: Path) -> N
     assert git_ops.merge_base(repo, "main", head) == base
     assert git_ops.resolve_diff_merge_base(repo, "main", head) == remote_tip
 
-def test_resolve_diff_merge_base_carries_only_ancestor_of_dangling_base(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_resolve_diff_merge_base_carries_only_ancestor_of_dangling_base(repo: Path) -> None:
     common = _git(repo, "rev-parse", "HEAD")
     _git(repo, "checkout", "-b", "feature")
     write_and_stage(repo, "feature.py", "FEATURE = 1\n")
@@ -158,8 +162,8 @@ def _install_diff_base_git_shim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 )
 def test_resolve_diff_merge_base_rejects_and_redacts_external_git_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, expected_message: str, private_fragment: str,
+                                                                           repo: Path,
 ) -> None:
-    repo = _make_repo_with_main(tmp_path)
     head = _git(repo, "rev-parse", "HEAD")
     _install_diff_base_git_shim(tmp_path, monkeypatch, mode=mode, head=head)
     with pytest.raises(GitError) as raised:
@@ -171,8 +175,9 @@ def test_resolve_diff_merge_base_rejects_and_redacts_external_git_failures(
     assert head not in message
     assert len(message) < 200
 
-def test_resolve_diff_merge_base_redacts_external_git_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_resolve_diff_merge_base_redacts_external_git_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo: Path,
+) -> None:
     head = _git(repo, "rev-parse", "HEAD")
     _install_diff_base_git_shim(tmp_path, monkeypatch, mode="timeout-preference", head=head)
     with pytest.raises(GitError) as raised:
@@ -182,8 +187,9 @@ def test_resolve_diff_merge_base_redacts_external_git_timeout(tmp_path: Path, mo
     assert head not in str(raised.value)
 
 @pytest.mark.parametrize("include_untracked", [False, True])
-def test_independent_snapshot_preserves_exact_filename_bytes(tmp_path: Path, include_untracked: bool) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_independent_snapshot_preserves_exact_filename_bytes(
+    tmp_path: Path, include_untracked: bool, repo: Path,
+) -> None:
     tracked = [" leading and trailing ", "line\nbreak"]
     untracked = [" scratch ", "scratch\nline"]
     for name in tracked:
@@ -219,8 +225,8 @@ def _repository_identity(repo: Path) -> tuple[str, str, bytes, str]:
 )
 def test_independent_snapshot_preserves_directory_to_file_change(
     tmp_path: Path, include_untracked: bool, staged: bool, children: tuple[str, ...], replacement: bytes,
+                                                                 repo: Path,
 ) -> None:
-    repo = _make_repo_with_main(tmp_path)
     nested = repo / "x"
     nested.mkdir()
     for child in children:
@@ -248,8 +254,7 @@ def test_independent_snapshot_preserves_directory_to_file_change(
     assert (repo / "x").read_bytes() == replacement
 
 
-def test_independent_snapshot_preserves_staged_file_to_directory_change(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_independent_snapshot_preserves_staged_file_to_directory_change(tmp_path: Path, repo: Path) -> None:
     replaced = repo / "x"
     replaced.write_text("old file\n", encoding="utf-8")
     _git(repo, "add", "x")
@@ -270,8 +275,7 @@ def test_independent_snapshot_preserves_staged_file_to_directory_change(tmp_path
     assert _git(repo, "status", "--short") == before_status
 
 @pytest.mark.parametrize("include_untracked", [False, True])
-def test_independent_snapshot_preserves_non_utf8_paths(tmp_path: Path, include_untracked: bool) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_independent_snapshot_preserves_non_utf8_paths(tmp_path: Path, include_untracked: bool, repo: Path) -> None:
     tracked = os.fsdecode(b"tracked-\xff")
     scratch = os.fsdecode(b"scratch-\xfe")
     try:
@@ -289,8 +293,7 @@ def test_independent_snapshot_preserves_non_utf8_paths(tmp_path: Path, include_u
     if include_untracked:
         assert (snapshot.repo / scratch).read_bytes() == b"scratch bytes"
 
-def test_independent_snapshot_rejects_destination_parent_symlink(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_independent_snapshot_rejects_destination_parent_symlink(tmp_path: Path, repo: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
     sentinel = outside / "child.txt"
@@ -309,8 +312,9 @@ def test_independent_snapshot_rejects_destination_parent_symlink(tmp_path: Path)
     assert (repo / "parent" / "child.txt").read_text() == "new tracked child"
     assert git_ops.staged_patch(repo) == before
 
-def test_independent_snapshot_rejects_shared_alternates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_independent_snapshot_rejects_shared_alternates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo: Path,
+) -> None:
     real_clone = git_ops.clone
     def clone_with_alternates(
         remote_url: str, target: Path, *, blobless: bool = False, no_local: bool = False, timeout: int = 300,
@@ -371,8 +375,8 @@ def test_independent_snapshot_rejects_inherited_git_overrides_before_mutation(
 
 def test_independent_snapshot_redacts_malformed_git_environment_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                                      repo: Path,
 ) -> None:
-    repo = _make_repo_with_main(tmp_path)
     destination = tmp_path / "snapshot"
     newline_name = "GIT_TRACE_PRIVATE\nSECRET_NAME"
     oversized_name = "GIT_CONFIG_" + "S" * 500
@@ -392,8 +396,7 @@ def test_independent_snapshot_redacts_malformed_git_environment_names(
     assert os.environ[newline_name] == private_value
     assert os.environ[oversized_name] == private_value
 
-def test_independent_snapshot_redacts_malformed_names_at_process_boundary(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_independent_snapshot_redacts_malformed_names_at_process_boundary(tmp_path: Path, repo: Path) -> None:
     destination = tmp_path / "snapshot"
     newline_name = "GIT_TRACE_PRIVATE\nSECRET_NAME"
     oversized_name = "GIT_CONFIG_" + "S" * 500
@@ -437,8 +440,8 @@ raise SystemExit(9)
 
 def test_independent_snapshot_bounds_git_environment_name_diagnostics(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                                      repo: Path,
 ) -> None:
-    repo = _make_repo_with_main(tmp_path)
     for index in range(30):
         monkeypatch.setenv(f"GIT_TRACE_TEST_{index:02d}", "PRIVATE")
     with pytest.raises(git_ops.SnapshotPreparationError) as raised:
@@ -453,8 +456,8 @@ def test_independent_snapshot_bounds_git_environment_name_diagnostics(
 
 def test_independent_snapshot_known_git_violation_skips_exec_path_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                                        repo: Path,
 ) -> None:
-    repo = _make_repo_with_main(tmp_path)
     trace_file = tmp_path / "git-trace-side-effect.log"
     monkeypatch.setenv("GIT_TRACE", str(trace_file))
     monkeypatch.setenv("GIT_EXEC_PATH", str(tmp_path / "invalid git exec path"))
@@ -467,8 +470,8 @@ def test_independent_snapshot_known_git_violation_skips_exec_path_probe(
 
 def test_independent_snapshot_redacts_invalid_utf8_exec_path_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                                   repo: Path,
 ) -> None:
-    repo = _make_repo_with_main(tmp_path)
     private_exec_path = str(tmp_path / "PRIVATE_EXEC_PATH_SENTINEL")
     real_git = shutil.which("git")
     assert real_git is not None
@@ -517,8 +520,8 @@ def test_independent_snapshot_strict_queries_reject_broken_repository(tmp_path: 
 ])
 def test_independent_snapshot_rejects_indexed_config_injection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str,
+                                                               repo: Path,
 ) -> None:
-    repo = _make_repo_with_main(tmp_path)
     destination = tmp_path / "snapshot"
     count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
     monkeypatch.setenv(f"GIT_CONFIG_KEY_{count}", key)
@@ -537,8 +540,8 @@ def test_independent_snapshot_rejects_indexed_config_injection(
 @pytest.mark.parametrize("signing", ["true", "false"])
 def test_independent_snapshot_preserves_safe_config_and_independent_objects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signing: str,
+                                                                            repo: Path,
 ) -> None:
-    repo = _make_repo_with_main(tmp_path)
     count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
     monkeypatch.setenv(f"GIT_CONFIG_KEY_{count}", "commit.gpgsign")
     monkeypatch.setenv(f"GIT_CONFIG_VALUE_{count}", signing)
@@ -608,8 +611,8 @@ def test_independent_snapshot_accepts_git_exported_default_exec_path_in_pre_push
 
 def test_independent_snapshot_rejects_exec_path_when_default_query_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                                         repo: Path,
 ) -> None:
-    repo = _make_repo_with_main(tmp_path)
     destination = tmp_path / "snapshot"
     monkeypatch.setenv("GIT_EXEC_PATH", "/trusted-looking/git-core")
     monkeypatch.setenv("PATH", str(tmp_path / "missing-bin"))
@@ -619,14 +622,12 @@ def test_independent_snapshot_rejects_exec_path_when_default_query_fails(
     assert not destination.exists()
     assert dict(os.environ) == before
 
-def test_independent_snapshot_unborn_detection_rejects_corrupt_head(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_independent_snapshot_unborn_detection_rejects_corrupt_head(repo: Path) -> None:
     (repo / ".git" / "HEAD").write_text("invalid head contents\n")
     with pytest.raises(GitError):
         git_ops.is_unborn_head(repo)
 
-def test_independent_snapshot_symbolic_head_is_not_ambiguous_with_tag(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_independent_snapshot_symbolic_head_is_not_ambiguous_with_tag(tmp_path: Path, repo: Path) -> None:
     _git(repo, "tag", "main")
     assert git_ops.symbolic_head(repo, strict=True) == "main"
     assert not git_ops.is_unborn_head(repo)
@@ -644,15 +645,13 @@ def test_clone_no_local_requests_independent_objects(tmp_path: Path, monkeypatch
     assert calls == [["git", "clone", "--no-local", "source", str(tmp_path / "snapshot")]]
 
 @pytest.mark.parametrize("name", [" leading and trailing ", "line\nbreak", "café.py"])
-def test_diff_name_only_strict_preserves_exact_git_paths(tmp_path: Path, name: str) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_diff_name_only_strict_preserves_exact_git_paths(repo: Path, name: str) -> None:
     write_and_stage(repo, name, b"content\n")
     _commit(repo, "unusual path")
     assert git_ops.diff_name_only_strict(repo, "HEAD^", "HEAD") == [name]
     assert git_ops.diff_name_only_strict(repo, "HEAD", "HEAD") == []
 
-def test_assert_is_worktree_passes_for_real_repo(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_assert_is_worktree_passes_for_real_repo(repo: Path) -> None:
     git_ops.assert_is_worktree(repo)
     assert git_ops.is_inside_worktree(repo) is True
 
@@ -669,8 +668,7 @@ def test_assert_is_worktree_rejects_org_dir(tmp_path: Path) -> None:
         git_ops.assert_is_worktree(org)
     assert git_ops.is_inside_worktree(org) is False
 
-def test_assert_is_worktree_rejects_subdir_of_repo(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_assert_is_worktree_rejects_subdir_of_repo(repo: Path) -> None:
     sub = repo / "src"
     sub.mkdir()
     (sub / "x.txt").write_text("x\n")
@@ -682,8 +680,7 @@ def test_assert_is_worktree_rejects_missing_path(tmp_path: Path) -> None:
     with pytest.raises(NotAWorktreeError):
         git_ops.assert_is_worktree(tmp_path / "does-not-exist")
 
-def test_head_sha_returns_full_sha(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_head_sha_returns_full_sha(repo: Path) -> None:
     expected = _git(repo, "rev-parse", "HEAD")
     assert git_ops.head_sha(repo) == expected
     assert len(expected) == 40
@@ -694,12 +691,10 @@ def test_head_sha_raises_on_empty_repo(tmp_path: Path) -> None:
     with pytest.raises(GitError):
         git_ops.head_sha(repo)
 
-def test_current_branch_on_named_branch(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_current_branch_on_named_branch(repo: Path) -> None:
     assert git_ops.current_branch(repo) == "main"
 
-def test_current_branch_returns_none_when_detached(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_current_branch_returns_none_when_detached(repo: Path) -> None:
     sha = _git(repo, "rev-parse", "HEAD")
     _git(repo, "checkout", "--detach", sha)
     assert git_ops.current_branch(repo) is None
@@ -710,8 +705,7 @@ def test_default_branch_uses_origin_head(tmp_path: Path) -> None:
     _git(repo, "remote", "set-head", "origin", "main")
     assert git_ops.default_branch(repo) == "main"
 
-def test_default_branch_falls_back_to_main(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_default_branch_falls_back_to_main(repo: Path) -> None:
     assert git_ops.default_branch(repo) == "main"
 
 def test_list_local_branches_maps_names_to_oids(tmp_path: Path) -> None:
@@ -753,21 +747,18 @@ def test_remote_url_returns_url_when_remote_configured(tmp_path: Path) -> None:
     repo, bare = _repo_with_origin(tmp_path)
     assert git_ops.remote_url(repo) == str(bare)
 
-def test_remote_url_returns_none_when_remote_missing(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_remote_url_returns_none_when_remote_missing(repo: Path) -> None:
     assert git_ops.remote_url(repo) is None
 
 def test_remote_url_returns_none_for_unknown_remote_name(tmp_path: Path) -> None:
     repo, bare = _repo_with_origin(tmp_path)
     assert git_ops.remote_url(repo, "upstream") is None
 
-def test_branch_exists_local(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_branch_exists_local(repo: Path) -> None:
     _git(repo, "checkout", "-b", "feat-local")
     assert git_ops.branch_exists(repo, "feat-local") is True
 
-def test_branch_exists_missing(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_branch_exists_missing(repo: Path) -> None:
     assert git_ops.branch_exists(repo, "nonexistent") is False
 
 def _ref_raw_sha(repo: Path) -> str:
@@ -794,19 +785,16 @@ def _ref_named_branch(repo: Path) -> str:
     "build_ref", [_ref_raw_sha, _ref_abbreviated_sha, _ref_tag, _ref_relative_commit_ish, _ref_named_branch],
     ids=["raw_sha", "abbreviated_sha", "tag", "relative_commit_ish", "named_branch"],
 )
-def test_ref_and_commit_exist_true(tmp_path: Path, build_ref: Any, probe: Any) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_ref_and_commit_exist_true(repo: Path, build_ref: Any, probe: Any) -> None:
     assert probe(repo, build_ref(repo)) is True
 
-def test_ref_exists_missing(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_ref_exists_missing(repo: Path) -> None:
     assert git_ops.ref_exists(repo, "nonexistent") is False
     # A tree-ish that is not a commit must be rejected, not accepted.
     tree = _git(repo, "rev-parse", "HEAD^{tree}")
     assert git_ops.ref_exists(repo, tree) is False
 
-def test_ref_exists_rejects_leading_dash(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_ref_exists_rejects_leading_dash(repo: Path) -> None:
     assert git_ops.ref_exists(repo, "-not-a-ref") is False
     assert git_ops.ref_exists(repo, "--exec=evil") is False
 
@@ -823,14 +811,12 @@ def test_commit_exists_rejects_origin_only(tmp_path: Path) -> None:
     assert git_ops.branch_exists(repo, "remote-only") is True
     assert git_ops.commit_exists(repo, "remote-only") is False
 
-def test_commit_exists_missing(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_commit_exists_missing(repo: Path) -> None:
     assert git_ops.commit_exists(repo, "nonexistent") is False
     tree = _git(repo, "rev-parse", "HEAD^{tree}")
     assert git_ops.commit_exists(repo, tree) is False
 
-def test_commit_exists_rejects_leading_dash(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_commit_exists_rejects_leading_dash(repo: Path) -> None:
     assert git_ops.commit_exists(repo, "-not-a-ref") is False
 
 @pytest.mark.parametrize(
@@ -842,14 +828,12 @@ def test_commit_exists_rejects_leading_dash(tmp_path: Path) -> None:
         pytest.param("-not-a-ref", "HEAD", False, id="leading_dash_ref"),
     ],
 )
-def test_is_ancestor_reports_relationship(tmp_path: Path, ancestor: str, descendant: str, expected: bool) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_is_ancestor_reports_relationship(repo: Path, ancestor: str, descendant: str, expected: bool) -> None:
     write_and_stage(repo, "second.txt", "second\n")
     _commit(repo, "second")
     assert git_ops.is_ancestor(repo, ancestor, descendant) is expected
 
-def test_merge_base_returns_shared_commit(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_merge_base_returns_shared_commit(repo: Path) -> None:
     _git(repo, "checkout", "-b", "feat")
     write_and_stage(repo, "feat.txt", "feat\n")
     _commit(repo, "feat commit")
@@ -879,8 +863,7 @@ def test_merge_base_prefers_upstream_when_remote_ahead(tmp_path: Path) -> None:
     expected = _git(repo, "merge-base", "HEAD", "origin/main")
     assert git_ops.merge_base(repo, "main") == expected
 
-def test_merge_base_returns_none_for_missing_branch(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_merge_base_returns_none_for_missing_branch(repo: Path) -> None:
     assert git_ops.merge_base(repo, "missing-branch") is None
 
 def test_merge_base_returns_none_when_head_missing(tmp_path: Path) -> None:
@@ -891,12 +874,10 @@ def test_merge_base_returns_none_when_head_missing(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "refs", [pytest.param(("-no-such-ref",), id="base"), pytest.param(("main", "-no-such-ref"), id="head")],
 )
-def test_merge_base_returns_none_for_leading_dash_ref(tmp_path: Path, refs: tuple[str, ...]) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_merge_base_returns_none_for_leading_dash_ref(repo: Path, refs: tuple[str, ...]) -> None:
     assert git_ops.merge_base(repo, *refs) is None
 
-def test_remote_urls_is_strict_and_allows_no_remotes(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_remote_urls_is_strict_and_allows_no_remotes(repo: Path) -> None:
     assert git_ops.remote_urls(repo) == {}
     _git(repo, "remote", "add", "origin", "https://github.com/acme/widgets.git")
     _git(repo, "remote", "add", "upstream", "git@github.com:other/widgets.git")
@@ -907,8 +888,7 @@ def test_remote_urls_is_strict_and_allows_no_remotes(tmp_path: Path) -> None:
     with pytest.raises(GitError, match="remote 'broken'.*fetch URL"):
         git_ops.remote_urls(repo)
 
-def test_resolve_pr_merge_base_uses_local_branch_without_remotes(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_resolve_pr_merge_base_uses_local_branch_without_remotes(repo: Path) -> None:
     base = git_ops.head_sha(repo)
     _git(repo, "checkout", "-b", "feature")
     write_and_stage(repo, "feature.txt", "feature\n")
@@ -928,8 +908,7 @@ def test_resolve_pr_merge_base_prefers_present_remote_over_stale_local(tmp_path:
     _git(repo, "branch", "-f", "main", stale_local)
     assert git_ops.resolve_pr_merge_base(repo, ["refs/remotes/origin/main"], "refs/heads/main", head) == remote_base
 
-def test_resolve_pr_merge_base_rejects_divergent_matching_remotes(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_resolve_pr_merge_base_rejects_divergent_matching_remotes(repo: Path) -> None:
     oldest = git_ops.head_sha(repo)
     write_and_stage(repo, "base-update.txt", "new base\n")
     newer = _commit(repo, "base update")
@@ -942,14 +921,12 @@ def test_resolve_pr_merge_base_rejects_divergent_matching_remotes(tmp_path: Path
         git_ops.resolve_pr_merge_base(repo, ["refs/remotes/one/main", "refs/remotes/two/main"], "refs/heads/main", head)
 
 @pytest.mark.parametrize("head", ["HEAD", "deadbeef", "f" * 40])
-def test_resolve_pr_merge_base_requires_exact_present_head(tmp_path: Path, head: str) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_resolve_pr_merge_base_requires_exact_present_head(repo: Path, head: str) -> None:
     with pytest.raises(GitError, match="exact PR head"):
         git_ops.resolve_pr_merge_base(repo, [], "refs/heads/main", head)
 
 @pytest.mark.parametrize("local_ref", ["main", "refs/heads/-bad", "refs/heads/main~1"])
-def test_resolve_pr_merge_base_rejects_invalid_base_ref(tmp_path: Path, local_ref: str) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_resolve_pr_merge_base_rejects_invalid_base_ref(repo: Path, local_ref: str) -> None:
     with pytest.raises(GitError, match="base ref"):
         git_ops.resolve_pr_merge_base(repo, [], local_ref, git_ops.head_sha(repo))
 
@@ -980,11 +957,10 @@ def test_diff_excludes_paths(tmp_path: Path) -> None:
     assert "keep.txt" in out
     assert "drop.txt" not in out
 
-def test_diff_prefers_origin_when_on_default_branch(tmp_path: Path) -> None:
+def test_diff_prefers_origin_when_on_default_branch(tmp_path: Path, repo: Path) -> None:
     remote_dir = tmp_path / "remote.git"
     remote_dir.mkdir()
     _git(remote_dir, "init", "--bare", "-b", "main")
-    repo = _make_repo_with_main(tmp_path)
     _git(repo, "remote", "add", "origin", str(remote_dir))
     _git(repo, "push", "-u", "origin", "main")
     # Local commit on main — not pushed.
@@ -1009,14 +985,12 @@ def test_diff_name_only_returns_multiple_files_in_order(tmp_path: Path) -> None:
     result = git_ops.diff_name_only(repo, "main", "HEAD")
     assert result == ["alpha.txt", "beta.txt"]
 
-def test_diff_name_only_returns_empty_list_on_bad_ref(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_diff_name_only_returns_empty_list_on_bad_ref(repo: Path) -> None:
     result = git_ops.diff_name_only(repo, "nonexistent-ref", "HEAD")
     assert result == []
 
-def test_changed_files_against_compares_tracked_changes_to_snapshot(tmp_path: Path) -> None:
+def test_changed_files_against_compares_tracked_changes_to_snapshot(repo: Path) -> None:
     """A pre-fix snapshot, rather than HEAD, is the guard's tracked baseline."""
-    repo = _make_repo_with_main(tmp_path)
     tracked = repo / "tracked.txt"
     tracked.write_text("committed\n")
     _git(repo, "add", "tracked.txt")
@@ -1039,27 +1013,23 @@ def test_log_returns_oneline_commits(tmp_path: Path) -> None:
     out = git_ops.log(repo, "main")
     assert "topic-msg" in out
 
-def test_show_returns_file_bytes_at_ref(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_show_returns_file_bytes_at_ref(repo: Path) -> None:
     out = git_ops.show(repo, "HEAD", "base.txt")
     assert out == b"base\n"
 
-def test_show_raises_on_missing_path(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_show_raises_on_missing_path(repo: Path) -> None:
     with pytest.raises(git_ops.PathAbsentError):
         git_ops.show(repo, "HEAD", "nope.txt")
 
-def test_show_raises_a_plain_error_when_the_object_store_is_damaged(tmp_path: Path) -> None:
+def test_show_raises_a_plain_error_when_the_object_store_is_damaged(repo: Path) -> None:
     """Absence recognition is positive-only: an unreadable blob is not a missing path."""
-    repo = _make_repo_with_main(tmp_path)
     blob = _git(repo, "rev-parse", "HEAD:base.txt").strip()
     (repo / ".git" / "objects" / blob[:2] / blob[2:]).unlink()
     with pytest.raises(GitError) as excinfo:
         git_ops.show(repo, "HEAD", "base.txt")
     assert not isinstance(excinfo.value, git_ops.PathAbsentError)
 
-def test_grep_fixed_matches_returns_path_pattern_pairs(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_grep_fixed_matches_returns_path_pattern_pairs(repo: Path) -> None:
     (repo / "widget_user.py").write_text("import widget\n")
     (repo / "gadget_user.ts").write_text("gadget\n")
     (repo / "partial.py").write_text("widget_factory\n")
@@ -1070,16 +1040,14 @@ def test_grep_fixed_matches_returns_path_pattern_pairs(tmp_path: Path) -> None:
     assert len(matches) == 2
     assert set(matches) == {("widget_user.py", "widget"), ("gadget_user.ts", "gadget")}
 
-def test_grep_fixed_matches_raises_on_nonzero_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_grep_fixed_matches_raises_on_nonzero_exit(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
         return subprocess.CompletedProcess(args=["git"], returncode=2, stdout=b"", stderr=b"fatal: unknown option")
     monkeypatch.setattr(subprocess, "run", fake_run)
     with pytest.raises(GitError, match="git grep -F -o -z -f failed"):
         git_ops.grep_fixed_matches(repo, ("widget",))
 
-def test_grep_fixed_matches_raises_on_malformed_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_grep_fixed_matches_raises_on_malformed_record(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # A line without a NUL separator produces parts with len != 2.
     def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
         return subprocess.CompletedProcess(args=["git"], returncode=0, stdout=b"file.py\n", stderr=b"")
@@ -1087,17 +1055,15 @@ def test_grep_fixed_matches_raises_on_malformed_record(tmp_path: Path, monkeypat
     with pytest.raises(GitError, match="malformed record"):
         git_ops.grep_fixed_matches(repo, ("widget",))
 
-def test_grep_fixed_matches_empty_when_no_matches(tmp_path: Path) -> None:
+def test_grep_fixed_matches_empty_when_no_matches(repo: Path) -> None:
     """Exit code 1 ("no matches") is treated as success: an empty list."""
-    repo = _make_repo_with_main(tmp_path)
     write_and_stage(repo, "widget.py", "widget\n")
     _commit(repo, "add widget")
     assert git_ops.grep_fixed_matches(repo, ("absent_pattern",)) == []
 
 def test_grep_fixed_matches_dedups_and_skips_nul_cr_lf_patterns(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    repo: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    repo = _make_repo_with_main(tmp_path)
     write_and_stage(repo, "widget.py", "widget\n")
     _commit(repo, "add widget")
     patterns_files: list[bytes] = []
@@ -1116,8 +1082,7 @@ def test_grep_fixed_matches_dedups_and_skips_nul_cr_lf_patterns(
     assert matches == []
     assert patterns_files == [b"widget\ngadget"]
 
-def test_grep_fixed_matches_empty_when_all_patterns_unsuitable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_grep_fixed_matches_empty_when_all_patterns_unsuitable(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     write_and_stage(repo, "widget.py", "widget\n")
     _commit(repo, "add widget")
     def no_git(*args: Any, **kwargs: Any) -> Any:
@@ -1125,21 +1090,18 @@ def test_grep_fixed_matches_empty_when_all_patterns_unsuitable(tmp_path: Path, m
     monkeypatch.setattr(subprocess, "run", no_git)
     assert git_ops.grep_fixed_matches(repo, ("", "a\x00b", "a\rb", "a\nb")) == []
 
-def test_grep_fixed_matches_default_word_false_matches_substrings(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_grep_fixed_matches_default_word_false_matches_substrings(repo: Path) -> None:
     write_and_stage(repo, "app.py", "application\n")
     _commit(repo, "add app")
     assert git_ops.grep_fixed_matches(repo, ("app",)) == [("app.py", "app")]
 
-def test_status_porcelain_clean_and_dirty(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_status_porcelain_clean_and_dirty(repo: Path) -> None:
     assert git_ops.status_porcelain(repo) == ""
     (repo / "untracked.txt").write_text("u\n")
     out = git_ops.status_porcelain(repo)
     assert "untracked.txt" in out
 
-def test_upstream_ahead_count_no_upstream(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_upstream_ahead_count_no_upstream(repo: Path) -> None:
     assert git_ops.upstream_ahead_count(repo, "main") == 0
 
 def test_upstream_ahead_count_when_remote_ahead(tmp_path: Path) -> None:
@@ -1169,8 +1131,7 @@ def test_fetch_pulls_new_commits(tmp_path: Path) -> None:
     git_ops.fetch(repo)
     assert _git(repo, "rev-parse", "origin/main") == new_sha
 
-def test_worktree_add_and_remove_round_trip(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_worktree_add_and_remove_round_trip(tmp_path: Path, repo: Path) -> None:
     head = _git(repo, "rev-parse", "HEAD")
     wt = tmp_path / "wt"
     git_ops.worktree_add(repo, wt, head)
@@ -1180,8 +1141,7 @@ def test_worktree_add_and_remove_round_trip(tmp_path: Path) -> None:
     git_ops.worktree_remove(repo, wt)
     assert not wt.exists()
 
-def test_worktree_move_preserves_registered_worktree_with_spaces(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_worktree_move_preserves_registered_worktree_with_spaces(tmp_path: Path, repo: Path) -> None:
     source = tmp_path / "legacy worktree"
     destination = tmp_path / "private workspaces" / "moved worktree"
     destination.parent.mkdir()
@@ -1194,8 +1154,7 @@ def test_worktree_move_preserves_registered_worktree_with_spaces(tmp_path: Path)
     assert str(destination) in porcelain
     assert str(source) not in porcelain
 
-def test_worktree_move_propagates_git_failure(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_worktree_move_propagates_git_failure(tmp_path: Path, repo: Path) -> None:
     missing = tmp_path / "missing worktree"
     destination = tmp_path / "destination"
     with pytest.raises(GitError, match="git worktree move"):
@@ -1266,8 +1225,7 @@ def _flaky_timeout_run(
         return ok
     return run
 
-def test_run_git_timeout_retry_behavior(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_run_git_timeout_retry_behavior(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
     ok = subprocess.CompletedProcess(args=["git"], returncode=0, stdout="true\n", stderr="")
     # Case 1: transient timeout (1st attempt) then success on the retry.
     calls = {"n": 0}
@@ -1291,9 +1249,8 @@ def test_run_git_timeout_retry_behavior(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert not isinstance(exc.value, git_ops.GitTimeoutError)
     assert calls["n"] == 1  # no retries for non-timeout failures
 
-def test_run_git_encodes_input_text_when_capturing_bytes(tmp_path: Path) -> None:
+def test_run_git_encodes_input_text_when_capturing_bytes(repo: Path) -> None:
     """Binary capture requires encoded input; a raw TypeError would mask Git failures."""
-    repo = _make_repo_with_main(tmp_path)
     bytes_proc = git_process._run_git(repo, ["hash-object", "--stdin"], capture_bytes=True, input_text="abc\n")
     text_proc = git_process._run_git(repo, ["hash-object", "--stdin"], input_text="abc\n")
     assert bytes_proc.returncode == 0
@@ -1314,10 +1271,9 @@ def test_run_git_encodes_input_text_when_capturing_bytes(tmp_path: Path) -> None
     ],
 )
 def test_mutating_wrapper_does_not_retry_on_timeout(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, operation: Any,
+    monkeypatch: pytest.MonkeyPatch, repo: Path, operation: Any,
 ) -> None:
     """A timed-out mutation may have completed, so retry could duplicate changes or PRs."""
-    repo = _make_repo_with_main(tmp_path)
     calls = {"n": 0}
     monkeypatch.setattr(subprocess, "run", _timeout_run(cmd=["command"], timeout=60, calls=calls))
     with pytest.raises(git_ops.GitTimeoutError):
@@ -1333,10 +1289,9 @@ def test_mutating_wrapper_does_not_retry_on_timeout(
     ], ids=["malformed", "negative", "zero", "valid"],
 )
 def test_run_gh_timeout_environment_validation(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path, env_value: str,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, repo: Path, env_value: str,
     expected_timeout: int, expected_warning: str | None,
 ) -> None:
-    repo = _make_repo_with_main(tmp_path)
     monkeypatch.setenv("DAYDREAM_GH_TIMEOUT_SECONDS", env_value)
     monkeypatch.setattr(subprocess, "run", _timeout_run(cmd=["gh"], timeout=expected_timeout))
     with pytest.raises(git_ops.GitTimeoutError) as exc:
@@ -1359,11 +1314,10 @@ def test_run_gh_timeout_environment_validation(
     ], ids=["default", "empty-warns", "malformed-warns", "negative-warns", "zero-valid", "one-valid"],
 )
 def test_read_only_gh_retry_environment_validation(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path, env_value: str | None,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, repo: Path, env_value: str | None,
     expected_attempts: int, expected_warning: str | None,
 ) -> None:
     """Read-only ``gh`` retry budget is validated at call time; retry 0 stays a valid 1 attempt."""
-    repo = _make_repo_with_main(tmp_path)
     if env_value is not None:
         monkeypatch.setenv("DAYDREAM_GH_TIMEOUT_RETRIES", env_value)
     else:
@@ -1383,9 +1337,8 @@ def test_read_only_gh_retry_environment_validation(
         assert expected_warning in caplog.text
 
 def test_run_gh_read_wrapper_retries_then_succeeds_and_exhausts(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, repo: Path,
 ) -> None:
-    repo = _make_repo_with_main(tmp_path)
     ok = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="octocat/hello\n", stderr="")
     # Case 1: transient timeout (1st attempt) then success on the retry.
     calls = {"n": 0}
@@ -1399,11 +1352,10 @@ def test_run_gh_read_wrapper_retries_then_succeeds_and_exhausts(
         git_ops.gh_pr_diff(repo, 7)
     assert calls["n"] == git_process._gh_retries() + 1
 
-def test_gh_api_retries_only_when_idempotent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_gh_api_retries_only_when_idempotent(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
     """Caller-declared reads may retry; GraphQL POST mutations must execute once despite
     sharing the HTTP method.
     """
-    repo = _make_repo_with_main(tmp_path)
     calls = {"n": 0}
     monkeypatch.setattr(subprocess, "run", _timeout_run(cmd=["gh"], timeout=60, calls=calls))
     # Read: idempotent=True -> retried to exhaustion.
@@ -1418,10 +1370,9 @@ def test_gh_api_retries_only_when_idempotent(monkeypatch: pytest.MonkeyPatch, tm
 
 @pytest.mark.parametrize("labels", [None, ["daydream", "tech-debt"]], ids=["no-labels", "two-labels"])
 def test_gh_issue_create_constructs_argv_with_body_file_and_labels(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, labels: list[str] | None,
+    monkeypatch: pytest.MonkeyPatch, repo: Path, labels: list[str] | None,
 ) -> None:
     """Issue bodies travel through an unlinked file, never argv; labels remain optional."""
-    repo = _make_repo_with_main(tmp_path)
     captured: dict[str, Any] = {}
     def fake_run(args: Any, *pargs: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
         # Snapshot argv + cwd + body-file contents at call time (the tempfile
@@ -1454,8 +1405,7 @@ def test_gh_issue_create_constructs_argv_with_body_file_and_labels(
     assert [argv[i + 1] for i in label_positions] == (labels or [])
     assert captured["cwd"] == repo
 
-def test_gh_issue_create_raises_on_non_zero_exit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_gh_issue_create_raises_on_non_zero_exit(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
     body_path: list[str] = []
     def fake_run(args: Any, *pargs: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
         # Capture the body tempfile path while it still exists (the unlink-in-
@@ -1468,9 +1418,8 @@ def test_gh_issue_create_raises_on_non_zero_exit(monkeypatch: pytest.MonkeyPatch
         git_ops.gh_issue_create(repo, title="t", body="b", repo_slug="octocat/hello")
     assert body_path and not Path(body_path[0]).exists()
 
-def test_gh_issue_list_returns_parsed_rows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_gh_issue_list_returns_parsed_rows(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
     """Issue rows retain bodies so scope-finding deduplication can read their fingerprint markers."""
-    repo = _make_repo_with_main(tmp_path)
     rows = [
         {
             "number": 42, "title": "[daydream] out-of-scope finding: notes.txt",
@@ -1492,9 +1441,8 @@ def test_gh_issue_list_returns_parsed_rows(monkeypatch: pytest.MonkeyPatch, tmp_
     assert "--search" in argv and argv[argv.index("--search") + 1] == "out-of-scope"
     assert "--repo" in argv and "octocat/hello" in argv
 
-def test_gh_issue_list_returns_empty_on_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_gh_issue_list_returns_empty_on_failure(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
     """Failed dedup lookup must allow filing the finding instead of dropping or blocking it."""
-    repo = _make_repo_with_main(tmp_path)
     def fake_run(args: Any, *pargs: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
         return subprocess.CompletedProcess(args=list(args), returncode=1, stdout="", stderr="gh: not authenticated\n")
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -1513,8 +1461,7 @@ def local_only_gh(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("GH_REPO", raising=False)
 
 @gh_required
-def test_gh_repo_view_returns_none_outside_github_repo(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_gh_repo_view_returns_none_outside_github_repo(repo: Path) -> None:
     assert git_ops.gh_repo_view(repo) is None
 
 @pytest.mark.parametrize(
@@ -1526,21 +1473,18 @@ def test_gh_repo_view_returns_none_outside_github_repo(tmp_path: Path) -> None:
 )
 @gh_required
 @pytest.mark.usefixtures("local_only_gh")
-def test_gh_pr_raises_without_remote(tmp_path: Path, call: Any) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_gh_pr_raises_without_remote(repo: Path, call: Any) -> None:
     with pytest.raises(GitError, match="no git remotes found"):
         call(repo)
 
 @gh_required
-def test_gh_pr_diff_raises_without_remote(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_gh_pr_diff_raises_without_remote(repo: Path) -> None:
     with pytest.raises(GitError):
         git_ops.gh_pr_diff(repo, 1)
 
 @gh_required
-def test_gh_api_raises_without_auth(tmp_path: Path) -> None:
+def test_gh_api_raises_without_auth(repo: Path) -> None:
     """``gh api`` against a relative endpoint with no GitHub remote fails."""
-    repo = _make_repo_with_main(tmp_path)
     with pytest.raises(GitError):
         git_ops.gh_api(repo, "repos/{owner}/{repo}")
 
@@ -1567,8 +1511,7 @@ def test_diff_paths_direct_vs_merge_base_differ_on_divergent_history(tmp_path: P
     assert "MAIN" in direct
     assert "MAIN" not in since_merge_base
 
-def test_diff_paths_restricts_to_paths(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_diff_paths_restricts_to_paths(repo: Path) -> None:
     _git(repo, "checkout", "-b", "feat")
     (repo / "keep.txt").write_text("keep\n")
     (repo / "drop.txt").write_text("drop\n")
@@ -1578,8 +1521,7 @@ def test_diff_paths_restricts_to_paths(tmp_path: Path) -> None:
     assert "keep.txt" in out
     assert "drop.txt" not in out
 
-def test_diff_paths_unified_context_lines(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_diff_paths_unified_context_lines(repo: Path) -> None:
     write_and_stage(repo, "ctx.txt", "\n".join(f"line {i}" for i in range(1, 31)) + "\n")
     _commit(repo, "ctx baseline")
     _git(repo, "checkout", "-b", "feat")
@@ -1591,14 +1533,12 @@ def test_diff_paths_unified_context_lines(tmp_path: Path) -> None:
     big = git_ops.diff_paths(repo, "main", "feat", ["ctx.txt"], unified=10)
     assert len(big) > len(small)
 
-def test_diff_paths_raises_on_invalid_ref(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_diff_paths_raises_on_invalid_ref(repo: Path) -> None:
     with pytest.raises(GitError):
         git_ops.diff_paths(repo, "definitely-not-a-ref", "HEAD", ["base.txt"])
 
 
-def test_gh_pr_queries_request_only_legacy_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_gh_pr_queries_request_only_legacy_fields(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(cmd)
@@ -1623,9 +1563,8 @@ def test_gh_pr_queries_request_only_legacy_fields(tmp_path: Path, monkeypatch: p
     ],
 )
 def test_gh_pr_view_returns_none_only_for_anchored_absence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pr: int | None, stderr: str,
+    repo: Path, monkeypatch: pytest.MonkeyPatch, pr: int | None, stderr: str,
 ) -> None:
-    repo = _make_repo_with_main(tmp_path)
     _patch_subprocess_run(monkeypatch, returncode=1, stderr=stderr)
     assert git_ops.gh_pr_view(repo, pr) is None
 
@@ -1637,44 +1576,38 @@ def test_gh_pr_view_returns_none_only_for_anchored_absence(
         'prefix: no pull requests found for branch "feature"', "HTTP 404: resource not found",
     ],
 )
-def test_gh_pr_view_unknown_failures_raise(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr: str) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_gh_pr_view_unknown_failures_raise(repo: Path, monkeypatch: pytest.MonkeyPatch, stderr: str) -> None:
     _patch_subprocess_run(monkeypatch, returncode=1, stderr=stderr)
     with pytest.raises(GitError, match=re.escape(stderr)):
         git_ops.gh_pr_view(repo, 42)
 
 @pytest.mark.parametrize("stdout", ["not-json", "[]", "null", "42"])
-def test_gh_pr_view_rejects_invalid_json_shape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: str) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_gh_pr_view_rejects_invalid_json_shape(repo: Path, monkeypatch: pytest.MonkeyPatch, stdout: str) -> None:
     _patch_subprocess_run(monkeypatch, stdout=stdout)
     with pytest.raises(GitError, match="invalid JSON|JSON object"):
         git_ops.gh_pr_view(repo, 42)
 
 @pytest.mark.parametrize("stdout", ["not-json", "{}", "[42]", '[{"number": 1}, null]'])
 def test_gh_pr_list_rejects_failure_and_invalid_shape(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: str
+    repo: Path, monkeypatch: pytest.MonkeyPatch, stdout: str
 ) -> None:
-    repo = _make_repo_with_main(tmp_path)
     _patch_subprocess_run(monkeypatch, stdout=stdout)
     with pytest.raises(GitError, match="invalid JSON|JSON list|row"):
         git_ops.gh_pr_list_for_branch(repo, "feature")
 
-def test_gh_pr_list_nonzero_uses_gh_error_classifier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_gh_pr_list_nonzero_uses_gh_error_classifier(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_subprocess_run(monkeypatch, returncode=1, stderr="rate limit exceeded; retry-after: 7")
     with pytest.raises(git_ops.RateLimitError) as excinfo:
         git_ops.gh_pr_list_for_branch(repo, "feature")
     assert excinfo.value.retry_after == 7
 
 @pytest.mark.parametrize("slug", ["owner", "owner/repo/extra", "owner/ ", " owner/repo", "/repo"])
-def test_gh_repo_view_required_rejects_invalid_slug(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slug: str) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_gh_repo_view_required_rejects_invalid_slug(repo: Path, monkeypatch: pytest.MonkeyPatch, slug: str) -> None:
     _patch_subprocess_run(monkeypatch, stdout=slug + "\n")
     with pytest.raises(GitError, match="invalid repository slug"):
         git_ops.gh_repo_view_required(repo)
 
-def test_gh_repo_view_required_returns_exact_slug(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_gh_repo_view_required_returns_exact_slug(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_subprocess_run(monkeypatch, stdout="Owner/Repo\n")
     assert git_ops.gh_repo_view_required(repo) == ("Owner", "Repo")
 
@@ -1695,9 +1628,8 @@ def test_diagnostic_url_redaction_is_bounded_on_long_untrusted_text() -> None:
     assert checked.returncode == 0, checked.stderr
 
 def test_gh_repo_view_required_preserves_safe_failure_diagnostic(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    repo = _make_repo_with_main(tmp_path)
     _patch_subprocess_run(
         monkeypatch, returncode=1,
         stderr="HTTP 401: authentication required for token ghp_abcdefghijklmnopqrstuvwxyz1234567890",
@@ -1709,16 +1641,14 @@ def test_gh_repo_view_required_preserves_safe_failure_diagnostic(
 
 @gh_required
 @pytest.mark.parametrize("fields", ["view", "list"])
-def test_installed_gh_accepts_production_pr_fields_without_network(tmp_path: Path, fields: str) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_installed_gh_accepts_production_pr_fields_without_network(repo: Path, fields: str) -> None:
     selected = git_ops.GH_PR_VIEW_FIELDS if fields == "view" else git_ops.GH_PR_LIST_FIELDS
     proc = subprocess.run(
         ["gh", "pr", fields, "--json", ",".join(selected)], cwd=repo, capture_output=True, text=True, check=False,
     )
     assert "Unknown JSON field" not in proc.stderr
 
-def test_gh_api_input_data_passes_tempfile_and_cleans_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_gh_api_input_data_passes_tempfile_and_cleans_up(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         captured["cmd"] = cmd
@@ -1748,10 +1678,9 @@ def test_gh_api_input_data_passes_tempfile_and_cleans_up(tmp_path: Path, monkeyp
     ],
 )
 def test_gh_api_input_data_preserves_tempfile_on_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, expected_type: type[GitError],
+    repo: Path, monkeypatch: pytest.MonkeyPatch, failure: str, expected_type: type[GitError],
 ) -> None:
     """Preserve failed API payloads and disclose their recovery path in the error."""
-    repo = _make_repo_with_main(tmp_path)
     captured: dict[str, Any] = {}
     attempts: list[list[str]] = []
     class RequestAuth:
@@ -1802,8 +1731,7 @@ def test_gh_api_input_data_preserves_tempfile_on_failure(
 @pytest.mark.parametrize(
     ("pr", "number"), [(None, 7), (42, 42)], ids=["omits_pr_arg_when_none", "includes_pr_arg_when_given"],
 )
-def test_gh_pr_view_pr_arg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pr: int | None, number: int) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_gh_pr_view_pr_arg(repo: Path, monkeypatch: pytest.MonkeyPatch, pr: int | None, number: int) -> None:
     captured: dict[str, list[str]] = {}
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         captured["cmd"] = cmd
@@ -1818,8 +1746,7 @@ def test_gh_pr_view_pr_arg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pr: 
     else:
         assert cmd[:4] == ["gh", "pr", "view", str(pr)]
 
-def test_daydream_commits_returns_tagged_commits(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_daydream_commits_returns_tagged_commits(repo: Path) -> None:
     _git(repo, "checkout", "-b", "feat/x")
     write_and_stage(repo, "a.py", "a\n")
     _git(repo, "commit", "-m", "fix: something\n\nDaydream-Run: test-123\nDaydream-Version: 0.14.0")
@@ -1827,16 +1754,14 @@ def test_daydream_commits_returns_tagged_commits(tmp_path: Path) -> None:
     assert result is not None
     assert "fix: something" in result
 
-def test_daydream_commits_excludes_untagged(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_daydream_commits_excludes_untagged(repo: Path) -> None:
     _git(repo, "checkout", "-b", "feat/x")
     write_and_stage(repo, "b.py", "b\n")
     _commit(repo, "chore: unrelated change")
     result = git_ops.daydream_commits(repo, "main")
     assert result is None
 
-def test_daydream_commits_none_when_no_commits(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_daydream_commits_none_when_no_commits(repo: Path) -> None:
     _git(repo, "checkout", "-b", "feat/x")
     result = git_ops.daydream_commits(repo, "main")
     assert result is None
@@ -2035,9 +1960,8 @@ def test_gh_api_headers_pass_dash_h_args(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert "--input" in captured[1]
     assert captured_auth == [auth, auth]
 
-def test_gh_api_error_message_redacts_authorization_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gh_api_error_message_redacts_authorization_token(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Fake only subprocess.run; the real gh_api path must redact its own Bearer header."""
-    repo = _make_repo_with_main(tmp_path)
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         raise OSError("gh executable failed to spawn")
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -2048,9 +1972,8 @@ def test_gh_api_error_message_redacts_authorization_token(tmp_path: Path, monkey
     assert "Authorization: ***" in msg
 
 def test_gh_api_timeout_redacts_authorization_token(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    repo: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    repo = _make_repo_with_main(tmp_path)
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -2085,11 +2008,10 @@ def test_gh_api_timeout_redacts_authorization_token(
     ],
 )
 def test_gh_api_manifest_conversion_failures_redact_code(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failure_mode: str,
+    repo: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failure_mode: str,
     expected_fragment: str,
 ) -> None:
     """Fake subprocess failures through real gh_api; redact conversion codes while retaining diagnostics."""
-    repo = _make_repo_with_main(tmp_path)
     sentinel = "manifest-code-sentinel"
     endpoint = f"/app-manifests/{sentinel}/conversions"
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -2237,9 +2159,8 @@ def test_gh_file_at_ref_rejects_a_directory_response(fake_gh: FakeGh, tmp_path: 
     with pytest.raises(GitError, match="does not name a file"):
         git_ops.gh_file_at_ref(tmp_path, "o/r", _FILE_AT_REF_SHA, "src")
 
-def test_log_shas_returns_none_when_ref_is_gone(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_log_shas_returns_none_when_ref_is_gone(repo: Path, caplog: pytest.LogCaptureFixture) -> None:
     """A deleted ref makes the query unavailable; an empty list would falsely imply no follow-up commits."""
-    repo = _make_repo_with_main(tmp_path)
     with caplog.at_level(logging.WARNING, logger="daydream.git_ops"):
         result = git_ops.log_shas(repo, "deleted-branch", since="main")
     assert result is None
@@ -2270,15 +2191,13 @@ def test_log_shas_since_returns_commits_in_range(tmp_path: Path) -> None:
     assert shas == [tip, parent]  # newest first, exact, both entries
     assert all(len(s) == 40 for s in shas)
 
-def test_log_shas_since_warns_on_git_error(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_log_shas_since_warns_on_git_error(repo: Path, caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.WARNING, logger="daydream.git_ops"):
         result = git_ops.log_shas_since(repo, "main", "nonexistent-ref")
     assert result == []
     assert any("log_shas_since" in record.message for record in caplog.records)
 
-def test_worktree_lock_mtime_fails_closed_when_exact_worktree_disappears(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_worktree_lock_mtime_fails_closed_when_exact_worktree_disappears(tmp_path: Path, repo: Path) -> None:
     wt = tmp_path / "linked" / "same"
     git_ops.worktree_add(repo, wt, "main", detach=True)
     retained = tmp_path / "moved-outside-git"
@@ -2288,8 +2207,7 @@ def test_worktree_lock_mtime_fails_closed_when_exact_worktree_disappears(tmp_pat
     assert retained.is_dir()
     assert (retained / ".git").is_file()
 
-def test_worktree_lock_mtime_rejects_nonregular_lock_metadata(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_worktree_lock_mtime_rejects_nonregular_lock_metadata(tmp_path: Path, repo: Path) -> None:
     wt = tmp_path / "linked" / "same"
     git_ops.worktree_add(repo, wt, "main", detach=True)
     locked = git_ops.git_dir(wt) / "locked"
@@ -2300,8 +2218,7 @@ def test_worktree_lock_mtime_rejects_nonregular_lock_metadata(tmp_path: Path) ->
     assert locked.is_dir()
 
 @pytest.mark.parametrize("lock_reason", ["run-A", None], ids=["locked", "unlocked"])
-def test_worktree_remove_unlocked_unlocks_before_removing(tmp_path: Path, lock_reason: str | None) -> None:
-    repo = _make_repo_with_main(tmp_path)
+def test_worktree_remove_unlocked_unlocks_before_removing(repo: Path, lock_reason: str | None) -> None:
     worktree = repo / "worktree"
     git_ops.worktree_add(repo, worktree, "main", detach=True, lock_reason=lock_reason)
     assert (git_ops.worktree_lock_mtime(worktree) is not None) is (lock_reason is not None)
@@ -2309,9 +2226,8 @@ def test_worktree_remove_unlocked_unlocks_before_removing(tmp_path: Path, lock_r
     assert not worktree.exists()
 
 
-def test_worktree_add_with_lock_reason_arms_lock_atomically(tmp_path: Path) -> None:
+def test_worktree_add_with_lock_reason_arms_lock_atomically(repo: Path) -> None:
     """Arm the lock during creation so concurrent pruning has no unlocked removal window."""
-    repo = _make_repo_with_main(tmp_path)
     wt = repo / "wt-locked"
     git_ops.worktree_add(repo, wt, "main", detach=True, lock_reason="run-A")
     assert git_ops.worktree_lock_mtime(wt) is not None

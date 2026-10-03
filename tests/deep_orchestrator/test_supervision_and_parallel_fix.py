@@ -91,6 +91,12 @@ def _prepare_fix_stub(target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_e
     return _supervision_stub(target, monkeypatch, mute_side_effects)
 
 
+@pytest.fixture
+def stub(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute) -> StubBackend:
+    """Interactive stub backend for this module's real-path fix-cycle tests."""
+    return _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
+
+
 def _supervision_stub(
     target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute | None = None, *, pin_pr: bool = False,
     **install_kwargs: Any,
@@ -268,8 +274,8 @@ async def test_run_deep_renders_prescan_summary_not_json(
 
 async def test_parallel_fix_applies_all_disjoint_files(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
+    stub: StubBackend,
 ) -> None:
-    stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     files = ["f1.py", "f2.py", "f3.py", "f4.py"]
     _add_to_reviewed_diff(multi_stack_target, files)
     stub.merge_items = [_merge_item(i + 1, f, "high") for i, f in enumerate(files)]
@@ -281,10 +287,9 @@ async def test_parallel_fix_applies_all_disjoint_files(
 
 async def test_long_fix_is_not_turn_capped(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: MakeConfig,
-    mute_side_effects: Mute,
+    mute_side_effects: Mute, stub: StubBackend,
 ) -> None:
 
-    stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     stub.fix_turns_needed = 200
     stub.merge_items = [
         _merge_item(1, "api.py", "high"), _merge_item(2, "App.tsx", "high"), _merge_item(3, "App.tsx", "medium"),
@@ -307,13 +312,13 @@ async def test_long_fix_is_not_turn_capped(
 
 async def test_parallel_fix_same_file_no_race(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
+    stub: StubBackend,
 ) -> None:
     """3 items on ONE file + 1 on another. The 3 same-file findings collapse into ONE batched fix turn that
     addresses every marker in severity order, while the other file's group runs concurrently. The
     read-modify-write append + anyio.sleep(0) makes any cross-file race deterministic; per-file partitioning
     keeps shared.py's markers ordered and intact."""
 
-    stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     shared = multi_stack_target / "shared.py"
     _add_to_reviewed_diff(multi_stack_target, ["shared.py", "other.py"])
     stub.fix_append_path = shared
@@ -327,12 +332,12 @@ async def test_parallel_fix_same_file_no_race(
 
 async def test_parallel_fix_footprint_intersection_dispatches_to_one_agent(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
+    stub: StubBackend,
 ) -> None:
     """A finding whose footprint intersects another group is dispatched to ONE
     agent owning both -- observable as ONE batched fix turn covering both files,
     not two per-file turns."""
 
-    stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     _add_to_reviewed_diff(multi_stack_target, ["a.py", "b.py", "c.py"])
     stub.merge_items = [_merge_item(1, "a.py", "high"), {**_merge_item(2, "b.py", "high"), "related_files": ["a.py"]},
         _merge_item(3, "c.py", "high"),
@@ -353,11 +358,11 @@ async def test_parallel_fix_footprint_intersection_dispatches_to_one_agent(
 
 async def test_fix_verify_turn_is_read_only(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
+    stub: StubBackend,
 ) -> None:
     """AC: verification is strictly read-only. The stub records ``read_only``
     per call (stub_backend.py:276), so the real-path run must show every
     fix-verify turn arriving with ``read_only=True``."""
-    stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))
     assert exit_code == 0
@@ -391,11 +396,11 @@ async def test_fix_verify_uses_verify_backend_key_through_runner(
 
 async def test_fix_verify_writes_outcomes_and_breaks_on_resolved(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
+    stub: StubBackend,
 ) -> None:
     """Spec: every dispatched finding has a recorded terminal outcome; all
     resolved -> BreakLoop on round 1 (one fix pass per group, no re-dispatch)."""
 
-    stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     stub.merge_items = [_merge_item(1, "api.py", "high"), _merge_item(2, "App.tsx", "medium")]
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))
     assert exit_code == 0
@@ -412,11 +417,11 @@ async def test_fix_verify_writes_outcomes_and_breaks_on_resolved(
 
 async def test_fix_verify_loop_redispatch_resolves_second_round(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
+    stub: StubBackend,
 ) -> None:
     """Spec AC#2: a partial first fix verifies unresolved, re-dispatches in a
     second round, verifies resolved -> the loop ran twice and the outcome is
     resolved."""
-    stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     stub.fix_verify_resolve_after_round = 2  # round 1 -> unresolved, round 2 -> resolved
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))
@@ -429,11 +434,11 @@ async def test_fix_verify_loop_redispatch_resolves_second_round(
 
 async def test_fix_verify_wrong_target_retargets_within_scope(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
+    stub: StubBackend,
 ) -> None:
     """Spec: a wrong_target retarget re-dispatches to the corrected file, but
     only inside the allowed edit set (#336 net never widens)."""
 
-    stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     item = _merge_item(1, "api.py", "high")
     item["related_files"] = ["App.tsx"]
     stub.merge_items = [item]
@@ -454,11 +459,10 @@ async def test_fix_verify_wrong_target_retargets_within_scope(
 
 async def test_unresolved_finding_reported_attempted_not_fixed(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-    capsys: pytest.CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str], stub: StubBackend,
 ) -> None:
     """Spec: a finding still unresolved after the last round appears as
     attempted-not-fixed, never counted/shown as fixed."""
-    stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     stub.fix_verify_resolve_after_round = 99  # never resolves -> attempted-not-fixed
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))

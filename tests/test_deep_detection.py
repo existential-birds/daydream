@@ -20,19 +20,29 @@ def test_stack_assignment_has_no_skill_field() -> None:
     assignment = StackAssignment(stack_name="python", files=["a.py"])
     assert not hasattr(assignment, "skill_invocation")
 
-def test_extension_routing_python() -> None:
-    result = detect_stacks(["src/main.py"])
-    names = {a.stack_name for a in result}
-    assert "python" in names
 
-def test_extension_routing_react() -> None:
-    result = detect_stacks(["src/App.tsx"])
-    assert "react" in {a.stack_name for a in result}
 
-def test_ambiguous_single_stack_shortcut() -> None:
-    result = detect_stacks(["src/app.py", "migrations/001.sql"])
-    python = next(a for a in result if a.stack_name == "python")
-    assert "migrations/001.sql" in python.files
+
+@pytest.mark.parametrize(("files", "stack_name", "member", "docs_only"),
+    [pytest.param(["src/main.py"], "python", "src/main.py", None, id="python-main"),
+        pytest.param(["src/App.tsx"], "react", "src/App.tsx", None, id="react-app"),
+        pytest.param(["src/app.py", "migrations/001.sql"], "python", "migrations/001.sql", None,
+            id="ambiguous-shortcut"),
+        pytest.param(["backend/api/main.py", "backend/api/queries.sql", "frontend/App.tsx"], "python",
+            "backend/api/queries.sql", None, id="ambiguous-nearest-ancestor"),
+        pytest.param(["main.py", "App.tsx", "shared.sql"], "generic", "shared.sql", None, id="equal-depth-fallthrough"),
+        pytest.param(["pyproject.toml", "src/main.py"], "python", "pyproject.toml", None, id="config-promotion"),
+        pytest.param(["src/main.py", "README.md"], "generic", "README.md", False, id="md-pinned-to-generic"),
+    ],
+)
+def test_stack_membership_routing(files: list[str], stack_name: str, member: str, docs_only: bool | None) -> None:
+    """detect_stacks routes each file to the owned stack, and docs-only follows the mixed diff."""
+    result = detect_stacks(files)
+    stack = next(a for a in result if a.stack_name == stack_name)
+    assert member in stack.files
+    if docs_only is not None:
+        assert stack.is_docs_only is docs_only
+
 
 def test_mixed_frontend_and_repository_infrastructure_routes_separately() -> None:
     """Shelfspace #2826's Node/CI changes must not inflate the React review."""
@@ -64,17 +74,7 @@ def test_infrastructure_defaults_preserve_explicit_and_nested_ownership() -> Non
     assert set(stacks["generic"]) == set(generic_files)
     assert stacks["build"] == ["scripts/custom.cjs"]
 
-def test_ambiguous_nearest_ancestor() -> None:
-    result = detect_stacks(["backend/api/main.py", "backend/api/queries.sql", "frontend/App.tsx"],)
-    python = next(a for a in result if a.stack_name == "python")
-    assert "backend/api/queries.sql" in python.files
 
-def test_equal_depth_fallthrough() -> None:
-    result = detect_stacks(
-        ["main.py", "App.tsx", "shared.sql"],  # .sql has no unambiguous ancestor,
-    )
-    generic = next(a for a in result if a.stack_name == "generic")
-    assert "shared.sql" in generic.files
 
 @pytest.mark.parametrize(("files", "expected"),
     [pytest.param(["config.yaml"], {"generic"}, id="D-13a-config-default-generic"),
@@ -88,16 +88,7 @@ def test_language_classification(files: list[str], expected: set[str]) -> None:
     language_names = {a.stack_name for a in result if a.stack_name != "structure"}
     assert language_names == expected
 
-def test_config_promotion_pyproject() -> None:
-    result = detect_stacks(["pyproject.toml", "src/main.py"])
-    python = next(a for a in result if a.stack_name == "python")
-    assert "pyproject.toml" in python.files
 
-def test_md_pinned_to_generic() -> None:
-    result = detect_stacks(["src/main.py", "README.md"])
-    generic = next(a for a in result if a.stack_name == "generic")
-    assert "README.md" in generic.files
-    assert generic.is_docs_only is False  # mixed with py stack, but docs go here
 
 def test_no_files_dropped() -> None:
     files = ["src/main.py", "README.md", "config.yaml", "Dockerfile", "src/App.tsx"]

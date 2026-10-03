@@ -181,16 +181,20 @@ def _report_reuse_decision(
     _persist_reuse_audit(work, gate, record)
 
 
-def _pre_push_reuse_decision(
+def _reuse_or_report(
     work: WorkContext,
     recipe: TestRecipe | None,
     evidence: TestAttemptEvidence | None,
     retained_tree_key: str | None,
+    gate: str,
+    *,
+    post_commit_verified: bool = False,
 ) -> ReuseDecision | None:
-    """Consider reuse only after strict post-commit retained-tree verification.
+    """Resolve and report reuse from usable evidence; ``None`` keeps real validation.
 
-    That proof permits ignoring moved HEAD/branch. Missing recipe or usable evidence
-    returns None and keeps the proactive test run.
+    Missing recipe, identity, or retained tree key returns None. Set
+    ``post_commit_verified`` only after strict post-commit retained-tree proof,
+    which permits ignoring moved HEAD/branch.
     """
     if recipe is None or evidence is None:
         return None
@@ -198,16 +202,13 @@ def _pre_push_reuse_decision(
     if identity is None or retained_tree_key is None:
         return None
     target = reuse_target(
-        work,
-        recipe,
-        session_id=identity.session_id,
-        retained_tree_key=retained_tree_key,
-        post_commit_verified=True,
+        work, recipe, session_id=identity.session_id, retained_tree_key=retained_tree_key,
+        post_commit_verified=post_commit_verified,
     )
     if target is None:
         return None
     decision = decide_reuse(identity, target)
-    _report_reuse_decision(work, "pre-push", decision, identity, target)
+    _report_reuse_decision(work, gate, decision, identity, target)
     return decision
 
 
@@ -226,20 +227,11 @@ async def _validate_declined_fixes(
     raises; no configured command leaves the decline without a fabricated verdict.
     """
     cmd = _canonical_test_cmd(config) if recipe is None else _recipe_command(recipe)
-    if evidence is not None and evidence.identity is not None and retained_tree_key is not None:
-        target = reuse_target(
-            work,
-            recipe,
-            session_id=evidence.identity.session_id,
-            retained_tree_key=retained_tree_key,
-        )
-        decision = None if target is None else decide_reuse(evidence.identity, target)
-        if target is not None and decision is not None:
-            _report_reuse_decision(
-                work, "declined-commit", decision, evidence.identity, target
-            )
-        if decision is not None and decision.reused:
-            return
+    decision = _reuse_or_report(
+        work, recipe, evidence, retained_tree_key, "declined-commit"
+    )
+    if decision is not None and decision.reused:
+        return
     if cmd is None:
         return
     result = await _run_host_test_command(cmd, work, config, recipe=recipe)
@@ -414,8 +406,8 @@ async def _do_commit(
                 "--test-command or the `test_command` config key).",
             )
         else:
-            reuse = _pre_push_reuse_decision(
-                work, recipe, evidence, retained_tree_key
+            reuse = _reuse_or_report(
+                work, recipe, evidence, retained_tree_key, "pre-push", post_commit_verified=True
             )
             if reuse is None or not reuse.reused:
                 # Record the hook's own phase in addition to test-execution events.

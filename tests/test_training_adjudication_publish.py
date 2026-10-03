@@ -286,17 +286,21 @@ def test_resume_auth_error_is_not_treated_as_missing(tmp_path: Path) -> None:
     assert "hf_secret_token" not in str(excinfo.value)
     assert not destination.exists()
 
-@pytest.mark.parametrize("kind", ["file", "directory", "symlink"])
-def test_resume_requires_fresh_destination(kind: str, tmp_path: Path, hub: AnnotationsHub) -> None:
-    destination = tmp_path / "fresh"
+def _prepopulate_destination(destination: Path, kind: str) -> None:
+    """Create an existing file/directory/symlink at ``destination`` for freshness guards."""
     if kind == "file":
         destination.write_text("existing")
     elif kind == "directory":
         destination.mkdir()
     else:
-        target = tmp_path / "target"
+        target = destination.parent / "target"
         target.mkdir()
         destination.symlink_to(target, target_is_directory=True)
+
+@pytest.mark.parametrize("kind", ["file", "directory", "symlink"])
+def test_resume_requires_fresh_destination(kind: str, tmp_path: Path, hub: AnnotationsHub) -> None:
+    destination = tmp_path / "fresh"
+    _prepopulate_destination(destination, kind)
 
     with pytest.raises(ValueError, match="must not exist"):
         resume_annotation_state(hub, curation_id=_CID, destination=destination)
@@ -865,14 +869,7 @@ def test_final_download_requires_fresh_destination(kind: str, tmp_path: Path, hu
     bundle, curation_id = _final_bundle(tmp_path)
     result = publish_final_annotation_bundle(hub, bundle)
     destination = tmp_path / "download"
-    if kind == "file":
-        destination.write_text("existing")
-    elif kind == "directory":
-        destination.mkdir()
-    else:
-        target = tmp_path / "target"
-        target.mkdir()
-        destination.symlink_to(target, target_is_directory=True)
+    _prepopulate_destination(destination, kind)
     hub.info_revision_log.clear()
 
     with pytest.raises(ValueError, match="must not exist"):

@@ -102,8 +102,7 @@ def _summary(inv: Invocation) -> dict[str, Any]:
 class TestPendingDraftLifecycle:
     """Decision 1: drafts stay UNENDED until billing ownership resolves."""
 
-    def test_draft_opens_on_start_and_stays_unended_until_resolution(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
+    def test_draft_opens_on_start_and_stays_unended_until_resolution(self, recorder: Any) -> None:
         inv = _iq(recorder)
         inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
         summary = _summary(inv)
@@ -199,8 +198,7 @@ class TestNativeTimingValidation:
 class TestBillingOwnerResolution:
     """Decision 5: closed owner before export; children|structural|none."""
 
-    def test_zero_children_with_authoritative_total_bills_chain_once(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
+    def test_zero_children_with_authoritative_total_bills_chain_once(self, recorder: Any) -> None:
         inv = _iq(recorder)
         # An opaque attempt with no generations retains its authoritative structural bill.
         _total(recorder, inv, input_tokens=7, output_tokens=2)
@@ -209,8 +207,7 @@ class TestBillingOwnerResolution:
         assert summary["billing_owner"] == "structural_attempt"
         assert summary["drafts"] == []
 
-    def test_exact_complete_allocation_bills_children(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
+    def test_exact_complete_allocation_bills_children(self, recorder: Any) -> None:
         inv = _iq(recorder)
         for gid in ("g1", "g2"):
             inv.observe(GenerationStartEvent(generation_id=gid, observed_at_unix_ns=1_000))
@@ -223,8 +220,7 @@ class TestBillingOwnerResolution:
         assert summary["billing_owner"] == "generation_children"
         assert [d["billed"] for d in summary["drafts"]] == [True, True]
 
-    def test_partial_children_with_authoritative_total_bills_chain_only(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
+    def test_partial_children_with_authoritative_total_bills_chain_only(self, recorder: Any) -> None:
         inv = _iq(recorder)
         for gid in ("g1", "g2"):
             inv.observe(GenerationStartEvent(generation_id=gid, observed_at_unix_ns=1_000))
@@ -255,8 +251,7 @@ class TestBillingOwnerResolution:
         assert any("contradiction" in d for d in summary["diagnostics"])
         assert summary["drafts"][0]["billed"] is False
 
-    def test_owner_never_switches_after_resolution(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
+    def test_owner_never_switches_after_resolution(self, recorder: Any) -> None:
         inv = _iq(recorder)
         for gid in ("g1", "g2"):
             inv.observe(GenerationStartEvent(generation_id=gid, observed_at_unix_ns=1_000))
@@ -306,8 +301,7 @@ class TestBillingOwnerResolution:
 class TestPendingBounds:
     """Decision 1 bounds: 512 drafts / 10 MiB retained choice bytes."""
 
-    def test_draft_count_cap_drains_with_fixed_count_only_diagnostic(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
+    def test_draft_count_cap_drains_with_fixed_count_only_diagnostic(self, recorder: Any) -> None:
         inv = _iq(recorder)
         _seal_generations(inv, 512)
         assert _summary(inv)["drafts"][-1]["ended"] is False  # cap not yet hit
@@ -331,8 +325,7 @@ class TestPendingBounds:
         assert tail["billed"] is False
         assert tail["choice_parts"] == []
 
-    def test_choice_bytes_cap_10_mib(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
+    def test_choice_bytes_cap_10_mib(self, recorder: Any) -> None:
         inv = _iq(recorder)
         huge = TextChoicePart(text="x" * (10 * 1024 * 1024))
         inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
@@ -350,17 +343,15 @@ class TestPendingBounds:
 class TestUnbilledOrNoneCapOwner:
     """Cap drain locks ownership to structural (if a later total exists) or none."""
 
-    def test_cap_drain_with_later_authoritative_total_locks_structural(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
+    def test_cap_drain_with_later_authoritative_total_locks_structural(self, recorder: Any) -> None:
         inv = _iq(recorder)
         _seal_generations(inv, 513)
         _total(recorder, inv, input_tokens=1, output_tokens=1)
         inv.finish()
         assert _summary(inv)["billing_owner"] == "structural_attempt"
 
-    def test_cap_drained_drafts_never_bill_even_with_matching_sums(self, tmp_path: Path) -> None:
+    def test_cap_drained_drafts_never_bill_even_with_matching_sums(self, recorder: Any) -> None:
         """Cap-drained children stay unbilled even when late usage matches terminal totals."""
-        recorder = make_recorder(tmp_path)
         inv = _iq(recorder)
         for i in range(513):
             gid = f"g{i:04d}"
@@ -378,8 +369,7 @@ class TestUnbilledOrNoneCapOwner:
         assert summary["billing_owner"] == "structural_attempt"
         assert all(draft["billed"] is False for draft in summary["drafts"])
 
-    def test_cap_drain_without_total_owner_none(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
+    def test_cap_drain_without_total_owner_none(self, recorder: Any) -> None:
         inv = _iq(recorder)
         _seal_generations(inv, 513)
         inv.finish()
@@ -388,8 +378,7 @@ class TestUnbilledOrNoneCapOwner:
 class TestEventDispatchAndSummary:
     """Dispatch routing, subtrajectory surfacing, no behavior change without generations."""
 
-    def test_no_generation_events_leave_summary_unchanged(self, tmp_path: Path) -> None:
-        recorder = make_recorder(tmp_path)
+    def test_no_generation_events_leave_summary_unchanged(self, recorder: Any) -> None:
         inv = _iq(recorder)
         inv.observe(
             MetricsEvent(message_id="m1", prompt_tokens=5, completion_tokens=3, cached_tokens=0, cost_usd=0.001,)

@@ -30,8 +30,13 @@ def _mutate_one_digest(source: Path, target: Path) -> Path:
     return target
 
 
-def test_preview_ledger_is_deterministic_and_digest_pinned(tmp_path: Path) -> None:
-    root = write_sessions_index(tmp_path / "index")
+@pytest.fixture
+def root(tmp_path: Path) -> Path:
+    """A fresh sessions index under the test's tmp_path."""
+    return write_sessions_index(tmp_path / "index")
+
+
+def test_preview_ledger_is_deterministic_and_digest_pinned(tmp_path: Path, root: Path) -> None:
     ledger_a = tmp_path / "ledger-a.json"
     ledger_b = tmp_path / "ledger-b.json"
     assert run_preview(root, ledger_a) == run_preview(root, ledger_b)
@@ -46,13 +51,11 @@ def test_preview_ledger_is_deterministic_and_digest_pinned(tmp_path: Path) -> No
     assert [i["record_id"] for i in a["items"]] == sorted(i["record_id"] for i in a["items"])
     assert a["ledger_digest"]
 
-def test_preview_first_run_reports_no_drift(tmp_path: Path) -> None:
-    root = write_sessions_index(tmp_path / "index")
+def test_preview_first_run_reports_no_drift(tmp_path: Path, root: Path) -> None:
     result = run_preview(root, tmp_path / "ledger.json")
     assert result["drifted_record_ids"] == []
 
-def test_preview_detects_evidence_drift(tmp_path: Path) -> None:
-    root = write_sessions_index(tmp_path / "index")
+def test_preview_detects_evidence_drift(tmp_path: Path, root: Path) -> None:
     ledger = tmp_path / "ledger.json"
     run_preview(root, ledger)
     # Capture the old ledger before preview overwrites it; otherwise the comparison is vacuous.
@@ -76,22 +79,19 @@ def test_preview_missing_sessions_file_raises_hydration_error(tmp_path: Path) ->
     with pytest.raises(HydrationError):
         run_preview(tmp_path, tmp_path / "ledger.json")
 
-def test_preview_moving_branch_revision_is_rejected(tmp_path: Path) -> None:
-    root = write_sessions_index(tmp_path / "index")
+def test_preview_moving_branch_revision_is_rejected(tmp_path: Path, root: Path) -> None:
     (root / "index-revision.txt").write_text("main\n", encoding="utf-8")
     with pytest.raises(MovingBranchError):
         run_preview(root, tmp_path / "ledger.json")
 
-def test_preview_pinned_sha_revision_lands_in_ledger(tmp_path: Path) -> None:
-    root = write_sessions_index(tmp_path / "index")
+def test_preview_pinned_sha_revision_lands_in_ledger(tmp_path: Path, root: Path) -> None:
     sha = "a" * 40
     (root / "index-revision.txt").write_text(sha + "\n", encoding="utf-8")
     result = run_preview(root, tmp_path / "ledger.json")
     ledger = json.loads((tmp_path / "ledger.json").read_text())
     assert result["index_revision"] == ledger["index_revision"] == sha
 
-def test_preview_malformed_evidence_raises_value_error_naming_source(tmp_path: Path) -> None:
-    root = write_sessions_index(tmp_path / "index")
+def test_preview_malformed_evidence_raises_value_error_naming_source(tmp_path: Path, root: Path) -> None:
     sessions_path = root / "sessions.jsonl"
     sessions = [json.loads(line) for line in sessions_path.read_text().splitlines() if line.strip()]
     del sessions[0]["resolutions"][0]["evidence_digest"]
@@ -99,8 +99,7 @@ def test_preview_malformed_evidence_raises_value_error_naming_source(tmp_path: P
     with pytest.raises(ValueError, match="fp-b"):
         run_preview(root, tmp_path / "ledger.json")
 
-def test_export_fails_closed_and_requeues_on_digest_drift(tmp_path: Path) -> None:
-    root = write_sessions_index(tmp_path / "index")
+def test_export_fails_closed_and_requeues_on_digest_drift(tmp_path: Path, root: Path) -> None:
     ledger = tmp_path / "ledger.json"
     run_preview(root, ledger)
     drifted = _mutate_one_digest(root, tmp_path / "root2")
@@ -108,8 +107,7 @@ def test_export_fails_closed_and_requeues_on_digest_drift(tmp_path: Path) -> Non
         build_export_entries(drifted, ledger)
     assert excinfo.value.requeued_record_ids  # affected findings requeued, nothing merged
 
-def test_export_identity_and_digests_stable_without_drift(tmp_path: Path) -> None:
-    root = write_sessions_index(tmp_path / "index")
+def test_export_identity_and_digests_stable_without_drift(tmp_path: Path, root: Path) -> None:
     ledger = tmp_path / "ledger.json"
     run_preview(root, ledger)
     rows_a = build_export_entries(root, ledger)
@@ -120,8 +118,7 @@ def test_export_identity_and_digests_stable_without_drift(tmp_path: Path) -> Non
     digests = {e["record_id"]: e["evidence_digest"] for e in rows_a}
     assert all(digests[i["record_id"]] == i["evidence_digest"] for i in ledger_items)
 
-def test_preview_and_export_identity_digest_stability_gate(tmp_path: Path) -> None:
-    root = write_sessions_index(tmp_path / "index")
+def test_preview_and_export_identity_digest_stability_gate(tmp_path: Path, root: Path) -> None:
     ledger = tmp_path / "ledger.json"
     run_preview(root, ledger)
     rows = build_export_entries(root, ledger)

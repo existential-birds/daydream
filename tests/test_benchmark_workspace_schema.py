@@ -126,8 +126,7 @@ def test_privacy_classification_and_policies_are_literals() -> None:
         with pytest.raises(ValidationError):
             BenchmarkManifest.model_validate(raw)
 
-def test_snapshot_policy_is_literal() -> None:
-    raw = _valid_case_dict()
+def test_snapshot_policy_is_literal(raw: dict[str, Any]) -> None:
     raw["snapshot"]["policy"] = "some_head"
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
@@ -191,9 +190,8 @@ def test_import_pull_request_is_strict_submodel() -> None:
         ImportDocument.model_validate(doc)
     assert ei.value.errors()[0]["loc"][0] == "pull_request"
 
-def test_case_pull_request_is_strict_submodel() -> None:
+def test_case_pull_request_is_strict_submodel(raw: dict[str, Any]) -> None:
     # partial (missing a required field) rejected
-    raw = _valid_case_dict()
     raw["pull_request"].pop("author")
     with pytest.raises(ValidationError) as ei:
         CaseDocument.model_validate(raw)
@@ -204,8 +202,7 @@ def test_case_pull_request_is_strict_submodel() -> None:
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw2)
 
-def test_case_source_is_strict_submodel() -> None:
-    raw = _valid_case_dict()
+def test_case_source_is_strict_submodel(raw: dict[str, Any]) -> None:
     raw["source"]["bogus"] = 1
     with pytest.raises(ValidationError) as ei:
         CaseDocument.model_validate(raw)
@@ -367,6 +364,12 @@ def _valid_case_dict() -> dict[str, Any]:
     }
 
 
+@pytest.fixture
+def raw() -> dict[str, Any]:
+    """A fresh valid case dict; pytest rebuilds it per test."""
+    return _valid_case_dict()
+
+
 def _finding_id_for(case_id: Any, title: Any, body: Any, severity: Any, path: Any, start_line: Any, end_line: Any,
 ) -> Any:
     return derive_finding_id({"title": title, "body": body, "severity": severity,
@@ -413,8 +416,7 @@ def test_ready_snapshot_requires_merge_base_resolution_marker() -> None:
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(marked)
 
-def test_base_drift_is_the_only_new_snapshot_reason() -> None:
-    raw = _valid_case_dict()
+def test_base_drift_is_the_only_new_snapshot_reason(raw: dict[str, Any]) -> None:
     raw["snapshot"] = _unreplayable_snapshot(
         policy="explicit_head", requested_head="a" * 40, original_base_sha="b" * 40,
         requested_base_sha="0123456789abcdef0123456789abcdef01234567",
@@ -428,16 +430,14 @@ def test_base_drift_is_the_only_new_snapshot_reason() -> None:
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
 
-def test_ready_snapshot_rejects_missing_bundle_fields() -> None:
+def test_ready_snapshot_rejects_missing_bundle_fields(raw: dict[str, Any]) -> None:
     # Re-validate from a raw dict so a missing required field is caught.
-    raw = _valid_case_dict()
     raw["snapshot"].pop("bundle_file")
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
 
-def test_ready_snapshot_requires_requested_base_sha() -> None:
+def test_ready_snapshot_requires_requested_base_sha(raw: dict[str, Any]) -> None:
     # requested_base_sha is required on a ready snapshot (no back-compat).
-    raw = _valid_case_dict()
     raw["snapshot"].pop("requested_base_sha")
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
@@ -445,20 +445,17 @@ def test_ready_snapshot_requires_requested_base_sha() -> None:
     doc = _valid_case()
     assert doc.snapshot.requested_base_sha == "0123456789abcdef0123456789abcdef01234567"
 
-def test_ready_requires_snapshot_attestation() -> None:
-    raw = _valid_case_dict()
+def test_ready_requires_snapshot_attestation(raw: dict[str, Any]) -> None:
     raw["curation"].update({"state": "ready", "snapshot_attested": False})
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
 
-def test_stale_requires_snapshot_not_attested() -> None:
-    raw = _valid_case_dict()
+def test_stale_requires_snapshot_not_attested(raw: dict[str, Any]) -> None:
     raw["curation"].update({"state": "stale", "snapshot_attested": True, "gold_status": None, "clean_attested": False})
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
 
-def test_unreplayable_curation_requires_unreplayable_snapshot() -> None:
-    raw = _valid_case_dict()                       # snapshot.status == ready
+def test_unreplayable_curation_requires_unreplayable_snapshot(raw: dict[str, Any]) -> None:
     raw["curation"].update({"state": "unreplayable", "snapshot_attested": False,
                             "clean_attested": False, "gold_status": None, "findings": []})
     with pytest.raises(ValidationError):           # ready snapshot + unreplayable state
@@ -468,8 +465,7 @@ def test_unreplayable_curation_requires_unreplayable_snapshot() -> None:
     doc = CaseDocument.model_validate(raw)
     assert doc.curation.state == "unreplayable"
 
-def test_unreplayable_snapshot_requires_matching_curation_unless_excluded() -> None:
-    raw = _valid_case_dict()
+def test_unreplayable_snapshot_requires_matching_curation_unless_excluded(raw: dict[str, Any]) -> None:
     raw["snapshot"] = _unreplayable_snapshot(
         policy="explicit_head", requested_head="a" * 40, original_base_sha="b" * 40,
         requested_base_sha="0123456789abcdef0123456789abcdef01234567",
@@ -484,15 +480,13 @@ def test_unreplayable_snapshot_requires_matching_curation_unless_excluded() -> N
     })
     assert CaseDocument.model_validate(raw).curation.state == "excluded"
 
-def test_snapshot_requested_base_must_match_pull_request_base() -> None:
-    raw = _valid_case_dict()
+def test_snapshot_requested_base_must_match_pull_request_base(raw: dict[str, Any]) -> None:
     raw["snapshot"]["base_resolution"] = "merge_base_v1"
     raw["snapshot"]["requested_base_sha"] = "c" * 40
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
 
-def test_unreplayable_snapshot_requires_error_and_null_bundle() -> None:
-    raw = _valid_case_dict()
+def test_unreplayable_snapshot_requires_error_and_null_bundle(raw: dict[str, Any]) -> None:
     raw["snapshot"] = _unreplayable_snapshot(reason="head_not_on_pr", detail="head sha not on PR")
     raw["curation"].update({"state": "unreplayable", "snapshot_attested": False,
         "clean_attested": False, "gold_status": None, "findings": [], "task_spec_sha256": None,
@@ -500,16 +494,14 @@ def test_unreplayable_snapshot_requires_error_and_null_bundle() -> None:
     doc = CaseDocument.model_validate(raw)
     assert doc.snapshot.status == "unreplayable"
 
-def test_unreplayable_with_ready_fields_rejected() -> None:
-    raw = _valid_case_dict()
+def test_unreplayable_with_ready_fields_rejected(raw: dict[str, Any]) -> None:
     raw["snapshot"]["status"] = "unreplayable"
     raw["snapshot"]["error"] = {"reason": "equal_trees", "detail": "no change"}
     raw["snapshot"]["bundle_file"] = "snapshots/pr-000101-0123456789ab.bundle"  # must be null
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
 
-def test_finding_title_and_body_limits() -> None:
-    raw = _valid_case_dict()
+def test_finding_title_and_body_limits(raw: dict[str, Any]) -> None:
     raw["curation"]["findings"][0]["title"] = "x" * 501
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
@@ -518,8 +510,7 @@ def test_finding_title_and_body_limits() -> None:
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw2)
 
-def test_finding_rejects_nul_in_title() -> None:
-    raw = _valid_case_dict()
+def test_finding_rejects_nul_in_title(raw: dict[str, Any]) -> None:
     raw["curation"]["findings"][0]["title"] = "bad\x00title"
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
@@ -571,8 +562,7 @@ def test_finding_severity_declares_no_inline_level_literal() -> None:
     literal = next(arg for arg in get_args(annotation) if get_args(arg))
     assert get_args(literal) == get_args(severity.SeverityLevel)
 
-def test_finding_location_must_be_relative_and_ordered() -> None:
-    raw = _valid_case_dict()
+def test_finding_location_must_be_relative_and_ordered(raw: dict[str, Any]) -> None:
     raw["curation"]["findings"][0]["location"] = {"path": "/abs/path.py", "start_line": 2, "end_line": 2}
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
@@ -597,22 +587,19 @@ def test_finding_id_is_case_scoped() -> None:
     id2 = derive_finding_id(f, case_id="pr-000102-0123456789ab")
     assert id1 != id2                      # identical content, different case -> different id
 
-def test_v2_case_rejects_noncanonical_finding_id() -> None:
-    raw = _valid_case_dict()
+def test_v2_case_rejects_noncanonical_finding_id(raw: dict[str, Any]) -> None:
     raw["curation"]["findings"][0]["finding_id"] = "0" * 64   # wrong digest
     with pytest.raises(ValidationError) as ei:
         CaseDocument.model_validate(raw)
     assert "finding_id" in str(ei.value)
 
-def test_v1_legacy_case_loads_without_digest_check() -> None:
-    raw = _valid_case_dict()
+def test_v1_legacy_case_loads_without_digest_check(raw: dict[str, Any]) -> None:
     raw["schema_version"] = 1
     raw["curation"]["findings"][0]["finding_id"] = "e" * 64   # legacy id, not case-scoped
     doc = CaseDocument.model_validate(raw)                    # must load (digest gated on v2)
     assert doc.schema_version == 1
 
-def test_historical_daydream_marker_cannot_be_gold() -> None:
-    raw = _valid_case_dict()
+def test_historical_daydream_marker_cannot_be_gold(raw: dict[str, Any]) -> None:
     body = "looks fine"
     finding = {
         "title": "Daydream self-output", "body": body + finding_marker("a" * 64), "severity": None, "location": None,
@@ -624,8 +611,7 @@ def test_historical_daydream_marker_cannot_be_gold() -> None:
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
 
-def test_legacy_ready_without_task_spec_digest_backfills_and_validates() -> None:
-    raw = _valid_case_dict()
+def test_legacy_ready_without_task_spec_digest_backfills_and_validates(raw: dict[str, Any]) -> None:
     del raw["curation"]["task_spec_sha256"]                # legacy pre-approval workspace
     prepared = schema._schema_ready(raw)
     digest = prepared["curation"]["task_spec_sha256"]
@@ -633,8 +619,7 @@ def test_legacy_ready_without_task_spec_digest_backfills_and_validates() -> None
     assert digest == expected
     assert CaseDocument.model_validate(prepared).curation.task_spec_sha256 == digest
 
-def test_present_null_ready_task_spec_digest_is_not_legacy_backfilled() -> None:
-    raw = _valid_case_dict()
+def test_present_null_ready_task_spec_digest_is_not_legacy_backfilled(raw: dict[str, Any]) -> None:
     raw["curation"]["task_spec_sha256"] = None
 
     prepared = schema._schema_ready(raw)
@@ -645,8 +630,7 @@ def test_present_null_ready_task_spec_digest_is_not_legacy_backfilled() -> None:
         CaseDocument.model_validate(prepared)
 
 @pytest.mark.parametrize("digest", ["", "zzz", "a" * 63, "a" * 65, "g" * 64, "A" * 64])
-def test_malformed_task_spec_digest_is_corruption_not_staleness(digest: str) -> None:
-    raw = _valid_case_dict()
+def test_malformed_task_spec_digest_is_corruption_not_staleness(digest: str, raw: dict[str, Any]) -> None:
     raw["curation"]["task_spec_sha256"] = digest
     prepared = schema._schema_ready(raw)
 
@@ -654,8 +638,7 @@ def test_malformed_task_spec_digest_is_corruption_not_staleness(digest: str) -> 
     with pytest.raises(ValidationError, match="lowercase 64-hex"):
         CaseDocument.model_validate(prepared)
 
-def test_task_spec_approval_reports_nonready_current_and_stale() -> None:
-    raw = _valid_case_dict()
+def test_task_spec_approval_reports_nonready_current_and_stale(raw: dict[str, Any]) -> None:
     raw["curation"]["state"] = "draft"
     assert task_spec_approval(raw).state == "not-required"
     raw = _valid_case_dict()
@@ -738,13 +721,12 @@ def test_classify_validation_codes() -> None:
     assert classify_validation(ready=False, corrupt=False) == 2
     assert classify_validation(ready=False, corrupt=True) == 1
 
-def test_case_document_accepts_additive_prioritization_key() -> None:
+def test_case_document_accepts_additive_prioritization_key(raw: dict[str, Any]) -> None:
     """Spike pin (task 0, plan #879): the new additive ``prioritization`` key
     loads under the strict CaseDocument schema (schema_version stays 2) and
     round-trips. If this ever fails in a way an optional-field default cannot
     fix, the additive-under-v2 Key Decision is unsound and must be re-routed to
     the spec before any prioritization task runs."""
-    raw = _valid_case_dict()
     assert "prioritization" not in raw
     doc = CaseDocument.model_validate(raw)
     assert doc.prioritization is None  # absence tolerated (old case docs load)
@@ -780,8 +762,7 @@ def test_case_prioritization_facts_shape() -> None:
     doc = CaseDocument.model_validate(_valid_case_dict())
     assert doc.prioritization is None
 
-def test_case_document_tolerates_absent_and_rejects_bad_prioritization() -> None:
-    raw = _valid_case_dict()
+def test_case_document_tolerates_absent_and_rejects_bad_prioritization(raw: dict[str, Any]) -> None:
     doc = CaseDocument.model_validate(raw)
     assert doc.prioritization is None  # absent key -> None, old docs load
 

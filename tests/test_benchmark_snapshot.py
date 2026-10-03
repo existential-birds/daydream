@@ -103,6 +103,12 @@ _SHA_HEAD = 'd9a75fd29107db73ef6cb08f877e644381c31f25'
 _SHA_HEAD_TREE = '100c61d903cabfd705776af46193bc55d494940d'
 
 
+@pytest.fixture
+def origin(tmp_path: Path) -> str:
+    """A seeded origin repository under tmp_path."""
+    return _seed_origin(tmp_path)
+
+
 def test_mirror_supports_rename_tracing_for_anchor_derivation(tmp_path: Path) -> None:
     """A full-history bare mirror supports both --follow and diff -M rename tracing. Name
     an explicit starting SHA: mirror refs omit the symbolic HEAD branch, so an
@@ -210,8 +216,7 @@ def test_derive_authoring_path_fails_closed(tmp_path: Path) -> None:
             snapshot.derive_authoring_path(m, *args)
         assert expected_reason in str(exc.value)
 
-def test_ensure_mirror_and_fetch_pr_head(tmp_path: Path) -> None:
-    origin = _seed_origin(tmp_path)
+def test_ensure_mirror_and_fetch_pr_head(tmp_path: Path, origin: str) -> None:
     mirror = tmp_path / "cache" / "repository.git"
     sn.ensure_mirror(tmp_path)
     assert mirror.is_dir()
@@ -221,8 +226,7 @@ def test_ensure_mirror_and_fetch_pr_head(tmp_path: Path) -> None:
     _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2)
     assert sn.rev_parse(mirror, "refs/pull/1/head") == _SHA_HEAD
 
-def test_ancestor_of_pr_head_enforced(tmp_path: Path) -> None:
-    origin = _seed_origin(tmp_path)   # base3 reachable via main, NOT an ancestor of the PR head
+def test_ancestor_of_pr_head_enforced(tmp_path: Path, origin: str) -> None:
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE3, explicit_shas=[_SHA_HEAD])
     pr_head = sn.rev_parse(m, "refs/pull/1/head")
     assert sn.head_reachability(m, _SHA_BASE2, pr_head) == "ok"     # ancestor
@@ -230,8 +234,7 @@ def test_ancestor_of_pr_head_enforced(tmp_path: Path) -> None:
     assert sn.head_reachability(m, _SHA_BASE3, pr_head) == "head_not_on_pr"
     assert sn.head_reachability(m, "0" * 40, pr_head) == "head_unreachable"
 
-def test_resolve_base_and_trees(tmp_path: Path) -> None:
-    origin = _seed_origin(tmp_path)
+def test_resolve_base_and_trees(tmp_path: Path, origin: str) -> None:
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     base = sn.resolve_original_base(m, "refs/heads/base_tip", _SHA_HEAD)
     assert base == _SHA_BASE2
@@ -241,16 +244,14 @@ def test_resolve_base_and_trees(tmp_path: Path) -> None:
     assert bt == _SHA_BASE2_TREE and ht == _SHA_HEAD_TREE
     assert sn.resolve_trees(m, base, "0" * 40) == "missing_object"
 
-def test_degenerate_equal_trees_and_canonical_diff(tmp_path: Path) -> None:
-    origin = _seed_origin(tmp_path)
+def test_degenerate_equal_trees_and_canonical_diff(tmp_path: Path, origin: str) -> None:
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     assert sn.degenerate(_SHA_BASE2_TREE, _SHA_BASE2_TREE) == "equal_trees"
     assert sn.degenerate(_SHA_BASE2_TREE, _SHA_HEAD_TREE) is None   # real change
     d = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
     assert re.fullmatch(r"[0-9a-f]{64}", d)
 
-def test_bundle_two_refs_deterministic(tmp_path: Path) -> None:
-    origin = _seed_origin(tmp_path)
+def test_bundle_two_refs_deterministic(tmp_path: Path, origin: str) -> None:
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
@@ -264,8 +265,10 @@ def test_bundle_two_refs_deterministic(tmp_path: Path) -> None:
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
     assert storage.sha256_file(bundle) == first
 
-def test_bundle_heads_accepts_relative_path_from_any_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    origin = _seed_origin(tmp_path)
+def test_bundle_heads_accepts_relative_path_from_any_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    origin: str,
+) -> None:
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
@@ -276,13 +279,12 @@ def test_bundle_heads_accepts_relative_path_from_any_cwd(tmp_path: Path, monkeyp
     assert heads_rel == {"refs/heads/base", "refs/heads/head"}
     assert heads_abs == {"refs/heads/base", "refs/heads/head"}
 
-def test_canonical_diff_digest_is_abbreviation_stable(tmp_path: Path) -> None:
+def test_canonical_diff_digest_is_abbreviation_stable(tmp_path: Path, origin: str) -> None:
     """The same base/head pair hashes identically whether the diff runs in a
     mirror whose effective core.abbrev is widened past the clone's. Failing-by-
     construction: pre-fix the mirror's 12-hex index lines mismatch the clone's
     default, so validate_offline_clone raises a digest mismatch."""
 
-    origin = _seed_origin(tmp_path)
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2)
     _git(m, "config", "core.abbrev", "12")
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
@@ -290,8 +292,10 @@ def test_canonical_diff_digest_is_abbreviation_stable(tmp_path: Path) -> None:
     diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
     sn.validate_offline_clone(bundle, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha, workdir=tmp_path)
 
-def test_git_fetch_wires_command_scoped_credential_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    origin = _seed_origin(tmp_path)
+def test_git_fetch_wires_command_scoped_credential_helper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    origin: str,
+) -> None:
     mirror = tmp_path / "mirror.git"
     git_process._run_git(tmp_path, ["init", "--bare", str(mirror)], retries=0)
     captured: dict[str, list[str]] = {}
@@ -309,8 +313,7 @@ def test_git_fetch_wires_command_scoped_credential_helper(tmp_path: Path, monkey
     argv = captured["argv"]
     assert "-c" in argv and any(a.startswith("credential.helper=!gh auth git-credential") for a in argv)
 
-def test_offline_clone_validates(tmp_path: Path) -> None:
-    origin = _seed_origin(tmp_path)
+def test_offline_clone_validates(tmp_path: Path, origin: str) -> None:
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
@@ -321,13 +324,12 @@ def test_offline_clone_validates(tmp_path: Path) -> None:
     with pytest.raises(git_ops.GitError):
         sn.validate_offline_clone(bad, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha, workdir=tmp_path)
 
-def test_offline_clone_fidelity_rejects_tampering(tmp_path: Path) -> None:
+def test_offline_clone_fidelity_rejects_tampering(tmp_path: Path, origin: str) -> None:
     """Acceptance (b/c) at unit level: the offline-clone fidelity contract
     rejects every structurally-distinct tampered bundle shape (extra ref,
     extra reachable commit, wrong parent, wrong tree) while a valid bundle
     passes all probes."""
 
-    origin = _seed_origin(tmp_path)
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     base_tree, head_tree = _SHA_BASE2_TREE, _SHA_HEAD_TREE
     diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
@@ -404,8 +406,7 @@ def test_changed_paths_rejects_malformed_nul_records(tmp_path: Path, monkeypatch
     with pytest.raises(GitError, match="name-status"):
         sn.changed_paths(tmp_path, "a" * 40, "b" * 40)
 
-def test_freeze_explicit_head_rejects_paths_outside_pr_inventory(tmp_path: Path) -> None:
-    origin = _seed_origin(tmp_path)
+def test_freeze_explicit_head_rejects_paths_outside_pr_inventory(tmp_path: Path, origin: str) -> None:
     drifted, bundle = sn.freeze_one(
         tmp_path, "o/r", 1, base_tip=_SHA_BASE3, head_sha=_SHA_HEAD, policy="explicit_head", requested_head=_SHA_HEAD,
         pr_changed_files={"feature.py"}, origin_url=origin,
@@ -417,8 +418,7 @@ def test_freeze_explicit_head_rejects_paths_outside_pr_inventory(tmp_path: Path)
     assert drifted["requested_base_sha"] == _SHA_BASE3
     assert bundle is None
 
-def test_freeze_final_head_skips_pr_inventory_guard(tmp_path: Path) -> None:
-    origin = _seed_origin(tmp_path)
+def test_freeze_final_head_skips_pr_inventory_guard(tmp_path: Path, origin: str) -> None:
     ready, bundle = sn.freeze_one(
         tmp_path, "o/r", 1, base_tip=_SHA_BASE3, head_sha=_SHA_HEAD, policy="final_pr_head", requested_head="final",
         pr_changed_files=set(), origin_url=origin,
@@ -426,8 +426,7 @@ def test_freeze_final_head_skips_pr_inventory_guard(tmp_path: Path) -> None:
     assert ready["status"] == "ready"
     assert isinstance(bundle, bytes)
 
-def test_freeze_one_ready_and_reasons(tmp_path: Path) -> None:
-    origin = _seed_origin(tmp_path)
+def test_freeze_one_ready_and_reasons(tmp_path: Path, origin: str) -> None:
     _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     ready, bundle = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE2, head_sha=_SHA_HEAD,
                            policy="final_pr_head", requested_head="final", pr_changed_files=set(), origin_url=origin)
@@ -475,12 +474,11 @@ def test_freeze_two_prs_unrelated_base_tips_both_ready(tmp_path: Path) -> None:
     assert ready2["status"] == "ready" and isinstance(b2, bytes)
     assert sn.rev_parse(m, "refs/heads/base_tip") == dev_tip
 
-def test_freeze_one_base_advanced_two_sha(tmp_path: Path) -> None:
+def test_freeze_one_base_advanced_two_sha(tmp_path: Path, origin: str) -> None:
     """Acceptance (a): a base branch advanced past the PR fork records the true
     merge base as original_base_sha and the selected base tip as
     requested_base_sha — two distinct SHAs."""
 
-    origin = _seed_origin(tmp_path)
     _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     # PR head is forked from base2; main has advanced to base3.
     ready, bundle = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE3, head_sha=_SHA_HEAD,
@@ -491,11 +489,10 @@ def test_freeze_one_base_advanced_two_sha(tmp_path: Path) -> None:
     assert ready["original_base_sha"] != ready["requested_base_sha"]
     assert isinstance(bundle, bytes) and bundle.startswith(b"# v2 git bundle")
 
-def test_freeze_distinct_base_vs_head_unreachable(tmp_path: Path) -> None:
+def test_freeze_distinct_base_vs_head_unreachable(tmp_path: Path, origin: str) -> None:
     """A base-tip fetch failure classifies ``base_unreachable``; a PR-head fetch
     failure classifies ``head_unreachable`` — never collapsed to one reason."""
 
-    origin = _seed_origin(tmp_path)
     # base-tip ref absent on the origin (only base1..3 + refs/pull/1/head exist)
     ur, b = sn.freeze_one(tmp_path, "o/r", 1, base_tip="0" * 40, head_sha=_SHA_HEAD,
                           policy="final_pr_head", requested_head="final", pr_changed_files=set(), origin_url=origin)

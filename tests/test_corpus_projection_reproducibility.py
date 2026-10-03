@@ -16,7 +16,6 @@ from tests.test_corpus_projection import (
     _config_for,
     _write_ann_sumsums,
     _write_annotations_snapshot,
-    _write_bundle,
 )
 
 
@@ -46,11 +45,10 @@ def test_assign_split_is_deterministic_and_salted() -> None:
     )
 
 @pytest.mark.parametrize("enriched", [False, True])
-def test_reprojection_is_byte_for_byte_deterministic(tmp_path: Path, enriched: bool) -> None:
+def test_reprojection_is_byte_for_byte_deterministic(tmp_path: Path, enriched: bool, bundle_dir: Path) -> None:
     """The same bundle projects byte-identically twice, with and without the
     additive enrichment, so the emitted digests deterministically cover
     finding_text / task_identity / lineage diff pointers."""
-    bundle_dir = _write_bundle(tmp_path)
     if enriched:
         _enrich_bundle(bundle_dir)
         _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
@@ -78,13 +76,12 @@ def _enrich_bundle(bundle_dir: Path) -> None:
     (batch_dir / "diff.patch").write_text("diff --git a/x.py b/x.py\n+print(1)\n")
 
 
-def test_enriched_projection_pins_exact_additive_record_shape(tmp_path: Path) -> None:
+def test_enriched_projection_pins_exact_additive_record_shape(tmp_path: Path, bundle_dir: Path) -> None:
     """The projected gold-accepted record from an enriched bundle is pinned
     dict-for-dict at the additive v2 shape: finding_text + its sha256, the
     task_identity block, and the diff pointer mirrored into lineage. The
     exact equality IS the reproducibility contract — new projector keys must
     regenerate this dict, never relax it to a subset check."""
-    bundle_dir = _write_bundle(tmp_path)
     _enrich_bundle(bundle_dir)
     _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
     build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "out"))
@@ -121,8 +118,7 @@ def test_enriched_projection_pins_exact_additive_record_shape(tmp_path: Path) ->
         }, "task_segment": "seg-0", "tier": "gold", "trajectory_id": "sess-a:fix-0",
     }
 
-def test_splits_are_disjoint_and_frozen(tmp_path: Path) -> None:
-    bundle_dir = _write_bundle(tmp_path)
+def test_splits_are_disjoint_and_frozen(tmp_path: Path, bundle_dir: Path) -> None:
     _write_annotations_snapshot(bundle_dir)
     out_a = tmp_path / "o"
     build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out_a))
@@ -140,8 +136,7 @@ def test_splits_are_disjoint_and_frozen(tmp_path: Path) -> None:
     train3, _, _ = _read_split_memberships(out_a)
     assert train3 == train
 
-def test_split_membership_recorded_in_record_lineage(tmp_path: Path) -> None:
-    bundle_dir = _write_bundle(tmp_path)
+def test_split_membership_recorded_in_record_lineage(tmp_path: Path, bundle_dir: Path) -> None:
     _write_annotations_snapshot(bundle_dir)
     out = tmp_path / "o"
     build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out))
@@ -149,8 +144,7 @@ def test_split_membership_recorded_in_record_lineage(tmp_path: Path) -> None:
         record = json.loads(line)
         assert record["lineage"]["split"] in {"train", "validation", "holdout"}
 
-def test_share_capped_replay_is_byte_identical_and_splits_disjoint(tmp_path: Path) -> None:
-    bundle_dir = _write_bundle(tmp_path)
+def test_share_capped_replay_is_byte_identical_and_splits_disjoint(tmp_path: Path, bundle_dir: Path) -> None:
     snap = _write_annotations_snapshot(
         bundle_dir, session_id="sess-a", n_siblings=4, dispositions=["accepted", "accepted", "accepted"],
     )
@@ -183,8 +177,7 @@ def test_share_capped_replay_is_byte_identical_and_splits_disjoint(tmp_path: Pat
     lineage = json.loads((tmp_path / "a" / "lineage.json").read_text())
     assert lineage["share_caps"]["version"] == 1
 
-def test_late_outcome_evidence_is_refused(tmp_path: Path) -> None:
-    bundle_dir = _write_bundle(tmp_path)
+def test_late_outcome_evidence_is_refused(tmp_path: Path, bundle_dir: Path) -> None:
     _write_annotations_snapshot(bundle_dir, valid_at="2030-01-01T00:00:00+00:00")
     cfg = _config_for(bundle_dir, tmp_path, out_dir=tmp_path / "late", as_of="2026-06-01T00:00:00+00:00")
     with pytest.raises(ValueError, match="valid_at"):
