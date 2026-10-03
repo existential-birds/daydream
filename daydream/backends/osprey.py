@@ -52,6 +52,28 @@ _JSONL_PROTOCOL_VERSION = 2
 _MAX_DIAGNOSTIC_LINES = 10
 _MAX_DIAGNOSTIC_LINE_CHARS = 500
 
+# Option names are shared by argv construction and effective request evidence.
+_TIMEOUT_OPTIONS = (
+    "turn_timeout",
+    "stream_idle_timeout_secs",
+    "streaming_timeout_secs",
+    "empty_completion_threshold",
+    "driver_max_retries",
+)
+_RESULT_OPTIONS = (
+    "compress_min_bytes",
+    "tool_result_cap",
+    "tool_result_head",
+    "tool_result_tail",
+    "tool_result_max_lines",
+    "retry_failure_threshold",
+    "no_progress_family_threshold",
+    "no_progress_family_window",
+    "no_progress_artifact_threshold",
+    "no_progress_suppression_window",
+)
+_LIMIT_OPTIONS = ("max_subagents", "llm_rpm")
+
 _SUCCESS_OUTCOMES = frozenset({"completed", "terminal_tool"})
 _KNOWN_IGNORED_EVENTS = frozenset(
     {
@@ -401,11 +423,8 @@ class OspreyBackend:
         if self.immutable_runtime_surface:
             args.append("--immutable-runtime-surface")
         add_value("--max-turns", max_turns)
-        add_value("--turn-timeout", self.turn_timeout)
-        add_value("--stream-idle-timeout-secs", self.stream_idle_timeout_secs)
-        add_value("--streaming-timeout-secs", self.streaming_timeout_secs)
-        add_value("--empty-completion-threshold", self.empty_completion_threshold)
-        add_value("--driver-max-retries", self.driver_max_retries)
+        for option in _TIMEOUT_OPTIONS:
+            add_value("--" + option.replace("_", "-"), getattr(self, option))
 
         if read_only:
             args.append("--read-only")
@@ -425,17 +444,9 @@ class OspreyBackend:
 
         if self.compress_context is not None:
             args.append(f"--compress-context={str(self.compress_context).lower()}")
-        add_value("--compress-min-bytes", self.compress_min_bytes)
-        add_value("--tool-result-cap", self.tool_result_cap)
-        add_value("--tool-result-head", self.tool_result_head)
-        add_value("--tool-result-tail", self.tool_result_tail)
-        add_value("--tool-result-max-lines", self.tool_result_max_lines)
+        for option in _RESULT_OPTIONS:
+            add_value("--" + option.replace("_", "-"), getattr(self, option))
         add_value("--tool-result-raw-dir", self.tool_result_raw_dir)
-        add_value("--retry-failure-threshold", self.retry_failure_threshold)
-        add_value("--no-progress-family-threshold", self.no_progress_family_threshold)
-        add_value("--no-progress-family-window", self.no_progress_family_window)
-        add_value("--no-progress-artifact-threshold", self.no_progress_artifact_threshold)
-        add_value("--no-progress-suppression-window", self.no_progress_suppression_window)
         for key, value in self.vars:
             args.extend(["--var", f"{key}={value}"])
         if continuation is not None:
@@ -452,8 +463,8 @@ class OspreyBackend:
                 raise OspreyProtocolError(f"unknown osprey continuation mode {mode!r}")
         if output_schema_path is not None:
             args.extend(["--output-schema", str(output_schema_path)])
-        add_value("--max-subagents", self.max_subagents)
-        add_value("--llm-rpm", self.llm_rpm)
+        for option in _LIMIT_OPTIONS:
+            add_value("--" + option.replace("_", "-"), getattr(self, option))
         add_value("--effort", self.effort or self.reasoning_effort)
         if self.ultracode:
             args.append("--ultracode")
@@ -599,23 +610,10 @@ class OspreyBackend:
                             compress_context=self.compress_context,
                             ultracode=self.ultracode,
                             max_turns=max_turns,
-                            turn_timeout=self.turn_timeout,
-                            stream_idle_timeout_secs=self.stream_idle_timeout_secs,
-                            streaming_timeout_secs=self.streaming_timeout_secs,
-                            empty_completion_threshold=self.empty_completion_threshold,
-                            driver_max_retries=self.driver_max_retries,
-                            compress_min_bytes=self.compress_min_bytes,
-                            tool_result_cap=self.tool_result_cap,
-                            tool_result_head=self.tool_result_head,
-                            tool_result_tail=self.tool_result_tail,
-                            tool_result_max_lines=self.tool_result_max_lines,
-                            retry_failure_threshold=self.retry_failure_threshold,
-                            no_progress_family_threshold=self.no_progress_family_threshold,
-                            no_progress_family_window=self.no_progress_family_window,
-                            no_progress_artifact_threshold=self.no_progress_artifact_threshold,
-                            no_progress_suppression_window=self.no_progress_suppression_window,
-                            max_subagents=self.max_subagents,
-                            llm_rpm=self.llm_rpm,
+                            **{
+                                option: getattr(self, option)
+                                for option in (*_TIMEOUT_OPTIONS, *_RESULT_OPTIONS, *_LIMIT_OPTIONS)
+                            },
                             observation_update_bytes=_OSPREY_OBSERVATION_UPDATE_BYTES,
                             observation_inline_bytes=_OSPREY_OBSERVATION_INLINE_BYTES,
                             observation_admission_bytes=_OSPREY_OBSERVATION_ADMISSION_BYTES,

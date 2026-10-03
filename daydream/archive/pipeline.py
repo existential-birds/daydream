@@ -187,12 +187,7 @@ def _fix_state(
     *,
     stabilization_failed: bool,
 ) -> dict[str, Any]:
-    """Derive fix state from stabilization/fix failures and phase events.
-
-    A current-session stabilization failure wins because the retained fix was
-    deliberately rejected.  Otherwise non-empty group failures are partial and
-    a FIX phase start is successful.
-    """
+    """Derive fix state from stabilization/fix failures and phase events."""
     if stabilization_failed:
         return {"ran": True, "status": _FAILED}
     fix_failures = _read_json_artifact(_deep_dir(target_dir) / "fix-failures.json", dict)
@@ -212,11 +207,7 @@ def _test_state(
     *,
     stabilization_failed: bool,
 ) -> dict[str, Any]:
-    """Derive test state from final stabilization and ``test-verdict.json``.
-
-    The pre-finalization verdict is not sufficient when a matching terminal
-    stabilization artifact rejects that evidence.
-    """
+    """Derive test state from final stabilization and ``test-verdict.json``."""
     if stabilization_failed:
         return {"ran": True, "status": _FAILED}
     verdict = _read_json_artifact(_deep_dir(target_dir) / "test-verdict.json", dict)
@@ -575,24 +566,7 @@ def derive_phase_states(
     pr_repo: str | None = None,
     pr_number: int | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Return terminal states for merge, fix, test, push, and remote CI.
-
-    Each entry is ``{"ran": bool, "status": str}`` with status one of
-    ``succeeded``/``failed``/``partial``/``absent``/``unknown``. Pure
-    derivation over on-disk deep artifacts + frozen phase events; absent or
-    malformed evidence degrades to ``absent`` or ``unknown`` rather than
-    raising.
-
-    Most deep artifacts are repository-local rather than run-qualified.
-    ``test-verdict.json`` and ``stabilization-failed.json`` therefore carry a
-    ``session_id`` and are accepted only when they match this archive session;
-    stale or unbound evidence reads as absent. The two remote artifacts carry
-    the same session plus exact pushed/PR identities. All five ``runs_*`` flags
-    gate reads to phases the current flow executes, so a skipped phase remains
-    neutral regardless of artifacts left by prior runs.
-    Merge requires one valid current-session event pair; absent run identity
-    cannot inherit a result from on-disk artifacts.
-    """
+    """Return terminal states for merge, fix, test, push, and remote CI."""
     stabilization_failed = _matching_stabilization_failure(target_dir, session_id)
     push_state, push = (
         _push_state(target_dir, phase_events, session_id)
@@ -653,21 +627,7 @@ def derive_pipeline_status(
     runs_fix: bool = False,
     runs_test: bool = False,
 ) -> str:
-    """Aggregate pipeline outcome from the archive state + per-phase states.
-
-    Precedence:
-    1. ``cancelled`` when the archive is ``partial`` with no fix failures
-       (``write_partial`` signal flush — the run stopped early, nothing failed).
-    2. ``failed`` when any local, push, or remote phase reports failed.
-    3. ``partial`` when ``fix_failures`` are present.
-    4. ``partial`` when a required local phase never ran or an attempted push/
-       remote phase is incomplete.
-    5. ``succeeded`` when every phase is succeeded or absent AND at least one
-       phase actually ran (a flow that runs none of these phases surfaces no
-       derivable phase signal, so an early-aborted/failed run must not be
-       archived as unqualified success).
-    6. else ``unknown``.
-    """
+    """Aggregate pipeline outcome from the archive state + per-phase states."""
     if archive_status == "partial" and not fix_failures:
         return "cancelled"
     phase_names = ("merge", "fix", "test", "push", "remote_ci")

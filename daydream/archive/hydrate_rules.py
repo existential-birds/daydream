@@ -32,11 +32,8 @@ REASON_CODE_LICENSE_EVIDENCE_MISSING = "license_evidence_missing"
 REASON_CODE_REPO_IDENTITY_MISSING = "repo_identity_missing"
 REASON_CODE_REPO_COMMIT_UNRESOLVED = "repo_commit_unresolved"
 
-# Import-specific reason codes (issue #1082 local-observation importer, fixed
-# registry). Every surviving observation row maps to exactly one of these six
-# buckets; byte-identical duplicates dropped by the dedupe are never bucket-
-# accounted, so ``sum(accounting) + deduped_count`` equals the source row
-# inventory count (M7) and the codes are stable strings (KD5).
+# Every surviving import row gets one stable reason. Accounting plus byte-identical
+# duplicates removed by dedupe equals the full source inventory.
 REASON_CODE_IMPORT_UNMATCHED_SESSION = "import_unmatched_session"
 REASON_CODE_IMPORT_IDENTITY_CONFLICT = "import_identity_conflict"
 REASON_CODE_IMPORT_STALE_EVIDENCE = "import_stale_evidence"
@@ -68,11 +65,7 @@ def derive_curation_id(
     decisions_digest: str = "",
     distribution_digest: str = "",
 ) -> str:
-    """Bind source identity, policy, opt-ins, exclusions, decisions, and distribution.
-
-    Extend the historical canonical tab-joined hash; sort casefolded opt-ins so
-    set order cannot affect the cur- plus 16-hex identity.
-    """
+    """Bind source identity, policy, opt-ins, exclusions, decisions, and distribution."""
     opt_ins = ",".join(sorted(s.casefold() for s in allow_copyleft))
     canonical = (
         f"cur-v2\t{source_commit}\t{policy_digest}\t{policy_version}\t{opt_ins}"
@@ -118,10 +111,7 @@ def legacy_pipeline_status(
     pipeline_status: str | None,
     deep_artifacts: dict[str, object] | None,
 ) -> str | tuple[str, str]:
-    """Revalidate missing/unknown pipeline status using deep-artifact evidence.
-
-    Known values pass through; absent evidence yields pipeline_status_evidence_absent.
-    """
+    """Revalidate missing/unknown pipeline status using deep-artifact evidence."""
     if pipeline_status and pipeline_status != "unknown":
         return pipeline_status
     if not deep_artifacts:

@@ -73,11 +73,7 @@ def _required_env(environment: Mapping[str, str], name: str) -> str:
 
 
 def _require_https_endpoint(url: str, *, message: str, host: str = "") -> None:
-    """Reject a non-HTTPS endpoint, a mismatched host, or any embedded userinfo.
-
-    ``host=""`` requires only that a hostname is present (the claude base-URL
-    contract); a non-empty *host* must also match it case-insensitively.
-    """
+    """Reject a non-HTTPS endpoint, a mismatched host, or any embedded userinfo."""
     parsed = urllib.parse.urlsplit(url)
     if (
         parsed.scheme.lower() != "https"

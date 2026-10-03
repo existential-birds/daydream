@@ -665,11 +665,7 @@ def reward_details(
     verdicts: list[Verdict],
     matches: set[tuple[str, str]],
 ) -> dict[str, object]:
-    """Capture verdicts, selected matches, and unmatched gold/candidates.
-
-    Never embeds finding title/body/path content, source, or diffs — only ids
-    and verdict reasoning.
-    """
+    """Capture verdicts, selected matches, and unmatched gold/candidates."""
     matched_gold = {g for g, _ in matches}
     matched_candidates = {c for _, c in matches}
     gold_ids = [_finding_id(g) for g in gold]

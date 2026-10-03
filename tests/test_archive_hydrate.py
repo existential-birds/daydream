@@ -16,7 +16,6 @@ from jsonschema import Draft202012Validator
 import daydream.git_ops as git_ops
 from daydream.archive import hydrate, hydrate_rules, license_enrich, sanitize
 from daydream.archive.hydrate import admission_summary_buckets
-from daydream.archive.hydrate_client import FakeHub
 from daydream.archive.hydrate_rules import (
     EXCLUSION_CODES,
     REASON_CODE_REPO_COMMIT_UNRESOLVED,
@@ -29,6 +28,7 @@ from daydream.archive.provenance import ExecutableProvenance
 from daydream.archive.scan import scan_run_dir
 from daydream.training.corpus_projection.license import load_license_policy, resolve_repo_decision
 from tests.fixtures.training.build_hub_snapshot import SNAPSHOT_REVISION, build_snapshot
+from tests.harness.hub import FakeHub
 
 
 def _write_policy(tmp_path: Path) -> str:

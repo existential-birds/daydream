@@ -42,11 +42,7 @@ def render_metric() -> bytes:
 
 
 def _canonical_verifier_bytes() -> bytes:
-    """Return the canonical ``verifier_core`` module's exact source bytes.
-
-    The host module *is* the canonical scorer. Fails closed with
-    :class:`CompileError` if the canonical source cannot be read.
-    """
+    """Return the canonical ``verifier_core`` module's exact source bytes."""
     src = Path(vc.__file__ if vc.__file__ is not None else "")
     if not src.is_file():
         raise CompileError(f"canonical verifier_core module not found at {src}")
@@ -93,13 +89,8 @@ def _escape_historical_delimiters(text: str) -> str:
     )
 
 
-# A persisted ``body_sha256`` is interpolated into the truncation marker only
-# when it has the schema's own digest shape (_hex64: lowercase 64-hex). The
-# compile path loads every case through the shared model gate, where
-# ``PullRequestMeta._body_hash_consistency`` rejects a digest that mismatches
-# the stored body before it ever reaches this function; the shape check +
-# stored-body verification here is defense-in-depth, and any other value falls
-# back to the deterministic stored-body digest.
+# Only schema-valid digests matching the stored body may enter truncation markers.
+# The model gate rejects corruption; absent/invalid digests hash the stored body.
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -134,16 +125,9 @@ def bounded_pr_context(
         t_title, t_body = truncated_text, ""
         if not t_title.startswith("title: "):
             t_title = "title: " + t_title
-    # The marker attests the persisted normalized-body digest (body_sha256 at
-    # import time) verbatim -- but only when it satisfies the schema's own
-    # _body_hash_consistency contract (lowercase 64-hex equal to sha256 of the
-    # stored normalized body). Every case the compile path loads passes the
-    # model gate first, so a hand-edited body_sha256 is rejected as corruption
-    # before it could inject content past the marker line or attest a digest
-    # that no longer matches the compiled body; any other value (e.g. an
-    # absent/blank digest) falls back to the deterministic stored-body digest
-    # (the same fallback as a missing key). Never re-derived from the escaped
-    # surface.
+    # Attest the persisted body digest only if it is lowercase 64-hex and matches
+    # the stored normalized body. Otherwise hash that body, never its escaped rendering.
+    # The compiler's model gate rejects mismatched persisted digests before rendering.
     stored_body = str(pull_request.get("body") or "")
     stored_digest = hashlib.sha256(stored_body.encode("utf-8")).hexdigest()
     persisted = str(pull_request.get("body_sha256") or "")
@@ -373,11 +357,7 @@ _COPY_ASSETS = ("tests/score_review.py", "tests/verifier_core.py", "tests/judge_
 
 
 def _copy_assets(case_stage: Path) -> list[tuple[str, str]]:
-    """Copy the verifier/solution template assets into *case_stage* byte-for-byte.
-
-    Returns ``[(rel, sha256), ...]`` for inventory. A missing template asset
-    raises :class:`CompileError` -- never a silent skip or fabricated file.
-    """
+    """Copy the verifier/solution template assets into *case_stage* byte-for-byte."""
     from daydream.benchmark.harbor.package import (
         VERIFIER_BASE_IMAGE,
         render_verifier_dockerfile,
@@ -509,10 +489,7 @@ def _is_compilable(curation: dict[str, Any]) -> bool:
     """Eligible iff ready AND snapshot-attested (findings-ready or clean-ready)."""
     if not (curation.get("state") == "ready" and curation.get("snapshot_attested")):
         return False
-    # Single-sourced empty-gold eligibility: derive_gold_status is None exactly
-    # when the gold set is empty and never clean-attested, the same derived
-    # status mark_ready's guard trusts, so a ready case that never received
-    # clean attestation must not compile as clean.
+    # Use mark_ready's gold-status rule: empty findings require clean attestation.
     return schema.derive_gold_status(schema.Curation(**curation)) is not None
 
 
@@ -640,12 +617,8 @@ def _compile_case(
     gold_path.write_bytes(gold_bytes)
     gold_sha256 = hashlib.sha256(gold_bytes).hexdigest()
 
-    # Immutable, deterministic per-case verifier metadata beside the gold file
-    # (no timestamps): opaque task key + base/head refs + the hidden-gold sentinel.
-    # ``source_case_id`` is the compiled opaque task key the gold finding ids
-    # are derived with (never the raw workspace authoring id); the opaque
-    # ``case_id`` binds the candidate artifact. This keeps the authoring
-    # identifier out of every shipped surface the leakage scan screens.
+    # Verifier metadata binds the opaque task key, base/head refs, and hidden gold.
+    # Both source_case_id and candidate case_id are opaque; authoring ids never ship.
     metadata = {
         "schema_version": 1,
         "case_id": key,
@@ -760,18 +733,8 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict[str, Any
         except storage.WorkspaceCorrupt as exc:
             raise CompileError(str(exc)) from exc
         repo_slug = manifest.source.repository
-        # Every indexed case is loaded through the shared model-gated loader
-        # (same ``_schema_ready`` + ``CaseDocument`` validation as the
-        # validate/status read path); a present-but-corrupt case raises
-        # ``WorkspaceCorrupt`` before any staging begins. The manifest model
-        # validation (which rejects malformed/empty privacy host lists) is
-        # surfaced as ``CompileError`` so a disallowed-host policy fails the
-        # compile closed through the documented rejection type.
-        # The compiled network policy is sourced from the workspace's persisted
-        # privacy allowlists -- never a hardcoded default. The Privacy field
-        # validators (_normalize_host_list) already reject empty/malformed
-        # lists during model_validate, surfacing above as CompileError, so an
-        # unsafe (or hostless) policy can never reach the task render.
+        # Model-gated case loading rejects corruption before staging; manifest/privacy
+        # errors become CompileError. Render only the persisted, validated allowlists.
         reviewer_hosts = list(manifest.privacy.reviewer_allowed_hosts)
         judge_hosts = list(manifest.privacy.judge_allowed_hosts)
         case_docs: dict[str, dict[str, Any]] = {}

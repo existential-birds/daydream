@@ -31,10 +31,8 @@ PI_BASE_IMAGE = (
 )
 PI_PACKAGE = "@earendil-works/pi-coding-agent@0.84.3"
 
-# Marker comment pair delimiting the wheel-install block of the environment
-# Dockerfile template. render_environment_dockerfile strips the delimited block
-# verbatim when a wheel is not baked, so a wheel-less compile never emits a
-# COPY/install referencing a wheel that was never written into environment/.
+# Strip the marked wheel-install Dockerfile block verbatim for wheel-less builds;
+# never emit COPY/install instructions for an absent wheel.
 _WHEEL_BEGIN = "# __ENV_WHEEL_BEGIN__"
 _WHEEL_END = "# __ENV_WHEEL_END__"
 
@@ -202,11 +200,7 @@ def docker_network_policy_capability() -> DockerNetworkPolicyCapability:
 def _read_packaged_resource(
     module: str, rel: str, fallback: Path, label: str
 ) -> str:
-    """Read a packaged resource through the installed-release resource seam.
-
-    Reads *rel* from the installed package *module*, falling back to the local
-    source-tree *fallback* and raising ``PackageError`` when neither resolves.
-    """
+    """Read a packaged resource through the installed-release resource seam."""
     try:
         resource = importlib.resources.files(module)
         for part in Path(rel).parts:

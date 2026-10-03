@@ -21,13 +21,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from daydream.archive.hydrate import (
-    HydrationError,
-    _curated_dir,
-    _manifest_license_evidence,
-    _manifest_repo_slug,
-    _require_manifest_dict,
-)
+from daydream.archive.hydrate_admission import _curated_dir, _manifest_license_evidence, _manifest_repo_slug
+from daydream.archive.hydrate_stage import _require_manifest_dict
+from daydream.archive.hydrate_types import HydrationError
 from daydream.training.corpus_projection.license import normalize_repo_slug
 from daydream.trajectory import RUNS_DIRNAME, redact_text
 
@@ -53,11 +49,7 @@ def _commit_from_source(source: str) -> str | None:
 
 @dataclass(frozen=True)
 class EnrichedEvidence:
-    """License evidence from an authorized immutable source.
-
-    ``source`` is a provenance string of the form ``github:<owner>/<repo>@<full-commit>``
-    — never a URL carrying credentials.
-    """
+    """License evidence from an authorized immutable source."""
 
     spdx_id: str
     source: str
@@ -66,29 +58,18 @@ class EnrichedEvidence:
 
 @runtime_checkable
 class RepoLicenseResolver(Protocol):
-    """Resolver seam: authorized immutable license evidence for one repo slug.
-
-    ``None`` means unresolvable at this source — a recorded stable-code miss,
-    not an exception; the gate rejects it downstream (fail-closed).
-    """
+    """Resolver seam: authorized immutable license evidence for one repo slug."""
 
     def resolve(self, repo_slug: str, repo_commit: str | None) -> EnrichedEvidence | None: ...
 
 
 class GithubLicenseResolver:
-    """Resolve commit-pinned GitHub license evidence using the ambient token.
-
-    404 is a miss. Rate limits receive three attempts with bounded exponential
-    backoff and Retry-After support; surfaced errors are redacted.
-    """
+    """Resolve commit-pinned GitHub license evidence using the ambient token."""
 
     def resolve(self, repo_slug: str, repo_commit: str | None) -> EnrichedEvidence | None:
         token = os.environ.get(_GITHUB_TOKEN_ENV, "")
         if not token:
-            # Fail fast with a clear, credential-free message before any HTTP
-            # request: an empty ``Authorization: Bearer`` header is answered 401
-            # and would otherwise surface only as a redacted generic failure
-            # after download/ingest/dedupe have already run.
+            # Require a token before HTTP or staging; errors never expose credentials.
             raise HydrationError(
                 "GITHUB_TOKEN is not set; license evidence enrichment requires "
                 "a GitHub API token for the license endpoint. Export "
@@ -112,11 +93,8 @@ class GithubLicenseResolver:
                 redact_text(f"license response for {repo_slug} carried no usable spdx_id")
             )
         if not isinstance(commit, str) or commit.strip() == "":
-            # The license endpoint succeeded but no resolved Git repository
-            # commit could be pinned: a recorded stable-code miss, never a
-            # fatal abort (RepoLicenseResolver contract — None means
-            # unresolvable at this source -> repo_commit_unresolved). One
-            # unpinnable repo must not abort the entire hydration.
+            # An unpinnable Git commit records repo_commit_unresolved instead of aborting
+            # the corpus. None means unresolvable under the resolver contract.
             return None
         return EnrichedEvidence(
             spdx_id=spdx_id, source=f"github:{repo_slug}@{commit}", repo_commit=commit,
@@ -238,14 +216,7 @@ def _write_resolved(
 def enrich_license_evidence(
     stage: Path, *, resolver: RepoLicenseResolver
 ) -> dict[str, dict[str, str]]:
-    """Enrich admitted manifests with missing license evidence, caching by repo/commit.
-
-    Well-formed declared evidence stays unchanged; a declared full commit still
-    gets a resolution-map cache row. Each session records resolved evidence,
-    missing repo identity, or unresolved commit. Return enriched evidence by
-    session. Resolver misses remain gate-rejected evidence; network errors
-    propagate as redacted HydrationError exceptions.
-    """
+    """Enrich admitted manifests with missing license evidence, caching by repo/commit."""
     runs_dir = stage / RUNS_DIRNAME
     by_session, by_repo = _load_cache(stage)
     fresh: list[dict[str, Any]] = []
@@ -257,15 +228,9 @@ def enrich_license_evidence(
         sid = str(data.get("session_id") or derivative.name)
         declared = _manifest_license_evidence(data)
         if declared is not None:
-            # Well-formed declared evidence is never re-derived (out of scope
-            # per spec), but a repo that appears only with declared evidence
-            # must still be resolvable in the published resolution map: record
-            # a resolved cache row from the declared source when it pins a full
-            # 40-hex Git commit (the map's pinned_sha comes from these rows).
-            # No pinned commit -> no row (the map reports such a repo as
-            # unreachable, never a fabricated revision). Deliberately not
-            # seeded into by_repo so evidence-less siblings of the same repo
-            # still hit the live resolver.
+            # Retain declared evidence; cache its full Git commit for the resolution map.
+            # Without a pinned commit, report unreachable. Do not seed by_repo: evidence-less
+            # siblings must still use the live resolver.
             commit = _commit_from_source(str(declared.get("source") or ""))
             raw_slug = _manifest_repo_slug(data)
             slug = normalize_repo_slug(raw_slug) if raw_slug else ""
@@ -280,12 +245,8 @@ def enrich_license_evidence(
         prior = by_session.get(sid)
         if prior is not None:
             if prior.get("status") == "resolved":
-                # The cache records the resolution — on a same-stage-dir reuse
-                # (e.g. an idempotent re-run whose ingest re-pristined this
-                # session) the derivative's manifest has been reverted to the
-                # evidence-less form. Write the evidence back into the manifest
-                # so the gate consumes it exactly like a freshly-enriched
-                # session: the gate reads only the manifest, never the cache.
+                # Ingest may restore an evidence-less manifest on reuse. Reapply cached evidence:
+                # the admission gate reads manifests, never the cache.
                 resolved[sid] = _write_resolved(derivative, data, prior)
             continue
         raw_slug = _manifest_repo_slug(data)
@@ -303,11 +264,8 @@ def enrich_license_evidence(
         else:
             evidence = resolver.resolve(slug, None)
             if evidence is None:
-                # The repo slug was identified but no resolved Git repository
-                # commit could be pinned at this source: record the specific
-                # stable code (the resolution map reports such sessions under
-                # ``unavailable``; the license gate emits the same code into
-                # the import ledger, folding into the evidence-missing bucket).
+                # An identified repo without a pinned Git commit is unavailable; retain that
+                # specific reason in the resolution map and license evidence-missing bucket.
                 entry = {
                     "session_id": sid, "repo_slug": slug,
                     "status": "repo_commit_unresolved",
@@ -329,11 +287,7 @@ def enrich_license_evidence(
 def publish_enrichment_cache(
     stage: Path, *, revision: str | None = None, curated_dir: Path | None = None,
 ) -> Path | None:
-    """Publish the staging cache as license-evidence.jsonl for audit and replay.
-
-    Use the supplied post-gate curated directory, or the historical pre-identity
-    location when absent. Return None when no cache exists.
-    """
+    """Publish the staging cache as license-evidence.jsonl for audit and replay."""
     cache = _cache_path(stage)
     if not cache.is_file():
         return None

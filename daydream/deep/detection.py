@@ -14,10 +14,13 @@ from pathlib import PurePosixPath
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.extensions import Registry, StackRule, get_registry
 
+GENERIC_STACK = "generic"
+
 # Extension -> stack-key (lowercase, matches the supported built-in stacks).
 # This table is about review routing, not syntactic parsing
 # (tree_sitter_index.LANGUAGES serves a different purpose).
 _EXT_TO_STACK: dict[str, str] = {
+    ".md": GENERIC_STACK,
     ".py": "python",
     ".pyi": "python",
     ".ts": "react",
@@ -46,11 +49,6 @@ _CONFIG_OWNERSHIP_SIGNALS: dict[str, str] = {
     "Cargo.lock": "rust",
     "Package.swift": "ios",
 }
-
-# Generic-fallback stack key. Not a built-in language stack — it is a synthetic
-# bucket signalling "run the native generic review agent".
-GENERIC_STACK = "generic"
-
 
 @dataclass
 class StackAssignment:
@@ -147,34 +145,16 @@ def detect_stacks(
     assigned: dict[str, str] = {}  # path -> stack_name
     ambiguous: list[str] = []
 
-    # Unambiguous routing (fork rules + extension + .md pinning + config default).
+    # Fork rules win, followed by pinned Markdown, language, and config routes.
     for path in changed_files:
-        # Fork StackRule globs win per-file, before any built-in routing.
         rule = _match_stack_rule(path, rules)
-        if rule is not None:
-            assigned[path] = rule.stack_name
-            continue
-
-        base = _basename(path)
-        suffix = _ext(path)
-
-        # D-14: .md pinned unconditionally.
-        if suffix == ".md":
-            assigned[path] = GENERIC_STACK
-            continue
-
-        # D-11: extension lookup.
-        if suffix in _EXT_TO_STACK:
-            assigned[path] = _EXT_TO_STACK[suffix]
-            continue
-
-        # D-13: config/infra default-generic (may be promoted in pass 2).
-        if _is_config_generic_default(path) or base in _CONFIG_OWNERSHIP_SIGNALS:
-            assigned[path] = GENERIC_STACK
-            continue
-
-        # Otherwise ambiguous — resolved in pass 3.
-        ambiguous.append(path)
+        stack = rule.stack_name if rule is not None else _EXT_TO_STACK.get(_ext(path))
+        if stack is None and (_is_config_generic_default(path) or _basename(path) in _CONFIG_OWNERSHIP_SIGNALS):
+            stack = GENERIC_STACK
+        if stack is None:
+            ambiguous.append(path)
+        else:
+            assigned[path] = stack
 
     # Promote config files whose owner stack is present in the diff (D-13).
     present_stacks = {s for s in assigned.values() if s != GENERIC_STACK}
@@ -214,25 +194,17 @@ def detect_stacks(
         and all(_ext(f) == ".md" for f in groups[GENERIC_STACK])
     )
 
-    results: list[StackAssignment] = []
-    for stack_name in sorted(non_generic_stacks):
-        files = sorted(groups[stack_name])
-        results.append(
-            StackAssignment(
-                stack_name=stack_name,
-                files=files,
-                is_docs_only=all(_ext(f) == ".md" for f in files),
-            )
-        )
+    order = sorted(non_generic_stacks)
     if GENERIC_STACK in groups:
-        files = sorted(groups[GENERIC_STACK])
-        results.append(
-            StackAssignment(
-                stack_name=GENERIC_STACK,
-                files=files,
-                is_docs_only=diff_is_docs_only,
-            )
+        order.append(GENERIC_STACK)
+    results = [
+        StackAssignment(
+            stack_name=stack,
+            files=sorted(groups[stack]),
+            is_docs_only=diff_is_docs_only if stack == GENERIC_STACK else all(_ext(f) == ".md" for f in groups[stack]),
         )
+        for stack in order
+    ]
 
     # Structural meta-stack: appended unconditionally for any non-docs-only diff
     # with at least one changed file (caller gates on ctx.pipeline().structural_enabled).

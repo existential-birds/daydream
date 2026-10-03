@@ -17,7 +17,14 @@ import pytest
 import yaml
 
 from daydream import cli as top_cli, git_ops
-from daydream.benchmark import curation as cu, github_import as gi, schema, snapshot as sn, storage
+from daydream.benchmark import (
+    curation as cu,
+    github_import as gi,
+    github_transport as transport,
+    schema,
+    snapshot as sn,
+    storage,
+)
 from daydream.benchmark.cli import _handle_benchmark_command, _handle_benchmark_status
 from daydream.benchmark.harbor import build
 from daydream.benchmark.harbor.build import task_spec_digest
@@ -645,7 +652,7 @@ def test_rate_limit_retries_three_then_fails_pr(tmp_path: Path, fake_gh: FakeGh,
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [])
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
     slept: list[float] = []
-    monkeypatch.setattr("daydream.benchmark.github_import.time.sleep", lambda s: slept.append(s))
+    monkeypatch.setattr("daydream.benchmark.github_transport.time.sleep", lambda s: slept.append(s))
     real_run = subprocess.run
 
     def flaky_gh(args: Any, *pargs: Any, **kwargs: Any) -> Any:
@@ -1455,7 +1462,7 @@ def test_graphql_review_threads_retries_rate_limit_then_fails(
         return {"data": ok}
 
     monkeypatch.setattr("daydream.git_ops.gh_api", flaky_gh_api)
-    monkeypatch.setattr(gi, "time", type("_T", (), {"sleep": staticmethod(lambda _s: None)})())
+    monkeypatch.setattr(transport, "time", type("_T", (), {"sleep": staticmethod(lambda _s: None)})())
     threads = gi._graphql_review_threads(ws, "o/r", 101)
     assert threads == []
     assert calls["n"] == 3, "rate-limit retry should make 3 attempts"
@@ -1584,7 +1591,7 @@ def test_graphql_review_threads_records_rate_limit_after_retries(
         raise RateLimitError("graphql rate limited", retry_after=0.0)
 
     monkeypatch.setattr("daydream.git_ops.gh_api", always_limited)
-    monkeypatch.setattr(gi, "time", type("_T", (), {"sleep": staticmethod(lambda _s: None)})())
+    monkeypatch.setattr(transport, "time", type("_T", (), {"sleep": staticmethod(lambda _s: None)})())
     with pytest.raises(gi._ImportRateLimitError):
         gi._graphql_review_threads(ws, "o/r", 101)
 

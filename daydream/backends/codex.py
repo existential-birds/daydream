@@ -1,8 +1,4 @@
-"""Codex CLI subprocess backend for daydream.
-
-Spawns `codex exec --experimental-json` as an async subprocess,
-writes the prompt to stdin, and reads JSONL events from stdout.
-"""
+"""Translate codex exec --experimental-json: stdin prompts, JSONL stdout events."""
 
 from __future__ import annotations
 
@@ -11,7 +7,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import shutil
 import subprocess as subprocess
 import sys as sys
@@ -19,7 +14,8 @@ import tempfile
 import threading
 import uuid
 from collections import Counter
-from collections.abc import AsyncGenerator, Iterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +37,16 @@ from daydream.backends import (
     TurnEndEvent,
     resolve_fanout_concurrency,
 )
+from daydream.backends._codex_events import (
+    _bounded_diagnostic_label as _bounded_diagnostic_label,
+    _bounded_process_excerpt,
+    _file_change_events,
+    _parser_diagnostics,
+    _record_unknown,
+    _unwrap_shell_command as _unwrap_shell_command,
+    display_shell_command as display_shell_command,
+    supervisor_shell_command as supervisor_shell_command,
+)
 from daydream.backends._subprocess import stream_idle_timeout_s
 from daydream.backends._transport import (
     CliTransport,
@@ -53,35 +59,21 @@ from daydream.backends._transport import (
     write_temp_json_schema,
 )
 from daydream.pricing import ModelPrice, compute_cost_from_totals, load_user_prices, resolve_prices
-from daydream.trajectory import redact_structured_text
 
 _CODEX_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
-_DIAGNOSTIC_LABEL_MAX_CHARS = 64
-_DIAGNOSTIC_LABEL_MAX_DISTINCT = 32
 _NON_JSON_EXCERPT_MAX_LINES = 20
-_NON_JSON_EXCERPT_MAX_CHARS_PER_LINE = 256
-# Only public error items activate this contract; absent markers cannot
-# justify invented tool events or invocation-wide coverage claims.
-# External contract: this literal identifies Codex CLI release/wire mode.
-_TRANSPORT_COVERAGE_CONTRACT = "codex-cli-0.153.4-json-code-mode"
 
 _logger = logging.getLogger(__name__)
 
 
 def _prepare_read_only_checkout(source: Path, destination: Path) -> Path:
-    """Build the shared standalone snapshot, including nonignored untracked files.
-
-    Generic Codex read-only behavior remains path-hiding, not an audit sandbox.
-    """
+    """Snapshot tracked/nonignored files and Git refs; Codex read-only remains path hiding, not an audit sandbox."""
     return git_ops.prepare_independent_snapshot(
         source, destination, include_untracked=True,
     ).repo
 
 
-# Child-environment variables whose value would give an isolated codex
-# subprocess a handle on the caller's repo: the inherited ``$PWD``/``$OLDPWD``
-# and the ``GIT_*`` redirection vars that could point the clone's git ops back
-# at the source's refs/index/worktree.
+# Remove inherited cwd/Git redirects that could point isolated child operations at source refs/index/worktree.
 _GIT_REDIRECT_STRIP_VARS = (
     "PWD",
     "OLDPWD",
@@ -108,10 +100,8 @@ _XCRUN_TIMEOUT_S = 5
 
 
 def _probe_real_git_dir(environment: Mapping[str, str] | None) -> str | None:
-    """Run and validate one bounded ``xcrun --find git`` probe.
-
-    ``None`` preserves ordinary subprocess inheritance. An explicit mapping is
-    complete and is passed through without merging process globals.
+    """Validate a bounded xcrun --find git probe. None preserves ambient inheritance;
+    explicit environment mappings are complete and never merge host globals.
     """
     kwargs: dict[str, Any] = {
         "capture_output": True,
@@ -131,8 +121,7 @@ def _probe_real_git_dir(environment: Mapping[str, str] | None) -> str | None:
         return None
     if proc.returncode != 0:
         _logger.warning(
-            "codex: could not resolve real git via 'xcrun --find git' (exit %s: %s); "
-            "leaving child PATH unchanged",
+            "codex: could not resolve real git via 'xcrun --find git' (exit %s: %s); leaving child PATH unchanged",
             proc.returncode,
             proc.stderr.strip(),
         )
@@ -149,10 +138,7 @@ def _probe_real_git_dir(environment: Mapping[str, str] | None) -> str | None:
 
 
 def _resolve_real_git_dir() -> str | None:
-    """Cache ambient macOS real-git resolution, including misses, once per process.
-
-    Explicit execution environments probe directly without consulting this cache.
-    """
+    """Cache ambient macOS real-git hits/misses; explicit execution environments probe independently."""
     global _REAL_GIT_DIR, _REAL_GIT_RESOLVED
     with _REAL_GIT_RESOLUTION_LOCK:
         if _REAL_GIT_RESOLVED:
@@ -165,10 +151,7 @@ def _resolve_real_git_dir() -> str | None:
 
 
 class _SharedCheckout:
-    """Reference-count one disposable checkout per concurrent (backend, cwd) group.
-
-    Delete it when the last generator exits. Sequential calls rebuild for freshness.
-    """
+    """Reference-count a disposable checkout for concurrent backend/cwd calls; rebuild after the last exit."""
 
     __slots__ = ("cwd", "path", "temp_dir", "refs")
 
@@ -185,28 +168,18 @@ def _isolated_child_env(
     *,
     base_environment: dict[str, str] | None = None,
 ) -> dict[str, str] | None:
-    """Build the child environment without paths back to an isolated source repo.
-
-    For clones, remove PWD/OLDPWD and Git redirects. On Darwin prepend real git
-    to PATH to bypass the sandbox-incompatible xcrun shim; probe failure leaves
-    PATH unchanged. Without isolation, return an explicit environment intact or
-    None for ambient inheritance. Independently discovered source paths remain
-    accessible; this is path hiding, not filesystem confinement.
+    """Remove source-repo path redirects from clone environments. On Darwin prepend real git to
+    bypass xcrun; probe failure leaves PATH intact. Non-isolated calls retain explicit environments
+    or ambient inheritance. Independently discovered source paths remain accessible.
     """
     if execution_cwd == cwd:
         return dict(base_environment) if base_environment is not None else None
-    child_env = (
-        dict(base_environment) if base_environment is not None else os.environ.copy()
-    )
+    child_env = dict(base_environment) if base_environment is not None else os.environ.copy()
     for var in _GIT_REDIRECT_STRIP_VARS:
         child_env.pop(var, None)
     # Explicit environments probe uncached; ordinary callers use the cache.
     if sys.platform == "darwin":
-        real_git_dir = (
-            _probe_real_git_dir(child_env)
-            if base_environment is not None
-            else _resolve_real_git_dir()
-        )
+        real_git_dir = _probe_real_git_dir(child_env) if base_environment is not None else _resolve_real_git_dir()
         if real_git_dir and "PATH" in child_env:
             child_env["PATH"] = real_git_dir + os.pathsep + child_env["PATH"]
     return child_env
@@ -215,10 +188,7 @@ def _isolated_child_env(
 def _resolved_prices_for_execution(
     execution_input: BackendExecutionInput | None,
 ) -> dict[str, ModelPrice]:
-    """Load prices from the run environment, or ambient overrides for direct callers.
-
-    An injected environment lacking both a prices path and HOME uses built-ins.
-    """
+    """Load run-owned prices or ambient direct-call overrides; missing prices path/HOME uses built-ins."""
     if execution_input is None:
         return resolve_prices(load_user_prices())
 
@@ -234,163 +204,13 @@ def _resolved_prices_for_execution(
 
 
 def _rebind_source_paths(prompt: str, source: Path, execution: Path) -> str:
-    """Replace source paths in prompts, including resolved and doubled-slash forms.
-
-    Match path boundaries so sibling prefixes such as work-2/workspace/work.py
-    remain unchanged; no recognized source spelling may reach isolated stdin.
+    """Rebind recognized source paths, including resolved/double-slash forms, at path boundaries
+    so sibling prefixes remain intact and source spellings cannot reach isolated stdin.
     """
     for candidate in {str(source), str(source.resolve())}:
         pattern = re.escape(candidate).replace("/", "/+") + r"(?![\w.-])"
         prompt = re.sub(pattern, str(execution), prompt)
     return prompt
-
-
-_SHELL_LC_PREFIX_RE = re.compile(r"^/bin/(?:zsh|bash|sh)\s+-lc\s+")
-
-
-def _unwrap_shell_command(command: str) -> str:
-    """Decode /bin/{zsh,bash,sh} -lc payloads without changing replayable command bytes.
-
-    A single shlex payload is returned verbatim, including leading cd. For bare
-    multi-word payloads, preserve the raw remainder after -lc so embedded quotes
-    survive. Unknown wrappers, missing payloads, malformed quoting, and quoted
-    payloads followed by extra arguments return the original input unchanged.
-    """
-    try:
-        argv = shlex.split(command)
-    except ValueError:
-        return command
-    if len(argv) >= 2 and argv[0] in ("/bin/zsh", "/bin/bash", "/bin/sh") and argv[1] == "-lc":
-        if len(argv) == 3:
-            return argv[2]
-        # More than one word after '-lc': a shell-quoted payload with trailing
-        # argv is not a valid wrapper (fail open), but a bare, unquoted payload
-        # is the real-Codex shape for simple commands ('/bin/zsh -lc ls -la').
-        # Recover it from the raw command so embedded quoting is preserved.
-        wrapper = _SHELL_LC_PREFIX_RE.match(command)
-        if wrapper is not None:
-            payload = command[wrapper.end() :]
-            if payload and payload[0] not in ("'", '"'):
-                return payload
-    return command
-
-
-_CD_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
-
-
-def display_shell_command(command: str) -> str:
-    """Decode a shell wrapper and strip leading cd <dir> && for display.
-
-    Stored tool inputs use _unwrap_shell_command instead to preserve replay.
-    Malformed wrappers pass through; an unmatched cd prefix stays unchanged.
-    """
-    decoded = _unwrap_shell_command(command)
-    return _CD_PREFIX_RE.sub("", decoded, count=1)
-
-
-def supervisor_shell_command(command: str) -> str:
-    """Decode and strip leading cd for start-anchored supervisor rules such as ^make.
-
-    Never redact or cap: either operation could change what a supervisor matches.
-    """
-    return display_shell_command(command)
-
-
-def _bounded_diagnostic_label(value: Any) -> str:
-    """Return one redacted, bounded scalar label for diagnostic aggregation."""
-    if not isinstance(value, (str, int, float, bool)) and value is not None:
-        return "<non-scalar>"
-    return redact_structured_text(str(value))[:_DIAGNOSTIC_LABEL_MAX_CHARS]
-
-
-def _bounded_process_excerpt(value: str) -> str:
-    """Redact a complete non-JSON line before applying the exception cap."""
-    return redact_structured_text(value)[:_NON_JSON_EXCERPT_MAX_CHARS_PER_LINE]
-
-
-def _record_unknown(
-    counter: Counter[str],
-    value: Any,
-    *,
-    overflow: list[int],
-) -> None:
-    """Count an unknown label with bounded retained cardinality."""
-    label = _bounded_diagnostic_label(value)
-    if label in counter:
-        counter[label] += 1
-    elif len(counter) < _DIAGNOSTIC_LABEL_MAX_DISTINCT:
-        counter[label] = 1
-    else:
-        overflow[0] += 1
-
-
-def _counter_summary(counter: Counter[str], overflow: list[int]) -> dict[str, Any]:
-    return {
-        "total": sum(counter.values()) + overflow[0],
-        "labels": dict(counter),
-        "overflow": overflow[0],
-    }
-
-
-def _parser_diagnostics(
-    *,
-    error_sentinel_count: int,
-    unknown_event_types: Counter[str],
-    unknown_event_overflow: list[int],
-    unknown_item_types: Counter[str],
-    unknown_item_overflow: list[int],
-    malformed_shapes: Counter[str],
-    non_json_count: int,
-    parse_warnings: Counter[str],
-) -> list[DiagnosticEvent]:
-    """Build deterministic conditional diagnostics from bounded parser state."""
-    diagnostics: list[DiagnosticEvent] = []
-    if error_sentinel_count:
-        diagnostics.append(
-            DiagnosticEvent(
-                code="codex_transport_coverage",
-                message=(
-                    "The current Codex public stream contains uncorrelated error items; "
-                    "tool coverage is incomplete."
-                ),
-                metadata={
-                    "coverage": "incomplete",
-                    "reason": "uncorrelated_public_error_item",
-                    "occurrences": error_sentinel_count,
-                    "contract": _TRANSPORT_COVERAGE_CONTRACT,
-                },
-            )
-        )
-    if (
-        unknown_event_types
-        or unknown_event_overflow[0]
-        or unknown_item_types
-        or unknown_item_overflow[0]
-        or malformed_shapes
-        or non_json_count
-        or parse_warnings
-    ):
-        diagnostics.append(
-            DiagnosticEvent(
-                code="codex_parser_coverage",
-                message="The Codex public stream contained parser coverage gaps.",
-                metadata={
-                    "unknown_event_types": _counter_summary(
-                        unknown_event_types, unknown_event_overflow
-                    ),
-                    "unknown_item_types": _counter_summary(
-                        unknown_item_types, unknown_item_overflow
-                    ),
-                    "malformed_shapes": dict(malformed_shapes),
-                    "non_json_lines": non_json_count,
-                    "warnings": {
-                        "total": sum(parse_warnings.values()),
-                        "reasons": dict(parse_warnings),
-                    },
-                },
-            )
-        )
-    return diagnostics
 
 
 class CodexError(Exception):
@@ -401,86 +221,12 @@ class CodexError(Exception):
         self.category = category
 
 
-def _file_change_events(
-    item: dict[str, Any],
-    execution_cwd: Path,
-) -> Iterator[ToolStartEvent | ToolResultEvent]:
-    """Emit a synthetic patch start/result pair; file changes have no native start.
-
-    Preserve legacy scalar inputs for extension tool supervisors. Modern changes
-    additionally carry the full path/kind list, with in-checkout absolute paths
-    made relative. Missing status means success; pathless input is an observable
-    error. Result excerpts are capped at 500 characters per section.
-    """
-    item_id = item.get("id", str(uuid.uuid4()))
-    changes = item.get("changes")
-    if isinstance(changes, (dict, list)):
-        if isinstance(changes, list):
-            changes = {
-                str(change.get("path") or change.get("file_path")): change
-                for change in changes
-                if isinstance(change, dict) and (change.get("path") or change.get("file_path"))
-            }
-        parsed = []
-        for raw_path, entry in changes.items():
-            kind = entry.get("type", "unknown") if isinstance(entry, dict) else "unknown"
-            path = str(raw_path)
-            try:
-                if os.path.isabs(path) and os.path.commonpath([path, str(execution_cwd)]) == str(execution_cwd):
-                    path = os.path.relpath(path, execution_cwd)
-            except ValueError:
-                pass  # Keep absolute paths on disjoint drives.
-            parsed.append({"path": path, "kind": kind})
-        status = item.get("status") or "completed"
-        output = ", ".join(f"{change['kind']}: {change['path']}" for change in parsed)[:500]
-        if status == "declined":
-            output = f"File change declined by sandbox: {output}"
-        if status in ("failed", "declined"):
-            for stream in ("stdout", "stderr"):
-                excerpt = item.get(stream, "")
-                if excerpt:
-                    output += f"\n{stream}: {excerpt[:500]}"
-        start_input: dict[str, Any] = {"changes": parsed, "file": "unknown", "action": "modified"}
-        if len(parsed) == 1:
-            start_input.update(file=parsed[0]["path"], action=parsed[0]["kind"])
-        is_error = status != "completed"
-    elif "file_path" in item:
-        file_path = item.get("file_path", "unknown")
-        action = item.get("action", "modified")
-        start_input = {"file": file_path, "action": action}
-        output = f"{action}: {file_path}"
-        is_error = False
-        status = None
-    else:
-        fields = {key: value for key, value in item.items() if key != "type" and value != "unknown"}
-        start_input = {"file_change": fields}
-        output = f"unparseable file_change item: {json.dumps(fields)[:500]}"
-        is_error = True
-        status = item.get("status") or None
-    yield ToolStartEvent(
-        id=item_id,
-        name="patch",
-        input=start_input,
-    )
-    yield ToolResultEvent(
-        id=item_id,
-        output=output,
-        is_error=is_error,
-        status=status,
-    )
-
-
 class CodexBackend:
-    """Backend that wraps the Codex CLI subprocess.
-
-    Translates Codex JSONL events into the unified AgentEvent stream.
-    """
+    """Translate the Codex CLI JSONL stream into normalized events."""
 
     supports_finalization = True
 
-    # Codex operates in a disposable read-only clone of the workspace, so it
-    # can safely have over-budget diffs inlined (truncated) and exploration
-    # summaries inlined rather than pointed at on-disk artifact files.
+    # Disposable read-only clones permit inline truncated diffs/context instead of source artifact paths.
     read_only_disposable_clone = True
 
     def __init__(
@@ -497,9 +243,7 @@ class CodexBackend:
             self.fanout_concurrency = execution_input.fanout_concurrency
             self.retry_policy = execution_input.retry_policy
         else:
-            self.fanout_concurrency = resolve_fanout_concurrency(
-                "DAYDREAM_FANOUT_CONCURRENCY", 8
-            )
+            self.fanout_concurrency = resolve_fanout_concurrency("DAYDREAM_FANOUT_CONCURRENCY", 8)
         self._transports: list[CliTransport] = []
         # Disposable read-only checkouts shared across concurrent execute() calls
         # (built once per cwd, refcounted; cleaned up when the last holder exits).
@@ -518,21 +262,15 @@ class CodexBackend:
         persist_session: bool = True,
         finalization: bool = False,
     ) -> AsyncGenerator[AgentEvent, None]:
-        """Yield Codex events, rejecting unsupported agents with NotImplementedError.
-
-        read_only adds a sandbox and, at Git worktree roots, a disposable standalone
-        clone of HEAD, index, tracked/nonignored files, and refs without a source
-        remote. Git metadata mutations therefore affect the clone. Exclude source
-        paths from argv/stdin/env/cwd; independently discovered paths remain a
-        limitation. Non-root cwd uses the sandbox in place. Clone preparation and
-        read-only resumption failures raise CodexError; never fall back to source.
-        Keep native session identity but omit continuation for deleted checkouts.
-        The default uses danger-full-access in the caller's cwd.
-
-        finalization caps effort at low, preserving lower levels. Codex has no tool
-        disable control, so callers retain the host zero-tool guard. persist_session
-        is accepted but ignored. Turn failures raise CodexError; stdout silence raises
-        retryable StreamStalledError and run_agent retries with a fresh subprocess.
+        """Yield Codex events; nonempty agents raise NotImplementedError. read_only uses a sandbox and,
+        at Git roots, a disposable snapshot of HEAD/index/tracked/nonignored files/refs without source
+        remotes. Git mutations affect the clone; source paths are excluded from argv/stdin/env/cwd,
+        but independently discovered source paths remain accessible. Non-root cwd uses the sandbox
+        in place. Preparation/resume failures raise CodexError without falling back to source.
+        Deleted clones expose native session identity without continuation; default runs use caller cwd
+        with danger-full-access. Finalization caps effort at low and still needs a host zero-tool guard.
+        persist_session is ignored. Turn failures raise CodexError; stdout stalls raise retryable
+        StreamStalledError and retries start fresh subprocesses.
         """
         if agents:
             raise NotImplementedError(
@@ -551,9 +289,7 @@ class CodexBackend:
         last_agent_text: str | None = None
         structured_result: Any = None
 
-        # Pair idless starts/completions by FIFO; misses get
-        # observable orphan ids. Accumulate item.updated text because completion
-        # may contain no text. See _claim_tool_id for the correlation contract.
+        # Pair idless tools FIFO with observable orphan ids; retain updated text when completion omits it.
         pending_fifo: dict[str, list[str]] = {}  # item_type → [ids] in start order
         updated_text: dict[str, list[str]] = {}  # item_id → [text deltas]
         parse_warnings: Counter[str] = Counter()  # persisted bounded reasons
@@ -562,6 +298,7 @@ class CodexBackend:
         unknown_item_types: Counter[str] = Counter()
         unknown_item_overflow = [0]
         malformed_shapes: Counter[str] = Counter()
+        record_unknown_item = partial(_record_unknown, unknown_item_types, overflow=unknown_item_overflow)
         non_json_count = 0
         error_sentinel_count = 0
         _pending_result: ResultEvent | None = None
@@ -601,11 +338,7 @@ class CodexBackend:
 
         def _take_early_diagnostics() -> list[DiagnosticEvent]:
             """Emit the first observable marker for each diagnostic code."""
-            fresh = [
-                event
-                for event in _current_diagnostics()
-                if event.code not in early_diagnostic_codes
-            ]
+            fresh = [event for event in _current_diagnostics() if event.code not in early_diagnostic_codes]
             for event in fresh:
                 early_diagnostic_codes.add(event.code)
                 emitted_diagnostic_signatures[event.code] = _diagnostic_signature(event)
@@ -622,11 +355,7 @@ class CodexBackend:
             return changed
 
         def _claim_tool_id(item_type: str) -> str:
-            """Correlate no-id completions with unconsumed starts in FIFO order.
-
-            On a miss, warn and assign a deterministic orphan id for unmatched_tool_results;
-            a dangling source_call_id would fail trajectory validation.
-            """
+            """Pair idless completions with starts in FIFO order; misses warn and get deterministic orphan ids."""
             nonlocal unmatched_seq
             fifo = pending_fifo.get(item_type, [])
             item_id = fifo.pop(0) if fifo else None
@@ -663,13 +392,13 @@ class CodexBackend:
                             destination = Path(temp_dir.name) / "repo"
                             try:
                                 prepared = await asyncio.to_thread(
-                                    _prepare_read_only_checkout, cwd, destination,
+                                    _prepare_read_only_checkout,
+                                    cwd,
+                                    destination,
                                 )
                             except (git_ops.GitError, OSError, shutil.Error) as exc:
                                 temp_dir.cleanup()
-                                raise CodexError(
-                                    "failed to create disposable read-only checkout"
-                                ) from exc
+                                raise CodexError("failed to create disposable read-only checkout") from exc
                             shared_checkout = _SharedCheckout(cwd, prepared, temp_dir)
                             self._checkouts[cwd] = shared_checkout
                         shared_checkout.refs += 1
@@ -696,14 +425,8 @@ class CodexBackend:
             if continuation is not None and continuation.backend == "codex":
                 args.extend(["resume", continuation.data["thread_id"]])
 
-            # Built off the event loop (asyncio.to_thread, like the sibling git
-            # calls above), so the env copy and bounded xcrun probe never stall
-            # concurrent fan-out execute() calls.
-            base_environment = (
-                self._execution_input.child_environment()
-                if self._execution_input is not None
-                else None
-            )
+            # Copy/probe the environment off-loop so bounded xcrun lookup cannot stall sibling executions.
+            base_environment = self._execution_input.child_environment() if self._execution_input is not None else None
             child_env = await asyncio.to_thread(
                 _isolated_child_env,
                 cwd,
@@ -716,26 +439,21 @@ class CodexBackend:
                 # path appears in the bytes written to the isolated subprocess.
                 prompt = _rebind_source_paths(prompt, cwd, execution_cwd)
 
-            # P18 Task 1: closed typed effective-config admission from the
-            # exact argv built above. max_turns and persist_session are
-            # accepted-but-not-passed on this CLI surface, so they stay
-            # None (documented unavailability, never an effective claim).
-            codex_resume_applied = (
-                continuation is not None and continuation.backend == "codex"
-            )
+            # Record exact applied argv controls; unsupported max_turns/persist_session remain None.
+            codex_resume_applied = continuation is not None and continuation.backend == "codex"
             codex_resume_thread: str | None = None
             if continuation is not None and codex_resume_applied:
                 thread_value = continuation.data.get("thread_id")
                 codex_resume_thread = thread_value if isinstance(thread_value, str) else None
             yield RequestEvent(
-                prompt=prompt, model_name=model_name, output_schema=output_schema,
+                prompt=prompt,
+                model_name=model_name,
+                output_schema=output_schema,
                 reasoning_effort=effort,
                 session_id=codex_resume_thread,
                 config=CodexRequestConfig(
                     finalization=finalization,
-                    sandbox_mode=(
-                        "read-only" if read_only else "danger-full-access"
-                    ),
+                    sandbox_mode=("read-only" if read_only else "danger-full-access"),
                     experimental_json=True,
                     native_output_schema=schema_path is not None,
                     read_only_isolation=read_only and execution_cwd != cwd,
@@ -768,9 +486,8 @@ class CodexBackend:
                 try:
                     event = json.loads(raw_line)
                 except json.JSONDecodeError:
-                    # Keep bounded raw lines only for the existing process-exit
-                    # exception excerpt. Persistent diagnostics and logs retain
-                    # only the count, never the line payload.
+                    # Retain bounded lines only for exit exceptions; persistent diagnostics/logs keep counts without
+                    # payloads.
                     non_json_count += 1
                     if len(non_json_lines) >= _NON_JSON_EXCERPT_MAX_LINES:
                         non_json_lines.pop(0)
@@ -846,11 +563,7 @@ class CodexBackend:
                             input=arguments,
                         )
                     elif item_type not in ("agent_message", "reasoning", "file_change", "error"):
-                        _record_unknown(
-                            unknown_item_types,
-                            item_type,
-                            overflow=unknown_item_overflow,
-                        )
+                        record_unknown_item(item_type)
                     # agent_message and reasoning item.started are no-ops
                     # (text is empty, we wait for item.completed)
 
@@ -862,11 +575,7 @@ class CodexBackend:
                         if text and item_id:
                             updated_text.setdefault(item_id, []).append(text)
                     elif item_type not in ("command_execution", "mcp_tool_call", "file_change", "error"):
-                        _record_unknown(
-                            unknown_item_types,
-                            item_type,
-                            overflow=unknown_item_overflow,
-                        )
+                        record_unknown_item(item_type)
 
                 elif event_type == "item.completed":
                     if item_type in ("command_execution", "mcp_tool_call"):
@@ -875,7 +584,6 @@ class CodexBackend:
                             item_id = _claim_tool_id(item_type)
                             for diagnostic in _take_early_diagnostics():
                                 yield diagnostic
-
 
                     if item_type in ("agent_message", "reasoning"):
                         text = self._extract_text(item)
@@ -898,23 +606,14 @@ class CodexBackend:
                         output = item.get("aggregated_output", "")
                         status = item.get("status", "")
 
-                        if status == "declined":
-                            yield ToolResultEvent(
-                                id=item_id,
-                                output="Command declined by sandbox",
-                                is_error=True,
-                                status="declined",
-                            )
-                        else:
-                            # Forward exit status metadata alongside is_error so
-                            # trajectories preserve the structured signal.
-                            yield ToolResultEvent(
-                                id=item_id,
-                                output=output,
-                                is_error=exit_code != 0,
-                                exit_code=exit_code,
-                                status=status or None,
-                            )
+                        declined = status == "declined"
+                        yield ToolResultEvent(
+                            id=item_id,
+                            output="Command declined by sandbox" if declined else output,
+                            is_error=declined or exit_code != 0,
+                            exit_code=None if declined else exit_code,
+                            status=status or None,
+                        )
 
                     elif item_type == "file_change":
                         for patch_event in _file_change_events(item, execution_cwd):
@@ -941,11 +640,7 @@ class CodexBackend:
                         error_sentinel_count += 1
 
                     else:
-                        _record_unknown(
-                            unknown_item_types,
-                            item_type,
-                            overflow=unknown_item_overflow,
-                        )
+                        record_unknown_item(item_type)
 
                 elif event_type == "turn.completed":
                     usage = event.get("usage", {})
@@ -958,9 +653,8 @@ class CodexBackend:
                         model_name = native_model
                     if isinstance(native_provider, str) and native_provider:
                         provider_name = native_provider
-                    # Codex has no message id or cost: use an empty id and estimate cost
-                    # from user-overridable prices (None for unknown models). Require both
-                    # token counts; reasoning tokens are an output subset, never additive.
+                    # Use an empty message id and price-table cost estimates; unknown models yield no cost.
+                    # Metrics require both token counts; reasoning remains an output subset.
                     cached_tokens = usage.get("cached_input_tokens")
                     reasoning_tokens = usage.get("reasoning_output_tokens")
                     in_tok = usage.get("input_tokens")
@@ -1063,18 +757,13 @@ class CodexBackend:
                 for diagnostic in _take_early_diagnostics():
                     yield diagnostic
 
-            # Reap the child, then surface its final diagnostics before the
-            # shared exit check formats the backend-specific message from the
-            # code and captured diagnostics.
+            # Reap, emit final diagnostics, then raise a backend-specific exit error.
             returncode = await reap(transport)
 
             for diagnostic in _take_final_diagnostics():
                 yield diagnostic
 
-            # Fail fast on non-zero exit: if codex crashed without emitting a
-            # turn.failed event, surface the failure with diagnostic output
-            # instead of reporting a successful completion with empty/partial
-            # output.
+            # Report nonzero process exits even without turn.failed; empty/partial output is not success.
             raise_for_exit(
                 returncode,
                 error_type=CodexError,

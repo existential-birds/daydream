@@ -77,51 +77,44 @@ def _boilerplate_stop_conditions(
     scope = normalized["scope"]
     existing_paths = contract._entry_paths(scope["existing_paths"])
     in_scope_paths = [*existing_paths, *contract._entry_paths(scope["new_paths"])]
+    specifications = [
+        (
+            "drift",
+            "Before editing a file, read the exact line range quoted for "
+            "it in the Current state section and compare it to the quoted "
+            "text. It does not match character for character.",
+            "Report the mismatched file, the quoted excerpt, and the "
+            "current repository content.",
+            existing_paths,
+        ),
+        (
+            "repeated-verification-failure",
+            "A verification in this plan fails, you make exactly one "
+            "correction, and it fails again — two failures total for the "
+            "same verification. Do not attempt a third time.",
+            "Report both failing command outputs and the correction that "
+            "was attempted.",
+            [],
+        ),
+        (
+            "out-of-scope-change",
+            "Completing a step requires editing a path that is not "
+            "declared in this plan's scope.",
+            "Report the required path and why the declared scope "
+            "boundary is insufficient.",
+            in_scope_paths,
+        ),
+    ]
     conditions = [
         {
-            "kind": "drift",
-            "condition": (
-                "Before editing a file, read the exact line range quoted for "
-                "it in the Current state section and compare it to the quoted "
-                "text. It does not match character for character."
-            ),
+            "kind": kind,
+            "condition": condition,
             "required_action": STOP_REQUIRED_ACTION,
-            "evidence_to_report": (
-                "Report the mismatched file, the quoted excerpt, and the "
-                "current repository content."
-            ),
-            "related_paths": existing_paths,
+            "evidence_to_report": evidence,
+            "related_paths": paths,
             "related_step_ids": [],
-        },
-        {
-            "kind": "repeated-verification-failure",
-            "condition": (
-                "A verification in this plan fails, you make exactly one "
-                "correction, and it fails again — two failures total for the "
-                "same verification. Do not attempt a third time."
-            ),
-            "required_action": STOP_REQUIRED_ACTION,
-            "evidence_to_report": (
-                "Report both failing command outputs and the correction that "
-                "was attempted."
-            ),
-            "related_paths": [],
-            "related_step_ids": [],
-        },
-        {
-            "kind": "out-of-scope-change",
-            "condition": (
-                "Completing a step requires editing a path that is not "
-                "declared in this plan's scope."
-            ),
-            "required_action": STOP_REQUIRED_ACTION,
-            "evidence_to_report": (
-                "Report the required path and why the declared scope "
-                "boundary is insufficient."
-            ),
-            "related_paths": in_scope_paths,
-            "related_step_ids": [],
-        },
+        }
+        for kind, condition, evidence, paths in specifications
     ]
 
     def mapped(kind: str, condition: dict[str, Any]) -> dict[str, Any]:

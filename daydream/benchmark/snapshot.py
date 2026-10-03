@@ -46,10 +46,7 @@ def _fetch_env() -> dict[str, str]:
 
 
 def ensure_mirror(root: Path) -> Path:
-    """Return ``root/cache/repository.git``, creating the bare mirror if absent.
-
-    Idempotent: a present bare mirror is returned untouched.
-    """
+    """Return ``root/cache/repository.git``, creating the bare mirror if absent."""
     root = Path(root)
     m = mirror(root)
     if not m.exists():
@@ -94,11 +91,7 @@ def fetch_head_refs(
     explicit_shas: list[str] | tuple[str, ...] = (),
     origin_url: str | None = None,
 ) -> Path:
-    """Fetch ``refs/pull/N/head`` + explicit heads into the mirror.
-
-    A missing/unfetchable PR-head ref raises :class:`GitError` — the caller
-    classifies it ``head_unreachable``. Returns the mirror path. Idempotent.
-    """
+    """Fetch ``refs/pull/N/head`` + explicit heads into the mirror."""
     root = Path(root)
     origin_url = origin_url or f"https://github.com/{repo_slug}.git"
     m = ensure_mirror(root)
@@ -305,11 +298,8 @@ def anchor_delta(
             return "binary"
         if path not in diff.modified:
             return "unchanged"
-        # The anchored path was modified: the anchor's [start_line, end_line]
-        # span lives in the diff-base (authoring) coordinate space, so
-        # intersect it with the -U0 hunk *base-side* ranges (``-l,s``) — the
-        # new-side ``+c,d`` positions diverge from the authoring coordinates
-        # whenever lines shift above the anchor, misclassifying the span.
+        # Authoring coordinates are on the diff base: intersect -U0 base-side hunk
+        # ranges, never new-side ranges that shift when preceding lines change.
         hunks = git_process._run_git(
             mirror_repo, ["diff", "-U0", base_tip, head, "--", path], retries=0,
         )
@@ -338,11 +328,7 @@ def anchor_delta(
 
 
 def resolve_original_base(mirror_repo: Path, base_tip_ref: str, head_sha: str) -> str | None:
-    """The merge-base of the base tip and head, or None when none exists.
-
-    Soft-failure: returns ``None`` for a documented no-merge-base case (a real
-    broken git invocation propagates as ``GitError``).
-    """
+    """The merge-base of the base tip and head, or None when none exists."""
     proc = git_process._run_git(mirror_repo, ["merge-base", base_tip_ref, head_sha], retries=0)
     if proc.returncode == 1:
         # exit code 1 is git's documented signal for "no common ancestor" --
@@ -393,10 +379,7 @@ def derive_authoring_path(mirror_repo: Path, authoring_sha: str, path: str, mapp
             "history-unavailable",
             f"git diff --name-status -M {authoring_sha} {mapped_sha} failed in {mirror_repo}: {stderr.strip()}",
         )
-    # The -z output is byte-oriented and may carry non-UTF-8 pathnames from the
-    # traced range, so capture bytes and surrogateescape-decode each field (the
-    # canonical NUL-split pattern shared with git_ops.ls_files; see
-    # snapshot._nul_fields).
+    # Capture NUL-framed bytes and surrogateescape-decode non-UTF-8 paths.
     fields = _nul_fields(trace.stdout)
     matches: list[str] = []
     i = 0
@@ -432,12 +415,7 @@ def resolve_trees(mirror_repo: Path, base_sha: str, head_sha: str) -> str | tupl
 
 
 def degenerate(base_tree: str, head_tree: str) -> str | None:
-    """Classify a degenerate (empty) base/head change, or None when real.
-
-    Equal trees return ``"equal_trees"`` -- the only degenerate case, since
-    ``git diff --quiet`` is zero only for identical trees, which the equality
-    check already covers. Distinct trees are therefore always a real change.
-    """
+    """Classify a degenerate (empty) base/head change, or None when real."""
     if base_tree == head_tree:
         return "equal_trees"
     return None
@@ -730,10 +708,8 @@ def freeze_one(
                 f"snapshot contains {len(extra_paths)} path(s) outside PR inventory: {preview}{suffix}",
             )
 
-    # 7) canonical diff + deterministic bundle + offline validation.
-    #    The bundle is built under the private scratch area (never ``snapshots/<case>``)
-    #    and cleaned up after its bytes are captured, so the final ``snapshots/`` path is
-    #    written only by the caller's journaled Transaction commit.
+    # Build and validate the deterministic bundle in private scratch, then clean it.
+    # Only the caller's journaled Transaction writes the final snapshots/ path.
     scratch_bundle = root / "cache" / "freeze-scratch" / f"{case_id}.bundle"
     try:
         diff_sha = canonical_diff_sha256(m, base, head_sha)

@@ -11,8 +11,8 @@ from daydream.improve.command_contract import (
     path_is_confined as _path_is_confined,
     valid_repository_file_path as _valid_repository_file_path,
 )
-from daydream.improve.prompts import PLAN_AUTHOR_SCHEMA
 from daydream.improve.render import redact_secret_values
+from daydream.improve.schemas import PLAN_AUTHOR_SCHEMA
 
 _AUTHOR_PROSE_FIELD_PATTERNS: tuple[tuple[str, ...], ...] = (
     ("why_this_matters", "problem"),

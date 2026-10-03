@@ -40,6 +40,7 @@ from daydream.deep.settings import _resolve_config_value
 from daydream.deep.state import DeepState
 from daydream.extensions import get_registry
 from daydream.extensions.api import Stop
+from daydream.fanout import run_fanout
 from daydream.flows.engine import FlowContext
 from daydream.json_utils import atomic_write_json
 from daydream.prompt_budget import (
@@ -629,28 +630,25 @@ async def _run_diagram_step(
         async with dispatch_scope(
             recorder, phase=DaydreamPhase.DIAGRAM, descriptors=descriptors
         ) as dispatch:
-            async with anyio.create_task_group() as tg:
-                for kind in kinds:
-                # Default-arg capture -- prevents the late-binding closure bug.
-                    async def _task(kind_name: str = kind) -> None:
-                        async with limiter:
-                            try:
-                                results[kind_name] = await _run_diagram_kind(
-                                    ctx,
-                                    kind=kind_name,
-                                    eligibility=eligibility,
-                                    hunk_ranges=hunk_ranges,
-                                    symbols=symbols,
-                                    recorder=recorder,
-                                    backend=backend,
-                                    dispatch=dispatch,
-                                )
-                            except Exception as exc:  # noqa: BLE001 -- parallel isolation
-                                detail = f"{type(exc).__name__}: {exc}"
-                                failures[kind_name] = detail
-                                results[kind_name] = _failed_kind_result(exc)
+            async def author(kind_name: str) -> None:
+                try:
+                    results[kind_name] = await _run_diagram_kind(
+                        ctx,
+                        kind=kind_name,
+                        eligibility=eligibility,
+                        hunk_ranges=hunk_ranges,
+                        symbols=symbols,
+                        recorder=recorder,
+                        backend=backend,
+                        dispatch=dispatch,
+                    )
+                except Exception as exc:  # noqa: BLE001 -- parallel isolation
+                    detail = f"{type(exc).__name__}: {exc}"
+                    failures[kind_name] = detail
+                    results[kind_name] = _failed_kind_result(exc)
 
-                    tg.start_soon(_task)
+
+            await run_fanout(kinds, author, limiter=limiter)
             returned_failures = sum(
                 result is not None and result.get("status") == "failed"
                 for result in results.values()

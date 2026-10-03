@@ -1,8 +1,5 @@
-"""Shared subprocess lifecycle for Codex, Pi, and Osprey.
-
-Own spawning, stdin, idle reads, stderr drains, exit handling, and shielded
-teardown. Adapters own protocol interpretation and error wording; this layer
-yields decoded lines and exit codes without protocol fallbacks.
+"""Own CLI spawning, stdin, idle reads, stderr drains, exit handling, and shielded teardown.
+Adapters interpret protocols/errors; transport exposes decoded lines and exit codes without fallbacks.
 """
 
 from __future__ import annotations
@@ -32,21 +29,14 @@ class StdinMode(enum.Enum):
 
 
 class StderrPolicy(enum.Enum):
-    """Merge stderr into JSONL, or drain it separately through a bounded sink.
-
-    DRAIN_TASK callers await drain_finished after wait/terminate so it cannot
-    outlive the transport.
-    """
+    """Merge stderr into JSONL or drain to a bounded sink; DRAIN_TASK must finish before transport cleanup returns."""
 
     MERGE_INTO_STDOUT = enum.auto()
     DRAIN_TASK = enum.auto()
 
 
 class TransportExitError(Exception):
-    """The child exited non-zero.
-
-    The backend formats its own user-visible message from the exit code.
-    """
+    """Nonzero child exit; the backend owns its user-visible diagnostic message."""
 
     def __init__(self, cli: str, returncode: int) -> None:
         self.cli = cli
@@ -54,10 +44,7 @@ class TransportExitError(Exception):
 
 
 class CliTransport:
-    """Spawn and stream decoded stdout; propagate stall, oversized-line, and spawn errors.
-
-    Each backend maps transport failures into its own error contract.
-    """
+    """Spawn/stream decoded stdout; propagate stalls, oversized lines, and spawn errors for adapter handling."""
 
     def __init__(
         self,
@@ -157,11 +144,8 @@ class CliTransport:
     async def lines(
         self, timeout_for_line: Callable[[], float | None]
     ) -> AsyncIterator[str]:
-        """Yield decoded, stripped lines under per-line idle windows.
-
-        Re-evaluate the timeout for each line to support response/tool-active windows.
-        Propagate StreamStalledError and oversized-line ValueError; decoding is strict
-        unless the adapter requests replacement.
+        """Read stripped lines with a fresh response/tool-active idle window per line. Propagate stalls
+        and oversized-line ValueError; decoding stays strict unless the adapter requests replacement.
         """
         if self._proc is None:
             raise RuntimeError("transport not started; call start() first")
@@ -218,10 +202,7 @@ PROCESS_EXIT_EXCERPT_MAX_LINES = 10
 
 
 async def reap(transport: CliTransport) -> int | None:
-    """Return the actual exit code, suppressing TransportExitError.
-
-    Adapters may emit diagnostics/terminal events before checking the code.
-    """
+    """Return the actual exit code without TransportExitError, allowing terminal events before failure checks."""
     try:
         await transport.wait()
     except TransportExitError:
@@ -274,10 +255,7 @@ def process_exit_message(*, display: str, returncode: int, lines: list[str]) -> 
 
 
 def write_temp_json_schema(schema: dict[str, Any], *, prefix: str) -> str:
-    """Write a schema file for the CLI; the caller unlinks it after child exit.
-
-    Remove the temporary file here if serialization fails.
-    """
+    """Write a caller-owned temporary schema; unlink on serialization failure, otherwise after child exit."""
     handle = tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", suffix=".json", prefix=prefix, delete=False
     )

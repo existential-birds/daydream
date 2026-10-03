@@ -50,10 +50,8 @@ _RULES: tuple[tuple[re.Pattern[str], str, str], ...] = tuple(
     + [(p, c, SEVERITY_ADVISORY) for p, c in _ADVISORY_RULES]
 )
 
-# Entire {cfg.DB_USER}, {password}, or ${PGPASSWORD} slots are templates.
-# Userinfo captures greedily include string quotes/prefixes (e.g. f"{cfg.DB_USER}),
-# so absorb those too. Quotes are excluded by RFC 3986; prefix letters require
-# a following quote, keeping mixed literal values such as pw{n} blocking.
+# Whole template slots are safe, including string prefixes/quotes captured in userinfo.
+# Require the prefix's quote so mixed literal passwords such as pw{n} still block.
 _PLACEHOLDER_PART_PATTERN = re.compile(r"""(?:[A-Za-z]{0,2}["'`])?\$?\{[^{}]*\}["'`]?""")
 
 
@@ -76,10 +74,7 @@ class ScanResult:
 
     @property
     def blocking(self) -> bool:
-        """Refuse egress for blocking findings or ``clean=False`` without findings.
-
-        The latter keeps incomplete results fail-closed.
-        """
+        """Refuse egress for blocking findings or ``clean=False`` without findings."""
         if not self.clean and not self.findings:
             return True
         return any(f.severity == SEVERITY_BLOCKING for f in self.findings)
@@ -108,10 +103,7 @@ def _digest(matched: str) -> str:
 
 
 def _userinfo_parts(pattern: re.Pattern[str], match: re.Match[str]) -> list[str] | None:
-    """Normalize each userinfo rule's capture into colon-separated parts.
-
-    URL rules capture separate fields or just the scheme; SCP captures ``user:pass@`` together.
-    """
+    """Normalize each userinfo rule's capture into colon-separated parts."""
     if pattern is _URL_CREDENTIAL_PATTERN:
         return [match.group(2), match.group(3)]
     if pattern is _TOKEN_ONLY_USERINFO_PATTERN:
@@ -122,11 +114,7 @@ def _userinfo_parts(pattern: re.Pattern[str], match: re.Match[str]) -> list[str]
 
 
 def _is_placeholder_userinfo(parts: list[str]) -> bool:
-    """Recognize userinfo made entirely of interpolation slots, including quoted literals.
-
-    All three overlapping userinfo rules must use this guard; otherwise the wider
-    token-only rule would still block templates accepted by the scheme-bearing rule.
-    """
+    """Recognize userinfo made entirely of interpolation slots, including quoted literals."""
     return bool(parts) and all(_PLACEHOLDER_PART_PATTERN.fullmatch(part) for part in parts)
 
 
@@ -147,10 +135,7 @@ def _scan_text(text: str) -> Iterator[tuple[str, str, str, str]]:
 
 
 def _dedupe(findings: Iterable[Finding]) -> list[Finding]:
-    """Deduplicate by ``(path, location, category, digest)``, retaining insertion order.
-
-    Blocking wins when overlapping rules produce the same finding at different severities.
-    """
+    """Deduplicate by ``(path, location, category, digest)``, retaining insertion order."""
     resolved: dict[tuple[str, str, str, str], Finding] = {}
     for finding in findings:
         key = (finding.path, finding.location, finding.category, finding.digest)
@@ -213,10 +198,7 @@ def _scan_file(rel_path: str, text: str) -> list[Finding]:
 
 
 def _scan_multiline_pem(rel_path: str, text: str) -> Iterator[Finding]:
-    """Find PEM armor spanning lines that the non-JSON per-line pass cannot match.
-
-    Report the block's starting line; `_dedupe` collapses overlap with single-line matches.
-    """
+    """Find PEM armor spanning lines that the non-JSON per-line pass cannot match."""
     for match in _PEM_KEY_PATTERN.finditer(text):
         matched = match.group(0)
         if "[REDACTED_" in matched:
@@ -232,13 +214,7 @@ def _scan_multiline_pem(rel_path: str, text: str) -> Iterator[Finding]:
 
 
 def scan_run_dir(run_dir: Path) -> ScanResult:
-    """Recursively scan every file under *run_dir*; fail closed on any error.
-
-    Files that fail UTF-8 decode are findings themselves (no binary exemption
-    in v1). Exceptions from decoding, regex execution, or I/O are absorbed
-    per-file into a ``scan_error`` finding — this function never raises and
-    never returns a clean result when something went wrong.
-    """
+    """Recursively scan every file under *run_dir*; fail closed on any error."""
     result = ScanResult()
     if not run_dir.is_dir():
         result.clean = False

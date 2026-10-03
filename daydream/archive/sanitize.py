@@ -89,11 +89,7 @@ def _sanitize_url_string(value: str) -> str:
 
 
 def _sanitize_json_document(doc: Any) -> Any:
-    """Canonicalize URL leaves, then run every string leaf through the text pipeline.
-
-    Tool observations routinely embed URLs inside prose, so URL normalization
-    alone is insufficient. Text and JSON leaves use the same redaction rules.
-    """
+    """Canonicalize URL leaves, then run every string leaf through the text pipeline."""
     if isinstance(doc, dict):
         return {key: _sanitize_json_document(child) for key, child in doc.items()}
     if isinstance(doc, list):
@@ -104,11 +100,7 @@ def _sanitize_json_document(doc: Any) -> Any:
 
 
 def sanitize_bundle_files(derivative_dir: Path) -> None:
-    """Transform a private bundle copy in place; callers must scan before release.
-
-    This transformation does not copy, publish, or record archive audit state.
-    Never pass an original or frozen evidence directory.
-    """
+    """Transform a private bundle copy in place; callers must scan before release."""
     for file_path in sorted(derivative_dir.rglob("*")):
         if not file_path.is_file():
             continue
@@ -199,11 +191,7 @@ def _append_audit(
 def _quarantine_derivative(
     derivative_dir: Path, sanitized_dir: Path, archive_dir: Path, run_dir: Path, session_id: str
 ) -> None:
-    """Quarantine a derivative without overwriting imported source bundles.
-
-    Only an ownership marker permits replacing a prior derivative slot;
-    unowned collisions use a sibling slot.
-    """
+    """Quarantine a derivative without overwriting imported source bundles."""
     quarantine_dir = archive_dir / "quarantine" / session_id
     quarantine_dir.parent.mkdir(parents=True, exist_ok=True)
     if derivative_dir.exists():
@@ -220,12 +208,7 @@ def _quarantine_derivative(
 
 
 def sanitize_bundle(run_dir: Path, archive_dir: Path) -> SanitizeResult:
-    """Copy, sanitize, and scan one bundle; release only nonblocking derivatives.
-
-    The source remains untouched. Blocked output moves to quarantine with an
-    audit record. Unexpected failures remove partial output, record quarantine,
-    and propagate for the bulk caller to handle.
-    """
+    """Copy, sanitize, and scan one bundle; release only nonblocking derivatives."""
     sanitized_dir = archive_dir / "sanitized"
     session_id = _resolve_session_id(run_dir)
     derivative_dir = sanitized_dir / session_id
@@ -242,10 +225,8 @@ def sanitize_bundle(run_dir: Path, archive_dir: Path) -> SanitizeResult:
                 shutil.copy2(item, target)
         sanitize_bundle_files(derivative_dir)
 
-        # Fail-closed release gate: a blocking finding (or a scanner error)
-        # withholds the derivative. An advisory finding is by construction not
-        # a credential (#1170) — a rule that cannot identify a secret must not
-        # gate egress either — so it is reported and the derivative released.
+        # Blocking findings or scanner errors withhold release; advisories identify no
+        # credential and are reported without blocking publication.
         scan_result = scan.scan_run_dir(derivative_dir)
         if scan_result.blocking:
             raise _DerivativeUncleanError(f"derivative scan found {scan_result.summary()}")
@@ -281,10 +262,7 @@ def sanitize_bundle(run_dir: Path, archive_dir: Path) -> SanitizeResult:
 
 
 def sanitize_archive(archive_dir: Path) -> list[SanitizeResult]:
-    """Sanitize all run bundles, continuing after quarantined failures.
-
-    Skip completed sessions only when derivative bytes still match the resume digest.
-    """
+    """Sanitize all run bundles, continuing after quarantined failures."""
     sanitized_dir = archive_dir / "sanitized"
     sanitized_dir.mkdir(parents=True, exist_ok=True)
     completed = _read_progress(sanitized_dir)
@@ -315,12 +293,7 @@ def sanitize_archive(archive_dir: Path) -> list[SanitizeResult]:
 
 
 def import_bundle(run_dir: Path, archive_dir: Path) -> ImportResult:
-    """Scan downloaded bytes before ingest; quarantine on blocking findings or scan errors.
-
-    Advisories are reported value-free and permit ingest. An occupied quarantine
-    slot is preserved; the incoming bundle remains rejected even if a sanitized
-    derivative exists.
-    """
+    """Scan downloaded bytes before ingest; quarantine on blocking findings or scan errors."""
     scan_result = scan.scan_run_dir(run_dir)
     if not scan_result.blocking:
         if scan_result.findings:

@@ -85,11 +85,7 @@ class CleanReport:
 
 
 def _delete_path(path: Path) -> None:
-    """Delete a containment-resolved filesystem target (symlink-safe).
-
-    Callers must have resolved ``path`` through ``_resolve_target``/containment
-    already; this only removes the exact link (for a symlink) or the tree/file.
-    """
+    """Delete a containment-resolved filesystem target (symlink-safe)."""
     if path.is_symlink():
         path.unlink()
     elif path.is_dir():
@@ -155,12 +151,8 @@ def _clean_jobs(
             run_path = Path(validated)
             envs = entry.get("environments") or []
             if not envs:
-                # No recorded image refs, so the run's spawned Docker images
-                # cannot be addressed. A run whose job dir never materialized
-                # has no images either, so it is cleanable; a run that does
-                # have a job dir must keep it and its prior state rather than
-                # deleting an irreconcileable run and silently orphaning the
-                # images it spawned.
+                # Missing image refs allow cleanup only when no job directory materialized.
+                # Otherwise retain the run: deleting it would strand unaddressable Docker images.
                 if run_path.is_dir():
                     report.images_failed += 1
                     continue
@@ -206,11 +198,7 @@ def _clean_jobs(
 
 
 def _clean_curated(root: Path, report: CleanReport) -> None:
-    """Delete curated source/gold: the four curated paths (only under ``--all``).
-
-    Each is containment-resolved first; a symlink escape under ``imports/`` etc.
-    fails closed. Curated deletion is unrecoverable.
-    """
+    """Delete curated source/gold: the four curated paths (only under ``--all``)."""
     for rel in _CURATED_DIRS:
         _resolve_target(root, rel)
         target = root / rel
@@ -236,11 +224,7 @@ def clean_workspace(
     confirm: Callable[[str], bool] | None = None,
     docker_rm: Callable[[list[str]], dict[str, Any]] | None = None,
 ) -> CleanReport:
-    """Delete only the requested ledger-derived artifacts (empty selection = no-op).
-
-    ``--all`` requires ``--yes`` (or an interactive TTY via the ``confirm``
-    seam); otherwise it refuses before deleting anything.
-    """
+    """Delete only the requested ledger-derived artifacts (empty selection = no-op)."""
     root = Path(root).resolve()
     report = CleanReport()
     if all_ and not yes:
@@ -256,10 +240,7 @@ def clean_workspace(
         _clean_trajectories(root, report)
     if jobs or all_:
         _clean_jobs(root, report, docker_rm=docker_rm)
-    # Curated source/gold is unrecoverable, so it is deleted only after every
-    # derived stage has completed; a derived-stage soft failure (an image the
-    # jobs stage could not remove) must not have already destroyed an
-    # irreplaceable workspace.
+    # Delete irreplaceable source/gold only after all derived cleanup succeeds.
     if all_ and report.exit_code == 0:
         _clean_curated(root, report)
     return report

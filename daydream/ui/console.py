@@ -1,8 +1,4 @@
-"""Console construction and phase-hero banner components.
-
-Themed ``Console`` factory, the gradient interpolation helpers, and the
-pyfiglet phase-hero banner.
-"""
+"""Themed consoles, color interpolation, and phase-hero banners."""
 
 import pyfiglet
 from rich import box

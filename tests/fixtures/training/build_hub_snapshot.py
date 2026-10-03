@@ -16,7 +16,6 @@ from typing import Any, Callable
 
 from daydream.archive import license_enrich
 from daydream.archive.hydrate import RepoInfo
-from daydream.archive.hydrate_client import FakeHub
 from daydream.archive.hydrate_rules import (
     ADMISSION_POLICY_VERSION,
     HYDRATION_INDEX_SCHEMA_VERSION,
@@ -25,6 +24,7 @@ from daydream.archive.hydrate_rules import (
 )
 from daydream.archive.manifest import Manifest
 from tests.fixtures.training.build_archive import _MINIMAL_TRAJECTORY, FIXTURE_SESSIONS
+from tests.harness.hub import FakeHub
 
 REPO_ID = "org/private-ds"
 SNAPSHOT_REVISION = hashlib.sha256(b"fixture-hub-snapshot-v1").hexdigest()[:40]

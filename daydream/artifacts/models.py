@@ -24,6 +24,20 @@ class ArtifactVisibilityError(RuntimeError):
     """A live artifact namespace could not be opened or used safely."""
 
 
+class _SessionState(str, Enum):
+    """Lifecycle of an :class:`ArtifactSession`.
+
+    Exactly the state strings the session always cycled through; ``str``-based
+    so serialized diagnostics and comparisons keep their prior textual form.
+    """
+
+    ACTIVE = "active"
+    FROZEN = "frozen"
+    PUBLISHING = "publishing"
+    PUBLISHED = "published"
+    CLOSED = "closed"
+
+
 class _Transition(str, Enum):
     """Journalled in-flight transaction state; ``PUBLISH_*`` members publish."""
 

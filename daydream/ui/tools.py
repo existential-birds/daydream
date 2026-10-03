@@ -1,9 +1,4 @@
-"""Tool-call rendering helpers.
-
-Task-id harvesting/labeling, callback-progress formatting, tool-arg
-colorization, and the shared header/body/result builders consumed by the
-live tool-call panels.
-"""
+"""Tool labels, callback progress, and shared live-panel header/body/result rendering."""
 
 import re
 
@@ -74,10 +69,9 @@ _PRIMARY_TOOL_ARG = {
 
 
 def _primary_tool_value(name: str, args: dict[str, object]) -> tuple[str, str | None]:
-    """Return (value, key) for the preferred nonempty string argument.
-
-    Unknown tools fall back to the first non-mechanical string. The key lets
-    callers color paths separately from patterns; Bash prefers command."""
+    """Choose the preferred nonempty string and its role; unknown tools use the first non-mechanical
+    string. Bash prefers command, and callers color path roles separately from patterns.
+    """
     for key in _PRIMARY_TOOL_ARG.get(name, ()):
         value = args.get(key)
         if isinstance(value, str) and value.strip():
@@ -104,11 +98,8 @@ def _redacted_bash_command(
     ellipsis: bool = False,
     max_chars: int = _BASH_COMMAND_MAX_CHARS,
 ) -> str:
-    """Redact (and Codex 'shell'-strip) a Bash command for single-line display.
-
-    Codex ('shell') commands carry the replayable cd-prefixed payload; only the
-    display variant strips it. The complete value is redacted before truncation
-    so a credential cannot be shortened into an unmatchable fragment.
+    """Redact the complete command before truncation; Codex shell display additionally strips leading cd.
+    Stored tool inputs retain the replayable command.
     """
     from daydream.backends.codex import display_shell_command
     from daydream.redaction import redact_structured_text
@@ -140,9 +131,7 @@ def _task_label_ns_key(name: str, task_id: str) -> str:
 
 
 def _derive_task_label(args: dict[str, object], task_id: str) -> str:
-    """Choose subject, description, subagent, first command/prompt line, or task id.
-
-    Labels are capped at 80 characters; task-id fallbacks are unchanged."""
+    """Choose subject/description/subagent/first command-or-prompt line, capped at 80 chars; otherwise keep task id."""
     for key in ("subject", "description", "subagent_type"):
         value = args.get(key)
         if isinstance(value, str) and value.strip():
@@ -170,10 +159,9 @@ def format_callback_progress(
     label: str | None,
     max_len: int = _BASH_COMMAND_MAX_CHARS,
 ) -> Text:
-    """Render one indented tool status without opening a competing Live panel.
-
-    Task tools lead with a human label and demote ids; mechanical flags are hidden.
-    Other tools use the same primary argument and role colors as panel headers."""
+    """Render indented progress without competing Live panels; task labels lead, ids are secondary,
+    mechanical flags stay hidden, and primary-argument styles match panel headers.
+    """
     line = Text("    ")
     icon = _CALLBACK_TOOL_ICONS.get(name)
     if icon:
@@ -256,11 +244,7 @@ def _append_label_and_id(header_line: Text, label: str | None, task_id: str, *, 
 
 
 def _append_gradient_preview(content: Text, string: str, start_hex: str, end_hex: str, *, bold: bool) -> None:
-    """Append an Edit old/new preview with a per-char color gradient.
-
-    Truncates to ``_EDIT_PREVIEW_MAX_LINES`` lines and interpolates each
-    character's color from ``start_hex`` to ``end_hex``.
-    """
+    """Append an Edit gradient preview capped at _EDIT_PREVIEW_MAX_LINES."""
     lines = string.split("\n")
     preview = "\n".join(lines[:_EDIT_PREVIEW_MAX_LINES])
     if len(lines) > _EDIT_PREVIEW_MAX_LINES:
@@ -351,7 +335,6 @@ def _build_tool_header(
         return content
 
     if name == "TodoWrite":
-
         todos = args.get("todos", [])
         if isinstance(todos, list):
             for todo in todos:
@@ -371,7 +354,6 @@ def _build_tool_header(
         return content
 
     if name in ("Bash", "shell"):
-
         description = str(args.get("description", ""))
         if description:
             content.append("\n")
@@ -386,65 +368,20 @@ def _build_tool_header(
 
         return content
 
-    if name == "Write":
-        file_path = str(args.get("file_path", ""))
-
-        content.append(f" {mystical_term('Write')}... ", style=f"{STYLE_PURPLE} italic")
-        content.append(file_path, style=STYLE_CYAN)
-
-        return content
-
-    if name == "Glob":
-        pattern = str(args.get("pattern", ""))
-        search_path = str(args.get("path", ""))
-
-        content.append(f" {mystical_term('Glob')}... ", style=f"{STYLE_PURPLE} italic")
-        content.append(pattern, style=STYLE_ORANGE)
-
-        if search_path:
-            _append_arg_field(content, "path", search_path, STYLE_CYAN)
-
-        return content
-
-    if name == "Grep":
-        pattern = str(args.get("pattern", ""))
-        search_path = str(args.get("path", ""))
-        glob_filter = str(args.get("glob", ""))
-        file_type = str(args.get("type", ""))
-
-        content.append(f" {mystical_term('Grep')}... ", style=f"{STYLE_PURPLE} italic")
-        content.append(pattern, style=STYLE_ORANGE)
-
-        if search_path:
-            _append_arg_field(content, "path", search_path, STYLE_CYAN)
-
-        if glob_filter:
-            _append_arg_field(content, "glob", glob_filter, STYLE_YELLOW)
-
-        if file_type:
-            _append_arg_field(content, "type", file_type, STYLE_YELLOW)
-
-        return content
-
-    if name == "Read":
-        file_path = str(args.get("file_path", ""))
-        offset = args.get("offset")
-        limit = args.get("limit")
-
-        content.append(f" {mystical_term('Read')}... ", style=f"{STYLE_PURPLE} italic")
-        content.append(file_path, style=STYLE_CYAN)
-
-        if offset is not None or limit is not None:
-            content.append("\n")
-            if offset is not None:
-                content.append("offset=", style=STYLE_PURPLE)
-                content.append(str(offset), style=STYLE_YELLOW)
-            if limit is not None:
-                if offset is not None:
-                    content.append(", ", style=STYLE_FG)
-                content.append("limit=", style=STYLE_PURPLE)
-                content.append(str(limit), style=STYLE_YELLOW)
-
+    if name in {"Read", "Write", "Glob", "Grep"}:
+        key = "pattern" if name in {"Glob", "Grep"} else "file_path"
+        content.append(f" {mystical_term(name)}... ", style=f"{STYLE_PURPLE} italic")
+        content.append(str(args.get(key, "")), style=_primary_value_style(key))
+        if name in {"Glob", "Grep"}:
+            for option, style in (("path", STYLE_CYAN), ("glob", STYLE_YELLOW), ("type", STYLE_YELLOW)):
+                value = str(args.get(option, ""))
+                if value and (name == "Grep" or option == "path"):
+                    _append_arg_field(content, option, value, style)
+        elif name == "Read":
+            bounds = {key: args[key] for key in ("offset", "limit") if args.get(key) is not None}
+            if bounds:
+                content.append("\n")
+                content.append_text(_colorize_tool_args(bounds))
         return content
 
     if name == "Edit":
@@ -486,7 +423,6 @@ def _build_tool_header(
             content.append(subagent, style=STYLE_CYAN)
         return content
 
-
     if args:
         content.append("\n")
         args_text = _colorize_tool_args(args)
@@ -527,42 +463,19 @@ def _build_result_content(
 ) -> Text | Syntax | Group:
     """Truncate and color result lines, highlighting recognized shell output."""
     lines = content.split("\n")
-    truncated = False
-    total_lines = len(lines)
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
-        truncated = True
-
-    if not is_error and _detect_shell_syntax(content):
-        display_content = "\n".join(lines)
-        syntax = Syntax(
-            display_content,
-            "bash",
-            theme="dracula",
-            line_numbers=False,
-            word_wrap=True,
-        )
-
-        if truncated:
-            truncation_text = Text()
-            truncation_text.append(
-                f"\n... ({total_lines - max_lines} more lines)",
-                style=Style(color=NEON_COLORS["yellow"], italic=True),
-            )
-            return Group(syntax, truncation_text)
-        return syntax
-
-    result_text = Text()
-    for i, line in enumerate(lines):
-        result_text.append_text(_colorize_line(line, is_error))
-        if i < len(lines) - 1:
-            result_text.append("\n")
-
-    if truncated:
-        result_text.append("\n")
-        result_text.append(
-            f"... ({total_lines - max_lines} more lines)",
+    visible = lines[:max_lines]
+    remaining = len(lines) - len(visible)
+    suffix = (
+        Text(
+            f"\n... ({remaining} more lines)",
             style=Style(color=NEON_COLORS["yellow"], italic=True),
         )
-
-    return result_text
+        if remaining
+        else Text()
+    )
+    if not is_error and _detect_shell_syntax(content):
+        syntax = Syntax("\n".join(visible), "bash", theme="dracula", line_numbers=False, word_wrap=True)
+        return Group(syntax, suffix) if remaining else syntax
+    result = Text("\n").join(_colorize_line(line, is_error) for line in visible)
+    result.append_text(suffix)
+    return result

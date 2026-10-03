@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import math
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -24,35 +25,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class DaydreamFileConfig:
-    """Merged repository policy; None means the runtime default still applies.
+    """Merged policy: CLI globals > file phase settings > file globals > defaults.
 
-    CLI globals outrank file phase overrides, which outrank file globals.
-    ``phases`` also accepts extension phase keys. Operator destinations and
-    credentials (tracing, Hub uploads) never come from repository settings.
-
-    Scalar policy is lenient: malformed values degrade to unset. Boolean
-    switches require actual booleans, never truthy numbers. Counts reject
-    booleans; budgets and quality thresholds also reject NaN and infinity.
-    Non-negative bounds preserve zero: a zero group budget intentionally skips
-    fixes. Test-command timeouts and diagram/improve bounds must be positive.
-    Invalid declared retry allowances warn before using the default.
-
-    ``latency_profile`` is deliberately parsed without validating its vocabulary:
-    the runtime resolver promotes unknown names to forensic. ``review_profile``
-    is only a path here; review_profile.py owns strict profile validation.
-    ``extra_risk_categories`` likewise gets fail-loud vocabulary validation at
-    verification, and can only widen mandatory selection.
-
-    Improve service roots/groups and partition bounds come from ``[improve]``;
-    issue publication requires explicit ``[improve.github] publish_issues=true``.
-    ``[diagram] mode`` allows auto/off; forcing a diagram kind is CLI-only.
-    Empty diagram service roots inherit Improve roots, then layout inference.
-
-    ``test_required_suites`` declares which suites the single configured command
-    covers; it never creates a second runner or substitutes a targeted check.
-    An explicit false review-cache switch wins at either CLI or file tier, while
-    cache retention bounds remain independent of the enable switch.
-    Field defaults and the full configuration reference live in config.py and README.
+    Malformed scalars become unset; counts reject booleans and budgets reject
+    non-finite values. Zero nonnegative bounds remain meaningful. Repository
+    settings never supply operator destinations or credentials. Profile and
+    risk-category vocabulary validation belongs to their runtime resolvers.
     """
 
     model: str | None = None
@@ -267,6 +245,57 @@ def _coerce_review_profile_path(raw: Any) -> Path | None:
     return Path(raw)
 
 
+
+# Fields with identical lenient decoding share one policy; special/nested fields stay explicit.
+_ROOT_DECODERS: dict[Callable[[Any], Any], tuple[str, ...]] = {
+    _coerce_string: (
+        "latency_profile",
+        "test_command",
+    ),
+    _coerce_phases: (
+        "phases",
+    ),
+    _coerce_optional_bool: (
+        "precision_mode",
+        "approve_on_clean",
+        "scope_issue_filing",
+        "deep_shard_enabled",
+        "review_cache_enabled",
+        "verify_all",
+        "quality_gate_enabled",
+    ),
+    _coerce_non_negative_float: (
+        "group_max_wall_s",
+        "quality_gate_erosion_delta",
+        "quality_gate_verbosity_delta",
+        "quality_gate_erosion_absolute",
+        "quality_gate_verbosity_absolute",
+    ),
+    _coerce_non_negative_int: (
+        "group_max_serial_items",
+        "deep_shard_max_files",
+        "deep_shard_max_bytes",
+        "deep_shard_fanout_cap",
+        "deep_shard_frontier_max",
+        "review_cache_max_entries",
+        "review_cache_max_bytes",
+        "review_cache_max_age_days",
+    ),
+    _coerce_review_profile_path: (
+        "review_profile",
+    ),
+    _coerce_string_list: (
+        "extra_risk_categories",
+        "supervisor_deny_globs",
+        "tool_bash_deny",
+        "test_required_suites",
+    ),
+    _coerce_positive_float: (
+        "test_command_wall_s",
+    ),
+}
+
+
 def load_file_config(root: Path) -> DaydreamFileConfig:
     """Merge repository policy, returning empty defaults when neither file exists.
 
@@ -308,39 +337,14 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         raw_improve_publish if isinstance(raw_improve_publish, bool) else False
     )
     return DaydreamFileConfig(
+        **{name: decode(merged.get(name)) for decode, names in _ROOT_DECODERS.items() for name in names},
         model=str(model) if model is not None else None,
         backend=str(backend) if backend is not None else None,
         reasoning_effort=str(reasoning_effort) if reasoning_effort is not None else None,
-        latency_profile=_coerce_string(merged.get("latency_profile")),
-        phases=_coerce_phases(merged.get("phases")),
         shallow_fanout_threshold=threshold,
-        precision_mode=_coerce_optional_bool(merged.get("precision_mode")),
-        approve_on_clean=_coerce_optional_bool(merged.get("approve_on_clean")),
-        scope_issue_filing=_coerce_optional_bool(merged.get("scope_issue_filing")),
-        group_max_wall_s=_coerce_non_negative_float(merged.get("group_max_wall_s")),
-        group_max_serial_items=_coerce_non_negative_int(merged.get("group_max_serial_items")),
         retry_recovery_allowance_s=_coerce_retry_recovery_allowance(merged),
-        review_profile=_coerce_review_profile_path(merged.get("review_profile")),
-        deep_shard_enabled=_coerce_optional_bool(merged.get("deep_shard_enabled")),
-        deep_shard_max_files=_coerce_non_negative_int(merged.get("deep_shard_max_files")),
-        deep_shard_max_bytes=_coerce_non_negative_int(merged.get("deep_shard_max_bytes")),
-        deep_shard_fanout_cap=_coerce_non_negative_int(merged.get("deep_shard_fanout_cap")),
-        deep_shard_frontier_max=_coerce_non_negative_int(merged.get("deep_shard_frontier_max")),
-        review_cache_enabled=_coerce_optional_bool(merged.get("review_cache_enabled")),
-        review_cache_max_entries=_coerce_non_negative_int(merged.get("review_cache_max_entries")),
-        review_cache_max_bytes=_coerce_non_negative_int(merged.get("review_cache_max_bytes")),
-        review_cache_max_age_days=_coerce_non_negative_int(merged.get("review_cache_max_age_days")),
-        verify_all=_coerce_optional_bool(merged.get("verify_all")),
-        extra_risk_categories=_coerce_string_list(merged.get("extra_risk_categories")),
-        quality_gate_enabled=_coerce_optional_bool(merged.get("quality_gate_enabled")),
-        quality_gate_erosion_delta=_coerce_non_negative_float(merged.get("quality_gate_erosion_delta")),
-        quality_gate_verbosity_delta=_coerce_non_negative_float(merged.get("quality_gate_verbosity_delta")),
-        quality_gate_erosion_absolute=_coerce_non_negative_float(merged.get("quality_gate_erosion_absolute")),
-        quality_gate_verbosity_absolute=_coerce_non_negative_float(merged.get("quality_gate_verbosity_absolute")),
         supervisor=_coerce_choice(merged.get("supervisor"), {"off", "rules", "llm"}),
-        supervisor_deny_globs=_coerce_string_list(merged.get("supervisor_deny_globs")),
         tool_supervisor=_coerce_choice(merged.get("tool_supervisor"), {"off", "rules"}),
-        tool_bash_deny=_coerce_string_list(merged.get("tool_bash_deny")),
         improve_service_roots=_coerce_string_list(improve.get("service_roots")),
         improve_service_groups={
             str(group): _coerce_string_list(roots)
@@ -354,7 +358,4 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         diagram_min_modules=_coerce_positive_int(diagram, "min_modules"),
         diagram_min_branch_points=_coerce_positive_int(diagram, "min_branch_points"),
         diagram_service_roots=_coerce_string_list(diagram.get("service_roots")),
-        test_command=_coerce_string(merged.get("test_command")),
-        test_command_wall_s=_coerce_positive_float(merged.get("test_command_wall_s")),
-        test_required_suites=_coerce_string_list(merged.get("test_required_suites")),
     )

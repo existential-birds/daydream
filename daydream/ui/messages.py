@@ -1,8 +1,4 @@
-"""Simple message and prompt components.
-
-The error/warning/success/cost/info/skipped/dim print helpers,
-the selection menu, and the interactive ``prompt_user`` input.
-"""
+"""Console messages, selection menus, and interaction-gateway prompts."""
 
 from rich import box
 from rich.console import Console

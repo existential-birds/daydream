@@ -15,6 +15,7 @@ from daydream.config import (
     PLAN_WRITE_MAX_CONCURRENCY,
 )
 from daydream.extensions.api import Stop
+from daydream.fanout import run_fanout
 from daydream.improve import artifacts
 from daydream.improve.authoring import _verification_commands, author_plan, failed_plan_result
 from daydream.improve.context import _audit_repo
@@ -259,73 +260,70 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                 f"({landed}/{total}).",
             )
 
-    async with anyio.create_task_group() as task_group:
-        for selection_index, finding in enumerate(selected):
-            if reservations[selection_index].number is None:
-                _land(selection_index, {"finding": finding})
-                continue
-            descriptor = (
-                f"plan-{plan_slug(finding.get('title'))}-"
-                f"{selection_index + 1:03d}"
+    jobs: list[tuple[int, dict[str, Any], str, dict[str, Any]]] = []
+    for selection_index, finding in enumerate(selected):
+        if reservations[selection_index].number is None:
+            _land(selection_index, {"finding": finding})
+            continue
+        descriptor = (
+            f"plan-{plan_slug(finding.get('title'))}-"
+            f"{selection_index + 1:03d}"
+        )
+        attempt = {
+            "descriptor": descriptor,
+            "backend": type(backend).__name__,
+            "model": getattr(backend, "model", "unknown-model"),
+        }
+        try:
+            prompt = ctx.registry.prompt("plan-writer")(
+                finding=finding,
+                recon_summary=json.dumps(
+                    ctx.data["recon"],
+                    sort_keys=True,
+                ),
+                verification_commands=_legacy_verification_commands(
+                    ctx.data["recon"]
+                ),
+                cwd=_audit_repo(ctx),
             )
-            attempt = {
-                "descriptor": descriptor,
-                "backend": type(backend).__name__,
-                "model": getattr(backend, "model", "unknown-model"),
-            }
-            try:
-                prompt = ctx.registry.prompt("plan-writer")(
-                    finding=finding,
-                    recon_summary=json.dumps(
-                        ctx.data["recon"],
-                        sort_keys=True,
-                    ),
-                    verification_commands=_legacy_verification_commands(
-                        ctx.data["recon"]
-                    ),
-                    cwd=_audit_repo(ctx),
-                )
-            except Exception:  # noqa: BLE001 - isolate each plan safely
-                _land(selection_index, failed_plan_result(finding, attempt, ("PROMPT_CONSTRUCTION_FAILED",)))
-                continue
+        except Exception:  # noqa: BLE001 - isolate each plan safely
+            _land(selection_index, failed_plan_result(finding, attempt, ("PROMPT_CONSTRUCTION_FAILED",)))
+            continue
 
-            async def _task(
-                current: dict[str, Any] = finding,
-                current_index: int = selection_index,
-                task_prompt: str = prompt,
-                task_descriptor: str = descriptor,
-                task_attempt: dict[str, Any] = attempt,
-            ) -> None:
-                async with limiter:
-                    async with trajectory.maybe_fork(recorder, task_descriptor):
-                        try:
-                            record = await author_plan(
-                                ctx, backend, finding=current, prompt=task_prompt, attempt=task_attempt,
-                                record_retry=lambda diagnostic: authoring_diagnostics.append(
-                                    (current_index, diagnostic)
-                                ),
-                            )
-                        except Exception as exc:  # noqa: BLE001 - isolate each plan safely
-                            category = getattr(exc, "category", "UNKNOWN")
-                            stable_category = (
-                                category
-                                if category
-                                in {
-                                    "RATE_LIMIT",
-                                    "TIMEOUT",
-                                    "STREAM_DROP",
-                                    "PROCESS_EXIT",
-                                    "AUTH_CONFIG",
-                                    "UNKNOWN",
-                                }
-                                else "UNKNOWN"
-                            )
-                            record = failed_plan_result(current, task_attempt, (stable_category,))
-                # Each writer's plan reaches disk here, while its slower
-                # siblings are still running.
-                _land(current_index, record)
+        jobs.append((selection_index, finding, prompt, attempt))
 
-            task_group.start_soon(_task)
+    async def write_plan(job: tuple[int, dict[str, Any], str, dict[str, Any]]) -> dict[str, Any]:
+        current_index, current, task_prompt, task_attempt = job
+        try:
+            record = await author_plan(
+                ctx, backend, finding=current, prompt=task_prompt, attempt=task_attempt,
+                record_retry=lambda diagnostic: authoring_diagnostics.append(
+                    (current_index, diagnostic)
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - isolate each plan safely
+            category = getattr(exc, "category", "UNKNOWN")
+            stable_category = (
+                category
+                if category
+                in {
+                    "RATE_LIMIT",
+                    "TIMEOUT",
+                    "STREAM_DROP",
+                    "PROCESS_EXIT",
+                    "AUTH_CONFIG",
+                    "UNKNOWN",
+                }
+                else "UNKNOWN"
+            )
+            record = failed_plan_result(current, task_attempt, (stable_category,))
+        return record
+
+    await run_fanout(
+        jobs, write_plan, limiter=limiter, recorder=recorder,
+        descriptor=lambda job: str(job[3]["descriptor"]),
+        completed=lambda job, record: _land(job[0], record),
+    )
 
     result = session.finish()
     record_plan_write_diagnostics(

@@ -9,9 +9,9 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import asdict, dataclass, field, fields, replace
+from dataclasses import fields
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from daydream import git_ops
 from daydream.extensions import (
@@ -37,6 +37,13 @@ from daydream.reviews.identity import (
     parse_diagram_markers as parse_diagram_markers,
     parse_finding_markers as parse_finding_markers,
 )
+from daydream.reviews.lookup import (
+    _head_repo_slug_from_row as _head_repo_slug_from_row,
+    _pr_info_from_row as _pr_info_from_row,
+    capture_pr_base_tip as capture_pr_base_tip,
+    find_open_pr as find_open_pr,
+    find_pr_by_number as find_pr_by_number,
+)
 from daydream.reviews.models import (
     ClassifiedIssues as ClassifiedIssues,
     ClassifiedReviewResult as ClassifiedReviewResult,
@@ -58,6 +65,14 @@ from daydream.reviews.rendering import (
     default_render_summary as default_render_summary,
     format_comment_body as format_comment_body,
     resolve_review_renderers as resolve_review_renderers,
+)
+from daydream.reviews.submission import (
+    ClassifiedReviewPlan as ClassifiedReviewPlan,
+    GitHubReviewTransport as GitHubReviewTransport,
+    ReviewTransport as ReviewTransport,
+    _file_comment_payload_dict as _file_comment_payload_dict,
+    _review_payload_dict as _review_payload_dict,
+    post_classified_review as post_classified_review,
 )
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.severity import normalize_severity
@@ -210,151 +225,6 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
             )
         )
     return out
-
-
-def _head_repo_slug_from_row(row: dict[str, Any]) -> str | None:
-    """Resolve the head repository, rejecting malformed or contradictory identities.
-
-    A deleted fork (null repository) allows base-repository link fallback. Older gh
-    versions omit nameWithOwner or emit an empty string; validated owner/name may
-    reconstruct it. Populated fields must agree case-insensitively."""
-    if "headRepository" not in row or "headRepositoryOwner" not in row:
-        raise GitError("invalid PR row: missing requested head repository metadata")
-    head_owner = row["headRepositoryOwner"]
-    owner_login: str | None = None
-    if head_owner is not None:
-        if not isinstance(head_owner, dict) or not isinstance(head_owner.get("login"), str):
-            raise GitError("invalid PR row: malformed head repository owner")
-        owner_login = head_owner["login"]
-        if git_ops.split_owner_repo(f"{owner_login}/repository") is None:
-            raise GitError("invalid PR row: malformed head repository owner")
-    head_repo = row["headRepository"]
-    if head_repo is None:
-        return None
-    if not isinstance(head_repo, dict):
-        raise GitError("invalid PR row: headRepository must be an object or null")
-    repo_name = head_repo.get("name")
-    if "name" in head_repo and (
-        not isinstance(repo_name, str)
-        or git_ops.split_owner_repo(f"owner/{repo_name}") is None
-    ):
-        raise GitError("invalid PR row: malformed head repository name")
-    if "nameWithOwner" in head_repo:
-        name_with_owner = head_repo["nameWithOwner"]
-        if not isinstance(name_with_owner, str):
-            raise GitError("invalid PR row: head repository nameWithOwner must be a string")
-        if name_with_owner != "":
-            slug = git_ops.split_owner_repo(name_with_owner)
-            if slug is None:
-                raise GitError("invalid PR row: malformed head repository slug")
-            if (
-                (owner_login is not None and slug[0].casefold() != owner_login.casefold())
-                or (isinstance(repo_name, str) and slug[1].casefold() != repo_name.casefold())
-            ):
-                raise GitError("invalid PR row: contradictory head repository identity")
-            return name_with_owner
-    if owner_login is not None and isinstance(repo_name, str):
-        return f"{owner_login}/{repo_name}"
-    raise GitError("invalid PR row: unavailable head repository slug requires owner and name")
-
-
-def _pr_info_from_row(
-    target_dir: Path, row: dict[str, Any], *, auth: GitHubAuth = INHERIT_GITHUB_AUTH
-) -> PRInfo:
-    """Resolve the base posting repository and fork-aware head link.
-
-    Raise GitError for invalid PR metadata, repository context, or local merge base."""
-    from daydream.archive.git_safe import normalize_remote_url
-
-    number = row.get("number")
-    head_sha = row.get("headRefOid")
-    head_ref = row.get("headRefName")
-    base_ref = row.get("baseRefName")
-    url = row.get("url")
-    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
-        raise GitError("invalid PR row: number must be a positive integer")
-    if not isinstance(head_sha, str):
-        raise GitError("invalid PR row: headRefOid must be a string")
-    if not isinstance(head_ref, str) or not head_ref:
-        raise GitError("invalid PR row: headRefName must be a non-empty string")
-    if not isinstance(base_ref, str) or not base_ref:
-        raise GitError("invalid PR row: baseRefName must be a non-empty string")
-    if not isinstance(url, str) or not url:
-        raise GitError("invalid PR row: url must be a non-empty string")
-    head_repo = _head_repo_slug_from_row(row)
-    git_ops.validate_branch_name(target_dir, head_ref)
-    git_ops.validate_branch_name(target_dir, base_ref)
-
-    owner, repo = git_ops.gh_repo_view_required(target_dir, auth=auth)
-    base_slug = f"{owner}/{repo}"
-    matching_remotes: list[str] = []
-    for remote, raw_url in git_ops.remote_urls(target_dir).items():
-        identity, _safe_url = normalize_remote_url(raw_url)
-        if identity is not None and identity.lower() == base_slug.lower():
-            matching_remotes.append(f"refs/remotes/{remote}/{base_ref}")
-    base_sha = git_ops.resolve_pr_merge_base(
-        target_dir,
-        matching_remotes,
-        f"refs/heads/{base_ref}",
-        head_sha,
-    )
-    return PRInfo(
-        number=number,
-        head_sha=head_sha,
-        base_sha=base_sha,
-        base_ref=base_ref,
-        head_ref=head_ref,
-        owner=owner,
-        repo=repo,
-        url=url,
-        head_repo=head_repo,
-        pr_base_sha=row.get("baseRefOid") if isinstance(row.get("baseRefOid"), str) else None,
-    )
-
-
-def capture_pr_base_tip(
-    target_dir: Path, pr: PRInfo, *, auth: GitHubAuth = INHERIT_GITHUB_AUTH,
-) -> str | None:
-    """Read optional base-tip evidence without requiring newer gh JSON fields.
-
-    A PR that advanced between reads cannot supply evidence for this snapshot.
-    The required identity and merge base already come from the initial lookup.
-    """
-    if pr.pr_base_sha is not None:
-        return pr.pr_base_sha
-    try:
-        data = git_ops.gh_api(target_dir, f"repos/{pr.owner}/{pr.repo}/pulls/{pr.number}", auth=auth)
-    except GitError:
-        return None
-    if not isinstance(data, dict) or not isinstance(data.get("head"), dict):
-        return None
-    if data["head"].get("sha") != pr.head_sha or not isinstance(data.get("base"), dict):
-        return None
-    sha = data["base"].get("sha")
-    return sha if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha) else None
-
-
-def find_open_pr(
-    target_dir: Path, *, auth: GitHubAuth = INHERIT_GITHUB_AUTH
-) -> PRInfo | None:
-    """Find the branch's open PR; return None for absence and raise GitError on failure."""
-    branch = git_ops.current_branch(target_dir)
-    if not branch:
-        return None
-    rows = git_ops.gh_pr_list_for_branch(target_dir, branch, auth=auth)
-    if not rows:
-        return None
-    return _pr_info_from_row(target_dir, rows[0], auth=auth)
-
-
-def find_pr_by_number(
-    target_dir: Path, pr_number: int, *, auth: GitHubAuth = INHERIT_GITHUB_AUTH
-) -> PRInfo | None:
-    """Find an explicit PR without branch fallback; raise GitError on lookup failure."""
-    data = git_ops.gh_pr_view(target_dir, pr_number, auth=auth)
-    if data is None:
-        return None
-    return _pr_info_from_row(target_dir, data, auth=auth)
 
 
 _ANCHOR_TOKEN = re.compile(r"`([^`\n]{3,80})`|\b([A-Za-z_][A-Za-z0-9_]{4,})\b")
@@ -670,117 +540,6 @@ def _inline_comment(issue: ParsedIssue, line: int, renderers: ReviewRenderers) -
     )
 
 
-@dataclass(frozen=True)
-class ClassifiedReviewPlan:
-    """Immutable, authorized input to the shared review write operation."""
-
-    pr: PRInfo
-    inline: tuple[InlineReviewComment, ...]
-    inline_issues: tuple[ParsedIssue, ...]
-    file_level: tuple[ParsedIssue, ...]
-    body_only: tuple[ParsedIssue, ...]
-    event: ReviewEvent
-    run_info: str
-    renderers: ReviewRenderers
-    diagram_blocks: str | None
-    review_warnings: tuple[str, ...] = ()
-
-    @classmethod
-    def from_classified(
-        cls,
-        pr: PRInfo,
-        classified: ClassifiedIssues,
-        *,
-        event: ReviewEvent,
-        run_info: str,
-        renderers: ReviewRenderers,
-        diagram_blocks: str | None = None,
-        review_warnings: tuple[str, ...] = (),
-    ) -> ClassifiedReviewPlan:
-        """Snapshot a mutable classified review after the caller authorizes it."""
-        return cls(
-            pr=pr,
-            inline=tuple(classified.inline),
-            inline_issues=tuple(replace(issue) for issue in classified.inline_issues),
-            file_level=tuple(replace(issue) for issue in classified.file_level),
-            body_only=tuple(replace(issue) for issue in classified.body_only),
-            event=event,
-            run_info=run_info,
-            renderers=renderers,
-            diagram_blocks=diagram_blocks,
-            review_warnings=review_warnings,
-        )
-
-
-class ReviewTransport(Protocol):
-    """Explicit capability for the two kinds of GitHub review writes."""
-
-    def post_file_comment(self, pr: PRInfo, payload: FileCommentPayload) -> bool: ...
-
-    def post_review(self, pr: PRInfo, payload: ReviewPayload) -> ReviewPostResult: ...
-
-
-def _file_comment_payload_dict(payload: FileCommentPayload) -> dict[str, Any]:
-    return asdict(payload)
-
-
-def _review_payload_dict(payload: ReviewPayload) -> dict[str, Any]:
-    return {
-        "event": payload.event.value,
-        "commit_id": payload.commit_id,
-        "body": payload.body,
-        "comments": [asdict(comment) for comment in payload.comments],
-    }
-
-
-@dataclass(frozen=True)
-class GitHubReviewTransport:
-    """GitHub review writes bound to one repository checkout and auth source."""
-
-    target_dir: Path
-    auth: GitHubAuth = field(repr=False)
-
-    def post_file_comment(self, pr: PRInfo, payload: FileCommentPayload) -> bool:
-        endpoint = f"/repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/comments"
-        try:
-            git_ops.gh_api(
-                self.target_dir,
-                endpoint,
-                method="POST",
-                input_data=_file_comment_payload_dict(payload),
-                auth=self.auth,
-            )
-        except GitError:
-            return False
-        return True
-
-    def post_review(self, pr: PRInfo, payload: ReviewPayload) -> ReviewPostResult:
-        endpoint = f"/repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/reviews"
-        try:
-            data = git_ops.gh_api(
-                self.target_dir,
-                endpoint,
-                method="POST",
-                input_data=_review_payload_dict(payload),
-                auth=self.auth,
-            )
-        except GitError as exc:
-            safe_error = "GitHub review submission failed"
-            if exc.preserved_payload_path is not None:
-                safe_error += (
-                    " (request payload preserved at "
-                    f"{exc.preserved_payload_path})"
-                )
-            return ReviewPostResult(review_url=None, safe_error=safe_error)
-        if not isinstance(data, dict):
-            return ReviewPostResult(review_url=None, safe_error=None)
-        url = data.get("html_url")
-        return ReviewPostResult(
-            review_url=str(url) if url else None,
-            safe_error=None,
-        )
-
-
 # Severities that must never let an opted-in review post as an approval.
 # Fails closed: any string outside ``_NON_BLOCKING_SEVERITIES`` blocks. The
 # findings schema permits arbitrary strings, so unknown/off-vocabulary labels
@@ -846,53 +605,6 @@ def build_payload(
             renderers=renderers,
             diagram_blocks=diagram_blocks,
         )
-    )
-
-
-def post_classified_review(
-    plan: ClassifiedReviewPlan,
-    *,
-    transport: ReviewTransport,
-) -> ClassifiedReviewResult:
-    """Submit ordered file comments, fold failures, then post one final review."""
-    posted: list[ParsedIssue] = []
-    folded: list[ParsedIssue] = []
-    for finding in plan.file_level:
-        payload = FileCommentPayload(
-            commit_id=plan.pr.head_sha,
-            path=finding.path,
-            subject_type="file",
-            body=format_comment_body(finding, "file_level", plan.renderers),
-        )
-        if transport.post_file_comment(plan.pr, payload):
-            posted.append(finding)
-        else:
-            folded.append(finding)
-
-    final_classified = ClassifiedIssues(
-        inline=list(plan.inline),
-        inline_issues=list(plan.inline_issues),
-        file_level=list(posted),
-        body_only=[*plan.body_only, *folded],
-    )
-    review_payload = build_payload_for_event(
-        plan.pr,
-        final_classified,
-        event=plan.event,
-        run_info=plan.run_info,
-        renderers=plan.renderers,
-        diagram_blocks=plan.diagram_blocks,
-        review_warnings=plan.review_warnings,
-    )
-    review_result = transport.post_review(plan.pr, review_payload)
-    posted_review = review_result.review_url is not None
-    return ClassifiedReviewResult(
-        status=SubmissionStatus.POSTED if posted_review else SubmissionStatus.FAILED,
-        review_url=review_result.review_url,
-        posted_file_level=tuple(posted),
-        folded_file_level=tuple(folded),
-        final_review_posted=posted_review,
-        safe_error=None if posted_review else review_result.safe_error,
     )
 
 

@@ -1,9 +1,4 @@
-"""Summary, table, and deep-review status components.
-
-Fix-progress indicators, the iteration divider, the run summary table, the
-issues table, the verdict-join table, the exploration-context summary, and the
-deep-mode stage/verification/preflight notices.
-"""
+"""Fix progress, issue/verdict/exploration summaries, and deep-stage notices."""
 
 import json
 from pathlib import Path
@@ -57,9 +52,7 @@ def print_fix_complete(
     total: int,
     outcome: str | None = None,
 ) -> None:
-    """Report a fix attempt until its verifier returns a terminal verdict.
-
-    Only resolved means applied; other verdicts remain attempted, not fixed."""
+    """Only a resolved verifier outcome means applied; other outcomes remain attempted, not fixed."""
     text = Text()
     text.append("  ", style=Style())
     text.append(f"[{item_num}/{total}] ", style=STYLE_BOLD_CYAN)
@@ -120,10 +113,9 @@ def format_verdict_join(
     other: list[int | None],
     total: int,
 ) -> Table:
-    """Show verdict categories and ids, plus an independently computed total.
-
-    Matched and Structural always appear; other empty categories are omitted.
-    Skipped findings were not selected, whereas unmatched findings lack verdicts."""
+    """Show category ids/counts and an independent total. Matched/Structural always appear;
+    empty other categories are omitted. Skipped findings differ from missing unmatched verdicts.
+    """
     table = Table(
         title="Verdict Join",
         title_style=STYLE_BOLD_GREEN,
@@ -226,9 +218,7 @@ def print_stage_progress(console: Console, current: int, total: int, name: str) 
 
 
 def print_verification_summary(console: Console, verdicts_path: Path) -> None:
-    """Summarize verifier flags and optional selected/skipped counts.
-
-    Missing or malformed artifacts produce no output and cannot block fixing."""
+    """Summarize verifier flags/counts; missing or malformed artifacts cannot block fixing."""
     try:
         data = json.loads(verdicts_path.read_text())
     except (OSError, json.JSONDecodeError):

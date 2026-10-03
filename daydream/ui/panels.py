@@ -1,8 +1,4 @@
-"""Live-updating animated panels.
-
-The thinking panel, the spinner animation, the consolidated tool-call
-Live panel and its multi-panel registry, and the shutdown progress panel.
-"""
+"""Live thinking, tool-call, spinner, and shutdown panels."""
 
 import re
 from collections.abc import Iterator
@@ -307,12 +303,10 @@ class LiveToolPanel:
         else:
             result_content = self._build_result_content_internal()
 
-            if self._is_error:
-                result_title = Text()
-                result_title.append("❌ Error", style=STYLE_BOLD_RED)
-            else:
-                result_title = Text()
-                result_title.append("Output", style=STYLE_BOLD_CYAN)
+            result_title = Text(
+                "❌ Error" if self._is_error else "Output",
+                style=STYLE_BOLD_RED if self._is_error else STYLE_BOLD_CYAN,
+            )
 
             if isinstance(result_content, Text) and not result_content.plain.strip():
                 # Wrap the lone header in Group for return-type consistency.
@@ -352,10 +346,9 @@ class _ActivePanelsGroup:
 
 
 class LiveToolPanelRegistry:
-    """Own one Live context for concurrent tool panels.
-
-    Finalization pauses Live, prints the finished panel, then resumes remaining
-    panels. Task labels are correlated even when callbacks create no panel."""
+    """Own one shared Live context; pause/print/resume when panels finish.
+    Correlate task labels even when callbacks create no panel.
+    """
 
     def __init__(self, console: Console, quiet_mode: bool = False) -> None:
         """Initialize the registry."""

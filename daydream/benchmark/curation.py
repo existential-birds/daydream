@@ -59,13 +59,7 @@ def _clone_cache_key(bundle_path: Path) -> tuple[str, int, int] | None:
 
 @contextmanager
 def _bundle_clone(root: Path, snapshot_doc: dict[str, Any]) -> Iterator[Path]:
-    """Read Git evidence from a cached frozen-bundle clone, independent of the mirror.
-
-    Resolve the authoring path, clone with --no-local --no-checkout under root/cache,
-    and reuse by resolved path plus stat signature for the process lifetime. The
-    bundle exposes origin/base and origin/head refs. Missing or unclonable bundles
-    raise CurationError.
-    """
+    """Read Git evidence from a cached frozen-bundle clone, independent of the mirror."""
     bundle_rel = snapshot_doc.get("bundle_file")
     if not bundle_rel:
         raise CurationError("ready snapshot carries no bundle_file")
@@ -112,11 +106,7 @@ def _bundle_clone(root: Path, snapshot_doc: dict[str, Any]) -> Iterator[Path]:
 
 
 def _head_file_line_count(root: Path, snapshot_doc: dict[str, Any], path: str) -> int:
-    """Count lines at refs/remotes/origin/head in the frozen-bundle clone.
-
-    The original head SHA is not addressable in this bundle. Missing paths or Git
-    failures raise CurationError; an existing empty file has zero lines.
-    """
+    """Count lines at refs/remotes/origin/head in the frozen-bundle clone."""
     with _bundle_clone(root, snapshot_doc) as clone:
         proc = git_process._run_git(
             clone, ["cat-file", "blob", f"refs/remotes/origin/head:{path}"], retries=0
@@ -143,11 +133,7 @@ def _load_case(root: Path, case_id: str) -> dict[str, Any]:
 def _with_case_lock(
     root: Path, case_id: str, op: str, mutate: Callable[[dict[str, Any]], None]
 ) -> None:
-    """Lock, recover interrupted transactions, then load and mutate the latest case.
-
-    Validate and stage only after mutate succeeds. CurationError propagates without
-    changing case bytes; the mutation callback always runs under the lock.
-    """
+    """Lock, recover interrupted transactions, then load and mutate the latest case."""
     with storage.WorkspaceLock(root):
         storage.recover_startup(root)
         raw = _load_case(root, case_id)
@@ -156,11 +142,7 @@ def _with_case_lock(
 
 
 def _changed_file_stats(root: Path, case_id: str, snapshot_doc: dict[str, Any]) -> tuple[int, int]:
-    """Sum base-to-head numstat files and lines from the frozen bundle.
-
-    Its synthetic base tree is the true merge base. Non-ready snapshots return
-    (0, 0); unreadable ready snapshots raise instead of fabricating counts.
-    """
+    """Sum base-to-head numstat files and lines from the frozen bundle."""
     if snapshot_doc.get("status") != "ready":
         return 0, 0
     try:
@@ -189,11 +171,7 @@ def _changed_file_stats(root: Path, case_id: str, snapshot_doc: dict[str, Any]) 
 
 
 def list_cases(root: Path) -> list[dict[str, Any]]:
-    """Read case state with evidence and frozen-diff counts.
-
-    Count all import evidence, falling back to candidate count only for a missing
-    or unreadable import so the resumable index remains usable.
-    """
+    """Read case state with evidence and frozen-diff counts."""
     manifest = load_yaml_strict(Path(root) / "benchmark.yaml")
     out: list[dict[str, Any]] = []
     for case in manifest.get("cases", []):
@@ -235,11 +213,7 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
 def _evidence_list(
     root: Path, raw: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    """Load all evidence in persisted order and attach candidate indices by source ID.
-
-    Non-candidates get None. Missing or unreadable referenced imports propagate
-    storage errors; no substitute list is fabricated.
-    """
+    """Load all evidence in persisted order and attach candidate indices by source ID."""
     source = raw.get("source") or {}
     import_file = source.get("import_file")
     if not import_file:
@@ -258,12 +232,7 @@ def _evidence_list(
 
 
 def get_case(root: Path, case_id: str) -> dict[str, Any]:
-    """Load one read-only case view with full evidence and candidate provenance.
-
-    Join candidates by source id; absent evidence leaves the candidate key absent.
-    Attach the canonical evidence order and its separate prioritized projection only
-    in memory. Missing or unreadable referenced imports propagate storage errors.
-    """
+    """Load one read-only case view with full evidence and candidate provenance."""
     raw = _load_case(root, case_id)
     records = _evidence_list(root, raw)
     projection = _evidence_projection(records, raw)
@@ -280,11 +249,7 @@ def get_case(root: Path, case_id: str) -> dict[str, Any]:
 def _evidence_projection(
     records: list[dict[str, Any]], raw: dict[str, Any]
 ) -> dict[str, dict[str, Any]]:
-    """Project already-loaded records by source id for the candidate view.
-
-    Observed commit ids remain explanatory. Authoring commit ids come only from strict
-    anchors, and the candidate's closed-set ``not_exact_reason`` is copied unchanged.
-    """
+    """Project already-loaded records by source id for the candidate view."""
     candidate_reasons = {
         c.get("source_id"): c.get("not_exact_reason")
         for c in (raw.get("candidates") or [])
@@ -353,10 +318,7 @@ _DELTA_SIGNAL_CODES = {
 
 
 def _reply_parent_index(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Index inline comments by REST database ID and GraphQL node ID.
-
-    Reviews and issue comments cannot be reply parents or share a threadless bucket.
-    """
+    """Index inline comments by REST database ID and GraphQL node ID."""
     index: dict[str, dict[str, Any]] = {}
     for rec in records:
         if rec.get("kind") != "inline_comment":
@@ -372,11 +334,7 @@ def _reply_parent_index(records: list[dict[str, Any]]) -> dict[str, dict[str, An
 
 
 def _thread_key(record: dict[str, Any], parents: dict[str, dict[str, Any]]) -> str | None:
-    """Use GraphQL thread identity, or the top of the REST reply chain.
-
-    A threaded ancestor donates its thread ID. Unrelated threadless records key
-    by themselves, so no shared None bucket can join them.
-    """
+    """Use GraphQL thread identity, or the top of the REST reply chain."""
     seen: set[Any] = set()
     cur = record
     while not cur.get("thread_id"):
@@ -393,52 +351,43 @@ def _thread_key(record: dict[str, Any], parents: dict[str, dict[str, Any]]) -> s
     return cur.get("thread_id") or cur.get("source_id")
 
 
-def collect_signals(record: dict[str, Any], view_context: dict[str, Any]) -> frozenset[str]:
-    """Return distinct resolved, outdated, anchor-delta, and later-PR-author-reply signals.
+def _reply_context(
+    records: list[dict[str, Any]], pr_login: str | None
+) -> tuple[dict[str, dict[str, Any]], dict[Any, str]]:
+    """Index parent chains and each thread's latest PR-author reply once."""
+    parents = _reply_parent_index(records)
+    latest: dict[Any, str] = {}
+    for record in records:
+        created = record.get("created_at")
+        if not pr_login or not created or not record.get("reply_to_id"):
+            continue
+        if (record.get("author") or {}).get("login") != pr_login:
+            continue
+        key = _thread_key(record, parents)
+        latest[key] = max(latest.get(key, created), created)
+    return parents, latest
 
-    Reply evidence uses author, thread, and strictly later timestamps, never text.
-    view_context supplies records, PR author, persisted facts, and optionally a
-    precomputed latest reply per thread; direct callers fall back to scanning.
-    """
-    signals: set[str] = set()
-    if record.get("resolved"):
-        signals.add("resolved")
-    if record.get("outdated"):
-        signals.add("outdated")
+
+def collect_signals(record: dict[str, Any], view_context: dict[str, Any]) -> frozenset[str]:
+    """Return distinct resolved, outdated, anchor-delta, and later-PR-author-reply signals."""
+    signals = {key for key in ("resolved", "outdated") if record.get(key)}
     source_id = record.get("source_id")
     facts = view_context.get("facts") or {}
     for group in ("candidates", "non_candidates"):
-        entry = (facts.get(group) or {}).get(source_id)
-        if entry:
-            code = _DELTA_SIGNAL_CODES.get(entry.get("anchor_delta"))
-            if code:
-                signals.add(code)
+        entry = (facts.get(group) or {}).get(source_id) or {}
+        code = _DELTA_SIGNAL_CODES.get(cast(str, entry.get("anchor_delta")))
+        if code:
+            signals.add(code)
     pr_login = view_context.get("pr_author_login")
     created = record.get("created_at")
     if pr_login and created:
         latest = view_context.get("latest_pr_author_reply")
         parents = view_context.get("reply_parents")
         if latest is None or parents is None:
-            # Fallback for direct callers that did not precompute the
-            # per-thread map: scan the full evidence list as before.
-            parents = _reply_parent_index(view_context.get("records") or [])
-            thread_key = _thread_key(record, parents)
-            for other in view_context.get("records") or []:
-                if other is record or not other.get("reply_to_id"):
-                    continue
-                if _thread_key(other, parents) != thread_key:
-                    continue
-                if ((other.get("author") or {}).get("login")) != pr_login:
-                    continue
-                other_created = other.get("created_at")
-                if not other_created or other_created <= created:
-                    continue
-                signals.add("pr-author-reply")
-                break
-        else:
-            later = latest.get(_thread_key(record, parents))
-            if later is not None and later > created:
-                signals.add("pr-author-reply")
+            parents, latest = _reply_context(view_context.get("records") or [], pr_login)
+        later = latest.get(_thread_key(record, parents))
+        if later is not None and later > created:
+            signals.add("pr-author-reply")
     return frozenset(signals)
 
 
@@ -452,49 +401,32 @@ def classify_evidence(
     commit_relation: str,
     anchor_delta: str,
 ) -> tuple[str, str, list[str]]:
-    """Classify first-match: decided, context, withdrawn, then signal counts.
-
-    Two signals imply likely_actioned; one implies possibly_actioned. Missing or
-    unavailable facts then imply needs_judgment, otherwise review_first. Exactness
-    blockers do not affect rank; reasons retain REASON_CODES order.
-    """
-
-    def ordered(codes: list[str]) -> list[str]:
-        rank = {code: i for i, code in enumerate(REASON_CODES)}
-        return sorted(codes, key=lambda c: rank[c])
-
-    if "finding" in refs and "exclusion" in refs:
-        return "decided", "conflict", ordered(["decided-by-conflict"])
-    if "finding" in refs:
-        return "decided", "finding", ordered(["decided-by-finding"])
-    if "exclusion" in refs:
-        return "decided", "exclusion", ordered(["decided-by-exclusion"])
+    """Classify first-match: decided, context, withdrawn, then signal counts."""
+    decided = refs & {"finding", "exclusion"}
+    if decided:
+        disposition = next(iter(decided)) if len(decided) == 1 else "conflict"
+        return "decided", disposition, [f"decided-by-{disposition}"]
     if not is_candidate:
-        return "context", "n/a", ordered(["non-candidate"])
+        return "context", "n/a", ["non-candidate"]
     if dismissed:
-        return "withdrawn", "undecided", ordered(["dismissed"])
-    if len(signals) >= 2:
-        return "likely_actioned", "undecided", ordered(list(signals))
-    if len(signals) == 1:
-        return "possibly_actioned", "undecided", ordered(list(signals))
-    if commit_relation == "non_ancestor":
-        return "needs_judgment", "undecided", ordered(["commit-non-ancestor"])
-    if commit_relation == "unavailable":
-        return "needs_judgment", "undecided", ordered(["commit-unavailable"])
-    if anchor_delta == "unavailable":
-        return "needs_judgment", "undecided", ordered(["anchor-unavailable"])
-    if not facts_present:
-        return "needs_judgment", "undecided", ordered(["facts-missing"])
+        return "withdrawn", "undecided", ["dismissed"]
+    if signals:
+        band = "likely_actioned" if len(signals) >= 2 else "possibly_actioned"
+        rank = {reason: index for index, reason in enumerate(REASON_CODES)}
+        return band, "undecided", sorted(signals, key=rank.__getitem__)
+    for needs_judgment, reason in (
+        (commit_relation == "non_ancestor", "commit-non-ancestor"),
+        (commit_relation == "unavailable", "commit-unavailable"),
+        (anchor_delta == "unavailable", "anchor-unavailable"),
+        (not facts_present, "facts-missing"),
+    ):
+        if needs_judgment:
+            return "needs_judgment", "undecided", [reason]
     return "review_first", "undecided", []
 
 
 def prioritized_evidence(raw: dict[str, Any]) -> dict[str, Any]:
-    """Project loaded evidence into entries and by_source without Git, network, or writes.
-
-    Sort by band rank, canonical position, then source ID. Each entry retains
-    exactness, disposition, and same-thread peers. Missing facts leave signalled,
-    context, and decided records in those bands; other candidates need judgment.
-    """
+    """Project loaded evidence into entries and by_source without Git, network, or writes."""
     records = raw.get("evidence") or []
     facts = raw.get("prioritization") or None
     curation = raw.get("curation") or {}
@@ -512,22 +444,7 @@ def prioritized_evidence(raw: dict[str, Any]) -> dict[str, Any]:
         e.get("source_id") for e in (curation.get("exclusions") or []) if e.get("source_id")
     }
     pr_login = ((raw.get("pull_request") or {}).get("author") or {}).get("login")
-    latest_pr_author_reply: dict[Any, str] = {}
-    reply_parents = _reply_parent_index(records)
-    if pr_login and records:
-        # Index once for constant-time later-reply checks. Without a GraphQL
-        # thread ID, _thread_key separates REST chains by their root.
-        for other in records:
-            if not other.get("reply_to_id"):
-                continue
-            if ((other.get("author") or {}).get("login")) != pr_login:
-                continue
-            tid = _thread_key(other, reply_parents)
-            t = other.get("created_at")
-            if not t:
-                continue
-            if latest_pr_author_reply.get(tid) is None or t > latest_pr_author_reply[tid]:
-                latest_pr_author_reply[tid] = t
+    reply_parents, latest_pr_author_reply = _reply_context(records, pr_login)
     view_context = {
         "pr_author_login": pr_login,
         "records": records,
@@ -735,11 +652,7 @@ def _evidence_source_ids(root: Path, raw: dict[str, Any]) -> set[str]:
 def _check_evidence_sources(
     root: Path, raw: dict[str, Any], source_ids: Iterable[str], case_id: str
 ) -> None:
-    """Validate references in input order, loading their import projection only once.
-
-    Empty source streams require no import read. Laziness preserves an atom's
-    missing-source error before inspecting later atoms.
-    """
+    """Validate references in input order, loading their import projection only once."""
     evidence_ids = None
     for src in source_ids:
         if evidence_ids is None:
@@ -752,11 +665,7 @@ def _append_atoms_to_case(
     root: Path, raw: dict[str, Any], case_id: str, atoms: list[dict[str, Any]],
     *, authored: bool, require_sources: bool,
 ) -> None:
-    """Validate all sources, reopen curation, and add the derived batch atomically.
-
-    Edited atoms require sources; report an empty source list by atom index before any
-    finding is appended. Re-derive gold status after constructing the complete batch.
-    """
+    """Validate all sources, reopen curation, and add the derived batch atomically."""
     def sources() -> Iterator[str]:
         for i, atom in enumerate(atoms):
             source_ids = list(atom.get("source_ids") or [])
@@ -807,11 +716,7 @@ def add_findings(
 def add_edited_findings(
     root: Path, case_id: str, *, atoms: list[dict[str, Any]]
 ) -> None:
-    """Add an atomic split/merge batch with derived IDs and edited provenance.
-
-    Every atom needs nonempty source_ids backed by import evidence. Reject an
-    empty list by atom index; any invalid source or result leaves the case unchanged.
-    """
+    """Add an atomic split/merge batch with derived IDs and edited provenance."""
 
     def mutate(raw: dict[str, Any]) -> None:
         _append_atoms_to_case(
@@ -825,11 +730,7 @@ def _build_finding(
     case_id: str, replacement: dict[str, Any],
     *, authored: bool = False, kind: str | None = None,
 ) -> dict[str, Any]:
-    """Construct trusted finding fields, provenance, and a content-derived finding id.
-
-    Callers validate source ids first. Ignore any ids or provenance supplied on the atom;
-    only accepted candidates and byte-matching reviewed fragments choose historical kind.
-    """
+    """Construct trusted finding fields, provenance, and a content-derived finding id."""
     source_ids = list(replacement.get("source_ids") or [])
     finding = {
         "title": replacement["title"],
@@ -892,10 +793,7 @@ def _append_evidence_exclusion(
 def exclude_evidence(
     root: Path, case_id: str, source_id: str, *, reason: str, note: str | None = None
 ) -> None:
-    """Exclude one source, replacing any previous row.
-
-    Only reason=other accepts a note, and then a nonblank note is required.
-    """
+    """Exclude one source, replacing any previous row."""
 
     exclude_evidence_batch(root, case_id, [source_id], reason=reason, note=note)
 
@@ -943,10 +841,7 @@ def _demote_ready(curation: dict[str, Any]) -> str | None:
 
 
 def _reopen_for_mutation(curation: dict[str, Any]) -> dict[str, Any]:
-    """Demote ready to draft; leave stale stale but clear its attestation/approval.
-
-    Draft remains writable. Excluded and unreplayable cases reject gold mutations.
-    """
+    """Demote ready to draft; leave stale stale but clear its attestation/approval."""
     state = curation.get("state")
     if state == "ready":
         _demote_ready(curation)
@@ -961,12 +856,7 @@ def _reopen_for_mutation(curation: dict[str, Any]) -> dict[str, Any]:
 
 
 def mark_ready(root: Path, case_id: str, *, head_sha: str, task_spec_sha256: str | None = None) -> None:
-    """Attest the exact frozen head and approved task-spec digest, then mark ready.
-
-    Require a valid ready transition and nonempty or clean-attested gold. When the
-    digest is omitted, derive it under the lock from the state being persisted.
-    Store the approval timestamp with the digest; validate the whole case before commit.
-    """
+    """Attest the exact frozen head and approved task-spec digest, then mark ready."""
 
     def mutate(raw: dict[str, Any]) -> None:
         snapshot_doc = raw.get("snapshot") or {}
@@ -1042,11 +932,7 @@ def exclude_case(
 
 
 def reinclude_case(root: Path, case_id: str) -> None:
-    """Re-include an excluded case to the state its snapshot supports.
-
-    A ready-snapshot case re-includes to ``draft``; an unreplayable-snapshot
-    case to ``unreplayable``. Requires the case be currently ``excluded``.
-    """
+    """Re-include an excluded case to the state its snapshot supports."""
 
     def mutate(raw: dict[str, Any]) -> None:
         curation = raw.setdefault("curation", {})
@@ -1067,11 +953,7 @@ def _fragment_provenance(
     *,
     case_id: str,
 ) -> tuple[str, list[str]]:
-    """Derive historical only for one source whose candidate content matches exactly.
-
-    Other source-backed findings are edited; source-free findings are authored.
-    Ignore the fragment's claimed provenance kind.
-    """
+    """Derive historical only for one source whose candidate content matches exactly."""
     _check_evidence_sources(root, raw, source_ids, case_id)
     if len(source_ids) == 1:
         cand = next(
@@ -1084,11 +966,7 @@ def _fragment_provenance(
 
 
 def apply_gold_fragment(root: Path, case_id: str, fragment: dict[str, Any]) -> None:
-    """Derive and validate a reviewed gold fragment, ignoring forged IDs and status.
-
-    Apply the shared evidence/case exclusion contracts. A ready snapshot becomes
-    draft with snapshot attestation cleared; fragments cannot produce ready gold.
-    """
+    """Derive and validate a reviewed gold fragment, ignoring forged IDs and status."""
 
     def mutate(raw: dict[str, Any]) -> None:
         curation = raw.setdefault("curation", {})

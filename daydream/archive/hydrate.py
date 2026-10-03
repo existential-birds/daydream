@@ -14,27 +14,63 @@ import os
 import re
 import shutil
 import time
-from collections import Counter
-from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass, field, fields as dataclass_fields
-from pathlib import Path, PurePosixPath
-from typing import Any, Protocol, runtime_checkable
+from collections.abc import Iterable
+from pathlib import Path
+from typing import Any
 
 from daydream.archive import hydrate_rules, sanitize
 from daydream.archive._console import warn as _warn
-from daydream.archive.git_safe import normalize_remote_url
-from daydream.archive.hydrate_rules import (
-    REASON_CODE_BUNDLE_UNREADABLE,
-    REASON_CODE_C5_EXCLUDED_REPO,
-    REASON_CODE_C8_COPYLEFT_UNOPTED,
-    REASON_CODE_IDENTITY_COLLISION,
-    REASON_CODE_LICENSE_EVIDENCE_MISSING,
-    REASON_CODE_PATH_TRAVERSAL,
-    REASON_CODE_REPO_COMMIT_UNRESOLVED,
-    REASON_CODE_REPO_IDENTITY_MISSING,
-    REASON_CODE_SANITIZE_FAILED,
-    REASON_CODE_SECRETS_SCAN_DIRTY,
-    REASON_CODE_UNTRUSTED_REMOTE_HOST,
+from daydream.archive.hydrate_admission import (
+    _curated_dir as _curated_dir,
+    _iter_enrichment_cache,
+    _license_bucket as _license_bucket,
+    _manifest_index_fields,
+    _policy_binding as _policy_binding,
+    _repo_license_decision as _repo_license_decision,
+    _session_identity as _session_identity,
+    admission_summary_buckets as admission_summary_buckets,
+    apply_license_gate as apply_license_gate,
+    build_import_ledger as build_import_ledger,
+    build_resolution_map as build_resolution_map,
+    dedupe_admitted as dedupe_admitted,
+    license_admission_by_repo as license_admission_by_repo,
+    license_admission_summary as license_admission_summary,
+    rebuild_index as rebuild_index,
+    resolve_curation_identity as resolve_curation_identity,
+    restamp_admitted_digests as restamp_admitted_digests,
+)
+from daydream.archive.hydrate_discovery import (
+    _is_bare_segment,
+    _validate_relpath as _validate_relpath,
+)
+from daydream.archive.hydrate_stage import (
+    _bundle_dirs,
+    _discovered_session_ids as _discovered_session_ids,
+    _download_discovery_block as _download_discovery_block,
+    _manifest_remote_fields,
+    _read_manifest_dict,
+    _require_manifest_dict as _require_manifest_dict,
+    download_snapshot as download_snapshot,
+    ingest_bundles as ingest_bundles,
+)
+from daydream.archive.hydrate_types import (
+    DedupeResult as DedupeResult,
+    DownloadResult as DownloadResult,
+    HubClient as HubClient,
+    HubConcurrentUpdateError as HubConcurrentUpdateError,
+    HubDownloadError as HubDownloadError,
+    HubUnavailableError as HubUnavailableError,
+    HydrateHubConfig as HydrateHubConfig,
+    HydrateSummary as HydrateSummary,
+    HydrationError as HydrationError,
+    IngestResult as IngestResult,
+    MovingBranchError as MovingBranchError,
+    NoSessionCandidatesError as NoSessionCandidatesError,
+    PublicDestinationError as PublicDestinationError,
+    RepoInfo as RepoInfo,
+    ResumeState as ResumeState,
+    StageError as StageError,
+    VerificationError as VerificationError,
 )
 from daydream.archive.index import query_runs, upsert_run
 from daydream.archive.manifest import Manifest
@@ -42,68 +78,14 @@ from daydream.archive.scan import scan_run_dir
 from daydream.json_utils import atomic_write_json
 from daydream.redaction import redact_text
 from daydream.timeutil import now_iso_utc
-from daydream.training.exclusion import EXCLUSION_PATH
-from daydream.trajectory import RUN_DOCUMENT_NAME, RUNS_DIRNAME
+from daydream.trajectory import RUNS_DIRNAME
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _HEX_PREFIX_RE = re.compile(r"^[0-9a-f]{4,39}$")
 ANNOTATION_BRANCH = "main"
 
-# Missing repository identity or commit counts as missing license evidence.
-# A successful import has no reason code and maps to admitted separately.
-_LICENSE_BUCKET_BY_CODE: dict[str, str] = {
-    REASON_CODE_C5_EXCLUDED_REPO: "c5_excluded",
-    REASON_CODE_C8_COPYLEFT_UNOPTED: "c8_copyleft_unopted",
-    REASON_CODE_LICENSE_EVIDENCE_MISSING: "license_evidence_missing",
-    REASON_CODE_REPO_IDENTITY_MISSING: "license_evidence_missing",
-    REASON_CODE_REPO_COMMIT_UNRESOLVED: "license_evidence_missing",
-}
-_LICENSE_REASON_CODES = frozenset(_LICENSE_BUCKET_BY_CODE)
-_LICENSE_BUCKETS = ("admitted", "c5_excluded", "c8_copyleft_unopted", "license_evidence_missing")
-
-
-class HydrationError(Exception):
-    """Base class for every hydrate failure mode; the orchestrator decides."""
-
-
-class HubConcurrentUpdateError(HydrationError):
-    """An atomic Hub commit was rejected because its parent is no longer head."""
-
-
-class HubUnavailableError(HydrationError):
-    """The ``huggingface_hub`` extra or its ``HF_TOKEN`` prerequisite is missing."""
-
-
-class HubDownloadError(HydrationError):
-    """A requested path/revision does not exist in the Hub repo (fail-closed)."""
-
-
-class StageError(HydrationError):
-    """Staging the pinned snapshot failed (download, digest, or path violation)."""
-
-
-class NoSessionCandidatesError(HydrationError):
-    """The snapshot looks like a run archive but contains no complete sessions."""
-
-
-class MovingBranchError(HydrationError):
-    """A symbolic ref (moving branch/tag) was requested without ``exploratory=True``."""
-
-
-class PublicDestinationError(HydrationError):
-    """The target Hub repo is public — hydration publishes only to private repos (M17)."""
-
-
-class VerificationError(HydrationError):
-    """The clean-room verification cycle failed — success is never reported (M20)."""
-
-
 def resolve_source_revision(client: HubClient, revision: str, *, exploratory: bool) -> str:
-    """Pin a verified full SHA, unique hex prefix, or explicitly allowed moving ref.
-
-    Unknown or ambiguous revisions fail closed. Client errors are redacted before
-    propagation; exploratory refs resolve to their current immutable SHA.
-    """
+    """Pin a verified full SHA, unique hex prefix, or explicitly allowed moving ref."""
     revision = revision.strip()
     if _FULL_SHA_RE.fullmatch(revision.lower()):
         # Normalize hex only; symbolic refs remain case-sensitive.
@@ -144,1288 +126,13 @@ def resolve_source_revision(client: HubClient, revision: str, *, exploratory: bo
     return info.sha
 
 
-@dataclass(frozen=True)
-class RepoInfo:
-    """Minimal repo metadata the hydration flow needs."""
-
-    sha: str
-    private: bool
-
-
-@runtime_checkable
-class HubClient(Protocol):
-    """Narrow Hub surface hydration depends on (list/download/commit/repo-info)."""
-
-    def repo_info(self, revision: str | None = None) -> RepoInfo: ...
-
-    def list_repo_files(self, revision: str | None = None) -> list[str]: ...
-
-    def download_file(self, path_in_repo: str, revision: str | None = None) -> bytes: ...
-
-    def upload_files(
-        self, mapping: dict[str | Path, Path], commit_message: str
-    ) -> None: ...
-
-    @property
-    def repo_private(self) -> bool: ...
-
-
-@dataclass(frozen=True)
-class DownloadResult:
-    """Outcome of one :func:`download_snapshot` pass over the pinned revision."""
-
-    downloaded: int = 0
-    skipped: int = 0
-    digests: dict[str, str] = field(default_factory=dict)  # relpath -> sha256
-    discovered: int = 0
-    run_shaped_manifests: int = 0
-    incomplete_manifests: tuple[str, ...] = ()
-
-
-_REQUIRED_SESSION_ARTIFACTS = frozenset(("manifest.json", RUN_DOCUMENT_NAME))
-_DERIVED_ARCHIVE_ROOTS = frozenset(("annotations", "curated"))
-# Root names that are never valid session ids at depth 1, in either layout.
-# ``bronze`` is the immutable raw-ingest tree (M10): hydration must never
-# discover or stage anything under it.
-_RESERVED_CANONICAL_ROOTS = frozenset(("annotations", "bronze", "bundle", "bundles", "curated"))
-
-
-@dataclass(frozen=True)
-class _DiscoveredSession:
-    """One source-layout session identified by its manifest path."""
-
-    session_id: str
-    source_root: str
-    layout: str
-
-
-@dataclass(frozen=True)
-class _Discovery:
-    """Validated snapshot discovery and its normalized staging file map."""
-
-    sessions: tuple[_DiscoveredSession, ...]
-    normalized_paths: tuple[tuple[str, str], ...]  # (normalized, source)
-    run_shaped_manifests: int
-    canonical_manifests: int
-    legacy_manifests: int
-    incomplete_manifests: tuple[str, ...]
-
-
-def _source_root_for_path(relpath: str) -> str | None:
-    """Return a discovery hint; only a matching manifest and required artifact set admit it as a source root."""
-    parts = PurePosixPath(relpath).parts
-    if not parts or parts[0] in _DERIVED_ARCHIVE_ROOTS:
-        return None
-    if parts[0] == "bundles":
-        if (
-            len(parts) >= 3
-            and _is_bare_segment(parts[1])
-            and parts[1] not in _RESERVED_CANONICAL_ROOTS
-        ):
-            return f"bundles/{parts[1]}"
-        return None
-    if len(parts) >= 2 and _is_bare_segment(parts[0]) and parts[0] not in _RESERVED_CANONICAL_ROOTS:
-        return parts[0]
-    return None
-
-
-def _manifest_source_session(relpath: str) -> _DiscoveredSession | None:
-    """Recognize the two supported manifest layouts without reading content."""
-    parts = PurePosixPath(relpath).parts
-    if len(parts) == 2 and parts[1] == "manifest.json":
-        session_id = parts[0]
-        if _is_bare_segment(session_id) and session_id not in _RESERVED_CANONICAL_ROOTS:
-            return _DiscoveredSession(session_id, session_id, "canonical")
-    if (
-        len(parts) == 3
-        and parts[0] == "bundles"
-        and parts[2] == "manifest.json"
-        and _is_bare_segment(parts[1])
-        and parts[1] not in _RESERVED_CANONICAL_ROOTS
-    ):
-        return _DiscoveredSession(parts[1], f"bundles/{parts[1]}", "legacy")
-    return None
-
-
-def _discover_snapshot(relpaths: list[str]) -> _Discovery:
-    """Discover manifest-backed sessions with trajectories; normalize both layouts and reject path collisions."""
-    manifest_sessions: dict[str, _DiscoveredSession] = {}
-    paths_by_root: dict[str, set[str]] = {}
-    canonical_manifests = 0
-    legacy_manifests = 0
-    for relpath in relpaths:
-        session = _manifest_source_session(relpath)
-        if session is not None:
-            if session.source_root in manifest_sessions:
-                raise StageError(
-                    redact_text(f"duplicate run-shaped manifest path for {session.source_root!r}")
-                )
-            manifest_sessions[session.source_root] = session
-            if session.layout == "canonical":
-                canonical_manifests += 1
-            else:
-                legacy_manifests += 1
-        source_root = _source_root_for_path(relpath)
-        if source_root is not None:
-            paths_by_root.setdefault(source_root, set()).add(relpath)
-
-    complete: list[_DiscoveredSession] = []
-    incomplete: list[str] = []
-    for source_root, session in sorted(manifest_sessions.items()):
-        available = {
-            PurePosixPath(path).relative_to(PurePosixPath(source_root)).as_posix()
-            for path in paths_by_root.get(source_root, set())
-        }
-        missing = sorted(_REQUIRED_SESSION_ARTIFACTS - available)
-        if missing:
-            incomplete.append(f"{source_root} (missing {', '.join(missing)})")
-        else:
-            complete.append(session)
-
-    session_id_counts = Counter(session.session_id for session in complete)
-    duplicates = sorted(
-        session_id for session_id, count in session_id_counts.items() if count > 1
-    )
-    if duplicates:
-        raise StageError(
-            redact_text(
-                "multiple source layouts normalize to the same session id(s): "
-                + ", ".join(repr(value) for value in duplicates)
-            )
-        )
-
-    normalized_paths: dict[str, str] = {}
-    for session in complete:
-        source_root = session.source_root
-        for source_path in sorted(paths_by_root[source_root]):
-            suffix = PurePosixPath(source_path).relative_to(PurePosixPath(source_root)).as_posix()
-            normalized = f"bundles/{session.session_id}/{suffix}"
-            prior = normalized_paths.get(normalized)
-            if prior is not None and prior != source_path:
-                raise StageError(
-                    redact_text(
-                        f"source paths {prior!r} and {source_path!r} collide after normalization "
-                        f"at {normalized!r}"
-                    )
-                )
-            normalized_paths[normalized] = source_path
-
-    return _Discovery(
-        sessions=tuple(sorted(complete, key=lambda item: item.session_id)),
-        normalized_paths=tuple(sorted(normalized_paths.items())),
-        run_shaped_manifests=canonical_manifests + legacy_manifests,
-        canonical_manifests=canonical_manifests,
-        legacy_manifests=legacy_manifests,
-        incomplete_manifests=tuple(incomplete),
-    )
-
-
-def _validate_relpath(relpath: str, root: Path) -> Path:
-    """Require a relative path strictly within staging before writing; escaping paths raise StageError."""
-    p = PurePosixPath(relpath)
-    if p.is_absolute() or any(part == ".." for part in p.parts):
-        raise StageError(
-            redact_text(
-                f"refusing relpath {relpath!r}: traversal — path escapes the staging root"
-            )
-        )
-    target = (root / relpath).resolve()
-    if not target.is_relative_to(root.resolve()):
-        raise StageError(
-            redact_text(
-                f"refusing relpath {relpath!r}: traversal — resolved path escapes the staging root"
-            )
-        )
-    return target
-
-
-def _is_bare_segment(value: str) -> bool:
-    """Accept one nonempty path segment, excluding dot segments and either separator."""
-    return bool(value) and value not in (".", "..") and "/" not in value and "\\" not in value
-
-
-def download_snapshot(
-    client: HubClient,
-    *,
-    revision: str,
-    stage_dir: Path,
-    expect: dict[str, str] | None = None,
-) -> DownloadResult:
-    """Download a pinned snapshot into ``stage_dir/<revision>/bundles/<session-id>``.
-
-    Discover canonical and legacy session layouts; exclude derived/unrelated files.
-    The download manifest records source and normalized paths, digest, size, and time.
-    Resume skips only artifacts matching the recorded digest. ``expect`` can pin
-    source or normalized paths to digests; any disagreement is fatal. Validate paths
-    before writes; download failures remove partial artifacts and raise redacted errors.
-    """
-    revision = str(revision)
-    root = stage_dir / revision
-    manifest_path = root / "_download_manifest.json"
-    records: dict[str, dict[str, Any]] = {}
-    if manifest_path.exists():
-        try:
-            loaded = json.loads(manifest_path.read_text())
-            records = {a["relpath"]: a for a in loaded.get("artifacts", [])}
-        except (OSError, ValueError, KeyError, TypeError):
-            records = {}  # corrupt ledger: rebuild from disk state
-
-    relpaths = list(client.list_repo_files(revision=revision))
-    for relpath in relpaths:
-        # Validate every Hub path, including ignored metadata and derived
-        # output, before applying discovery filters. A malicious ignored path
-        # must not become an escape hatch around the staging trust boundary.
-        _validate_relpath(relpath, root)
-    discovery = _discover_snapshot(relpaths)
-    if not discovery.sessions:
-        details = "; ".join(discovery.incomplete_manifests) or "required artifacts were not found"
-        raise NoSessionCandidatesError(
-            redact_text(
-                f"source revision {revision!r} contains {discovery.run_shaped_manifests} "
-                "run-shaped manifest(s) but discovery produced zero candidates "
-                f"(canonical={discovery.canonical_manifests}, legacy={discovery.legacy_manifests}); "
-                "expected <session-id>/manifest.json plus trajectory.json or "
-                f"bundles/<session-id>/...; {details}"
-            )
-        )
-    downloaded = 0
-    skipped = 0
-    digests: dict[str, str] = {}
-    artifacts: list[dict[str, Any]] = []
-
-    for normalized, source_relpath in discovery.normalized_paths:
-        target = _validate_relpath(normalized, root)
-        expected_sha = (expect or {}).get(source_relpath) or (expect or {}).get(normalized)
-        try:
-            if target.exists():
-                existing = hashlib.sha256(target.read_bytes()).hexdigest()
-                record_sha = records.get(normalized, {}).get("sha256")
-                if expected_sha in (None, existing) and record_sha in (None, existing):
-                    digests[normalized] = existing
-                    skipped += 1
-                    artifacts.append(
-                        {
-                            **records.get(normalized, {}),
-                            "relpath": normalized,
-                            "source_relpath": source_relpath,
-                            "sha256": existing,
-                        }
-                    )
-                    continue
-            data = client.download_file(source_relpath, revision=revision)
-        except HydrationError as exc:
-            raise StageError(redact_text(str(exc))) from exc
-        sha = hashlib.sha256(data).hexdigest()
-        if expected_sha is not None and sha != expected_sha:
-            raise StageError(
-                redact_text(f"digest mismatch for {source_relpath!r}: expected {expected_sha}, got {sha}")
-            )
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(target.name + ".partial")
-        try:
-            tmp.write_bytes(data)
-            tmp.replace(target)
-        except OSError as exc:
-            tmp.unlink(missing_ok=True)
-            raise StageError(redact_text(f"write failed for {normalized!r}: {exc}")) from exc
-        downloaded += 1
-        digests[normalized] = sha
-        artifacts.append(
-            {
-                "relpath": normalized,
-                "source_relpath": source_relpath,
-                "sha256": sha,
-                "size": len(data),
-                "fetched_at": now_iso_utc(),
-            }
-        )
-
-    root.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "revision": revision,
-                "artifacts": artifacts,
-                "candidate_sessions": [session.session_id for session in discovery.sessions],
-                "discovery": {
-                    "run_shaped_manifests": discovery.run_shaped_manifests,
-                    "canonical_manifests": discovery.canonical_manifests,
-                    "legacy_manifests": discovery.legacy_manifests,
-                    "incomplete_manifests": list(discovery.incomplete_manifests),
-                },
-            },
-            indent=2,
-        )
-    )
-    return DownloadResult(
-        downloaded=downloaded,
-        skipped=skipped,
-        digests=digests,
-        discovered=len(discovery.sessions),
-        run_shaped_manifests=discovery.run_shaped_manifests,
-        incomplete_manifests=discovery.incomplete_manifests,
-    )
-
-
-def _read_manifest_dict(bundle_dir: Path) -> dict[str, Any] | None:
-    """Read ``manifest.json`` from ``bundle_dir``; ``None`` when absent/unparseable."""
-    path = bundle_dir / "manifest.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
-def _require_manifest_dict(bundle_dir: Path, *, label: str) -> dict[str, Any]:
-    """Read a derivative manifest fail-closed; ``label`` names it in the error."""
-    data = _read_manifest_dict(bundle_dir)
-    if data is None:
-        raise HydrationError(redact_text(f"{label} has an unreadable manifest"))
-    return data
-
-
-def _bundle_dirs(root: Path) -> list[Path]:
-    """Snapshot the bundle directories in deterministic order before callers move them."""
-    return sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
-
-
-def _derivative_manifests(stage: Path, root: str = RUNS_DIRNAME) -> Iterator[tuple[Path, dict[str, Any]]]:
-    label = "admitted" if root == RUNS_DIRNAME else root
-    for derivative in _bundle_dirs(stage / root):
-        yield derivative, _require_manifest_dict(derivative, label=f"{label} derivative {derivative.name}")
-
-
-def _admitted_session_id(derivative: Path, data: dict[str, Any]) -> str:
-    sid = str(data.get("session_id") or derivative.name)
-    if not _is_bare_segment(sid):
-        raise HydrationError(
-            redact_text(f"admitted derivative {derivative.name} has an unsafe session id {sid!r}")
-        )
-    return sid
-
-
-def _read_manifest_field(data: dict[str, Any], key: str) -> Any:
-    """Read canonical ``git`` provenance first, then the legacy flat field."""
-    git = data.get("git")
-    if isinstance(git, dict) and key in git:
-        return git[key]
-    return data.get(key)
-
-
-def _manifest_remote_fields(data: dict[str, Any]) -> tuple[bool, str | None, str | None]:
-    """Normalize ``remote_url`` to ``(has_url, slug, canonical_url)``; blank is all-None."""
-    raw_url = _read_manifest_field(data, "remote_url")
-    if isinstance(raw_url, str) and raw_url.strip():
-        return True, *normalize_remote_url(raw_url)
-    return False, None, None
-
-
-@dataclass(frozen=True)
-class IngestResult:
-    """Outcome of the ingest gate for one staged session bundle (issue #982 M4/M6)."""
-
-    session_id: str
-    status: str  # "admitted" | "quarantined"
-    reason_code: str | None = None
-
-
-def _read_download_manifest(stage: Path, revision: str) -> dict[str, Any] | None:
-    """Read and parse the download manifest, or ``None`` when it is absent.
-
-    Invalid JSON and a non-dict payload both raise ``HydrationError``
-    fail-closed; both manifest consumers share this read/parse layer.
-    """
-    path = stage / "downloads" / str(revision) / "_download_manifest.json"
-    if not path.is_file():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise HydrationError(redact_text(f"invalid download discovery ledger {path}: {exc}")) from exc
-    if not isinstance(payload, dict):
-        raise HydrationError(redact_text(f"invalid download discovery ledger {path}"))
-    return payload
-
-
-def _download_discovery_block(stage: Path, revision: str) -> dict[str, Any]:
-    """Read discovery diagnostics; legacy manifests return empty, while invalid JSON fails closed."""
-    payload = _read_download_manifest(stage, revision)
-    if payload is None:
-        return {}
-    discovery = payload.get("discovery", {})
-    if not isinstance(discovery, dict):
-        path = stage / "downloads" / str(revision) / "_download_manifest.json"
-        raise HydrationError(redact_text(f"invalid download discovery ledger {path}"))
-    return discovery
-
-
-def _discovered_session_ids(stage: Path, revision: str) -> list[str] | None:
-    """Read the authoritative candidate list, rejecting unsafe or duplicate ids.
-
-    ``None`` permits legacy manually staged trees. A present empty list excludes stale
-    normalized directories from a previous download.
-    """
-    payload = _read_download_manifest(stage, revision)
-    if payload is None:
-        return None
-    if "candidate_sessions" not in payload:
-        return None
-    path = stage / "downloads" / str(revision) / "_download_manifest.json"
-    candidates = payload["candidate_sessions"]
-    if not isinstance(candidates, list) or not all(
-        isinstance(session_id, str) and _is_bare_segment(session_id) for session_id in candidates
-    ):
-        raise HydrationError(redact_text(f"invalid candidate session ids in {path}"))
-    if len(set(candidates)) != len(candidates):
-        raise HydrationError(redact_text(f"duplicate candidate session ids in {path}"))
-    return list(candidates)
-
-
-def ingest_bundles(stage: Path, *, revision: str) -> list[IngestResult]:
-    """Admit discovered bundles through the shared import and sanitization gates.
-
-    Reject unreadable manifests, unsafe session ids, and untrusted remote hosts before
-    using embedded data. ``sanitize.import_bundle`` owns secrets quarantine; strip
-    ``.git`` directories before ``sanitize_bundle`` performs its release scan. Move
-    released derivatives to ``stage/runs`` and persist one outcome per input bundle.
-    Identity collisions are handled by ``dedupe_admitted``.
-    """
-    bundles_root = stage / "downloads" / str(revision) / "bundles"
-    discovered_ids = _discovered_session_ids(stage, revision)
-    bundle_items = (
-        [(bundle_dir.name, bundle_dir) for bundle_dir in _bundle_dirs(bundles_root)]
-        if discovered_ids is None
-        else [(session_id, bundles_root / session_id) for session_id in discovered_ids]
-    )
-    results: list[IngestResult] = []
-    for name, bundle_dir in bundle_items:
-        data = _read_manifest_dict(bundle_dir)
-        if data is None:
-            results.append(IngestResult(name, "quarantined", REASON_CODE_BUNDLE_UNREADABLE))
-            continue
-        session_id = str(data.get("session_id") or name)
-        if not _is_bare_segment(session_id):
-            # M4: the manifest's session id is Hub-provided path data; reject
-            # traversal/absolute ids before any write — the sanitize gate
-            # (which mkdirs from the session id) never sees them.
-            results.append(IngestResult(session_id, "quarantined", REASON_CODE_PATH_TRAVERSAL))
-            continue
-        has_url, identity, _canonical = _manifest_remote_fields(data)
-        if has_url and identity is None:
-            # Non-allowlisted host: rejected as admission data before any
-            # gate work; the raw copy stays in downloads, never indexed.
-            results.append(
-                IngestResult(session_id, "quarantined", REASON_CODE_UNTRUSTED_REMOTE_HOST)
-            )
-            continue
-        gate = sanitize.import_bundle(bundle_dir, stage)
-        if gate.quarantined or not gate.imported:
-            results.append(IngestResult(session_id, "quarantined", REASON_CODE_SECRETS_SCAN_DIRTY))
-            continue
-        # Task 0B constraint: hydrated staging bundles must exclude .git (the
-        # raw download copy is daydream-staged data, safe to prune locally).
-        for git_dir in list(bundle_dir.rglob(".git")):
-            if git_dir.is_dir():
-                shutil.rmtree(git_dir)
-        try:
-            sanitized = sanitize.sanitize_bundle(bundle_dir, stage)
-        except Exception:
-            results.append(IngestResult(session_id, "quarantined", REASON_CODE_SANITIZE_FAILED))
-            continue
-        if not sanitized.released:
-            results.append(IngestResult(session_id, "quarantined", REASON_CODE_SECRETS_SCAN_DIRTY))
-            continue
-        derivative = stage / "sanitized" / session_id
-        target = stage / RUNS_DIRNAME / session_id
-        _move_dir(derivative, target)  # staging layout only, not the gate
-        results.append(IngestResult(session_id, "admitted"))
-    atomic_write_json(
-        bundles_root.parent / "_ingest_results.json",
-        {
-            "revision": str(revision),
-            "results": [
-                {"session_id": r.session_id, "status": r.status, "reason_code": r.reason_code}
-                for r in results
-            ],
-        },
-    )
-    return results
-
-
-def _manifest_repo_slug(data: dict[str, Any]) -> str | None:
-    """Repository identity from a session manifest (nested ``git.repo_slug`` or flat).
-
-    A missing/blank slug stays ``None`` in the row — identity refusal is the
-    admission gate's job (fail-closed there), never a substituted fallback.
-    """
-    raw = _read_manifest_field(data, "repo_slug")
-    return raw if isinstance(raw, str) and raw.strip() else None
-
-
-def _manifest_license_evidence(data: dict[str, Any]) -> dict[str, str] | None:
-    """Declared license evidence (``spdx_id`` + ``source``) from a session manifest.
-
-    Schema-shaped: only the two string fields the frozen curation-manifest
-    schema allows are carried; anything else (missing, blank, non-dict) is ``None``.
-    """
-    raw = data.get("license_evidence")
-    if not isinstance(raw, dict):
-        return None
-    spdx_id = raw.get("spdx_id")
-    if not isinstance(spdx_id, str) or not spdx_id.strip():
-        return None
-    evidence = {"spdx_id": spdx_id.strip()}
-    source = raw.get("source")
-    if isinstance(source, str):
-        evidence["source"] = source
-    return evidence
-
-
-def _repo_license_decision(
-    data: dict[str, Any], policy: Any, allow_copyleft: frozenset[str] | set[str]
-) -> Any:
-    """Resolve one manifest's repo decision from its slug/evidence + gate policy.
-
-    The deferred import keeps ``daydream.training.corpus_projection.license``
-    (which imports this package) from loading at module import time.
-    """
-    from daydream.training.corpus_projection.license import (  # noqa: PLC0415  # local: avoid import cycle at module load
-        resolve_repo_decision,
-    )
-
-    return resolve_repo_decision(
-        _manifest_repo_slug(data) or "",
-        _manifest_license_evidence(data),
-        policy,
-        allow_copyleft,
-    )
-
-
-def _session_identity(stage: Path, sid: str, revision: str, *, root: str, collision: bool) -> \
-        tuple[str | None, dict[str, str] | None]:
-    """Read repo/license identity in derivative precedence, or (None, None) if every manifest is unreadable."""
-    segment = sid if _is_bare_segment(sid) else hashlib.sha256(sid.encode()).hexdigest()
-    candidates = [stage / RUNS_DIRNAME / sid]
-    if collision:
-        candidates.append(stage / "quarantine" / f"{segment}.conflict")
-    candidates += [stage / root / segment,
-                   stage / "downloads" / str(revision) / "bundles" / segment]
-    for candidate in candidates:
-        data = _read_manifest_dict(candidate)
-        if data is not None:
-            return _manifest_repo_slug(data), _manifest_license_evidence(data)
-    return None, None
-
-
-def _iter_enrichment_cache(stage: Path) -> Iterator[dict[str, Any]]:
-    """Yield the dict rows of the enrichment evidence cache, skipping malformed lines."""
-    from daydream.archive.license_enrich import (  # noqa: PLC0415  # local: avoid import cycle at module load
-        _ENRICH_CACHE_NAME,
-        _ENRICH_DIR,
-    )
-
-    path = stage / _ENRICH_DIR / _ENRICH_CACHE_NAME
-    if not path.is_file():
-        return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(entry, dict):
-            yield entry
-
-
-def _repo_commit_unresolved_sessions(stage: Path) -> set[str]:
-    """Session ids whose enrichment could identify a repo but could not pin its commit."""
-    unresolved: set[str] = set()
-    for entry in _iter_enrichment_cache(stage):
-        if entry.get("status") != REASON_CODE_REPO_COMMIT_UNRESOLVED:
-            continue
-        sid = entry.get("session_id")
-        if isinstance(sid, str) and sid:
-            unresolved.add(sid)
-    return unresolved
-
-
-def apply_license_gate(
-    stage: Path,
-    *,
-    revision: str,
-    license_policy_path: str | Path | None,
-    allow_copyleft: frozenset[str] | set[str],
-) -> list[tuple[str, str]]:
-    """Apply the required license policy after ingest, dedupe, and enrichment.
-
-    Resolve exclusion-list, policy, and opt-in decisions from each manifest. Move
-    rejected derivatives to ``excluded/`` and record their stable reason codes so
-    admitted + rejected still equals input. Missing policy fails before gate work.
-    Enrichment's commit-unresolved reason overrides generic missing evidence; decisions
-    otherwise depend only on the policy and recorded evidence.
-    """
-    if not license_policy_path:
-        raise ValueError(
-            "license admission gate requires license_policy_path (fail-closed): "
-            "no license policy file was provided"
-        )
-    from daydream.training.corpus_projection.license import (  # noqa: PLC0415  # local: avoid import cycle at module load
-        load_license_policy,
-    )
-
-    policy, _digest = load_license_policy(license_policy_path)
-    curated = _pre_identity_dir(stage, str(revision))
-    ledger_path = _dedupe_dir(stage, curated.name) / "dedupe.jsonl"
-    rejected: list[tuple[str, str]] = []
-    unresolved = _repo_commit_unresolved_sessions(stage)
-    for derivative, data in _derivative_manifests(stage):
-        sid = _admitted_session_id(derivative, data)
-        decision = _repo_license_decision(data, policy, allow_copyleft)
-        if decision.status != "rejected" or decision.reason_code is None:
-            continue
-        reason_code = decision.reason_code
-        if reason_code == REASON_CODE_LICENSE_EVIDENCE_MISSING and sid in unresolved:
-            # Retain enrichment's specific unresolved-commit reason in the ledger.
-            reason_code = REASON_CODE_REPO_COMMIT_UNRESOLVED
-        _move_dir(derivative, stage / "excluded" / sid)
-        _append_dedupe_entry(ledger_path, sid, str(revision), status="excluded", reason_code=reason_code)
-        rejected.append((sid, reason_code))
-    if rejected:
-        rebuild_index(stage)  # excluded derivatives leave the staging index immediately
-    return rejected
-
-
-def _staging_local_source_path(raw: Any, stage: Path) -> str | None:
-    """Rewrite an embedded ``source_path`` to a staging-local value or ``None``.
-
-    Embedded paths are data: an absolute path outside the staging root is
-    dropped (never dereferenced, never carried into the index).
-    """
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    p = Path(raw)
-    if not p.is_absolute():
-        return raw
-    try:
-        p.relative_to(stage)
-    except ValueError:
-        return None
-    return raw
-
-
-def _manifest_index_fields(data: dict[str, Any]) -> dict[str, Any]:
-    """Decode producer manifest blocks into index fields, retaining flat legacy input."""
-    valid = {f.name for f in dataclass_fields(Manifest)} - {"daydream"}
-    fields = {key: value for key, value in data.items() if key in valid}
-    for block_name in ("run", "git", "code_context", "pr", "metrics", "outcome"):
-        block = data.get(block_name)
-        if not isinstance(block, dict):
-            continue
-        aliases = {
-            "run": {"flow": "run_flow"},
-            "pr": {"number": "pr_number", "repo": "pr_repo"},
-            "outcome": {"labels": "outcome_labels"},
-        }.get(block_name, {})
-        for key, value in block.items():
-            field_name = aliases.get(key, key)
-            if field_name in valid:
-                fields[field_name] = json.dumps(value) if field_name == "outcome_labels" else value
-    return fields
-
-
-def rebuild_index(stage: Path) -> None:
-    """Index admitted derivatives with credential-free URLs and staging-local paths.
-
-    ``archive_path`` names the derivative; embedded ``source_path`` values outside
-    staging are dropped without dereferencing them. Malformed manifests and index
-    write failures propagate rather than silently skipping admitted content.
-    """
-    for derivative, data in _derivative_manifests(stage):
-        # ``daydream`` provenance is a nested dict in produced manifests; the
-        # index expects the executable-provenance object, so it is dropped from
-        # the hydrated rebuild (never coerced into a Manifest field).
-        kwargs = _manifest_index_fields(data)
-        _has_url, slug, canonical = _manifest_remote_fields(data)
-        kwargs["repo_slug"], kwargs["remote_url"] = slug, canonical
-        kwargs["source_path"] = _staging_local_source_path(_read_manifest_field(data, "source_path"), stage)
-        kwargs["archive_path"] = str(derivative)
-        upsert_run(stage, Manifest(**kwargs))
-
-
-def build_resolution_map(
-    stage: Path, *, repo_commits: Mapping[str, str],
-) -> dict[str, Any]:
-    """Group admitted sessions by trusted repo slug and resolved full repository SHA.
-
-    Missing identities or full commits, including raw bundles rejected for untrusted
-    hosts, appear under ``unavailable``. Read the index and downloaded manifests only:
-    never clone, fetch, substitute a raw URL, or use the Hub revision as a repo commit.
-    """
-    cmap: dict[str, Any] = {}
-    unavailable: list[str] = []
-    indexed: set[str] = set()
-    for row in query_runs(stage):
-        indexed.add(str(row["session_id"]))
-        slug = row.get("repo_slug")
-        if not slug:
-            unavailable.append(str(row["session_id"]))
-            continue
-        commit = repo_commits.get(str(slug))
-        if not isinstance(commit, str) or not _FULL_SHA_RE.fullmatch(commit):
-            # No resolved Git repository commit for this slug: reported, never
-            # a fabricated revision (the Hub revision is not a repo commit).
-            unavailable.append(str(row["session_id"]))
-            continue
-        entry = cmap.setdefault(
-            str(slug), {"repo_slug": str(slug), "pinned_sha": commit, "session_ids": []}
-        )
-        entry["session_ids"].append(str(row["session_id"]))
-    # Bundles rejected at admission for a non-allowlisted host never reached the
-    # index; they are still reported under "unavailable" (no raw-URL fallback).
-    for manifest_path in sorted(stage.glob("downloads/*/bundles/*/manifest.json")):
-        data = _read_manifest_dict(manifest_path.parent)
-        if data is None:
-            continue
-        session_id = str(data.get("session_id") or manifest_path.parent.name)
-        if session_id in indexed:
-            continue
-        _has_url, slug, _canonical = _manifest_remote_fields(data)
-        if slug is None and session_id not in unavailable:
-            unavailable.append(session_id)
-    if unavailable:
-        cmap["unavailable"] = sorted(unavailable)
-    return cmap
-
-
-@dataclass
-class DedupeResult:
-    """Outcome of one :func:`dedupe_admitted` pass over ``stage/runs/`` (M7/M8/M9)."""
-
-    admitted: int = 0
-    skipped: int = 0
-    collisions: int = 0
-    collision_ids: list[str] = field(default_factory=list)
-    excluded: list[tuple[str, str]] = field(default_factory=list)  # (session_id, reason_code)
-
-
-def _curated_dir(stage: Path, source_commit: str, binding: dict[str, Any] | None = None) -> Path:
-    """Curated output prefix derived from the source and optional post-gate binding.
-
-    Publications require the v2 policy-bound identity. The unbound historical identity
-    is retained only for pre-gate staging and historical prefixes.
-    """
-    if binding is not None:
-        cid = hydrate_rules.derive_curation_id(
-            source_commit,
-            str(binding["policy_digest"]),
-            str(binding["policy_version"]),
-            binding["allow_copyleft"],
-            str(binding["exclusions_digest"]),
-            str(binding["decisions_digest"]),
-            str(binding["distribution_digest"]),
-        )
-    else:
-        cid = hydrate_rules.derive_pre_identity_curation_id(
-            source_commit,
-            hydrate_rules.SANITIZER_VERSION,
-            hydrate_rules.HYDRATION_INDEX_SCHEMA_VERSION,
-            hydrate_rules.ADMISSION_POLICY_VERSION,
-        )
-    return stage / "curated" / cid
-
-
-def _pre_identity_dir(stage: Path, source_commit: str) -> Path:
-    """Source-scoped staging key for dedupe, restamping, and gate rejections.
-
-    The v2 identity depends on completed gate decisions; this earlier key is never
-    published.
-    """
-    return _curated_dir(stage, source_commit)
-
-
-def _exclusions_digest() -> str:
-    """sha256 over the sorted stable exclusion-codes string of the pinned C5
-    exclusion list (``training/schema/exclusion.txt`` bytes) — a bound identity
-    input, so editing the list changes the curation id."""
-    codes = sorted(
-        line.strip() for line in
-        EXCLUSION_PATH.read_text(encoding="utf-8").splitlines() if line.strip()
-    )
-    canonical = "".join(f"{code}\n" for code in codes)
-    return hashlib.sha256(canonical.encode()).hexdigest()
-
-
-def _policy_binding(
-    stage: Path,
-    source_commit: str,
-    policy: Any,
-    policy_digest: str,
-    allow_copyleft: frozenset[str] | set[str],
-) -> dict[str, Any]:
-    """Bind post-gate decisions and pinned policy inputs to canonical digests.
-
-    Include admitted and license-rejected repos, deduped by slug. Hash sorted
-    ``slug/status/reason/spdx`` lines for decisions and ``spdx/count`` lines for the
-    license distribution. Together with policy version/digest, opt-ins, and exclusion
-    codes, these inputs make replay over identical evidence byte-identical.
-    """
-    decisions: dict[str, tuple[str, str | None, str | None]] = {}
-    for derivative, data in _derivative_manifests(stage):
-        decision = _repo_license_decision(data, policy, allow_copyleft)
-        decisions[str(decision.repo_slug)] = (
-            str(decision.status), decision.reason_code, decision.spdx_id,
-        )
-    # Bind rejected repos too: changed gate reasons must change identity.
-    # Preserve the recorded reason, which may be more specific than a fresh
-    # policy resolution. Fixture/ingest exclusions were never license decisions.
-    recorded_excluded = _DedupeLedger.load(
-        _dedupe_dir(stage, _pre_identity_dir(stage, str(source_commit)).name) / "dedupe.jsonl"
-    ).latest
-    for derivative, data in _derivative_manifests(stage, "excluded"):
-        sid = str(data.get("session_id") or derivative.name)
-        entry = recorded_excluded.get(sid) or {}
-        code = entry.get("reason_code")
-        if code not in _LICENSE_REASON_CODES:
-            continue  # never a license-gate decision, never in the digest
-        decision = _repo_license_decision(data, policy, allow_copyleft)
-        decisions[str(decision.repo_slug)] = (
-            "rejected", str(code), decision.spdx_id,
-        )
-    decision_lines = sorted(
-        f"{slug}\t{status}\t{reason_code or ''}\t{spdx_id or ''}\n"
-        for slug, (status, reason_code, spdx_id) in decisions.items()
-    )
-    decisions_digest = hashlib.sha256("".join(decision_lines).encode()).hexdigest()
-    distribution = Counter(spdx for (_, __, spdx) in decisions.values() if spdx)
-    distribution_lines = sorted(
-        f"{spdx}\t{count}\n" for spdx, count in distribution.items()
-    )
-    distribution_digest = hashlib.sha256("".join(distribution_lines).encode()).hexdigest()
-    return {
-        "policy_digest": str(policy_digest),
-        "policy_version": str(policy.policy_version),
-        "allow_copyleft": set(allow_copyleft),
-        "exclusions_digest": _exclusions_digest(),
-        "decisions_digest": decisions_digest,
-        "distribution_digest": distribution_digest,
-    }
-
-
-def resolve_curation_identity(
-    stage: Path,
-    *,
-    source_commit: str,
-    license_policy_path: str | Path | None,
-    allow_copyleft: frozenset[str] | set[str],
-) -> dict[str, Any]:
-    """Derive the v2 curation id after the license gate from its policy-bound evidence.
-
-    A missing policy fails before derivation; return the binding and derived id.
-    """
-    if not license_policy_path:
-        raise HydrationError(
-            "curation identity requires license_policy_path (fail-closed): "
-            "no license policy file was provided"
-        )
-    from daydream.training.corpus_projection.license import (  # noqa: PLC0415  # local: avoid import cycle
-        load_license_policy,
-    )
-
-    policy, policy_digest = load_license_policy(license_policy_path)
-    binding = _policy_binding(stage, str(source_commit), policy, policy_digest, allow_copyleft)
-    binding["curation_id"] = _curated_dir(stage, str(source_commit), binding=binding).name
-    return binding
-
-
-def _dedupe_dir(stage: Path, curation_id: str) -> Path:
-    """Private ledger and admitted baselines, outside every curated upload prefix."""
-    return stage / "_dedupe" / curation_id
-
-
-def _append_dedupe_entry(
-    path: Path, sid: str, revision: str, *, status: str = "admitted",
-    reason_code: str | None = None, digest: str | None = None,
-) -> None:
-    """Append one JSONL record to the dedupe ledger (same shape as sanitize progress)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    entry = {"session_id": sid, "status": status, "reason_code": reason_code,
-             "content_digest": digest, "revision": str(revision), "at": now_iso_utc()}
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry) + "\n")
-
-
-@dataclass
-class _DedupeLedger:
-    """Three views of the append-only dedupe ledger.
-
-    ``latest`` retains the valid prefix even on corrupt JSONL; corruption clears both
-    admitted views. Collision records never replace admitted baselines or enter
-    ``ever_admitted``. That history retains pristine pre-enrichment digests so repeat
-    ingest restores enriched content instead of quarantining the same source.
-    """
-
-    latest: dict[str, dict[str, Any]] = field(default_factory=dict)
-    admitted: dict[str, str | None] = field(default_factory=dict)
-    ever_admitted: dict[str, set[str]] = field(default_factory=dict)
-
-    @classmethod
-    def load(cls, path: Path) -> _DedupeLedger:
-        ledger = cls()
-        if not path.is_file():
-            return ledger
-        try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                entry = json.loads(line)
-                if not isinstance(entry, dict) or not entry.get("session_id"):
-                    continue
-                sid = str(entry["session_id"])
-                ledger.latest[sid] = entry
-                if entry.get("status") == "admitted":
-                    digest = entry.get("content_digest")
-                    ledger.admitted[sid] = digest
-                    if isinstance(digest, str) and digest:
-                        ledger.ever_admitted.setdefault(sid, set()).add(digest)
-        except (OSError, ValueError):
-            ledger.admitted.clear()
-            ledger.ever_admitted.clear()
-        return ledger
-
-
-def restamp_admitted_digests(stage: Path, *, revision: str) -> None:
-    """Refresh changed admitted baselines and append their enriched content digests.
-
-    Enrichment rewrites manifests after dedupe. The curation manifest and clean-room
-    verification must therefore use the enriched bytes, while dedupe history retains
-    the pristine digest for idempotent re-ingest.
-    """
-    curated = _pre_identity_dir(stage, revision)
-    dedupe_dir = _dedupe_dir(stage, curated.name)
-    baseline_root = dedupe_dir / "admitted"
-    ledger_path = dedupe_dir / "dedupe.jsonl"
-    for derivative in _bundle_dirs(stage / RUNS_DIRNAME):
-        sid = derivative.name
-        digest = sanitize._derivative_digest(derivative)
-        baseline = baseline_root / sid
-        if baseline.is_dir() and sanitize._derivative_digest(baseline) == digest:
-            continue  # unchanged by enrichment; ledger digest stays authoritative
-        if baseline.is_dir():
-            shutil.rmtree(baseline)
-        shutil.copytree(derivative, baseline)
-        _append_dedupe_entry(ledger_path, sid, str(revision), digest=digest)
-
-
-def _move_dir(source: Path, target: Path) -> None:
-    """Move a directory, replacing any prior occupant of ``target``."""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists():
-        shutil.rmtree(target)
-    shutil.move(str(source), str(target))
-
-
-def _deep_artifact_evidence(derivative: Path, data: dict[str, Any]) -> dict[str, object] | None:
-    """Read legacy-status evidence from deep sidecars and derived manifest fields.
-
-    Produced manifests have no ``deep_artifacts`` field. Missing evidence returns
-    ``None`` so legacy revalidation excludes the bundle.
-    """
-    evidence: dict[str, object] = {}
-    deep_dir = derivative / "deep"
-    if deep_dir.is_dir():
-        for path in sorted(deep_dir.glob("*.json")):
-            try:
-                evidence[path.stem] = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-    for key, value in (
-        ("fix_failures", data.get("fix_failures")),
-        ("phase_states", data.get("phase_states")),
-        ("archive_status", data.get("archive_status")),
-    ):
-        if key not in evidence and isinstance(value, (dict, str)):
-            evidence[key] = value
-    return evidence or None
-
-
-def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
-    """Exclude fixtures, revalidate legacy status, then dedupe by session and digest.
-
-    An unknown digest for an admitted session is quarantined at ``<sid>.conflict``;
-    the admitted baseline is restored. Previously admitted digests include pristine
-    pre-enrichment content, so replay restores the enriched baseline as an admission.
-    Record every decision in private dedupe state and rebuild the admitted index.
-    Unreadable manifests and missing required baselines fail closed.
-    """
-    revision = str(revision)
-    curated = _pre_identity_dir(stage, revision)
-    dedupe_dir = _dedupe_dir(stage, curated.name)
-    ledger_path = dedupe_dir / "dedupe.jsonl"
-    baseline_root = dedupe_dir / "admitted"
-    # Collision records never replace the last admitted digest or its history.
-    ledger = _DedupeLedger.load(ledger_path)
-    result = DedupeResult()
-    for derivative, data in _derivative_manifests(stage):
-        sid = _admitted_session_id(derivative, data)
-        try:
-            codes = hydrate_rules.fixture_exclusion_codes(derivative)
-        except (OSError, ValueError):
-            codes = [REASON_CODE_BUNDLE_UNREADABLE]
-        if not codes and "pipeline_status" in data:
-            verdict = hydrate_rules.legacy_pipeline_status(
-                data.get("pipeline_status"), _deep_artifact_evidence(derivative, data),
-            )
-            if isinstance(verdict, tuple):
-                codes = [verdict[1]]
-        if codes:
-            code = codes[0]
-            _move_dir(derivative, stage / "excluded" / sid)
-            _append_dedupe_entry(ledger_path, sid, revision, status="excluded", reason_code=code)
-            result.excluded.append((sid, code))
-            continue
-
-        digest = sanitize._derivative_digest(derivative)
-        baseline = baseline_root / sid
-        status, reason_code = "admitted", None
-        if ledger.admitted.get(sid) not in (None, digest):
-            # Pristine pre-enrichment content is an idempotent re-ingest;
-            # every other changed digest is a collision. Both restore the
-            # published baseline, whose existence is checked before moving bytes.
-            reingest = digest in ledger.ever_admitted.get(sid, set())
-            if not baseline.is_dir():
-                message = (f"cannot restore admitted baseline for {sid}: no admitted baseline exists"
-                           if reingest else f"identity collision for {sid} but no admitted baseline exists")
-                raise HydrationError(redact_text(message))
-            if reingest:
-                shutil.rmtree(derivative)
-                digest = sanitize._derivative_digest(baseline)
-            else:
-                _move_dir(derivative, stage / "quarantine" / f"{sid}.conflict")
-                status, reason_code = "collision", REASON_CODE_IDENTITY_COLLISION
-            shutil.copytree(baseline, stage / RUNS_DIRNAME / sid)
-        elif not baseline.exists():
-            baseline.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(derivative, baseline)
-        _append_dedupe_entry(ledger_path, sid, revision, status=status, reason_code=reason_code, digest=digest)
-        if status == "collision":
-            result.collisions += 1
-            result.collision_ids.append(sid)
-        else:
-            result.admitted += 1
-    rebuild_index(stage)
-    return result
-
-
-def _license_bucket(code: str | None) -> str:
-    """Map a license-gate decision to its human admission bucket."""
-    if code is None:
-        return "admitted"
-    try:
-        return _LICENSE_BUCKET_BY_CODE[code]
-    except KeyError:
-        raise ValueError(
-            f"license admission summary: {code!r} is not a license-gate "
-            "reason code — the summary buckets only partition license decisions"
-        ) from None
-
-
-def admission_summary_buckets(
-    entries: Iterable[tuple[str, str | None]],
-) -> dict[str, int]:
-    """Count license decisions, rejecting codes outside the license gate.
-
-    ``None`` is admitted; missing identity or unresolved commit counts as missing
-    license evidence. The bucket sum equals the adjudicated session count.
-    """
-    buckets: dict[str, int] = dict.fromkeys(_LICENSE_BUCKETS, 0)
-    for _sid, code in entries:
-        buckets[_license_bucket(code)] += 1
-    return buckets
-
-
-def _license_admission_entries(ledger: Mapping[str, Any]) -> list[tuple[str, str | None]]:
-    """Extract every license decision before callers read session manifests."""
-    entries: list[tuple[str, str | None]] = [
-        (str(item["session_id"]), None) for item in ledger.get("imported", [])
-    ]
-    for item in ledger.get("rejections", []):
-        code = item.get("reason_code")
-        if code in _LICENSE_REASON_CODES:
-            entries.append((str(item["session_id"]), str(code)))
-    return entries
-
-
-def license_admission_summary(ledger: Mapping[str, Any]) -> dict[str, int]:
-    """Count imports and license-gate rejections, excluding ingest/fixture failures that the gate never adjudicated."""
-    return admission_summary_buckets(_license_admission_entries(ledger))
-
-
-def license_admission_by_repo(
-    stage: Path, ledger: Mapping[str, Any]
-) -> dict[str, dict[str, int]]:
-    """Group the license summary population by its manifest repo slug.
-
-    Count imports and license-gate rejections only; use ``unresolved`` for missing
-    slugs. Results contain value-free slugs and counts, never embedded URLs or paths.
-    """
-    revision = str(ledger["pinned_revision"])
-    entries = _license_admission_entries(ledger)
-    by_repo: dict[str, dict[str, int]] = {}
-    for sid, code in entries:
-        # Imported sessions still live under stage/runs/<sid> (checked first);
-        # license-gate rejections were moved to stage/excluded/<sid>.
-        slug, _evidence = _session_identity(
-            stage, sid, revision, root="excluded", collision=False
-        )
-        buckets = by_repo.setdefault(slug or "unresolved", dict.fromkeys(_LICENSE_BUCKETS, 0))
-        buckets[_license_bucket(code)] += 1
-    return by_repo
-
-
-def build_import_ledger(
-    stage: Path,
-    *,
-    revision: str,
-    source_commit: str,
-    binding: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Atomically persist admission accounting under the policy-bound curated prefix.
-
-    Combine discovery, ingest, and private dedupe records. Each input must have exactly
-    one outcome. Rejections contain stable codes, session ids, and digests only; no
-    raw URLs, paths, or matched secrets. Read dedupe state from its pre-identity key
-    while writing publication data under the post-gate v2 identity.
-    """
-    revision = str(revision)
-    source_commit = str(source_commit)
-    curated = _curated_dir(stage, source_commit, binding=binding)
-    dedupe_ledger = _dedupe_dir(stage, _pre_identity_dir(stage, source_commit).name) / "dedupe.jsonl"
-    dedupe_state = _DedupeLedger.load(dedupe_ledger)
-
-    ingest_results: list[dict[str, Any]] = []
-    ingest_path = stage / "downloads" / revision / "_ingest_results.json"
-    if ingest_path.is_file():
-        try:
-            loaded = json.loads(ingest_path.read_text(encoding="utf-8"))
-            ingest_results = list(loaded.get("results", []))
-        except (OSError, ValueError, AttributeError):
-            ingest_results = []
-
-    candidate_ids = _discovered_session_ids(stage, revision)
-    if candidate_ids is None:
-        candidate_ids = [str(e["session_id"]) for e in ingest_results]
-    if len(ingest_results) != len(candidate_ids):
-        raise HydrationError(
-            redact_text(
-                f"discovery accounting mismatch for revision {revision!r}: "
-                f"discovered {len(candidate_ids)} candidate(s), "
-                f"ingest produced {len(ingest_results)} result(s)"
-            )
-        )
-
-    imported: list[dict[str, Any]] = []
-    quarantined: list[dict[str, Any]] = []
-    excluded: list[dict[str, Any]] = []
-    seen_session_ids: set[str] = set()
-    for raw_result in ingest_results:
-        sid = str(raw_result["session_id"])
-        if sid in seen_session_ids:
-            raise HydrationError(redact_text(f"duplicate ingest result for candidate session {sid!r}"))
-        seen_session_ids.add(sid)
-        entry = dedupe_state.latest.get(sid) or {}
-        reason_code = raw_result.get("reason_code")
-        if raw_result.get("status") == "admitted":
-            # A current ingest admission can be turned into an exclusion or
-            # collision by the dedupe pass; that decision is the authoritative
-            # current outcome and must not be listed as imported as well.
-            if entry.get("status") == "excluded":
-                excluded.append({"session_id": sid, "reason_code": entry.get("reason_code")})
-            elif entry.get("status") == "collision":
-                quarantined.append({"session_id": sid, "reason_code": entry.get("reason_code")})
-            else:
-                imported.append(
-                    {
-                        "session_id": sid,
-                        "content_digest": dedupe_state.admitted.get(
-                            sid, entry.get("content_digest")
-                        ),
-                    }
-                )
-        elif raw_result.get("status") == "quarantined":
-            quarantined.append({"session_id": sid, "reason_code": reason_code})
-        else:
-            raise HydrationError(redact_text(f"unknown ingest status for candidate {sid!r}"))
-
-    rejections = [
-        {
-            "session_id": str(entry["session_id"]),
-            "reason_code": entry.get("reason_code"),
-            "content_digest": (dedupe_state.latest.get(str(entry["session_id"]), {}) or {}).get("content_digest"),
-        }
-        for entry in sorted(quarantined + excluded, key=lambda item: str(item["session_id"]))
-    ]
-    discovery_block = _download_discovery_block(stage, revision)
-    accounted = len(imported) + len(rejections)
-    if accounted != len(candidate_ids):
-        raise HydrationError(
-            redact_text(
-                f"discovery accounting mismatch for revision {revision!r}: "
-                f"discovered {len(candidate_ids)} candidate(s), admitted {len(imported)}, "
-                f"rejected {len(rejections)}"
-            )
-        )
-
-    ledger: dict[str, Any] = {
-        "schema_version": hydrate_rules.HYDRATION_INDEX_SCHEMA_VERSION,
-        "pinned_revision": revision,
-        "source_commit": source_commit,
-        "curation_id": curated.name,
-        "generated_at": now_iso_utc(),
-        "imported": imported,
-        "quarantined": sorted(quarantined, key=lambda x: x["session_id"]),
-        "excluded": sorted(excluded, key=lambda x: x["session_id"]),
-        "rejections": rejections,
-        "tallies": {
-            "discovered": len(candidate_ids),
-            "run_shaped_manifests": int(
-                discovery_block.get("run_shaped_manifests", len(candidate_ids))
-            ),
-            "incomplete_manifests": [
-                str(item) for item in discovery_block.get("incomplete_manifests", [])
-            ],
-            "imported": len(imported),
-            "quarantined": len(quarantined),
-            "excluded": len(excluded),
-            "rejections": len(rejections),
-            "accounted": accounted,
-        },
-    }
-    atomic_write_json(curated / "import-ledger.json", ledger)
-    return ledger
-
-
 _UPLOAD_ATTEMPTS = 6
 _UPLOAD_BASE_DELAY_S = 2.0
 _UPLOAD_MAX_DELAY_S = 120.0
 
 
-@dataclass(frozen=True)
-class ResumeState:
-    """Resume checkpoint derived from the remote Hub ledger (never VM-local state)."""
-
-    completed_sessions: set[str] = field(default_factory=set)
-    redownloaded: list[str] = field(default_factory=list)
-
-
 def _retry_upload(client: HubClient, mapping: dict[str | Path, Path], commit_message: str) -> None:
-    """Upload with the hub.py commit-conflict retry shape (exponential backoff).
-
-    More attempts than hub.py's warning-path loop, because hydration is fatal
-    on final failure. Content identity never changes across retries (M21).
-    """
+    """Upload with the hub.py commit-conflict retry shape (exponential backoff)."""
     for attempt in range(1, _UPLOAD_ATTEMPTS + 1):
         try:
             client.upload_files(mapping, commit_message)
@@ -1464,13 +171,7 @@ def check_prefix_binding(
     client: HubClient, *, curation_id: str, binding: dict[str, Any],
     allow_unbound_resume: bool = False,
 ) -> None:
-    """Reject conflicting or legacy-unbound published prefixes before any upload.
-
-    Compare the canonical binding bytewise. A missing record is permitted for a fresh
-    prefix, or when ``allow_unbound_resume`` and its resume ledger identify the window
-    between batch publication and finalization. Legacy batches without that ledger
-    fail closed. Errors expose only the prefix and digest fields.
-    """
+    """Reject conflicting or legacy-unbound published prefixes before any upload."""
     prefix = f"curated/{curation_id}/"
     current = _policy_binding_record(binding).encode("utf-8")
     try:
@@ -1517,13 +218,7 @@ def check_prefix_binding(
 def publish_batches(
     client: HubClient, stage: Path, *, curation_id: str, skip_sessions: set[str] | None = None
 ) -> None:
-    """Publish sanitized batches and supporting ledgers under a private curated prefix.
-
-    The caller must check the policy binding first. Verify upload paths before writing;
-    include resolution, resume, and checksum records. ``skip_sessions`` omits verified
-    remote batches from uploads while retaining their checksums and resume records.
-    Upload failures remain fatal after retries; content-addressed paths are idempotent.
-    """
+    """Publish sanitized batches and supporting ledgers under a private curated prefix."""
     if not client.repo_private:
         raise PublicDestinationError(
             "refusing to publish: the Hub repo is not private; hydration "
@@ -1606,11 +301,7 @@ def _write_resolution_map(stage: Path, curated: Path) -> None:
 
 
 def _write_resume_ledger(curated: Path, curation_id: str) -> None:
-    """Write (append) one resume record per admitted batch under ``resume/ledger.jsonl``.
-
-    Content-addressed: re-publishing identical content produces byte-identical
-    records, so the ledger stays deduplicated (latest entry per session wins).
-    """
+    """Write (append) one resume record per admitted batch under ``resume/ledger.jsonl``."""
     source_commit = _curation_source_commit(curated)
     entries = {
         batch.name: {
@@ -1645,12 +336,7 @@ def _write_resume_ledger(curated: Path, curation_id: str) -> None:
 
 
 def resume_state(client: HubClient, *, curation_id: str, stage_dir: Path) -> ResumeState:
-    """Verify remote checkpoint batch digests into staging, without trusting local state.
-
-    Matching batches are completed; missing/mismatched batches are redownloaded.
-    An unavailable ledger yields an empty checkpoint. Corrupt entries, unsafe paths,
-    and batch download failures propagate.
-    """
+    """Verify remote checkpoint batch digests into staging, without trusting local state."""
     prefix = f"curated/{curation_id}/"
     try:
         raw = client.download_file(f"{prefix}resume/ledger.jsonl")
@@ -1695,11 +381,7 @@ def resume_state(client: HubClient, *, curation_id: str, stage_dir: Path) -> Res
 
 
 def _import_hf_hub() -> Any:
-    """Return the ``huggingface_hub`` module, or ``None`` when not installed.
-
-    Kept as a module-level function so tests can monkeypatch it to ``None`` to
-    simulate the missing-extra environment.
-    """
+    """Return the ``huggingface_hub`` module, or ``None`` when not installed."""
     if importlib.util.find_spec("huggingface_hub") is None:
         return None
     import huggingface_hub  # noqa: PLC0415  # lazy: optional extra
@@ -1717,11 +399,7 @@ def _write_sha256sums(curated: Path, prefix: str, relpaths: Iterable[str]) -> No
 
 
 def _make_client(repo_id: str, *, token_present: bool | None = None) -> HfHubClient:
-    """Require the optional Hub package and token, then construct the production adapter.
-
-    ``token_present`` overrides the environment check. Errors name prerequisites only
-    and never echo token material.
-    """
+    """Require the optional Hub package and token, then construct the production adapter."""
     if _import_hf_hub() is None:
         raise HubUnavailableError(
             "The 'huggingface-hub' package is required for hydrate but is not "
@@ -1738,11 +416,7 @@ def _make_client(repo_id: str, *, token_present: bool | None = None) -> HfHubCli
 
 
 class HfHubClient:
-    """Production :class:`HubClient` adapter over a lazily imported ``huggingface_hub``.
-
-    The token is read from ``os.environ["HF_TOKEN"]`` only and is never stored
-    on argv, logged, or included in ``repr``.
-    """
+    """Production :class:`HubClient` adapter over a lazily imported ``huggingface_hub``."""
 
     def __init__(self, repo_id: str) -> None:
         hf = _import_hf_hub()
@@ -1815,12 +489,7 @@ class HfHubClient:
         parent_commit: str,
         branch: str,
     ) -> str:
-        """Commit ``mapping`` as one guarded dataset tree update.
-
-        ``parent_commit`` is the optimistic-concurrency guard for ``branch``.
-        A stale parent can still cause the Hub to pre-upload LFS blobs, but it
-        cannot create a repository-tree commit.
-        """
+        """Commit ``mapping`` as one guarded dataset tree update."""
         from huggingface_hub.errors import HfHubHTTPError  # noqa: PLC0415  # optional lazy dependency
 
         try:
@@ -1862,38 +531,6 @@ class HfHubClient:
                 redact_text(f"atomic commit returned invalid commit OID for {self._repo_id}")
             )
         return oid
-
-
-@dataclass(frozen=True)
-class HydrateHubConfig:
-    """Operator configuration for ``run_hydrate_hub`` (harvest ``RunConfig`` discipline)."""
-
-    source_repo: str
-    source_revision: str
-    destination_repo: str
-    stage_dir: Path
-    exploratory: bool = False
-    # License admission gate (issue #1080): the policy file is the digest-pinned
-    # versioned artifact; allow_copyleft is the exact-slug C8 opt-in set.
-    license_policy_path: str | None = None
-    allow_copyleft: frozenset[str] = frozenset()
-
-
-@dataclass
-class HydrateSummary:
-    """Outcome of one ``run_hydrate_hub`` invocation; ``verified`` gates success."""
-
-    source_commit: str
-    curation_id: str
-    output_commit_sha: str | None = None
-    dry_run_discovered: int = 0
-    dry_run_admitted: int = 0
-    dry_run_rejected: int = 0
-    dry_run_incomplete_manifests: tuple[str, ...] = ()
-    verify_admitted: int = 0
-    verified: bool = False
-    # Four admission buckets from the import ledger; empty without a license policy.
-    license_admission: dict[str, int] = field(default_factory=dict)
 
 
 def _curation_manifest_doc(
@@ -1958,11 +595,7 @@ def _curation_manifest_doc(
 
 def finalize(client: HubClient, stage: Path, *, curation_id: str, source_commit: str,
              binding: dict[str, Any]) -> str:
-    """Publish the curation manifest, policy binding, and final checksums; return its SHA.
-
-    Recheck the remote binding immediately before upload. Exclude ``_SUCCESS`` from
-    both upload and checksums: verification pins this commit before success exists.
-    """
+    """Publish the curation manifest, policy binding, and final checksums; return its SHA."""
     curated = stage / "curated" / curation_id
     ledger_path = curated / "import-ledger.json"
     if not ledger_path.is_file():
@@ -2020,12 +653,7 @@ def verify_publication(
     dry_run_admitted: int,
     source_commit: str,
 ) -> int:
-    """Verify pinned output in a fresh directory and return the admitted count.
-
-    Check every checksum, the frozen manifest schema and identity, each batch's secrets
-    scan and content digest, then rebuild an index from portable artifacts. Blocking
-    findings or count mismatches fail; advisory findings are reported without values.
-    """
+    """Verify pinned output in a fresh directory and return the admitted count."""
     prefix = f"curated/{curation_id}/"
     verify_dir = stage / "_verify"
     if verify_dir.exists():
@@ -2117,11 +745,7 @@ def verify_publication(
 
 
 def prepare_hydration(config: HydrateHubConfig, source_client: HubClient) -> tuple[str, dict[str, Any] | None]:
-    """Stage the exact candidate population shared by preview and publication.
-
-    Dry runs may omit policy and stop after dedupe. With policy, enrich and gate
-    before deriving identity; publication checks that policy is present first.
-    """
+    """Stage the exact candidate population shared by preview and publication."""
     source_commit = resolve_source_revision(
         source_client, config.source_revision, exploratory=config.exploratory,
     )
@@ -2151,12 +775,7 @@ def prepare_hydration(config: HydrateHubConfig, source_client: HubClient) -> tup
 
 
 def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -> HydrateSummary:
-    """Hydrate through admission, policy binding, publication, and clean-room verification.
-
-    Source and destination get separate production clients unless a client is injected.
-    Policy and private-destination checks precede publication. Set ``verified`` and
-    publish the final ``_SUCCESS`` marker only after verification passes.
-    """
+    """Hydrate through admission, policy binding, publication, and clean-room verification."""
     # Direct callers must meet the same policy prerequisite as the CLI.
     if config.license_policy_path is None:
         raise HydrationError(

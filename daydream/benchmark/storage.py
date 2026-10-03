@@ -35,11 +35,7 @@ class LockContentionError(WorkspaceError):
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
-    """A :class:`yaml.SafeLoader` that rejects documents with duplicate keys.
-
-    Duplicate mapping keys in a manifest or case file are almost always a
-    mistake (or a smuggling attempt) — they are treated as corruption.
-    """
+    """A :class:`yaml.SafeLoader` that rejects documents with duplicate keys."""
 
 
 def _construct_mapping(loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False) -> dict[str, Any]:
@@ -60,10 +56,7 @@ _UniqueKeyLoader.add_constructor(
 
 
 def load_yaml_strict(path: Path) -> dict[str, Any]:
-    """Load a mapping or raise ``WorkspaceCorrupt`` for unreadable, invalid, or empty YAML.
-
-    Duplicate keys, non-mapping roots, and unsafe tags are rejected.
-    """
+    """Load a mapping or raise ``WorkspaceCorrupt`` for unreadable, invalid, or empty YAML."""
     try:
         data = yaml.load(Path(path).read_bytes(), Loader=_UniqueKeyLoader)
     except WorkspaceCorrupt:
@@ -91,12 +84,7 @@ def load_json_strict(path: Path) -> dict[str, Any]:
 
 
 def _atomic_write(path: Path, content: bytes, *, mode: int) -> None:
-    """Atomically write ``content`` to ``path`` via the shared primitive.
-
-    Delegates to :func:`daydream.json_utils.atomic_write_bytes` with the same
-    hardening this module always had (strict final file mode, private 0700
-    parent chains, file fsync before the rename).
-    """
+    """Atomically write ``content`` to ``path`` via the shared primitive."""
     ensure_private_dir(path.parent)
     atomic_write_bytes(path, content, mode=mode, fsync=True)
 
@@ -191,19 +179,10 @@ class WorkspaceLock:
         return False
 
 
-# Transaction journal (prepared | committing | complete) + startup recovery
-#
-# A transaction persists a same-filesystem journal under
-# ``<root>/transactions/<op_id>/journal.json`` describing the exact ordered
-# replacement of a set of workspace files. ``benchmark.yaml`` is always
-# replaced last. On startup, ``recover_startup`` rolls a ``prepared`` journal
-# forward-away (targets were never touched), rolls a ``committing`` journal
-# back in reverse from backups/absent-markers, and verifies + cleans a
-# ``complete`` journal. Because the journal lives on the same filesystem as
-# the targets and every phase is fsynced before the next begins, a crash at
-# any boundary restores either the whole before-state or the whole after-state
-# — never a checksum-drifted partial. Recovery is mode-safe: verified targets
-# keep ``0600``, and scaffold dirs kept by ``_remove_created_dirs`` stay ``0700``.
+# Same-filesystem journal: replacements are ordered, with benchmark.yaml last.
+# Recovery discards prepared transactions, restores committing transactions in reverse,
+# and verifies complete transactions. Fsync at each boundary preserves whole before/
+# after states; recovered files remain 0600 and retained scaffold directories 0700.
 
 
 @dataclass
@@ -282,12 +261,7 @@ class Transaction:
             self._created_dirs.append(rel)
 
     def stage(self, target_rel: str | Path, content: bytes) -> None:
-        """Stage ``content`` for an atomic replace of ``target_rel``.
-
-        Writes a staged file + a backup of any prior target under
-        ``transactions/<op_id>/`` and records before/after digests. The real
-        target is not touched here.
-        """
+        """Stage ``content`` for an atomic replace of ``target_rel``."""
         rel = _resolve_target(self._root, target_rel)
         if rel in self._states:
             raise WorkspaceCorrupt(f"{self._root}: duplicate staged target {rel!r}")
@@ -367,12 +341,7 @@ class Transaction:
         _fsync_file(self._journal_path())
 
     def _begin_committing(self) -> None:
-        """Transition the journal to ``committing`` with nothing applied.
-
-        A transaction enters ``committing`` by rewriting the journal with
-        ``state == committing`` and ``applied_count == 0`` before any target
-        is replaced.
-        """
+        """Transition the journal to ``committing`` with nothing applied."""
         self._state = "committing"
         self._applied_count = 0
         self._write_journal()
@@ -757,13 +726,8 @@ def _rollback_committing(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
     _remove_created_dirs(root, doc)
 
 
-
 def _remove_created_dirs(root: Path, doc: dict[str, Any]) -> None:
-    """Remove scaffold subdirs created by an interrupted transaction.
-
-    Only empty directories are removed, deepest first — a subdir that already
-    holds real user content is preserved for the caller to adjudicate.
-    """
+    """Remove scaffold subdirs created by an interrupted transaction."""
     created = doc.get("created_dirs") or []
     for rel in sorted(created, key=len, reverse=True):
         rel = _resolve_target(root, rel)

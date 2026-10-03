@@ -1,0 +1,30 @@
+{
+  "baseline": "e698ba7d11f28e98a660e68172cc87f7ceeb0402",
+  "scope": "All owned Python under daydream/, scripts/, rl/daydream_review/, including published runtime templates; excludes vendored ATIF and RL tests. Newly added modules count.",
+  "physical_counter": "Python str.splitlines; all new production modules included",
+  "source_counter": "scb-check==0.2.0 --report --include-all on snapshots containing only the declared production inventory",
+  "source_runtime": "Python 3.12",
+  "inventory_hash": "SHA256 of sorted relative paths with trailing newlines",
+  "before": {
+    "files": 341,
+    "physical_loc": 113316,
+    "source_loc": 85501,
+    "clone_loc": 2440,
+    "high_cc_functions": 504,
+    "high_cog_functions": 624,
+    "inventory_sha256": "da1ec8cc60740f71f9b15b35db6afc44b0a5d97c10c1c5654a5d29b59481f846"
+  },
+  "after": {
+    "files": 364,
+    "physical_loc": 111607,
+    "source_loc": 85358,
+    "clone_loc": 2381,
+    "high_cc_functions": 502,
+    "high_cog_functions": 621,
+    "inventory_sha256": "65bba3996d14b87195f7240f875c51ec1d09c27e9893bc41cf301e040d0fa175"
+  },
+  "physical_reduction_percent": 1.508,
+  "source_reduction_percent": 0.167,
+  "requested_physical_reduction_percent": 10,
+  "target_met": false
+}

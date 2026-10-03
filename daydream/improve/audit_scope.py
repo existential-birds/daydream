@@ -25,7 +25,7 @@ from daydream.improve.partition import (
     group_partitions,
     stack_by_path,
 )
-from daydream.improve.prompts import (
+from daydream.improve.schemas import (
     CHANGE_SHAPES,
     MAINTENANCE_SIGNALS,
 )

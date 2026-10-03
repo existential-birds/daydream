@@ -35,6 +35,7 @@ from daydream.improve.prompts import (
 )
 from daydream.improve.redaction import redact_model_value
 from daydream.improve.repo_commands import enumerate_repository_commands
+from daydream.output_schema import array_schema
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.repository_paths import canonicalize_working_directory
 from daydream.services import (
@@ -61,10 +62,7 @@ RECON_SCHEMA: dict[str, Any] = {
     ],
     "properties": {
         "languages": {"type": "array", "items": {"type": "string"}},
-        "commands": {
-            "type": "array",
-            "items": RECON_COMMAND_SCHEMA,
-        },
+        "commands": array_schema(RECON_COMMAND_SCHEMA),
         "conventions": {"type": "array", "items": {"type": "string"}},
         "intent_docs": {"type": "array", "items": {"type": "string"}},
     },

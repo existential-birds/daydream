@@ -61,10 +61,8 @@ IMPORT_REASON_CODES = (
 # not flag their own markers.
 REDACTED_PATH = "[REDACTED_PATH]"
 
-# Absolute local path embedded inside a larger string. The lookbehind blocks
-# scheme separators (``https://…``) and UNC double slashes, so canonical git
-# URLs survive untouched; standalone path values are caught by the
-# startswith("/") check in :func:`_redact_path_string`.
+# Match embedded local paths while excluding scheme/UNC separators. Standalone
+# absolute paths are handled by _redact_path_string's leading-slash check.
 _EMBEDDED_ABSOLUTE_PATH_RE = re.compile(r"(?<![:/\w])(/[\w.-]+(?:/[\w.-]+)+)")
 
 # Derive writer fields from the schema; preserve policy provenance and compute legacy
@@ -92,12 +90,7 @@ _TUPLE_FIELDS = (
 
 
 def canonical_payload_digest(row: dict[str, Any], *, include_observed_at: bool) -> str:
-    """Hash the canonical observation payload, optionally including transaction time.
-
-    Auto dedupe omits both ``observed_at`` and a ``valid_at`` collapsed onto it:
-    identical evidence captured at different times is one generation. Human
-    rows include both stamps and collapse only when byte-identical.
-    """
+    """Hash the canonical observation payload, optionally including transaction time."""
     excluded = set()
     if not include_observed_at:
         excluded |= {"observed_at", "valid_at"}
@@ -156,13 +149,7 @@ def redact_metadata_value(value: Any) -> Any:
 
 
 def redact_imported_metadata(rows: list[dict[str, Any]], *, scan_dir: Path) -> dict[str, Any]:
-    """Scrub imported rows, write the payload, and apply the publication scan.
-
-    Blocking findings retain the offending rows but set ``blocked`` and the
-    ``import_unredactable_metadata`` reason. Advisory findings remain visible
-    in the value-free summary and allow publication. Malformed JSON blobs
-    raise; no placeholder evidence is substituted. Publication scans again.
-    """
+    """Scrub imported rows, write the payload, and apply the publication scan."""
     payload: list[dict[str, Any]] = []
     for row in rows:
         session_id = str(row.get("session_id", ""))
@@ -230,17 +217,7 @@ def merge_imported_observations(
     observations_path: Path | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Validate and append linked rows through the canonical archive writer.
-
-    Inputs already name their destination session. Optional file rows join the
-    same plan, sorted by session, observation time, and source. Before writing,
-    reject inventory-digest drift, malformed list JSON, and invalid/naive
-    timestamps. The writer then enforces session existence, auto dedupe, and
-    human precedence; existing observations are never replaced or deleted.
-
-    Return the plan and appended/deduped counts. Dry runs perform validation
-    without writes and return zero counts.
-    """
+    """Validate and append linked rows through the canonical archive writer."""
     imports = list(linked_imports)
     if observations_path is not None and observations_path.is_file():
         loaded = json.loads(observations_path.read_text(encoding="utf-8"))
@@ -311,13 +288,7 @@ def _dedup_tuple(row: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def dedupe_observations(inventories: list[list[dict[str, Any]]]) -> dict[str, Any]:
-    """Merge overlapping inventories without collapsing distinct evidence generations.
-
-    Use the writer's auto evidence tuple plus canonical payload digest; retain
-    the earliest observation time for duplicates. Equal evidence keys with
-    conflicting payloads enter ``content_conflict``. Return sorted surviving
-    ``rows``, ``deduped_count``, and conflicts, accounting for every input row.
-    """
+    """Merge overlapping inventories without collapsing distinct evidence generations."""
     # Group every input row by dedup tuple, carrying its payload digest.
     groups: dict[tuple[Any, ...], list[tuple[dict[str, Any], str]]] = {}
     for inventory in inventories:
@@ -358,17 +329,7 @@ def link_session_identity(
     repo_slug_sha_lookup: dict[tuple[str, str, str], Any],
     unmatched_identity_less: bool = False,
 ) -> dict[str, dict[str, Any]]:
-    """Link records to hydrated sessions by identity/digest, then repo/base/head.
-
-    ``hydrated_index`` maps session ids to derivative digests and record ids;
-    ``repo_slug_sha_lookup`` maps triples to a Hub session id (or a mapping
-    containing ``hub_session_id``). Return ``linked`` matches with their method,
-    plus reason-coded ``unmatched`` and ``identity_conflict`` mappings.
-
-    A digest conflict may still resolve through the repo/SHA fallback. Missing
-    fallback identity raises unless ``unmatched_identity_less`` requests an
-    unmatched record, allowing repo-less local runs to remain in the inventory.
-    """
+    """Link records to hydrated sessions by identity/digest, then repo/base/head."""
     linked: dict[str, dict[str, str]] = {}
     unmatched: dict[str, str] = {}
     identity_conflict: dict[str, str] = {}
@@ -423,14 +384,7 @@ def classify_run_level(
     *,
     projector_findings: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
-    """Partition observations into per-finding, run-level-only, or ambiguous evidence.
-
-    ``projector_findings`` supplies each session's canonical ``record_id`` and
-    ``evidence_sha`` pairs. Run labels never fan out across findings: only a
-    unique decisive identity/evidence match becomes per-finding gold evidence.
-    Missing projections remain run-level-only; non-unique matches enter the
-    adjudication queue. Malformed labels or projection identities raise.
-    """
+    """Partition observations into per-finding, run-level-only, or ambiguous evidence."""
     per_finding: dict[str, list[dict[str, Any]]] = {}
     run_level_only: dict[str, str] = {}
     ambiguous: dict[str, str] = {}
@@ -537,10 +491,7 @@ def accounting(
     link_result: dict[str, Any],
     run_level_result: dict[str, Any],
 ) -> dict[str, int]:
-    """Count surviving and conflicting rows by import reason code.
-
-    The total must equal their combined input count; unclassifiable rows raise.
-    """
+    """Count surviving and conflicting rows by import reason code."""
     counts = {code: 0 for code in IMPORT_REASON_CODES}
     for _row, code in _row_reason_codes(
         merged_rows,
@@ -560,11 +511,7 @@ def run_pure_import(
     projector_findings: dict[str, list[dict[str, Any]]],
     unmatched_identity_less: bool = False,
 ) -> dict[str, Any]:
-    """Compose dedupe, identity linkage, finding classification, accounting, and ledger.
-
-    Accounting covers surviving and conflicting rows; adding deduped_count
-    must recover the full inventory size. Input ordering does not affect output.
-    """
+    """Compose dedupe, identity linkage, finding classification, accounting, and ledger."""
     merged = dedupe_observations(inventories)
     link_result = link_session_identity(
         merged["rows"],
@@ -628,10 +575,7 @@ def build_import_ledger(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def gold_eligible(observation: dict[str, Any]) -> bool:
-    """Admit gold only when labeler, policy, and classifier versions are allowlisted.
-
-    Missing or legacy provenance remains importable evidence but cannot be decisive.
-    """
+    """Admit gold only when labeler, policy, and classifier versions are allowlisted."""
     for field in ("labeler_version", "labeler_policy_version", "reply_classifier_version"):
         value = observation.get(field)
         if not value or str(value) not in KNOWN_LABELER_VERSIONS:
