@@ -211,6 +211,22 @@ def _has_non_daydream_worktree_changes(status: str) -> bool:
     return False
 
 
+def _print_findings_target_mismatch(analyzed_head: str, pr_head: str | None) -> None:
+    """Report a findings export target that is not the analyzed checkout.
+
+    Shared by every mode that writes a findings artifact, so review and diagram
+    runs reject a moved head with the same sentence: both commits, and what the
+    operator can do next.
+    """
+    if pr_head is None:
+        detail = "no pull request matches the analyzed checkout"
+    else:
+        detail = f"analyzed {analyzed_head[:12]}, PR now points at {pr_head[:12]}"
+    print_error(console, "Findings Artifact",
+                f"Target PR does not match the analyzed checkout ({detail}); "
+                "re-run against the new head, or check out and review the superseded commit deliberately.")
+
+
 def _remote_ci_enabled(ctx: FlowContext) -> bool:
     """Run remote verification only after this flow recorded a successful push."""
     deep_state = DeepState(ctx.data)
@@ -522,7 +538,10 @@ async def _run_review_spine(
 
     target_dir = work.repo
 
-    # Findings export is commit-bound. Capture target once and diff explicit SHA endpoints.
+    # Findings export is commit-bound, in every mode that writes an artifact:
+    # capture the target once, before any work happens, and diff explicit SHA
+    # endpoints. Diagram mode captures the same identity but keeps its own
+    # two-dot diff selection below.
     from daydream.pr_review import capture_pr_base_tip, find_open_pr, find_pr_by_number
     from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
 
@@ -532,11 +551,21 @@ async def _run_review_spine(
     try:
         captured_head = git_ops.head_sha(target_dir)
         captured_base = git_ops.resolve_diff_merge_base(target_dir, work.base_branch, captured_head)
+        if config.findings_out is not None and mode == "diagram":
+            captured_pr = (find_pr_by_number(target_dir, config.pr_number, auth=github_execution.auth)
+                           if config.pr_number is not None else find_open_pr(target_dir, auth=github_execution.auth))
+            if captured_pr is None or captured_pr.head_sha != captured_head:
+                _print_findings_target_mismatch(captured_head, None if captured_pr is None else captured_pr.head_sha)
+                return 1
+            # No ``capture_pr_base_tip`` here: a diagram run carries no coverage
+            # record, so the base tip has no consumer. Placement still derives
+            # from the analyzed commit's own merge base.
+            captured_pr = replace(captured_pr, base_sha=captured_base)
         if config.findings_out is not None and mode != "diagram":
             captured_pr = (find_pr_by_number(target_dir, config.pr_number, auth=github_execution.auth)
                            if config.pr_number is not None else find_open_pr(target_dir, auth=github_execution.auth))
             if captured_pr is None or captured_pr.head_sha != captured_head:
-                print_error(console, "Findings Artifact", "Target PR does not match the analyzed checkout")
+                _print_findings_target_mismatch(captured_head, None if captured_pr is None else captured_pr.head_sha)
                 return 1
             pr_base_sha = capture_pr_base_tip(target_dir, captured_pr, auth=github_execution.auth)
             captured_pr = replace(captured_pr, base_sha=captured_base)

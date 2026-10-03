@@ -21,6 +21,7 @@ from daydream.findings import write_findings_artifact
 from daydream.pr_review import diagram_marker, parse_diagram_markers, validate_diagram_payload
 from daydream.runner import run
 from tests.harness import diagram_repos as dr
+from tests.harness.console import collapse_panel_text
 from tests.harness.diagram_repos import build_large_cross_module_repo, load_diagram_artifact as _artifact
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git
@@ -39,10 +40,13 @@ def diagram_run(monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., Any]
 ) -> Callable[..., Any]:
     """Run a ``--diagram-only`` flow with a diagram-scripted stub backend."""
     for module in (
-        "daydream.deep.orchestrator", "daydream.deep.review_steps", "daydream.deep.diagram_steps", "daydream.phases",
+        "daydream.deep.review_steps", "daydream.deep.diagram_steps", "daydream.phases",
         "daydream.runner", "daydream.pr_review",
     ):
         silence_console(module)
+    # The orchestrator's error panels stay observable: a run that refuses to
+    # export is only actionable if the operator can read why.
+    silence_console("daydream.deep.orchestrator", keep=("console", "print_error"))
     silence(monkeypatch)
 
     async def _run(target: Path, *, diagram: str = "auto", specs: dict[str, list[dict[str, Any]]] | None = None,
@@ -256,6 +260,31 @@ async def test_findings_out_writes_a_diagram_artifact_phase_b_reposts_it(
     assert len(posted) == 1
     assert expected in posted[0]["body"]
     assert fake_gh.calls("POST", "/repos/acme/widgets/pulls/7/reviews") == []
+
+
+async def test_findings_out_rejects_a_moved_head_before_diagram_export(
+    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A PR head that left the analyzed checkout ends a findings-out diagram run."""
+    target = dr.build_branch_heavy_repo(tmp_path)
+    base = git(target, "rev-parse", "main")
+    fake_gh.serve_pr_view({"number": 7, "state": "OPEN", "headRefName": "feature", "baseRefName": "main",
+        "headRefOid": base, "headRepository": {"name": "widgets", "nameWithOwner": "acme/widgets"},
+        "headRepositoryOwner": {"login": "acme"}, "url": "https://github.com/acme/widgets/pull/7", "body": ""})
+    artifact_path = tmp_path / "findings.json"
+
+    exit_code, stub = await diagram_run(
+        target, diagram="flowchart", specs={"flowchart": [dr.flowchart_spec()]},
+        findings_out=str(artifact_path), pr_number=7,
+    )
+
+    assert exit_code == 1
+    assert not artifact_path.exists()
+    assert stub.calls == [], "the run must reject before spending an agent turn"
+    panel = collapse_panel_text(capsys)
+    assert base[:12] in panel and git_ops.head_sha(target)[:12] in panel
+    assert "re-run against the new head" in panel
+
 
 async def test_phase_b_reposts_a_diagram_artifact_without_any_checkout(
     tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], monkeypatch: pytest.MonkeyPatch,
