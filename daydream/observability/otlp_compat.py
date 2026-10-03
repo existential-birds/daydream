@@ -1,7 +1,5 @@
-"""Bounded OTLP encoding, acknowledgments, HTTP transport and pinned gRPC bridge.
-
-Fidelity repair and retry/deadline handling are locally owned. Environment and
-SDK globals remain untouched; transports do not delegate nested retry loops.
+"""Owned bounded OTLP encoding, fidelity repair, acknowledgments, and transport retries.
+Environment/SDK globals stay untouched; nested SDK retry loops are bypassed.
 """
 
 from __future__ import annotations
@@ -176,12 +174,10 @@ def classify_http_ack(
     body: bytes | None,
     complete: bool,
 ) -> tuple[str, int]:
-    """Return (verdict, rejected) for a complete, bounded HTTP 200 acknowledgment.
+    """Classify complete bounded HTTP 200 acknowledgments. Empty bodies succeed.
 
-    Empty bodies succeed regardless of content type. Nonempty bodies require a
-    protobuf response or JSON object with success=true and no error/errors key.
-    Media types are case-insensitive. Positive partial rejection is terminal failure;
-    zero-rejection partial success is accepted with a warning. Neither is retried.
+    Nonempty bodies need protobuf or JSON success=true without error/errors; media
+    types are case-insensitive. Partial rejection fails, zero rejection warns; neither retries.
     """
     if status != 200:
         return (_ACK_MALFORMED, 0)
@@ -312,10 +308,9 @@ def resolve_ssl_context(
 
 
 class HttpxOtlpTransport:
-    """Own one portal/client and enforce a whole-operation deadline per export.
+    """Own portal/client with one export deadline covering send/read/backoff.
 
-    Sending, bounded response reads and backoff share the deadline. Ambiguous
-    post-send timeout is unverified and never retried; shutdown closes owners once.
+    Ambiguous post-send timeout is unverified, never retried; shutdown closes once.
     """
 
     def __init__(
@@ -379,7 +374,7 @@ class HttpxOtlpTransport:
             return SpanExportResult.FAILURE
 
     def export_batch(self, spans: Sequence[ReadableSpan], *, timeout_s: float) -> SpanExportResult:
-        """Encode inside the monotonic budget, then run the attempt loop."""
+        """Encode within the monotonic budget, then run the HTTP attempt loop."""
         if self._state != "OPEN":
             return SpanExportResult.FAILURE
         self._start = self._clock()
@@ -540,10 +535,8 @@ def _grpc_retry_delay(exc: Any) -> float | None:
 
 
 class GrpcBridge:
-    """Own bounded retries over the pinned OTel 1.44 private unary Export surface.
-
-    Version/surface drift fails initialization. Each attempt uses remaining time;
-    the delegate's retry loop is never called.
+    """Own retries over pinned OTel 1.44 unary Export; surface/version drift fails setup. Delegate
+    retry loops are bypassed.
     """
 
     def __init__(self, delegate: GrpcExporter, ledger: DeliveryLedger) -> None:
@@ -572,12 +565,7 @@ class GrpcBridge:
         return self._delegate
 
     def export_batch(self, spans: Sequence[ReadableSpan], *, timeout_s: float) -> SpanExportResult:
-        """One owned export with a single-retry policy for RESOURCE_EXHAUSTED.
-
-        Exactly one unary ``Export(remaining)`` per attempt, never the delegate's
-        retry loop. Only RESOURCE_EXHAUSTED with a parseable RetryInfo earns one
-        in-deadline retry; every other failure is terminal.
-        """
+        """Call unary Export with remaining time; only RESOURCE_EXHAUSTED plus RetryInfo earns one in-deadline retry."""
         if self._state != "OPEN" or getattr(self._delegate, "_shutdown", False):
             return SpanExportResult.FAILURE
         request = encode_batch(spans)

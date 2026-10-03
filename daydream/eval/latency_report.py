@@ -1,10 +1,9 @@
-"""Compare latency, recall, and shipped-lens contributions over a fixed corpus.
+"""Compare observed corpus latency, recall, and shipped-lens attribution.
 
-Report only observed runs, with zeroed missing profiles and no population-level
-claims. Shipped attribution uses required lens fields; citation coverage is a
-separate measure from raw pre-merge attribution. Cold/warm/ungrouped samples use
-nearest-rank percentiles. Optional verifier-selection reports label item-ratio
-latency projections separately from the archived measured arm."""
+Missing profiles are zeroed; nearest-rank cold/warm/ungrouped percentiles describe
+only observed runs. Citation coverage is separate from attribution. Selection
+latency projections remain labeled separately from measured archived arms.
+"""
 
 from __future__ import annotations
 
@@ -145,6 +144,7 @@ def _phase_timings(evaluation: Mapping[str, Any]) -> dict[str, float | None]:
                 break
     return result
 
+
 _UNGROUPED = "ungrouped"
 """Sample-group key for a case that declares no ``sample_group``."""
 
@@ -164,9 +164,7 @@ def _seconds_text(value: float) -> str:
     return f"{value:g}"
 
 
-def _case_sample_series(
-    case: Mapping[str, Any], root: Path
-) -> tuple[dict[str, list[float]], list[dict[str, str]]]:
+def _case_sample_series(case: Mapping[str, Any], root: Path) -> tuple[dict[str, list[float]], list[dict[str, str]]]:
     """Load named elapsed-time series from inline profiles or archived evaluations.
 
     Report unreadable run files with their paths/reasons rather than silently dropping them."""
@@ -197,9 +195,7 @@ def _case_sample_series(
     return series, skipped
 
 
-def _runtime_report(
-    manifest: Mapping[str, Any], cases: Sequence[Mapping[str, Any]], root: Path
-) -> dict[str, Any]:
+def _runtime_report(manifest: Mapping[str, Any], cases: Sequence[Mapping[str, Any]], root: Path) -> dict[str, Any]:
     """Group measured samples by declared sample_group, defaulting to ungrouped.
 
     Omit empty groups; report observed case counts and shared nearest-rank percentiles."""
@@ -223,10 +219,7 @@ def _runtime_report(
     rendered: dict[str, Any] = {}
     lines = [f"Review runtime corpus: {corpus}", _RUNTIME_TARGET]
     for group_name, bucket in groups.items():
-        profiles = {
-            name: _percentiles(values)
-            for name, values in bucket["profiles"].items()
-        }
+        profiles = {name: _percentiles(values) for name, values in bucket["profiles"].items()}
         rendered[group_name] = {"n": bucket["n"], "profiles": profiles}
         parts = [
             f"{name} p50={_seconds_text(stats['p50'])} p90={_seconds_text(stats['p90'])}"
@@ -376,9 +369,7 @@ def _empty_mode_counts() -> dict[str, int]:
     }
 
 
-def _selection_mode_report(
-    counts: Mapping[str, int], samples: Sequence[float], *, projected: bool
-) -> dict[str, Any]:
+def _selection_mode_report(counts: Mapping[str, int], samples: Sequence[float], *, projected: bool) -> dict[str, Any]:
     """Render one selection mode's counters plus the nearest-rank latency figures."""
     anchor_total = counts["anchor_total"]
     recall = round(counts["selected_anchors"] / anchor_total, 4) if anchor_total else 0.0
@@ -399,10 +390,10 @@ def _selection_mode_report(
 
 
 def _selection_block(cases: Sequence[Mapping[str, Any]], root: Path) -> dict[str, Any]:
-    """Compare conservative and selective verification over the same archived cases.
+    """Compare archived verification modes; proposed latency uses selected-item ratios.
 
-    Current latency is measured; proposed latency is projected by selected-item ratio.
-    Only contradictions and recall gate flip_allowed, never projected latency."""
+    Only contradictions and recall gate flip_allowed, never projected latency.
+    """
     current = _empty_mode_counts()
     proposed = _empty_mode_counts()
     case_names: list[str] = []
@@ -449,9 +440,7 @@ def _selection_block(cases: Sequence[Mapping[str, Any]], root: Path) -> dict[str
             # exemption (structural / wonder) is recorded in the decision list
             # but is not a skip the mode chose to make, so a ``verify_all`` run
             # reports zero skipped (mirrors phases.py selection_block).
-            counts["skipped"] += sum(
-                1 for decision in rejected if decision.reason_code == SKIP_REASON_CODE
-            )
+            counts["skipped"] += sum(1 for decision in rejected if decision.reason_code == SKIP_REASON_CODE)
             counts["contradictory_fixes"] += sum(
                 1
                 for decision in rejected
@@ -486,9 +475,7 @@ def _selection_block(cases: Sequence[Mapping[str, Any]], root: Path) -> dict[str
     }
 
 
-def build_report(
-    manifest: Mapping[str, Any], *, corpus_dir: Path | None = None
-) -> dict[str, Any]:
+def build_report(manifest: Mapping[str, Any], *, corpus_dir: Path | None = None) -> dict[str, Any]:
     """Aggregate corpus profiles; an explicit corpus_dir overrides the manifest-relative root."""
     if not isinstance(manifest, Mapping):
         raise ValueError("corpus manifest must be a JSON object")
@@ -506,9 +493,7 @@ def build_report(
     shipped_total: dict[str, int] = dict.fromkeys(LATENCY_PROFILES, 0)
     false_positives: dict[str, int] = dict.fromkeys(LATENCY_PROFILES, 0)
     contested: dict[str, list[int]] = {profile: [0, 0] for profile in LATENCY_PROFILES}
-    shipped_by_lens: dict[str, dict[str, int]] = {
-        profile: dict.fromkeys(_LENSES, 0) for profile in LATENCY_PROFILES
-    }
+    shipped_by_lens: dict[str, dict[str, int]] = {profile: dict.fromkeys(_LENSES, 0) for profile in LATENCY_PROFILES}
     unattributed: dict[str, int] = dict.fromkeys(LATENCY_PROFILES, 0)
     decisions: dict[str, list[dict[str, Any]]] = {profile: [] for profile in LATENCY_PROFILES}
     citations_present = 0
@@ -557,26 +542,15 @@ def build_report(
             unattributed[str(profile)] += attribution["unattributed"]
             citations_present += attribution["citations_present"]
             citations_total += attribution["total"]
-            decisions[str(profile)].append(
-                {"case": name, **_decision(routing)}
-            )
+            decisions[str(profile)].append({"case": name, **_decision(routing)})
 
     profiles_report: dict[str, Any] = {}
     for profile in LATENCY_PROFILES:
         runs = len(decisions[profile])
-        phase_latency = {
-            phase: _percentiles(samples[profile][phase])
-            for phase in _PROFILE_PHASE_TIMING_KEYS
-        }
-        recall = (
-            round(golden_found[profile] / golden_total[profile], 4)
-            if golden_total[profile]
-            else 0.0
-        )
+        phase_latency = {phase: _percentiles(samples[profile][phase]) for phase in _PROFILE_PHASE_TIMING_KEYS}
+        recall = round(golden_found[profile] / golden_total[profile], 4) if golden_total[profile] else 0.0
         false_positive_rate = (
-            round(false_positives[profile] / shipped_total[profile], 4)
-            if shipped_total[profile]
-            else 0.0
+            round(false_positives[profile] / shipped_total[profile], 4) if shipped_total[profile] else 0.0
         )
         profiles_report[profile] = {
             "runs": runs,

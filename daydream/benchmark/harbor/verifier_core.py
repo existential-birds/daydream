@@ -249,13 +249,9 @@ def assign_candidate_id(
 
 
 def _canonical_tuple(finding: object) -> tuple[object, ...]:
-    return (
-        str(_finding_component(finding, "title") or ""),
-        str(_finding_component(finding, "body") or ""),
-        str(_finding_component(finding, "severity") or ""),
-        str(_finding_component(finding, "path") or ""),
-        str(_finding_component(finding, "start_line") or ""),
-        str(_finding_component(finding, "end_line") or ""),
+    return tuple(
+        str(_finding_component(finding, name) or "")
+        for name in ("title", "body", "severity", "path", "start_line", "end_line")
     )
 
 
@@ -672,14 +668,8 @@ def reward_details(
     cand_ids = [_candidate_id(c) for c in candidates]
     return {
         "verdicts": [
-            {
-                "gold_id": v.gold_id,
-                "candidate_id": v.candidate_id,
-                "match": v.match,
-                "confidence": v.confidence,
-                "reasoning": v.reasoning,
-            }
-            for v in verdicts
+            {name: getattr(verdict, name) for name in ("gold_id", "candidate_id", "match", "confidence", "reasoning")}
+            for verdict in verdicts
         ],
         "matches": [
             {"gold_id": g, "candidate_id": c} for g, c in sorted(matches)
@@ -791,21 +781,16 @@ def _axis_aggregates(
     """
     n_loc = location_pairs
     n_sev = severity_pairs
+    tiers = {tier: loc_tiers[tier] for tier in ("exact", "near", "file", "miss")}
     return {
-        "location_exact": loc_tiers["exact"],
-        "location_near": loc_tiers["near"],
-        "location_file": loc_tiers["file"],
-        "location_miss": loc_tiers["miss"],
-        "location_exact_rate": loc_tiers["exact"] / n_loc if n_loc else 0.0,
-        "location_near_rate": loc_tiers["near"] / n_loc if n_loc else 0.0,
-        "location_file_rate": loc_tiers["file"] / n_loc if n_loc else 0.0,
-        "location_miss_rate": loc_tiers["miss"] / n_loc if n_loc else 0.0,
+        **{f"location_{tier}": count for tier, count in tiers.items()},
+        **{
+            f"location_{tier}_rate": count / n_loc if n_loc else 0.0
+            for tier, count in tiers.items()
+        },
         "location_credit": loc_credit_sum / n_loc if n_loc else 0.0,
         "location_pairs_scored": n_loc,
-        "total_location_exact": loc_tiers["exact"],
-        "total_location_near": loc_tiers["near"],
-        "total_location_file": loc_tiers["file"],
-        "total_location_miss": loc_tiers["miss"],
+        **{f"total_location_{tier}": count for tier, count in tiers.items()},
         "severity_exact": sev_exact,
         "severity_within_1": sev_within_1,
         "severity_exact_rate": sev_exact / n_sev if n_sev else 0.0,

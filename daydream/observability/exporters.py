@@ -1,7 +1,5 @@
-"""Destination factories and native compatibility attributes over bounded OTLP transports.
-
-Presets isolate authentication/TLS from generic settings; generic OTLP honors
-signal-specific/shared settings. Each runtime owns its exporter and delivery ledger.
+"""Owned OTLP destinations and native aliases. Presets isolate auth/TLS; generic OTLP honors signal-
+over-shared settings. Each runtime owns delivery state.
 """
 
 from __future__ import annotations
@@ -280,9 +278,7 @@ def _grpc_generic_exporter(timeout: float, config: ObservabilityConfig) -> SpanE
     else:
         parsed = urlsplit("http://localhost:4317")
         insecure = None
-    compression = (
-        grpc.Compression.Gzip if _otlp_compression_setting() == "gzip" else grpc.Compression.NoCompression
-    )
+    compression = grpc.Compression.Gzip if _otlp_compression_setting() == "gzip" else grpc.Compression.NoCompression
     from opentelemetry.metrics import NoOpMeterProvider
 
     ledger = DeliveryLedger()
@@ -332,11 +328,7 @@ def _langsmith_usage(attributes: Mapping[str, AttributeValue]) -> dict[str, Any]
 
 
 def _copy_span(span: ReadableSpan, attributes: Mapping[str, AttributeValue]) -> ReadableSpan:
-    """Clone identity and attributes while preserving bounded event/link containers.
-
-    Their public tuple views lose dropped counts. Adapters share the untouched
-    containers and retain exact event/link ordering.
-    """
+    """Copy spans while sharing untouched event/link containers, preserving ordering and dropped counts."""
     return ReadableSpan(
         name=span.name,
         context=span.context,
@@ -356,11 +348,7 @@ def _copy_span(span: ReadableSpan, attributes: Mapping[str, AttributeValue]) -> 
 def _preserved_attributes(
     span: ReadableSpan, additions: Mapping[str, AttributeValue]
 ) -> BoundedAttributes | dict[str, AttributeValue]:
-    """Add vendor attributes with enough capacity to retain every existing/additional key.
-
-    Copy original bounded dropped counts verbatim. Plain dict inputs retain the
-    SDK's zero dropped-count behavior.
-    """
+    """Add keys without dropping existing attributes; preserve original bounded dropped counts."""
     original = getattr(span, "_attributes", None)
     if isinstance(original, BoundedAttributes):
         capacity = max(original.maxlen or 0, len(original) + len(additions))

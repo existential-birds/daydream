@@ -1,8 +1,4 @@
-"""Operator-only tracing settings and the exporter factory contract.
-
-Destination credentials and transport settings stay in the operator environment;
-this immutable value contains no secrets and never reads reviewed repository files.
-"""
+"""Immutable operator tracing settings; secrets stay in the environment, never reviewed repository files."""
 
 from __future__ import annotations
 
@@ -55,10 +51,8 @@ class ObservabilityConfig:
 
 
 class TraceExporterFactory(Protocol):
-    """Build an owned synchronous OTel exporter when a selected run starts.
-
-    Registration and ``ext validate`` never invoke factories. The runtime owns
-    exporter flushing and shutdown, including cleanup after partial setup failure.
+    """Build an owned exporter only at run start; runtime flushes/closes even partial setup.
+    Registration and ext validate never call factories.
     """
 
     def __call__(self, config: ObservabilityConfig) -> SpanExporter: ...

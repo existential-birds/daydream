@@ -166,17 +166,13 @@ def _clean_jobs(
                 if env.get("removed") is True:
                     continue
                 result = docker_rm(_image_refs(env))
-                if result.get("returncode") == 0:
+                if result.get("returncode") == 0 or result.get("absent"):
                     env["removed"] = True
                     changed = True
-                    report.images_removed += 1
-                elif result.get("absent"):
-                    # The image is already gone (an external prune or a prior
-                    # partial removal): count it absent and persist the flag so
-                    # a later pass does not re-attempt (and re-fail) it.
-                    env["removed"] = True
-                    changed = True
-                    report.images_absent += 1
+                    if result.get("returncode") == 0:
+                        report.images_removed += 1
+                    else:
+                        report.images_absent += 1
                 else:
                     report.images_failed += 1
                     all_removed = False
@@ -199,17 +195,12 @@ def _clean_jobs(
 
 def _clean_curated(root: Path, report: CleanReport) -> None:
     """Delete curated source/gold: the four curated paths (only under ``--all``)."""
-    for rel in _CURATED_DIRS:
+    for rel in (*_CURATED_DIRS, "benchmark.yaml"):
         _resolve_target(root, rel)
         target = root / rel
         if target.exists() or target.is_symlink():
             _delete_path(target)
             report.gold_deleted += 1
-    _resolve_target(root, "benchmark.yaml")
-    manifest = root / "benchmark.yaml"
-    if manifest.exists() or manifest.is_symlink():
-        _delete_path(manifest)
-        report.gold_deleted += 1
     report.recoverable = False
 
 

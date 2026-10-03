@@ -149,6 +149,13 @@ def _record_failure(
     span.add_event("exception", attributes)
 
 
+def _set_attributes(span: trace.Span, policy: PrivacyPolicy, attributes: dict[str, Any]) -> None:
+    """Apply present attributes through the same privacy policy on every child span."""
+    for key, value in attributes.items():
+        if value is not None:
+            span.set_attribute(key, policy.value(value))
+
+
 class SpanScope:
     """Small fail-open scope; application exceptions are never implicitly recorded."""
 
@@ -449,14 +456,19 @@ class AttemptObserver:
         # Custom subclasses may carry arbitrary data, so do not serialize
         # them or any raw SDK options/environment into telemetry.
         if type(event.config) in (
-            EffectiveRequestConfig, ClaudeRequestConfig, CodexRequestConfig,
-            PiRequestConfig, OspreyRequestConfig,
+            EffectiveRequestConfig,
+            ClaudeRequestConfig,
+            CodexRequestConfig,
+            PiRequestConfig,
+            OspreyRequestConfig,
         ):
-            self.scope.attrs({
-                f"daydream.request.config.{key}": value
-                for key, value in asdict(event.config).items()
-                if value is not None
-            })
+            self.scope.attrs(
+                {
+                    f"daydream.request.config.{key}": value
+                    for key, value in asdict(event.config).items()
+                    if value is not None
+                }
+            )
         self.scope.attrs(
             {
                 "gen_ai.request.model": event.model_name,
@@ -531,9 +543,7 @@ class AttemptObserver:
             # Terminal/session totals close billing; absent generations bill the attempt.
             self._saw_authoritative_total = True
         if event.model_usage is not None:
-            self.scope.attrs(
-                {"daydream.model_usage": {key: asdict(value) for key, value in event.model_usage.items()}}
-            )
+            self.scope.attrs({"daydream.model_usage": {key: asdict(value) for key, value in event.model_usage.items()}})
 
     @_observe.register
     def _observe_result(self, event: ResultEvent, policy: PrivacyPolicy) -> None:
@@ -572,18 +582,20 @@ class AttemptObserver:
         )
         self.tools[event.id] = span
         self.tool_names[event.id] = event.name
-        for key, value in {
-            **_scope_attributes.get(),
-            "daydream.span.kind": "tool",
-            "traceloop.span.kind": "tool",
-            "traceloop.entity.name": event.name,
-            "gen_ai.operation.name": "execute_tool",
-            "gen_ai.tool.name": event.name,
-            "gen_ai.tool.call.id": event.id,
-            "daydream.tool.started_at": event.timestamp,
-        }.items():
-            if value is not None:
-                span.set_attribute(key, session.policy.value(value))
+        _set_attributes(
+            span,
+            policy,
+            {
+                **_scope_attributes.get(),
+                "daydream.span.kind": "tool",
+                "traceloop.span.kind": "tool",
+                "traceloop.entity.name": event.name,
+                "gen_ai.operation.name": "execute_tool",
+                "gen_ai.tool.name": event.name,
+                "gen_ai.tool.call.id": event.id,
+                "daydream.tool.started_at": event.timestamp,
+            },
+        )
         if self.capture:
             args = session.policy.value(event.input)
             span.set_attribute("traceloop.entity.input", session.policy.json(args))
@@ -617,9 +629,7 @@ class AttemptObserver:
                 "daydream.tool.truncated": event.truncated,
                 "daydream.tool.completed_at": event.timestamp,
             }
-            for key, value in values.items():
-                if value is not None:
-                    span.set_attribute(key, session.policy.value(value))
+            _set_attributes(span, policy, values)
             if self.capture:
                 span.set_attribute("traceloop.entity.output", session.policy.json(event.output))
             self._close_tool(
@@ -643,10 +653,8 @@ class AttemptObserver:
 
     @_observe.register
     def _seal_generation(self, event: GenerationEndEvent, policy: PrivacyPolicy) -> None:
-        """Create a pending span at native start, falling back to host receipt time.
-
-        End it only after the trajectory ledger freezes the billing owner. Standard
-        response/usage aliases appear only on the billed generation child.
+        """Start at native/host receipt time; end after ledger billing freezes. Only billed children
+        get response/usage aliases.
         """
         session = self.scope.session
         draft = self.generations.get(event.generation_id)
@@ -673,19 +681,21 @@ class AttemptObserver:
             if key in _INHERITED_ATTRIBUTES:
                 span.set_attribute(key, session.policy.value(value))
         span.set_attribute("traceloop.entity.name", session.policy.text(f"chat {model}" if model else "chat"))
-        for key, value in {
-            "daydream.span.kind": "generation",
-            "gen_ai.operation.name": "chat",
-            "traceloop.span.kind": "llm",
-            "daydream.generation.id": event.generation_id,
-            "daydream.generation.boundary_complete": event.boundary_complete,
-            "daydream.generation.end_source": event.end_source,
-            "daydream.generation.native_started_at_unix_ms": native_start_ms,
-            "daydream.generation.native_started_at_unix_ns": native_start_ns,
-            "daydream.generation.sealed_end_unix_ns": event.ended_at_unix_ns,
-        }.items():
-            if value is not None:
-                span.set_attribute(key, session.policy.value(value))
+        _set_attributes(
+            span,
+            policy,
+            {
+                "daydream.span.kind": "generation",
+                "gen_ai.operation.name": "chat",
+                "traceloop.span.kind": "llm",
+                "daydream.generation.id": event.generation_id,
+                "daydream.generation.boundary_complete": event.boundary_complete,
+                "daydream.generation.end_source": event.end_source,
+                "daydream.generation.native_started_at_unix_ms": native_start_ms,
+                "daydream.generation.native_started_at_unix_ns": native_start_ns,
+                "daydream.generation.sealed_end_unix_ns": event.ended_at_unix_ns,
+            },
+        )
         if native_start_ns is not None and event.ended_at_unix_ns is not None:
             span.set_attribute("daydream.generation.duration_ns", event.ended_at_unix_ns - native_start_ns)
         if event.choice_parts and self.capture:
@@ -705,11 +715,7 @@ class AttemptObserver:
         return "structural_attempt" if self._saw_authoritative_total else "unresolved"
 
     def _generation_lifecycle(self) -> dict[str, Any] | None:
-        """Read this attempt's frozen lifecycle after invocation finalization.
-
-        The invocation exits before its attempt scope, so the final subtrajectory
-        belongs to this attempt, including when earlier retries exist.
-        """
+        """Read the latest finalized invocation lifecycle; invocation exits before attempt, including retries."""
         try:
             recorder = get_current_recorder()
             if recorder is None:
@@ -745,9 +751,7 @@ class AttemptObserver:
                     "gen_ai.provider.name": draft.get("provider_name"),
                     "gen_ai.response.finish_reasons": [draft["finish_reason"]] if draft.get("finish_reason") else None,
                 }
-                for key, value in attrs.items():
-                    if value is not None:
-                        span.set_attribute(key, session.policy.value(value))
+                _set_attributes(span, session.policy, attrs)
                 usage = draft.get("usage") or {}
                 for key, value in _usage_attributes(usage).items():
                     span.set_attribute(key, value)
@@ -792,22 +796,17 @@ class AttemptObserver:
             self.scope.attrs(_usage_attributes(usage))
             if self.usage_metadata:
                 self.scope.attrs({"daydream.message_usage": list(self.usage_metadata.values())})
-            admitted_models, model_diagnostic = _admit_observed_identity_list(
-                self.models, max_chars=_MAX_MODEL_NAME_CHARS, context="models"
-            )
-            admitted_providers, provider_diagnostic = _admit_observed_identity_list(
-                self.providers, max_chars=_MAX_PROVIDER_NAME_CHARS, context="providers"
-            )
-            for diagnostic in (model_diagnostic, provider_diagnostic):
+            identities: dict[str, Any] = {}
+            for name, observed, limit in (
+                ("models", self.models, _MAX_MODEL_NAME_CHARS),
+                ("providers", self.providers, _MAX_PROVIDER_NAME_CHARS),
+            ):
+                admitted, diagnostic = _admit_observed_identity_list(observed, max_chars=limit, context=name)
+                identities[f"daydream.{name}"] = list(admitted) if admitted else None
                 if diagnostic is not None:
                     code = diagnostic.split(":", 1)[0]
                     self.diagnostic_counts[code] = self.diagnostic_counts.get(code, 0) + 1
-            self.scope.attrs(
-                {
-                    "daydream.models": list(admitted_models) if admitted_models else None,
-                    "daydream.providers": list(admitted_providers) if admitted_providers else None,
-                }
-            )
+            self.scope.attrs(identities)
             if self.diagnostic_counts:
                 self.scope.attrs(
                     {

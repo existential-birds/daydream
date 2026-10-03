@@ -17,11 +17,7 @@ _console = ui.create_console()
 
 
 class Redactor:
-    """Redact ATIF messages, reasoning, tool arguments, and observations.
-
-    Text uses the shared structured redactor; nested arguments use key-aware
-    container redaction. Failures replace the affected surface with a marker,
-    never raw content."""
+    """Redact ATIF text and nested key-sensitive values; failures replace content with markers."""
 
     def _redact_optional_text(self, value: str | None) -> str | None:
         """Redact a possibly-None text field; degrade to [REDACTION_FAILED] on error."""
@@ -37,15 +33,7 @@ class Redactor:
         ]
 
     def _redact_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Redact every value inside a ToolCall.arguments dict (native walk).
-
-        Each value is walked recursively with key-aware sensitive-key
-        detection (:func:`redact_value`) so nested credentials under
-        lower/mixed/camel-case keys are replaced without a JSON round-trip;
-        the output keeps its declared ``dict[str, Any]`` shape and preserves
-        nested structure (CR-01). A failure on any one key degrades only that
-        key to ``"[REDACTION_FAILED]"`` per REDA-05.
-        """
+        """Redact nested sensitive keys while preserving shape; failures replace only the affected key."""
         out: dict[str, Any] = {}
         for key, val in arguments.items():
             try:
@@ -72,18 +60,7 @@ class Redactor:
         return observation.model_copy(update={"results": new_results})
 
     def redact_step(self, step: Step) -> Step:
-        """Return a redacted copy of *step* (REDA-04, REDA-05).
-
-        Applies the redaction rules uniformly to ``message``,
-        ``reasoning_content``, every ``ToolCall.arguments`` value, and
-        every ``ObservationResult.content`` string. Internal exceptions
-        degrade to ``"[REDACTION_FAILED]"`` for the offending field — never
-        raw pass-through.
-
-        Returns:
-            A new Step instance whose text-bearing fields have been run
-            through the redaction rules.
-        """
+        """Return a redacted copy; any uncaught failure wipes all text-bearing surfaces."""
         try:
             updates: dict[str, Any] = {}
             if isinstance(step.message, str):

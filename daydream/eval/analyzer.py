@@ -30,6 +30,7 @@ from daydream.trajectory import (
 
 # Trajectory loading
 
+
 def _latest_main_trajectory(daydream_dir: Path) -> Path | None:
     """Find the newest runs/<session>/trajectory.json by mtime."""
     candidates = list(daydream_dir.glob(f"{RUNS_DIRNAME}/*/{RUN_DOCUMENT_NAME}"))
@@ -51,12 +52,7 @@ def _run_dir_trajectory_paths(run_dir: Path) -> list[Path]:
 
 
 def collect_trajectory_paths(run_dir: Path) -> list[Path]:
-    """Collect trajectory files for *run_dir*, main trajectory first.
-
-    Looks for ``trajectory.json`` plus ``trajectories/*.json`` directly under
-    *run_dir*; when neither exists, falls back to the most recently modified
-    ``runs/<session_id>/`` run beneath it.
-    """
+    """Collect root/sibling documents, falling back to the newest nested run if absent."""
     paths = _run_dir_trajectory_paths(run_dir)
     if not paths:
         latest = _latest_main_trajectory(run_dir)
@@ -81,10 +77,7 @@ def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict
         if exact.is_dir():
             run_dir = exact
         elif runs_dir.is_dir():
-            matches = sorted(
-                d for d in runs_dir.iterdir()
-                if d.is_dir() and d.name.startswith(session_id)
-            )
+            matches = sorted(d for d in runs_dir.iterdir() if d.is_dir() and d.name.startswith(session_id))
             if len(matches) == 1:
                 run_dir = matches[0]
             elif len(matches) > 1:
@@ -119,12 +112,11 @@ def _agent_label(filename: str) -> str:
     return re.sub(r"--[0-9a-f]{64}$", "", label)
 
 
-_WRITE_TOOL_ALIASES = frozenset(
-    {"write", "edit", "multiedit", "notebookedit", "patch", "apply_patch"}
-)
+_WRITE_TOOL_ALIASES = frozenset({"write", "edit", "multiedit", "notebookedit", "patch", "apply_patch"})
 
 
 # Analysis functions
+
 
 def _all_trajectories(trajectories: dict[str, Any]) -> list[dict[str, Any]]:
     all_trajs: list[dict[str, Any]] = []
@@ -143,10 +135,8 @@ _BILLING_FIELDS = {
 
 
 def analyze_costs(trajectories: dict[str, Any]) -> dict[str, Any]:
-    """Report invocation-local agent rows and authoritative whole-run totals.
-
-    Marked roots include fork billing already; legacy documents aggregate rows.
-    Cache tokens are a subset of prompt tokens and are never added again.
+    """Report local agent rows and whole-run billing; marked roots include forks, legacy rows
+    aggregate. Cache tokens remain a prompt subset.
     """
     agents: list[dict[str, Any]] = []
     forks_by_source = {fork["_source_file"]: fork for fork in trajectories.get("forked") or []}
@@ -160,18 +150,19 @@ def analyze_costs(trajectories: dict[str, Any]) -> dict[str, Any]:
             if isinstance(ref, str)
         }
         child_metrics = [
-            forks_by_source[source].get("final_metrics") or {}
-            for source in child_sources if source in forks_by_source
+            forks_by_source[source].get("final_metrics") or {} for source in child_sources if source in forks_by_source
         ]
-        agents.append({
-            "agent": _agent_label(traj["_source_file"]),
-            **{
-                name: (metrics.get(key) or default) - sum(child.get(key) or default for child in child_metrics)
-                for name, (key, default) in _BILLING_FIELDS.items()
-            },
-            "steps": metrics.get("total_steps") or len(traj.get("steps", [])),
-            "model": traj.get("agent", {}).get("model_name", "unknown"),
-        })
+        agents.append(
+            {
+                "agent": _agent_label(traj["_source_file"]),
+                **{
+                    name: (metrics.get(key) or default) - sum(child.get(key) or default for child in child_metrics)
+                    for name, (key, default) in _BILLING_FIELDS.items()
+                },
+                "steps": metrics.get("total_steps") or len(traj.get("steps", [])),
+                "model": traj.get("agent", {}).get("model_name", "unknown"),
+            }
+        )
 
     root = trajectories.get("main")
     root_metrics = (root or {}).get("final_metrics") or {}
@@ -200,18 +191,14 @@ def analyze_tools(trajectories: dict[str, Any]) -> dict[str, Any]:
     for traj in _all_trajectories(trajectories):
         label = _agent_label(traj["_source_file"])
         counts = Counter(
-            call["function_name"]
-            for step in traj.get("steps", [])
-            for call in step.get("tool_calls") or []
+            call["function_name"] for step in traj.get("steps", []) for call in step.get("tool_calls") or []
         )
         by_agent[label] = dict(counts)
         total_counts.update(counts)
 
     total = sum(total_counts.values())
     write_count = sum(
-        count
-        for function_name, count in total_counts.items()
-        if function_name.casefold() in _WRITE_TOOL_ALIASES
+        count for function_name, count in total_counts.items() if function_name.casefold() in _WRITE_TOOL_ALIASES
     )
 
     return {
@@ -233,24 +220,15 @@ _EMPTY_PER_LENS = {"wonder": 0, "per-stack": 0, "structure": 0}
 
 
 def _load_shipped_items(deep_dir: Path) -> list[Any] | None:
-    """Load the canonical shipped set: None means absent, [] means shipped nothing.
-
-    Corrupt JSON or a missing/non-list items field raises a data-integrity error.
-    Return items unchanged, including non-dict entries, so counts remain faithful.
-    """
+    """Load shipped items unchanged: absent is None, empty is []; corrupt/missing/non-list items raise."""
     merged_items_file = deep_dir / "merged-items.json"
     if not merged_items_file.exists():
         return None
     merged = json.loads(merged_items_file.read_text())
-    # Shape-check before use so a well-formed-but-wrong-shape file (top-level
-    # non-object, or ``items`` not a list) is treated as the documented
-    # data-integrity error instead of silently yielding a bogus count. The
-    # writer always emits the ``items`` key, so a missing ``items`` is a
-    # wrong shape too -- only ``items": []`` is "shipped nothing".
+    # Missing/non-list items are corrupt evidence; only an explicit [] means shipped nothing.
     if not isinstance(merged, dict) or not isinstance(merged.get("items"), list):
         raise ValueError(
-            "merged-items.json must be an object whose ``items`` is a list; "
-            f"got top-level type {type(merged).__name__}"
+            f"merged-items.json must be an object whose ``items`` is a list; got top-level type {type(merged).__name__}"
         )
     items: list[Any] = merged["items"]
     return items
@@ -259,36 +237,20 @@ def _load_shipped_items(deep_dir: Path) -> list[Any] | None:
 def _shipped_counts(
     deep_dir: Path, all_findings: list[dict[str, Any]], merged_review: dict[str, Any]
 ) -> tuple[int, dict[str, int]]:
-    """Return shipped total and confidence counts from the same evidence source.
-
-    Canonical merged items win, including an empty list. Otherwise use the rendered
-    review count (without confidence attribution), then raw per-stack records.
-    """
+    """Prefer canonical shipped items (including []), then rendered review counts, then raw stack records."""
     merged_items = _load_shipped_items(deep_dir)
     if merged_items is not None:
-        # Every merged item is shipped: the renderer now emits wonder-lens
-        # findings too (issue #741), so the shipped set equals the posted
-        # review. A present-but-empty list means "shipped nothing".
-        by_confidence = dict(
-            Counter(i.get("confidence", "UNKNOWN") for i in merged_items)
-        )
+        # Every merged item is shipped, including wonder; an explicit [] means shipped nothing.
+        by_confidence = dict(Counter(i.get("confidence", "UNKNOWN") for i in merged_items))
         return len(merged_items), by_confidence
     if merged_review.get("merged_finding_count"):
-        # The review is the shipped rendering but carries no confidence values,
-        # so no confidence attribution is possible without another source. Return
-        # an empty rather than cross-mix the pre-merge per-stack confidences.
+        # Rendered reviews have no confidence values; never borrow attribution from pre-merge records.
         return merged_review["merged_finding_count"], {}
-    return len(all_findings), dict(
-        Counter(f.get("confidence", "UNKNOWN") for f in all_findings)
-    )
+    return len(all_findings), dict(Counter(f.get("confidence", "UNKNOWN") for f in all_findings))
 
 
 def analyze_findings(daydream_dir: Path) -> dict[str, Any]:
-    """Report shipped totals/confidence, raw lens attribution, and merge/dedup evidence.
-
-    _shipped_counts owns source precedence. Per-lens counts describe pre-merge inputs
-    and need not sum to the shipped total.
-    """
+    """Report shipped counts, raw pre-merge lens attribution, and merge/dedup evidence."""
     deep_dir = daydream_dir / "deep"
     if not deep_dir.is_dir():
         return {
@@ -305,14 +267,7 @@ def analyze_findings(daydream_dir: Path) -> dict[str, Any]:
     stacks: list[dict[str, Any]] = []
     per_lens = dict(_EMPTY_PER_LENS)
 
-    # ``wonder`` reads the bare-list ``alternatives.json`` (the canonical wonder
-    # artifact); the ``stack-*-records.json`` walk below buckets each stack into
-    # per-stack / structure by name. These lens counts are raw,
-    # *pre-merge* attribution -- they are not derived from the shipped
-    # ``merged-items.json`` set, so they need not sum to, or relate to, the
-    # shipped ``total`` reported by ``_shipped_counts``. Reconciling a lens to
-    # the shipped set would hide how many items survived merge/dedup, so report
-    # readers should treat the lens as raw attribution rather than a partition.
+    # Raw wonder/stack/structure counts precede merge and need not partition shipped totals.
     alts_path = deep_dir / "alternatives.json"
     if alts_path.exists():
         try:
@@ -353,9 +308,7 @@ def analyze_findings(daydream_dir: Path) -> dict[str, Any]:
     review_path = deep_dir / "review-output.md"
     if review_path.exists():
         text = review_path.read_text()
-        merged_review["merged_finding_count"] = len(
-            re.findall(r"^\d+\.\s+\[", text, re.MULTILINE)
-        )
+        merged_review["merged_finding_count"] = len(re.findall(r"^\d+\.\s+\[", text, re.MULTILINE))
 
     total, by_confidence = _shipped_counts(deep_dir, all_findings, merged_review)
 
@@ -398,11 +351,7 @@ true total; only the comparison is capped.
 
 
 def _hunk_ranges(daydream_dir: Path) -> tuple[dict[str, list[tuple[int, int]]], str]:
-    """Read inclusive head-side ranges from hunk-index.json, falling back to diff.patch.
-
-    Return ranges and source; malformed/missing inputs degrade to ({}, "none") so
-    optional location analysis cannot prevent archive finalization.
-    """
+    """Read head-side hunk-index ranges, falling back to diff.patch; malformed inputs yield ({}, "none")."""
     index: dict[str, Any] = load_hunk_index(daydream_dir)
     source = "hunk-index.json"
     if not index:
@@ -448,11 +397,7 @@ def _cited_line(record: dict[str, Any]) -> Any:
 
 
 def _location_tier(ranges: list[tuple[int, int]] | None, line: int) -> tuple[str, int | None]:
-    """Classify distance from changed lines using the shared posting tolerance.
-
-    Missing/empty ranges mean file_absent; zero distance is in_hunk, then
-    within_tolerance or beyond_tolerance.
-    """
+    """Classify shared posting distance: absent file, in hunk, within tolerance, or beyond tolerance."""
     from daydream.pr_review import HUNK_TOLERANCE
 
     if not ranges:
@@ -466,12 +411,10 @@ def _location_tier(ranges: list[tuple[int, int]] | None, line: int) -> tuple[str
 
 
 def analyze_location(daydream_dir: Path) -> dict[str, Any]:
-    """Score original citations in the shipped review set against the run's hunks.
+    """Score original shipped citations against hunks; structural line-zero anchors are exempt.
 
-    Structural line-zero anchors are whole-file exemptions. Missing/noninteger/bool
-    lines and non-dict items are unscorable. Without hunks, nothing is scored.
-    Rates over empty populations are None, never evidence of perfect accuracy.
-    Only per-item detail is capped; counters/rates cover all shipped items.
+    Malformed citations are unscorable; missing hunks produce no scores. Empty rates
+    are None. Only detail rows are capped; counters cover all items.
     """
     deep_dir = daydream_dir / "deep"
     items = _load_shipped_items(deep_dir)
@@ -492,11 +435,7 @@ def analyze_location(daydream_dir: Path) -> dict[str, Any]:
         if item.get("location_distrust") is True:
             distrusted_items += 1
         elif "location_cited_line" in item:
-            # ``location_cited_line`` is stamped on both the snap (relocate)
-            # and the demote branch of ``location_validator.validate_records``
-            # (its own docstring: the key means "relocated OR distrusted").
-            # Demoted items are already counted above, so only count this as
-            # a relocation when it was NOT a demotion (issue #1106 R2).
+            # Cited-line metadata marks relocation or demotion; demotions must not count twice.
             relocated_items += 1
 
         lens = item.get("lens")
@@ -516,22 +455,20 @@ def analyze_location(daydream_dir: Path) -> dict[str, Any]:
         tiers[tier] += 1
         scored_items += 1
         if len(detail) < _LOCATION_ITEM_CAP:
-            detail.append({
-                "id": item.get("id"),
-                "file": cited_file,
-                "line": item.get("line"),
-                "cited_line": item.get("location_cited_line"),
-                "lens": lens,
-                "tier": tier,
-                "distance": distance,
-                "location_distrust": item.get("location_distrust") is True,
-            })
+            detail.append(
+                {
+                    "id": item.get("id"),
+                    "file": cited_file,
+                    "line": item.get("line"),
+                    "cited_line": item.get("location_cited_line"),
+                    "lens": lens,
+                    "tier": tier,
+                    "distance": distance,
+                    "location_distrust": item.get("location_distrust") is True,
+                }
+            )
 
-    tier_rates = (
-        {name: round(count / scored_items, 4) for name, count in tiers.items()}
-        if scored_items > 0
-        else {}
-    )
+    tier_rates = {name: round(count / scored_items, 4) for name, count in tiers.items()} if scored_items > 0 else {}
     return {
         "hunk_source": hunk_source,
         "shipped_items": len(items or []),
@@ -540,9 +477,7 @@ def analyze_location(daydream_dir: Path) -> dict[str, Any]:
         "unscorable_items": unscorable_items,
         "tiers": tiers,
         "tier_rates": tier_rates,
-        "in_hunk_rate": (
-            round(tiers["in_hunk"] / scored_items, 4) if scored_items > 0 else None
-        ),
+        "in_hunk_rate": (round(tiers["in_hunk"] / scored_items, 4) if scored_items > 0 else None),
         "distrusted_items": distrusted_items,
         "relocated_items": relocated_items,
         "items": detail,
@@ -550,23 +485,13 @@ def analyze_location(daydream_dir: Path) -> dict[str, Any]:
 
 
 def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
-    """Measure duplicate findings that survived merge, including structural/language pairs.
+    """Measure shipped description similarity, including cross-file and cross-lens pairs.
 
-    Compare descriptions across files and report the full similarity distribution,
-    not only threshold crossings. Provenance lists retain every source uid; empty
-    attribution remains empty. Missing shipped sets have an unknown duplicate count;
-    empty sets have zero. Similarity is None without comparable pairs.
-    Scan at most _DUPLICATION_INPUT_CAP items and report truncation; retain the true
-    shipped total and at most _DUPLICATION_PAIR_CAP highest-similarity detail rows.
+    Preserve all source UIDs. Missing shipped sets have unknown duplicate counts; empty
+    sets have zero. No comparable pairs yield None similarity. Bound scan/detail counts
+    while retaining true shipped totals and explicit truncation.
     """
-    # Function-local import: ``daydream.deep.orchestrator`` imports this module
-    # at module level, so a module-level ``daydream.deep.dedup`` import here
-    # would close an import cycle through ``daydream/deep/__init__.py``. Same
-    # no-cycle pattern as ``daydream/phases.py:1091``. ``daydream.deep.records``
-    # is imported here for the same reason and not at module level: it has no
-    # daydream imports of its own, but importing it still executes the
-    # ``daydream.deep`` package ``__init__``, which pulls in the orchestrator
-    # and closes the very same cycle.
+    # Local imports avoid a deep package/orchestrator/analyzer import cycle.
     from daydream.deep.dedup import _SIM_THRESHOLD, build_record_dedup_candidates
     from daydream.deep.records import item_source_uids
 
@@ -610,9 +535,7 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
     near = [pair for pair in pairs if pair.similarity >= _SIM_THRESHOLD]
     same_file = [pair for pair in pairs if _same_file(pair)]
     same_file_near = [pair for pair in same_file if pair.similarity >= _SIM_THRESHOLD]
-    top = sorted(
-        pairs, key=lambda pair: (-pair.similarity, pair.record_a_id, pair.record_b_id)
-    )[:_DUPLICATION_PAIR_CAP]
+    top = sorted(pairs, key=lambda pair: (-pair.similarity, pair.record_a_id, pair.record_b_id))[:_DUPLICATION_PAIR_CAP]
 
     return {
         "shipped_items": len(items),
@@ -622,9 +545,7 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
         "same_file_pairs": len(same_file),
         "same_file_near_duplicate_pairs": len(same_file_near),
         "max_similarity": round(max(similarities), 4) if similarities else None,
-        "mean_similarity": (
-            round(sum(similarities) / len(similarities), 4) if similarities else None
-        ),
+        "mean_similarity": (round(sum(similarities) / len(similarities), 4) if similarities else None),
         "pairs": [_pair_row(pair) for pair in top],
     }
 
@@ -636,11 +557,7 @@ def analyze_timing(trajectories: dict[str, Any]) -> dict[str, Any]:
 
     for traj in _all_trajectories(trajectories):
         label = _agent_label(traj["_source_file"])
-        ts_list = [
-            parse_iso_timestamp(s["timestamp"])
-            for s in traj.get("steps", [])
-            if s.get("timestamp")
-        ]
+        ts_list = [parse_iso_timestamp(s["timestamp"]) for s in traj.get("steps", []) if s.get("timestamp")]
         if len(ts_list) >= 2:
             duration = (ts_list[-1] - ts_list[0]).total_seconds()
             agent_timings.append({"agent": label, "duration_seconds": round(duration, 1)})
@@ -739,10 +656,7 @@ def _tool_outcome_flags(steps: list[dict[str, Any]]) -> list[str]:
                 source_call_id = result.get("source_call_id")
                 raw_extra = result.get("extra")
                 extra = raw_extra if isinstance(raw_extra, dict) else {}
-                interrupted = (
-                    extra.get("status") == "interrupted"
-                    or extra.get("cancelled") is True
-                )
+                interrupted = extra.get("status") == "interrupted" or extra.get("cancelled") is True
                 if isinstance(source_call_id, str) and source_call_id:
                     if source_call_id not in call_counts:
                         found.add("unmatched_tool_result")
@@ -753,15 +667,10 @@ def _tool_outcome_flags(steps: list[dict[str, Any]]) -> list[str]:
                     elif extra.get("is_error") is True:
                         found.add("failed_tool_result")
                 elif interrupted and (call_counts or malformed_calls):
-                    # Recorder-generated interruption markers deliberately
-                    # carry a null source id. The unpaired call is the primary
-                    # evidence; this branch preserves the marker semantics
-                    # without misclassifying it as an orphan result.
+                    # Null-ID interruption markers describe unpaired calls, not orphan results.
                     found.add("incomplete_tool_call")
 
-        if malformed_calls or any(
-            paired_counts[call_id] < count for call_id, count in call_counts.items()
-        ):
+        if malformed_calls or any(paired_counts[call_id] < count for call_id, count in call_counts.items()):
             found.add("incomplete_tool_call")
 
         step_extra = step.get("extra")
@@ -797,15 +706,10 @@ def analyze_training_signals(
         # Reasoning token fraction (approximation from char length)
         reasoning_chars = sum(len(s.get("reasoning_content") or "") for s in steps)
         message_chars = sum(
-            len(s["message"]) for s in steps
-            if s.get("source") == "agent" and isinstance(s.get("message"), str)
+            len(s["message"]) for s in steps if s.get("source") == "agent" and isinstance(s.get("message"), str)
         )
         total_output_chars = reasoning_chars + message_chars
-        reasoning_fraction = (
-            round(reasoning_chars / total_output_chars, 4)
-            if total_output_chars > 0
-            else 0
-        )
+        reasoning_fraction = round(reasoning_chars / total_output_chars, 4) if total_output_chars > 0 else 0
 
         noise_flags: list[str] = []
         for s in steps:
@@ -823,16 +727,18 @@ def analyze_training_signals(
         # never repeats a training-review flag.
         noise_flags = list(dict.fromkeys(noise_flags))
 
-        signals.append({
-            "trajectory": label,
-            "source_file": traj["_source_file"],
-            "steps": len(steps),
-            "has_reasoning": has_reasoning,
-            "tool_calls": total_tool_calls,
-            "reasoning_fraction": reasoning_fraction,
-            "noise_flags": noise_flags,
-            "training_quality": "clean" if not noise_flags else "review",
-        })
+        signals.append(
+            {
+                "trajectory": label,
+                "source_file": traj["_source_file"],
+                "steps": len(steps),
+                "has_reasoning": has_reasoning,
+                "tool_calls": total_tool_calls,
+                "reasoning_fraction": reasoning_fraction,
+                "noise_flags": noise_flags,
+                "training_quality": "clean" if not noise_flags else "review",
+            }
+        )
 
     clean = sum(1 for s in signals if s["training_quality"] == "clean")
 
@@ -862,6 +768,7 @@ def analyze_routing(daydream_dir: str | Path) -> dict[str, Any]:
 
 # Top-level entry point
 
+
 def analyze_session(
     daydream_dir: str | Path,
     session_id: str | None = None,
@@ -870,16 +777,13 @@ def analyze_session(
     artifact_provenance: ArtifactEvidenceProvenance | None = None,
     code_workspace: Path | None = None,
 ) -> dict[str, Any]:
-    """Combine trajectory, findings, timing, routing, training, and quality analysis.
+    """Combine archived analysis; frozen trajectories bypass files and provenance controls display paths.
 
-    Frozen trajectories bypass mutable-file reads. Artifact provenance supplies the
-    public display path; only quality reads the live code_workspace. Unsafe tree-sitter
-    versions mark quality unavailable while preserving the remaining evaluation.
+    Only quality reads code_workspace. Unsafe tree-sitter marks quality unavailable
+    without dropping the remaining evaluation.
     """
     daydream_dir = Path(daydream_dir)
-    display_daydream_dir = (
-        daydream_dir if artifact_provenance is None else artifact_provenance.public_daydream_dir
-    )
+    display_daydream_dir = daydream_dir if artifact_provenance is None else artifact_provenance.public_daydream_dir
     trajectories = (
         frozen_trajectories
         if frozen_trajectories is not None
@@ -909,13 +813,7 @@ def analyze_session(
     try:
         quality = analyze_quality(daydream_dir, code_workspace=code_workspace)
     except TreeSitterBadVersionError as exc:
-        # issue #1087: a known-bad tree-sitter install refuses native analysis
-        # (assert_tree_sitter_safe at analyze_quality entry). Degrade only the
-        # quality section -- the rest of the evaluation is pure Python and
-        # stays valid, so the archive still writes evaluation.json instead
-        # of failing the whole run. The explicit marker records why
-        # the section is empty, mirroring the quality gate's fail-open
-        # "unavailable" contract.
+        # Unsafe native parsing marks only quality unavailable, preserving pure-Python archival analysis.
         quality = {
             "erosion": None,
             "verbosity": None,
@@ -927,11 +825,7 @@ def analyze_session(
         }
 
     finding_count = findings_data["total"]
-    cost_per_finding = (
-        round(costs["total_cost_usd"] / finding_count, 4)
-        if finding_count > 0
-        else None
-    )
+    cost_per_finding = round(costs["total_cost_usd"] / finding_count, 4) if finding_count > 0 else None
 
     result: dict[str, Any] = {
         "session_id": session_id,

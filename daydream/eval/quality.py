@@ -1,4 +1,5 @@
 """Deterministic Python structural quality and clone analysis."""
+
 from __future__ import annotations
 
 import math
@@ -13,8 +14,18 @@ from daydream.generated_files import is_generated_file
 
 _QUALITY_EXCLUDED_DIRS = frozenset(
     {
-        ".git", ".daydream", "node_modules", ".venv", "venv", "__pycache__", ".worktrees",
-        "dist", "build", "vendor", "third_party", "migrations",
+        ".git",
+        ".daydream",
+        "node_modules",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".worktrees",
+        "dist",
+        "build",
+        "vendor",
+        "third_party",
+        "migrations",
         # ``atif`` is daydream/atif, explicitly vendored from Harbor
         # (see daydream/atif/NOTICE) — out of metric scope (Finding #5).
         "atif",
@@ -252,10 +263,7 @@ def _identity_comprehension_lines(root: Any) -> set[int]:
             continue
         has_filter = any(
             child.type == "if_clause"
-            or (
-                child.type == "for_in_clause"
-                and any(grandchild.type == "if_clause" for grandchild in child.children)
-            )
+            or (child.type == "for_in_clause" and any(grandchild.type == "if_clause" for grandchild in child.children))
             for child in node.children
         )
         if has_filter:
@@ -378,9 +386,7 @@ def _count_later_references(func: Any, name: str, after_row: int) -> int:
     return sum(
         1
         for node in _iter_function(func)
-        if node.type == "identifier"
-        and node.text.decode() == name
-        and node.start_point.row > after_row
+        if node.type == "identifier" and node.text.decode() == name and node.start_point.row > after_row
     )
 
 
@@ -563,11 +569,7 @@ def _cross_file_clone_flagged_lines(
     file_lines: list[tuple[Path, list[str]]],
     target_paths: set[Path] | None = None,
 ) -> dict[Path, set[int]]:
-    """Flag exact blocks shared across files, optionally reporting only target paths.
-
-    All parsed peers still contribute clone evidence. Non-target entries remain empty;
-    within-file clones are computed separately and unioned without double counting.
-    """
+    """Flag exact peer blocks; restrict reporting, retain all peers, and union local clones without double counting."""
     flagged = _repeated_block_rows(
         {path: [line.strip() for line in lines] for path, lines in file_lines},
         require_distinct_sources=True,
@@ -614,22 +616,16 @@ def analyze_quality(
     *,
     code_workspace: Path | None = None,
 ) -> dict[str, Any]:
-    """Measure scoped Python quality in code_workspace, defaulting to daydream_dir.parent.
+    """Measure scoped Python quality in code_workspace (default daydream_dir.parent).
 
-    An explicit empty candidate set skips enumeration. Other candidate sets restrict
-    reporting while all eligible, parseable peers remain clone evidence. Failed parses
-    stay in scoped_files but are absent from every metric/index. Zero denominators
-    yield None ratios. Refuse unsafe tree-sitter versions even for empty scope.
+    Empty candidate sets skip enumeration; other sets limit reports, retaining all
+    parseable peers for clones. Parse failures count in scope but not metrics. Empty
+    denominators yield None. Unsafe tree-sitter is refused even for empty scopes.
     """
     daydream_dir = Path(daydream_dir)
     workspace = daydream_dir.parent if code_workspace is None else code_workspace
 
-    # Single shared choke point for every native-analysis entry point (mirrors
-    # ``detect_affected_files``): a known-bad installed tree-sitter raises
-    # before any ``Language``/``Parser`` construction -- and before the
-    # empty-candidate / python-free shortcuts below could skip native work
-    # entirely -- so the failure surfaces instead of a silent clean verdict.
-    # No-op on good installs; errors propagate to the caller unwrapped.
+    # Reject unsafe tree-sitter before parser construction or any empty-scope shortcut.
     assert_tree_sitter_safe()
 
     # An explicitly empty candidate set is a zero-count empty report: never
@@ -654,14 +650,7 @@ def analyze_quality(
         candidate_path_set = {path for path, _rel in candidates}
     scoped = len(candidates)
 
-    # Parse and validate each candidate ONCE. Only successfully parsed files
-    # feed the per-file aggregates; a malformed file stays in ``scoped`` but is
-    # omitted from the aggregates (Finding #1). In whole-workspace mode every
-    # candidate is a scoped file (byte-identical to today). In candidate mode
-    # non-candidate peers join the clone index via ``_parse_python_file``'s
-    # returned lines without being aggregated, so a candidate's cross-file
-    # clone attribution still sees every peer (issue #457). The parse results
-    # are reused below, so no file is ever parsed twice.
+    # Parse once. Failed parses remain scoped but unmeasured; eligible peers still provide clone evidence.
     parsed: dict[Path, Any] = {}
     parsed_lines: dict[Path, list[str]] = {}
     file_lines: list[tuple[Path, list[str]]] = []
@@ -675,14 +664,8 @@ def analyze_quality(
             parsed[path] = root
             parsed_lines[path] = lines
 
-    # Cross-file clone pass over the index (parsed candidates + raw peers):
-    # find blocks duplicated verbatim across >=2 files, then feed each target's
-    # cross-file line rows into its per-file verbosity below (Finding #6). In
-    # candidate mode only parsed candidate paths are flagged (``target_paths``),
-    # so peers stay unmeasured while still contributing clone sources, and an
-    # unparseable candidate stays out of both the index and the flag targets.
-    # Within-file duplicates are still handled per file inside
-    # _file_quality_from_tree.
+    # Cross-file clones flag only parsed targets; peers provide evidence without metrics. Local
+    # clones are unioned per file.
     cross_file_flagged = _cross_file_clone_flagged_lines(
         file_lines,
         target_paths=set(parsed) if candidate_paths is not None else None,

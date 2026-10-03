@@ -16,15 +16,15 @@
   },
   "after": {
     "files": 364,
-    "physical_loc": 111607,
-    "source_loc": 85358,
-    "clone_loc": 2381,
-    "high_cc_functions": 502,
-    "high_cog_functions": 621,
+    "physical_loc": 110980,
+    "source_loc": 85139,
+    "clone_loc": 2375,
+    "high_cc_functions": 501,
+    "high_cog_functions": 620,
     "inventory_sha256": "65bba3996d14b87195f7240f875c51ec1d09c27e9893bc41cf301e040d0fa175"
   },
-  "physical_reduction_percent": 1.508,
-  "source_reduction_percent": 0.167,
+  "physical_reduction_percent": 2.061,
+  "source_reduction_percent": 0.423,
   "requested_physical_reduction_percent": 10,
   "target_met": false
 }

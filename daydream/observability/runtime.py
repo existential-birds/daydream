@@ -54,11 +54,13 @@ def associate_run_trajectory(session_id: str) -> None:
     """Link the early run span once its root trajectory identity is available."""
     session = current_session()
     if session is not None and session.root_scope is not None:
-        session.root_scope.attrs({
-            "daydream.session.id": session_id,
-            "daydream.trajectory.id": session_id,
-            "traceloop.association.properties.session_id": session_id,
-        })
+        session.root_scope.attrs(
+            {
+                "daydream.session.id": session_id,
+                "daydream.trajectory.id": session_id,
+                "traceloop.association.properties.session_id": session_id,
+            }
+        )
         # Seed descendants even without a recorder; root exit resets this context.
         from daydream.observability.spans import associate_trajectory_identity
 
@@ -129,10 +131,8 @@ class TraceSession:
         self.tracer = self.provider.get_tracer("daydream", version("daydream"))
 
     def _build_resource(self, config: ObservabilityConfig) -> Resource:
-        """Build from declared sources, bypassing ambient SDK resource detectors.
-
-        Malformed operator attributes are discarded together. Application identity wins
-        reserved-key collisions, except a valid operator service.instance.id survives.
+        """Bypass ambient detectors; discard malformed operator attributes together. Application
+        reserved keys win, except valid service.instance.id.
         """
         attributes: dict[str, str] = {}
         raw = os.environ.get("OTEL_RESOURCE_ATTRIBUTES", "")

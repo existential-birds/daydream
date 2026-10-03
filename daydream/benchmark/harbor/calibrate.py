@@ -203,14 +203,8 @@ def _confusion_matrix(
     counts = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
     for truth, pred in zip(gold_labels, majority_labels):
         actual = truth is True or truth == "match"
-        if actual and pred:
-            counts["tp"] += 1
-        elif not actual and pred:
-            counts["fp"] += 1
-        elif not actual and not pred:
-            counts["tn"] += 1
-        else:
-            counts["fn"] += 1
+        outcome = ("tp" if actual else "fp") if pred else ("fn" if actual else "tn")
+        counts[outcome] += 1
     return counts
 
 

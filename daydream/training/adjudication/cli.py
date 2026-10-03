@@ -103,12 +103,7 @@ def _load_queue(state_dir: Path) -> list[dict[str, Any]]:
 def _resolved_record_ids(
     queue: Sequence[Mapping[str, Any]], observations: Sequence[Mapping[str, Any]]
 ) -> set[str]:
-    """Record ids with a human observation matching the item's current digest.
-
-    Matching the ``evidence_digest`` means a stale judgment (the item has
-    since been reopened by digest drift) does not count as resolved — the
-    reopened item stays in the open set.
-    """
+    """Resolve fresh human judgments; drift, conflict and review requirements keep items open."""
     prior = prior_adjudications(observations)
     resolved: set[str] = set()
     for item in queue:
@@ -128,11 +123,7 @@ def _open_items(queue: Sequence[Mapping[str, Any]], resolved: set[str]) -> list[
 
 
 def _positive_int(raw: str) -> int:
-    """argparse type converter: reject values < 1 with a usage error (exit 2).
-
-    Replaces a bare ``assert`` (stripped under ``python -O``) so ``--batch 0``
-    or a negative batch is a malformed invocation, never a silent no-op.
-    """
+    """Reject malformed/nonpositive batches with argparse exit 2, including under Python -O."""
     try:
         value = int(raw)
     except ValueError:
@@ -175,9 +166,29 @@ def _pin_from_args(args: argparse.Namespace) -> dict[str, str]:
     return pin
 
 
-def _add_state_dir(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--state-dir", type=Path, required=True, metavar="PATH",
-                        help="Adjudication state directory (queue.json + observations.jsonl)")
+_PATH_HELP = {
+    'index-root': 'Hydrated index root containing sessions.jsonl',
+    'materialize-dir': 'Directory produced by `materialize` (manifest + sessions.jsonl)',
+    'archive-dir': 'Archive directory holding the SQLite label-observations index',
+    'out-dir': 'Directory for sessions.jsonl + preview-manifest.json',
+    'manifest': 'Preview manifest pinning the snapshot',
+    'destination': 'Fresh directory to install the verified state into',
+    'state-dir': 'Adjudication state directory (queue.json + observations.jsonl)',
+    'curation-bundle-dir': "Curation bundle root digested into lineage.json's batch_fileset_digest",
+}
+
+
+def _add_paths(parser: argparse.ArgumentParser, *names: str) -> None:
+    """Add required filesystem inputs from the shared command vocabulary."""
+    for name in names:
+        parser.add_argument(f"--{name}", type=Path, required=True, metavar="PATH", help=_PATH_HELP[name])
+
+
+def _add_hub_repo(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--hub-repo", default=_ANNOTATION_HUB_REPO, type=str, metavar="REPO",
+        help=f"Private Hub dataset repo (default: {_ANNOTATION_HUB_REPO})",
+    )
 
 
 def _build_adjudicate_parser() -> argparse.ArgumentParser:
@@ -188,15 +199,13 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="adjudicate_subverb", required=True)
 
     p_build = sub.add_parser("build", help="Build the adjudication queue from a hydrated index.")
-    p_build.add_argument("--index-root", type=Path, required=True, metavar="PATH",
-                         help="Hydrated index root containing sessions.jsonl")
-    _add_state_dir(p_build)
+    _add_paths(p_build, "index-root", "state-dir")
 
     p_show = sub.add_parser("show", help="Show unresolved queue items grouped by disposition.")
-    _add_state_dir(p_show)
+    _add_paths(p_show, "state-dir")
 
     p_label = sub.add_parser("label", help="Record human observation(s) for queue item(s).")
-    _add_state_dir(p_label)
+    _add_paths(p_label, "state-dir")
     target = p_label.add_mutually_exclusive_group(required=True)
     target.add_argument("--record-id", type=str, default=None, metavar="HEX",
                         help="Record id (64-hex digest) of a single queue item")
@@ -217,9 +226,7 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
     p_export = sub.add_parser(
         "export", help="Merge the preview ledger + observations into the projector export shape."
     )
-    p_export.add_argument("--index-root", type=Path, required=True, metavar="PATH",
-                          help="Hydrated index root containing sessions.jsonl")
-    _add_state_dir(p_export)
+    _add_paths(p_export, "index-root", "state-dir")
     p_export.add_argument("--out", type=Path, default=None, metavar="PATH",
                           help="Export JSONL path (required unless --dry-run)")
     p_export.add_argument("--dry-run", action="store_true",
@@ -228,9 +235,7 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
     p_report = sub.add_parser(
         "report", help="Print adjudication coverage, class balance, inter-rater, strata."
     )
-    p_report.add_argument("--index-root", type=Path, required=True, metavar="PATH",
-                          help="Hydrated index root containing sessions.jsonl")
-    _add_state_dir(p_report)
+    _add_paths(p_report, "index-root", "state-dir")
     p_report.add_argument("--conflicts", action="store_true",
                           help="List disagreeing-rater findings oldest-first instead of the report")
     p_report.add_argument("--as-of", type=str, default=None, metavar="ISO_TS",
@@ -241,21 +246,15 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
         "materialize",
         help="Materialize the preview annotation snapshot (sessions.jsonl + manifest).",
     )
-    p_materialize.add_argument("--index-root", type=Path, required=True, metavar="PATH",
-                               help="Hydrated index root containing sessions.jsonl")
-    p_materialize.add_argument("--out-dir", type=Path, required=True, metavar="PATH",
-                               help="Directory for sessions.jsonl + preview-manifest.json")
+    _add_paths(p_materialize, "index-root", "out-dir")
     _add_pin_flags(p_materialize)
 
     p_publish = sub.add_parser(
         "publish-state",
         help="Publish adjudication state additively to the private Hub.",
     )
-    _add_state_dir(p_publish)
-    p_publish.add_argument("--manifest", type=Path, required=True, metavar="PATH",
-                           help="Preview manifest pinning the snapshot")
-    p_publish.add_argument("--hub-repo", type=str, default=_ANNOTATION_HUB_REPO, metavar="REPO",
-                           help=f"Private Hub dataset repo (default: {_ANNOTATION_HUB_REPO})")
+    _add_paths(p_publish, "state-dir", "manifest")
+    _add_hub_repo(p_publish)
 
     p_resume = sub.add_parser(
         "resume-state",
@@ -266,25 +265,18 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
                                  help="Stable curation identity used to discover the checkpoint")
     resume_identity.add_argument("--manifest", type=Path, metavar="PATH",
                                  help="Compatibility manifest supplying curation and snapshot identity")
-    p_resume.add_argument("--destination", type=Path, required=True, metavar="PATH",
-                          help="Fresh directory to install the verified state into")
+    _add_paths(p_resume, "destination")
     p_resume.add_argument("--snapshot-id", type=str, default=None, metavar="ID",
                           help="Optional expected preview snapshot identity")
     p_resume.add_argument("--revision", type=str, default=None, metavar="OID",
                           help="Optional exact 40-hex Hub revision to restore")
-    p_resume.add_argument("--hub-repo", type=str, default=_ANNOTATION_HUB_REPO, metavar="REPO",
-                          help=f"Private Hub dataset repo (default: {_ANNOTATION_HUB_REPO})")
+    _add_hub_repo(p_resume)
 
     p_harvest = sub.add_parser(
         "harvest-snapshot",
         help="Canonical harvest: drift gate, precedence merge, label_observations append.",
     )
-    p_harvest.add_argument("--index-root", type=Path, required=True, metavar="PATH",
-                           help="Hydrated index root containing sessions.jsonl")
-    p_harvest.add_argument("--materialize-dir", type=Path, required=True, metavar="PATH",
-                           help="Directory produced by `materialize` (manifest + sessions.jsonl)")
-    p_harvest.add_argument("--archive-dir", type=Path, required=True, metavar="PATH",
-                           help="Archive directory holding the SQLite label-observations index")
+    _add_paths(p_harvest, "index-root", "materialize-dir", "archive-dir")
     p_harvest.add_argument("--state-dir", type=Path, required=True, metavar="PATH",
                            help="Adjudication state directory (observations.jsonl source)")
 
@@ -292,17 +284,8 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
         "publish-final",
         help="Construct and publish the final annotation bundle (immutable snapshot).",
     )
-    p_publish_final.add_argument("--index-root", type=Path, required=True, metavar="PATH",
-                                 help="Hydrated index root containing sessions.jsonl")
-    p_publish_final.add_argument("--materialize-dir", type=Path, required=True, metavar="PATH",
-                                 help="Directory produced by `materialize` (manifest + sessions.jsonl)")
-    _add_state_dir(p_publish_final)
-    p_publish_final.add_argument("--archive-dir", type=Path, required=True, metavar="PATH",
-                                 help="Archive directory holding the SQLite label-observations index")
-    p_publish_final.add_argument("--curation-bundle-dir", type=Path, required=True, metavar="PATH",
-                                 help="Curation bundle root digested into lineage.json's batch_fileset_digest")
-    p_publish_final.add_argument("--hub-repo", type=str, default=_ANNOTATION_HUB_REPO, metavar="REPO",
-                                 help=f"Private Hub dataset repo (default: {_ANNOTATION_HUB_REPO})")
+    _add_paths(p_publish_final, "index-root", "materialize-dir", "state-dir", "archive-dir", "curation-bundle-dir")
+    _add_hub_repo(p_publish_final)
     p_publish_final.add_argument("--dry-run", action="store_true",
                                  help="Build and validate the staging bundle without publishing to the Hub")
 
@@ -334,7 +317,7 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
     p_import.add_argument("--archive-dir", type=Path, required=True, metavar="PATH",
                           help="Hydrated archive directory holding the SQLite index the "
                                "import merges into — the single merge target")
-    _add_state_dir(p_import)
+    _add_paths(p_import, "state-dir")
     p_import.add_argument("--json", action="store_true",
                           help="Print the digest-stable import report as JSON")
     p_import.add_argument("--dry-run", action="store_true",
@@ -345,8 +328,7 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
     p_import.add_argument("--manifest", type=Path, metavar="PATH",
                           help="Preview manifest pinning curation_id + snapshot_id "
                                "(required with --publish)")
-    p_import.add_argument("--hub-repo", type=str, default=_ANNOTATION_HUB_REPO, metavar="REPO",
-                          help=f"Private Hub dataset repo (default: {_ANNOTATION_HUB_REPO})")
+    _add_hub_repo(p_import)
 
     return parser
 

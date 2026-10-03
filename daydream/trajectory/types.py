@@ -1,4 +1,5 @@
 """Trajectory identity, lifecycle vocabulary, and immutable write snapshots."""
+
 from __future__ import annotations
 
 import json
@@ -9,12 +10,7 @@ from typing import Any, Literal, cast
 
 
 class DaydreamPhase(str, Enum):
-    """Phase label for ``Step.extra['daydream_phase']`` (MAP-08).
-
-    Values match ATIF ``extra`` field literals exactly. Required keyword-only
-    arg on ``run_agent()`` (D-05); every call site in ``phases.py`` passes a
-    literal member.
-    """
+    """Required run_agent phase; values match ATIF Step.extra daydream_phase literals."""
 
     REVIEW = "review"
     PARSE = "parse"

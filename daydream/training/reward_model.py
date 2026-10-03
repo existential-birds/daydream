@@ -21,12 +21,7 @@ from daydream.training.corpus import _is_admitted_outcome_gold
 if TYPE_CHECKING:
     from daydream.training.gate import FrozenSplit
 
-# Gold labels usable for outcome training. ``_OUTCOME_GOLD_LABELS`` in the
-# corpus module covers the accepted class only (the corpus itself is
-# accepted-only per C9); the reward model additionally needs the rejected
-# class to learn the negative side of the ranking.
-_REJECTED_GOLD_LABELS = frozenset({"rejected"})
-_GOLD_LABELS = frozenset({"accepted"}) | _REJECTED_GOLD_LABELS
+_GOLD_LABELS = frozenset({"accepted", "rejected"})
 
 _FLOOR = 0.0
 _CEILING = 1.0
@@ -142,12 +137,10 @@ def _read_admitted_rows(labels_path: str | Path) -> list[dict[str, Any]]:
             policy_version = row.get("labeler_policy_version")
             decisive_mix = bool(row.get("decisive_mix", False))
             decisive_only = bool(row.get("decisive_only", True))
-            if label == "accepted":
-                admitted = _is_admitted_outcome_gold(
-                    label, has_posterior, policy_version, decisive_mix, decisive_only
-                )
-            else:  # "rejected": mirror of the gold-outcome guard for the negative class
-                admitted = has_posterior and policy_version is not None and not decisive_mix and decisive_only
+            admitted = _is_admitted_outcome_gold(
+                label, has_posterior, policy_version, decisive_mix, decisive_only,
+                allowed_labels=_GOLD_LABELS,
+            )
             if not admitted:
                 raise ValueError(
                     f"row {row_id} in {labels_path} is refused by the gold-outcome gate "

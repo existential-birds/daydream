@@ -785,17 +785,12 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict[str, Any
                 case_rows.append(row)
                 key = row["key"]
                 all_files.update({f"{key}/{rel}": sha for rel, sha in row["files"].items()})
-                control_plane[f"{key}/README.md"] = _CASE_README
-                control_plane[f"{key}/instruction.md"] = (stage / key / "instruction.md").read_text()
-                control_plane[f"{key}/Task.md"] = (stage / key / "Task.md").read_text()
-                control_plane[f"{key}/task.toml"] = (stage / key / "task.toml").read_text()
-                control_plane[f"{key}/environment/Dockerfile"] = (
-                    stage / key / "environment" / "Dockerfile"
-                ).read_text()
-                control_plane[f"{key}/environment/runtime-requirements.lock"] = runtime_lock.decode("utf-8")
-                control_plane[f"{key}/tests/verifier-metadata.json"] = (
-                    stage / key / "tests" / "verifier-metadata.json"
-                ).read_text()
+                for rel in (
+                    "README.md", "instruction.md", "Task.md", "task.toml",
+                    "environment/Dockerfile", "environment/runtime-requirements.lock",
+                    "tests/verifier-metadata.json",
+                ):
+                    control_plane[f"{key}/{rel}"] = (stage / key / rel).read_text()
 
             (stage / "README.md").write_text(_ROOT_README)
             from daydream.benchmark.harbor.package import render_job_config
@@ -807,13 +802,14 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict[str, Any
             metric_bytes, verifier_bytes = render_metric_stage(stage)
             (stage / "jobs").mkdir(exist_ok=True)
 
-            all_files["README.md"] = hashlib.sha256(_ROOT_README.encode("utf-8")).hexdigest()
-            all_files["harbor-job.yaml"] = hashlib.sha256(job_bytes).hexdigest()
-            all_files["harbor-oracle.yaml"] = hashlib.sha256(oracle_job_bytes).hexdigest()
-            all_files["metric.py"] = hashlib.sha256(metric_bytes).hexdigest()
-            all_files["verifier_core.py"] = hashlib.sha256(verifier_bytes).hexdigest()
-            control_plane["harbor-job.yaml"] = job_bytes.decode("utf-8")
-            control_plane["harbor-oracle.yaml"] = oracle_job_bytes.decode("utf-8")
+            for rel, data in (
+                ("README.md", _ROOT_README.encode("utf-8")),
+                ("harbor-job.yaml", job_bytes), ("harbor-oracle.yaml", oracle_job_bytes),
+                ("metric.py", metric_bytes), ("verifier_core.py", verifier_bytes),
+            ):
+                all_files[rel] = hashlib.sha256(data).hexdigest()
+                if rel.endswith(".yaml"):
+                    control_plane[rel] = data.decode("utf-8")
 
             lock = _build_lock(
                 case_rows,
