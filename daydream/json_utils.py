@@ -246,7 +246,6 @@ class SchemaAwareSelection:
 
     value: Any | None
     candidate_count: int
-    selected_type: str | None
     rejected_type: str | None
     rejected_reason: str | None
 
@@ -283,7 +282,7 @@ def extract_json_by_schema(
     object. A whole text that parses but is rejected falls through to the scan.
     """
     if not text or not text.strip():
-        return SchemaAwareSelection(None, 0, None, None, None)
+        return SchemaAwareSelection(None, 0, None, None)
 
     cleaned = _strip_json_fences(text)
 
@@ -311,11 +310,11 @@ def extract_json_by_schema(
             scan_from = end_idx
 
     if not candidates:
-        return SchemaAwareSelection(None, 0, None, None, None)
+        return SchemaAwareSelection(None, 0, None, None)
 
     for _, value, _ in reversed(sorted(candidates, key=lambda item: item[0])):
         if accept(value, schema):
-            return SchemaAwareSelection(value, len(candidates), type(value).__name__, None, None)
+            return SchemaAwareSelection(value, len(candidates), None, None)
 
     # Nothing accepted: trace the largest span (extract_json's own tie-break) with
     # content-free rejection evidence so the caller can report a bounded reason.
@@ -324,4 +323,4 @@ def extract_json_by_schema(
     for error in Draft202012Validator(schema).iter_errors(largest[1]):
         reason = f"{error.validator} at {error.json_path}"
         break
-    return SchemaAwareSelection(None, len(candidates), None, type(largest[1]).__name__, reason)
+    return SchemaAwareSelection(None, len(candidates), type(largest[1]).__name__, reason)

@@ -263,10 +263,12 @@ class StructuredOutputFailure(str):
         return value
 
 
-#: Private alias for :func:`daydream.json_utils.validates_schema`, kept because
-#: four modules import this name.  The strict gate is implemented exactly once,
-#: in ``json_utils``; every structured-output boundary shares that predicate, so
-#: tightening it cannot silently diverge between two spellings.
+#: Backwards-compatible alias for :func:`daydream.json_utils.validates_schema`.
+#: The strict gate is
+#: implemented exactly once, in ``json_utils``; every structured-output boundary
+#: shares that predicate, so tightening it cannot silently diverge between two
+#: spellings.  All in-repo consumers use the public helper directly; this name
+#: remains only as a re-export for external callers of the old private path.
 _validates_schema = validates_schema
 
 
@@ -281,8 +283,8 @@ def _select_by_schema(text: str, schema: dict[str, Any], *, require_full_schema:
     nothing validates, so this never widens what is accepted, only reorders it.
     """
     if require_full_schema:
-        return extract_json_by_schema(text, schema=schema, accept=_validates_schema)
-    strict = extract_json_by_schema(text, schema=schema, accept=_validates_schema)
+        return extract_json_by_schema(text, schema=schema, accept=validates_schema)
+    strict = extract_json_by_schema(text, schema=schema, accept=validates_schema)
     if strict.value is not None:
         return strict
     return extract_json_by_schema(text, schema=schema, accept=_salvageable)
@@ -294,7 +296,7 @@ def _salvageable(value: Any, schema: dict[str, Any]) -> bool:
     Objects must contain required keys, with lists in required array slots;
     nested records are validated downstream by callers using this capability.
     """
-    if _validates_schema(value, schema):
+    if validates_schema(value, schema):
         return True
     if not isinstance(value, dict):
         return False
@@ -705,7 +707,7 @@ async def _run_agent(
                                 if not (
                                     require_full_schema and output_schema is not None
                                     and isinstance(event, ResultEvent)
-                                    and not _validates_schema(event.structured_output, output_schema)
+                                    and not validates_schema(event.structured_output, output_schema)
                                 ):
                                     await display.observe(event)
                                 if isinstance(event, ToolStartEvent):
@@ -976,7 +978,7 @@ async def _run_agent(
         """Accept explicit validation opt-out or a downstream-salvageable value."""
         return not validate_structured_output or (
             output_schema is not None and (
-                _validates_schema(value, output_schema) if require_full_schema
+                validates_schema(value, output_schema) if require_full_schema
                 else _salvageable(value, output_schema)
             )
         )
