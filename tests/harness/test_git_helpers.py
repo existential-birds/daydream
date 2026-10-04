@@ -8,9 +8,13 @@ commit step. Values were measured on this repository with these helpers.
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
-from tests.harness.git_helpers import git, init_repo, seeded_commit, write_and_stage
+import pytest
+
+from tests.harness.git_helpers import git, init_repo, install_diff_base_git_shim, seeded_commit, write_and_stage
 
 _SHA_BASE1 = "cae67fc3eb4c5d3dd3353ca7fb41f909837bf0a2"
 _SHA_BASE1_TREE = "2cd99bd20f7b3bac54014e20db1831d64b2c4fc9"
@@ -54,3 +58,22 @@ def test_write_and_stage_stages_binary_content(tmp_path: Path) -> None:
 
     assert (repo / "blob.bin").read_bytes() == b"\x00\x01\x02"
     assert git(repo, "show", "--name-only", "--format=", "HEAD") == "blob.bin"
+
+def test_diff_base_git_shim_answers_head_probe_and_restores_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    head = "a" * 40
+    before = os.environ["PATH"]
+    with install_diff_base_git_shim(tmp_path, monkeypatch, mode="malformed-head", head=head) as shim_dir:
+        probe = subprocess.run(["git", "rev-parse", "--verify", f"{head}^{{commit}}"],
+            capture_output=True, text=True, check=False)
+        delegated = subprocess.run(["git", "rev-parse", "--verify", "HEAD"],
+            capture_output=True, text=True, check=False)
+    expected = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], capture_output=True, text=True, check=False)
+
+    assert probe.returncode == 0
+    assert probe.stdout.strip() == "PRIVATE_STDOUT_SENTINEL"
+    # Every other invocation is delegated verbatim to the real git.
+    assert delegated.stdout == expected.stdout
+    assert shim_dir.name not in os.environ["PATH"]
+    assert os.environ["PATH"] == before

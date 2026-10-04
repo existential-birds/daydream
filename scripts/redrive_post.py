@@ -40,19 +40,15 @@ async def _run(target_dir: Path, pr_number: int, auto_yes: bool = False) -> None
         print(f"Could not read merged-items.json at {items_path}: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    try:
-        status = await post_review_to_pr_from_report(
-            target_dir,
-            items_path,
-            console=create_console(),
-            post=auto_yes,
-            pr_number=pr_number,
-            run_info=render_run_info(()),
-            renderers=resolve_review_renderers(get_registry()),
-        )
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"Could not read merged-items.json at {items_path}: {exc}", file=sys.stderr)
-        sys.exit(1)
+    status = await post_review_to_pr_from_report(
+        target_dir,
+        items_path,
+        console=create_console(),
+        post=auto_yes,
+        pr_number=pr_number,
+        run_info=render_run_info(()),
+        renderers=resolve_review_renderers(get_registry()),
+    )
 
     if status in (PostStatus.NO_PR, PostStatus.FAILED):
         sys.exit(1)

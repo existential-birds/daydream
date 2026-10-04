@@ -282,11 +282,15 @@ def _unit_payload(
     components: dict[str, Any],
     grounding: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Wrap ``components``/``grounding`` in the four-key payload envelope."""
+    """Wrap ``components``/``grounding`` in the four-key payload envelope.
+
+    The format stamp lives on the envelope and is stamped into ``components`` here so
+    the five unit builders cannot drift from it; no reader keys on the copy.
+    """
     return {
         "format": REUSE_KEY_FORMAT,
         "unit": unit,
-        "components": components,
+        "components": {"format": REUSE_KEY_FORMAT, **components},
         "grounding": dict(grounding),
     }
 
@@ -318,7 +322,6 @@ def shard_key_payload(
     ordered_frontier = sorted(set(frontier_files))
     exploration_present = exploration_dir is not None and Path(exploration_dir).is_dir()
     components: dict[str, Any] = {
-        "format": REUSE_KEY_FORMAT,
         "hunk_slice": _hunk_slice_component(diff_path_or_hunks, hunk_index, ordered_files),
         "assigned_files": ordered_files,
         "assigned_blobs": blob_map_digest(worktree_root, ordered_files),
@@ -355,7 +358,6 @@ def intent_key_payload(
     worktree_root normalizes the diff's run paths and is never stored in the payload.
     """
     components: dict[str, Any] = {
-        "format": REUSE_KEY_FORMAT,
         "diff": digest_text(normalize_run_scoped(diff_text, run_root=worktree_root)),
         "commit_log": digest_text(commit_log),
         "branch_name": digest_text(branch_name),
@@ -380,7 +382,6 @@ def wonder_key_payload(
 ) -> dict[str, Any]:
     """Key diff and horse_mode; intent and other loop grounding stay outside the key."""
     components: dict[str, Any] = {
-        "format": REUSE_KEY_FORMAT,
         "diff": digest_text(diff_text),
         "horse_mode": horse_mode,
         **_identity_components(identity),
@@ -420,7 +421,6 @@ def arbiter_key_payload(
     # ``unit_key`` returns ``None`` (a named miss) rather than keying the subset
     # that did read.
     components: dict[str, Any] = {
-        "format": REUSE_KEY_FORMAT,
         "records": _record_digests(contributing_records),
         "structural": (
             _ABSENT if structural_records is None else digest_bytes(structural_records)
@@ -447,7 +447,6 @@ def merge_key_payload(
     loop grounding is recorded but never keyed.
     """
     components: dict[str, Any] = {
-        "format": REUSE_KEY_FORMAT,
         "records": _record_digests(contributing_records),
         "structural": structural_records_present,
         "failed_stacks": sorted(failed_stacks),

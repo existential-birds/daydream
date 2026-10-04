@@ -38,6 +38,7 @@ from tests.harness.git_helpers import (
     configure_identity as _configure_identity,
     git as _git,
     init_repo as _init_repo,
+    install_diff_base_git_shim,
     write_and_stage,
 )
 
@@ -92,58 +93,6 @@ def test_resolve_diff_merge_base_carries_only_ancestor_of_dangling_base(repo: Pa
     _git(repo, "checkout", "feature")
     assert git_ops.resolve_diff_merge_base(repo, dangling_tip, head) == common
 
-def _install_diff_base_git_shim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, mode: str, head: str) -> Path:
-    """Install an external Git shim for resolver boundary failures."""
-    real_git = shutil.which("git")
-    assert real_git is not None
-    shim_dir = tmp_path / "diff base git shim"
-    shim_dir.mkdir()
-    shim = shim_dir / "git"
-    shim.write_text(
-        f"#!{sys.executable}\n"
-        "import os, subprocess, sys, time\n"
-        "args = sys.argv[1:]\n"
-        "mode = os.environ['DAYDREAM_TEST_GIT_SHIM_MODE']\n"
-        "real = os.environ['DAYDREAM_TEST_REAL_GIT']\n"
-        "head = os.environ['DAYDREAM_TEST_HEAD']\n"
-        "is_preference = args[:2] == ['rev-parse', '--verify'] and "
-        "len(args) == 3 and args[2].startswith('refs/remotes/origin/')\n"
-        "is_head = args[:2] == ['rev-parse', '--verify'] and "
-        "len(args) == 3 and args[2] == head + '^{commit}'\n"
-        "if mode == 'malformed-head' and is_head:\n"
-        "    print('PRIVATE_STDOUT_SENTINEL')\n"
-        "    raise SystemExit(0)\n"
-        "if mode == 'uppercase-head' and is_head:\n"
-        "    print(head.upper())\n"
-        "    raise SystemExit(0)\n"
-        "if mode == 'abbreviated-head' and is_head:\n"
-        "    print(head[:12])\n"
-        "    raise SystemExit(0)\n"
-        "if mode == 'sha256-head' and is_head:\n"
-        "    print(head + head[:24])\n"
-        "    raise SystemExit(0)\n"
-        "if mode == 'invalid-utf8-head' and is_head:\n"
-        "    os.write(1, b'\\xff\\xfe\\n')\n"
-        "    raise SystemExit(0)\n"
-        "if mode == 'malformed-merge' and args[:1] == ['merge-base']:\n"
-        "    print('PRIVATE_MERGE_SENTINEL')\n"
-        "    raise SystemExit(0)\n"
-        "if mode == 'timeout-preference' and is_preference:\n"
-        "    time.sleep(30)\n"
-        "if mode == 'remove-after-preference' and is_preference:\n"
-        "    result = subprocess.run([real, *args])\n"
-        "    os.unlink(sys.argv[0])\n"
-        "    raise SystemExit(result.returncode)\n"
-        "raise SystemExit(subprocess.run([real, *args]).returncode)\n",
-        encoding="utf-8",
-    )
-    shim.chmod(0o755)
-    monkeypatch.setenv("DAYDREAM_TEST_GIT_SHIM_MODE", mode)
-    monkeypatch.setenv("DAYDREAM_TEST_REAL_GIT", real_git)
-    monkeypatch.setenv("DAYDREAM_TEST_HEAD", head)
-    monkeypatch.setenv("PATH", str(shim_dir))
-    return shim
-
 @pytest.mark.parametrize(
     ("mode", "expected_message", "private_fragment"),
     [
@@ -165,9 +114,9 @@ def test_resolve_diff_merge_base_rejects_and_redacts_external_git_failures(
                                                                            repo: Path,
 ) -> None:
     head = _git(repo, "rev-parse", "HEAD")
-    _install_diff_base_git_shim(tmp_path, monkeypatch, mode=mode, head=head)
-    with pytest.raises(GitError) as raised:
-        git_ops.resolve_diff_merge_base(repo, "main", head)
+    with install_diff_base_git_shim(tmp_path, monkeypatch, mode=mode, head=head):
+        with pytest.raises(GitError) as raised:
+            git_ops.resolve_diff_merge_base(repo, "main", head)
     message = str(raised.value)
     assert message == expected_message
     assert private_fragment not in message
@@ -179,9 +128,9 @@ def test_resolve_diff_merge_base_redacts_external_git_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo: Path,
 ) -> None:
     head = _git(repo, "rev-parse", "HEAD")
-    _install_diff_base_git_shim(tmp_path, monkeypatch, mode="timeout-preference", head=head)
-    with pytest.raises(GitError) as raised:
-        git_ops.resolve_diff_merge_base(repo, "main", head)
+    with install_diff_base_git_shim(tmp_path, monkeypatch, mode="timeout-preference", head=head):
+        with pytest.raises(GitError) as raised:
+            git_ops.resolve_diff_merge_base(repo, "main", head)
     assert str(raised.value) == "branch-focus preferred base probe failed"
     assert str(repo) not in str(raised.value)
     assert head not in str(raised.value)

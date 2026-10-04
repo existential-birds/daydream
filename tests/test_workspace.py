@@ -41,6 +41,7 @@ from tests.harness.git_helpers import (
     configure_identity as _configure_identity,
     git as _git,
     init_repo as _init_repo,
+    install_diff_base_git_shim,
 )
 
 
@@ -740,39 +741,8 @@ async def test_audit_workspace_redacts_diff_base_probe_failures(
     repo, _ = _make_repo_with_origin(tmp_path)
     head = _git(repo, "rev-parse", "HEAD")
     before = _audit_source_signature(repo)
-    real_git = shutil.which("git")
-    assert real_git is not None
-    shim_dir = tmp_path / "private git shim"
-    shim_dir.mkdir()
-    shim = shim_dir / "git"
-    shim.write_text(
-        f"#!{sys.executable}\n"
-        "import os, subprocess, sys\n"
-        "args = sys.argv[1:]\n"
-        "real = os.environ['DAYDREAM_TEST_REAL_GIT']\n"
-        "mode = os.environ['DAYDREAM_TEST_GIT_SHIM_MODE']\n"
-        "head = os.environ['DAYDREAM_TEST_HEAD']\n"
-        "is_preference = args[:2] == ['rev-parse', '--verify'] and "
-        "len(args) == 3 and args[2].startswith('refs/remotes/origin/')\n"
-        "is_head = args[:2] == ['rev-parse', '--verify'] and "
-        "len(args) == 3 and args[2] == head + '^{commit}'\n"
-        "if mode == 'malformed-head' and is_head:\n"
-        "    print('PRIVATE_STDOUT_SENTINEL')\n"
-        "    raise SystemExit(0)\n"
-        "if mode == 'remove-after-preference' and is_preference:\n"
-        "    result = subprocess.run([real, *args])\n"
-        "    os.unlink(sys.argv[0])\n"
-        "    raise SystemExit(result.returncode)\n"
-        "raise SystemExit(subprocess.run([real, *args]).returncode)\n",
-        encoding="utf-8",
-    )
-    shim.chmod(0o755)
 
-    with monkeypatch.context() as shim_env:
-        shim_env.setenv("DAYDREAM_TEST_REAL_GIT", real_git)
-        shim_env.setenv("DAYDREAM_TEST_GIT_SHIM_MODE", mode)
-        shim_env.setenv("DAYDREAM_TEST_HEAD", head)
-        shim_env.setenv("PATH", str(shim_dir))
+    with install_diff_base_git_shim(tmp_path, monkeypatch, mode=mode, head=head) as shim_dir:
         with pytest.raises(git_ops.SnapshotPreparationError, match=r"^cannot resolve branch-focus diff merge-base$",
         ) as exc_info:
             async with open_audit_workspace(
@@ -782,7 +752,7 @@ async def test_audit_workspace_redacts_diff_base_probe_failures(
 
     message = str(exc_info.value)
     assert "PRIVATE_STDOUT_SENTINEL" not in message
-    assert "private git shim" not in message
+    assert shim_dir.name not in message
     assert str(repo) not in message
     assert head not in message
     assert _audit_source_signature(repo) == before

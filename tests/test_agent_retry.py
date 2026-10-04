@@ -25,7 +25,7 @@ from tests.harness.pi_replay import make_mock_process
 from tests.harness.trajectory import make_recorder
 
 # The sanitized provider 429 and the healthy follow-up, replayed through the real
-# Pi transport by the timing proofs below. Defined once and shared by both tests.
+# Pi transport by the timing proof below.
 _ERROR_MESSAGE = (
     '429: {"message":"Temporary admission failure","code":429,'
     '"metadata":{"headers":{"Retry-After":"10"}}}'
@@ -615,14 +615,23 @@ def test_the_extracted_retry_delay_planner_clamps_to_every_bound(monkeypatch: py
     ) == (0.0, "retry_hint_exceeds_budget")
 
 
-async def test_run_agent_waits_a_server_hint_in_full_when_it_fits(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    ("second_lines", "allowance_s", "retries", "expected_sleep"),
+    [
+        # The next attempt begins no earlier than the advertised delay, even when the configured
+        # jitter maximum (4s) is smaller than the hint (10s).
+        pytest.param(list(_HEALTHY_LINES), 300.0, True, [pytest.approx(10.0)], id="hint-fits-waits-in-full"),
+        # An unfittable hint (10 > 5): exactly one attempt, one stop reason, no second spawn.
+        pytest.param(list(_ERROR_LINES), 5.0, False, [], id="hint-exceeds-budget-stops"),
+    ],
+)
+async def test_run_agent_honours_or_stops_on_a_server_hint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, second_lines: list[str], allowance_s: float,
+    retries: bool, expected_sleep: list[Any],
 ) -> None:
-    """The next attempt begins no earlier than the advertised delay, even when
-    the configured jitter maximum (4s) is smaller than the hint (10s)."""
     clock = FakeClock(monotonic_value=0.0).install(monkeypatch)
     slept = patch_retry_sleep(monkeypatch, clock)
-    procs = [make_mock_process(list(_ERROR_LINES)), make_mock_process(list(_HEALTHY_LINES))]
+    procs = [make_mock_process(list(_ERROR_LINES)), make_mock_process(list(second_lines))]
     spawned: list[int] = []
 
     async def _spawn(*_args: Any, **_kwargs: Any) -> Any:
@@ -634,37 +643,18 @@ async def test_run_agent_waits_a_server_hint_in_full_when_it_fits(
     backend.retry_attempts = 1
     backend.retry_base_delay_s = 1.0
     backend.retry_max_delay_s = 4.0
-    out, _, _ = await run_agent(
-        cast(Backend, backend), tmp_path, "p", phase=DaydreamPhase.FIX,
-        wall_budget_s=10_000.0, retry_recovery_allowance_s=300.0,
-    )
-    assert out == "done"
-    assert len(spawned) == 2  # exactly one retry after the admission failure
-    assert slept == [pytest.approx(10.0)]  # the full hint, not the 1.0 jitter cap
-
-
-async def test_run_agent_stops_when_the_hint_exceeds_the_remaining_budget(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """An unfittable hint: exactly one attempt, one stop reason, no second spawn."""
-    clock = FakeClock(monotonic_value=0.0).install(monkeypatch)
-    slept = patch_retry_sleep(monkeypatch, clock)
-    procs = [make_mock_process(list(_ERROR_LINES)), make_mock_process(list(_ERROR_LINES))]
-    spawned: list[int] = []
-
-    async def _spawn(*_args: Any, **_kwargs: Any) -> Any:
-        spawned.append(1)
-        return procs.pop(0)
-
-    monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", _spawn)
-    backend = PiBackend(model="glm-5.2")
-    backend.retry_attempts = 1
-    backend.retry_base_delay_s = 1.0
-    backend.retry_max_delay_s = 4.0
-    with pytest.raises(PiError):
-        await run_agent(
+    if retries:
+        out, _, _ = await run_agent(
             cast(Backend, backend), tmp_path, "p", phase=DaydreamPhase.FIX,
-            wall_budget_s=10_000.0, retry_recovery_allowance_s=5.0,  # hint 10 > 5
+            wall_budget_s=10_000.0, retry_recovery_allowance_s=allowance_s,
         )
-    assert len(spawned) == 1  # no further attempt dispatched after the stop
-    assert slept == []  # no shortened wait is substituted
+        assert out == "done"
+        assert len(spawned) == 2  # exactly one retry after the admission failure
+    else:
+        with pytest.raises(PiError):
+            await run_agent(
+                cast(Backend, backend), tmp_path, "p", phase=DaydreamPhase.FIX,
+                wall_budget_s=10_000.0, retry_recovery_allowance_s=allowance_s,  # hint 10 > 5
+            )
+        assert len(spawned) == 1  # no further attempt dispatched after the stop
+    assert slept == expected_sleep  # the full hint, or no shortened wait in its place

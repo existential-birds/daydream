@@ -6,10 +6,16 @@ Harbor bundle identity, and production snapshot/RL fixtures remain distinct.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import shutil
 import subprocess
+import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from daydream import git_ops
 from daydream.workspace import WorkContext
@@ -136,6 +142,73 @@ def refreshing_session(name: str, refresh_calls: dict[str, int]) -> git_ops.Refr
         git_ops.StaticGitHubAuth({"PATH": f"/{name}/tools", "GH_TOKEN": f"ghs_{name}_expired_token_1234567890"}),
         expires_at=0, refresh=refresh,
     )
+
+
+@contextlib.contextmanager
+def install_diff_base_git_shim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, mode: str, head: str,
+) -> Iterator[Path]:
+    """Put an external ``git`` shim on ``PATH`` for the duration of the block.
+
+    The shim answers the branch-focus resolver's probes from ``mode`` (one of
+    ``malformed-head``, ``uppercase-head``, ``abbreviated-head``, ``sha256-head``,
+    ``invalid-utf8-head``, ``malformed-merge``, ``remove-after-preference``, which delegates then
+    deletes itself, and ``timeout-preference``) and delegates everything else to the real git, so
+    resolver failure paths and their redaction run against a real transport. ``head`` is the
+    recorded SHA whose ``rev-parse --verify <head>^{commit}`` probe is answered. Yields the shim
+    directory so callers can assert its name never reaches a message.
+    """
+    real_git = shutil.which("git")
+    assert real_git is not None
+    shim_dir = tmp_path / "diff base git shim"
+    shim_dir.mkdir(exist_ok=True)
+    shim = shim_dir / "git"
+    # Adjacent string literals, not an f-string: the invalid-utf8 mode must emit exact bytes.
+    shim.write_text(
+        f"#!{sys.executable}\n"
+        "import os, subprocess, sys, time\n"
+        "args = sys.argv[1:]\n"
+        "mode = os.environ['DAYDREAM_TEST_GIT_SHIM_MODE']\n"
+        "real = os.environ['DAYDREAM_TEST_REAL_GIT']\n"
+        "head = os.environ['DAYDREAM_TEST_HEAD']\n"
+        "is_preference = args[:2] == ['rev-parse', '--verify'] and "
+        "len(args) == 3 and args[2].startswith('refs/remotes/origin/')\n"
+        "is_head = args[:2] == ['rev-parse', '--verify'] and "
+        "len(args) == 3 and args[2] == head + '^{commit}'\n"
+        "if mode == 'malformed-head' and is_head:\n"
+        "    print('PRIVATE_STDOUT_SENTINEL')\n"
+        "    raise SystemExit(0)\n"
+        "if mode == 'uppercase-head' and is_head:\n"
+        "    print(head.upper())\n"
+        "    raise SystemExit(0)\n"
+        "if mode == 'abbreviated-head' and is_head:\n"
+        "    print(head[:12])\n"
+        "    raise SystemExit(0)\n"
+        "if mode == 'sha256-head' and is_head:\n"
+        "    print(head + head[:24])\n"
+        "    raise SystemExit(0)\n"
+        "if mode == 'invalid-utf8-head' and is_head:\n"
+        "    os.write(1, b'\\xff\\xfe\\n')\n"
+        "    raise SystemExit(0)\n"
+        "if mode == 'malformed-merge' and args[:1] == ['merge-base']:\n"
+        "    print('PRIVATE_MERGE_SENTINEL')\n"
+        "    raise SystemExit(0)\n"
+        "if mode == 'timeout-preference' and is_preference:\n"
+        "    time.sleep(30)\n"
+        "if mode == 'remove-after-preference' and is_preference:\n"
+        "    result = subprocess.run([real, *args])\n"
+        "    os.unlink(sys.argv[0])\n"
+        "    raise SystemExit(result.returncode)\n"
+        "raise SystemExit(subprocess.run([real, *args]).returncode)\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    with monkeypatch.context() as shim_env:
+        shim_env.setenv("DAYDREAM_TEST_GIT_SHIM_MODE", mode)
+        shim_env.setenv("DAYDREAM_TEST_REAL_GIT", real_git)
+        shim_env.setenv("DAYDREAM_TEST_HEAD", head)
+        shim_env.setenv("PATH", str(shim_dir))
+        yield shim_dir
 
 
 def bare_remote(path: Path) -> Path:
