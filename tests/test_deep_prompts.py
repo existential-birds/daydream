@@ -356,13 +356,17 @@ def test_arbiter_prompt_instructs_collapsing_duplicate_findings(tmp_path: Path) 
     # start pruning neighbouring findings that merely touch the same code.
     assert "never reject a finding merely for overlapping" in out
 
-def test_verification_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
-    out = build_verification_prompt(strategy=_default_strategy("verification"),
+def _verification_prompt(tmp_path: Path, *, items: list[dict[str, Any]] | None = None, **overrides: Any) -> str:
+    """Build the verifier prompt with the shared one-item finding, cwd and output path."""
+    return build_verification_prompt(strategy=_default_strategy("verification"),
         items=[{"id": 1, "lens": "per-stack", "severity": "high", "file": "api.py",
-                "line": 10, "description": "x", "rationale": "y"}],
+                "line": 10, "description": "x", "rationale": "y"}] if items is None else items,
         cwd=tmp_path, output_path=tmp_path / "verdicts.json",
+        **overrides,
     )
-    assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in out
+
+def test_verification_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
+    assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in _verification_prompt(tmp_path)
 
 @pytest.mark.parametrize("builder", _REVIEW_BUILDERS)
 def test_review_prompt_includes_verification_protocol(tmp_path: Path, builder: str) -> None:
@@ -377,9 +381,8 @@ def test_review_prompt_includes_verification_protocol(tmp_path: Path, builder: s
     assert "$review-verification-protocol" not in prompt
 
 def test_build_verification_prompt_includes_gate_zero_echo(tmp_path: Path) -> None:
-    items = [{"id": "1", "file": "x.py", "line": 10, "description": "Test finding"}]
-    out = build_verification_prompt(
-        strategy=_default_strategy("verification"), items=items, cwd=tmp_path, output_path=tmp_path / "verdicts.json",
+    out = _verification_prompt(tmp_path,
+        items=[{"id": "1", "file": "x.py", "line": 10, "description": "Test finding"}],
     )
     assert "Gate-0" in out or "anti-confabulation" in out
     assert "same-turn echo" in out or "file:line" in out
@@ -414,12 +417,7 @@ def test_verification_prompt_has_no_schema_dump_or_write_instruction(tmp_path: P
     """The backend receives output_schema and the host persists verdicts; prompts
     must not duplicate schema dumps or request agent-written verdict files.
     """
-    items = [{"id": 1, "lens": "per-stack", "severity": "high", "file": "api.py",
-         "line": 10, "description": "x", "rationale": "y"}
-    ]
-    prompt = build_verification_prompt(strategy=_default_strategy("verification"),
-        items=items, cwd=tmp_path, output_path=tmp_path / "verdicts.json"
-    )
+    prompt = _verification_prompt(tmp_path)
 
     assert "conforming EXACTLY to this schema" not in prompt
     assert "RECOMMENDATION_VERDICTS_SCHEMA" not in prompt
@@ -438,12 +436,7 @@ def test_verification_prompt_advertises_full_read_only_bash_allowlist(tmp_path: 
     single source — never a hand-written partial list — and must not instruct a
     shell command the read-only guard denies."""
 
-    items = [{"id": 1, "lens": "per-stack", "severity": "high", "file": "api.py",
-         "line": 10, "description": "x", "rationale": "y"}
-    ]
-    prompt = build_verification_prompt(strategy=_default_strategy("verification"),
-        items=items, cwd=tmp_path, output_path=tmp_path / "verdicts.json"
-    )
+    prompt = _verification_prompt(tmp_path)
 
     # Pin literal commands independently of the renderer to catch omissions.
     assert ("`ls`, `cat`, `git status`, `git log`, `git show`, `git blame`, `git diff`" in prompt)
@@ -770,6 +763,17 @@ _FAILURES: list[dict[str, Any]] = [{"element": "message", "ref": "2", "reason": 
     {"element": "root", "ref": "core/resolve.py:resolve_identity", "reason": "ROOT_NOT_CANDIDATE"},
 ]
 
+def _repair_prompt(kind: str, **overrides: Any) -> str:
+    """Build the repair prompt with the shared failure list and schema, no candidate roots."""
+    kwargs: dict[str, Any] = {"kind": kind, "failures": _FAILURES, "candidate_roots": None,
+        "schema": _diagram_schema()}
+    return build_diagram_repair_prompt(**(kwargs | overrides))
+
+def _diagram_prompts(tmp_path: Path) -> dict[str, str]:
+    """The three diagram prompt families keyed by the parametrised builder name."""
+    return {"sequence": _sequence_prompt(tmp_path), "flowchart": _flowchart_prompt(tmp_path),
+        "repair": _repair_prompt("flowchart")}
+
 def test_sequence_prompt_clone_mode_inlines_exploration_under_boundary(tmp_path: Path) -> None:
     """Issue #1123: clone mode renders inline exploration + dependency content
     inside the untrusted-content boundary and never a .daydream pointer."""
@@ -834,10 +838,7 @@ def test_diagram_prompts_open_with_their_role_sentence(tmp_path: Path) -> None:
     """D17: the role sentence is the prompt's opening text (the stub dispatches on it)."""
     assert _sequence_prompt(tmp_path).startswith("You are the sequence-diagram author for this pull request.")
     assert _flowchart_prompt(tmp_path).startswith("You are the flowchart author for this pull request.")
-    repair = build_diagram_repair_prompt(
-        kind="flowchart", failures=_FAILURES, candidate_roots=None, schema=_diagram_schema()
-    )
-    assert repair.startswith("Diagram repair turn (flowchart):")
+    assert _repair_prompt("flowchart").startswith("Diagram repair turn (flowchart):")
 
 def test_diagram_grounding_instruction_states_the_three_host_guarantees() -> None:
     """The contract describes source validation, pruning, and host rendering."""
@@ -851,12 +852,7 @@ def test_diagram_grounding_instruction_states_the_three_host_guarantees() -> Non
 
 @pytest.mark.parametrize("builder", ["sequence", "flowchart", "repair"])
 def test_diagram_prompts_carry_the_grounding_instruction(builder: str, tmp_path: Path) -> None:
-    prompts = {"sequence": _sequence_prompt(tmp_path), "flowchart": _flowchart_prompt(tmp_path),
-        "repair": build_diagram_repair_prompt(
-            kind="sequence", failures=_FAILURES, candidate_roots=None, schema=_diagram_schema()
-        ),
-    }
-    assert DIAGRAM_GROUNDING_INSTRUCTION in prompts[builder]
+    assert DIAGRAM_GROUNDING_INSTRUCTION in _diagram_prompts(tmp_path)[builder]
 
 def test_diagram_grounding_instruction_not_delivered_to_review_prompts(tmp_path: Path) -> None:
     per_stack = build_per_stack_prompt(
@@ -936,18 +932,14 @@ def test_flowchart_prompt_has_no_candidate_roots(tmp_path: Path) -> None:
     assert "- (none)" in prompt
 
 def test_repair_prompt_lists_every_failure_with_its_reason_code() -> None:
-    prompt = build_diagram_repair_prompt(
-        kind="sequence", failures=_FAILURES, candidate_roots=None, schema=_diagram_schema()
-    )
+    prompt = _repair_prompt("sequence")
     assert "- message `2`: FILE_MISSING" in prompt
     assert "- participant `Identity Resolver`: PARTICIPANT_FILE_MISSING" in prompt
     assert "- root `core/resolve.py:resolve_identity`: ROOT_NOT_CANDIDATE" in prompt
 
 def test_repair_prompt_states_the_repair_contract() -> None:
     """Correct or remove, return the full spec, exactly one repair turn."""
-    prompt = build_diagram_repair_prompt(
-        kind="sequence", failures=_FAILURES, candidate_roots=None, schema=_diagram_schema()
-    )
+    prompt = _repair_prompt("sequence")
     assert "Correct its evidence" in prompt
     assert "Remove the element from the spec entirely" in prompt
     assert "Return the FULL corrected spec in the same JSON shape" in prompt
@@ -955,11 +947,9 @@ def test_repair_prompt_states_the_repair_contract() -> None:
     assert "ROOT_NOT_CANDIDATE` verdict" not in prompt
 
 def test_repair_prompt_repeats_the_candidate_list_for_a_root_repick() -> None:
-    prompt = build_diagram_repair_prompt(kind="flowchart", failures=_FAILURES,
-        candidate_roots=[
+    prompt = _repair_prompt("flowchart", candidate_roots=[
             {"file": "core/resolve.py", "name": "resolve_identity", "line": 22, "end_line": 71, "branch_points": 4}
-        ], schema=_diagram_schema(),
-    )
+        ])
     assert "`ROOT_NOT_CANDIDATE` verdict means the root you chose is not in the candidate list" in prompt
     assert "Re-pick a root from the list below" in prompt
     assert "- `resolve_identity` in core/resolve.py, lines 22-71, 4 changed branch point(s)" in prompt
@@ -967,12 +957,7 @@ def test_repair_prompt_repeats_the_candidate_list_for_a_root_repick() -> None:
 
 @pytest.mark.parametrize("builder", ["sequence", "flowchart", "repair"])
 def test_diagram_prompts_embed_the_output_schema(builder: str, tmp_path: Path) -> None:
-    prompts = {"sequence": _sequence_prompt(tmp_path), "flowchart": _flowchart_prompt(tmp_path),
-        "repair": build_diagram_repair_prompt(
-            kind="flowchart", failures=_FAILURES, candidate_roots=None, schema=_diagram_schema()
-        ),
-    }
-    prompt = prompts[builder]
+    prompt = _diagram_prompts(tmp_path)[builder]
     assert "Return ONLY a JSON object matching this schema:" in prompt
     assert json.dumps(_diagram_schema(), indent=2) in prompt
 
