@@ -35,7 +35,8 @@ resolution:
   status: in_progress
   issues:
   - https://github.com/existential-birds/daydream/issues/1466
-  prs: []
+  prs:
+  - https://github.com/existential-birds/daydream/pull/1476
   fix_commits:
   - 1a5cfeb01e5951de164834922d8488c55f080bd5
   - 52bef957031a1dd8d0faaffd983333e82d36defa
@@ -69,6 +70,10 @@ resolution:
     result: 'Passed: 33 tests after test-only transport setup isolation; original request deadline, total return bound, observed
       connection closure and no-later-poll assertions retained.'
     checked_commit: 52bef957031a1dd8d0faaffd983333e82d36defa
+  - command: git push -u origin anderskev/1466-decouple-failures
+    result: 'Passed ordinary signed-commit and full make check pre-push gates: 9330 passed, 14 skipped, 90.38% branch coverage;
+      branch published with issue fix, finding and test-only hook repair.'
+    checked_commit: 13490ad7f57123d259519e7134c6e194a6c05eb3
 ---
 
 # Separate optional data persistence from protected review output publication
@@ -131,3 +136,7 @@ Captured the active session's verified opportunity after the completed fix. Orig
 ### 2026-10-04 — Repair ordinary push hook failure
 
 The first ordinary push at `15f35a134b22ae2d87363a52fb380e0a7b367ca6` failed the existing slow-peer deadline test; hooks rejected publication. A focused 16-worker coverage run reproduced the failure and measured 0.549s synchronous HTTPX client setup in a 0.555s verifier call, consuming the 0.12s budget before socket I/O. Commit `52bef957031a1dd8d0faaffd983333e82d36defa` prepares a real HTTPX transport outside the measured slow-peer interval. Real streaming, cancellation, connection closure, 0.35s return bound and request-start budget assertions are retained. No runtime source or hook changed. Serial and parallel module runs each passed 33 tests; the full ordinary push gate is rerun for publication. Relative to the original issue implementation, this adds 11 test lines. Original fix-start and benchmark provenance remain unchanged.
+
+### 2026-10-04 — Draft PR publication
+
+Draft PR [#1476](https://github.com/existential-birds/daydream/pull/1476) targets `main` and resolves #1466. The ordinary retry push at `13490ad7f57123d259519e7134c6e194a6c05eb3` passed signed-commit verification and the full gate: 9,330 tests passed, 14 skipped, 90.38% branch coverage, plus lock/lint/dead-code/type/workflow/naming checks. Its source/test tree matches repaired implementation state `52bef957031a1dd8d0faaffd983333e82d36defa`; the intervening finding commit is documentation-only. Original issue implementation `1a5cfeb01e5951de164834922d8488c55f080bd5` and its earlier checks remain separate historical evidence. This reciprocal-link update is documentation-only; resolution remains in progress while the PR is open.
