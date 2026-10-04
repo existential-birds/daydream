@@ -156,10 +156,10 @@ def build_projection_50(tmp_path: Path) -> Path:
             emit_process_traces=True,
         )
     )
-    # Include SHA256SUMS and curation-manifest.json before loading; the directory digest covers all
-    # files.
-    _write_sumsums(proj_dir)
-    shutil.copyfile(bundle_dir / "curation-manifest.json", proj_dir / "curation-manifest.json")
+    # The projection directory holds exactly what build_frozen_corpus writes. Nothing downstream
+    # reads a SHA256SUMS or curation-manifest.json here: load_v2_projection consumes only _SUCCESS,
+    # the split JSONL files and lineage.json, and the directory digest it reports is recomputed from
+    # whatever is present.
     return proj_dir
 
 
