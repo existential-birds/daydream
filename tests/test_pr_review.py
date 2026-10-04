@@ -120,6 +120,12 @@ def test_finding_renderer_falls_back_and_warns_on_error(caplog: pytest.LogCaptur
 
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
+_RUN_INFO = pr_comment_renderer.render_run_info_block([_FIXTURE])
+# Input findings handed to _post/post_review_to_pr_from_report below. They are inert whenever
+# `classify` is stubbed (see _stub_post): the stubbed classifier never reads them.
+_POST_ISSUE = ParsedIssue(path="a.py", line=1, title="t", body="b")
+_ONE_INLINE = pr_review.ClassifiedIssues(inline=[_inline(line=1)], body_only=[])
+_NO_ISSUES = pr_review.ClassifiedIssues()
 
 def test_custom_summary_renderer_can_build_collapsible_per_finding_list(pr: PRInfo) -> None:
 
@@ -465,9 +471,14 @@ def _classified_with_severity(severity: str, confidence: str, *, body_confidence
 
 
 def _approval_payload(pr: PRInfo, classified: pr_review.ClassifiedIssues) -> dict[str, Any]:
-    return payload_for(pr, classified, approve_on_clean=True, renderers=BUILTIN_RENDERERS,
-        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
-    )
+    return payload_for(pr, classified, approve_on_clean=True, renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO)
+
+
+def _approval_payload_for_issue(pr: PRInfo, **issue_fields: Any) -> dict[str, Any]:
+    """Approval-gate payload for one inline finding whose fields are ``**issue_fields``."""
+    return _approval_payload(pr, pr_review.ClassifiedIssues(
+        inline=[_inline()], inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", **issue_fields)],
+    ))
 
 def test_build_payload_approves_when_clean_and_enabled(pr: PRInfo) -> None:
     payload = _approval_payload(pr, _classified_with_severity("low", "LOW", body_confidence="MEDIUM"))
@@ -484,23 +495,12 @@ def test_build_payload_keeps_comment_when_blocking_finding(pr: PRInfo, severity:
     assert "no high/medium findings" not in payload["body"]
 
 def test_build_payload_none_severity_does_not_crash_on_approve_check(pr: PRInfo,) -> None:
-    classified = pr_review.ClassifiedIssues(
-        inline=[_inline()], inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", severity=None)],
-    )
-
-    payload = _approval_payload(pr, classified)
+    payload = _approval_payload_for_issue(pr, severity=None)
     assert payload["event"] == "APPROVE"
 
 @pytest.mark.parametrize("off_vocabulary_severity", ["critical", "blocker"])
 def test_build_payload_keeps_comment_when_off_vocabulary_severity(pr: PRInfo, off_vocabulary_severity: str,) -> None:
-    classified = pr_review.ClassifiedIssues(inline=[_inline()],
-        inline_issues=[ParsedIssue(
-                path="a.py", line=10, title="t", body="b", confidence="HIGH", severity=off_vocabulary_severity,
-            )
-        ],
-    )
-
-    payload = _approval_payload(pr, classified)
+    payload = _approval_payload_for_issue(pr, confidence="HIGH", severity=off_vocabulary_severity)
     assert payload["event"] == "COMMENT"
     assert "no high/medium findings" not in payload["body"]
 
@@ -741,15 +741,38 @@ class _FakeConsole:
 def _assumed_context(answer: str) -> RunContext:
     return RunContext(InteractionPolicy(assume=answer))
 
+
+def _stub_post(monkeypatch: pytest.MonkeyPatch, pr: PRInfo, classified: pr_review.ClassifiedIssues, *,
+               submit: Any = None, messages: list[str] | None = None,
+               ) -> dict[str, pr_review.ClassifiedReviewPlan]:
+    """Stub every ``pr_review._post`` seam and return the dict that receives the submitted plan.
+
+    Pass *submit* to replace the recording stub (e.g. to return ``FAILED``); pass *messages* to
+    collect ``print_success``/``print_warning`` output that is otherwise dropped.
+    """
+    captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
+    collect = messages.append if messages is not None else lambda *_a: None
+    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
+    monkeypatch.setattr(pr_review, "classify", lambda *_a, **_k: classified)
+    monkeypatch.setattr(pr_review, "post_classified_review", submit or _recording_fake_submit(captured))
+    monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
+    monkeypatch.setattr(pr_review, "print_success", lambda _c, msg: collect(msg))
+    monkeypatch.setattr(pr_review, "print_warning", lambda _c, msg: collect(msg))
+    return captured
+
+
+def _post_kwargs(answer: str | None = "yes", **overrides: Any) -> dict[str, Any]:
+    """The console/run-context/renderers/run-info every ``pr_review._post`` call shares."""
+    return {"console": _FakeConsole(), "run_context": _assumed_context(answer) if answer is not None else None,
+            "renderers": BUILTIN_RENDERERS, "run_info": _RUN_INFO, **overrides}
+
 @pytest.mark.asyncio
 async def test_post_skips_when_no_pr(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: None)
     warnings: list[str] = []
     monkeypatch.setattr(pr_review, "print_warning", lambda _c, msg: warnings.append(msg),)
     status = await pr_review._post(tmp_path, [ParsedIssue(path="x.py", line=1, title="t", body="b")],
-        console=_FakeConsole(),  # type: ignore[arg-type]
-        renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
-    )
+        **_post_kwargs(None))
     assert warnings and "No open PR" in warnings[0]
     assert status == pr_review.PostStatus.NO_PR
 
@@ -764,31 +787,17 @@ async def test_post_fails_with_safe_diagnostic_when_pr_lookup_errors(monkeypatch
     monkeypatch.setattr(pr_review, "print_error", lambda _console, title, message: errors.append((title, message)),)
 
     status = await pr_review._post(tmp_path, [ParsedIssue(path="x.py", line=1, title="t", body="b")],
-        console=_FakeConsole(),  # type: ignore[arg-type]
-        renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
-    )
+        **_post_kwargs(None))
 
     assert status == pr_review.PostStatus.FAILED
     assert errors == [("PR Lookup Failed", "gh pr list failed: authentication required")]
 
 @pytest.mark.asyncio
 async def test_post_succeeds_and_prints_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo) -> None:
-    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
-    monkeypatch.setattr(
-        pr_review, "classify", lambda *_a, **_k: pr_review.ClassifiedIssues(inline=[_inline(line=1)], body_only=[],),
-    )
-    captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
-    fake_submit = _recording_fake_submit(captured)
-    monkeypatch.setattr(pr_review, "post_classified_review", fake_submit)
     successes: list[str] = []
-    monkeypatch.setattr(pr_review, "print_success", lambda _c, msg: successes.append(msg),)
-    monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
+    captured = _stub_post(monkeypatch, pr, _ONE_INLINE, messages=successes)
 
-    status = await pr_review._post(tmp_path, [ParsedIssue(path="a.py", line=1, title="t", body="b")],
-        console=_FakeConsole(),  # type: ignore[arg-type]
-        run_context=_assumed_context("yes"), renderers=BUILTIN_RENDERERS,
-        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
-    )
+    status = await pr_review._post(tmp_path, [_POST_ISSUE], **_post_kwargs())
     assert captured["plan"].pr.head_sha == pr.head_sha
     assert captured["plan"].event is pr_review.ReviewEvent.COMMENT
     assert successes and "pullrequestreview" in successes[0]
@@ -797,23 +806,13 @@ async def test_post_succeeds_and_prints_url(monkeypatch: pytest.MonkeyPatch, tmp
 @pytest.mark.asyncio
 async def test_post_payload_approves_when_clean_and_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo,
 ) -> None:
-    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
-    monkeypatch.setattr(pr_review, "classify",
-        lambda *_a, **_k: pr_review.ClassifiedIssues(inline=[_inline(line=1)],
-            inline_issues=[ParsedIssue(path="a.py", line=1, title="t", body="b", confidence="LOW", severity="low",)],
-        ),
+    clean = pr_review.ClassifiedIssues(
+        inline=[_inline(line=1)],
+        inline_issues=[ParsedIssue(path="a.py", line=1, title="t", body="b", confidence="LOW", severity="low")],
     )
-    captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
-    fake_submit = _recording_fake_submit(captured)
-    monkeypatch.setattr(pr_review, "post_classified_review", fake_submit)
-    monkeypatch.setattr(pr_review, "print_success", lambda *_a, **_k: None)
-    monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
+    captured = _stub_post(monkeypatch, pr, clean)
 
-    status = await pr_review._post(tmp_path, [ParsedIssue(path="a.py", line=1, title="t", body="b", severity="low")],
-        console=_FakeConsole(),  # type: ignore[arg-type]
-        approve_on_clean=True, run_context=_assumed_context("yes"), renderers=BUILTIN_RENDERERS,
-        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
-    )
+    status = await pr_review._post(tmp_path, [_POST_ISSUE], **_post_kwargs(approve_on_clean=True))
     assert captured["plan"].event is pr_review.ReviewEvent.APPROVE
     assert status == pr_review.PostStatus.POSTED
 
@@ -821,26 +820,19 @@ async def test_post_payload_approves_when_clean_and_enabled(monkeypatch: pytest.
 async def test_post_warns_with_preserved_payload_path_on_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo,
 ) -> None:
-    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
-    monkeypatch.setattr(
-        pr_review, "classify", lambda *_a, **_k: pr_review.ClassifiedIssues(inline=[_inline(line=1)], body_only=[],),
-    )
     err = "GitHub review submission failed (request payload preserved at /tmp/x.json)"
-    monkeypatch.setattr(pr_review, "post_classified_review",
-        lambda _plan, *, transport: pr_review.ClassifiedReviewResult(
+
+    def failed_submit(_plan: pr_review.ClassifiedReviewPlan, *, transport: pr_review.ReviewTransport
+    ) -> pr_review.ClassifiedReviewResult:
+        return pr_review.ClassifiedReviewResult(
             status=pr_review.SubmissionStatus.FAILED, review_url=None, posted_file_level=(), folded_file_level=(),
             final_review_posted=False, safe_error=err,
-        ),
-    )
-    warnings: list[str] = []
-    monkeypatch.setattr(pr_review, "print_warning", lambda _c, msg: warnings.append(msg),)
-    monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
+        )
 
-    status = await pr_review._post(tmp_path, [ParsedIssue(path="a.py", line=1, title="t", body="b")],
-        console=_FakeConsole(),  # type: ignore[arg-type]
-        run_context=_assumed_context("yes"), renderers=BUILTIN_RENDERERS,
-        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
-    )
+    warnings: list[str] = []
+    _stub_post(monkeypatch, pr, _ONE_INLINE, submit=failed_submit, messages=warnings)
+
+    status = await pr_review._post(tmp_path, [_POST_ISSUE], **_post_kwargs())
     assert warnings
     assert "no comments were posted" in warnings[0].lower()
     # The structured safe error preserves the request payload path.
@@ -870,30 +862,10 @@ def test_github_transport_surfaces_only_structured_preserved_payload_path(
 
 @pytest.mark.asyncio
 async def test_post_skipped_when_user_declines(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo) -> None:
-    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
-    monkeypatch.setattr(
-        pr_review, "classify", lambda *_a, **_k: pr_review.ClassifiedIssues(inline=[_inline(line=1)], body_only=[],),
-    )
-    submit_called = False
+    captured = _stub_post(monkeypatch, pr, _ONE_INLINE)
 
-    def fake_submit(_plan: pr_review.ClassifiedReviewPlan, *, transport: pr_review.ReviewTransport
-    ) -> pr_review.ClassifiedReviewResult:
-        nonlocal submit_called
-        submit_called = True
-        return pr_review.ClassifiedReviewResult(
-            status=pr_review.SubmissionStatus.POSTED, review_url="x", posted_file_level=(), folded_file_level=(),
-            final_review_posted=True, safe_error=None,
-        )
-
-    monkeypatch.setattr(pr_review, "post_classified_review", fake_submit)
-    monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
-
-    status = await pr_review._post(tmp_path, [ParsedIssue(path="a.py", line=1, title="t", body="b")],
-        console=_FakeConsole(),  # type: ignore[arg-type]
-        run_context=_assumed_context("no"), renderers=BUILTIN_RENDERERS,
-        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
-    )
-    assert not submit_called
+    status = await pr_review._post(tmp_path, [_POST_ISSUE], **_post_kwargs(answer="no"))
+    assert "plan" not in captured  # declined: nothing was ever submitted
     assert status == pr_review.PostStatus.NOTHING_TO_POST
 
 @pytest.mark.asyncio
@@ -906,7 +878,7 @@ async def test_post_review_from_report_empty_items_is_nothing_to_post(monkeypatc
 
     status = await pr_review.post_review_to_pr_from_report(tmp_path, merged,
         console=_FakeConsole(),  # type: ignore[arg-type]
-        renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+        renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO,
     )
     assert status == pr_review.PostStatus.NOTHING_TO_POST
 
@@ -917,18 +889,11 @@ async def test_post_review_from_report_empty_items_posts_diagram(
     merged = tmp_path / "merged-items.json"
     merged.write_text(json.dumps({"items": []}))
     blocks = "<details><summary><h3>Flowchart</h3></summary>\nX\n</details>"
-    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
-    monkeypatch.setattr(pr_review, "classify", lambda *_a, **_k: pr_review.ClassifiedIssues())
-    captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
-    fake_submit = _recording_fake_submit(captured)
-    monkeypatch.setattr(pr_review, "post_classified_review", fake_submit)
-    monkeypatch.setattr(pr_review, "print_success", lambda *_a, **_k: None)
-    monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
+    captured = _stub_post(monkeypatch, pr, _NO_ISSUES)
 
     status = await pr_review.post_review_to_pr_from_report(tmp_path, merged,
         console=_FakeConsole(),  # type: ignore[arg-type]
-        post=True, diagram_blocks=blocks, renderers=BUILTIN_RENDERERS,
-        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+        post=True, diagram_blocks=blocks, renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO,
     )
 
     assert status == pr_review.PostStatus.POSTED
@@ -942,10 +907,7 @@ async def test_incomplete_live_review_posts_even_without_findings_and_cannot_app
 ) -> None:
     merged = tmp_path / "merged-items.json"
     merged.write_text(json.dumps({"items": []}))
-    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
-    monkeypatch.setattr(pr_review, "classify", lambda *_a, **_k: pr_review.ClassifiedIssues())
-    captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
-    monkeypatch.setattr(pr_review, "post_classified_review", _recording_fake_submit(captured))
+    captured = _stub_post(monkeypatch, pr, _NO_ISSUES)
     warnings: tuple[str, ...] = ("Alternatives: wall_budget_exceeded",)
     if failed_reviewer:
         coverage = review_coverage(scope_ids=("python",), phases=())
@@ -1187,27 +1149,14 @@ def test_file_hunks_gh_fallback_handles_subprocess_error(monkeypatch: pytest.Mon
     assert hunks == []
 
 def test_demoted_high_finding_still_blocks_approval(pr: PRInfo) -> None:
-    classified = pr_review.ClassifiedIssues(inline=[_inline()],
-        inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", severity="low", location_distrust=True,
-                severity_before_demotion="high",
-            )
-        ],
-    )
-    payload = _approval_payload(pr, classified)
+    payload = _approval_payload_for_issue(pr, severity="low", location_distrust=True, severity_before_demotion="high")
     assert payload["event"] == "COMMENT"
 
 def test_demoted_low_finding_does_not_block_approval(pr: PRInfo) -> None:
     """Location distrust alone does not block originally low or unasserted severity."""
     for before in ("low", None):
-        classified = pr_review.ClassifiedIssues(inline=[_inline()],
-            inline_issues=[ParsedIssue(
-                    path="a.py", line=10, title="t", body="b", severity="low", location_distrust=True,
-                    severity_before_demotion=before,
-                )
-            ],
-        )
-        payload = payload_for(pr, classified, approve_on_clean=True, renderers=BUILTIN_RENDERERS,
-            run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
+        payload = _approval_payload_for_issue(
+            pr, severity="low", location_distrust=True, severity_before_demotion=before,
         )
         assert payload["event"] == "APPROVE"
 
@@ -1235,11 +1184,7 @@ def test_null_severity_coerces_to_none_not_none_string(raw: dict[str, Any]) -> N
 
 def test_null_severity_does_not_block_approval(pr: PRInfo) -> None:
     # SUPERVISE_SCHEMA emits severity: null — must approve like omitted.
-    classified = pr_review.ClassifiedIssues(
-        inline=[_inline()], inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", severity=None)],
-    )
-
-    payload = _approval_payload(pr, classified)
+    payload = _approval_payload_for_issue(pr, severity=None)
     assert payload["event"] == "APPROVE"
     assert "**Severity:** none" not in payload["body"]  # no phantom label rendered
 
