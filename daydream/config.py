@@ -49,6 +49,19 @@ DEFAULT_RETRY_RECOVERY_ALLOWANCE_S = 300.0
 DEFAULT_GROUP_MAX_WALL_S = 600.0  # 10 min of wall-clock across one file group
 DEFAULT_GROUP_MAX_SERIAL_ITEMS = 6  # max per-finding fix calls in one group
 
+# Bound one repair job (issue #1210): a single execution, the job's cumulative
+# total across every execution, and how many executions it may run. These three
+# values are the issue's *proposals* adopted as configurable defaults — not
+# measured optimal values, and not derived from a measurement of real repairs.
+# The job total deliberately exceeds one execution's ceiling, because a bounded
+# second attempt is the entire point of a repair job; raising it is therefore an
+# explicit, reviewable policy change rather than a tuning detail. All three are
+# overridable per repository through [tool.daydream], and an invalid value
+# degrades back to the default below.
+DEFAULT_REPAIR_EXECUTION_WALL_S = 1800.0  # wall ceiling for one repair execution
+DEFAULT_REPAIR_JOB_WALL_S = 7200.0  # cumulative wall ceiling across all executions
+DEFAULT_REPAIR_MAX_EXECUTIONS = 4  # bounded repair executions per job
+
 # Report per-file erosion/verbosity regressions without blocking the run.
 # Use before/after deltas, or absolute after-values when the baseline is undefined.
 # Record flags in fix-quality-gate.json and the manifest. _step_fix resolves

@@ -4,7 +4,10 @@
 A repair turn's authorized work is captured from the live tree *before* any
 restoration runs, because cleanup can be the only thing that erases it. These
 tests pin the payload contract, the atomic versioned write, cross-process
-readability, the corrupt-is-a-blocker policy, and the real capture ordering.
+readability, the corrupt-is-a-blocker policy, and the real capture ordering. The
+job's *own* state — the fail-closed outcome posture, the relative per-execution
+allowance, the honest termination states, and the persisted consumption that
+survives a process restart — is pinned below that capture half.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ import subprocess
 import sys
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import anyio
@@ -22,7 +26,17 @@ import pytest
 
 from daydream import phases
 from daydream.backends import ResultEvent, TextEvent
-from daydream.deep.repair_job import merge_repair_job, read_repair_job, record_diagnostic
+from daydream.deep.repair_job import (
+    RepairAction,
+    RepairJobPolicy,
+    RepairJobRecord,
+    RepairJobState,
+    merge_repair_job_record,
+    read_repair_job_record,
+    record_diagnostic,
+    write_repair_job_record,
+)
+from daydream.deep.settings import _resolve_non_negative_float, repair_job_policy
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.phases.repair_checkpoint import (
     REPAIR_CHECKPOINT_FORMAT,
@@ -62,6 +76,37 @@ def _checkpoint(**overrides: Any) -> RepairCheckpoint:
     }
     fields.update(overrides)
     return RepairCheckpoint(**fields)
+
+
+def _policy(**overrides: Any) -> RepairJobPolicy:
+    """Build a job policy; the four bounds are keyword defaults."""
+    fields: dict[str, Any] = {
+        "execution_s": 1800.0,
+        "job_total_s": 7200.0,
+        "max_executions": 4,
+        "reserve_s": 60.0,
+    }
+    fields.update(overrides)
+    return RepairJobPolicy(**fields)
+
+
+def _job(**overrides: Any) -> RepairJobRecord:
+    """Build a job record; the identity and the start-captured policy are defaults."""
+    fields: dict[str, Any] = {
+        "job_id": "repair-job-0001",
+        "state": RepairJobState.RUNNING,
+        "failure_identity": "sha256:0123456789abcdef",
+        "authorized_scope": ("src/handler.py", "tests/test_a.py"),
+        "policy_revision": 3,
+        "policy": _policy(),
+    }
+    fields.update(overrides)
+    return RepairJobRecord(**fields)
+
+
+def _limit_config(**attrs: object) -> Any:
+    """Minimal RunConfig stand-in carrying only the scalar under test."""
+    return SimpleNamespace(file_config=None, **attrs)
 
 
 def test_checkpoint_payload_carries_every_required_field() -> None:
@@ -132,24 +177,24 @@ def test_unwritable_checkpoint_is_a_blocker_not_a_silent_clean_away(
 
 def test_job_record_merges_a_diagnostic_instead_of_clobbering_state(tmp_path: Path) -> None:
     """The read-modify-write shape: a later merge keeps an earlier execution's evidence."""
-    first = merge_repair_job(tmp_path, {
-        "job_id": "repair-s1", "execution_count": 1, "consumed_budget": {"elapsed_s": 1.5},
+    first = merge_repair_job_record(tmp_path, {
+        "job_id": "repair-s1", "executions": 1, "last_execution_budget": {"elapsed_s": 1.5},
     })
-    assert first.state == "active"
+    assert first.state is RepairJobState.RUNNING
     second = record_diagnostic(tmp_path, "repair-s1", "checkpoint_write_failed: OSError: disk full")
     assert second is not None
     assert second.job_id == "repair-s1"
-    assert second.execution_count == 1, "the diagnostic merge dropped the earlier execution"
-    assert second.consumed_budget == {"elapsed_s": 1.5}
+    assert second.executions == 1, "the diagnostic merge dropped the earlier execution"
+    assert second.last_execution_budget == {"elapsed_s": 1.5}
     assert second.diagnostics == ("checkpoint_write_failed: OSError: disk full",)
-    assert read_repair_job(tmp_path) == second
+    assert read_repair_job_record(tmp_path) == second
 
 
 def test_corrupt_job_record_is_not_read_as_an_empty_job(tmp_path: Path) -> None:
     """A foreign or corrupt record is reported as absent, never as fresh state."""
-    assert read_repair_job(tmp_path) is None
+    assert read_repair_job_record(tmp_path) is None
     (tmp_path / "repair-job.json").write_text("{not json")
-    assert read_repair_job(tmp_path) is None
+    assert read_repair_job_record(tmp_path) is None
 
 
 @pytest.mark.asyncio
@@ -188,7 +233,7 @@ async def test_phase_blocks_the_repair_when_the_checkpoint_cannot_be_persisted(
     assert any("checkpoint_write_failed" in diagnostic and "OSError" in diagnostic
         for diagnostic in result.repairs[0].diagnostics)
     # The blocker is named in the job record too, so a resuming job sees it.
-    job = read_repair_job(tmp_path / ".daydream" / "deep")
+    job = read_repair_job_record(tmp_path / ".daydream" / "deep")
     assert job is not None
     assert any("checkpoint_write_failed" in diagnostic for diagnostic in job.diagnostics)
 
@@ -253,3 +298,99 @@ async def test_checkpoint_captures_authorized_work_before_the_guard_restores(
     assert stored["patch_digest"] == hashlib.sha256(
         stored["candidate_patch"].encode()).hexdigest()
     assert result.repairs[0].checkpoint_ref == "repair-checkpoint.json"
+
+
+def test_paused_job_is_structurally_incapable_of_a_passing_verdict() -> None:
+    """Requirement 24: enforced by the shape of the outcome, not a later check."""
+    for state in RepairJobState:
+        job = _job(state=state)
+        if state is RepairJobState.COMPLETED:
+            continue
+        assert job.cannot_report_green is True, state
+        assert job.cannot_authorize_commit is True, state
+
+
+def test_execution_deadline_is_the_smallest_remaining_allowance_less_reserve() -> None:
+    """Requirement 36: process-local, derived per execution."""
+    job = _job(consumed_s=500.0, policy=_policy(execution_s=1800, job_total_s=7200,
+                                                 max_executions=4, reserve_s=120))
+    assert job.execution_allowance_s() == pytest.approx(min(1800, 7200 - 500 - 120))
+
+
+def test_job_allowance_exhaustion_reports_exhausted_not_blocked() -> None:
+    """Requirement 42: honest termination states."""
+    assert _job(consumed_s=7200.0, executions=1, policy=_policy()).next_action() \
+        == RepairAction.EXHAUSTED
+
+
+def test_no_progress_reports_blocked_naming_the_unchanged_evidence() -> None:
+    """Requirement 41 + the Should Have: the signal names what it saw."""
+    job = _job(unchanged_evidence=("focused test:tests/test_a.py", "src/handler.py"))
+    job.record_execution(progress=False, next_experiment=None)
+    assert job.next_action() == RepairAction.BLOCKED
+    assert "tests/test_a.py" in (job.last_transition_reason or "")
+
+
+def test_more_output_or_changed_bytes_alone_is_not_progress() -> None:
+    """Requirement 40: a real defect alone is not progress."""
+    job = _job()
+    job.record_execution(progress=False, next_experiment=None,
+                         completed_experiments=[], tool_calls=400, changed_paths=("src/a.py",))
+    assert job.next_action() == RepairAction.BLOCKED
+
+
+def test_consumption_survives_a_process_restart(tmp_path: Path) -> None:
+    """Requirement 38: reopening resets neither consumption nor reservations."""
+    write_repair_job_record(tmp_path, _job(consumed_s=900.0, executions=2,
+                                           policy=_policy(execution_s=900, job_total_s=1200,
+                                                          max_executions=2, reserve_s=60)))
+    reloaded = read_repair_job_record(tmp_path)
+    assert reloaded is not None
+    assert reloaded.consumed_s == 900.0 and reloaded.executions == 2
+    # Requirement 44: the policy was captured at job start, so a resumed job
+    # keeps the bounds it was granted rather than inheriting today's policy.
+    assert reloaded.execution_allowance_s() == pytest.approx(min(900.0, 1200 - 900 - 60))
+
+
+@pytest.mark.parametrize(("raw_value", "expected"), [(-5, 1800.0), ("nonsense", 1800.0),
+                                                      (0.0, 0.0), (900.0, 900.0)])
+def test_invalid_job_limits_degrade_to_the_default(raw_value: object, expected: float) -> None:
+    """The existing resolver family degrades invalid input to the default."""
+    cfg = _limit_config(repair_execution_wall_s=raw_value)
+    assert _resolve_non_negative_float(cfg, "repair_execution_wall_s", 1800.0) == expected
+
+
+def test_settings_compose_the_job_policy_from_configured_limits() -> None:
+    """The three limits resolve through the existing non-negative resolvers."""
+    default = repair_job_policy(_limit_config())
+    assert (default.execution_s, default.job_total_s, default.max_executions) == (1800.0, 7200.0, 4)
+    configured = repair_job_policy(
+        _limit_config(repair_execution_wall_s=600.0, repair_job_wall_s=3600.0,
+                      repair_max_executions=2)
+    )
+    assert (configured.execution_s, configured.job_total_s, configured.max_executions) \
+        == (600.0, 3600.0, 2)
+
+
+def test_execution_count_ceiling_is_exhausted_not_blocked() -> None:
+    """Requirement 42: a bounded job stops on its own bounds, not on a defect."""
+    job = _job(executions=4, policy=_policy(max_executions=4))
+    assert job.next_action() == RepairAction.EXHAUSTED
+
+
+def test_operator_grant_is_recorded_apart_from_usage_and_never_silent() -> None:
+    """Requirement 43: replenishment is explicit, auditable, and separate from history."""
+    job = _job(consumed_s=7200.0, executions=2, policy=_policy())
+    assert job.next_action() == RepairAction.EXHAUSTED
+    with pytest.raises(ValueError, match="reason"):
+        job.grant_allowance(1800.0, reason="   ")
+    job.grant_allowance(1800.0, reason="operator: budget extended after triage")
+    assert job.consumed_s == 7200.0, "a grant must not rewrite historical usage"
+    assert job.next_action() == RepairAction.EXECUTE
+    assert "operator: budget extended after triage" in (job.last_transition_reason or "")
+
+
+def test_cost_ceiling_is_exhausted_not_blocked() -> None:
+    """Requirement 42: cost is a bound like time and count, and reports as exhausted."""
+    job = _job(cumulative_cost_usd=5.01, policy=_policy(max_cost_usd=5.0))
+    assert job.next_action() == RepairAction.EXHAUSTED

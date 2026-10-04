@@ -32,7 +32,10 @@ class DaydreamFileConfig:
 
     Scalar policy is lenient: malformed values degrade to unset. Boolean
     switches require actual booleans, never truthy numbers. Counts reject
-    booleans; budgets and quality thresholds also reject NaN and infinity.
+    booleans; budgets and quality thresholds also reject NaN and infinity. The
+    repair-job limits follow exactly those two policies:
+    ``repair_execution_wall_s``/``repair_job_wall_s`` are budgets,
+    ``repair_max_executions`` is a count.
     Non-negative bounds preserve zero: a zero group budget intentionally skips
     fixes. Test-command timeouts and diagram/improve bounds must be positive.
     Invalid declared retry allowances warn before using the default.
@@ -66,6 +69,9 @@ class DaydreamFileConfig:
     scope_issue_filing: bool | None = None
     group_max_wall_s: float | None = None
     group_max_serial_items: int | None = None
+    repair_execution_wall_s: float | None = None
+    repair_job_wall_s: float | None = None
+    repair_max_executions: int | None = None
     retry_recovery_allowance_s: float | None = None
     deep_shard_enabled: bool | None = None
     deep_shard_max_files: int | None = None
@@ -319,6 +325,9 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         scope_issue_filing=_coerce_optional_bool(merged.get("scope_issue_filing")),
         group_max_wall_s=_coerce_non_negative_float(merged.get("group_max_wall_s")),
         group_max_serial_items=_coerce_non_negative_int(merged.get("group_max_serial_items")),
+        repair_execution_wall_s=_coerce_non_negative_float(merged.get("repair_execution_wall_s")),
+        repair_job_wall_s=_coerce_non_negative_float(merged.get("repair_job_wall_s")),
+        repair_max_executions=_coerce_non_negative_int(merged.get("repair_max_executions")),
         retry_recovery_allowance_s=_coerce_retry_recovery_allowance(merged),
         review_profile=_coerce_review_profile_path(merged.get("review_profile")),
         deep_shard_enabled=_coerce_optional_bool(merged.get("deep_shard_enabled")),

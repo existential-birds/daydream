@@ -5,7 +5,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
+from daydream.config import (
+    DEFAULT_REPAIR_EXECUTION_WALL_S,
+    DEFAULT_REPAIR_JOB_WALL_S,
+    DEFAULT_REPAIR_MAX_EXECUTIONS,
+)
 from daydream.config_file import _coerce_non_negative_float, _coerce_non_negative_int
+from daydream.deep.repair_job import RepairJobPolicy
 
 if TYPE_CHECKING:
     from daydream.deep.detection import StackAssignment
@@ -48,6 +54,37 @@ def _resolve_non_negative_float(config: RunConfig, attr: str, default: float) ->
     """Resolve a float threshold; negative/NaN/infinite values degrade to *default*."""
     coerced = _coerce_non_negative_float(_resolve_config_value(config, attr, default))
     return coerced if coerced is not None else default
+
+
+def repair_execution_wall_s(config: RunConfig) -> float:
+    """Wall ceiling for one repair execution (issue #1210's proposal as a default)."""
+    return _resolve_non_negative_float(
+        config, "repair_execution_wall_s", DEFAULT_REPAIR_EXECUTION_WALL_S,
+    )
+
+
+def repair_job_wall_s(config: RunConfig) -> float:
+    """Cumulative wall ceiling across every execution of one repair job."""
+    return _resolve_non_negative_float(config, "repair_job_wall_s", DEFAULT_REPAIR_JOB_WALL_S)
+
+
+def repair_max_executions(config: RunConfig) -> int:
+    """How many bounded executions one repair job may run."""
+    return _resolve_non_negative_int(config, "repair_max_executions", DEFAULT_REPAIR_MAX_EXECUTIONS)
+
+
+def repair_job_policy(config: RunConfig) -> RepairJobPolicy:
+    """The repair-job bounds a new job is *granted*, resolved once at job start.
+
+    Requirement 44: the coordinator passes this into the job record, which stores
+    it. A resumed job reads its stored policy, so a later process cannot inherit
+    a broader policy than the job was granted.
+    """
+    return RepairJobPolicy(
+        execution_s=repair_execution_wall_s(config),
+        job_total_s=repair_job_wall_s(config),
+        max_executions=repair_max_executions(config),
+    )
 
 
 def fresh_ttt(config: RunConfig) -> bool:
