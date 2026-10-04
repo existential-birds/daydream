@@ -56,6 +56,7 @@ from daydream.git_ops.models import (
 )
 from daydream.git_ops.mutations import (
     apply_staged_patch as apply_staged_patch,
+    apply_worktree_patch as apply_worktree_patch,
     checkout_branch as checkout_branch,
     checkout_detach as checkout_detach,
     clone as clone,
@@ -74,6 +75,7 @@ from daydream.git_ops.mutations import (
     worktree_add as worktree_add,
     worktree_lock_mtime as worktree_lock_mtime,
     worktree_move as worktree_move,
+    worktree_patch_applies as worktree_patch_applies,
     worktree_remove as worktree_remove,
     worktree_remove_unlocked as worktree_remove_unlocked,
     worktree_unlock as worktree_unlock,

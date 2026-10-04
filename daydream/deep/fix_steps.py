@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -21,10 +22,11 @@ from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.fix_state import EvidenceKey, FixCycleState
 from daydream.deep.quality_gate import QualityGateThresholds, _evaluate_quality_gate, capture_quality
 from daydream.deep.records import item_uid, stamp_item_uids
+from daydream.deep.repair_coordinator import continue_repair_job, repair_job_id
 from daydream.deep.scope_issues import (
     _resolve_changed_files,
 )
-from daydream.deep.settings import _resolve_config_value, _resolve_opt_in
+from daydream.deep.settings import _resolve_config_value, _resolve_opt_in, repair_job_policy
 from daydream.deep.state import DeepState
 from daydream.deep.verify_selection import SelectionConfig, resolve_selection_config
 from daydream.extensions.api import BreakLoop, Stop
@@ -939,6 +941,9 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
             test_backend = ctx.backend_for("test")
             repair_backend = ctx.backend_for("fix")
 
+            def _capture_tree_key() -> str:
+                return fix_state._capture_full_delta_key(ctx.work, state)
+
             def _confine_after_repair() -> None:
                 # Requirement 12: full confinement runs after every repair outcome,
                 # before the rerun. It reuses the one implementation terminal
@@ -948,23 +953,61 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
                 # to consume, not this seam's.
                 fix_state._strict_scope_and_scrub(ctx, state, phase="test_heal", round_number=None)
 
-            result = await phase_test_and_heal(
-                test_backend,
-                ctx.work,
-                feedback_items=deep_state.items,
-                config=ctx.config,
-                session_id=state.session_id,
-                capture_tree_key=lambda: fix_state._capture_full_delta_key(ctx.work, state),
+            async def _run_execution() -> TestAndHealResult:
+                """One bounded test-and-heal execution, from the same production phase.
+
+                The coordinator re-dispatches through this exact closure, so a
+                continued repair job is the same phase call with a fresh execution
+                context — never a second implementation of the heal loop.
+                """
+                result = await phase_test_and_heal(
+                    test_backend,
+                    ctx.work,
+                    feedback_items=deep_state.items,
+                    config=ctx.config,
+                    session_id=state.session_id,
+                    capture_tree_key=_capture_tree_key,
+                    footprint=state.footprint,
+                    repair_backend=repair_backend,
+                    confinement=_confine_after_repair,
+                    run_context=ctx.run_context,
+                    artifact_session=ctx.artifacts,
+                    allow_standalone=ctx.allow_standalone_artifacts,
+                    recipe=deep_state.test_recipe,
+                )
+                if not isinstance(result, TestAndHealResult):
+                    raise TypeError("phase_test_and_heal returned an invalid evidence result")
+                return result
+
+            started = time.monotonic()
+            result = await _run_execution()
+            first_elapsed_s = time.monotonic() - started
+            # The repair job owns continuation: it decides whether this run's
+            # execution owes another one, restores captured work first, and is the
+            # only thing that dispatches a second execution.
+            continuation = await continue_repair_job(
+                work=ctx.work,
+                deep_dir_path=deep_state.dd,
+                job_id=repair_job_id(state.session_id),
                 footprint=state.footprint,
-                repair_backend=repair_backend,
-                confinement=_confine_after_repair,
-                run_context=ctx.run_context,
-                artifact_session=ctx.artifacts,
-                allow_standalone=ctx.allow_standalone_artifacts,
-                recipe=deep_state.test_recipe,
+                capture_tree_key=_capture_tree_key,
+                first=result,
+                dispatch=_run_execution,
+                policy=repair_job_policy(ctx.config),
+                first_elapsed_s=first_elapsed_s,
             )
-            if not isinstance(result, TestAndHealResult):
-                raise TypeError("phase_test_and_heal returned an invalid evidence result")
+            if continuation.result is not None and continuation.result is not result:
+                # Evidence from every execution of this job, not just the last one:
+                # a verdict that erased the interrupted turn would report a green
+                # run that in fact went through one.
+                result = TestAndHealResult(
+                    passed=continuation.result.passed,
+                    retries=result.retries + continuation.result.retries,
+                    proceed=continuation.result.proceed,
+                    ignored=continuation.result.ignored,
+                    attempts=(*result.attempts, *continuation.result.attempts),
+                    repairs=(*result.repairs, *continuation.result.repairs),
+                )
             _persist_test_verdict(
                 ctx,
                 state,

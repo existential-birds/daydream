@@ -63,7 +63,7 @@ from daydream.backends._transport import (
     reap,
     teardown,
 )
-from daydream.config import DEFAULT_PI_MODEL
+from daydream.config import DEFAULT_PI_MODEL, DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
 from daydream.json_utils import extract_json, extract_json_by_schema, validates_schema
 from daydream.retry_policy import classify_failure, parse_message_retry_hint
 
@@ -141,10 +141,14 @@ def _configured_pi_model(
 
 # Pi's minimal built-in prompt needs explicit exploration/tool guidance.
 # Append this preamble each turn; keep it concise to limit repeated context.
-_PI_SYSTEM_PREAMBLE = """\
-You are an efficient coding agent operating under a strict tool-call budget.
-Honor the invocation's time and tool allowance. Each call must resolve a
-specific unanswered question; the allowance is a ceiling, not a target.
+# The allowance sentence states what this invocation actually has: a tool-call
+# ceiling the host does not impose must never be described as strict, because
+# a cap that does not exist is not a discipline, it is a lie about the budget.
+_PI_PREAMBLE_TEMPLATE = """\
+You are an efficient coding agent operating under a bounded time budget.
+{allowance}
+Each call must resolve a specific unanswered question; the allowance is a ceiling,
+not a target.
 
 WORK STRATEGY:
 - Use supplied exact file paths and diff context directly. When a location is
@@ -169,6 +173,33 @@ reading whole files.
 
 Be concise in your responses. Do not narrate exploration step by step; report
 findings and conclusions."""
+
+
+def render_pi_preamble(wall_budget_s: float, tool_call_budget: int | None) -> str:
+    """Render the preamble with the invocation's actual allowances.
+
+    Requirement 17: the numbers are rendered, never hardcoded, and the tool-call
+    sentence says exactly what is true. ``DEFAULT_TOOL_CALL_BUDGET`` is ``None``,
+    so the common case has no ceiling to honour — an uncapped turn is described as
+    uncapped rather than as a strict budget, and the wall allowance the host did
+    impose is stated instead.
+    """
+    wall = f"{float(wall_budget_s):g}"
+    if tool_call_budget is None:
+        allowance = (
+            f"This turn's effective wall allowance is {wall} seconds and its tool-call "
+            f"budget is uncapped: nothing stops you at a call count, so every call must "
+            f"earn the time it spends."
+        )
+    else:
+        allowance = (
+            f"This turn's effective wall allowance is {wall} seconds and its tool-call "
+            f"budget is {int(tool_call_budget)} calls."
+        )
+    return _PI_PREAMBLE_TEMPLATE.format(allowance=allowance)
+
+
+_PI_SYSTEM_PREAMBLE = render_pi_preamble(DEFAULT_WALL_BUDGET_S, DEFAULT_TOOL_CALL_BUDGET)
 
 
 _PI_FINALIZATION_PREAMBLE = """\

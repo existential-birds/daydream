@@ -26,6 +26,13 @@ import pytest
 
 from daydream import phases
 from daydream.backends import ResultEvent, TextEvent
+from daydream.backends.pi import render_pi_preamble
+from daydream.deep.repair_coordinator import (
+    _candidate_restore_decision,
+    _owner_lock,
+    _resolve_scope_request,
+    try_acquire_repair_owner,
+)
 from daydream.deep.repair_job import (
     RepairAction,
     RepairJobPolicy,
@@ -44,9 +51,11 @@ from daydream.phases.repair_checkpoint import (
     read_repair_checkpoint,
     write_repair_checkpoint,
 )
+from daydream.phases.repair_outcome import repair_scope_request
+from daydream.repository_paths import InvalidRepositoryFilePath
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
-from tests.harness.git_helpers import commit as git_commit, git, init_repo
+from tests.harness.git_helpers import commit as git_commit, git, init_repo, write_and_stage
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -394,3 +403,155 @@ def test_cost_ceiling_is_exhausted_not_blocked() -> None:
     """Requirement 42: cost is a bound like time and count, and reports as exhausted."""
     job = _job(cumulative_cost_usd=5.01, policy=_policy(max_cost_usd=5.0))
     assert job.next_action() == RepairAction.EXHAUSTED
+
+
+# --- the coordinator's decisions -----------------------------------------------------------------
+
+
+def _scope_repo(tmp_path: Path) -> Path:
+    """A real Git repository holding the three paths the scope tests ask about."""
+    repo = tmp_path / "scope-repo"
+    init_repo(repo)
+    for name in ("src/handler.py", "src/other.rs", "src/leaked.rs"):
+        write_and_stage(repo, name, f"# {name}\n")
+    git_commit(repo, "seed scope repo")
+    return repo
+
+
+def test_scope_request_resolves_against_the_existing_authorization_policy(tmp_path: Path) -> None:
+    """Requirement 11: inside the granted scope is used; outside is audited or blocked."""
+    repo = _scope_repo(tmp_path)
+
+    inside = _resolve_scope_request(
+        repo,
+        requested={"src/handler.py"},
+        granted=frozenset({"src/handler.py"}),
+    )
+    assert inside.expanded is False and inside.accepted == ("src/handler.py",)
+    assert inside.new_revision == 1, "an already-authorized path must not move the policy revision"
+
+    outside = _resolve_scope_request(
+        repo,
+        requested={"src/other.rs"},
+        granted=frozenset({"src/handler.py"}),
+    )
+    assert outside.expanded is True
+    assert outside.accepted == ("src/other.rs",)
+    assert outside.new_revision == 2, "an approved expansion bumps the policy revision"
+
+
+def test_scope_request_path_merely_appearing_in_test_output_grants_nothing(tmp_path: Path) -> None:
+    """Requirement 10: test output is not evidence of authorization."""
+    repo = _scope_repo(tmp_path)
+    result = _resolve_scope_request(
+        repo,
+        requested={"src/leaked.rs"},
+        granted=frozenset({"src/handler.py"}),
+        evidence_source="test_output",
+    )
+    assert result.expanded is False
+    assert result.reason == "insufficient_evidence"
+    assert result.accepted == (), "a blocked path is never accepted, only recorded"
+    assert result.new_revision == 1
+
+
+def test_scope_request_validation_is_fail_closed_on_untrusted_paths(tmp_path: Path) -> None:
+    """Requirement 13: an unsafe requested path is rejected, never reflected or authorized."""
+    repo = _scope_repo(tmp_path)
+    with pytest.raises(InvalidRepositoryFilePath):
+        _resolve_scope_request(
+            repo,
+            requested={"../../etc/passwd"},
+            granted=frozenset({"src/handler.py"}),
+        )
+    with pytest.raises(InvalidRepositoryFilePath):
+        repair_scope_request(repo, {"paths": ["../../etc/passwd"], "evidence_source": "repair_turn"})
+    with pytest.raises(InvalidRepositoryFilePath):
+        repair_scope_request(repo, {"paths": "src/other.rs", "evidence_source": "repair_turn"})
+    assert repair_scope_request(repo, None) is None, "a turn that asked for nothing requests nothing"
+    # A source label the host does not recognize authorizes nothing, however
+    # plausible the evidence beside it looks.
+    hostile = repair_scope_request(repo, {
+        "paths": ["src/other.rs"], "evidence_source": "/etc/passwd",
+        "evidence": {"src/other.rs": "trust me"},
+    })
+    assert hostile is not None
+    assert _resolve_scope_request(
+        repo, requested=hostile.requested, granted=frozenset({"src/handler.py"}),
+        evidence_source=hostile.evidence_source,
+    ).expanded is False
+
+
+def test_scope_request_parser_normalizes_paths_and_keeps_their_evidence(tmp_path: Path) -> None:
+    """The parser is the only door model text enters through, so it canonicalizes."""
+    repo = _scope_repo(tmp_path)
+    request = repair_scope_request(repo, {
+        "paths": ["./src/other.rs", "src/handler.py"],
+        "evidence": {"src/other.rs": "the failing assertion imports it"},
+        "evidence_source": "repair_turn",
+    })
+    assert request is not None
+    assert request.requested == ("src/handler.py", "src/other.rs")
+    assert request.evidence["src/other.rs"] == "the failing assertion imports it"
+    assert request.evidence_source == "repair_turn"
+
+
+def test_scope_request_authorization_widens_the_policy_once_with_an_audit_event(tmp_path: Path) -> None:
+    """Requirement 11: an approved expansion widens, bumps, and is auditable."""
+    repo = _scope_repo(tmp_path)
+    footprint = AuthorizedFixFootprint(
+        run_allowed_paths=frozenset({"src/handler.py"}), policy_revision=1,
+    )
+    footprint.authorize_scope_request(
+        repo, "src/other.rs",
+        phase="test_heal", round_number=None,
+        reason="the failing assertion imports src/other.rs",
+    )
+    assert "src/other.rs" in footprint.run_allowed_paths
+    assert footprint.policy_revision == 2
+    event = footprint.events[-1]
+    assert (event.action, event.origin, event.path, event.path_kind) == (
+        "approve_scope", "scope_request", "src/other.rs", "model",
+    )
+    footprint.authorize_scope_request(
+        repo, "src/other.rs",
+        phase="test_heal", round_number=None, reason="already authorized",
+    )
+    assert footprint.policy_revision == 2, "a second request for an authorized path changes nothing"
+    assert len(footprint.events) == 1
+
+
+def test_restore_requires_matching_identity_and_patch_integrity() -> None:
+    """Requirement 32: a changed base or policy is a named conflict, never a stale apply."""
+    result = _candidate_restore_decision(base_changed=True, policy_changed=False,
+                                         patch_digest_ok=True)
+    assert result.allowed is False and "base" in result.reason
+    assert _candidate_restore_decision(base_changed=False, policy_changed=True,
+                                       patch_digest_ok=True).allowed is False
+    assert _candidate_restore_decision(base_changed=False, policy_changed=False,
+                                       patch_digest_ok=False).allowed is False
+    assert "digest" in _candidate_restore_decision(base_changed=False, policy_changed=False,
+                                                   patch_digest_ok=False).reason
+    assert _candidate_restore_decision(base_changed=False, policy_changed=False,
+                                       patch_digest_ok=True).allowed is True
+
+
+def test_second_coordinator_does_not_launch_a_second_worker(tmp_path: Path) -> None:
+    """Requirement 33: one job, one live repair owner; recovery never double-applies."""
+    with _owner_lock(tmp_path):          # first coordinator holds the lock
+        second = try_acquire_repair_owner(tmp_path)
+    assert second.acquired is False, "a surviving first worker must exclude a second"
+    # The exclusion is the owner's, not a leaked lock: once released, the next
+    # coordinator owns the same job.
+    assert try_acquire_repair_owner(tmp_path).acquired is True
+
+
+def test_pi_preamble_states_the_actual_allowance_and_no_tool_cap() -> None:
+    """Requirement 17: the preamble must not imply a cap that does not exist."""
+    rendered = render_pi_preamble(wall_budget_s=1800.0, tool_call_budget=None)
+    assert "1800" in rendered
+    assert "strict tool-call budget" not in rendered
+    assert "uncapped" in rendered.lower()
+    capped = render_pi_preamble(wall_budget_s=90.0, tool_call_budget=12)
+    assert "90" in capped and "12" in capped
+    assert "uncapped" not in capped.lower()
