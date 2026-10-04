@@ -68,6 +68,7 @@ from daydream.deep.repair_job import (
     RepairJobState,
     read_repair_job_record,
     record_diagnostic,
+    repair_job_id,
     write_repair_job_record,
 )
 from daydream.fix_footprint import AuthorizedFixFootprint
@@ -391,11 +392,6 @@ def _owner_lock(root: Path) -> Iterator[RepairOwnerHandle]:
 
 
 # --- continuation ---------------------------------------------------------------------------------
-
-
-def repair_job_id(session_id: str) -> str:
-    """The repair job's identity for one test session (``phases/testing.py``'s own id)."""
-    return f"repair-{session_id}"
 
 
 @dataclass(frozen=True)

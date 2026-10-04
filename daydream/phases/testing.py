@@ -22,7 +22,8 @@ from daydream.backends import (
     Backend,
     ContinuationToken,
 )
-from daydream.deep.repair_job import record_diagnostic
+from daydream.deep.repair_job import read_repair_job_record, record_diagnostic, repair_job_id
+from daydream.deep.settings import repair_execution_wall_s
 from daydream.extensions import get_registry
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.generated_files import (
@@ -36,10 +37,12 @@ from daydream.generated_files import (
 from daydream.git_ops import GitError
 from daydream.output_schema import strict_object
 from daydream.phases.fix import (
+    SCOPE_REQUEST_BEGIN,
     _backend_concise_fix_prompts,
     _build_fix_scope_clause,
     _build_fix_style_suffix,
     _item_evidence,
+    parse_fix_scope_request,
 )
 from daydream.phases.handoff import _emit_failure_handoff
 from daydream.phases.inputs import (
@@ -295,6 +298,44 @@ def _build_repair_budget_clause(wall_budget_s: float, tool_call_budget: int | No
         "Prioritise the most likely root cause and land that fix rather than "
         "covering every candidate.\n"
     )
+
+
+def _repair_turn_wall_budget_s(
+    config: Any,
+    *,
+    repo: Path,
+    job_id: str,
+    artifact_session: ArtifactSession | None,
+    allow_standalone: bool,
+) -> float:
+    """Return the wall ceiling for one repair turn.
+
+    Two bounds apply to a repair turn and the tighter one wins. The phase's
+    general wall budget (``DEFAULT_WALL_BUDGET_S``) is the host-wide ceiling on
+    any single agent turn, and it stays live here. The repair job's own bound is
+    the configured ``repair_execution_wall_s`` -- or, once this job has a durable
+    record, what the job was *granted*: ``execution_allowance_s()``, the smaller
+    of the per-execution ceiling and what the job total still has left after its
+    persisted consumption and the reserve (requirement 44: stored, not
+    re-resolved, so a job cannot be handed a fresh budget by editing config
+    mid-job).
+
+    A zero allowance is a degenerate policy value rather than a live bound: an
+    exhausted job is never dispatched at all, so the repair bound falls back to
+    the configured ceiling rather than launching a turn with no seconds in it.
+    """
+    phase_bound = float(phase_config.DEFAULT_WALL_BUDGET_S)
+    repair_bound = (
+        repair_execution_wall_s(config) if config is not None
+        else phase_config.DEFAULT_REPAIR_EXECUTION_WALL_S
+    )
+    deep = artifact_dir_for(repo, session=artifact_session, allow_standalone=allow_standalone) / "deep"
+    stored = read_repair_job_record(deep)
+    if stored is not None and stored.job_id == job_id:
+        allowance = stored.execution_allowance_s()
+        if allowance > 0.0:
+            repair_bound = allowance
+    return min(phase_bound, repair_bound)
 
 
 def _compose_repair_prompt(
@@ -597,8 +638,10 @@ async def phase_test_and_heal(
     job_started = time.monotonic()
     continuation: ContinuationToken | None = None
     # The repair job is host-owned: one identity per heal loop, one execution
-    # per repair turn, so a resumed job can tell the two apart.
-    job_id = f"repair-{session_id}"
+    # per repair turn, so a resumed job can tell the two apart. The identity is
+    # built by the module that owns the record, because a checkpoint captured
+    # under one spelling is unrestorable under another.
+    job_id = repair_job_id(session_id)
     # Feed redacted host-suite failures through the same environmental/healing
     # gate as agent-run failures on the next iteration.
     host_failure_output: str | None = None
@@ -620,7 +663,13 @@ async def phase_test_and_heal(
             pre_untracked = set()
             pre_untracked_contents = {}
             snapshot_captured = False
-        wall_budget_s = phase_config.DEFAULT_WALL_BUDGET_S
+        wall_budget_s = _repair_turn_wall_budget_s(
+            config,
+            repo=work.repo,
+            job_id=job_id,
+            artifact_session=artifact_session,
+            allow_standalone=allow_standalone,
+        )
         tool_call_budget = phase_config.DEFAULT_TOOL_CALL_BUDGET
         fix_prompt = _compose_repair_prompt(
             output, feedback_items,
@@ -729,6 +778,13 @@ async def phase_test_and_heal(
         confinement_error = _confine_repaired_tree(confinement)
         if confinement_error is not None:
             diagnostics.append(f"confinement_failed: {confinement_error}")
+        # The turn's own request to widen the authorization, parsed from its
+        # final message: the coordinator, not the turn, decides whether any of it
+        # is granted. An unreadable block is a named degradation, never a
+        # half-applied authorization.
+        scope_request = parse_fix_scope_request(turn_output)
+        if scope_request is None and SCOPE_REQUEST_BEGIN in turn_output:
+            diagnostics.append("scope_request_unreadable: the turn's scope-request block did not parse")
         repairs.append(RepairAttemptEvidence(
             job_id=job_id,
             execution_id=f"{job_id}:execution:{retries_used}",
@@ -751,6 +807,7 @@ async def phase_test_and_heal(
             changed_paths=changed,
             checkpoint_ref=checkpoint_ref,
             focused_evidence=_repair_excerpt(turn_output),
+            scope_request=scope_request,
             continuation_ref=_continuation_ref(continuation_token),
             diagnostics=tuple(diagnostics),
         ))

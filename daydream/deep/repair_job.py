@@ -49,6 +49,17 @@ REPAIR_JOB_FORMAT: int = 1
 REPAIR_JOB_RESERVE_S: float = 60.0
 
 
+def repair_job_id(session_id: str) -> str:
+    """The repair job's identity for one test session.
+
+    One definition, because the producer (``phases/testing.py``) and the consumer
+    (``deep/repair_coordinator.py``) must agree byte-for-byte: a checkpoint
+    captured under a different spelling is unrestorable, which would silently
+    block the whole job.
+    """
+    return f"repair-{session_id}"
+
+
 class RepairJobState(StrEnum):
     """Where a repair job stands; every terminal state names why in its reason.
 
@@ -503,5 +514,6 @@ __all__ = [
     "merge_repair_job_record",
     "read_repair_job_record",
     "record_diagnostic",
+    "repair_job_id",
     "write_repair_job_record",
 ]

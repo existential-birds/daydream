@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -1014,6 +1015,23 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
                     ignored=continuation.result.ignored,
                     attempts=(*result.attempts, *continuation.result.attempts),
                     repairs=(*result.repairs, *continuation.result.repairs),
+                )
+            job = continuation.job
+            if job is not None and (job.cannot_report_green or job.cannot_authorize_commit):
+                # Fail closed, at the only place a verdict is produced: the
+                # coordinator may hand back a caller's passing result verbatim
+                # next to a job that never completed, and a job that is not
+                # `completed` is structurally barred both from reporting a
+                # passing verdict and from authorizing a commit — so the run is
+                # stopped here, before the retained tree is committed and pushed.
+                if result.passed and job.cannot_report_green:
+                    result = replace(result, passed=False)
+                if result.proceed and job.cannot_authorize_commit:
+                    result = replace(result, proceed=False)
+                print_warning(
+                    console,
+                    f"Repair job {job.job_id} is {job.state.value}; "
+                    "not reporting a passing verdict and not authorizing a commit.",
                 )
             _persist_test_verdict(
                 ctx,

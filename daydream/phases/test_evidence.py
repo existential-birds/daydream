@@ -213,7 +213,8 @@ class RepairAttemptEvidence:
     ``changed_paths`` is what the tree actually holds, never what the turn claimed.
     ``focused_evidence`` holds bounded redacted excerpts of the failure output the
     turn worked from, and ``scope_request`` is the structured request the turn
-    returned, if any.
+    returned in its final message (parsed by ``phases.fix.parse_fix_scope_request``),
+    if any.
     """
 
     job_id: str
