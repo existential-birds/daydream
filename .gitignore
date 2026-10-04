@@ -47,10 +47,14 @@ htmlcov/
 *.swo
 *~
 
-# Agent tooling (ignore local settings and all project-local skills)
+# Agent tooling (keep only the shared Improve curation skills versioned)
 .claude/*
 .claude/skills/
-.agents/
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/publish-improve-finding/
+!.agents/skills/create-improve-pr/
 .hermes/
 /skills-lock.json
 
