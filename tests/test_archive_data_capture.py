@@ -558,7 +558,8 @@ async def test_collection_failure_preserves_deep_review_exports(
 
     if failure in ("evaluation", "index"):
         monkeypatch.setattr(
-            "daydream.eval.analyzer.analyze_session" if failure == "evaluation" else "daydream.archive.upsert_run",
+            "daydream.eval.analyzer.analyze_session"
+            if failure == "evaluation" else "daydream.archive.finalize.upsert_run",
             fail_collection,
         )
     elif failure == "filesystem":

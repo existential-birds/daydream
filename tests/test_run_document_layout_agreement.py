@@ -8,7 +8,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from daydream.archive import _project_documents, get_archive_dir
+from daydream.archive import get_archive_dir
+from daydream.archive.bundle import _project_documents
 from daydream.eval.analyzer import collect_trajectory_paths, load_trajectories
 from daydream.trajectory import (
     RunWriteSnapshot,

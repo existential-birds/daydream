@@ -5,11 +5,13 @@ artifacts count as absent; malformed current evidence degrades to partial.
 Bad or incomplete evidence never turns a phase green.
 """
 
-from collections.abc import Mapping, Sequence
-from pathlib import Path
-from typing import Any, TypeGuard, cast
+from __future__ import annotations
 
-from daydream.archive import _read_json_artifact
+import json
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, TypeGuard, cast
+
 from daydream.remote_ci import (
     CIObservation,
     RemoteCILimits,
@@ -31,6 +33,9 @@ from daydream.trajectory import (
     LifecycleStatus,
 )
 
+if TYPE_CHECKING:
+    from daydream.run_snapshot import ArchiveRunSnapshot
+
 # Phase status values shared by phase_states entries and pipeline_status.
 _SUCCEEDED = "succeeded"
 _FAILED = "failed"
@@ -41,6 +46,143 @@ _UNKNOWN = "unknown"
 _REMOTE_INCOMPLETE = frozenset(
     {"pending", "missing", "timed_out", "unavailable", "superseded", "cancelled"}
 )
+
+
+def _read_json_artifact(path: Path, expected_type: type) -> Any | None:
+    """Read a JSON artifact from *path*, returning ``None`` when absent, empty, or malformed."""
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, expected_type) or not data:
+        return None
+    return data
+
+
+def _read_fix_failures(target_dir: Path) -> dict[str, str] | None:
+    """Read the deep fix phase's ``{file_group: reason}`` map via `_read_json_artifact`.
+
+    No recorded failures leaves run status unchanged.
+    """
+    # Keep deep imports lazy for non-deep runs.
+    from daydream.deep.artifacts import DeepArtifact
+
+    data = _read_json_artifact(DeepArtifact.FIX_FAILURES.at(target_dir / ".daydream" / "deep"), dict)
+    if data is None:
+        return None
+    return {str(k): str(v) for k, v in data.items()}
+
+
+def _read_fix_leftover_untracked(target_dir: Path) -> list[str] | None:
+    """Read paths left untracked by failed fix passes via `_read_json_artifact`."""
+    from daydream.deep.artifacts import DeepArtifact
+
+    data = _read_json_artifact(DeepArtifact.FIX_LEFTOVER_UNTRACKED.at(target_dir / ".daydream" / "deep"), list)
+    if data is None:
+        return None
+    return [str(p) for p in data]
+
+
+def _read_session_bound_json_artifact(
+    target_dir: Path, session_id: str | None, resolver: Callable[[Path], Path]
+) -> dict[str, Any] | None:
+    """Read a deep sidecar only when its ``session_id`` matches this run.
+
+    Return ``None`` for absent, empty, malformed, unbound, or stale artifacts,
+    or when this run has no session ID. Prior runs' sidecars cannot be attributed
+    to the current run. ``resolver`` receives ``<target_dir>/.daydream/deep``.
+    """
+    if session_id is None:
+        return None
+    data: dict[str, Any] | None = _read_json_artifact(
+        resolver(target_dir / ".daydream" / "deep"), dict
+    )
+    if data is None or data.get("session_id") != session_id:
+        return None
+    return data
+
+
+def _read_fix_quality_gate(target_dir: Path, session_id: str | None) -> dict[str, Any] | None:
+    """Read session-bound fix quality rounds through `_read_session_bound_json_artifact`.
+
+    The ``{enabled, session_id, rounds}`` payload holds per-file erosion and verbosity deltas.
+    """
+    from daydream.deep.artifacts import DeepArtifact
+
+    return _read_session_bound_json_artifact(target_dir, session_id, DeepArtifact.FIX_QUALITY_GATE.at)
+
+
+def _read_recommended_capture(target_dir: Path, session_id: str | None) -> dict[str, Any] | None:
+    """Read session-bound post-test capture provenance through `_read_session_bound_json_artifact`.
+
+    Its ``capture_point`` identifies which tree produced ``recommended.patch``.
+    """
+    from daydream.deep.artifacts import DeepArtifact
+
+    return _read_session_bound_json_artifact(target_dir, session_id, DeepArtifact.RECOMMENDED_CAPTURE.at)
+
+
+def _manifest_state(
+    *,
+    target_dir: Path,
+    run: ArchiveRunSnapshot,
+    frozen_extra: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive the status, fix, and pipeline manifest fields for one run tree.
+
+    Derivation is gated to the phases this registered flow can execute, and
+    every sidecar read is session-bound, so a non-deep or interrupted run never
+    adopts prior state. The ``derive_*`` helpers never raise on absent or
+    malformed artifacts, so this can never abort an archive.
+    """
+    from daydream.retry_policy import derive_retry_summary
+
+    recorder_provenance = run.recorder_provenance
+    phases = run.identity.phases
+    session_id = recorder_provenance.session_id
+    status = run.trajectories.status
+    runs_merge = phases.merge
+    runs_fix = phases.fix
+    runs_test = phases.test
+    runs_push = phases.push
+    runs_remote_ci = phases.remote_ci
+    # A deep fix run that hit per-group failures left partial/reverted edits in
+    # the tree; the run is NOT "complete".
+    fix_failures = _read_fix_failures(target_dir) if runs_fix else None
+    recommended = _read_recommended_capture(target_dir, session_id) if runs_fix else None
+    if fix_failures or frozen_extra.get("partial") is True:
+        status = "partial"
+    phase_states = derive_phase_states(
+        target_dir,
+        phase_events=frozen_extra.get("phase_events"),
+        runs_merge=runs_merge,
+        runs_fix=runs_fix,
+        runs_test=runs_test,
+        runs_push=runs_push,
+        runs_remote_ci=runs_remote_ci,
+        session_id=session_id,
+        pr_repo=recorder_provenance.pr_repo,
+        pr_number=recorder_provenance.pr_number,
+    )
+    return {
+        "status": status,
+        "fix_failures": fix_failures,
+        "fix_leftover_untracked": _read_fix_leftover_untracked(target_dir) if runs_fix else None,
+        "fix_quality_gate": _read_fix_quality_gate(target_dir, session_id) if runs_fix else None,
+        "recommended_capture": (recommended or {}).get("capture_point"),
+        "phase_states": phase_states,
+        "retry_summary": derive_retry_summary(frozen_extra.get("phase_events")),
+        "pipeline_status": derive_pipeline_status(
+            status,
+            fix_failures,
+            phase_states,
+            runs_merge=runs_merge,
+            runs_fix=runs_fix,
+            runs_test=runs_test,
+        ),
+    }
 
 
 def _deep_dir(target_dir: Path) -> Path:
