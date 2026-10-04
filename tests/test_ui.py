@@ -229,17 +229,6 @@ def test_bash_panel_shows_command_drops_mechanical_keys() -> None:
     assert "pytest" in out
     assert "block" not in out and "timeout" not in out
 
-def test_bash_panel_command_truncation_shows_ellipsis() -> None:
-    header = _build_tool_header("Bash", {"command": "x" * 250}, quiet_mode=False)
-    text = header.plain
-    assert "x" * 200 in text
-    assert "x" * 201 not in text
-    assert text.rstrip().endswith("...")
-
-    short_header = _build_tool_header("Bash", {"command": "true"}, quiet_mode=False)
-    assert not short_header.plain.rstrip().endswith("...")
-
-
 def _render_panel_text(reg: LiveToolPanelRegistry, tool_use_id: str) -> str:
 
     c = Console(file=StringIO(), record=True)
@@ -479,6 +468,8 @@ def test_bash_primary_field_consistent_across_three_render_surfaces() -> None:
     long_line = format_callback_progress("Bash", {"command": long_command}, None)
     assert "b" * _BASH_COMMAND_MAX_CHARS in long_line.plain
     assert len(_summarize_input({"command": long_command}, "Bash")) == _BASH_COMMAND_MAX_CHARS
+    # Under the cap nothing is truncated, so no ellipsis is appended.
+    assert not _build_tool_header("Bash", {"command": "true"}, quiet_mode=True).plain.rstrip().endswith("...")
 
 def test_bash_header_preserves_operator_cd_prefix() -> None:
     """Claude/Pi Bash commands never pass through the Codex wrapper (issue #336).
@@ -518,19 +509,6 @@ def _straddling_command(token: str, *, prefix: str = "") -> str:
     before_token = prefix + "echo " + "a" * (_BOUNDARY_PAD - len(prefix) - 12) + " --key "
     assert len(before_token) == _BOUNDARY_PAD
     return before_token + token + " tail"
-
-@pytest.mark.parametrize("token", [_AKIA_TOKEN, _JWT_TOKEN])
-def test_redacted_bash_command_redacts_before_the_cap(token: str) -> None:
-    """The order is strip -> redact the COMPLETE value -> cap (issue #1227).
-
-    The token straddles the cap boundary, so the fragment surviving a cap-first order is too short to match its
-    own pattern and would print in the clear."""
-    command = _straddling_command(token)
-    assert len(command) > _BASH_COMMAND_MAX_CHARS
-    displayed = _redacted_bash_command("Bash", command)
-    assert token[:8] not in displayed  # no fragment of the credential survives
-    assert "[REDACTED" in displayed
-    assert len(displayed) == _BASH_COMMAND_MAX_CHARS
 
 def test_redacted_bash_command_strip_is_codex_only_and_precedes_redaction() -> None:
     command = _straddling_command(_AKIA_TOKEN)

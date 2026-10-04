@@ -8,8 +8,6 @@ import hashlib
 import json
 import os
 import stat
-import threading
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -24,6 +22,7 @@ from daydream.backends.codex import CodexError
 from daydream.backends.osprey import OspreyTerminalError
 from daydream.backends.pi import PiError
 from daydream.run_config import RunConfig
+from tests.harness.blocked_mode import blocking_releaser, wait_for_entered
 from tests.harness.claude_sdk import (
     MockAssistantMessage,
     MockResultMessage,
@@ -452,48 +451,10 @@ async def test_runner_external_adapter_model_failure_preserves_partial_evidence(
     assert (public_run / "trajectory.json").read_bytes() == explicit_trajectory.read_bytes()
 
 
-def _release_fifo_invocations(fixture: ProtocolCli, expected: int, stop: threading.Event, failures: list[BaseException],
-) -> None:
-    seen_pids: set[int] = set()
-    deadline = time.monotonic() + 15
-    try:
-        while len(seen_pids) < expected:
-            if stop.is_set():
-                return
-            if time.monotonic() >= deadline:
-                raise TimeoutError("blocked protocol invocation did not enter")
-            try:
-                entered = json.loads(fixture.entered.read_text(encoding="utf-8"))
-                pid = entered["pid"]
-            except (FileNotFoundError, json.JSONDecodeError, KeyError):
-                stop.wait(0.01)
-                continue
-            if not isinstance(pid, int) or pid in seen_pids:
-                stop.wait(0.01)
-                continue
-            with fixture.release.open("wb", buffering=0) as release:
-                release.write(b"release")
-            seen_pids.add(pid)
-    except BaseException as exc:
-        failures.append(exc)
-
-
 async def _run_blocked_codex(*, fixture: ProtocolCli, config: RunConfig, private_base: Path) -> int:
-    stop = threading.Event()
-    failures: list[BaseException] = []
-    releaser = threading.Thread(
-        target=_release_fifo_invocations, args=(fixture, 2, stop, failures), name="artifact-visibility-fifo-releaser",
-        daemon=True,
-    )
-    releaser.start()
-    try:
+    with blocking_releaser(fixture, 2, join_timeout_s=5, name="artifact-visibility-fifo-releaser"):
         with anyio.fail_after(20):
             return await runner.run(config, private_roots=private_root_locations(base=private_base))
-    finally:
-        stop.set()
-        releaser.join(timeout=5)
-        assert not releaser.is_alive()
-        assert failures == []
 
 @pytest.mark.asyncio
 async def test_two_ephemeral_runs_for_one_source_cannot_observe_sibling_runtime(
@@ -926,22 +887,6 @@ async def test_runner_extension_osprey_sandbox_preserves_roots_and_inlines_input
     _assert_frozen_outputs(repo, archive_dir, explicit_trajectory, dump_dir, backend="osprey", model="fixture-model")
 
 
-async def _wait_for_entered(fixture: ProtocolCli, timeout_s: float = 30.0) -> int:
-    """Wait for the blocked fixture's atomic entered marker; return its pid."""
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        try:
-            entered = json.loads(fixture.entered.read_text(encoding="utf-8"))
-            pid = entered["pid"]
-        except (FileNotFoundError, json.JSONDecodeError, KeyError):
-            await anyio.sleep(0.02)
-            continue
-        if isinstance(pid, int):
-            return pid
-        await anyio.sleep(0.02)
-    raise AssertionError("blocked protocol invocation never published entered")
-
-
 def _assert_pid_reaped(pid: int) -> None:
     try:
         os.kill(pid, 0)
@@ -997,7 +942,7 @@ async def test_runner_external_adapter_cancellation_reaps_process_and_freezes_on
     config = _probe_config(make_config, repo, backend=backend, trajectory_path=explicit_trajectory)
     run_task = asyncio.create_task(runner.run(config, private_roots=private_root_locations(base=private_base)))
     try:
-        pid = await _wait_for_entered(fixture)
+        pid = await wait_for_entered(fixture)
         # The external process is blocked mid-turn: nothing may be frozen yet.
         assert not explicit_trajectory.exists()
         run_task.cancel()

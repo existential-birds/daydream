@@ -12,8 +12,6 @@ import hashlib
 import json
 import os
 import sys
-import threading
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +28,7 @@ from daydream.artifact_visibility import (
 from daydream.backends.codex import CodexError
 from daydream.phases import UnconfinedFindingError
 from tests.harness.backend import ScriptedBackend
+from tests.harness.blocked_mode import blocking_releaser
 from tests.harness.git_helpers import bare_remote, git, tracked_source_state as _tracked_source_state
 from tests.harness.protocol_cli import ProtocolCli, install_protocol_cli
 from tests.test_artifact_visibility_integration import (
@@ -301,39 +300,6 @@ def _assert_codex_observations(case: _VisibilityCase, *, expected_cwd: Path | No
     return model_cwds
 
 
-def _replace_destination_after_entered(fixture: ProtocolCli, destination: Path, replacement: bytes, *,
-    expected_pids: int, stop: threading.Event, failures: list[BaseException],
-) -> None:
-    """Replace the destination once after the blocked child publishes its entered marker.
-
-    Release each invocation through its FIFO; surface thread failures in the test."""
-    seen: set[int] = set()
-    replaced = False
-    deadline = time.monotonic() + 30
-    try:
-        while len(seen) < expected_pids:
-            if stop.is_set():
-                return
-            if time.monotonic() >= deadline:
-                raise TimeoutError("blocked protocol invocation did not enter")
-            try:
-                entered = json.loads(fixture.entered.read_text(encoding="utf-8"))
-                pid = entered["pid"]
-            except (FileNotFoundError, json.JSONDecodeError, KeyError):
-                stop.wait(0.01)
-                continue
-            if not isinstance(pid, int) or pid in seen:
-                stop.wait(0.01)
-                continue
-            seen.add(pid)
-            if not replaced:
-                destination.write_bytes(replacement)
-                replaced = True
-            with fixture.release.open("wb", buffering=0) as fifo:
-                fifo.write(b"release")
-    except BaseException as exc:  # surfaced by the test body
-        failures.append(exc)
-
 def test_artifact_visibility_cli_codex_in_place_publishes_after_model(
     visibility_case: Callable[..., _VisibilityCase], tmp_path: Path, archive_dir: Path
 ) -> None:
@@ -417,23 +383,12 @@ def test_artifact_visibility_cli_codex_publication_collision_restores_and_exits_
     explicit_trajectory = tmp_path / "collision trajectory output.json"
     explicit_trajectory.write_bytes(b"pre-existing published trajectory bytes")
     replacement = b"concurrent replacement trajectory bytes"
-    stop = threading.Event()
-    failures: list[BaseException] = []
-    releaser = threading.Thread(
-        target=_replace_destination_after_entered, args=(case.fixture, explicit_trajectory, replacement),
-        kwargs={"expected_pids": 2, "stop": stop, "failures": failures}, name="artifact-visibility-cli-collision",
-        daemon=True,
-    )
-    releaser.start()
-    try:
+    with blocking_releaser(case.fixture, 2, replacement=(explicit_trajectory, replacement), timeout_s=30,
+            join_timeout_s=15, name="artifact-visibility-cli-collision",
+    ):
         with pytest.raises(SystemExit) as exc:
             cli.main([str(case.repo), *_PROBE_ARGV, "--trajectory", str(explicit_trajectory)])
-    finally:
-        stop.set()
-        releaser.join(timeout=15)
     assert exc.value.code == 1
-    assert not releaser.is_alive()
-    assert failures == []
 
     observations = case.fixture.read_observations()
     assert len(observations) == 2
