@@ -26,7 +26,12 @@ from daydream.deep.repair_coordinator import continue_repair_job, repair_job_id
 from daydream.deep.scope_issues import (
     _resolve_changed_files,
 )
-from daydream.deep.settings import _resolve_config_value, _resolve_opt_in, repair_job_policy
+from daydream.deep.settings import (
+    _resolve_config_value,
+    _resolve_opt_in,
+    repair_job_grant_s,
+    repair_job_policy,
+)
 from daydream.deep.state import DeepState
 from daydream.deep.verify_selection import SelectionConfig, resolve_selection_config
 from daydream.extensions.api import BreakLoop, Stop
@@ -736,6 +741,7 @@ def _test_attempt_payload(attempt: TestAttemptEvidence) -> dict[str, Any]:
         "passed": attempt.passed,
         "input_tree_key": attempt.input_tree_key,
         "output_tree_key": attempt.output_tree_key,
+        "abort_reason": attempt.abort_reason,
     }
     if attempt.identity is not None:
         payload["identity"] = attempt.identity.payload()
@@ -995,6 +1001,7 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
                 dispatch=_run_execution,
                 policy=repair_job_policy(ctx.config),
                 first_elapsed_s=first_elapsed_s,
+                granted_allowance_s=repair_job_grant_s(ctx.config),
             )
             if continuation.result is not None and continuation.result is not result:
                 # Evidence from every execution of this job, not just the last one:

@@ -73,6 +73,16 @@ def repair_max_executions(config: RunConfig) -> int:
     return _resolve_non_negative_int(config, "repair_max_executions", DEFAULT_REPAIR_MAX_EXECUTIONS)
 
 
+def repair_job_grant_s(config: RunConfig) -> float:
+    """The operator's additional finite allowance for a job that ran out of time.
+
+    Requirement 43. Zero (the default) grants nothing, so a job is never
+    replenished silently; the coordinator applies this only to an *exhausted*
+    job, and records the grant beside the consumption it does not erase.
+    """
+    return _resolve_non_negative_float(config, "repair_grant_job_wall_s", 0.0)
+
+
 def repair_job_policy(config: RunConfig) -> RepairJobPolicy:
     """The repair-job bounds a new job is *granted*, resolved once at job start.
 

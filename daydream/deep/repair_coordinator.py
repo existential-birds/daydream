@@ -450,6 +450,7 @@ async def continue_repair_job(
     policy: RepairJobPolicy | None = None,
     cost_usd: float = 0.0,
     first_elapsed_s: float = 0.0,
+    granted_allowance_s: float = 0.0,
 ) -> RepairContinuationResult:
     """Continue one repair job until it completes, blocks, or exhausts its bounds.
 
@@ -464,6 +465,11 @@ async def continue_repair_job(
     result carries neither billing nor a duration, so a caller that measured them
     passes them in and a caller that could not leaves them at their defaults: an
     under-charge, never an over-charge, with the execution ceiling still binding.
+
+    ``granted_allowance_s`` is the operator's *additional finite* allowance
+    (requirement 43). It is applied only to a job that ran out of time, never to
+    one that went blocked, and only because someone asked for it: the seconds the
+    job already spent stay spent and the grant is recorded beside them.
     """
     deep = Path(deep_dir_path)
     stored = read_repair_job_record(deep)
@@ -481,6 +487,7 @@ async def continue_repair_job(
                 work=work, deep=deep, job_id=job_id, footprint=footprint,
                 capture_tree_key=capture_tree_key, first=first, dispatch=dispatch,
                 policy=policy, cost_usd=cost_usd, first_elapsed_s=first_elapsed_s,
+                granted_allowance_s=granted_allowance_s,
             )
     except LockContentionError as exc:
         ui.print_warning(
@@ -504,6 +511,7 @@ async def _continue_locked(
     policy: RepairJobPolicy | None,
     cost_usd: float,
     first_elapsed_s: float,
+    granted_allowance_s: float,
 ) -> RepairContinuationResult:
     """The continuation loop, run by the job's single live owner."""
     job = _load_job(deep, job_id=job_id, footprint=footprint, policy=policy)
@@ -511,17 +519,20 @@ async def _continue_locked(
         return RepairContinuationResult(
             False, first, job, f"the persisted job is already {job.state.value}",
         )
-    blocked = _corrupt_checkpoint_reason(deep)
-    if blocked is not None:
-        reason = f"the captured candidate cannot be trusted: {blocked}"
-        return _settle(
-            _persist(deep, job.with_state(RepairJobState.BLOCKED, reason)), first, 0, reason,
-        )
-
     result = first
     dispatched = 0
     measured = first_elapsed_s
     while True:
+        # Re-read every pass, not only at the start: a checkpoint that became
+        # untrustworthy *during* the job is just as unrecoverable as one that
+        # was corrupt when the job loaded, and "nothing to restore" would throw
+        # the only copy of an interrupted repair away without saying so.
+        blocked = _corrupt_checkpoint_reason(deep)
+        if blocked is not None:
+            reason = f"the captured candidate cannot be trusted: {blocked}"
+            return _settle(
+                _persist(deep, job.with_state(RepairJobState.BLOCKED, reason)), result, dispatched, reason,
+            )
         repair = _last_repair(result)
         if result is not None and repair is not None:
             _apply_scope_request(job, repair, repo=work.repo, deep=deep, footprint=footprint)
@@ -550,9 +561,17 @@ async def _continue_locked(
             job = _persist(deep, job)
             action = job.next_action()
             if action is not RepairAction.EXECUTE:
-                return _settle(
-                    job, result, dispatched, job.last_transition_reason or f"the job is {action.value}",
-                )
+                resumed = _apply_operator_grant(job, action, granted_allowance_s)
+                if resumed is None:
+                    return _settle(
+                        job, result, dispatched, job.last_transition_reason or f"the job is {action.value}",
+                    )
+                job = _persist(deep, resumed)
+                if job.next_action() is not RepairAction.EXECUTE:
+                    return _settle(
+                        job, result, dispatched,
+                        job.last_transition_reason or f"the job is {job.state.value}",
+                    )
 
         restored, reason = _restore_candidate(
             repo=work.repo, deep_dir_path=deep, checkpoint=checkpoint,
@@ -570,10 +589,43 @@ async def _continue_locked(
             )
         if restored:
             ui.print_info(agent.console, f"Repair job restored captured work: {reason}")
+        # The validating state is persisted *before* the dispatch, so a process
+        # that dies inside it leaves a job that says which execution was owed and
+        # why -- rather than a record that claims the work was still untouched.
+        job = _persist(deep, job.with_state(
+            RepairJobState.VALIDATING,
+            f"execution {job.executions + 1} runs the {BOUNDED_VALIDATION_EXPERIMENT}",
+        ))
         started = time.monotonic()
         result = await dispatch()
         measured = time.monotonic() - started
         dispatched += 1
+
+
+def _apply_operator_grant(
+    job: RepairJobRecord, action: RepairAction, allowance_s: float,
+) -> RepairJobRecord | None:
+    """Apply an operator's additional finite allowance, or return ``None``.
+
+    Only a *time* exhaustion is grantable. A blocked job stopped because its
+    evidence did not narrow, and handing it more seconds would buy nothing but
+    a repeated non-result, so a blocked job is never replenished -- with or
+    without an operator's grant. An exhausted job is replenished only when an
+    operator actually asked for it, and the grant lands in its own field, so the
+    consumption this job already paid for is still on the record. The grant is
+    also written to ``diagnostics``, so it stays auditable after the job moves on
+    to a state whose own reason says something else.
+    """
+    if action is not RepairAction.EXHAUSTED or allowance_s <= 0.0:
+        return None
+    exhausted = job.last_transition_reason or "exhaustion"
+    job.grant_allowance(allowance_s, reason=f"the operator granted {allowance_s:g}s more after {exhausted}")
+    granted = job.last_transition_reason or ""
+    job.diagnostics = (*job.diagnostics, f"operator_grant: {granted}")
+    return job.with_state(
+        RepairJobState.READY_TO_RESUME,
+        f"resumed by operator grant ({granted}); execution {job.executions + 1} is owed",
+    )
 
 
 def _restore_refused(checkpoint: RepairCheckpoint | None, reason: str) -> bool:

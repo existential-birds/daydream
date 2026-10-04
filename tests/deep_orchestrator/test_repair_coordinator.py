@@ -279,7 +279,11 @@ async def test_repair_resumes_in_a_genuinely_separate_process(
     # The charged execution is durable: the record survived the process that wrote it.
     charged = read_repair_job_record(deep)
     assert charged is not None, "the job record must outlive the process that charged it"
-    assert charged.executions == 1 and charged.state.value == "ready_to_resume", charged.payload()
+    assert charged.executions == 1, charged.payload()
+    # The record names the execution the crashed process had already dispatched:
+    # the validating state is persisted before that dispatch, so a process that
+    # dies inside it says so instead of looking untouched.
+    assert charged.state.value == "validating", charged.payload()
     assert charged.checkpoint_ref == "repair-checkpoint.json", charged.payload()
     assert not first_out.exists(), "the crashed worker never reported a result"
 

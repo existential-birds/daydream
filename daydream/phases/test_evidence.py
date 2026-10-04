@@ -189,6 +189,9 @@ class TestAttemptEvidence:
     """Tree-bound evidence from a host execution or TEST-agent report.
 
     Only host runs carry a reusable execution identity; prose verdicts never do.
+    ``abort_reason`` names why an agent turn's result is not a result: a turn the
+    host cut short is never evidence of a passing suite, however much its partial
+    output looks like one.
     """
 
     session_id: str
@@ -198,6 +201,7 @@ class TestAttemptEvidence:
     input_tree_key: str
     output_tree_key: str
     identity: TestExecutionIdentity | None = None
+    abort_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -314,6 +318,7 @@ async def phase_test_once(
     next_continuation: ContinuationToken | None = None
     identity: TestExecutionIdentity | None = None
     host_result: TestExecutionResult | None = None
+    abort_reason: str | None = None
     if cmd is not None:
         try:
             host_result = await _run_host_test_command(cmd, work, config, recipe=recipe)
@@ -334,7 +339,7 @@ async def phase_test_once(
     else:
         prompt = f"Run the project's test suite. {_TEST_RUN_INSTRUCTIONS}"
         prompt = append_extended_facts(prompt, recipe)
-        output, next_continuation, _ = await agent.run_agent(
+        output, next_continuation, abort_reason = await agent.run_agent(
             backend,
             work.repo,
             prompt,
@@ -344,7 +349,16 @@ async def phase_test_once(
             wall_budget_s=phase_config.TEST_WALL_BUDGET_S,
             run_context=run_context,
         )
-        passed = detect_test_success(output)
+        # An incomplete result is not a result. A turn the host cut off carries
+        # whatever text it had streamed, and a partial summary of a suite that
+        # never finished running is exactly the shape a false green takes, so
+        # the attempt is red and says why.
+        passed = abort_reason is None and detect_test_success(output)
+        if abort_reason is not None:
+            ui.print_warning(
+                agent.console,
+                f"Test-suite turn did not complete ({abort_reason}); it is not a result.",
+            )
         kind = "agent"
         command = None
     output_tree_key = capture_tree_key()
@@ -368,6 +382,7 @@ async def phase_test_once(
             input_tree_key=input_tree_key,
             output_tree_key=output_tree_key,
             identity=identity,
+            abort_reason=abort_reason,
         ),
         next_continuation,
         output,
