@@ -242,17 +242,25 @@ async def test_mixed_case_pr_identity_reaches_remote_ci_and_archives_success(
     assert "reason_code" not in remote_ends[0]
     assert remote_ends[0]["metadata"]["stop_reason"] == "no_ci"
 
-async def test_deep_archive_recommended_patch_excludes_preexisting_untracked_files(
+async def test_deep_archive_excludes_preexisting_untracked_files_from_patch_and_push(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, no_ci_remote: NoCIRemote,
 ) -> None:
-    _remote, exit_code = await _run_real_phases_deep(
+    # One run, two surfaces: the archived patch and the pushed ref must both
+    # carry the fix-created file and neither may pick up pre-existing notes.txt.
+    remote, exit_code = await _run_real_phases_deep(
         multi_stack_target, monkeypatch, archive_dir, no_ci_remote, untracked_fix="migrations/0002_add_x.sql",
     )
     assert exit_code == 0
-    run_dir = _only_archived_run(archive_dir)
-    recommended = (run_dir / "recommended.patch").read_text()
+    recommended = (_only_archived_run(archive_dir) / "recommended.patch").read_text()
     assert "migrations/0002_add_x.sql" in recommended  # fix-created file present
     assert "notes.txt" not in recommended              # pre-existing file excluded
+
+    # Inspect the ref actually pushed by the stub.
+    branch = git(multi_stack_target, "branch", "--show-current")
+    committed = git(remote, "ls-tree", "-r", "--name-only", branch).splitlines()
+    assert "migrations/0002_add_x.sql" in committed
+    assert "notes.txt" not in committed
+    assert "notes.txt" in git(multi_stack_target, "status", "--porcelain")
 
 async def test_deep_heal_edit_lands_in_archived_recommended_patch(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
@@ -277,21 +285,6 @@ async def test_deep_heal_edit_lands_in_archived_recommended_patch(
     assert sidecar["tree_key"] == sidecar["evidence_key"]["tree_key"]
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["recommended_patch_capture"] == "post_test"
-
-async def test_deep_archive_commit_excludes_preexisting_untracked_files(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, no_ci_remote: NoCIRemote,
-) -> None:
-    remote, exit_code = await _run_real_phases_deep(
-        multi_stack_target, monkeypatch, archive_dir, no_ci_remote, untracked_fix="migrations/0002_add_x.sql",
-    )
-    assert exit_code == 0
-
-    # Inspect the ref actually pushed by the stub.
-    branch = git(multi_stack_target, "branch", "--show-current")
-    committed = git(remote, "ls-tree", "-r", "--name-only", branch).splitlines()
-    assert "migrations/0002_add_x.sql" in committed
-    assert "notes.txt" not in committed
-    assert "notes.txt" in git(multi_stack_target, "status", "--porcelain")
 
 async def test_dump_artifacts_copies_full_bundle_to_target_dir(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path,

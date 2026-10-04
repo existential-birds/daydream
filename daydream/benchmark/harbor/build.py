@@ -497,6 +497,14 @@ _CASE_README = (
     "exposed.\n"
 )
 
+# The per-case control plane: case-relative paths forming the agent-visible task
+# surface, read by both the per-case lock digest and the leakage scan.
+_CASE_CONTROL_FILES: tuple[str, ...] = (
+    "README.md", "instruction.md", "Task.md", "task.toml",
+    "environment/Dockerfile", "environment/runtime-requirements.lock",
+    "tests/verifier-metadata.json",
+)
+
 _ROOT_README = (
     "# Daydream Harbor private benchmark\n\n"
     "This tree holds compiled historical code review tasks from a private PR "
@@ -674,11 +682,7 @@ def _compile_case(
         "tests/golden-review.json": gold_sha256,
         "solution/golden-review.json": oracle_sha256,
     }
-    for rel in (
-        "README.md", "instruction.md", "Task.md", "task.toml",
-        "environment/Dockerfile", "environment/runtime-requirements.lock",
-        "tests/verifier-metadata.json",
-    ):
+    for rel in _CASE_CONTROL_FILES:
         files[rel] = hashlib.sha256((case_stage / rel).read_bytes()).hexdigest()
     for rel, sha in assets:
         files[rel] = sha
@@ -822,17 +826,15 @@ def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict[str, Any
                 case_rows.append(row)
                 key = row["key"]
                 all_files.update({f"{key}/{rel}": sha for rel, sha in row["files"].items()})
-                control_plane[f"{key}/README.md"] = _CASE_README
-                control_plane[f"{key}/instruction.md"] = (stage / key / "instruction.md").read_text()
-                control_plane[f"{key}/Task.md"] = (stage / key / "Task.md").read_text()
-                control_plane[f"{key}/task.toml"] = (stage / key / "task.toml").read_text()
-                control_plane[f"{key}/environment/Dockerfile"] = (
-                    stage / key / "environment" / "Dockerfile"
-                ).read_text()
-                control_plane[f"{key}/environment/runtime-requirements.lock"] = runtime_lock.decode("utf-8")
-                control_plane[f"{key}/tests/verifier-metadata.json"] = (
-                    stage / key / "tests" / "verifier-metadata.json"
-                ).read_text()
+                # README is generated and the runtime lock is the shared one, so
+                # neither is re-read from the staged case.
+                generated = {
+                    "README.md": _CASE_README,
+                    "environment/runtime-requirements.lock": runtime_lock.decode("utf-8"),
+                }
+                for rel in _CASE_CONTROL_FILES:
+                    staged = generated.get(rel)
+                    control_plane[f"{key}/{rel}"] = staged if staged is not None else (stage / key / rel).read_text()
 
             (stage / "README.md").write_text(_ROOT_README)
             from daydream.benchmark.harbor.package import render_job_config
