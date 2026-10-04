@@ -55,7 +55,6 @@ class TraceCollector:
     """Captured requests and decoded spans from a loopback collector."""
 
     base_url: str = ""
-    status: int = 200
     requests: list[dict[str, Any]] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -75,10 +74,17 @@ class TraceCollector:
             body = gzip.decompress(body)
         elif encoding == "deflate":
             body = zlib.decompress(body)
-        payload = ExportTraceServiceRequest()
-        payload.ParseFromString(body)
+        # A body that is not a protobuf request (a scripted JSON or garbage ack,
+        # a partially-success response) is still recorded, with body=None.
+        decoded: dict[str, Any] | None = None
+        try:
+            payload = ExportTraceServiceRequest()
+            payload.ParseFromString(body)
+            decoded = MessageToDict(payload)
+        except Exception:
+            decoded = None
         with self._lock:
-            self.requests.append({"path": path, "headers": headers, "body": MessageToDict(payload)})
+            self.requests.append({"path": path, "headers": headers, "body": decoded})
 
 
 @contextmanager
@@ -105,21 +111,13 @@ class _QuietHTTPHandler(BaseHTTPRequestHandler):
 @contextmanager
 def otlp_collector(*, status: int = 200, response_headers: Mapping[str, str] | None = None, reason: str | None = None,
 ) -> Iterator[TraceCollector]:
-    """Receive real protobuf exports; close all listener resources on exit."""
-    collector = TraceCollector(status=status)
-
-    class Handler(_QuietHTTPHandler):
-        def do_POST(self) -> None:
-            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-            collector.capture(self.path, {key.lower(): value for key, value in self.headers.items()}, body)
-            self.send_response(collector.status, message=reason)
-            self.send_header("Content-Type", "application/x-protobuf")
-            self.send_header("Content-Length", "0")
-            for key, value in (response_headers or {}).items():
-                self.send_header(key, value)
-            self.end_headers()
-
-    with _loopback_http_server(Handler) as collector.base_url:
+    """Receive real protobuf exports and answer one fixed acknowledgment."""
+    ack = ScriptedResponse(
+        status=status,
+        headers={"Content-Type": "application/x-protobuf", **(response_headers or {})},
+        reason=reason,
+    )
+    with scripted_otlp_collector([ack]) as collector:
         yield collector
 
 
@@ -148,17 +146,8 @@ def scripted_otlp_collector(responses: list[ScriptedResponse], *, capture_conten
                 capture_content_type.append(response.headers.get("Content-Type"))
             if response.delay_s > 0:
                 time.sleep(response.delay_s)
-            # One entry per request; decode only when the body is a protobuf request.
-            entry: dict[str, Any] = {"path": self.path, "headers": headers, "body": None}
-            if response.body:
-                try:
-                    payload = ExportTraceServiceRequest()
-                    payload.ParseFromString(body)
-                    entry["body"] = MessageToDict(payload)
-                except Exception:
-                    pass  # Non-protobuf bodies are never decodable requests.
-            with collector._lock:
-                collector.requests.append(entry)
+            # One entry per request; a non-protobuf body is recorded with body=None.
+            collector.capture(self.path, headers, body)
             self.send_response(response.status, message=response.reason)
             ack_content_type = response.headers.get("Content-Type")
             if ack_content_type is not None:

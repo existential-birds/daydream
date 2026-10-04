@@ -5,7 +5,6 @@ from pathlib import Path
 
 from daydream.hunk_index import (
     added_line_numbers,
-    files_in_index,
     head_side_ranges,
     head_side_ranges_by_file,
     load_hunk_index,
@@ -31,7 +30,7 @@ def test_write_hunk_index_round_trips(tmp_path: Path) -> None:
     diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1,2 @@\n x\n+y\n"
     write_hunk_index(tmp_path, diff)
     idx = load_hunk_index(tmp_path)
-    assert files_in_index(idx) == ["a.py"]
+    assert sorted(idx) == ["a.py"]  # persisted keys are the changed files
     assert idx["a.py"]["added_total"] == 1 and idx["a.py"]["removed_total"] == 0
     assert idx["a.py"]["hunks"][0]["new_end"] == 2
     assert "added_lines" not in idx["a.py"]

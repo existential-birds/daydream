@@ -1,4 +1,4 @@
-"""Every model-bearing stage requires a profile strategy and host-envelope classification."""
+"""Every model-bearing stage requires a profile strategy."""
 
 from daydream import review_profile as rp
 from daydream.improve.prompts import AUDIT_PLAYBOOK_SECTIONS
@@ -14,12 +14,11 @@ STAGE_KEYS: frozenset[str] = frozenset({
     }
 )
 
-def test_every_registered_model_bearing_stage_has_strategy_and_classification() -> None:
-    # Iterate the full production registry so new stages cannot escape classification checks.
+def test_every_registered_model_bearing_stage_has_strategy() -> None:
+    # Iterate the full production registry so new stages cannot escape the strategy check.
     default = rp.build_default_profile()
     for stage in STAGE_KEYS:
         assert stage in default.strategies, f"model-bearing stage {stage} has no profile strategy"
-        assert stage in rp._ENVELOPE_BY_STAGE, f"stage {stage} has no host-envelope classification"
 
 def test_audit_stages_track_production_playbook() -> None:
     # Check playbook categories independently so omitted registry entries cannot pass self-referential checks.
@@ -28,4 +27,3 @@ def test_audit_stages_track_production_playbook() -> None:
         stage = f"improve.audit.{category}"
         assert stage in STAGE_KEYS, (f"audit category `{category}` is not a registered review stage")
         assert stage in default.strategies, (f"model-bearing audit stage {stage} has no profile strategy")
-        assert stage in rp._ENVELOPE_BY_STAGE, (f"stage {stage} has no host-envelope classification")

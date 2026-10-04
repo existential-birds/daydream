@@ -212,8 +212,3 @@ def load_hunk_index(daydream_dir: Path) -> dict[str, Any]:
         return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
-
-
-def files_in_index(index: dict[str, Any]) -> list[str]:
-    """Return the sorted keys (changed file paths) of a hunk index."""
-    return sorted(index)
