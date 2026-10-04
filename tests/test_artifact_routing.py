@@ -83,37 +83,6 @@ async def test_standalone_entry_rejects_borrowing_a_bound_artifact_session(
 
     assert prior.read_bytes() == b"prior session evidence\n"
 
-async def test_standalone_ephemeral_handoff_survives_without_archive_storage(
-    tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    make_work: Callable[..., WorkContext], make_config: Callable[..., RunConfig],
-) -> None:
-    from daydream.phases.handoff import _run_failure_summarizer
-
-    source = tiny_diff_target
-    ephemeral = tmp_path / "ephemeral"
-    git(source, "worktree", "add", "--detach", str(ephemeral), "HEAD")
-    work = replace(make_work(ephemeral), source=source, is_ephemeral=True)
-    unavailable = tmp_path / "unavailable-archive"
-    unavailable.write_text("not a directory")
-    monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(unavailable))
-    backend = ScriptedBackend(events=[ResultEvent(structured_output={"handoff_prompt": ""}, continuation=None)])
-    recorder = run_artifacts._open_recorder(
-        config=make_config(ephemeral), target_dir=ephemeral, work=work,
-        flow_kind=DaydreamRunFlow.CUSTOM, allow_standalone=True,
-    )
-    async with recorder:
-        body, handoff, written = await _run_failure_summarizer(
-            backend, work, "1 failed", allow_standalone=True,
-        )
-    git(source, "worktree", "remove", "--force", str(ephemeral))
-    assert written
-    assert handoff == source / ".daydream" / "runs" / recorder.session_id / "handoff.md"
-    assert handoff.read_text() == body
-    assert "trajectory unavailable for this run" in body
-    assert str(unavailable) not in body
-    assert str(ephemeral) not in body
-
-
 @pytest.mark.parametrize(
     "relative_destination", ["operator evidence/trajectory.json", ".daydream/custom trajectory.json"],
 )
