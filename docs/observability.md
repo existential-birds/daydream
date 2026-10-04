@@ -304,7 +304,7 @@ as this event's metadata and never replaces the lifecycle `reason_code` of the
 step or attempt that owns it. A turn's per-attempt span hierarchy is unchanged by
 a repair — a repair is an ordinary agent invocation inside the step.
 
-**The persisted records.** Two generated artifacts, private during the run and
+**The persisted records.** Three generated artifacts, private during the run and
 published into the checkout at finalization like every other output:
 
 - `.daydream/deep/test-verdict.json` carries a `repairs` array — one

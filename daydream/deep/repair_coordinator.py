@@ -665,6 +665,17 @@ def _elapsed(
     return 0.0
 
 
+def _is_captured_grant(stored: RepairJobRecord) -> bool:
+    """Whether this stored record is a job's captured grant, or diagnostics only.
+
+    The coordinator stamps every job it creates with the run's ``policy_revision``
+    and ``authorized_scope`` (``_load_job``/``_persist``). A record written by
+    ``record_diagnostic`` before the job existed has neither, so it is a
+    diagnostic carrier and not a grant.
+    """
+    return stored.policy_revision > 0 or bool(stored.authorized_scope)
+
+
 def _load_job(
     deep: Path, *, job_id: str, footprint: AuthorizedFixFootprint, policy: RepairJobPolicy | None,
 ) -> RepairJobRecord:
@@ -676,7 +687,21 @@ def _load_job(
     """
     stored = read_repair_job_record(deep)
     if stored is not None and stored.job_id == job_id:
-        return stored
+        if _is_captured_grant(stored):
+            return stored
+        # A record minted by record_diagnostic carries diagnostics only: it has
+        # no policy revision and no authorized scope, because nothing ever
+        # stamped the run's footprint onto it. Its diagnostics are kept (they
+        # name the blocker a resuming job must see) but its policy is NOT treated
+        # as this job's captured grant -- that grant is whatever the run
+        # configured, never the module defaults.
+        return RepairJobRecord(
+            job_id=job_id,
+            policy=policy or RepairJobPolicy(),
+            policy_revision=footprint.policy_revision,
+            authorized_scope=tuple(sorted(footprint.run_allowed_paths)),
+            diagnostics=stored.diagnostics,
+        )
     if stored is not None:
         record_diagnostic(
             deep, job_id,

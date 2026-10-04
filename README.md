@@ -703,6 +703,7 @@ repair_grant_job_wall_s = 0
 repair_execution_wall_s = 1800.0
 repair_job_wall_s = 7200.0
 repair_max_executions = 4
+repair_grant_job_wall_s = 0
 ```
 
 Budgets and counts accept only finite non-negative values and preserve zero, so

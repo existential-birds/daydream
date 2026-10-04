@@ -40,8 +40,7 @@ from tests.deep_orchestrator.support import (
     _direct_fix_context,
     _direct_fix_state,
 )
-from tests.harness.git_helpers import commit as _commit
-from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import commit as _commit, git as _git
 from tests.test_deep_orchestrator import _merge_item
 
 
@@ -265,10 +264,10 @@ async def test_step_test_keeps_green_for_a_completed_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The gate is the job's state, not a blanket refusal of every continuation."""
-    from daydream.deep.repair_job import write_repair_job_record as _write
     from daydream.deep.fix_steps import _step_test
-    from daydream.phases import TestAndHealResult, TestAttemptEvidence
     from daydream.deep.repair_coordinator import RepairContinuationResult
+    from daydream.deep.repair_job import write_repair_job_record as _write
+    from daydream.phases import TestAndHealResult, TestAttemptEvidence
 
     repo = _base_repo(tmp_path, "fail-closed-completed")
     items = [{**_merge_item(1, "a.py", "high"), "item_uid": "item:a"}]

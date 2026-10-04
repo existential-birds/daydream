@@ -637,6 +637,12 @@ async def _run_agent(
                         execute_kwargs["validate_structured_output"] = False
                     if not persist_session:
                         execute_kwargs["persist_session"] = False
+                    if getattr(backend, "supports_budget_preamble", False):
+                        # State the ceiling this turn is really under: the
+                        # deadline above is derived from the same value, so
+                        # the prompt cannot promise time the host withholds.
+                        execute_kwargs["wall_budget_s"] = wall_budget_s
+                        execute_kwargs["tool_call_budget"] = tool_call_budget
                     event_iter = backend.execute(
                         cwd, prompt, output_schema, continuation,
                         **execute_kwargs,

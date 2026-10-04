@@ -440,17 +440,40 @@ def merge_repair_job_record(
 
 
 def record_diagnostic(deep_dir_path: Path, job_id: str, diagnostic: str) -> RepairJobRecord | None:
-    """Append one named host degradation to the job record; return it, or ``None``.
+    """Append one named host degradation to an existing job record; return it, or ``None``.
 
     Used for failures the job cannot recover from inside its own turn — notably a
     repair checkpoint that could not be persisted. The write is best-effort by
     design only because its *caller* is the blocking outcome: this returns
     ``None`` when even the diagnostic could not be recorded.
+
+    Requirement 28: the blocker is named in the job record too, so a resuming
+    job sees why it stopped. That is why this records even when no record exists
+    yet — the checkpoint-write failure this is called for happens *before* the
+    job is created.
+
+    Requirement 44 is honoured by the reader instead: a record minted here has
+    ``policy_revision == 0`` and an empty ``authorized_scope`` (both filled from
+    defaults), while a real job record is stamped by the coordinator with the
+    run's footprint. :func:`daydream.deep.repair_coordinator._load_job` therefore
+    never adopts such a record as the job's captured grant — it keeps the
+    diagnostics and builds the job with the policy the run actually granted. So
+    writing one here cannot silently replace the run's configured bounds.
+
+    A diagnostic about a record belonging to another job is refused rather than
+    relabelling it into this job's grant.
     """
     existing = read_repair_job_record(deep_dir_path)
-    diagnostics = (*(existing.diagnostics if existing is not None else ()), diagnostic)
+    if existing is not None and existing.job_id != job_id:
+        return None
+    diagnostics = (
+        *(existing.diagnostics if existing is not None else ()),
+        diagnostic,
+    )
     try:
-        return merge_repair_job_record(deep_dir_path, {"job_id": job_id, "diagnostics": list(diagnostics)})
+        return merge_repair_job_record(
+            deep_dir_path, {"job_id": job_id, "diagnostics": list(diagnostics)},
+        )
     except OSError:
         return None
 

@@ -202,6 +202,24 @@ def render_pi_preamble(wall_budget_s: float, tool_call_budget: int | None) -> st
 _PI_SYSTEM_PREAMBLE = render_pi_preamble(DEFAULT_WALL_BUDGET_S, DEFAULT_TOOL_CALL_BUDGET)
 
 
+def pi_system_preamble(
+    wall_budget_s: float | None = None, tool_call_budget: int | None = None
+) -> str:
+    """Render this invocation's preamble, defaulting to the module allowances.
+
+    A turn granted a ceiling other than ``DEFAULT_WALL_BUDGET_S`` must not be told
+    about the default: the rendered allowance has to be the one the host actually
+    imposes, or the model plans against time it does not have. ``None`` means "not
+    supplied by the caller", which for the tool-call budget is also the honest
+    uncapped answer, so the default resolves to the module constants.
+    """
+    wall = DEFAULT_WALL_BUDGET_S if wall_budget_s is None else wall_budget_s
+    calls = DEFAULT_TOOL_CALL_BUDGET if tool_call_budget is None else tool_call_budget
+    if wall == DEFAULT_WALL_BUDGET_S and calls == DEFAULT_TOOL_CALL_BUDGET:
+        return _PI_SYSTEM_PREAMBLE
+    return render_pi_preamble(wall, calls)
+
+
 _PI_FINALIZATION_PREAMBLE = """\
 Serialize the completed task using only the supplied context and completed evidence.
 Return exactly the requested output format. Tools are disabled. Do not investigate,
@@ -438,6 +456,7 @@ class PiBackend:
     supports_finalization = True
     supports_tools_disabled = True
     supports_review_instructions = True
+    supports_budget_preamble = True
     # Honors a caller's validate_structured_output=False by keeping largest-span
     # extraction instead of applying schema-aware selection, matching the host
     # fallback in agent.py.
@@ -501,6 +520,8 @@ class PiBackend:
         review_instructions: str | None = None,
         tools_disabled: bool = False,
         validate_structured_output: bool = True,
+        wall_budget_s: float | None = None,
+        tool_call_budget: int | None = None,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Yield Pi events; a turn error raises PiError and nonempty agents are unsupported.
 
@@ -512,6 +533,8 @@ class PiBackend:
         serialization instructions, and caps thinking at low while preserving lower
         settings. tools_disabled keeps normal instructions/thinking and uses stdin.
         Pi cannot enforce max_turns: callers must enforce an absolute deadline.
+        wall_budget_s/tool_call_budget state the allowances the caller is actually
+        enforcing, so the preamble describes this turn rather than the defaults.
         Stdout silence raises retryable StreamStalledError; run_agent starts a fresh
         subprocess for each retry.
         """
@@ -609,7 +632,11 @@ class PiBackend:
         # Pi's built-in system prompt is minimal; append the daydream preamble
         # so the default DeepSeek model gets the same tool-efficiency / budget-awareness
         # guidance that Claude Code and Codex inject natively via their CLIs.
-        system_prompt = _PI_FINALIZATION_PREAMBLE if finalization else _PI_SYSTEM_PREAMBLE
+        system_prompt = (
+            _PI_FINALIZATION_PREAMBLE
+            if finalization
+            else pi_system_preamble(wall_budget_s, tool_call_budget)
+        )
         if review_instructions and not finalization:
             system_prompt += (
                 "\n\nBOUNDED REPOSITORY REVIEW:\n" + review_instructions
