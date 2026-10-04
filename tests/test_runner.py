@@ -1385,9 +1385,15 @@ async def _drive_fix_cycle_failing(
     return exit_code, test_backend, repair_backend, commit_calls
 
 def _assert_single_handoff(repo: Path, body: str) -> None:
+    """Assert exactly one handoff, whose authored text is ``body``.
+
+    The host appends its own sections after the turn's text (the repair-attempt
+    record names a run-scoped execution id, so it can never be part of a
+    fixed expected body), so the authored text is matched as a prefix.
+    """
     handoffs = list(repo.glob(".daydream/runs/*/handoff.md"))
     assert len(handoffs) == 1, f"expected exactly one handoff.md, got {handoffs!r}"
-    assert handoffs[0].read_text(encoding="utf-8") == body
+    assert handoffs[0].read_text(encoding="utf-8").startswith(body)
 
 async def test_fix_cycle_failing_tests_abort_writes_handoff(
     monkeypatch: pytest.MonkeyPatch, feature_branch_repo: Path, make_config: Callable[..., 'RunConfig'],
