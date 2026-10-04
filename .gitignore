@@ -54,6 +54,10 @@ htmlcov/
 .hermes/
 /skills-lock.json
 
+improve_curated/
+plans/
+.scratch/
+
 # Logs
 logs/
 *.log
