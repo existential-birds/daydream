@@ -55,6 +55,7 @@ from daydream.artifacts import (
     transactions as artifact_transactions,
     transfer as artifact_transfer,
 )
+from daydream.artifacts.filesystem import _atomic_json
 from daydream.deep.artifacts import check_deep_artifacts
 from daydream.json_utils import _fsync_directory, _fsync_file
 from daydream.run_artifacts import _RunWriteCapture
@@ -128,22 +129,6 @@ async def open_artifact_session(work: WorkContext, *, session_id: str, owner: Pr
     selected = _owner(work.source) if owner is None else owner
     async with _open_artifact_session(work, session_id=session_id, owner=selected) as session:
         yield session
-
-
-def _atomic_json(path: Path, payload: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "wb", closefd=False) as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-    finally:
-        os.close(fd)
-    os.replace(temporary, path)
-    _fsync_directory(path.parent)
 
 
 def _load_json(path: Path) -> dict[str, Any]:

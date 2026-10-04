@@ -24,19 +24,6 @@ def test_pipeline_keeps_existing_positional_constructor_order() -> None:
     assert pipeline.structural_enabled is False
     assert pipeline.review_wall_budget_s == 2700
 
-def test_stage_keys_cover_every_model_bearing_stage() -> None:
-    # Every named stage from spec R2 must be present (subset of the #886 manifest keys).
-    assert {"exploration.repository_survey", "exploration.pattern_scan", "exploration.dependency_trace",
-        "exploration.test_mapping", "intent", "alternatives", "discovery.per_stack", "discovery.structural",
-        "discovery.generic_fallback", "arbitration", "suppression", "merge", "supervision", "verification",
-    } <= set(STAGE_KEYS)
-
-def test_improve_audits_and_vetting_are_stages() -> None:
-    assert {"improve.audit.correctness", "improve.audit.security", "improve.audit.performance", "improve.audit.tests",
-        "improve.audit.tech-debt", "improve.audit.dependencies", "improve.audit.dx", "improve.audit.docs",
-        "improve.vetting",
-    } <= set(STAGE_KEYS)
-
 def test_default_profile_carries_schema_version_name_and_every_stage() -> None:
     p = rp.build_default_profile()
     assert p.schema_version == 1

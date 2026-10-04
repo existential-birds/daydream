@@ -66,7 +66,6 @@ from daydream.git_ops.mutations import (
     create_branch as create_branch,
     fetch as fetch,
     push_branch as push_branch,
-    registered_worktree_containing as registered_worktree_containing,
     remove_remote as remove_remote,
     restore_paths_from_ref as restore_paths_from_ref,
     restore_worktree_paths_from_ref as restore_worktree_paths_from_ref,
