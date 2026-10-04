@@ -324,9 +324,14 @@ def capture_manifest_run_identity(
 def _finalize_run_artifacts(
     run_artifacts: _RunArtifacts, *, selected: RunWriteSnapshot, config: RunConfig,
     work: WorkContext, successful: bool,
-) -> Exception | None:
-    """Freeze, strictly archive, and publish one joined run on a worker thread."""
-    from daydream.archive import ArchiveFinalizationError, finalize_archive_run
+) -> None:
+    """Freeze once, collect optional data, and publish the joined runtime outputs."""
+    from daydream.archive import (
+        ArchiveFinalizationError,
+        ArchiveIntegrityError,
+        ArchivePublicationError,
+        finalize_archive_run,
+    )
     from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
 
     if run_artifacts.capture.run_flow is None:
@@ -343,27 +348,19 @@ def _finalize_run_artifacts(
         if run_artifacts.dump is None
         else run_artifacts.session.finalization_merge_path(run_artifacts.dump, snapshot=snapshot)
     )
-    archive_error: Exception | None = None
     try:
         finalize_archive_run(
             run=ArchiveRunSnapshot(recorder_provenance, identity, selected), artifacts=snapshot,
             artifact_provenance=run_artifacts.session.provenance, config=config,
             work=work, upload=successful, dump_path=dump_path,
         )
+    except (ArchiveIntegrityError, ArchivePublicationError) as exc:
+        raise ArtifactVisibilityError(str(exc)) from exc
     except ArchiveFinalizationError as exc:
-        archive_error = exc
-    disposition = (
-        ArtifactDisposition.ROLLBACK
-        if archive_error is not None
-        else ArtifactDisposition.COMPLETE if successful else ArtifactDisposition.PARTIAL_EVIDENCE
-    )
-    try:
-        run_artifacts.session.finalize_frozen(snapshot, disposition=disposition)
-    except Exception as exc:
-        if archive_error is not None:
-            # Rollback is the propagated error, so log the archive gate/file detail here;
-            # add_note stores only a type and the renderer does not display notes.
-            print_error(console, "Artifact Finalization", str(archive_error))
-            exc.add_note(f"strict archive finalization also failed ({type(archive_error).__name__})")
-        raise
-    return archive_error
+        # Exception text can include credentials, repository content, or private
+        # runtime paths. Collection diagnostics report only the error category.
+        print_error(console, "Data Collection", f"Run data could not be persisted ({type(exc).__name__}).")
+        if dump_path is not None and dump_path.is_dir() and not any(dump_path.iterdir()):
+            dump_path.rmdir()
+    disposition = ArtifactDisposition.COMPLETE if successful else ArtifactDisposition.PARTIAL_EVIDENCE
+    run_artifacts.session.finalize_frozen(snapshot, disposition=disposition)

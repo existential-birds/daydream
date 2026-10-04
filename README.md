@@ -241,7 +241,7 @@ Daydream records every agent interaction as an [ATIF v1.7](https://www.harborfra
 
 During a run, Daydream keeps its working artifacts outside the target checkout. After finalization, it publishes the trajectory at `<project>/.daydream/runs/<session-id>/trajectory.json` and parallel sub-trajectories in the sibling `trajectories/` directory. Daydream archives the complete run bundle at `~/.daydream/archive/runs/<session-id>/`. The bundle contains the trajectory, the manifest, the review output, the diff, and the evaluation analysis. An SQLite index at `~/.daydream/archive/index.db` supports cross-project querying.
 
-Publication is all-or-nothing at finalization: a run that refuses publication (for example, because strict archive finalization failed) restores the checkout's prior artifacts instead of leaving a partial bundle. The archived bundle only exists once archiving has succeeded.
+Runtime output publication is all-or-nothing at finalization: invalid run identity, frozen evidence, findings projection, or output publication restores the checkout's prior artifacts. Archive, evaluation, index, and upload failures emit a sanitized data-collection diagnostic and preserve the review result and completed outputs. The archived bundle only exists once archiving has succeeded; handoffs do not promise a manifest from optional persistence.
 
 ### Corpus commands
 

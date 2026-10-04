@@ -134,17 +134,22 @@ def test_upload_run_bundle_create_repo_failure(hf_run_dir: Path, monkeypatch: py
     monkeypatch.setattr(hub, "HfApi", CreateRepoBoomApi)
     assert hub.upload_run_bundle(hf_run_dir, "acme/dd", "s4") is False
 
-def test_upload_run_bundle_non_conflict_upload_error(hf_run_dir: Path, monkeypatch: pytest.MonkeyPatch,) -> None:
+def test_upload_run_bundle_non_conflict_upload_error(
+    hf_run_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
     attempts: list[int] = []
 
     class NonConflictApi(_BaseFakeApi):
         def upload_folder(self, **kw: Any) -> None:
             attempts.append(1)
-            raise RuntimeError("some unrelated error")
+            raise RuntimeError("SECRET_COLLECTION_FAILURE /private/runtime")
 
     monkeypatch.setattr(hub, "HfApi", NonConflictApi)
     assert hub.upload_run_bundle(hf_run_dir, "acme/dd", "s5") is False
     assert len(attempts) == 1
+    out = capsys.readouterr().out
+    assert "Data Collection" in out
+    assert "SECRET_COLLECTION_FAILURE" not in out and "/private/runtime" not in out
 
 def test_upload_run_bundle_retry_exhaustion(hf_run_dir: Path, monkeypatch: pytest.MonkeyPatch,) -> None:
     attempts: list[int] = []

@@ -86,9 +86,11 @@ async def test_standalone_entry_rejects_borrowing_a_bound_artifact_session(
 @pytest.mark.parametrize(
     "relative_destination", ["operator evidence/trajectory.json", ".daydream/custom trajectory.json"],
 )
+@pytest.mark.parametrize("archive_failure", [False, True])
 async def test_ephemeral_failure_handoff_retains_explicit_trajectory_without_archive(
     tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any,
     make_config: Callable[..., RunConfig], relative_destination: str,
+    archive_failure: bool,
 ) -> None:
     repo = tiny_diff_target
     origin = bare_remote(tmp_path / "origin.git")
@@ -125,9 +127,12 @@ async def test_ephemeral_failure_handoff_retains_explicit_trajectory_without_arc
     # An empty, valid response exercises the deterministic host handoff.
     backend = ScriptedBackend(events=[ResultEvent(structured_output={"handoff_prompt": ""}, continuation=None)],)
     monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: backend)
+    if archive_failure:
+        monkeypatch.setattr("daydream.eval.analyzer.analyze_session",
+                            lambda *_a, **_k: (_ for _ in ()).throw(OSError("collection unavailable")))
     config = make_config(
-        repo, flow_name="artifact-handoff", force_worktree=True, trajectory_path=explicit, archive=False,
-        run_eval=False,
+        repo, flow_name="artifact-handoff", force_worktree=True, trajectory_path=explicit, archive=archive_failure,
+        run_eval=archive_failure,
         test_command=shlex.join([sys.executable, "-c", "import sys; print('1 failed, 0 passed'); sys.exit(1)"]),
     )
 
@@ -142,6 +147,7 @@ async def test_ephemeral_failure_handoff_retains_explicit_trajectory_without_arc
     body = handoffs[0].read_text()
     assert str(explicit) in body
     assert str(repo / ".daydream" / "diff.patch") in body
+    assert "manifest.json" not in body
     assert str(private_base) not in body
     assert "1 failed, 0 passed" in body
     assert backend.call_count == 1

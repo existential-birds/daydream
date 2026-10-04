@@ -5,7 +5,7 @@ import json
 import os
 import shlex
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -2886,8 +2886,11 @@ async def test_option4_fallback_puts_unknown_cause_in_hypotheses(
 # _resolve_handoff_paths — ephemeral worktree + archive routing
 
 @pytest.mark.asyncio
-async def test_recorderless_standalone_ephemeral_handoff_survives_worktree_cleanup(tmp_path: Path,) -> None:
-    """A standalone handoff without a recorder still belongs to the source checkout."""
+@pytest.mark.parametrize("recorded", [False, True])
+async def test_standalone_ephemeral_handoff_survives_worktree_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded: bool,
+) -> None:
+    """A standalone handoff belongs to the source even when archive storage is unavailable."""
 
     source = tmp_path / "source"
     init_repo(source)
@@ -2899,18 +2902,25 @@ async def test_recorderless_standalone_ephemeral_handoff_survives_worktree_clean
     work = WorkContext(repo=worktree, source=source, base_branch="main", base_sha=head, head_branch=None, head_sha=head,
         is_ephemeral=True, run_id="20260101000000-deadbeef",
     )
-    backend = ScriptedBackend(events=_handoff_turn("DURABLE_HANDOFF_BODY"))
+    unavailable = tmp_path / "unavailable-archive"
+    unavailable.touch()
+    monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(unavailable))
+    recorder = make_recorder(worktree, on_write=lambda *_args: None) if recorded else None
+    backend = ScriptedBackend(events=_handoff_turn(""))
 
     try:
-        body, handoff_path, written = await _run_failure_summarizer(
-            backend, work, "1 failed, 0 passed", allow_standalone=True,
-        )
+        async with recorder if recorder is not None else nullcontext():
+            body, handoff_path, written = await _run_failure_summarizer(
+                backend, work, "1 failed, 0 passed", allow_standalone=True,
+            )
         git(source, "worktree", "remove", "--force", str(worktree))
 
         assert written is True
-        assert handoff_path.parent == source / ".daydream"
-        assert handoff_path.read_text(encoding="utf-8") == "DURABLE_HANDOFF_BODY"
-        assert body == "DURABLE_HANDOFF_BODY"
+        expected = source / ".daydream"
+        assert handoff_path.parent == (expected / "runs" / recorder.session_id if recorder is not None else expected)
+        assert handoff_path.read_text(encoding="utf-8") == body
+        assert "trajectory unavailable for this run" in body
+        assert str(unavailable) not in body
         assert str(worktree) not in body
     finally:
         if worktree.exists():
@@ -2953,15 +2963,19 @@ def test_resolve_handoff_paths_routes_complete_artifact_references(
     recorder = SimpleNamespace(target_dir=repo, session_id=session_id,
                                on_write=(lambda *_args, **_kwargs: None) if ephemeral else None)
     handoff, artifacts = _resolve_handoff_paths(cast(TrajectoryRecorder, recorder), work, allow_standalone=True)
-    daydream_dir = archive / "runs" / session_id if ephemeral else repo / ".daydream"
-    run_dir = daydream_dir if ephemeral else daydream_dir / "runs" / session_id
+    daydream_dir = source / ".daydream" if ephemeral else repo / ".daydream"
+    run_dir = daydream_dir / "runs" / session_id
     assert handoff == run_dir / "handoff.md"
+    if ephemeral:
+        assert artifacts == HandoffArtifacts(), "unpersisted archive evidence is unavailable"
+        return
     expected = {"trajectory": run_dir / "trajectory.json", "trajectories": run_dir / "trajectories",
-                "manifest": run_dir / "manifest.json", "diff": daydream_dir / "diff.patch",
+                "diff": daydream_dir / "diff.patch",
                 "deep": daydream_dir / "deep"}
     for field, path in expected.items():
         assert getattr(artifacts, field) == path
         assert not path.exists(), "handoff references must survive the recorder's later flush"
+    assert artifacts.manifest is None, "optional persistence cannot promise a manifest"
 
 
 

@@ -16,7 +16,7 @@ from unittest.mock import patch
 import pytest
 from rich.console import Console
 
-from daydream import artifact_visibility, git_ops
+from daydream import git_ops
 from daydream.archive import hub, scan
 from daydream.archive.index import query_runs
 from daydream.backends import (
@@ -533,29 +533,67 @@ async def test_residual_dump_refusal_preserves_review_exports_and_destination(
     assert canary not in out
     await _assert_target_is_reusable(multi_stack_target)
 
-async def test_strict_archive_error_is_reported_when_rollback_also_fails(
+@pytest.mark.parametrize("failure", ["evaluation", "filesystem", "index", "upload"])
+async def test_collection_failure_preserves_deep_review_exports(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capfd: pytest.CaptureFixture[str],
+    fake_gh: FakeGh, archive_dir: Path, failure: str,
 ) -> None:
-    """Nonfatal diagnostic refusal does not weaken strict archive failure handling."""
+    """Optional collection failure cannot roll back completed deep-review outputs."""
     silence(monkeypatch)
     install_stub_backend(monkeypatch, multi_stack_target)
+    fake_gh.serve_open_pr(multi_stack_target)
 
-    def fail_index(*_args: Any, **_kwargs: Any) -> None:
-        raise OSError("synthetic archive index failure")
+    secret = "SECRET_COLLECTION_FAILURE /private/runtime"
+    reached: list[str] = []
+    def fail_collection(*_args: Any, **_kwargs: Any) -> Any:
+        reached.append(failure)
+        raise OSError(secret)
 
-    def refuse_restore(_session: object) -> None:
-        raise artifact_visibility.ArtifactVisibilityError("synthetic rollback failure")
-
-    monkeypatch.setattr("daydream.archive.upsert_run", fail_index)
-    monkeypatch.setattr(artifact_visibility.ArtifactSession, "_restore_prior", refuse_restore)
+    if failure in ("evaluation", "index"):
+        monkeypatch.setattr(
+            "daydream.eval.analyzer.analyze_session"
+            if failure == "evaluation" else "daydream.archive.finalize.upsert_run",
+            fail_collection,
+        )
+    elif failure == "filesystem":
+        unavailable = tmp_path / "SECRET_COLLECTION_FAILURE"
+        unavailable.touch()
+        monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(unavailable))
+    else:
+        monkeypatch.setattr(hub, "upload_run_bundle", fail_collection)
+    dump = tmp_path / "uploaded-artifacts"
+    dump.mkdir()
+    (dump / "prior.txt").write_text("operator baseline")
+    trajectory = tmp_path / "trajectory.json"
+    findings = tmp_path / "findings.json"
+    review = multi_stack_target / ".review-output.md"
+    review.write_text("operator baseline")
     exit_code = await run(_deep_run_config(
-        multi_stack_target, output_mode="review", dump_artifacts=str(tmp_path / "uploaded-artifacts"),
+        multi_stack_target, output_mode="review", non_interactive=True, dump_artifacts=str(dump),
+        pr_number=7, findings_out=str(findings), trajectory_path=trajectory,
+        trajectory_hub_repo="test/new-runs" if failure == "upload" else None,
     ))
-    assert exit_code == 1
+    assert exit_code == 0
+    assert reached == ([] if failure == "filesystem" else [failure])
+    assert review.read_text() != "operator baseline"
+    assert json.loads(findings.read_text())["findings"]
+    document = json.loads(trajectory.read_text())
+    assert document["steps"]
+    public = multi_stack_target / ".daydream" / "runs" / document["session_id"]
+    assert (public / "trajectory.json").read_bytes() == trajectory.read_bytes()
+    if failure in ("index", "upload"):
+        assert (dump / "trajectory.json").read_bytes() == trajectory.read_bytes()
+        assert (dump / "findings.json").read_bytes() == findings.read_bytes()
+    else:
+        assert list(dump.iterdir()) == [dump / "prior.txt"]
+        assert (dump / "prior.txt").read_text() == "operator baseline"
+    if failure == "upload":
+        archived = archive_dir / "runs" / document["session_id"]
+        assert (archived / "trajectory.json").read_bytes() == trajectory.read_bytes()
     out = "".join(capfd.readouterr())
-    assert "Artifact Finalization" in out
-    assert "archive finalization failed" in out
-    assert "synthetic rollback failure" in out
+    assert "Data Collection" in out
+    assert "SECRET_COLLECTION_FAILURE" not in out
+    assert "/private/runtime" not in out
 
 async def test_no_eval_leaves_manifest_eval_fields_null(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,

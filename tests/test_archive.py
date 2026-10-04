@@ -15,10 +15,6 @@ import pytest
 
 from daydream.archive import (
     ArchiveFinalizationError,
-    _copy_snapshot_bundle,
-    _project_documents,
-    _read_fix_quality_gate,
-    _read_recommended_capture,
     _schema,
     finalize_archive_run,
     get_archive_dir,
@@ -26,6 +22,7 @@ from daydream.archive import (
     pipeline,
     scan,
 )
+from daydream.archive.bundle import _copy_snapshot_bundle, _project_documents
 from daydream.archive.git_context import GitContext, capture_git_context
 from daydream.archive.index import (
     _CREATE_TABLE,
@@ -46,7 +43,12 @@ from daydream.archive.manifest import (
     archive_recorder_provenance_from_snapshot,
     build_manifest_from_snapshot,
 )
-from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
+from daydream.archive.pipeline import (
+    _read_fix_quality_gate,
+    _read_recommended_capture,
+    derive_phase_states,
+    derive_pipeline_status,
+)
 from daydream.archive.provenance import ExecutableProvenance
 from daydream.artifact_visibility import (
     ArtifactEvidenceProvenance,
@@ -846,7 +848,7 @@ def test_bundle_rejects_a_sibling_document_bound_to_another_session(tmp_path: Pa
         status="complete", cutoff_at="2026-01-01T00:00:01Z", root_trajectory_id=recorder.session_id,
         documents=(root, TrajectoryDocumentSnapshot("fork-1", target / "fork.json", foreign)),
     )
-    with pytest.raises(ValueError, match="frozen trajectory document identity"):
+    with pytest.raises(ArchiveFinalizationError, match="frozen trajectory projection failed"):
         _assemble_bundle(target, run_dir, recorder, write_snapshot=snapshot)
     assert not (run_dir / "trajectories").exists()
 
@@ -2250,7 +2252,7 @@ def test_archive_rejects_a_sibling_document_from_another_session(
         documents=(root, TrajectoryDocumentSnapshot("fork-1", target / "fork.json", foreign)),
     )
 
-    with pytest.raises(ArchiveFinalizationError, match="archive finalization failed"):
+    with pytest.raises(ArchiveFinalizationError, match="frozen trajectory projection failed"):
         _strict_archive(target=target, session_id=recorder.session_id, config=make_config(target, archive=True),
             write_snapshot=snapshot,
         )

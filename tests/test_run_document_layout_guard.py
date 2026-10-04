@@ -23,7 +23,8 @@ _EXCLUDED_PARTS = frozenset({"tests", "__pycache__", ".venv", "venv", "site-pack
 
 #: The in-scope callers. Each must import the layout surface (requirement 10).
 _IN_SCOPE_CONSUMERS = frozenset({
-    "daydream/archive/__init__.py", "daydream/archive/hydrate.py", "daydream/archive/license_enrich.py",
+    "daydream/archive/bundle.py", "daydream/archive/finalize.py",
+    "daydream/archive/hydrate.py", "daydream/archive/license_enrich.py",
     "daydream/archive/sanitize.py", "daydream/eval/analyzer.py", "daydream/artifact_visibility.py",
     "daydream/phases/handoff.py", "daydream/training/adjudication/materialize.py",
     "daydream/training/adjudication/import_local.py",

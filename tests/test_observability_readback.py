@@ -579,6 +579,17 @@ def test_immutable_budget_truncates_slow_peers(tmp_path: Path, monkeypatch: pyte
     """0.12s budget: return before 0.35s, peer observes close within 1s, no later poll."""
     receipt = _write_receipt(tmp_path)
     peer = _LoopbackPeer(trickle=trickle)
+    # Cold HTTPX transport imports and TLS context construction are synchronous
+    # and can exhaust the tiny budget under parallel coverage before any socket
+    # opens. Prepare that real transport outside the measured slow-peer interval;
+    # keep real HTTPX streaming, deadline cancellation, and connection closure.
+    transport = _verifier.httpx.AsyncHTTPTransport(trust_env=False)
+    client_type = _verifier.httpx.AsyncClient
+
+    def prepared_client(**kwargs: Any) -> Any:
+        return client_type(transport=transport, **kwargs)
+
+    monkeypatch.setattr(_verifier.httpx, "AsyncClient", prepared_client)
     try:
         monkeypatch.setenv("HH_API_URL", peer.base_url)
         monkeypatch.setenv("HH_API_KEY", _SECRET_KEY)

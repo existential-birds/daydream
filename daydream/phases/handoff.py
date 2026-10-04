@@ -9,7 +9,6 @@ from typing import Any
 import anyio
 
 from daydream import agent, git_ops, ui
-from daydream.archive import get_archive_dir
 from daydream.artifact_visibility import (
     ArtifactSession,
     ArtifactVisibilityError,
@@ -276,12 +275,12 @@ def _resolve_handoff_paths(
             live_daydream_dir / "diff.patch", repo=work.repo,
         )
         deep_dir = artifact_session.durable_path_for(live_daydream_dir / "deep", repo=work.repo)
-    elif work.is_ephemeral and recorder.on_write is not None:
-        # The worktree disappears after recorder exit; place the handoff alongside
-        # the archived bundle so references survive cleanup.
-        artifact_root = run_directory(get_archive_dir(), recorder.session_id)
-        diff_path = artifact_root / "diff.patch"
-        deep_dir = artifact_root / "deep"
+    elif work.is_ephemeral:
+        # Standalone execution has no runtime publication owner. Its disposable
+        # workspace and an optional recorder callback cannot promise durable
+        # evidence. Keep the handoff in the source without inventing archive links.
+        source_daydream = artifact_dir_for(work.source, session=None, allow_standalone=allow_standalone)
+        return run_directory(source_daydream, recorder.session_id) / "handoff.md", HandoffArtifacts()
     else:
         daydream_dir = artifact_dir_for(
             recorder.target_dir,
@@ -300,7 +299,11 @@ def _resolve_handoff_paths(
         trajectory=trajectory_path,
         trajectories=siblings_directory(artifact_root),
         diff=diff_path,
-        manifest=artifact_root / "manifest.json",
+        # Runtime publication does not produce an archive manifest. Optional
+        # persistence cannot promise one before it has actually succeeded.
+        manifest=(artifact_root / "manifest.json") if (
+            artifact_session is None and (artifact_root / "manifest.json").is_file()
+        ) else None,
         deep=deep_dir,
     )
 
@@ -472,7 +475,7 @@ async def _run_failure_summarizer(
     if recorder is not None:
         recorder.write_partial()
 
-    has_trajectory = recorder is not None
+    has_trajectory = artifacts.trajectory is not None
     active_session = artifact_session is not None
     changed_live = _changed_files(work.repo)
     possible_inputs = artifacts.inputs()

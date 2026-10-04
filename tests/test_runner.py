@@ -22,7 +22,6 @@ import pytest
 from rich.console import Console
 
 from daydream import clipboard, git_ops, pr_review, runner
-from daydream.archive import ArchiveFinalizationError
 from daydream.archive.git_context import GitContext
 from daydream.archive.manifest import (
     Manifest,
@@ -326,17 +325,19 @@ def _feature_repo(tmp_path: Path, *, remote: bool = False) -> Path:
     _commit(repo, "feature")
     return repo
 
-def _write_probe_flow(ext_dir: Any, flow_name: str) -> None:
+def _write_probe_flow(ext_dir: Any, flow_name: str, *, exit_code: int = 0) -> None:
     """Register a one-step flow whose step makes one real ``run_agent`` call."""
     ext_dir.write_module(
         "from daydream.agent import run_agent\n"
-        "from daydream.extensions import FlowStep\n"
+        "from daydream.extensions import FlowStep, Stop\n"
         "from daydream.trajectory import DaydreamPhase\n"
         "async def _probe(ctx):\n"
         "    assert ctx.artifacts is not None\n"
         "    assert ctx.private_workspace_owner is not None\n"
         "    await run_agent(ctx.backend_for('probe'), ctx.work.repo, 'PROBE',"
         " phase=DaydreamPhase.REVIEW)\n"
+        "    ctx.artifacts.review_output.write_text('Completed review\\n')\n"
+        f"    return Stop({exit_code})\n"
         "def register(registry):\n"
         "    registry.register_phase(FlowStep(name='probe', run=_probe))\n"
         f"    registry.set_flow({flow_name!r}, ['probe'])\n"
@@ -387,29 +388,66 @@ def _assert_one_published_run(repo: Path, archive_dir: Path) -> tuple[Path, Path
     assert len(public_runs) == len(archived_runs) == 1
     return public_runs[0], archived_runs[0]
 
-def _assert_partial_evidence_published(repo: Path, archive_dir: Path) -> None:
-    """A joined-but-failed run publishes partial evidence under both roots."""
-    public_run, archived_run = _assert_one_published_run(repo, archive_dir)
+def _assert_partial_evidence_published(repo: Path, archive_dir: Path, *, archive_failed: bool = False) -> None:
+    """A joined-but-failed run publishes evidence despite optional collection failure."""
+    public_runs = list((repo / ".daydream" / "runs").iterdir())
+    assert len(public_runs) == 1
+    public_run = public_runs[0]
     assert json.loads((public_run / "trajectory.json").read_text())["extra"]["partial"] is True
-    assert json.loads((archived_run / "manifest.json").read_text())["archive_status"] == "partial"
+    if archive_failed:
+        assert not list((archive_dir / "runs").glob("*"))
+    else:
+        _, archived_run = _assert_one_published_run(repo, archive_dir)
+        assert json.loads((archived_run / "manifest.json").read_text())["archive_status"] == "partial"
 
-@pytest.mark.parametrize("failure_mode", ["none", "destination", "archive"])
+def _fail_evaluation(*_args: Any, **_kwargs: Any) -> Any:
+    raise OSError("collection unavailable")
+
+@pytest.mark.parametrize("failure_mode,exit_code", [
+    ("none", 0), ("destination", 0), ("evaluation", 3),
+    ("identity", 0), ("frozen_tree", 0), ("dump_publication", 0),
+])
 async def test_artifact_session_runner_controlled_custom_flow_publishes_after_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path, failure_mode: str,
+    exit_code: int, capsys: pytest.CaptureFixture[str],
 ) -> None:
+    from daydream.archive import finalize_archive_run
+    from daydream.archive.dump import publish_dump
+
     repo = _feature_repo(tmp_path)
-    _write_probe_flow(ext_dir, "artifact-probe")
+    _write_probe_flow(ext_dir, "artifact-probe", exit_code=exit_code)
     backend = _ControlledBackend("block")
     monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: backend)
-    if failure_mode == "archive":
-        (repo / ".review-output.md").write_bytes(b"operator baseline\x00")
-        def fail_archive(**_kwargs: Any) -> None:
-            raise ArchiveFinalizationError("injected strict archive failure")
-        monkeypatch.setattr("daydream.archive.finalize_archive_run", fail_archive)
+
+    def corrupt_identity(**kwargs: Any) -> None:
+        kwargs["artifacts"] = replace(kwargs["artifacts"], session_id="foreign-session")
+        finalize_archive_run(**kwargs)
+
+    def corrupt_frozen_tree(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        (args[0] / "diff.patch").write_text("changed after freeze")
+        raise OSError("evaluation failed after changing frozen input")
+
+    def fail_dump(assembly: Path, destination: Path, session_id: str) -> bool:
+        publish_dump(assembly, destination, session_id)
+        raise OSError("dump publication failed")
+
+    if failure_mode == "evaluation":
+        monkeypatch.setattr("daydream.eval.analyzer.analyze_session", _fail_evaluation)
+    elif failure_mode == "identity":
+        monkeypatch.setattr("daydream.archive.finalize_archive_run", corrupt_identity)
+    elif failure_mode == "frozen_tree":
+        monkeypatch.setattr("daydream.eval.analyzer.analyze_session", corrupt_frozen_tree)
+    elif failure_mode == "dump_publication":
+        monkeypatch.setattr("daydream.archive.dump.publish_dump", fail_dump)
     external_trajectory = tmp_path / "external trajectory.json"
     external_trajectory.write_text("operator baseline\n", encoding="utf-8")
+    dump = tmp_path / "dump"
+    dump.mkdir()
+    (dump / "prior.txt").write_text("prior dump")
+    (repo / ".review-output.md").write_text("prior review")
     config = RunConfig(
-        target=str(repo), base="main", flow_name="artifact-probe", trajectory_path=external_trajectory, run_eval=False,
+        target=str(repo), base="main", flow_name="artifact-probe", trajectory_path=external_trajectory,
+        run_eval=failure_mode in ("evaluation", "frozen_tree"), dump_artifacts=str(dump),
         archive=True, non_interactive=True,
     )
     result: list[int] = []
@@ -427,23 +465,33 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
                 replacement.write_text("concurrent replacement\n", encoding="utf-8")
                 os.replace(replacement, external_trajectory)
             backend.release.set()
-    if failure_mode != "none":
+    if failure_mode in ("destination", "identity", "frozen_tree", "dump_publication"):
         assert result == [1]
         assert not list((archive_dir / "runs").glob("*"))
-        if failure_mode == "destination":
-            assert external_trajectory.read_text(encoding="utf-8") == "concurrent replacement\n"
-            assert not (repo / ".daydream").exists()
-        else:
-            assert external_trajectory.read_text(encoding="utf-8") == "operator baseline\n"
-            assert (repo / ".review-output.md").read_bytes() == b"operator baseline\x00"
-            assert not (repo / ".daydream" / "runs").exists()
+        expected = "concurrent replacement\n" if failure_mode == "destination" else "operator baseline\n"
+        assert external_trajectory.read_text(encoding="utf-8") == expected
+        assert not (repo / ".daydream").exists()
+        assert (repo / ".review-output.md").read_text() == "prior review"
+        assert (dump / "prior.txt").read_text() == "prior dump"
         return
-    assert result == [0]
+    assert result == [exit_code]
+    assert ("Data Collection" in capsys.readouterr().out) is (failure_mode == "evaluation")
+    assert (repo / ".review-output.md").read_text() == "Completed review\n"
+    if failure_mode == "evaluation":
+        public_runs = list((repo / ".daydream" / "runs").iterdir())
+        assert len(public_runs) == 1
+        assert external_trajectory.read_bytes() == (public_runs[0] / "trajectory.json").read_bytes()
+        assert not list((archive_dir / "runs").glob("*"))
+        assert (dump / "prior.txt").read_text() == "prior dump"
+        return
     public_run, archived_run = _assert_one_published_run(repo, archive_dir)
     archived_bytes = (archived_run / "trajectory.json").read_bytes()
     assert (public_run / "trajectory.json").read_bytes() == archived_bytes
     assert external_trajectory.read_bytes() == archived_bytes
-    assert json.loads((archived_run / "manifest.json").read_text())["session_id"] == public_run.name
+    assert (dump / "trajectory.json").read_bytes() == archived_bytes
+    manifest = json.loads((archived_run / "manifest.json").read_text())
+    assert manifest["session_id"] == public_run.name
+    assert manifest["archive_status"] == "complete"
 
 async def test_forced_ephemeral_runner_records_source_while_backend_uses_worktree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path
@@ -493,44 +541,52 @@ async def test_forced_ephemeral_runner_records_source_while_backend_uses_worktre
     assert evaluation["daydream_dir"] == str(repo.resolve() / ".daydream")
     assert str(backend.cwd) not in json.dumps(evaluation)
 
-@pytest.mark.parametrize("finalizer_interrupt", [False, True])
+@pytest.mark.parametrize("finalizer_failure", ["none", "interrupt", "evaluation"])
 async def test_artifact_session_runner_preserves_primary_and_publishes_partial_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path, finalizer_interrupt: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path, finalizer_failure: str,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A complete recorder write cannot turn a failed body into host success."""
     repo = _feature_repo(tmp_path)
     _write_probe_flow(ext_dir, "artifact-probe-error")
     primary = RuntimeError("model boundary failed")
     monkeypatch.setattr(runner, "create_backend", lambda *_a, **_k: _ControlledBackend("raise", error=primary))
-    if finalizer_interrupt:
+    if finalizer_failure == "evaluation":
+        monkeypatch.setattr("daydream.eval.analyzer.analyze_session", _fail_evaluation)
+    elif finalizer_failure == "interrupt":
         monkeypatch.setattr(
             "daydream.archive.finalize_archive_run", lambda **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
         )
     with pytest.raises(RuntimeError) as raised:
         await _run_private(
             RunConfig(
-                target=str(repo), base="main", flow_name="artifact-probe-error", run_eval=False, archive=True,
+                target=str(repo), base="main", flow_name="artifact-probe-error", run_eval=True, archive=True,
                 non_interactive=True,
             ), tmp_path,
         )
     assert raised.value is primary
-    if finalizer_interrupt:
+    assert ("Data Collection" in capsys.readouterr().out) is (finalizer_failure == "evaluation")
+    if finalizer_failure == "interrupt":
         assert not (repo / ".daydream").exists()
         assert not list((archive_dir / "runs").glob("*"))
         assert any("secondary base failure" in note for note in primary.__notes__)
         return
-    _assert_partial_evidence_published(repo, archive_dir)
+    _assert_partial_evidence_published(repo, archive_dir, archive_failed=finalizer_failure == "evaluation")
 
+@pytest.mark.parametrize("evaluation_failure", [False, True])
 async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path, evaluation_failure: bool,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Cancellation joins the backend, durably publishes evidence, then escapes."""
     repo = _feature_repo(tmp_path)
     _write_probe_flow(ext_dir, "artifact-probe-cancel")
     backend = _ControlledBackend("hang")
     monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: backend)
+    if evaluation_failure:
+        monkeypatch.setattr("daydream.eval.analyzer.analyze_session", _fail_evaluation)
     config = RunConfig(
-        target=str(repo), base="main", flow_name="artifact-probe-cancel", run_eval=False, archive=True,
+        target=str(repo), base="main", flow_name="artifact-probe-cancel", run_eval=True, archive=True,
         non_interactive=True,
     )
     caught: list[BaseException] = []
@@ -548,7 +604,8 @@ async def test_artifact_session_runner_cancellation_finalizes_then_propagates(
     assert len(caught) == 1
     assert isinstance(caught[0], anyio.get_cancelled_exc_class())
     assert backend.cancelled is True
-    _assert_partial_evidence_published(repo, archive_dir)
+    assert ("Data Collection" in capsys.readouterr().out) is evaluation_failure
+    _assert_partial_evidence_published(repo, archive_dir, archive_failed=evaluation_failure)
 
 async def test_signal_flush_immutable_cutoff_before_first_root_step(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: Callable[..., RunConfig],
