@@ -15,7 +15,6 @@ stamps come from production modules.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -27,6 +26,7 @@ from daydream.training.labeler_versions import (
     REPLY_CLASSIFIER_VERSION,
     RUBRIC_SCHEMA_VERSION,
 )
+from tests.harness.adjudication import sha256sums_text
 
 REWARD_VERSION = "2026.09.04-1"  # Frozen fixture semantics; never rescore on a production bump.
 
@@ -118,11 +118,6 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n")
 
 
-def _sha256sums(corpus_dir: Path, names: list[str]) -> None:
-    lines = [f"{hashlib.sha256((corpus_dir / name).read_bytes()).hexdigest()}  {name}" for name in names]
-    (corpus_dir / "SHA256SUMS").write_text("\n".join(lines) + "\n")
-
-
 def _write_bundle(corpus_dir: Path, records: list[dict[str, Any]], *, sums_over_tampered: bool = False) -> None:
     """Write the corpus bundle. sums_over_tampered changes corpus bytes after pristine SHA256SUMS to
     exercise digest refusal.
@@ -132,7 +127,10 @@ def _write_bundle(corpus_dir: Path, records: list[dict[str, Any]], *, sums_over_
     _write_json(corpus_dir / "lineage.json", _lineage())
     _write_json(corpus_dir / "curation-manifest.json", _manifest(records))
     (corpus_dir / "_SUCCESS").write_text("")
-    _sha256sums(corpus_dir, ["corpus.jsonl", "lineage.json", "curation-manifest.json"])
+    (corpus_dir / "SHA256SUMS").write_text(sha256sums_text(
+        (name, (corpus_dir / name).read_bytes())
+        for name in ("corpus.jsonl", "lineage.json", "curation-manifest.json")
+    ))
     if sums_over_tampered:
         tampered = [json.loads(line) for line in (corpus_dir / "corpus.jsonl").read_text().splitlines()]
         tampered[0]["session_id"] = "sess-tampered"

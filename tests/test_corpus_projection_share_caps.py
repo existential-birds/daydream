@@ -10,11 +10,11 @@ from daydream.commands.corpus import _build_build_corpus_parser, _handle_build_c
 from daydream.training.corpus_projection import BuildFrozenCorpusConfig
 from daydream.training.corpus_projection.projector import build_frozen_corpus
 from daydream.training.corpus_projection.selection import _apply_share_caps
+from tests.harness.adjudication import write_sha256sums
 from tests.test_corpus_projection import (
     _admit_second_batch,
     _config_for,
     _policy_file,
-    _write_ann_sumsums,
     _write_annotations_snapshot,
     _write_bundle,
 )
@@ -226,7 +226,7 @@ class TestBuildWiring:
         rows[-1]["profile"]["profile_name"] = "quick-review"
         snap.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
         ann_dir = snap.parent
-        _write_ann_sumsums(ann_dir)
+        write_sha256sums(ann_dir, skip=frozenset({"SHA256SUMS"}))
 
         out = tmp_path / "out"
         summary = build_frozen_corpus(self._share_cfg(
@@ -295,7 +295,7 @@ class TestCliShareFlags:
             row["profile"]["profile_name"] = "quick-review"
         snap.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
         ann_dir = snap.parent
-        _write_ann_sumsums(ann_dir)
+        write_sha256sums(ann_dir, skip=frozenset({"SHA256SUMS"}))
         return ["--bundle-root", str(bundle_dir), "--annotation-bundle-root", str(snap.parent),
             "--license-policy", str(_policy_file(tmp_path)), "--out", str(tmp_path / "out" / "corpus.jsonl"),
         ]

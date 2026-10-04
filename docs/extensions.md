@@ -413,8 +413,9 @@ list is an error, never a narrower-than-asked authorization.
 
 Granting is the coordinator's call, never the parser's: only the turn's *own*
 request with its own per-path evidence may widen the policy, through
-`AuthorizedFixFootprint.authorize_scope_request(...)` — the same shape and the
-same audited `origin="scope_request"` event as `authorize_new_generated`. A path
+`AuthorizedFixFootprint.authorize_widened_path(..., action="approve_scope",
+origin="scope_request")` — the same widening shape as a policy-approved
+generated path, recorded under its own `origin="scope_request"`. A path
 that merely appears in test output is not evidence of authorization, and a
 request that cannot be canonicalized grants nothing.
 

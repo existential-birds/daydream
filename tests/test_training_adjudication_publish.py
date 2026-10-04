@@ -19,7 +19,7 @@ from daydream.training.adjudication.publish import (
     resume_annotation_state,
 )
 from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
-from tests.harness.adjudication import policy_binding
+from tests.harness.adjudication import policy_binding, sha256sums_text
 
 # Use a 40-character hexadecimal pinned revision so Hub verification runs.
 INDEX_REVISION = "a" * 40
@@ -581,10 +581,7 @@ def _seed_final_envelope(hub: AnnotationsHub, bundle: Path) -> tuple[str, str, s
         }
     )
     data = {**semantic, "publication-manifest.json": publication}
-    data["SHA256SUMS"] = "".join(
-        f"{hashlib.sha256(value).hexdigest()}  {name}\n"
-        for name, value in sorted(data.items())
-    ).encode()
+    data["SHA256SUMS"] = sha256sums_text(sorted(data.items())).encode()
     data_oid = hub.seed_remote_files({f"{prefix}{name}": value for name, value in data.items()})
     success = _canonical_bytes(
         {"schema_version": "annotation-success/v1", "final_snapshot_id": final_id, "data_commit_oid": data_oid}

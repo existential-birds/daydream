@@ -205,8 +205,9 @@ def _apply_scope_request(
         return
     if resolution.expanded:
         for path in resolution.accepted:
-            footprint.authorize_scope_request(
+            footprint.authorize_widened_path(
                 repo, path,
+                action="approve_scope", origin="scope_request",
                 phase="test_heal", round_number=None,
                 reason=request.evidence.get(path) or (
                     f"repair turn {repair.execution_id} requested this path from the failure it worked on"

@@ -29,6 +29,7 @@ from daydream.archive.provenance import ExecutableProvenance
 from daydream.archive.scan import scan_run_dir
 from daydream.training.corpus_projection.license import load_license_policy, resolve_repo_decision
 from tests.fixtures.training.build_hub_snapshot import SNAPSHOT_REVISION, build_snapshot
+from tests.harness.adjudication import sha256sums_text
 
 
 def _write_policy(tmp_path: Path) -> str:
@@ -856,9 +857,8 @@ def _publish_verifiable_curation(tmp_path: Path, batch_files: dict[str, str]) ->
     (local / "curation-manifest.json").write_text(json.dumps(doc, indent=2) + "\n")
     relpaths = sorted(p.relative_to(local).as_posix() for p in local.rglob("*") if p.is_file())
     files = {f"{prefix}{rel}": (local / rel).read_bytes() for rel in relpaths}
-    files[f"{prefix}SHA256SUMS"] = "".join(
-        f"{hashlib.sha256((local / rel).read_bytes()).hexdigest()}  {prefix}{rel}\n"
-        for rel in relpaths
+    files[f"{prefix}SHA256SUMS"] = sha256sums_text(
+        ((rel, (local / rel).read_bytes()) for rel in relpaths), prefix=prefix
     ).encode()
     hub = FakeHub(repo_id="org/private-ds", private=True, files=files)
     hub.commit_revision("b" * 40)

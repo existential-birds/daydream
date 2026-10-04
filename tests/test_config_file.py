@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from daydream.config_file import DaydreamFileConfig, _coerce_non_negative_float, load_file_config
-from tests.harness.config import write_daydream_pyproject, write_target_hub_key
+from tests.harness.config import write_daydream_pyproject
 
 
 def test_improve_config_table_parses_service_roots(tmp_path: Path) -> None:
@@ -127,7 +127,7 @@ def test_bool_key_non_bool_degrades_to_none(tmp_path: Path, key: str) -> None:
     assert getattr(cfg, key) is None
 
 def test_target_trajectory_hub_repo_key_is_ignored(tmp_path: Path) -> None:
-    write_target_hub_key(tmp_path)
+    write_daydream_pyproject(tmp_path, trajectory_hub_repo="evil/repo")
     cfg = load_file_config(tmp_path)
     assert not hasattr(cfg, "trajectory_hub_repo")  # field removed from the model
 

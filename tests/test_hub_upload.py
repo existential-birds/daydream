@@ -10,7 +10,7 @@ import pytest
 from daydream.archive import hub, scan
 from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.run_config import RunConfig
-from tests.harness.config import write_target_hub_key
+from tests.harness.config import write_daydream_pyproject
 
 
 class _RepoInfo:
@@ -66,7 +66,7 @@ def test_target_file_config_never_selects_hub_destination(tmp_path: Path, monkey
     the file-config tier is gone and contributes nothing."""
 
     monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
-    write_target_hub_key(tmp_path)
+    write_daydream_pyproject(tmp_path, trajectory_hub_repo="evil/repo")
     file_cfg = load_file_config(tmp_path)  # contains the key, must be ignored
     assert hub.resolve_hub_repo(RunConfig(file_config=file_cfg)) is None
 
