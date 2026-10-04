@@ -8,7 +8,9 @@ from __future__ import annotations
 import ast
 import inspect
 import re
+from functools import partial
 from pathlib import Path
+from typing import Sequence
 
 import pytest
 
@@ -65,53 +67,47 @@ def test_explicit_roots_with_no_match_yield_no_services(monorepo: Path) -> None:
     services = enumerate_services(monorepo, DaydreamFileConfig(), service_roots=["nope/*"])
     assert services == []
 
-def test_deepest_match_skips_a_repo_root_service_and_accepts_a_path_equal_to_a_root() -> None:
-    services = [Service("root", Path("."), "config"), Service("api", Path("services/api"), "config"),
-        Service("inner", Path("services/api/inner"), "config"),
-    ]
+#: One root/api/inner ownership matrix. A tuple so the shared value cannot be
+#: mutated by a caller that sorts or filters it.
+_NESTED_SERVICES: tuple[Service, ...] = (
+    Service("root", Path("."), "config"),
+    Service("api", Path("services/api"), "config"),
+    Service("inner", Path("services/api/inner"), "config"),
+)
 
-    def owners(path: str) -> tuple[str, ...]:
-        return tuple(s.name
-            for s in owning_services(
-                path, services, match=ServiceMatch.DEEPEST, repo_root=RepoRootPolicy.SKIP, match_root_equal=True
-            )
+
+def _owners(
+    path: str, services: Sequence[Service], *,
+    match: ServiceMatch, repo_root: RepoRootPolicy, match_root_equal: bool,
+) -> tuple[str, ...]:
+    """Owning service names for ``path`` under one explicitly stated policy triple."""
+    return tuple(service.name
+        for service in owning_services(
+            path, services, match=match, repo_root=repo_root, match_root_equal=match_root_equal
         )
+    )
 
+
+def test_deepest_match_skips_a_repo_root_service_and_accepts_a_path_equal_to_a_root() -> None:
+    owners = partial(_owners, services=_NESTED_SERVICES, match=ServiceMatch.DEEPEST,
+                     repo_root=RepoRootPolicy.SKIP, match_root_equal=True)
     assert owners("services/api/inner/main.py") == ("inner",)
     assert owners("services/api/inner") == ("inner",)
     assert owners("scripts/tool.py") == ()
     assert owners(".") == ()
 
 def test_first_match_in_the_callers_order_catch_alls_a_repo_root_service() -> None:
-    services = sorted([Service("root", Path("."), "config"), Service("api", Path("services/api"), "config"),
-            Service("inner", Path("services/api/inner"), "config"),
-        ], key=lambda service: (-len(service.root.parts), service.root.as_posix()),
-    )
-
-    def owners(path: str) -> tuple[str, ...]:
-        return tuple(s.name
-            for s in owning_services(
-                path, services, match=ServiceMatch.FIRST, repo_root=RepoRootPolicy.CATCH_ALL, match_root_equal=False
-            )
-        )
-
+    services = sorted(_NESTED_SERVICES, key=lambda service: (-len(service.root.parts), service.root.as_posix()))
+    owners = partial(_owners, services=services, match=ServiceMatch.FIRST,
+                     repo_root=RepoRootPolicy.CATCH_ALL, match_root_equal=False)
     assert owners("services/api/inner/main.py") == ("inner",)
     assert owners("services/api/inner") == ("api",)
     assert owners("services/api") == ("root",)
     assert owners("README.md") == ("root",)
 
 def test_all_matching_owners_keep_input_order_under_the_ordinary_repo_root_rule() -> None:
-    services = [Service("root", Path("."), "config"), Service("api", Path("services/api"), "config"),
-        Service("inner", Path("services/api/inner"), "config"),
-    ]
-
-    def owners(path: str) -> tuple[str, ...]:
-        return tuple(s.name
-            for s in owning_services(
-                path, services, match=ServiceMatch.ALL, repo_root=RepoRootPolicy.ORDINARY, match_root_equal=True
-            )
-        )
-
+    owners = partial(_owners, services=_NESTED_SERVICES, match=ServiceMatch.ALL,
+                     repo_root=RepoRootPolicy.ORDINARY, match_root_equal=True)
     assert owners("services/api/inner/main.py") == ("api", "inner")
     assert owners(".") == ("root",)
     assert owners("README.md") == ()

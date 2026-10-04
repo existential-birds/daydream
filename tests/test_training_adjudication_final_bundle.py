@@ -2,7 +2,6 @@
 or hand-authored lineage.
 """
 
-import hashlib
 import json
 from pathlib import Path
 
@@ -22,7 +21,13 @@ from daydream.training.corpus_projection.bundle import load_curated_bundle
 from daydream.training.corpus_projection.projector import _verify_annotation_bundle
 from daydream.training.labeler_versions import ANNOTATION_SNAPSHOT_SCHEMA_VERSION
 from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
-from tests.harness.adjudication import accepted_observation, policy_binding, seed_index_dispositions
+from tests.harness.adjudication import (
+    accepted_observation,
+    policy_binding,
+    seed_index_dispositions,
+    sha256sums_text,
+    write_sha256sums,
+)
 from tests.test_training_adjudication_canonical import _PIN as _CANONICAL_PIN
 
 _SOURCE = "b" * 40
@@ -31,12 +36,7 @@ _PIN = {**_CANONICAL_PIN, "curation_id": _CURATION_ID, "sanitized_hub_commit": _
 
 
 def _refresh_curation_envelope(root: Path) -> None:
-    lines = []
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.name in {"SHA256SUMS", "_SUCCESS"}:
-            continue
-        lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  " f"{path.relative_to(root).as_posix()}")
-    (root / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_sha256sums(root, skip=frozenset({"SHA256SUMS", "_SUCCESS"}))
     (root / "_SUCCESS").write_text("ok\n", encoding="utf-8")
 
 
@@ -250,11 +250,10 @@ def test_complete_identity_changes_for_every_semantic_file(name: str, tmp_path: 
 
 def test_complete_seven_file_bundle_passes_existing_public_consumer(tmp_path: Path) -> None:
     index_root, _mat, _archive, out = _built_final_bundle(tmp_path)
-    sums = "".join(
-        f"{hashlib.sha256((out / name).read_bytes()).hexdigest()}  {name}\n"
-        for name in sorted(FINAL_IDENTITY_FILES)
+    (out / "SHA256SUMS").write_text(
+        sha256sums_text(((name, (out / name).read_bytes()) for name in sorted(FINAL_IDENTITY_FILES))),
+        encoding="utf-8",
     )
-    (out / "SHA256SUMS").write_text(sums, encoding="utf-8")
     (out / "_SUCCESS").write_text("complete\n", encoding="utf-8")
 
     lineage = _verify_annotation_bundle(out, load_curated_bundle(index_root), index_root)

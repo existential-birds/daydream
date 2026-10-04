@@ -31,6 +31,7 @@ from daydream.training.corpus_projection.segments import segment
 from daydream.training.corpus_projection.tiers import GoldGateError, classify_tier
 from daydream.training.exclusion import EXCLUSION_PATH
 from daydream.training.stacks import load_dataset_v2
+from tests.harness.adjudication import write_sha256sums
 from tests.harness.scripts import cli_main
 
 
@@ -54,30 +55,13 @@ _MANIFEST = {"schema_version": "1", "source_hub_commit": "0123456789abcdef012345
 }
 
 
-def _write_sumsums(bundle_dir: Path, *, exclude: frozenset[str] = frozenset()) -> None:
-    lines = []
+def _write_sumsums(bundle_dir: Path) -> None:
     # Producer-realistic relpaths: daydream.archive.hydrate.finalize writes
     # SHA256SUMS lines relative to the hub-checkout root under the
     # ``curated/<curation-id>/`` prefix; bundle.py strips that prefix because
     # the bundle root is the curated directory itself.
     prefix = f"curated/{bundle_dir.name}/" if bundle_dir.parent.name == "curated" else ""
-    for path in sorted(bundle_dir.rglob("*")):
-        if not path.is_file() or path.name == "SHA256SUMS" or path.name == "_SUCCESS":
-            continue
-        rel = path.relative_to(bundle_dir).as_posix()
-        if rel in exclude:
-            continue
-        lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {prefix}{rel}")
-    (bundle_dir / "SHA256SUMS").write_text("\n".join(lines) + "\n")
-
-
-def _write_ann_sumsums(root: Path, *, skip: frozenset[str] = frozenset({"SHA256SUMS"})) -> None:
-    """Regenerate an annotation bundle's SHA256SUMS listing in fixture format."""
-    rel = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file() and p.name not in skip)
-    (root / "SHA256SUMS").write_text(
-        "".join(f"{hashlib.sha256((root / p).read_bytes()).hexdigest()}  {p}\n" for p in rel),
-        encoding="utf-8",
-    )
+    write_sha256sums(bundle_dir, skip=frozenset({"SHA256SUMS", "_SUCCESS"}), prefix=prefix)
 
 
 def _repin_annotation_bundle(bundle_dir: Path) -> None:
@@ -91,7 +75,7 @@ def _repin_annotation_bundle(bundle_dir: Path) -> None:
     ann_lineage = json.loads((ann_dir / "lineage.json").read_text())
     ann_lineage["batch_fileset_digest"] = _derivative_digest(bundle_dir)
     (ann_dir / "lineage.json").write_text(json.dumps(ann_lineage, sort_keys=True) + "\n")
-    _write_ann_sumsums(ann_dir, skip=frozenset({"SHA256SUMS", "_SUCCESS"}))
+    write_sha256sums(ann_dir, skip=frozenset({"SHA256SUMS", "_SUCCESS"}))
 
 _SEED_REPO_SLUGS = {"sess-a": "owner/repo-a"}
 
@@ -266,7 +250,7 @@ def _write_annotation_bundle(root: Path, rows: list[dict[str, Any]], *, curation
         "schema_version": "annotation-snapshot/1055-snapshot-r1", "batch_fileset_digest": batch_fileset_digest,
         "labeler_version": "v1", "rubric_version": "v1", "classifier_version": "v1", "as_of": None,
     }, sort_keys=True) + "\n", encoding="utf-8")
-    _write_ann_sumsums(root)
+    write_sha256sums(root, skip=frozenset({"SHA256SUMS"}))
     if success:
         (root / "_SUCCESS").write_text("ok\n", encoding="utf-8")
     return root
@@ -592,7 +576,7 @@ def test_evidence_after_as_of_findings_never_emit_gold(tmp_path: Path, bundle_di
     # exactly as the fixture does (no SHA256SUMS self-line — it does not exist
     # when the fixture computes the listing).
     ann_dir = snap.parent
-    _write_ann_sumsums(ann_dir)
+    write_sha256sums(ann_dir, skip=frozenset({"SHA256SUMS"}))
     summary = build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "out"))
     assert summary["records_by_tier"] == {"silver": 1}
     records = _read_jsonl(tmp_path / "out" / "corpus.jsonl")

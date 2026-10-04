@@ -502,8 +502,9 @@ def test_scope_request_authorization_widens_the_policy_once_with_an_audit_event(
     footprint = AuthorizedFixFootprint(
         run_allowed_paths=frozenset({"src/handler.py"}), policy_revision=1,
     )
-    footprint.authorize_scope_request(
+    footprint.authorize_widened_path(
         repo, "src/other.rs",
+        action="approve_scope", origin="scope_request",
         phase="test_heal", round_number=None,
         reason="the failing assertion imports src/other.rs",
     )
@@ -513,8 +514,9 @@ def test_scope_request_authorization_widens_the_policy_once_with_an_audit_event(
     assert (event.action, event.origin, event.path, event.path_kind) == (
         "approve_scope", "scope_request", "src/other.rs", "model",
     )
-    footprint.authorize_scope_request(
+    footprint.authorize_widened_path(
         repo, "src/other.rs",
+        action="approve_scope", origin="scope_request",
         phase="test_heal", round_number=None, reason="already authorized",
     )
     assert footprint.policy_revision == 2, "a second request for an authorized path changes nothing"

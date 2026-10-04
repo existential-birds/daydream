@@ -17,6 +17,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_DIR = _REPO_ROOT / "daydream" / "templates" / "workflows"
 REPO_WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
 
+# Each packaged workflow is checked against the live repo copy, because the
+# packaged template must not drift from what the bot actually runs.
+_TEMPLATE_AND_LIVE_IDS = ["template", "live"]
+_COMMAND_WORKFLOW_PATHS = [TEMPLATES_DIR / "daydream-command.yml", REPO_WORKFLOWS_DIR / "daydream-command.yml"]
+_REVIEW_WORKFLOW_PATHS = [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"]
+_POST_WORKFLOW_PATHS = [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"]
+
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
 
 
@@ -106,10 +113,7 @@ def test_template_command_workflow_dispatches_approved_head() -> None:
     assert "COMMENT_CREATED_AT" in dispatch["env"]
     assert "actions/checkout" not in path.read_text(encoding="utf-8")
 
-@pytest.mark.parametrize(
-    "wf_path", [TEMPLATES_DIR / "daydream-command.yml", REPO_WORKFLOWS_DIR / "daydream-command.yml"],
-    ids=["template", "live"],
-)
+@pytest.mark.parametrize("wf_path", _COMMAND_WORKFLOW_PATHS, ids=_TEMPLATE_AND_LIVE_IDS)
 def test_command_workflow_acknowledges_only_after_successful_dispatch(wf_path: Path) -> None:
     """A failed dispatch creates no review run or failure report. Acknowledge only
     after success so the reaction cannot falsely signal a running review."""
@@ -134,9 +138,7 @@ def test_command_workflow_acknowledges_only_after_successful_dispatch(wf_path: P
         "dispatch would still post the 👀 reaction"
     )
 
-@pytest.mark.parametrize("wf_path", [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"],
-    ids=["template", "live"],
-)
+@pytest.mark.parametrize("wf_path", _REVIEW_WORKFLOW_PATHS, ids=_TEMPLATE_AND_LIVE_IDS)
 def test_review_workflow_head_bound_gate(wf_path: Path) -> None:
     """Bind checkout and review to the approved head; live Codex and packaged
     Anthropic workflows retain their distinct credential lifecycles."""
@@ -196,9 +198,7 @@ def _assert_single_reject_funnel(run: str, *, label: str) -> None:
         "push times, and pushes at/after the approving comment"
     )
 
-@pytest.mark.parametrize("wf_path", [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"],
-    ids=["template", "live"],
-)
+@pytest.mark.parametrize("wf_path", _REVIEW_WORKFLOW_PATHS, ids=_TEMPLATE_AND_LIVE_IDS)
 def test_review_workflow_persists_failure_context(wf_path: Path) -> None:
     """workflow_run cannot identify a dispatch run's PR. The failure artifact
     must supply its number and diagnostic to the post workflow."""
@@ -246,9 +246,7 @@ def test_findings_upload_survives_late_stage_failure(wf_path: Path) -> None:
     review = next(step for step in steps if "--findings-out" in step.get("run", ""))
     assert steps.index(review) < steps.index(upload)
 
-@pytest.mark.parametrize("wf_path", [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"],
-    ids=["template", "live"],
-)
+@pytest.mark.parametrize("wf_path", _POST_WORKFLOW_PATHS, ids=_TEMPLATE_AND_LIVE_IDS)
 def test_surface_analyze_failure_resolves_dispatch_run_pr(wf_path: Path) -> None:
     """Resolve dispatch-run PR identity from failure context; warn and continue
     when no trustworthy target is available."""
@@ -384,10 +382,7 @@ def test_match_step_recognizes_exactly_the_three_bot_commands(
     assert outputs["command"] == expected
     assert outputs["matched"] == ("true" if expected else "false")
 
-@pytest.mark.parametrize(
-    "wf_path", [TEMPLATES_DIR / "daydream-command.yml", REPO_WORKFLOWS_DIR / "daydream-command.yml"],
-    ids=["template", "live"],
-)
+@pytest.mark.parametrize("wf_path", _COMMAND_WORKFLOW_PATHS, ids=_TEMPLATE_AND_LIVE_IDS)
 def test_command_workflow_dispatches_the_matched_command(wf_path: Path) -> None:
     """Pass the matched command through env, preserving approval binding and
     keeping event interpolation out of shell code."""
@@ -398,9 +393,7 @@ def test_command_workflow_dispatches_the_matched_command(wf_path: Path) -> None:
     assert '-f command="$COMMAND"' in dispatch["run"]
     assert not _EVENT_INTERP.search(dispatch["run"])
 
-@pytest.mark.parametrize("wf_path", [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"],
-    ids=["template", "live"],
-)
+@pytest.mark.parametrize("wf_path", _REVIEW_WORKFLOW_PATHS, ids=_TEMPLATE_AND_LIVE_IDS)
 def test_review_workflow_command_input_is_a_bounded_choice(wf_path: Path) -> None:
     """Only approved commands may select a credential-bearing run. Installed
     workflow validation enforces the same three-option bound."""
@@ -412,9 +405,7 @@ def test_review_workflow_command_input_is_a_bounded_choice(wf_path: Path) -> Non
     assert command["default"] == "review"
     assert command["required"] is False
 
-@pytest.mark.parametrize("wf_path", [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"],
-    ids=["template", "live"],
-)
+@pytest.mark.parametrize("wf_path", _REVIEW_WORKFLOW_PATHS, ids=_TEMPLATE_AND_LIVE_IDS)
 def test_review_workflow_branches_on_command_and_fails_closed(wf_path: Path) -> None:
     """Diagram and review runs share head-binding and artifact contracts; reject
     unknown commands rather than dispatching a different run."""
@@ -472,9 +463,7 @@ def test_bot_workflow_action_references_are_pinned_to_commit_shas(wf_path: Path)
 # All workflows install pinned revisions. Released surfaces follow the package release; diagram
 # surfaces may need a reviewed newer commit.
 
-@pytest.mark.parametrize("post_path", [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"],
-    ids=["template", "live"],
-)
+@pytest.mark.parametrize("post_path", _POST_WORKFLOW_PATHS, ids=_TEMPLATE_AND_LIVE_IDS)
 def test_split_setup_preserves_privilege_split(post_path: Path) -> None:
     review = load_workflow(TEMPLATES_DIR / "daydream-review.yml")
     review_text = (TEMPLATES_DIR / "daydream-review.yml").read_text(encoding="utf-8")
@@ -507,9 +496,7 @@ def test_post_job_token_can_read_head_evidence(wf_path: Path) -> None:
     assert steps
     assert all(step["with"]["permission-contents"] == "read" for step in steps)
 
-@pytest.mark.parametrize("wf_path", [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"],
-    ids=["template", "live"],
-)
+@pytest.mark.parametrize("wf_path", _POST_WORKFLOW_PATHS, ids=_TEMPLATE_AND_LIVE_IDS)
 def test_post_findings_step_exports_bot_login(wf_path: Path) -> None:
     """Both post workflows must pass the deposited bot login. Without it, REST
     author dedup cannot run and GraphQL falls back to viewerDidAuthor alone."""
@@ -519,9 +506,7 @@ def test_post_findings_step_exports_bot_login(wf_path: Path) -> None:
     )
     assert '--bot-login "$BOT_LOGIN"' in text, f"{wf_path.name}: Post findings step must pass --bot-login explicitly"
 
-@pytest.mark.parametrize("wf_path", [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"],
-    ids=["template", "live"],
-)
+@pytest.mark.parametrize("wf_path", _POST_WORKFLOW_PATHS, ids=_TEMPLATE_AND_LIVE_IDS)
 def test_failure_comment_target_never_uses_findings_artifact(wf_path: Path) -> None:
     """Failure handlers trust only derived or event PR identity: findings.json
     is unvalidated here. Missing both identities must exit without posting."""

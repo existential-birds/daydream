@@ -11,10 +11,10 @@ import pytest
 
 from daydream.training.corpus_projection.projector import build_frozen_corpus
 from daydream.training.corpus_projection.splits import assign_split
+from tests.harness.adjudication import write_sha256sums
 from tests.test_corpus_projection import (
     _admit_second_batch,
     _config_for,
-    _write_ann_sumsums,
     _write_annotations_snapshot,
 )
 
@@ -162,7 +162,7 @@ def test_share_capped_replay_is_byte_identical_and_splits_disjoint(tmp_path: Pat
     rows[-1]["profile"]["profile_name"] = "quick-review"
     snap.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
     ann_dir = snap.parent
-    _write_ann_sumsums(ann_dir)
+    write_sha256sums(ann_dir, skip=frozenset({"SHA256SUMS"}))
     for out in (tmp_path / "a", tmp_path / "b"):
         build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out, max_stack_share=0.5,
                         max_repo_share=0.6, max_profile_share=0.7)

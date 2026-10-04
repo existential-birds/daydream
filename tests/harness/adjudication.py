@@ -1,14 +1,46 @@
-"""Shared adjudication test fixtures: hydrated ``index.db`` staging archives."""
+"""Shared adjudication test fixtures: hydrated ``index.db`` staging archives.
+
+Also owns the ``SHA256SUMS`` bundle-envelope writer every corpus, annotation, and
+final-bundle fixture has to produce byte-identically.
+"""
 
 from __future__ import annotations
 
+import hashlib
 import json
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from daydream.archive.hydrate_rules import derive_curation_id
 from daydream.archive.index import _get_connection
 from daydream.training.corpus_projection.identity import record_id
+
+
+def sha256sums_text(entries: Iterable[tuple[str, bytes]], *, prefix: str = "") -> str:
+    """``<sha256>  <name>\\n`` lines for ``(name, bytes)`` pairs, in the given order.
+
+    ``prefix`` prepends a bundle-relative directory (e.g. the producer-realistic
+    ``curated/<id>/`` a hub checkout records); it is part of the hashed name.
+    """
+    return "".join(f"{hashlib.sha256(data).hexdigest()}  {prefix}{name}\n" for name, data in entries)
+
+
+def write_sha256sums(root: Path, *, skip: frozenset[str], prefix: str = "") -> None:
+    """Write ``root/SHA256SUMS`` over every file under *root*, in relpath order.
+
+    ``skip`` names the files that must never appear in the listing — always the
+    listing itself, and ``_SUCCESS`` wherever the producer excludes it.
+    """
+    entries = sorted(
+        (path.relative_to(root).as_posix(), path)
+        for path in root.rglob("*")
+        if path.is_file() and path.name not in skip
+    )
+    (root / "SHA256SUMS").write_text(
+        sha256sums_text(((rel, path.read_bytes()) for rel, path in entries), prefix=prefix),
+        encoding="utf-8",
+    )
 
 
 def accepted_observation() -> dict[str, Any]:

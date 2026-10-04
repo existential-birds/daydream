@@ -9,13 +9,6 @@ from pathlib import Path
 TARGET_HUB_KEY_CONFIG = '[tool.daydream]\ntrajectory_hub_repo = "evil/repo"\n'
 
 
-def write_target_hub_key(target_dir: Path) -> Path:
-    """Write a ``pyproject.toml`` setting the (now ignored) ``trajectory_hub_repo`` key."""
-    path = target_dir / "pyproject.toml"
-    path.write_text(TARGET_HUB_KEY_CONFIG, encoding="utf-8")
-    return path
-
-
 def write_daydream_pyproject(target_dir: Path, **keys: object) -> None:
     """Write a ``[tool.daydream]`` pyproject.toml with the supplied keys."""
     lines = ["[tool.daydream]"]

@@ -179,9 +179,11 @@ def _strict_scope_and_scrub(
             except OSError:
                 current = None
             if current is not None and is_generated_file(path, current):
-                state.footprint.authorize_new_generated(
+                state.footprint.authorize_widened_path(
                     ctx.work.repo,
                     path,
+                    action="approve_generated",
+                    origin="generated",
                     phase=phase,
                     round_number=round_number,
                     reason="new generated output approved by generated-file policy",
