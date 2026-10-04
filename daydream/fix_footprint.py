@@ -16,6 +16,7 @@ from daydream.repository_paths import (
 FixFootprintAction = Literal[
     "authorize",
     "approve_generated",
+    "approve_scope",
     "rejected_retarget",
     "restore",
     "remove",
@@ -31,6 +32,7 @@ FixFootprintOrigin = Literal[
     "guard",
     "retarget",
     "staging",
+    "scope_request",
 ]
 
 _ACTIONS = frozenset(get_args(FixFootprintAction))
@@ -227,6 +229,40 @@ class AuthorizedFixFootprint:
             path=normalized,
             path_kind="model",
             origin="generated",
+            item_uid=None,
+            phase=phase,
+            round_number=round_number,
+            reason=reason,
+        )
+
+    def authorize_scope_request(
+        self,
+        repo: Path,
+        path: str,
+        *,
+        phase: str,
+        round_number: int | None,
+        reason: str,
+    ) -> None:
+        """Widen the run policy once for a path a repair turn asked to work on.
+
+        Same shape as :meth:`authorize_new_generated`, and the same two promises:
+        the request is canonicalized before it can enter the union, and an
+        already-authorized path is a no-op so the policy revision counts real
+        widenings only. The event records the request as its own origin, so an
+        auditor can tell a path the run reviewed from one a repair turn
+        demonstrated it needed.
+        """
+        normalized = canonicalize_repository_file_path(repo, path)
+        if normalized in self.run_allowed_paths:
+            return
+        self.run_allowed_paths = frozenset((*self.run_allowed_paths, normalized))
+        self.policy_revision += 1
+        self._append_event(
+            action="approve_scope",
+            path=normalized,
+            path_kind="model",
+            origin="scope_request",
             item_uid=None,
             phase=phase,
             round_number=round_number,

@@ -388,6 +388,31 @@ class TrajectoryRecorder:
             "profile_digest": digest,
         }
 
+    def emit_repair_outcome(
+        self,
+        *,
+        execution_id: str,
+        outcome: str,
+        abort_reason: str | None,
+        repair_reason_code: str | None,
+        changed_paths: tuple[str, ...] = (),
+    ) -> None:
+        """Record one bounded repair turn's host outcome and its concise reason codes.
+
+        Names and counts only: the scan needs to tell an interrupted repair from a
+        completed one without carrying the turn's prose. The converged public
+        reason travels as metadata, never as the lifecycle ``reason_code``.
+        """
+        self._emit_phase_event(
+            DaydreamPhase.TEST,
+            "repair_outcome",
+            execution_id=execution_id,
+            outcome=outcome,
+            abort_reason=abort_reason,
+            repair_reason_code=repair_reason_code,
+            changed_paths=list(changed_paths),
+        )
+
     def emit_file_group_budget_exceeded(
         self,
         *,

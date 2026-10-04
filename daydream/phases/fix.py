@@ -1,7 +1,7 @@
 """Fix for review and fix phases."""
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, TypedDict, Unpack
 
@@ -148,13 +148,47 @@ believe one is needed, stop and report why instead of running it.
 )
 
 
+#: The only shape a fix/repair turn's scope request takes on the wire: one block
+#: with these two markers, wrapping a JSON object the host parses
+#: (:func:`parse_fix_scope_request`). Prose that merely names an unauthorized path
+#: is not a request; this block is.
+SCOPE_REQUEST_BEGIN = "BEGIN SCOPE REQUEST"
+SCOPE_REQUEST_END = "END SCOPE REQUEST"
+
+
+def parse_fix_scope_request(output: str) -> Mapping[str, Any] | None:
+    """Return the scope request a turn returned in its final message, or ``None``.
+
+    Fail closed in both directions: no block (or an unterminated one) is a turn
+    that requested nothing, and a block that is not a JSON object is the same
+    answer rather than a half-parsed authorization. ``evidence_source`` is
+    host-assigned, never model-asserted: only a request the turn itself returned
+    from the failure it worked from can widen anything, and the coordinator
+    (``_AUTHORIZING_EVIDENCE_SOURCES``) decides whether that is worth a grant.
+    """
+    if not output or SCOPE_REQUEST_BEGIN not in output:
+        return None
+    remainder = output.split(SCOPE_REQUEST_BEGIN, 1)[1]
+    if SCOPE_REQUEST_END not in remainder:
+        return None
+    try:
+        payload = json.loads(remainder.split(SCOPE_REQUEST_END, 1)[0].strip())
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return {**payload, "evidence_source": "repair_turn"}
+
+
 def _build_fix_scope_clause(
     edit_scope: frozenset[str], read_scope: frozenset[str]
 ) -> str:
     """Render separate edit authorization and readable run context.
 
     The edit list is the enforcement contract. The wider read list is context
-    only and never grants write authority.
+    only and never grants write authority. A path outside the edit list is
+    reachable only by requesting it: name the path with evidence and let the
+    host widen the scope, rather than editing it and reporting after the fact.
     """
     edits = ", ".join(sorted(edit_scope)) or "(none)"
     readable_only = ", ".join(sorted(read_scope - edit_scope)) or "(none)"
@@ -163,6 +197,16 @@ def _build_fix_scope_clause(
         f"{edits}\n"
         "Run-readable context (read-only unless also listed in the edit scope): "
         f"{readable_only}\n"
+        "\nScope request (the only way outside that list): if a correct fix needs a "
+        "repository-relative path you are not authorized to edit, do NOT edit it. Stop "
+        "there and end your final message with exactly one block of this shape, naming "
+        "every path you need and the file:line evidence that requires it:\n"
+        f"{SCOPE_REQUEST_BEGIN}\n"
+        '{"paths": ["relative/path.py"],'
+        ' "evidence": {"relative/path.py": "file:line -- what requires this path"}}\n'
+        f"{SCOPE_REQUEST_END}\n"
+        "The host reads that block, not the prose around it, and decides whether to "
+        "widen the authorized scope for a later attempt.\n"
     )
 
 

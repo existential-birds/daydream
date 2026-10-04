@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import time
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -21,10 +23,16 @@ from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.fix_state import EvidenceKey, FixCycleState
 from daydream.deep.quality_gate import QualityGateThresholds, _evaluate_quality_gate, capture_quality
 from daydream.deep.records import item_uid, stamp_item_uids
+from daydream.deep.repair_coordinator import continue_repair_job, repair_job_id
 from daydream.deep.scope_issues import (
     _resolve_changed_files,
 )
-from daydream.deep.settings import _resolve_config_value, _resolve_opt_in
+from daydream.deep.settings import (
+    _resolve_config_value,
+    _resolve_opt_in,
+    repair_job_grant_s,
+    repair_job_policy,
+)
 from daydream.deep.state import DeepState
 from daydream.deep.verify_selection import SelectionConfig, resolve_selection_config
 from daydream.extensions.api import BreakLoop, Stop
@@ -36,6 +44,7 @@ from daydream.phases import (
     FIX_VERIFY_RETARGETABLE_VERDICTS,
     PushAttemptError,
     PushReceipt,
+    RepairAttemptEvidence,
     TestAndHealResult,
     TestAttemptEvidence,
     phase_commit_push,
@@ -51,6 +60,7 @@ from daydream.run_context import resolve_run_context
 from daydream.trajectory import (
     DaydreamPhase,
     current_session_id,
+    get_current_recorder,
     now_iso,
     phase_scope,
     redact_structured_text,
@@ -732,10 +742,21 @@ def _test_attempt_payload(attempt: TestAttemptEvidence) -> dict[str, Any]:
         "passed": attempt.passed,
         "input_tree_key": attempt.input_tree_key,
         "output_tree_key": attempt.output_tree_key,
+        "abort_reason": attempt.abort_reason,
     }
     if attempt.identity is not None:
         payload["identity"] = attempt.identity.payload()
     return payload
+
+
+def _repair_payload(repair: RepairAttemptEvidence) -> dict[str, Any]:
+    """Serialize one repair record: names, digests, and bounded excerpts only.
+
+    The same discipline ``evidence_reuse.audit_payload`` documents applies — the
+    artifact names what happened and points at the evidence, and never carries a
+    turn's raw prose.
+    """
+    return repair.payload()
 
 
 def _persist_test_verdict(
@@ -745,6 +766,7 @@ def _persist_test_verdict(
     passed: bool,
     ignored: bool,
     attempts: list[TestAttemptEvidence],
+    repairs: list[RepairAttemptEvidence] | None = None,
 ) -> None:
     deep_state = DeepState(ctx.data)
     from daydream.remote_ci import local_host_facts
@@ -757,6 +779,9 @@ def _persist_test_verdict(
             "ignored": ignored,
             "retries": max(0, len(attempts) - 1),
             "attempts": [_test_attempt_payload(attempt) for attempt in attempts],
+            # Always present, never omitted: a consumer must not have to tell
+            # "no repair happened" from "this writer predates repair records".
+            "repairs": [_repair_payload(repair) for repair in (repairs or ())],
             "local_host": local_host_facts(),
         },
         sort_keys=True,
@@ -852,12 +877,17 @@ async def finalize_retained_tree_after_test(
             attempts.append(evidence)
             ignored = False if evidence.passed else _authorize_final_red_override(ctx)
             ran_test = True
+            # This extra pass runs no repair turn of its own, but it rewrites the
+            # same verdict file: the heal loop's records are re-emitted rather
+            # than erased, because a consumer must never read "no repair" out of
+            # a pass that merely did not need one.
             _persist_test_verdict(
                 ctx,
                 state,
                 passed=evidence.passed,
                 ignored=ignored,
                 attempts=attempts,
+                repairs=list(result.repairs),
             )
 
         if pass_number == 1 and (mutated or ran_test):
@@ -911,28 +941,120 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
     state = DeepState(ctx.data).fix_cycle_state
     async with phase_scope(DaydreamPhase.TEST):
         try:
-            result = await phase_test_and_heal(
-                ctx.backend_for("test"),
-                ctx.work,
-                feedback_items=deep_state.items,
-                config=ctx.config,
-                session_id=state.session_id,
-                capture_tree_key=lambda: fix_state._capture_full_delta_key(ctx.work, state),
+            # Two resolutions, deliberately: test execution and summarization run on
+            # the TEST backend, while the heal turn is a fix turn and runs on the FIX
+            # backend, so repair gets the fix configuration (and the repair record
+            # names the instance that actually served it).
+            test_backend = ctx.backend_for("test")
+            repair_backend = ctx.backend_for("fix")
+
+            def _capture_tree_key() -> str:
+                return fix_state._capture_full_delta_key(ctx.work, state)
+
+            def _confine_after_repair() -> None:
+                # Requirement 12: full confinement runs after every repair outcome,
+                # before the rerun. It reuses the one implementation terminal
+                # stabilization already runs, so this only moves the enforcement
+                # point earlier; `finalize_retained_tree_after_test` is untouched and
+                # still owns the final pass. The mutated-tree report is the caller's
+                # to consume, not this seam's.
+                fix_state._strict_scope_and_scrub(ctx, state, phase="test_heal", round_number=None)
+
+            async def _run_execution() -> TestAndHealResult:
+                """One bounded test-and-heal execution, from the same production phase.
+
+                The coordinator re-dispatches through this exact closure, so a
+                continued repair job is the same phase call with a fresh execution
+                context — never a second implementation of the heal loop.
+                """
+                result = await phase_test_and_heal(
+                    test_backend,
+                    ctx.work,
+                    feedback_items=deep_state.items,
+                    config=ctx.config,
+                    session_id=state.session_id,
+                    capture_tree_key=_capture_tree_key,
+                    footprint=state.footprint,
+                    repair_backend=repair_backend,
+                    confinement=_confine_after_repair,
+                    run_context=ctx.run_context,
+                    artifact_session=ctx.artifacts,
+                    allow_standalone=ctx.allow_standalone_artifacts,
+                    recipe=deep_state.test_recipe,
+                )
+                if not isinstance(result, TestAndHealResult):
+                    raise TypeError("phase_test_and_heal returned an invalid evidence result")
+                return result
+
+            started = time.monotonic()
+            result = await _run_execution()
+            first_elapsed_s = time.monotonic() - started
+            # The repair job owns continuation: it decides whether this run's
+            # execution owes another one, restores captured work first, and is the
+            # only thing that dispatches a second execution.
+            continuation = await continue_repair_job(
+                work=ctx.work,
+                deep_dir_path=deep_state.dd,
+                job_id=repair_job_id(state.session_id),
                 footprint=state.footprint,
-                run_context=ctx.run_context,
-                artifact_session=ctx.artifacts,
-                allow_standalone=ctx.allow_standalone_artifacts,
-                recipe=deep_state.test_recipe,
+                capture_tree_key=_capture_tree_key,
+                first=result,
+                dispatch=_run_execution,
+                policy=repair_job_policy(ctx.config),
+                first_elapsed_s=first_elapsed_s,
+                granted_allowance_s=repair_job_grant_s(ctx.config),
             )
-            if not isinstance(result, TestAndHealResult):
-                raise TypeError("phase_test_and_heal returned an invalid evidence result")
+            if continuation.result is not None and continuation.result is not result:
+                # Evidence from every execution of this job, not just the last one:
+                # a verdict that erased the interrupted turn would report a green
+                # run that in fact went through one.
+                result = TestAndHealResult(
+                    passed=continuation.result.passed,
+                    retries=result.retries + continuation.result.retries,
+                    proceed=continuation.result.proceed,
+                    ignored=continuation.result.ignored,
+                    attempts=(*result.attempts, *continuation.result.attempts),
+                    repairs=(*result.repairs, *continuation.result.repairs),
+                )
+            job = continuation.job
+            if job is not None and (job.cannot_report_green or job.cannot_authorize_commit):
+                # Fail closed, at the only place a verdict is produced: the
+                # coordinator may hand back a caller's passing result verbatim
+                # next to a job that never completed, and a job that is not
+                # `completed` is structurally barred both from reporting a
+                # passing verdict and from authorizing a commit — so the run is
+                # stopped here, before the retained tree is committed and pushed.
+                if result.passed and job.cannot_report_green:
+                    result = replace(result, passed=False)
+                if result.proceed and job.cannot_authorize_commit:
+                    result = replace(result, proceed=False)
+                print_warning(
+                    console,
+                    f"Repair job {job.job_id} is {job.state.value}; "
+                    "not reporting a passing verdict and not authorizing a commit.",
+                )
             _persist_test_verdict(
                 ctx,
                 state,
                 passed=result.passed,
                 ignored=result.ignored,
                 attempts=list(result.attempts),
+                repairs=list(result.repairs),
             )
+            # The concise reason codes also land on the enclosing step's telemetry,
+            # so a scan can tell an interrupted repair from a completed one
+            # without reading the artifact back.
+            recorder = get_current_recorder()
+            for repair in result.repairs:
+                code = repair.reason_code
+                if recorder is not None:
+                    recorder.emit_repair_outcome(
+                        execution_id=repair.execution_id,
+                        outcome=repair.outcome.value,
+                        abort_reason=repair.abort_reason,
+                        repair_reason_code=code.value if code is not None else None,
+                        changed_paths=repair.changed_paths,
+                    )
         except Exception as exc:
             return _confinement_stop(ctx, state, "test_failure", None, "Test evidence failed", str(exc))
     if not result.proceed:

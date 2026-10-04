@@ -652,6 +652,65 @@ retry_recovery_allowance_s = 120
 retry_recovery_allowance_s = 120
 ```
 
+### Repair job budgets
+
+When a test run fails, the test phase may dispatch bounded **repair turns** to
+diagnose the failure and edit the authorized scope. Those turns form a *repair
+job*: each interrupted turn leaves authorized work on the tree, a durable
+checkpoint of that work, and a record of what the job has already spent, so the
+next bounded execution resumes instead of starting over. The job's own bounds are
+configurable:
+
+| Key | Default | Semantics |
+|-----|---------|-----------|
+| `repair_execution_wall_s` | `1800.0` | Wall-clock ceiling, in seconds, for **one** repair execution. Reaching it ends the turn mid-work; the partial edits are kept, recorded, and carried into the job's checkpoint rather than verified. |
+| `repair_job_wall_s` | `7200.0` | Cumulative wall-clock ceiling, in seconds, across **every** execution of one job. A 60-second reserve is held back from this total so the final validating execution has somewhere to run; the reserve is not operator-configurable. |
+| `repair_max_executions` | `4` | How many bounded executions one job may run. An execution that repeats the same candidate against the same failure is charged as no progress and ends the job, so this is a ceiling and not a retry count. |
+| `repair_grant_job_wall_s` | `0` | An operator's **additional finite** allowance for a job that ran out of time. It applies only to an *exhausted* job, never to one that went blocked, and it is recorded beside — never in place of — the seconds already spent. |
+
+**These three values are the issue's proposals adopted as configurable
+defaults, not measured optimal values.** No measurement of real repairs produced
+1800/7200/4, and they are not tuned against outage data. Raising the total
+allowance above a single execution's ceiling is a deliberate, reviewable policy
+change rather than a tuning detail: a bounded second attempt is the entire point
+of a repair job, so a job total equal to one execution would allow exactly one.
+A repository that wants the previous behavior back sets
+`repair_max_executions = 1` — or bounds `repair_job_wall_s` — explicitly.
+
+The bounds are resolved once, when the job starts, and **stored in the job
+record**. A resumed job therefore reads its own stored policy and can never
+quietly inherit a broader one than it was granted. Only consumed seconds are
+persisted, never an absolute clock reading, so every deadline is reconstructed
+process-locally and a record written by an earlier process stays meaningful.
+
+The job never runs unbounded: an execution without a *discriminating* result (a
+completed experiment, or a candidate patch a focused test supports) is recorded as
+no progress with the unchanged evidence named, and the job ends `blocked` or
+`exhausted` — keeping its checkpoint and its evidence, and never committing,
+pushing, or repeating. Only a `completed` job may report a passing verdict or
+authorize a commit. A job a second process finds already owned does not start a
+second worker; that run warns and continues with the evidence it has.
+
+```toml
+# pyproject.toml  →  [tool.daydream]
+[tool.daydream]
+repair_execution_wall_s = 1800.0
+repair_job_wall_s = 7200.0
+repair_max_executions = 4
+repair_grant_job_wall_s = 0
+
+# .daydream.toml  (top-level keys; no [tool.daydream] prefix)
+repair_execution_wall_s = 1800.0
+repair_job_wall_s = 7200.0
+repair_max_executions = 4
+repair_grant_job_wall_s = 0
+```
+
+Budgets and counts accept only finite non-negative values and preserve zero, so
+`repair_max_executions = 0` legitimately grants no execution. An invalid value
+degrades to the named default; it never silently becomes a different effective
+bound.
+
 ### Diagrams
 
 A review can post grounded mermaid diagrams — a sequence diagram, a flowchart, or both — folded into the PR summary comment and into `review-output.md`. The model never writes mermaid. It proposes a structured JSON spec in which every participant, message, node, and edge carries `file:line` evidence (plus a `symbol` where one applies). The host verifies that evidence against the head tree, and a pure renderer draws only what survived. PR comments show the diagrams without evidence tables or audit captions.
@@ -768,7 +827,9 @@ These paths contain finalized output in the source checkout. Live artifacts stay
 | `.daydream/runs/<id>/trajectories/` | Forked sub-trajectories from parallel fan-outs |
 | `.daydream/diff.patch` | Unified diff captured at run start |
 | `.daydream/deep/` | Deep pipeline artifacts |
-| `.daydream/deep/test-verdict.json` | Native local-test result and local host facts |
+| `.daydream/deep/test-verdict.json` | Native local-test result, per-repair-turn records, and local host facts |
+| `.daydream/deep/repair-job.json` | Repair job state: bound, consumption, execution count, and last transition reason |
+| `.daydream/deep/repair-checkpoint.json` | The interrupted repair's authorized work, captured before any restoration |
 | `.daydream/deep/push-verdict.json` | Session-bound ordinary push attempt and exact SHA |
 | `.daydream/deep/evidence-reuse.json` | Per-gate reuse decision: reused or revalidated, with the deciding component |
 | `.daydream/deep/remote-ci-verdict.json` | Bounded GitHub CI evidence for the exact pushed target |

@@ -129,6 +129,34 @@ class StubBackend:
         # fix turn, plus an optional new generated path created by that turn.
         self.heal_fix_generated: str | None = None
         self.heal_fix_new_generated: str | None = None
+        # Repo-relative tracked path outside the reviewed diff edited by a
+        # test-healing turn, with the line it appends. Exercises the early
+        # full confinement that must run before the suite is rerun.
+        self.heal_fix_unauthorized: str | None = None
+        self.heal_fix_unauthorized_line: str = "\n# unauthorized healing edit\n"
+        # Text a healing turn emits as its partial diagnosis and then never
+        # finishes: the real run_agent wall budget ends the turn, so the host
+        # records an interrupted repair rather than a completed one.
+        self.heal_fix_partial: str | None = None
+        # Authorized tracked path the healing turn edits, with the line it
+        # appends. Lands before any interruption check, so an interrupted turn
+        # leaves the work it was mid-way through on disk.
+        self.heal_fix_authorized: str | None = None
+        self.heal_fix_authorized_line: str = "\n# healing edit\n"
+        # Authorized untracked path the healing turn creates with this content.
+        self.heal_fix_authorized_new: str | None = None
+        self.heal_fix_authorized_new_text: str = "// added by the healing turn\n"
+        # Report a focused verification run the healing turn claims it ran. A
+        # claim, never a canonical result.
+        self.heal_fix_focused_claim: str | None = None
+        # Fail each healing turn's first N invocations with a transport-shaped
+        # error, so the retry ladder is exercised inside one execution.
+        self.heal_fix_retryable_failures: int = 0
+        self.heal_fix_retryable_error: Exception | None = None
+        self._heal_retry_counts: int = 0
+        # Emit this test-suite turn's answer and then never finish, so the host
+        # records an incomplete result whatever summary the text contains.
+        self.test_turn_partial_summary: str | None = None
         # Emit a runaway ToolStartEvent burst without a result to exercise budgets.
         self.runaway_fix: bool = False
         # Runaway pacing; zero still yields via sleep(0). Positive values can trip
@@ -692,6 +720,31 @@ class StubBackend:
         # The healing sentinel proves re-entry; environmental failures must leave
         # it absent.
         if pl.startswith("the tests failed"):
+            # The retry ladder shares one execution deadline, so a provider that
+            # fails a turn twice must still land inside the same allowance.
+            if self._heal_retry_counts < self.heal_fix_retryable_failures:
+                self._heal_retry_counts += 1
+                self._tick()
+                raise self.heal_fix_retryable_error or _StubRetryableError(
+                    "stub: retryable repair failure"
+                )
+            if self.heal_fix_authorized is not None:
+                edited = cwd / self.heal_fix_authorized
+                if edited.exists():
+                    edited.write_text(edited.read_text() + self.heal_fix_authorized_line)
+            if self.heal_fix_authorized_new is not None:
+                created = cwd / self.heal_fix_authorized_new
+                created.parent.mkdir(parents=True, exist_ok=True)
+                created.write_text(self.heal_fix_authorized_new_text)
+            if self.heal_fix_focused_claim is not None:
+                yield TextEvent(text=self.heal_fix_focused_claim)
+            if self.heal_fix_partial is not None:
+                # Diagnosis, then no result: only the host budget can end this
+                # turn, which is exactly the interrupted repair under test.
+                yield TextEvent(text=self.heal_fix_partial)
+                async for event in self._runaway_burst("htc", self.runaway_fix_sleep_s):
+                    yield event
+                return
             (cwd / ".daydream-heal-fix-applied").write_text("healed\n")
             if self.heal_fix_generated is not None:
                 generated = cwd / self.heal_fix_generated
@@ -701,6 +754,11 @@ class StubBackend:
                 new_generated = cwd / self.heal_fix_new_generated
                 new_generated.parent.mkdir(parents=True, exist_ok=True)
                 new_generated.write_text("-- new healing migration\n")
+            if self.heal_fix_unauthorized is not None:
+                unauthorized = cwd / self.heal_fix_unauthorized
+                unauthorized.write_text(
+                    unauthorized.read_text() + self.heal_fix_unauthorized_line
+                )
             yield TextEvent(text="Attempted to fix the test failures.")
             yield ResultEvent(structured_output=None, continuation=None)
             return
@@ -709,6 +767,12 @@ class StubBackend:
         # Postgres signature must stop healing before another fix turn.
         if "run the project's test suite" in pl:
             self.test_suite_calls += 1
+            if self.test_turn_partial_summary is not None:
+                # A pass summary the host then cuts off: the answer never arrived.
+                yield TextEvent(text=self.test_turn_partial_summary)
+                async for event in self._runaway_burst("ttc", self.runaway_fix_sleep_s):
+                    yield event
+                return
             if self.environmental_test_failure:
                 yield TextEvent(text=(
                         "could not connect to server: Connection refused\n"

@@ -61,6 +61,7 @@ from daydream.phases.schemas import (
     SUPPRESSION_SCHEMA as SUPPRESSION_SCHEMA,
 )
 from daydream.phases.test_evidence import (
+    RepairAttemptEvidence as RepairAttemptEvidence,
     TestAndHealResult as TestAndHealResult,
     TestAttemptEvidence as TestAttemptEvidence,
     phase_test_once as phase_test_once,

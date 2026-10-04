@@ -17,6 +17,7 @@ from daydream.backends import AgentEvent, ResultEvent, TextEvent
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.orchestrator import DEFAULT_SHALLOW_FANOUT_THRESHOLD, _shallow_fanout_threshold
 from daydream.deep.settings import _resolve_opt_in
+from daydream.phases import TestAndHealResult, phase_test_and_heal as _phase_test_and_heal
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
@@ -32,6 +33,7 @@ from tests.deep_orchestrator.support import (
 from tests.harness.git_helpers import git as _git
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.review_profile import independent_alternatives_profile
+from tests.harness.stub_backend import StubBackend as _StubBackend
 from tests.test_deep_orchestrator import (
     _CONFIDENCE_KNOB_STACKS,
     _PRECISION_STACKS,
@@ -455,6 +457,102 @@ async def test_environmental_failure_aborts_heal_loop(
     saw_test_step = "test" in _scan_trajectory_extra(run_root, traj, "daydream_phase")
     assert saw_test_step, "no TEST-phase trajectory step recorded -- heal phase not reached"
 
+async def test_failure_handoff_names_the_budget_reason_and_partial_diagnosis(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Requirement 5: the artifact a human reads says the repair was interrupted."""
+
+    _silence(monkeypatch, prompts=False)
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.fail_first_test_run = True
+    stub.heal_fix_partial = "PARTIAL-DIAGNOSIS-abc123"
+    # The interrupted turn is paced so the real wall budget, not the generator
+    # running dry, is what ends it.
+    stub.runaway_fix_sleep_s = 0.05
+    mute_side_effects(heal=False)
+
+    traj = tmp_path / "t.json"
+    with anyio.fail_after(60):
+        await run(make_config(multi_stack_target, trajectory_path=traj,
+                              assume="yes", output_mode="loop"))
+
+    verdict = json.loads((multi_stack_target / ".daydream" / "deep" / "test-verdict.json").read_text())
+    assert verdict["repairs"], "the repair record must reach the persisted verdict"
+    repair = verdict["repairs"][0]
+    assert repair["outcome"] == "budget_interrupted"
+    assert repair["abort_reason"] == "wall_budget_exceeded"
+
+    # The handoff lands in the session's run directory (and beside the artifacts
+    # for a recorder-less run); read whatever this run actually wrote.
+    handoffs = [
+        *multi_stack_target.glob(".daydream/handoff-*.md"),
+        *multi_stack_target.glob(".daydream/runs/*/handoff.md"),
+    ]
+    handoff = "".join(path.read_text() for path in handoffs)
+    assert "wall_budget_exceeded" in handoff, "the handoff must name the budget reason"
+    assert "PARTIAL-DIAGNOSIS-abc123" in handoff, "the handoff must carry the partial diagnosis"
+
+    # The same concise reason codes are scannable on the step's own telemetry.
+    events = _scan_phase_events(multi_stack_target / ".daydream", traj, "repair_outcome")
+    assert events, "the repair outcome must reach the enclosing step's telemetry"
+    assert {event["metadata"]["abort_reason"] for event in events} == {"wall_budget_exceeded"}
+    assert {event["metadata"]["outcome"] for event in events} == {"budget_interrupted"}
+
+async def test_repair_turn_uses_a_distinctly_configured_fix_backend(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Requirement 8: a distinct TEST/FIX configuration is provable from the run's own records."""
+    _silence(monkeypatch, prompts=False)
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
+    calls: list[dict[str, Any]] = []
+
+    def factory(_name: str, model: str | None = None, **_kw: object) -> _StubBackend:
+        instance = _StubBackend(multi_stack_target, model=model or "mock-model", shared_calls=calls)
+        # Only the TEST phase's instance fails its first run, so exactly one
+        # repair turn is driven and it must be served by the FIX instance.
+        instance.fail_first_test_run = instance.model == "test-model"
+        return instance
+
+    monkeypatch.setattr("daydream.runner.create_backend", factory)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
+    # The heal phase stays REAL so the repair record is produced by production code.
+    mute_side_effects(heal=False)
+
+    # The persisted repair-job record lands with the durable job record; until then
+    # the same typed evidence is read off the phase's own in-memory result.
+    results: list[TestAndHealResult] = []
+    real_phase = _phase_test_and_heal
+
+    async def _spy(*args: Any, **kwargs: Any) -> TestAndHealResult:
+        result = await real_phase(*args, **kwargs)
+        results.append(result)
+        return result
+
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_test_and_heal", _spy)
+
+    traj = tmp_path / "trajectory.json"
+    with anyio.fail_after(60):
+        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes",
+                output_mode="loop", test_model="test-model", fix_model="fix-model",
+        ))
+    assert exit_code == 0
+
+    # Test execution ran on the TEST configuration...
+    suite_models = {c["model"] for c in calls if "run the project's test suite" in c["prompt"].lower()}
+    assert suite_models == {"test-model"}, calls
+    # ...and the repair turn on the distinct FIX configuration.
+    repair_models = [c["model"] for c in calls if c["prompt"].lower().startswith("the tests failed")]
+    assert repair_models == ["fix-model"], repair_models
+    # The record agrees with the served instance, so the routing is readable
+    # after the fact rather than inferred from configuration.
+    heal_results = [r for r in results if r.repairs]
+    assert heal_results, "the heal loop recorded no repair at all"
+    assert [r.model for r in heal_results[0].repairs] == ["fix-model"]
+
 @pytest.mark.parametrize(("trajectory_mode", "response_kind"),
     [pytest.param("default", "clean", id="default-clean"),
         pytest.param("custom-public", "clean", id="custom-public-clean"),
@@ -486,7 +584,7 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
                 return None
             private_partial = Path(_prompt_ref(prompt, "trajectory-partial"))
             partial_payload = json.loads(private_partial.read_text(encoding="utf-8"))
-            changed_relative = Path(".daydream-heal-fix-applied")
+            changed_relative = Path("api.py")
             sanctioned = _sanctioned_inputs(prompt)
             assert sanctioned["trajectory-partial"] == private_partial
             assert all(path.is_file() for path in sanctioned.values())
@@ -518,6 +616,10 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub,)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     stub.fail_all_test_runs = True
+    # The handoff's live bytes come from the run's authorized fix edit, not from
+    # the heal turn's marker: an unauthorized new untracked path is confined away
+    # before the rerun, which is the behavior under test elsewhere.
+    stub.fix_edit_line = "\n# run edit\n"
     mute_side_effects(heal=False)
     _add_bare_remote(multi_stack_target)
 
@@ -544,7 +646,7 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
     assert str(artifact_runtime_root.parent) not in body
     assert len(summarizer_observations) == 1
     observation = summarizer_observations[0]
-    assert observation["changed_body"] == "healed\n"
+    assert observation["changed_body"].endswith("\n# run edit\n")
     assert observation["session_id"] == handoffs[0].parent.name
     if trajectory_mode == "external":
         assert observation["private_partial"] == str(expected_trajectory.with_suffix(".json.partial"))
@@ -552,15 +654,21 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
         assert str(artifact_runtime_root.parent) in observation["private_partial"]
     assert "Future handoff links (not readable evidence during this turn)" in observation["prompt"]
     assert "## On-disk artifacts (read these first" not in observation["prompt"]
-    assert "- .daydream-heal-fix-applied" in observation["prompt"]
-    assert str(multi_stack_target / ".daydream-heal-fix-applied") in observation["prompt"]
+    assert "- api.py" in observation["prompt"]
+    assert str(multi_stack_target / "api.py") in observation["prompt"]
     assert observation["future_children"] == str(public_run / "trajectories")
     private_partial = observation["private_partial"]
+    # The summarizer's body is preserved verbatim; the host's repair record is
+    # appended after it, so equality holds up to that host-owned tail.
+    def _summarizer_body(text: str) -> str:
+        return text.partition("\n## Test repair attempts (host record)")[0]
+
     if response_kind == "clean":
-        assert body == observation["model_body"]
+        assert _summarizer_body(body) == observation["model_body"]
+        assert "budget_interrupted" not in body
     elif response_kind == "known-leaf":
         if trajectory_mode == "external":
-            assert body == observation["model_body"]
+            assert _summarizer_body(body) == observation["model_body"]
         else:
             assert "HANDOFF_STRUCTURED_SUCCESS" not in body
             assert "Tests did not report success" in body

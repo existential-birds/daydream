@@ -166,6 +166,28 @@ usage ever.
 | `daydream.duration_ms` / `daydream.duration_api_ms` | ResultEvent | exact terminal durations (whole invocation) | attempt | int | ms | 0..2 | Observed | Terminal only | – | Span attributes | metadata | metadata | T5 | verified | Conditional; per-message durations stay in message_usage |
 | `daydream.started_at` | invocation-scope MetricsEvent | exact request start timestamp | attempt | string | – | 0..1 | Observed | When supplied | – | Span attribute | metadata | metadata | T5 | verified | Conditional |
 
+## Repair job outcome (recorder phase event, not a span attribute)
+
+A repair turn's host outcome (#1210) is recorded on the enclosing `test` step as
+a `repair_outcome` phase event, not as an OTel attribute. These rows exist so the
+contract is frozen here too: the fields are emitted whether or not trace export
+is on, they carry names and counts only (no prompt, no prose, no usage), and they
+never replace the lifecycle `reason_code` of the step or attempt that owns them.
+The per-turn evidence with its own field list lives in `test-verdict.json`'s
+`repairs` array; the job's state, consumption, and last transition reason live in
+`.daydream/deep/repair-job.json`. See
+[observability.md](observability.md#repair-jobs) for the inspection affordance.
+
+| field name | source backend/event | source authority/provenance | owning span | type | unit | cardinality | derivation | completeness | capture/redaction | generic OTLP disposition | HoneyHive canonical destination | LangSmith native destination | offline test node | live evidence status | applicability and omission reason |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `repair_outcome` event `execution_id` | `TrajectoryRecorder.emit_repair_outcome` (TEST phase event) | host-assigned execution identity | none (recorder phase event) | string | – | 1 per repair turn | Host bookkeeping | Every repair turn of every execution | Names only | absent — recorder phase event, never a span attribute | absent | absent | `test_failure_handoff_names_the_budget_reason_and_partial_diagnosis` | verified (recorder) | Applicable; an ordinary run with no repair turn emits none |
+| `repair_outcome` event `outcome` | same | host classification (`RepairOutcome`), never the model's claim | none | string | – | 1 | Vocabulary: `candidate_complete`, `diagnosis_unresolved`, `budget_interrupted`, `execution_error`, `scope_blocked` | Always | Closed vocabulary | absent — recorder phase event | absent | absent | same | verified (recorder) | Applicable; a host abort always wins over turn prose |
+| `repair_outcome` event `abort_reason` | same | host stop reason verbatim, e.g. `wall_budget_exceeded` | none | string or null | – | 0..1 | Host abort signal | When aborted | Existing stop-reason strings only | absent — recorder phase event | absent | absent | same | verified (recorder) | Conditional; null when the turn ended on its own |
+| `repair_outcome` event `repair_reason_code` | same | abort reason converged onto the existing public `ReasonCode` vocabulary | none | string or null | – | 0..1 | `repair_reason_code(...)` over `reason_for_budget` | When aborted | Fixed code set; no new public reason code | absent — recorder phase event | absent | absent | same | verified (recorder) | Conditional; null when the turn ended on its own, `BACKEND_FAILURE` when unrecognized |
+| `repair_outcome` event `changed_paths` | same | Git-observed authorized paths the tree actually holds | none | array(string) | – | 0..N per turn | Full-delta tree read | Always | Repository-relative paths, no content | absent — recorder phase event | absent | absent | same | verified (recorder) | Applicable; never what the turn claimed |
+| `test-verdict.json` `repairs[]` | `_persist_test_verdict` | `RepairAttemptEvidence.payload()` per turn, merged across every execution of the job | none (artifact) | array(object) | – | 0..N | Host observations: outcome, reasons, tree keys, elapsed seconds, checkpoint ref, bounded redacted `focused_evidence`, `scope_request` | Always present, empty when no repair ran | Bounded redacted excerpts; no raw turn prose | absent — generated artifact | absent | absent | same + `tests/test_repair_job.py` | verified (artifact) | Applicable; always written, so "no repair" is never inferred from absence |
+| `repair-job.json` (all fields) | `write_repair_job_record` / `merge_repair_job_record` | `RepairJobRecord`: `state`, captured `policy`, `consumed_s`, `cumulative_cost_usd`, `granted_allowance_s`, `executions`, evidence lists, `last_transition_reason`, `checkpoint_ref`, `last_execution_budget`, `diagnostics`, `format_version` | none (artifact) | object | s / USD / count | 1 per job | Read-modify-write in the `routing_record` shape; only consumed seconds persist, never an absolute clock | Only when a job exists | Names, counts, digests; a stale or corrupt file is a named recovery blocker | absent — generated artifact | absent | absent | `tests/test_repair_job.py` | verified (artifact) | Conditional: a run that never repaired writes no job record and takes no owner lock |
+
 ## Owned OpenLLMetry compatibility
 
 Only Daydream-owned context; ambient Traceloop callbacks/metadata never leak;

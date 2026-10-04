@@ -918,6 +918,9 @@ class Backend(Protocol):
       reasoning and native tool controls. Codex still requires a host zero-tool guard.
     - supports_tools_disabled: removes tools without lowering reasoning or changing
       the task. Distinct from finalization, read-only mode, and tool-call budgets.
+    - supports_budget_preamble: accepts wall_budget_s/tool_call_budget so the
+      backend's own system prompt can state this turn's real allowances rather
+      than its module defaults. The host enforces the bound either way.
     - reasoning_effort: native level fixed at construction; None defers to the driver.
       Backend instances are cached by kind, model, effort, and audit root.
     """

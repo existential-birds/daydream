@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import shlex
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,8 @@ from daydream.backends import (
     Backend,
     ContinuationToken,
 )
+from daydream.deep.repair_job import read_repair_job_record, record_diagnostic, repair_job_id
+from daydream.deep.settings import repair_execution_wall_s
 from daydream.extensions import get_registry
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.generated_files import (
@@ -34,14 +37,37 @@ from daydream.generated_files import (
 from daydream.git_ops import GitError
 from daydream.output_schema import strict_object
 from daydream.phases.fix import (
+    SCOPE_REQUEST_BEGIN,
     _backend_concise_fix_prompts,
     _build_fix_scope_clause,
     _build_fix_style_suffix,
     _item_evidence,
+    parse_fix_scope_request,
 )
 from daydream.phases.handoff import _emit_failure_handoff
-from daydream.phases.inputs import _render_bash_allowlist, _tail_test_output, append_extended_facts
-from daydream.phases.test_evidence import TestAndHealResult, TestAttemptEvidence, phase_test_once
+from daydream.phases.inputs import (
+    TEST_OUTPUT_TAIL_LINES,
+    _render_bash_allowlist,
+    _tail_test_output,
+    append_extended_facts,
+)
+from daydream.phases.repair_checkpoint import (
+    RepairCheckpoint,
+    bounded_result_excerpt,
+    command_label,
+    failure_identity,
+    next_experiment_for,
+    write_repair_checkpoint,
+)
+from daydream.phases.repair_outcome import RepairOutcome, classify_repair_outcome
+from daydream.phases.test_evidence import (
+    RepairAttemptEvidence,
+    TestAndHealResult,
+    TestAttemptEvidence,
+    _canonical_test_cmd,
+    phase_test_once,
+)
+from daydream.redaction import redact_text
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.test_execution import (
     TestRecipe,
@@ -54,6 +80,151 @@ from daydream.trajectory import (
 from daydream.workspace import WorkContext
 
 _logger = logging.getLogger(__name__)
+
+# A repair record outlives the process that wrote it, so it carries a bounded
+# excerpt of the turn's own partial output rather than the unbounded prose.
+_REPAIR_EXCERPT_MAX_CHARS = 2000
+
+
+def _repair_excerpt(text: str) -> tuple[str, ...]:
+    """Return at most one redacted, length-capped excerpt, or nothing for silent output."""
+    tail, _truncated = _tail_test_output(text)
+    if not tail.strip():
+        return ()
+    excerpt = redact_text(tail)
+    if len(excerpt) > _REPAIR_EXCERPT_MAX_CHARS:
+        excerpt = excerpt[-_REPAIR_EXCERPT_MAX_CHARS:]
+    return (excerpt,)
+
+
+def _resolve_test_argv(config: Any, recipe: TestRecipe | None) -> list[str]:
+    """Return the host's resolved test argv for the checkpoint, or ``[]``.
+
+    An unresolvable command is recorded as unknown rather than guessed: the
+    checkpoint names what the job ran, and a guessed command would let a
+    resuming job re-run something the host never executed.
+    """
+    if recipe is not None and recipe.command.resolved:
+        # A resolved recipe command is argv; the defensive string case would be a
+        # fact the recipe type forbids, so it is named rather than executed.
+        value = recipe.command.value
+        return list(value) if isinstance(value, tuple) else [value] if isinstance(value, str) else []
+    try:
+        return _canonical_test_cmd(config) or []
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def _capture_repair_checkpoint(
+    work: WorkContext,
+    *,
+    job_id: str,
+    execution_id: str,
+    base_ref: str,
+    failure_output: str,
+    turn_output: str,
+    abort_reason: str | None,
+    base_tree_key: str,
+    retained_tree_key: str,
+    footprint: AuthorizedFixFootprint,
+    repair_instance: Backend,
+    wall_budget_s: float,
+    tool_call_budget: int | None,
+    elapsed_s: float,
+    config: Any,
+    recipe: TestRecipe | None,
+    artifact_session: ArtifactSession | None,
+    allow_standalone: bool,
+) -> str:
+    """Persist this turn's authorized work and return the checkpoint's file name.
+
+    The patch is read from the *live tree* and restricted to the authorized
+    paths, at this exact point in ``_launch_fix``: confinement, the
+    generated-file guard, and any rerun all restore files, so a later read could
+    find nothing left to capture. Raises ``OSError``/``ValueError`` when the
+    checkpoint cannot be persisted or verified — an uncaptured repair is a repair
+    that never happened, so the caller must treat it as blocking.
+    """
+    outcome = classify_repair_outcome(abort_reason, turn_output)
+    deep_path = (
+        artifact_dir_for(work.repo, session=artifact_session, allow_standalone=allow_standalone) / "deep"
+    )
+    consumed: dict[str, float] = {"wall_budget_s": wall_budget_s, "elapsed_s": elapsed_s}
+    if tool_call_budget is not None:
+        consumed["tool_call_budget"] = float(tool_call_budget)
+    checkpoint = RepairCheckpoint(
+        job_id=job_id,
+        execution_id=execution_id,
+        candidate_patch=git_ops.build_recommended_patch_strict(
+            work.repo, base_ref, sorted(footprint.run_allowed_paths),
+        ).decode("utf-8", errors="replace"),
+        base_tree_key=base_tree_key,
+        retained_tree_key=retained_tree_key,
+        authorized_scope=tuple(sorted(footprint.run_allowed_paths)),
+        policy_revision=footprint.policy_revision,
+        failure_identity=failure_identity(failure_output),
+        test_command=command_label(_resolve_test_argv(config, recipe)),
+        focused_results=(bounded_result_excerpt(failure_output),) if failure_output.strip() else (),
+        next_experiment=next_experiment_for(outcome),
+        backend_name=type(repair_instance).__name__.removesuffix("Backend").lower(),
+        model=repair_instance.model,
+        consumed_budget=consumed,
+    )
+    return write_repair_checkpoint(deep_path, checkpoint).name
+
+
+def _capture_or_note(
+    work: WorkContext,
+    error: BaseException,
+    *,
+    output: str,
+    turn_output: str,
+    abort_reason: str | None,
+    job_id: str,
+    execution_id: str,
+    snapshot: str | None,
+    input_tree_key: str,
+    retained_tree_key: str,
+    footprint: AuthorizedFixFootprint,
+    repair_instance: Backend,
+    wall_budget_s: float,
+    tool_call_budget: int | None,
+    elapsed_s: float,
+    config: Any,
+    recipe: TestRecipe | None,
+    artifact_session: ArtifactSession | None,
+    allow_standalone: bool,
+) -> str | None:
+    """Capture the checkpoint on a turn that raised, noting rather than replacing the error.
+
+    The dying turn still owns a tree, so the capture happens before confinement
+    here too. A capture that fails is attached to the propagating error as a
+    note: the host error is the caller's answer and must not be swallowed by a
+    secondary storage failure, but the missing evidence must not vanish either.
+    """
+    try:
+        return _capture_repair_checkpoint(
+            work, job_id=job_id, execution_id=execution_id,
+            base_ref=snapshot or "HEAD", failure_output=output, turn_output=turn_output,
+            abort_reason=abort_reason, base_tree_key=input_tree_key,
+            retained_tree_key=retained_tree_key, footprint=footprint,
+            repair_instance=repair_instance, wall_budget_s=wall_budget_s,
+            tool_call_budget=tool_call_budget, elapsed_s=elapsed_s,
+            config=config, recipe=recipe, artifact_session=artifact_session,
+            allow_standalone=allow_standalone,
+        )
+    except Exception as exc:  # noqa: BLE001 -- the note is the report, not a crash
+        error.add_note(f"repair checkpoint not captured: {type(exc).__name__}: {exc}")
+        return None
+
+
+def _continuation_ref(token: ContinuationToken | None) -> str | None:
+    """Name a continuation without recording it: tokens carry opaque provider data."""
+    if token is None:
+        return None
+    digest = hashlib.sha256(repr(token).encode("utf-8", errors="surrogateescape")).hexdigest()[:16]
+    return f"continuation:{digest}"
+
 
 def _build_fix_prompt(
     test_output: str,
@@ -68,7 +239,12 @@ def _build_fix_prompt(
     """
     tail, truncated = _tail_test_output(test_output)
     if truncated:
-        output_section = f"Here is the tail of the test output:\n\n{tail}"
+        # Disclose the drop, and disclose how much: a repair that reads this as
+        # the whole failure record will chase a symptom the early lines named.
+        output_section = (
+            f"Here is the tail of the test output (truncated to its last "
+            f"{TEST_OUTPUT_TAIL_LINES} lines; earlier lines were dropped):\n\n{tail}"
+        )
     else:
         output_section = f"Here is the test output:\n\n{test_output}"
 
@@ -80,7 +256,9 @@ def _build_fix_prompt(
             files = [str(repo / f) if (repo / f).is_file() else f for f in files]
         if files:
             file_list = "\n".join(f"- {f}" for f in files)
-            parts.append(f"\nFiles modified during the fix phase:\n{file_list}")
+            # The list names where the findings point; it is not a record of what
+            # the previous fix turn changed, and must not read as one.
+            parts.append(f"\nFinding target files (not a diff of what changed):\n{file_list}")
         evidence = [value for item in feedback_items if (value := _item_evidence(item))]
         if evidence:
             evidence_list = "\n".join(f"- {value}" for value in evidence)
@@ -92,18 +270,98 @@ def _build_fix_prompt(
         parts.append("\nAnalyze the failures and fix them.")
     if feedback_items:
         parts.append("Focus on the files listed above.")
-        if concise_mode:
-            parts.append(
-                "Start with the files listed above; if a correct fix needs "
-                "another file, edit it and state which file."
-            )
-        else:
-            parts.append(
-                "Start with the files listed above; if a correct fix needs "
-                "another file, edit it and say which and why."
-            )
+        parts.append(
+            "Start with the files listed above. Edit authority is narrower than "
+            "that list: the authorized edit scope is the only set of paths you may "
+            "write, and anything outside it is reachable only by the scope-request "
+            "return path, never by editing it and reporting afterwards."
+        )
 
     return "\n".join(parts) + f"\n\n{GENERATED_FILES_PROMPT_RULE}\n" + _build_fix_style_suffix(concise_mode)
+
+
+def _build_repair_budget_clause(wall_budget_s: float, tool_call_budget: int | None) -> str:
+    """State the allowance the host will actually enforce, and nothing more.
+
+    A repair turn is wall-clock bounded; whether it is also tool-call bounded is
+    a fact about the resolved configuration, so an uncapped turn says so instead
+    of implying a cap that does not exist.
+    """
+    if tool_call_budget is None:
+        tool_line = "no tool-call cap is enforced, so spend the calls the diagnosis needs"
+    else:
+        tool_line = f"tool-call budget: {tool_call_budget} calls"
+    return (
+        f"\nTurn budget: {wall_budget_s:g}s of wall clock for this whole turn, and "
+        f"{tool_line}. Reaching the wall clock ends the turn mid-work: the partial "
+        "edits are kept and recorded, and the turn is not asked to verify them. "
+        "Prioritise the most likely root cause and land that fix rather than "
+        "covering every candidate.\n"
+    )
+
+
+def _repair_turn_wall_budget_s(
+    config: Any,
+    *,
+    repo: Path,
+    job_id: str,
+    artifact_session: ArtifactSession | None,
+    allow_standalone: bool,
+) -> float:
+    """Return the wall ceiling for one repair turn.
+
+    Two bounds apply to a repair turn and the tighter one wins. The phase's
+    general wall budget (``DEFAULT_WALL_BUDGET_S``) is the host-wide ceiling on
+    any single agent turn, and it stays live here. The repair job's own bound is
+    the configured ``repair_execution_wall_s`` -- or, once this job has a durable
+    record, what the job was *granted*: ``execution_allowance_s()``, the smaller
+    of the per-execution ceiling and what the job total still has left after its
+    persisted consumption and the reserve (requirement 44: stored, not
+    re-resolved, so a job cannot be handed a fresh budget by editing config
+    mid-job).
+
+    A zero allowance is a degenerate policy value rather than a live bound: an
+    exhausted job is never dispatched at all, so the repair bound falls back to
+    the configured ceiling rather than launching a turn with no seconds in it.
+    """
+    phase_bound = float(phase_config.DEFAULT_WALL_BUDGET_S)
+    repair_bound = (
+        repair_execution_wall_s(config) if config is not None
+        else phase_config.DEFAULT_REPAIR_EXECUTION_WALL_S
+    )
+    deep = artifact_dir_for(repo, session=artifact_session, allow_standalone=allow_standalone) / "deep"
+    stored = read_repair_job_record(deep)
+    if stored is not None and stored.job_id == job_id:
+        allowance = stored.execution_allowance_s()
+        if allowance > 0.0:
+            repair_bound = allowance
+    return min(phase_bound, repair_bound)
+
+
+def _compose_repair_prompt(
+    output: str = "",
+    feedback_items: list[dict[str, Any]] | None = None,
+    *,
+    repo: Path | None = None,
+    concise_mode: bool = False,
+    edit_scope: frozenset[str] = frozenset(),
+    wall_budget_s: float = phase_config.DEFAULT_WALL_BUDGET_S,
+    tool_call_budget: int | None = phase_config.DEFAULT_TOOL_CALL_BUDGET,
+    prompt_body: str | None = None,
+) -> str:
+    """Assemble the whole repair prompt: findings, edit authority, and real budget.
+
+    One composer, so the enforcement contract (authorized edit scope) and the
+    debugging workflow cannot drift into a prompt that contradicts itself.
+    ``prompt_body`` carries an extension's override of the ``fix`` prompt; when
+    absent the default renderer runs here.
+    """
+    prompt = prompt_body if prompt_body is not None else _build_fix_prompt(
+        output, feedback_items, repo=repo, concise_mode=concise_mode,
+    )
+    if edit_scope:
+        prompt += _build_fix_scope_clause(edit_scope, edit_scope)
+    return prompt + _build_repair_budget_clause(wall_budget_s, tool_call_budget)
 
 
 def _build_setup_investigator_prompt(test_output: str) -> str:
@@ -191,6 +449,23 @@ async def _run_setup_investigator(
     return result if isinstance(result, dict) and "verdict" in result else None
 
 
+def _confine_repaired_tree(confinement: Callable[[], None] | None) -> str | None:
+    """Run the host's footprint confinement, returning a named failure or ``None``.
+
+    ``None`` means there is nothing to enforce — the legacy agent-run path has
+    no run-wide footprint. A failure is returned, never raised: the caller is
+    already holding a repair outcome, and the failure has to be recorded by name
+    rather than replace the turn's own error.
+    """
+    if confinement is None:
+        return None
+    try:
+        confinement()
+    except Exception as exc:  # noqa: BLE001 -- the failure is data, not a crash
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
 def _reject_test_healing_generated_file_edits(
     repo: Path,
     *,
@@ -201,7 +476,16 @@ def _reject_test_healing_generated_file_edits(
     artifact_session: ArtifactSession | None = None,
     allow_standalone: bool = False,
 ) -> list[str] | None:
-    """Restore generated files, returning ``None`` if any restoration fails."""
+    """Restore generated files, returning ``None`` if any restoration fails.
+
+    Layering: this is the phase's own generated-file guard, scoped to the files a
+    healing turn edited against the pre-turn stash. The run-wide *footprint*
+    confinement (unauthorized paths, protected state, index) is the host's
+    ``confinement`` seam and is independent of this guard. In the deep pipeline
+    both run, in that order, before any rerun; this guard remains because it
+    still owns the legacy agent-run path and the ``confinement=None`` case, where
+    the per-turn stash is the only pre-repair reference available.
+    """
     if not snapshot_captured:
         # HEAD is not a safe substitute when capturing the pre-fix state
         # failed: it may discard edits that were present before this pass.
@@ -315,23 +599,49 @@ async def phase_test_and_heal(
     session_id: str | None = None,
     capture_tree_key: Callable[[], str] | None = None,
     footprint: AuthorizedFixFootprint | None = None,
+    repair_backend: Backend | None = None,
+    confinement: Callable[[], None] | None = None,
     artifact_session: ArtifactSession | None = None,
     allow_standalone: bool = False,
     recipe: TestRecipe | None = None,
     run_context: RunContext | None = None,
 ) -> TestAndHealResult:
-    """Run bound test attempts and offer a bounded authorized heal after failure."""
+    """Run bound test attempts and offer a bounded authorized heal after failure.
+
+    Two backends serve this phase, because a repair turn is a fix turn: test
+    execution and summarization run on ``backend`` (the TEST configuration) while
+    the heal turn runs on ``repair_backend`` (the FIX configuration). ``None``
+    reuses ``backend`` for both, which is the single-instance behaviour every
+    caller that predates the split relies on.
+
+    ``confinement`` is the host's run-wide footprint confinement, invoked once
+    after every repair outcome and before the generated-file guard, so the rerun
+    and any handoff observe the confined tree. ``None`` leaves the tree exactly
+    as the repair turn left it, which is the legacy agent-run behaviour.
+    """
     run_context = resolve_run_context(run_context)
     if session_id is None or capture_tree_key is None or footprint is None:
         raise TypeError(
             "phase_test_and_heal requires session_id, capture_tree_key, and footprint"
         )
     ui.print_phase_hero(agent.console, "AWAKEN", ui.phase_subtitle("AWAKEN"))
+    # A repair turn is a fix turn, so it runs on the FIX-configured instance; the
+    # repair record names whichever instance actually served it.
+    repair_instance = repair_backend if repair_backend is not None else backend
     ui.print_dim(agent.console, f"Model: {backend.model}")
+    if repair_instance is not backend:
+        ui.print_dim(agent.console, f"Repair model: {repair_instance.model}")
 
     retries_used = 0
     attempts: list[TestAttemptEvidence] = []
+    repairs: list[RepairAttemptEvidence] = []
+    job_started = time.monotonic()
     continuation: ContinuationToken | None = None
+    # The repair job is host-owned: one identity per heal loop, one execution
+    # per repair turn, so a resumed job can tell the two apart. The identity is
+    # built by the module that owns the record, because a checkpoint captured
+    # under one spelling is unrestorable under another.
+    job_id = repair_job_id(session_id)
     # Feed redacted host-suite failures through the same environmental/healing
     # gate as agent-run failures on the next iteration.
     host_failure_output: str | None = None
@@ -340,6 +650,8 @@ async def phase_test_and_heal(
         nonlocal retries_used, continuation
         # Snapshot each healing turn because deep's earlier batch guard cannot
         # protect existing generated files from subsequent test-healing edits.
+        # The snapshot is also the checkpoint's base ref, which is why it is taken
+        # before the turn rather than reconstructed afterwards.
         try:
             snapshot = git_ops.stash_create(work.repo)
             pre_untracked = set(git_ops.list_untracked(work.repo))
@@ -351,21 +663,165 @@ async def phase_test_and_heal(
             pre_untracked = set()
             pre_untracked_contents = {}
             snapshot_captured = False
-        fix_prompt = get_registry().prompt("fix")(
-            output, feedback_items, repo=work.repo,
-            concise_mode=_backend_concise_fix_prompts(backend),
+        wall_budget_s = _repair_turn_wall_budget_s(
+            config,
+            repo=work.repo,
+            job_id=job_id,
+            artifact_session=artifact_session,
+            allow_standalone=allow_standalone,
+        )
+        tool_call_budget = phase_config.DEFAULT_TOOL_CALL_BUDGET
+        fix_prompt = _compose_repair_prompt(
+            output, feedback_items,
+            repo=work.repo,
+            concise_mode=_backend_concise_fix_prompts(repair_instance),
+            edit_scope=footprint.run_allowed_paths,
+            wall_budget_s=wall_budget_s,
+            tool_call_budget=tool_call_budget,
+            prompt_body=get_registry().prompt("fix")(
+                output, feedback_items, repo=work.repo,
+                concise_mode=_backend_concise_fix_prompts(repair_instance),
+            ),
         )
         fix_prompt = append_extended_facts(fix_prompt, recipe)
-        fix_prompt += _build_fix_scope_clause(
-            footprint.run_allowed_paths, footprint.run_allowed_paths
-        )
-        await agent.run_agent(
-            backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX,
-            tool_call_budget=phase_config.DEFAULT_TOOL_CALL_BUDGET,
-            wall_budget_s=phase_config.DEFAULT_WALL_BUDGET_S,
-            run_context=run_context,
-        )
+        input_tree_key = capture_tree_key()
+        started = time.monotonic()
+        try:
+            partial_output, continuation_token, abort_reason = await agent.run_agent(
+                repair_instance, work.repo, fix_prompt, phase=DaydreamPhase.FIX,
+                tool_call_budget=tool_call_budget,
+                wall_budget_s=wall_budget_s,
+                run_context=run_context,
+            )
+        except Exception as exc:
+            # A turn that died still left a tree behind, so the checkpoint is
+            # captured and confinement runs on this path too. The original error
+            # is what the caller must see: a capture or confinement failure here
+            # is recorded, never raised over it. Cancellation is not this branch's
+            # business -- it already carries its own cleanup contract.
+            _capture_or_note(work, exc, output=output, turn_output="",
+                abort_reason=None, job_id=job_id, execution_id=f"{job_id}:execution:{retries_used + 1}",
+                snapshot=snapshot, input_tree_key=input_tree_key,
+                retained_tree_key=capture_tree_key(), footprint=footprint,
+                repair_instance=repair_instance, wall_budget_s=wall_budget_s,
+                tool_call_budget=tool_call_budget, elapsed_s=time.monotonic() - started,
+                config=config, recipe=recipe, artifact_session=artifact_session,
+                allow_standalone=allow_standalone,
+            )
+            _confine_repaired_tree(confinement)
+            raise
+        # The host, not the turn, decides what happened: the abort reason outranks
+        # whatever the partial prose claimed. `output` is the failing test output
+        # the turn worked from; `partial_output` is the turn's own unfinished text.
+        turn_output = partial_output if isinstance(partial_output, str) else ""
         retries_used += 1
+        diagnostics: list[str] = []
+        # Capture the turn's authorized work HERE, from the live tree, before any
+        # restoration: confinement, the generated-file guard, and every rerun
+        # restore files, so a read after this point could find nothing left to
+        # capture. `run_agent`'s partial is not a substitute -- the agent discards
+        # it at the moment of interruption -- and this ordering is load-bearing:
+        # do not "simplify" it into the guard's own after-the-fact diff.
+        checkpoint_ref: str | None = None
+        checkpoint_blocked = False
+        try:
+            checkpoint_ref = _capture_repair_checkpoint(
+                work, job_id=job_id, execution_id=f"{job_id}:execution:{retries_used}",
+                # Without a pre-turn stash the honest base is HEAD; the capture is
+                # still confined to the authorized paths either way.
+                base_ref=snapshot or "HEAD", failure_output=output, turn_output=turn_output,
+                abort_reason=abort_reason, base_tree_key=input_tree_key,
+                retained_tree_key=capture_tree_key(), footprint=footprint,
+                repair_instance=repair_instance, wall_budget_s=wall_budget_s,
+                tool_call_budget=tool_call_budget, elapsed_s=time.monotonic() - started,
+                config=config, recipe=recipe, artifact_session=artifact_session,
+                allow_standalone=allow_standalone,
+            )
+        except (OSError, ValueError) as exc:
+            # The last valid checkpoint is retained and the blocker is named in
+            # both the repair record and the job record. This blocks the repair
+            # below: work that cannot be captured is work the job cannot resume.
+            checkpoint_blocked = True
+            diagnostics.append(f"checkpoint_write_failed: {type(exc).__name__}: {exc}")
+            record_diagnostic(
+                artifact_dir_for(work.repo, session=artifact_session, allow_standalone=allow_standalone)
+                / "deep",
+                job_id,
+                f"checkpoint_write_failed: {type(exc).__name__}: {exc}",
+            )
+        except GitError as exc:
+            # No Git read means no candidate patch can exist at all, which is the
+            # same degraded mode the generated-file guard below already fails open
+            # on: it names the miss and lets the turn stand rather than pretending
+            # the tree is empty. Distinct from a storage blocker, which blocks.
+            diagnostics.append(f"checkpoint_capture_unavailable: {exc}")
+            ui.print_warning(
+                agent.console,
+                f"Could not capture a repair checkpoint (no Git read available): {exc}",
+            )
+        # Git-observed paths, never the feedback items' targets: only the tree
+        # itself says what the turn actually changed.
+        changed: tuple[str, ...] = ()
+        if snapshot is not None:
+            try:
+                changed = tuple(git_ops.changed_paths_z(work.repo, snapshot))
+            except (GitError, OSError) as exc:
+                # Never abort the repair over a degraded read, and never hide it:
+                # the record names the miss so the job can re-derive the paths.
+                diagnostics.append(f"changed_paths_unavailable: {exc}")
+        # Full footprint confinement runs after every repair outcome, before the
+        # generated-file guard and before any rerun or handoff, so the next test
+        # execution observes the confined tree rather than the raw repair tree.
+        # The host supplies the routine (the deep pipeline passes the same
+        # implementation its terminal stabilization uses); `None` is the legacy
+        # agent-run path, which has no run-wide footprint to enforce.
+        confinement_error = _confine_repaired_tree(confinement)
+        if confinement_error is not None:
+            diagnostics.append(f"confinement_failed: {confinement_error}")
+        # The turn's own request to widen the authorization, parsed from its
+        # final message: the coordinator, not the turn, decides whether any of it
+        # is granted. An unreadable block is a named degradation, never a
+        # half-applied authorization.
+        scope_request = parse_fix_scope_request(turn_output)
+        if scope_request is None and SCOPE_REQUEST_BEGIN in turn_output:
+            diagnostics.append("scope_request_unreadable: the turn's scope-request block did not parse")
+        repairs.append(RepairAttemptEvidence(
+            job_id=job_id,
+            execution_id=f"{job_id}:execution:{retries_used}",
+            run_id=work.run_id,
+            # A tree that could not be converged was never a candidate: the host
+            # blocked it, whatever the turn claimed.
+            outcome=(
+                RepairOutcome.SCOPE_BLOCKED if confinement_error is not None
+                else classify_repair_outcome(abort_reason, turn_output)
+            ),
+            abort_reason=abort_reason,
+            backend_name=type(repair_instance).__name__.removesuffix("Backend").lower(),
+            model=repair_instance.model,
+            execution_elapsed_s=time.monotonic() - started,
+            job_elapsed_s=time.monotonic() - job_started,
+            input_tree_key=input_tree_key,
+            # Re-captured after confinement: removing part of a candidate
+            # invalidates the evidence bound to the pre-confinement tree.
+            output_tree_key=capture_tree_key(),
+            changed_paths=changed,
+            checkpoint_ref=checkpoint_ref,
+            focused_evidence=_repair_excerpt(turn_output),
+            scope_request=scope_request,
+            continuation_ref=_continuation_ref(continuation_token),
+            diagnostics=tuple(diagnostics),
+        ))
+        if checkpoint_blocked:
+            # An uncaptured repair cannot be resumed, so it is not a candidate the
+            # host will rerun a test suite against. The record above is what says so.
+            ui.print_warning(
+                agent.console,
+                "Repair checkpoint could not be persisted; not rerunning tests against an "
+                "uncaptured repair tree.",
+            )
+            return False
+        # Each repair turn still starts a fresh context; the token is recorded for
+        # a resuming job, never fed to the next turn of this loop.
         continuation = None
         guard_result = _reject_test_healing_generated_file_edits(
             work.repo,
@@ -376,7 +832,46 @@ async def phase_test_and_heal(
             artifact_session=artifact_session,
             allow_standalone=allow_standalone,
         )
+        if confinement_error is not None:
+            # Confinement is the guarantee the rerun depends on. Without it the
+            # suite would run against a tree the host cannot vouch for.
+            ui.print_warning(
+                agent.console,
+                f"Confinement after the repair turn failed ({confinement_error}); not rerunning "
+                "tests against the unconverged tree.",
+            )
+            return False
+        if abort_reason is not None:
+            # An aborted turn left a tree the host cannot vouch for, exactly like a
+            # failed restoration: stop here rather than rerun the suite against it.
+            # The record above is what a resuming job reads.
+            ui.print_warning(
+                agent.console,
+                f"Test-healing repair turn aborted ({abort_reason}); not rerunning tests "
+                "against the unconverged tree.",
+            )
+            return False
         return guard_result is not None
+
+    async def _stop_after_failed_repair(output: str) -> TestAndHealResult:
+        """End the loop on a repair turn the host could not vouch for.
+
+        An interrupted, failed, or unconfined repair leaves the run with no green
+        tree and no further attempt, so the handoff is the only artifact a human
+        reads: the repair record has to name itself there instead of living only
+        in this return value.
+        """
+        await _emit_failure_handoff(
+            backend,
+            work,
+            output,
+            offer_clipboard=False,
+            repairs=tuple(repairs),
+            artifact_session=artifact_session,
+            allow_standalone=allow_standalone,
+            run_context=run_context,
+        )
+        return TestAndHealResult(False, retries_used, False, False, tuple(attempts), tuple(repairs))
 
     while True:
         agent.console.print()
@@ -406,7 +901,7 @@ async def phase_test_and_heal(
 
         if test_passed:
             ui.print_success(agent.console, "Tests passed")
-            return TestAndHealResult(True, retries_used, True, False, tuple(attempts))
+            return TestAndHealResult(True, retries_used, True, False, tuple(attempts), tuple(repairs))
 
         ui.print_warning(agent.console, "Tests may have failed or result is unclear.")
 
@@ -418,7 +913,7 @@ async def phase_test_and_heal(
                 "Test failure looks environmental (infrastructure unavailable); "
                 "skipping heal loop.",
             )
-            return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
+            return TestAndHealResult(False, retries_used, False, False, tuple(attempts), tuple(repairs))
 
         # Unattended defaults abort without mutation. --yes allows one bounded
         # fix/retry, then aborts. Only interactive runs without an assumption show
@@ -437,17 +932,18 @@ async def phase_test_and_heal(
                 work,
                 output,
                 offer_clipboard=False,
+                repairs=tuple(repairs),
                 artifact_session=artifact_session,
                 allow_standalone=allow_standalone,
                 run_context=run_context,
             )
-            return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
+            return TestAndHealResult(False, retries_used, False, False, tuple(attempts), tuple(repairs))
         if decision is True:
             # Bounded auto fix-and-retry: launch one fix attempt, then loop.
             agent.console.print()
             ui.print_info(agent.console, "Launching agent to fix test failures (auto)...")
             if not await _launch_fix(output):
-                return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
+                return await _stop_after_failed_repair(output)
             continue
 
         ui.print_menu(agent.console, "What would you like to do?", [
@@ -530,7 +1026,7 @@ async def phase_test_and_heal(
                         if evidence.passed:
                             ui.print_success(agent.console, "Tests passed")
                             return TestAndHealResult(
-                                True, retries_used, True, False, tuple(attempts)
+                                True, retries_used, True, False, tuple(attempts), tuple(repairs),
                             )
                         ui.print_warning(agent.console, "Approved test command failed.")
                         host_failure_output = alternate_output
@@ -543,12 +1039,12 @@ async def phase_test_and_heal(
             agent.console.print()
             ui.print_info(agent.console, "Launching agent to fix test failures...")
             if not await _launch_fix(output):
-                return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
+                return await _stop_after_failed_repair(output)
             continue
 
         elif choice == "3":
             ui.print_warning(agent.console, "Ignoring test failures, continuing...")
-            return TestAndHealResult(False, retries_used, True, True, tuple(attempts))
+            return TestAndHealResult(False, retries_used, True, True, tuple(attempts), tuple(repairs))
 
         elif choice == "4":
             ui.print_error(agent.console, "Aborted", "User requested abort")
@@ -557,12 +1053,13 @@ async def phase_test_and_heal(
                 work,
                 output,
                 offer_clipboard=True,
+                repairs=tuple(repairs),
                 artifact_session=artifact_session,
                 allow_standalone=allow_standalone,
                 run_context=run_context,
             )
-            return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
+            return TestAndHealResult(False, retries_used, False, False, tuple(attempts), tuple(repairs))
 
         else:
             ui.print_warning(agent.console, f"Invalid choice '{choice}', aborting")
-            return TestAndHealResult(False, retries_used, False, False, tuple(attempts))
+            return TestAndHealResult(False, retries_used, False, False, tuple(attempts), tuple(repairs))

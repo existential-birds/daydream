@@ -22,6 +22,7 @@ from daydream.backends import (
 from daydream.clipboard import clipboard_available, copy_to_clipboard
 from daydream.output_schema import strict_object
 from daydream.phases.inputs import _prepare_existing_phase_inputs, _render_bash_allowlist, _tail_test_output
+from daydream.phases.test_evidence import RepairAttemptEvidence
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.trajectory import (
     DaydreamPhase,
@@ -412,12 +413,41 @@ def _build_minimal_handoff(
     return "\n".join(parts)
 
 
+def _render_repair_record_section(repairs: tuple[RepairAttemptEvidence, ...]) -> str:
+    """Render the host's repair records as facts and names, never as model prose.
+
+    Each entry names the outcome, the host abort reason, the git-observed paths
+    the turn actually changed, and the bounded redacted excerpt of the partial
+    diagnosis. An empty record renders nothing at all.
+    """
+    if not repairs:
+        return ""
+    lines = ["", "## Test repair attempts (host record)", ""]
+    for index, repair in enumerate(repairs, start=1):
+        reason = repair.abort_reason or repair.reason_code
+        lines.extend([
+            f"{index}. outcome: {repair.outcome.value}",
+            f"   reason: {reason if reason is not None else '(none: the turn ended on its own)'}",
+            f"   execution: {repair.execution_id} on {repair.backend_name} ({repair.model})",
+            f"   elapsed: {repair.execution_elapsed_s:.1f}s in a {repair.job_elapsed_s:.1f}s job",
+            f"   changed paths: {', '.join(repair.changed_paths) or '(none observed)'}",
+            f"   checkpoint: {repair.checkpoint_ref or '(none captured)'}",
+        ])
+        if repair.diagnostics:
+            lines.append(f"   diagnostics: {'; '.join(repair.diagnostics)}")
+        for excerpt in repair.focused_evidence:
+            lines.extend(["   partial diagnosis:", *[f"     {line}" for line in excerpt.splitlines()]])
+        lines.append("")
+    return "\n".join(lines)
+
+
 @bind_resolved_run_context
 async def _run_failure_summarizer(
     backend: Backend,
     work: WorkContext,
     test_output: str,
     *,
+    repairs: tuple[RepairAttemptEvidence, ...] = (),
     artifact_session: ArtifactSession | None = None,
     allow_standalone: bool = False,
     run_context: RunContext | None = None,
@@ -426,6 +456,7 @@ async def _run_failure_summarizer(
 
     No recorder, agent errors, or unusable output trigger fallback. Return body, path,
     and written status; callers must display the body inline when writing fails.
+    ``repairs`` appends the host's own repair record to whatever body was produced.
     """
     run_context = resolve_run_context(run_context)
     recorder = get_current_recorder()
@@ -515,7 +546,7 @@ async def _run_failure_summarizer(
             artifact_session=artifact_session,
             allow_standalone=allow_standalone,
         ),
-        body,
+        body + _render_repair_record_section(repairs),
     )
     return body, handoff_path, written
 
@@ -527,16 +558,25 @@ async def _emit_failure_handoff(
     output: str,
     *,
     offer_clipboard: bool,
+    repairs: tuple[RepairAttemptEvidence, ...] = (),
     artifact_session: ArtifactSession | None = None,
     allow_standalone: bool = False,
     run_context: RunContext | None = None,
 ) -> None:
-    """Summarize and display test failure; offer clipboard copying only when requested."""
+    """Summarize and display test failure; offer clipboard copying only when requested.
+
+    ``repairs`` is the host's own record of every bounded repair turn this heal
+    loop ran. When present it is appended to the written body, so an interrupted
+    repair is named in the artifact a human reads rather than only in a transient
+    return value. The displayed body stays the summarizer's: the record is a fact
+    section, not model prose.
+    """
     run_context = resolve_run_context(run_context)
     body, handoff_path, handoff_written = await _run_failure_summarizer(
         backend,
         work,
         output,
+        repairs=repairs,
         artifact_session=artifact_session,
         allow_standalone=allow_standalone,
         run_context=run_context,

@@ -63,7 +63,7 @@ from daydream.backends._transport import (
     reap,
     teardown,
 )
-from daydream.config import DEFAULT_PI_MODEL
+from daydream.config import DEFAULT_PI_MODEL, DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
 from daydream.json_utils import extract_json, extract_json_by_schema, validates_schema
 from daydream.retry_policy import classify_failure, parse_message_retry_hint
 
@@ -141,10 +141,14 @@ def _configured_pi_model(
 
 # Pi's minimal built-in prompt needs explicit exploration/tool guidance.
 # Append this preamble each turn; keep it concise to limit repeated context.
-_PI_SYSTEM_PREAMBLE = """\
-You are an efficient coding agent operating under a strict tool-call budget.
-Honor the invocation's time and tool allowance. Each call must resolve a
-specific unanswered question; the allowance is a ceiling, not a target.
+# The allowance sentence states what this invocation actually has: a tool-call
+# ceiling the host does not impose must never be described as strict, because
+# a cap that does not exist is not a discipline, it is a lie about the budget.
+_PI_PREAMBLE_TEMPLATE = """\
+You are an efficient coding agent operating under a bounded time budget.
+{allowance}
+Each call must resolve a specific unanswered question; the allowance is a ceiling,
+not a target.
 
 WORK STRATEGY:
 - Use supplied exact file paths and diff context directly. When a location is
@@ -169,6 +173,51 @@ reading whole files.
 
 Be concise in your responses. Do not narrate exploration step by step; report
 findings and conclusions."""
+
+
+def render_pi_preamble(wall_budget_s: float, tool_call_budget: int | None) -> str:
+    """Render the preamble with the invocation's actual allowances.
+
+    Requirement 17: the numbers are rendered, never hardcoded, and the tool-call
+    sentence says exactly what is true. ``DEFAULT_TOOL_CALL_BUDGET`` is ``None``,
+    so the common case has no ceiling to honour — an uncapped turn is described as
+    uncapped rather than as a strict budget, and the wall allowance the host did
+    impose is stated instead.
+    """
+    wall = f"{float(wall_budget_s):g}"
+    if tool_call_budget is None:
+        allowance = (
+            f"This turn's effective wall allowance is {wall} seconds and its tool-call "
+            f"budget is uncapped: nothing stops you at a call count, so every call must "
+            f"earn the time it spends."
+        )
+    else:
+        allowance = (
+            f"This turn's effective wall allowance is {wall} seconds and its tool-call "
+            f"budget is {int(tool_call_budget)} calls."
+        )
+    return _PI_PREAMBLE_TEMPLATE.format(allowance=allowance)
+
+
+_PI_SYSTEM_PREAMBLE = render_pi_preamble(DEFAULT_WALL_BUDGET_S, DEFAULT_TOOL_CALL_BUDGET)
+
+
+def pi_system_preamble(
+    wall_budget_s: float | None = None, tool_call_budget: int | None = None
+) -> str:
+    """Render this invocation's preamble, defaulting to the module allowances.
+
+    A turn granted a ceiling other than ``DEFAULT_WALL_BUDGET_S`` must not be told
+    about the default: the rendered allowance has to be the one the host actually
+    imposes, or the model plans against time it does not have. ``None`` means "not
+    supplied by the caller", which for the tool-call budget is also the honest
+    uncapped answer, so the default resolves to the module constants.
+    """
+    wall = DEFAULT_WALL_BUDGET_S if wall_budget_s is None else wall_budget_s
+    calls = DEFAULT_TOOL_CALL_BUDGET if tool_call_budget is None else tool_call_budget
+    if wall == DEFAULT_WALL_BUDGET_S and calls == DEFAULT_TOOL_CALL_BUDGET:
+        return _PI_SYSTEM_PREAMBLE
+    return render_pi_preamble(wall, calls)
 
 
 _PI_FINALIZATION_PREAMBLE = """\
@@ -407,6 +456,7 @@ class PiBackend:
     supports_finalization = True
     supports_tools_disabled = True
     supports_review_instructions = True
+    supports_budget_preamble = True
     # Honors a caller's validate_structured_output=False by keeping largest-span
     # extraction instead of applying schema-aware selection, matching the host
     # fallback in agent.py.
@@ -470,6 +520,8 @@ class PiBackend:
         review_instructions: str | None = None,
         tools_disabled: bool = False,
         validate_structured_output: bool = True,
+        wall_budget_s: float | None = None,
+        tool_call_budget: int | None = None,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Yield Pi events; a turn error raises PiError and nonempty agents are unsupported.
 
@@ -481,6 +533,8 @@ class PiBackend:
         serialization instructions, and caps thinking at low while preserving lower
         settings. tools_disabled keeps normal instructions/thinking and uses stdin.
         Pi cannot enforce max_turns: callers must enforce an absolute deadline.
+        wall_budget_s/tool_call_budget state the allowances the caller is actually
+        enforcing, so the preamble describes this turn rather than the defaults.
         Stdout silence raises retryable StreamStalledError; run_agent starts a fresh
         subprocess for each retry.
         """
@@ -578,7 +632,11 @@ class PiBackend:
         # Pi's built-in system prompt is minimal; append the daydream preamble
         # so the default DeepSeek model gets the same tool-efficiency / budget-awareness
         # guidance that Claude Code and Codex inject natively via their CLIs.
-        system_prompt = _PI_FINALIZATION_PREAMBLE if finalization else _PI_SYSTEM_PREAMBLE
+        system_prompt = (
+            _PI_FINALIZATION_PREAMBLE
+            if finalization
+            else pi_system_preamble(wall_budget_s, tool_call_budget)
+        )
         if review_instructions and not finalization:
             system_prompt += (
                 "\n\nBOUNDED REPOSITORY REVIEW:\n" + review_instructions

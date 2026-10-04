@@ -1323,11 +1323,16 @@ async def test_fix_cycle_non_interactive_declines_fix_and_commit(
 
 async def _drive_fix_cycle_failing(
     monkeypatch: pytest.MonkeyPatch, target: Path, config: RunConfig, *, script: list[Turn],
+    repair_turn: Turn | None = None,
     stdin_guard_message: str | None = None, stdin_answers: list[str] | None = None,
     clipboard_is_available: bool = False,
-) -> tuple[int, ScriptedBackend, list[bool]]:
+) -> tuple[int, ScriptedBackend, ScriptedBackend, list[bool]]:
     """Drive real test-and-heal with seeded resume artifacts. Stub verify/fix, spy on commits, control gate
-    answers, and reject excess healing via _BEYOND_SCRIPT. Return exit code, backend, and commit calls.
+    answers, and reject excess healing via _BEYOND_SCRIPT. Return exit code, backends, and commit calls.
+
+    Test execution and the read-only summarizer run on the TEST phase's backend; the
+    heal turn is a fix turn, so it runs on the FIX phase's backend (issue #1210) and
+    is scripted through ``repair_turn`` rather than through ``script``.
     """
     _seed_fix_resume(target, [_fix_item()])
     # The backend script observes phases; mute only terminal output.
@@ -1338,11 +1343,13 @@ async def _drive_fix_cycle_failing(
     monkeypatch.setattr("daydream.agent.console", Console(file=StringIO()))
     monkeypatch.setattr("daydream.runner.console", type("C", (), {"print": lambda *a, **kw: None})())
     test_backend = ScriptedBackend(script=[*script, _BEYOND_SCRIPT], model="test-model-xyz")
-    stub_backend = ScriptedBackend(model="stub-model")
+    repair_backend = ScriptedBackend(
+        script=[repair_turn, _BEYOND_SCRIPT] if repair_turn is not None else [_BEYOND_SCRIPT], model="stub-model",
+    )
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
         lambda _config, phase, cache=None, **_kwargs: (
-            test_backend if phase == "test" else stub_backend
+            test_backend if phase == "test" else repair_backend
         ),
     )
     monkeypatch.setattr("daydream.deep.fix_steps.phase_verify_recommendations", _stub_verify)
@@ -1365,12 +1372,18 @@ async def _drive_fix_cycle_failing(
             raise AssertionError(stdin_guard_message or "stdin must not be touched")
         monkeypatch.setattr("builtins.input", _forbidden_input)
     exit_code = await runner.run(config)
-    return exit_code, test_backend, commit_calls
+    return exit_code, test_backend, repair_backend, commit_calls
 
 def _assert_single_handoff(repo: Path, body: str) -> None:
+    """Assert exactly one handoff, whose authored text is ``body``.
+
+    The host appends its own sections after the turn's text (the repair-attempt
+    record names a run-scoped execution id, so it can never be part of a
+    fixed expected body), so the authored text is matched as a prefix.
+    """
     handoffs = list(repo.glob(".daydream/runs/*/handoff.md"))
     assert len(handoffs) == 1, f"expected exactly one handoff.md, got {handoffs!r}"
-    assert handoffs[0].read_text(encoding="utf-8") == body
+    assert handoffs[0].read_text(encoding="utf-8").startswith(body)
 
 async def test_fix_cycle_failing_tests_abort_writes_handoff(
     monkeypatch: pytest.MonkeyPatch, feature_branch_repo: Path, make_config: Callable[..., 'RunConfig'],
@@ -1379,7 +1392,7 @@ async def test_fix_cycle_failing_tests_abort_writes_handoff(
 
     The read-only summarizer runs; the mutating heal agent and commit never run.
     """
-    exit_code, test_backend, commit_calls = await _drive_fix_cycle_failing(
+    exit_code, test_backend, repair_backend, commit_calls = await _drive_fix_cycle_failing(
         monkeypatch, feature_branch_repo,
         make_config(feature_branch_repo, start_at="fix", shallow=True, non_interactive=False),
         script=[_FAIL_TURN, _handoff_turn("# Handoff\n\ninteractive abort")],
@@ -1391,6 +1404,8 @@ async def test_fix_cycle_failing_tests_abort_writes_handoff(
     assert len(test_backend.prompts) == 2
     assert "read-only failure-summarizer" in test_backend.prompts[1]
     assert all("Analyze the failures and fix them" not in p for p in test_backend.prompts), test_backend.prompts
+    # An aborted heal never reaches the FIX backend.
+    assert repair_backend.call_count == 0, repair_backend.prompts
 
 async def test_fix_cycle_clipboard_timeout_keeps_event_loop_responsive_and_shows_manual_copy_guidance(
     monkeypatch: pytest.MonkeyPatch, feature_branch_repo: Path, make_config: Callable[..., 'RunConfig'],
@@ -1427,10 +1442,12 @@ async def test_fix_cycle_clipboard_timeout_keeps_event_loop_responsive_and_shows
             state["ticks"] += 1
             await anyio.sleep(0.001)
     ticker_task = asyncio.create_task(_ticker())
-    exit_code, _backend, commit_calls = await _drive_fix_cycle_failing(
-        monkeypatch, feature_branch_repo,
-        make_config(feature_branch_repo, start_at="fix", shallow=True, non_interactive=False),
+    exit_code, _test_backend, repair_backend, commit_calls = await _drive_fix_cycle_failing(
+        monkeypatch, feature_branch_repo, make_config(feature_branch_repo, start_at="fix", shallow=True,
+            non_interactive=False,
+        ),
         script=[_FAIL_TURN, _handoff_turn("# Handoff\n\nclipboard timeout")],
+        repair_turn=_FIX_TURN,
         stdin_answers=["y", "4", "y"], clipboard_is_available=True,
     )
     stop_tick.set()
@@ -1454,22 +1471,26 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
     """Unattended failure runs one heal attempt, then writes a handoff and exits 1.
 
     The real cycle follows fail/fix/fail/summary, never reads stdin, and emits one fix prompt.
+    The fix prompt is served by the FIX backend; tests and the summary stay on TEST.
     """
-    exit_code, test_backend, commit_calls = await _drive_fix_cycle_failing(
+    exit_code, test_backend, repair_backend, commit_calls = await _drive_fix_cycle_failing(
         monkeypatch, feature_branch_repo, make_config(feature_branch_repo, start_at="fix", shallow=True, assume="yes"),
-        # Reject a fifth backend call after fail, fix, fail, and handoff.
-        script=[_FAIL_TURN, _FIX_TURN, _FAIL_TURN, _handoff_turn("# Handoff\n\n--yes bounded fix failure")],
+        # Reject a fourth backend call after fail, fail, and handoff.
+        script=[_FAIL_TURN, _FAIL_TURN, _handoff_turn("# Handoff\n\n--yes bounded fix failure")],
+        repair_turn=_FIX_TURN,
         stdin_guard_message="input() must not be called under --yes",
     )
     assert exit_code == 1
     _assert_single_handoff(feature_branch_repo, "# Handoff\n\n--yes bounded fix failure")
     assert commit_calls == [], "a commit ran despite tests failing"
-    assert len(test_backend.prompts) == 4, test_backend.prompts
-    assert "Analyze the failures and fix them" in test_backend.prompts[1]
-    assert "read-only failure-summarizer" in test_backend.prompts[3]
-    assert test_backend.read_only_calls == [False, False, False, True], (
+    assert len(test_backend.prompts) == 3, test_backend.prompts
+    assert "read-only failure-summarizer" in test_backend.prompts[2]
+    assert test_backend.read_only_calls == [False, False, True], (
         test_backend.read_only_calls
     )
+    # The single bounded repair turn ran on the FIX-configured backend, never on TEST.
+    assert "Analyze the failures and fix them" in repair_backend.prompts[0]
+    assert all("Analyze the failures and fix them" not in p for p in test_backend.prompts), test_backend.prompts
 
 @pytest.mark.parametrize(
     ("config", "flow", "expected"),

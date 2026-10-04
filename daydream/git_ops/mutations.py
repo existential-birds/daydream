@@ -86,6 +86,52 @@ def apply_staged_patch(repo: Path, patch: bytes) -> None:
     )
 
 
+def worktree_patch_applies(repo: Path, patch: bytes, *, reverse: bool = False) -> bool:
+    """Report whether ``patch`` applies to the worktree, without touching it.
+
+    ``git apply --check`` is the worktree counterpart of the index check, and it
+    is how a restoration stays idempotent: a candidate that is already present
+    fails the forward check and passes the reverse one, so a second recovery
+    attempt reads "already there" instead of failing to apply. ``reverse`` swaps
+    the direction for exactly that question. A patch that does not apply is a
+    question with the answer ``False``, not an error.
+    """
+    args = ["apply", "--check", "--binary"]
+    if reverse:
+        args.append("--reverse")
+    try:
+        process._run_git(
+            repo,
+            args,
+            timeout=30,
+            retries=0,
+            capture_bytes=True,
+            input_bytes=patch,
+            error_context=f"git apply --check failed in {repo}",
+        )
+    except GitError:
+        return False
+    return True
+
+
+def apply_worktree_patch(repo: Path, patch: bytes) -> None:
+    """Apply binary patch bytes to the worktree, without retrying writes.
+
+    Restoration is the only caller: it re-applies a captured candidate to a tree
+    whose identity the host checked first. Retries are off because a write that
+    is not idempotent must never be repeated on a transport failure.
+    """
+    process._run_git(
+        repo,
+        ["apply", "--binary"],
+        timeout=30,
+        retries=0,
+        capture_bytes=True,
+        input_bytes=patch,
+        error_context=f"git apply --binary failed in {repo}",
+    )
+
+
 def checkout_detach(repo: Path, sha: str, *, timeout: int = 300) -> None:
     """Detach HEAD at the requested commit without retries.
 

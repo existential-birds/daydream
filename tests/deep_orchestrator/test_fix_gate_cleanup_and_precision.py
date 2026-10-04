@@ -117,11 +117,12 @@ async def test_heal_loop_receives_feedback_items_in_fix_prompt(
     assert "Focus on the files listed above." in heal_prompt, (
         f"scope instruction missing from heal fix prompt -- feedback_items not honored; prompt was: {heal_prompt!r}"
     )
-    # The heal stub also writes an unauthorized sentinel. The post-heal guard
-    # removes it, invalidating the retry's tree identity, so one shared no-heal
-    # final test is mandatory: fail, healed pass, stable pass.
-    assert stub.test_suite_calls == 3, (
-        f"expected 3 test-suite runs (fail, healed pass, stable pass), saw {stub.test_suite_calls}"
+    # The heal stub also writes an unauthorized sentinel. Run-wide confinement
+    # removes it right after the repair turn, so the rerun's own evidence is
+    # already bound to the converged retained tree and needs no stabilizing third
+    # run: fail, then healed pass.
+    assert stub.test_suite_calls == 2, (
+        f"expected 2 test-suite runs (fail, confined healed pass), saw {stub.test_suite_calls}"
     )
 
 async def test_structural_finding_reaches_fix_loop(

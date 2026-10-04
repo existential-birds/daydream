@@ -199,7 +199,11 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
     # tree still stabilizes, commits, and pushes, but the new remote-CI phase
     # must fail closed with an explicit handoff rather than claim completion.
     assert rc == 1
-    assert counter.read_text() == "3"
+    # The heal turn edits authorized sibling.py and unauthorized other.py.
+    # Confinement runs right after that turn, so the rerun observes other.py
+    # already restored and its evidence binds the converged retained tree: two
+    # host runs, not a third one to re-validate a tree the guard had yet to fix.
+    assert counter.read_text() == "2"
     assert (repo / "api.py").read_text() == "A = 3\n"
     assert (repo / "sibling.py").read_text() == "B = 7\n"
     assert (repo / "tests/test_a.py").is_file()
@@ -229,7 +233,7 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
         "api.py", "sibling.py", "tests/test_a.py",
     }
     verdict = json.loads((deep / "test-verdict.json").read_text())
-    assert len(verdict["attempts"]) == 3
+    assert len(verdict["attempts"]) == 2
     assert verdict["session_id"] == audit["session_id"]
     outcomes = json.loads((deep / "fix-outcomes.json").read_text())
     capture = json.loads((deep / "recommended-capture.json").read_text())
