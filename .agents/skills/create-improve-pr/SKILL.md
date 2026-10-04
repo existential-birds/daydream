@@ -5,13 +5,14 @@ description: "Implement or finish a curated improvement and publish a focused dr
 
 # Create an Improve fix PR
 
-Turn selected `improve_curated/` findings into a focused, reviewable **draft PR by default**. Preserve enough evidence to later evaluate blind discovery of the original improvement. This skill handles implementation and publication when invoked for a finding; it does not authorize merging.
+Turn selected `improve_curated/` findings into a focused, reviewable **draft PR by default**. The normal workflow is capture → issue → implementation in a later session → this skill. When `implement` has already completed the fix, verify and publish that work without restarting implementation. Preserve enough evidence to later evaluate blind discovery of the original improvement. This skill can finish remaining scoped work; it does not authorize merging.
 
 ## Inputs and authority
 
 Read the repository instructions, `improve_curated/AGENTS.md`, the selected finding documents, and relevant check/PR conventions. If `.agents/skills/pr/SKILL.md` is present, follow its concise Summary, Evidence, and Merge Danger conventions, augmented with the benchmark information below. Otherwise use this directory's self-contained `PR_TEMPLATE.md`; the optional local `pr` skill is not required on a fresh clone.
 
 - Use findings identified by the user or unambiguously selected in the active session. Ask for scope only when multiple unrelated choices remain; do not manufacture a finding to fill the template.
+- Read linked implementation issues from `resolution.issues` (missing means `[]`) or the active session. If a finding file is absent, recover the issue's embedded snapshot using its checksum and recorded path, then append the issue URL. Preserve a newer local record and resolve substantive discrepancies from evidence rather than overwriting it. Use the issue's handoff and implementation session evidence to recover the actual fix start; issue publication time is not fix-start time.
 - If no document exists, use `../publish-improve-finding/SKILL.md` to capture the active session's finding **before implementation**. Read its template for the canonical finding schema.
 - Invocation authorizes the scoped fix, appropriate validation, ordinary commits/pushes, and draft PR creation. Preserve unrelated user work. Never force-push, merge, mark ready, or expand into unrelated refactors without authorization.
 - Group findings only when one coherent change resolves them. Keep independent opportunities in separate PRs. A fix PR is evidence for a discovery benchmark; its diff is not the discovery task input.
@@ -61,12 +62,13 @@ Use `PR_TEMPLATE.md` in this directory. Replace placeholders with observed facts
 The human-readable description must explain:
 
 - Finding IDs and immutable links to their Markdown documents; the concrete evidence, root cause, and why the change matters.
+- Implementation issue URLs, copied into each finding's metadata `issues` list. Include `Closes #NUMBER` (or the full issue URL for another repository) only for issues this PR fully resolves; otherwise use an ordinary reference and state remaining work. Do not close issues merely because a draft exists.
 - Original observation and benchmark identities, with verification and any dirty/incomplete-snapshot limitations.
 - Intended simplification, observed result, preserved behavior/contracts, and any remaining scope.
 - Discovery matching notes: reference the finding's alternatives, equivalent discoveries, and exclusions. A later evaluator must match the underlying opportunity, not exact prose or this implementation.
 - Exact validation commands/results and checked state, plus material risks and limitations. Preserve the repository's concise Summary, Evidence, and Merge Danger sections.
 
-Copy each finding's `observed` and `benchmark` values exactly into its metadata entry; do not improve uncertain provenance by inference. `status: confirmed` requires the human confirmation recorded by the publishing skill. Do not label your own findings human-confirmed.
+Copy each finding's `observed`, `benchmark`, and `resolution.issues` values into its metadata entry (`issues: []` for older records); do not improve uncertain provenance by inference. Preserve issue links during PR backlink updates. `status: confirmed` requires the human confirmation recorded by the publishing skill. Do not label your own findings human-confirmed.
 
 Use GitHub blob URLs pinned to a **pushed full commit SHA** for finding documents, such as `https://github.com/OWNER/REPO/blob/FULL_SHA/improve_curated/FILE.md`. Verify the document exists at that commit. A branch URL may be added for convenience but cannot replace the immutable link. Preserve the repository's actual owner/name; do not assume this skill always runs in Daydream.
 
@@ -88,4 +90,4 @@ On a documentation-only retry, perform only missing publication/backlink/body st
 
 ## Completion report
 
-Return the PR URL, linked finding IDs, concise change/validation results, and any provenance or publication limitations. Do not merge. Remind future benchmark builders through the PR metadata/template that finding documents, fix diffs, PR descriptions, and future history are reference answers: exclude them from the evaluated agent's target snapshot.
+Return the PR URL, linked finding IDs and issues, concise change/validation results, and any provenance or publication limitations. Do not merge. Remind future benchmark builders through the PR metadata/template that finding documents, implementation issues, fix diffs, PR descriptions, and future history are reference answers: exclude them from the evaluated agent's target snapshot.

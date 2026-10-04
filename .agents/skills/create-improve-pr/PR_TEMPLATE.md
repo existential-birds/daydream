@@ -3,6 +3,7 @@
 <!-- Explain the concrete problem, why the simplification matters, and observed behavior after the fix. Include a small diff sketch/diagram only when useful. -->
 
 - Findings: FINDING_ID — [finding document](IMMUTABLE_DOCUMENT_URL)
+- Implementation issues: ISSUE_URLS (use a closing reference only for fully resolved issues).
 - Root cause and evidence: ...
 - Intended simplification: ...
 - Observed result and preserved contracts: ...
@@ -22,7 +23,7 @@ Optional size changes: source ..., tests ..., docs ...; comparison endpoints and
 
 Original observation: ... . Frozen benchmark: ... . Verified applicability and limitations: ... . Implementation began from ... . Target/head SHAs below are recorded at the stated time and may advance.
 
-The linked findings, this PR, its fix diff, and later repository history contain reference answers. Evaluate discovery against an isolated frozen source snapshot that excludes those materials. Unknown or unverified provenance is not a benchmark-ready case.
+The linked findings and implementation issues, this PR, its fix diff, and later repository history contain reference answers. Evaluate discovery against an isolated frozen source snapshot that excludes those materials. Unknown or unverified provenance is not a benchmark-ready case.
 
 <!-- improve-fix-metadata:start -->
 ```yaml
@@ -32,6 +33,7 @@ recorded_at: "REPLACE_WITH_UTC_ISO_TIMESTAMP"
 repository: "REPLACE_WITH_CANONICAL_REPOSITORY_URL"
 findings:
   - id: "REPLACE_WITH_FINDING_ID"
+    issues: [] # Canonical URLs from resolution.issues; absent in older records means [].
     document_path: "improve_curated/REPLACE_WITH_FILENAME.md"
     document_commit: "REPLACE_WITH_PUSHED_FULL_SHA"
     document_url: "REPLACE_WITH_IMMUTABLE_BLOB_URL"

@@ -12,7 +12,10 @@ push, GitHub issue, PR, merge, source edit, or training upload. Follow any separ
 authorized actions without requesting the same permission again.
 
 Read `improve_curated/AGENTS.md` and use [finding-template.md](finding-template.md).
-The directory's schema is shared with `create-improve-pr`; preserve its field names.
+The directory's schema is shared with `create-improve-issue` and `create-improve-pr`;
+preserve its field names and any existing issue/PR links. After capture, the user can
+invoke `create-improve-issue` to queue implementation in a future session. Do not
+create that issue automatically as part of capture.
 
 ## Capture procedure
 

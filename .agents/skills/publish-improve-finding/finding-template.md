@@ -23,6 +23,7 @@ affected_symbols: []
 related_findings: []
 resolution:
   status: open
+  issues: []
   prs: []
   fix_commits: []
   validation: []

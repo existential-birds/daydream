@@ -54,6 +54,7 @@ htmlcov/
 !.agents/skills/
 .agents/skills/*
 !.agents/skills/publish-improve-finding/
+!.agents/skills/create-improve-issue/
 !.agents/skills/create-improve-pr/
 .hermes/
 /skills-lock.json

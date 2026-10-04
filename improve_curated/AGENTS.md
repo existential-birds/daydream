@@ -3,9 +3,28 @@
 This directory holds durable cleanup/refactor opportunities discovered during human
 review and assisted sessions. Each Markdown record preserves the opportunity before
 its fix, the human judgment, and eventual resolution evidence. Use
-`.agents/skills/publish-improve-finding/SKILL.md` to capture a finding and
+`.agents/skills/publish-improve-finding/SKILL.md` to capture a finding,
+`.agents/skills/create-improve-issue/SKILL.md` to queue implementation, and
 `.agents/skills/create-improve-pr/SKILL.md` to connect an implementation PR.
 Do not create example findings that could be mistaken for real reference data.
+
+## Authoring and implementation workflow
+
+1. The user explores and confirms an improvement with an agent.
+2. `publish-improve-finding` writes the finding record.
+3. `create-improve-issue` creates a GitHub issue labeled `improve-training`, includes
+   the finding and implementation handoff, and records the issue URL here.
+4. In a later session, the user invokes `implement` on that issue. The implementation
+   agent reads the issue and finding, preserves the original observation/benchmark,
+   and records the actual fix-start source identity before editing. If the local
+   record is absent, restore the issue's embedded finding snapshot after verifying
+   its checksum, then append its issue URL; do not overwrite a newer record.
+5. `create-improve-pr` publishes the completed fix as a draft, links finding and issue,
+   and includes a closing reference only for an issue the fix actually resolves.
+
+The issue must stand on its own for a session without the original transcript or
+uncommitted finding file. Its embedded snapshot is a versioned copy of the finding,
+not a new source baseline. Issue creation does not mark the finding fixed.
 
 Implementation tracking: [Prime-based Improve discovery benchmark and training epic
 #1455](https://github.com/existential-birds/daydream/issues/1455). Its sub-issues
@@ -16,7 +35,7 @@ cover snapshot materialization, harness integration, scoring, evaluation, and tr
 These records are **hidden grader reference material**, not input for an agent asked
 to discover improvements. Keeping them in this repository does not make an ordinary
 checkout safe for evaluation. Future snapshot builders must explicitly exclude this
-entire directory and any copies, fix diffs, PR descriptions, prior audit reports,
+entire directory and any copies, implementation issues, fix diffs, PR descriptions, prior audit reports,
 session transcripts, or other answer-bearing artifacts. Also exclude `.git` history,
 remotes, and access to future commits or answer-bearing network resources. A checkout
 of an old SHA inside the live clone can still reveal later fixes.
@@ -47,7 +66,7 @@ IDs and filenames remain stable. Search existing records before creating another
 Update a duplicate; link related but independent opportunities. Preserve rejected
 candidates and explain the rejection. `AGENTS.md` is guidance, not a finding.
 
-The frontmatter fields below are the shared contract for both skills. Use YAML null
+The frontmatter fields below are the shared contract for all three skills. Use YAML null
 for unknown facts, empty lists for absent entries, quoted timestamps/SHA strings,
 and no placeholder values in saved findings. Keep every top-level field present;
 the capture template lives alongside `publish-improve-finding/SKILL.md`.
@@ -74,6 +93,7 @@ the capture template lives alongside `publish-improve-finding/SKILL.md`.
 | `affected_symbols` | Symbol strings, preferably qualified with path/module. |
 | `related_findings` | Stable IDs of related records; describe overlap in the body. |
 | `resolution.status` | `open`, `in_progress`, `fixed`, or `wont_fix`, independent of finding validity. A draft PR is `in_progress`, not `fixed`. |
+| `resolution.issues` | Canonical GitHub issue URL strings; append idempotently. Additive schema-v1 field: older records may omit it; readers treat absence as `[]`. New records include it. |
 | `resolution.prs` | Canonical GitHub PR URL strings; append idempotently. |
 | `resolution.fix_commits` | Full implementation/merge commit SHAs established by evidence; distinguish their roles in the body. |
 | `resolution.validation` | List of `{command, result, checked_commit}` objects. Use exact commands and observed results; `checked_commit` is a full SHA or `null` for dirty source, with the exact tested source reference/gap explained in the body. |
@@ -91,8 +111,10 @@ as verified human gold for a frozen benchmark.
 Preserve original source identity and discovery evidence when fixing a finding.
 Append dated corrections and judgment changes rather than silently rewriting their
 history. A change in human judgment may update `status`; retain the prior judgment
-and explanation in the body. Creating a PR adds its URL to `resolution.prs` and
-links back to this record in the PR description. Do not mark a finding fixed merely
+and explanation in the body. Creating an issue adds its URL to `resolution.issues`;
+its body retains a checksummed finding snapshot and any available commit-pinned link.
+Creating a PR preserves those issue URLs, adds its URL to `resolution.prs`, and
+links back to this record and its implementation issue. Do not mark a finding fixed merely
 because a PR exists or tests pass; record the actual implemented/landed state.
 
 Inspect references against their recorded source state rather than assuming deleted
