@@ -38,6 +38,7 @@ resolution:
   prs: []
   fix_commits:
   - 1a5cfeb01e5951de164834922d8488c55f080bd5
+  - 52bef957031a1dd8d0faaffd983333e82d36defa
   validation:
   - command: uv run pytest tests/test_runner.py -k controlled_custom_flow -q
     result: 'Before the production fix: 1 failed, 2 passed. Injected archive failure changed result 0 to 1 and exposed exception
@@ -55,6 +56,19 @@ resolution:
     result: 'Passed: 9330 tests, 14 skipped; branch coverage 90.38%, above the 86% gate. Lock, lint, dead-code, typecheck,
       workflow and naming checks passed.'
     checked_commit: 1a5cfeb01e5951de164834922d8488c55f080bd5
+  - command: git push -u origin anderskev/1466-decouple-failures
+    result: 'Failed ordinary pre-push make check: 1 failed, 9329 passed, 14 skipped, 90.38% branch coverage. test_immutable_budget_truncates_slow_peers[False]
+      took 0.743s against its 0.35s bound; push rejected. No hooks bypassed.'
+    checked_commit: 15f35a134b22ae2d87363a52fb380e0a7b367ca6
+  - command: uv run pytest tests/test_observability_readback.py -q
+    result: 'Passed: 33 tests after test-only transport setup isolation; original request deadline, total return bound, observed
+      connection closure and no-later-poll assertions retained.'
+    checked_commit: 52bef957031a1dd8d0faaffd983333e82d36defa
+  - command: uv run pytest tests/test_observability_readback.py -n 16 --cov=scripts/verify_observability_readback.py --cov-branch
+      --cov-fail-under=0 -q
+    result: 'Passed: 33 tests after test-only transport setup isolation; original request deadline, total return bound, observed
+      connection closure and no-later-poll assertions retained.'
+    checked_commit: 52bef957031a1dd8d0faaffd983333e82d36defa
 ---
 
 # Separate optional data persistence from protected review output publication
@@ -100,7 +114,7 @@ This finding, its implementation issue, fix diff, PR description, and future his
 
 Implementation commit `1a5cfeb01e5951de164834922d8488c55f080bd5` separates optional persistence from runtime publication, adds closed integrity/publication categories, sanitizes upload/collection diagnostics, preserves prepared dumps on optional later failures, and removes unpromised manifest/archive handoff links. Existing dataset format and source/runtime isolation remain intact.
 
-Validation commands and observed failures/passes are retained in frontmatter. The final successful `make check` and archive-capture test file were run against the source/test tree committed as `1a5cfeb01e5951de164834922d8488c55f080bd5`. PR preparation verified a clean worktree and no differences from that implementation tree. Subsequent finding capture/backlinks are documentation-only and do not retroactively change the checked implementation identity. Resolution remains in progress while the draft PR is open.
+Validation commands and observed failures/passes are retained in frontmatter. The final successful `make check` and archive-capture test file were run against the source/test tree committed as `1a5cfeb01e5951de164834922d8488c55f080bd5`. PR preparation verified a clean worktree and no differences from that implementation tree. Finding capture/backlinks are documentation-only. A later hook-blocking observability test repair is separately recorded below and does not retroactively change the original checked source identity. Resolution remains in progress while the draft PR is open.
 
 ## Savings
 
@@ -113,3 +127,7 @@ Validation commands and observed failures/passes are retained in frontmatter. Th
 ### 2026-10-04 — Post-implementation capture for draft PR publication
 
 Captured the active session's verified opportunity after the completed fix. Original discovery timing and benchmark applicability remain unknown/unverified; no pre-fix capture or human confirmation was invented. The implementation issue link is retained in `resolution.issues`.
+
+### 2026-10-04 — Repair ordinary push hook failure
+
+The first ordinary push at `15f35a134b22ae2d87363a52fb380e0a7b367ca6` failed the existing slow-peer deadline test; hooks rejected publication. A focused 16-worker coverage run reproduced the failure and measured 0.549s synchronous HTTPX client setup in a 0.555s verifier call, consuming the 0.12s budget before socket I/O. Commit `52bef957031a1dd8d0faaffd983333e82d36defa` prepares a real HTTPX transport outside the measured slow-peer interval. Real streaming, cancellation, connection closure, 0.35s return bound and request-start budget assertions are retained. No runtime source or hook changed. Serial and parallel module runs each passed 33 tests; the full ordinary push gate is rerun for publication. Relative to the original issue implementation, this adds 11 test lines. Original fix-start and benchmark provenance remain unchanged.
