@@ -205,28 +205,6 @@ def _per_pair_stable(verdicts: list[Any], threshold: float) -> bool:
     return flips <= 1
 
 
-def _confusion_matrix(
-    gold_labels: list[Any], majority_labels: list[bool]
-) -> dict[str, int]:
-    """Standard 2x2 confusion counts for a match/nonmatch label set.
-
-    Gold labels may be booleans (``True`` = match) or the strings
-    ``"match"`` / ``"nonmatch"``.
-    """
-    counts = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
-    for truth, pred in zip(gold_labels, majority_labels):
-        actual = truth is True or truth == "match"
-        if actual and pred:
-            counts["tp"] += 1
-        elif not actual and pred:
-            counts["fp"] += 1
-        elif not actual and not pred:
-            counts["tn"] += 1
-        else:
-            counts["fn"] += 1
-    return counts
-
-
 def _class_balanced_accuracy(matrix: dict[str, int]) -> float:
     """Average recognition across present classes using their actual sizes, including
     partial fixtures.
@@ -245,18 +223,23 @@ def _pass_gate(
 ) -> tuple[bool, dict[str, Any], dict[str, int], float]:
     """Return pass/fail reasons, confusion matrix, and balanced accuracy without I/O."""
     failures: dict[str, Any] = {}
-    gold_labels = [p["label"] for p in pairs]
     majority_labels = [_majority_label(runs) for runs in runs_per_pair]
+    # One gold-label predicate feeds both outputs, so the wrong-pair indices and the 2x2
+    # counts can never score the same pair two different ways. A gold label may be the
+    # boolean ``True`` (match) or the strings ``"match"`` / ``"nonmatch"``.
+    actuals = [p["label"] is True or p["label"] == "match" for p in pairs]
 
-    wrong_pairs = [
-        i
-        for i, (truth, pred) in enumerate(zip(gold_labels, majority_labels))
-        if (truth == "match") != bool(pred)
-    ]
+    matrix = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
+    wrong_pairs: list[int] = []
+    for i, (actual, pred) in enumerate(zip(actuals, majority_labels)):
+        if actual == pred:
+            matrix["tp" if actual else "tn"] += 1
+        else:
+            wrong_pairs.append(i)
+            matrix["fp" if pred else "fn"] += 1
     if wrong_pairs:
         failures["majority"] = wrong_pairs
 
-    matrix = _confusion_matrix(gold_labels, majority_labels)
     bacc = _class_balanced_accuracy(matrix)
     if bacc < 0.9:
         failures["balanced_accuracy"] = bacc
