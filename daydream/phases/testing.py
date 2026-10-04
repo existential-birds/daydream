@@ -853,19 +853,22 @@ async def phase_test_and_heal(
             return False
         return guard_result is not None
 
-    async def _stop_after_failed_repair(output: str) -> TestAndHealResult:
-        """End the loop on a repair turn the host could not vouch for.
+    async def _stop_with_handoff(output: str, *, offer_clipboard: bool) -> TestAndHealResult:
+        """End the loop on a failed test run, emitting the failure handoff once.
 
-        An interrupted, failed, or unconfined repair leaves the run with no green
-        tree and no further attempt, so the handoff is the only artifact a human
-        reads: the repair record has to name itself there instead of living only
-        in this return value.
+        Every terminal failure shape — a repair turn the host could not vouch
+        for, a declined/absorbed heal gate, an explicit abort — leaves the run
+        with no green tree and no further attempt, so the handoff is the only
+        artifact a human reads: the repair record has to name itself there
+        instead of living only in this return value. ``offer_clipboard`` is the
+        caller's policy: an operator aborting by hand may copy the output, a
+        machine-decided stop must never prompt.
         """
         await _emit_failure_handoff(
             backend,
             work,
             output,
-            offer_clipboard=False,
+            offer_clipboard=offer_clipboard,
             repairs=tuple(repairs),
             artifact_session=artifact_session,
             allow_standalone=allow_standalone,
@@ -927,23 +930,13 @@ async def phase_test_and_heal(
             ui.print_error(
                 agent.console, "Tests failed", "Aborting heal loop (no further auto-retries)",
             )
-            await _emit_failure_handoff(
-                backend,
-                work,
-                output,
-                offer_clipboard=False,
-                repairs=tuple(repairs),
-                artifact_session=artifact_session,
-                allow_standalone=allow_standalone,
-                run_context=run_context,
-            )
-            return TestAndHealResult(False, retries_used, False, False, tuple(attempts), tuple(repairs))
+            return await _stop_with_handoff(output, offer_clipboard=False)
         if decision is True:
             # Bounded auto fix-and-retry: launch one fix attempt, then loop.
             agent.console.print()
             ui.print_info(agent.console, "Launching agent to fix test failures (auto)...")
             if not await _launch_fix(output):
-                return await _stop_after_failed_repair(output)
+                return await _stop_with_handoff(output, offer_clipboard=False)
             continue
 
         ui.print_menu(agent.console, "What would you like to do?", [
@@ -1039,7 +1032,7 @@ async def phase_test_and_heal(
             agent.console.print()
             ui.print_info(agent.console, "Launching agent to fix test failures...")
             if not await _launch_fix(output):
-                return await _stop_after_failed_repair(output)
+                return await _stop_with_handoff(output, offer_clipboard=False)
             continue
 
         elif choice == "3":
@@ -1048,17 +1041,7 @@ async def phase_test_and_heal(
 
         elif choice == "4":
             ui.print_error(agent.console, "Aborted", "User requested abort")
-            await _emit_failure_handoff(
-                backend,
-                work,
-                output,
-                offer_clipboard=True,
-                repairs=tuple(repairs),
-                artifact_session=artifact_session,
-                allow_standalone=allow_standalone,
-                run_context=run_context,
-            )
-            return TestAndHealResult(False, retries_used, False, False, tuple(attempts), tuple(repairs))
+            return await _stop_with_handoff(output, offer_clipboard=True)
 
         else:
             ui.print_warning(agent.console, f"Invalid choice '{choice}', aborting")

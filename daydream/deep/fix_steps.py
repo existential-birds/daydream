@@ -361,7 +361,7 @@ def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> 
     deep_state = DeepState(ctx.data)
     iteration = deep_state.iteration
     outcomes = deep_state.fix_outcomes or {}
-    state = DeepState(ctx.data).fix_cycle_state
+    state = deep_state.fix_cycle_state
     if iteration in (None, 1) or not outcomes:
         initial_dispatch = [dict(i) for i in canonical]
         for item in initial_dispatch:
@@ -454,8 +454,8 @@ def _stabilization_stop(
 
 async def _step_fix(ctx: FlowContext) -> Stop | None:
     """Run one policy-bound fix round using its own complete rollback point."""
-    state = DeepState(ctx.data).fix_cycle_state
     deep_state = DeepState(ctx.data)
+    state = deep_state.fix_cycle_state
     items = _round_dispatch_items(ctx, deep_state.items)
     if not items:
         return None
@@ -658,8 +658,8 @@ def _persist_fix_outcomes_current(
 
 
 async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | Stop | None:
-    state = DeepState(ctx.data).fix_cycle_state
     deep_state = DeepState(ctx.data)
+    state = deep_state.fix_cycle_state
     snapshot = deep_state.fix_round_snapshot
     if snapshot is None:
         try:
@@ -807,7 +807,7 @@ async def finalize_retained_tree_after_test(
 ) -> Stop | None:
     """Strictly stabilize post-heal state in at most two guard passes."""
     deep_state = DeepState(ctx.data)
-    state = DeepState(ctx.data).fix_cycle_state
+    state = deep_state.fix_cycle_state
     attempts = list(result.attempts)
     if not attempts:
         return _stabilization_stop(
@@ -938,7 +938,7 @@ async def finalize_retained_tree_after_test(
 async def _step_test(ctx: FlowContext) -> Stop | None:
     """Run typed, identity-bound tests and strictly finalize the retained tree."""
     deep_state = DeepState(ctx.data)
-    state = DeepState(ctx.data).fix_cycle_state
+    state = deep_state.fix_cycle_state
     async with phase_scope(DaydreamPhase.TEST):
         try:
             # Two resolutions, deliberately: test execution and summarization run on
@@ -1072,7 +1072,7 @@ def _persist_push_verdict(
 ) -> None:
     """Replace the current session's exact push-attempt outcome atomically."""
     deep_state = DeepState(ctx.data)
-    state = DeepState(ctx.data).fix_cycle_state
+    state = deep_state.fix_cycle_state
     payload: dict[str, object] = {
         "schema_version": 1,
         "session_id": state.session_id,
@@ -1098,7 +1098,7 @@ def _persist_push_verdict(
 async def _step_commit(ctx: FlowContext) -> Stop | None:
     """Stage the finalized retained paths once, then commit and push them."""
     deep_state = DeepState(ctx.data)
-    state = DeepState(ctx.data).fix_cycle_state
+    state = deep_state.fix_cycle_state
     snapshot = state.latest_retained
     if snapshot is None:
         print_error(console, "Commit/Push Failed", "retained tree was not finalized")

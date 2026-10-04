@@ -306,27 +306,6 @@ def worktree_unlock(repo: Path, path: Path) -> None:
     )
 
 
-def registered_worktree_containing(repo: Path, path: Path) -> Path | None:
-    """Find the checkout's entry in Git's authoritative worktree registry.
-
-    A broken ``.git`` link or admin chain can fail ordinary worktree discovery while
-    still registered; such entries must never be treated as disposable residue.
-    """
-    proc = process._run_git(
-        repo, ["worktree", "list", "--porcelain"], timeout=30, retries=0, error_context="git worktree list failed"
-    )
-    wanted = path.resolve()
-    for line in proc.stdout.splitlines():
-        if line.startswith("worktree "):
-            try:
-                candidate = Path(line.split(maxsplit=1)[1].strip()).resolve()
-            except (IndexError, OSError):
-                continue
-            if candidate == wanted:
-                return candidate
-    return None
-
-
 def worktree_lock_mtime(path: Path) -> float | None:
     """Return the lock-armed time of the worktree at *path*, or None if unlocked.
 
