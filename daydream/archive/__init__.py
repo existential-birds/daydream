@@ -41,7 +41,15 @@ if TYPE_CHECKING:
 
 
 class ArchiveFinalizationError(RuntimeError):
-    """Strict host archive finalization did not complete successfully."""
+    """Optional run-data persistence did not complete successfully."""
+
+
+class ArchiveIntegrityError(ArchiveFinalizationError):
+    """Protected runtime evidence failed validation; publication must stop."""
+
+
+class ArchivePublicationError(ArchiveFinalizationError):
+    """An explicitly requested diagnostic output could not be published."""
 
 
 def get_archive_dir() -> Path:
@@ -61,10 +69,14 @@ def get_archive_dir() -> Path:
 
 def _validate_frozen_artifacts(artifacts: ArtifactTreeSnapshot) -> None:
     """Reject a frozen tree that changed before a strict host consumer."""
-    from daydream.artifact_visibility import manifest_tree
+    from daydream.artifact_visibility import ArtifactVisibilityError, manifest_tree
 
-    if manifest_tree(artifacts.root) != artifacts.manifest:
-        raise ArchiveFinalizationError("frozen artifact tree changed before archive")
+    try:
+        actual = manifest_tree(artifacts.root)
+    except (ArtifactVisibilityError, OSError) as exc:
+        raise ArchiveIntegrityError("frozen artifact tree could not be validated") from exc
+    if actual != artifacts.manifest:
+        raise ArchiveIntegrityError("frozen artifact tree changed before archive")
 
 
 def _copy_snapshot_bundle(
@@ -82,22 +94,21 @@ def _copy_snapshot_bundle(
     from daydream.artifact_visibility import OutputLabel
 
     recorder_provenance = run.recorder_provenance
-    _project_documents(
-        run.trajectories,
-        run_dir,
-        session_id=recorder_provenance.session_id,
-    )
+    try:
+        _project_documents(run.trajectories, run_dir, session_id=recorder_provenance.session_id)
+    except (ValueError, UnicodeError) as exc:
+        raise ArchiveIntegrityError("frozen trajectory projection failed") from exc
     findings_routes = [
         route for route in artifacts.destinations if route.label is OutputLabel.FINDINGS_OUTPUT
     ]
     findings_src: Path | None = None
     if findings_routes:
         if len(findings_routes) != 1 or findings_routes[0].frozen_path is None:
-            raise ArchiveFinalizationError("frozen artifact destination is malformed")
+            raise ArchiveIntegrityError("frozen artifact destination is malformed")
         try:
             relative = findings_routes[0].frozen_path.relative_to(artifact_provenance.live_root)
         except ValueError as exc:
-            raise ArchiveFinalizationError("frozen artifact destination escaped its run") from exc
+            raise ArchiveIntegrityError("frozen artifact destination escaped its run") from exc
         findings_src = artifacts.root / relative
     _copy_run_artifacts(
         artifacts.root,
@@ -202,7 +213,7 @@ def finalize_archive_run(
         or artifacts.workspace_key != artifact_provenance.workspace_key
         or (work is not None and artifact_provenance.public_source != work.source)
     ):
-        raise ArchiveFinalizationError("archive identity mismatch")
+        raise ArchiveIntegrityError("archive identity mismatch")
     _validate_frozen_artifacts(artifacts)
     if not config.archive and not config.dump_artifacts:
         return
@@ -252,6 +263,7 @@ def finalize_archive_run(
                 if "error" in evaluation:
                     raise ValueError("evaluation returned an incomplete result")
             except Exception as exc:
+                _validate_frozen_artifacts(artifacts)
                 raise ArchiveFinalizationError("evaluation finalization failed") from exc
             (assembly_dir / "evaluation.json").write_text(json.dumps(evaluation, indent=2), encoding="utf-8")
             _validate_frozen_artifacts(artifacts)
@@ -274,25 +286,33 @@ def finalize_archive_run(
             json.dumps(manifest.to_dict(), indent=2),
             encoding="utf-8",
         )
-        if config.archive and upload:
-            from daydream.archive import hub
-
-            hub_repo_id = hub.resolve_hub_repo(config)
-            _validate_frozen_artifacts(artifacts)
-            if hub_repo_id:
-                # Upload refusals/failures are already warned by the uploader;
-                # preserve the completed local bundle regardless of its disposition.
-                hub.upload_run_bundle(assembly_dir, hub_repo_id, session_id)
         if config.dump_artifacts:
             if dump_path is None:
-                raise ArchiveFinalizationError("dump finalization path is missing")
+                raise ArchivePublicationError("dump finalization path is missing")
             from daydream.archive.dump import publish_dump
 
             # A scan refusal withholds only the optional dump. Raw frozen
             # evidence and completed review outputs remain intact. Mark copying
             # started first so publication I/O failures still clean the stage.
             dump_started = True
-            dump_started = publish_dump(assembly_dir, dump_path, session_id)
+            try:
+                dump_started = publish_dump(assembly_dir, dump_path, session_id)
+            except Exception as exc:
+                raise ArchivePublicationError("dump publication failed") from exc
+        if config.archive and upload:
+            from daydream.archive import hub
+            from daydream.archive._console import warn
+
+            try:
+                hub_repo_id = hub.resolve_hub_repo(config)
+                _validate_frozen_artifacts(artifacts)
+                if hub_repo_id:
+                    hub.upload_run_bundle(assembly_dir, hub_repo_id, session_id)
+            except Exception as exc:
+                _validate_frozen_artifacts(artifacts)
+                if isinstance(exc, ArchiveIntegrityError):
+                    raise
+                warn(f"Data Collection: run upload failed ({type(exc).__name__})")
         _validate_frozen_artifacts(artifacts)
         os.replace(assembly_dir, run_dir)
         assembly_created = False
@@ -306,7 +326,10 @@ def finalize_archive_run(
         for private in owned_paths:
             if private is not None and private.is_dir() and not private.is_symlink():
                 _discard_or_note(private, exc, "archive")
-        if dump_started and dump_path is not None and dump_path.is_dir():
+        if (
+            dump_started and dump_path is not None and dump_path.is_dir()
+            and (isinstance(exc, (ArchiveIntegrityError, ArchivePublicationError)) or not isinstance(exc, Exception))
+        ):
             _discard_or_note(dump_path, exc, "dump", recreate=True)
         if isinstance(exc, ArchiveFinalizationError) or not isinstance(exc, Exception):
             raise

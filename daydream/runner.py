@@ -499,9 +499,7 @@ async def _run_workspace(
                             config=dispatch_config, work=work, successful=successful,
                         )
                         with anyio.CancelScope(shield=True):
-                            archive_error = await anyio.to_thread.run_sync(finalize)
-                        if archive_error is not None:
-                            finalization_error = archive_error
+                            await anyio.to_thread.run_sync(finalize)
                     except BaseException as exc:
                         if primary is None:
                             raise

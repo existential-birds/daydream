@@ -48,7 +48,7 @@ def upload_run_bundle(run_dir: Path, repo_id: str, session_id: str) -> bool:
     conflicts retry up to three total attempts with exponential backoff.
     """
     if not os.environ.get("HF_TOKEN"):
-        _warn(f"Skip HF upload of {session_id}: HF_TOKEN not set (set it to upload run bundles)")
+        _warn(f"Data Collection: skip HF upload of {session_id}: HF_TOKEN not set (set it to upload run bundles)")
         return False
 
     global HfApi
@@ -58,7 +58,7 @@ def upload_run_bundle(run_dir: Path, repo_id: str, session_id: str) -> bool:
 
             HfApi = huggingface_hub.HfApi
         except ImportError:
-            _warn("Skip HF upload: huggingface_hub not installed (pip install huggingface-hub)")
+            _warn("Data Collection: skip HF upload: huggingface_hub not installed (pip install huggingface-hub)")
             return False
 
     from daydream.archive import scan
@@ -66,7 +66,7 @@ def upload_run_bundle(run_dir: Path, repo_id: str, session_id: str) -> bool:
     scan_result = scan.scan_run_dir(run_dir)
     if scan_result.blocking:
         _warn(
-            f"Refusing HF upload of {session_id}: bundle secret scan found "
+            f"Data Collection: refusing HF upload of {session_id}: bundle secret scan found "
             f"problems ({scan_result.summary()})"
         )
         return False
@@ -87,7 +87,7 @@ def upload_run_bundle(run_dir: Path, repo_id: str, session_id: str) -> bool:
                 f"{session_id} will be uploaded to a public repo"
             )
     except Exception as exc:  # noqa: BLE001 - absorb, the run must not fail
-        _warn(f"HF upload of {session_id} to {repo_id} failed (non-fatal): {exc}")
+        _warn(f"Data Collection: HF upload of {session_id} failed ({type(exc).__name__})")
         return False
 
     for attempt in range(1, 4):
@@ -106,6 +106,6 @@ def upload_run_bundle(run_dir: Path, repo_id: str, session_id: str) -> bool:
             if conflict and attempt < 3:
                 time.sleep(min(_UPLOAD_RETRY_BASE_DELAY_S * (2 ** (attempt - 1)), _UPLOAD_RETRY_MAX_DELAY_S))
                 continue
-            _warn(f"HF upload of {session_id} to {repo_id} failed (non-fatal): {message}")
+            _warn(f"Data Collection: HF upload of {session_id} failed ({type(exc).__name__})")
             break
     return False

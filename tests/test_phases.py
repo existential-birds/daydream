@@ -2605,15 +2605,19 @@ def test_resolve_handoff_paths_routes_complete_artifact_references(
     recorder = SimpleNamespace(target_dir=repo, session_id=session_id,
                                on_write=(lambda *_args, **_kwargs: None) if ephemeral else None)
     handoff, artifacts = _resolve_handoff_paths(cast(TrajectoryRecorder, recorder), work, allow_standalone=True)
-    daydream_dir = archive / "runs" / session_id if ephemeral else repo / ".daydream"
-    run_dir = daydream_dir if ephemeral else daydream_dir / "runs" / session_id
+    daydream_dir = source / ".daydream" if ephemeral else repo / ".daydream"
+    run_dir = daydream_dir / "runs" / session_id
     assert handoff == run_dir / "handoff.md"
+    if ephemeral:
+        assert artifacts == HandoffArtifacts(), "unpersisted archive evidence is unavailable"
+        return
     expected = {"trajectory": run_dir / "trajectory.json", "trajectories": run_dir / "trajectories",
-                "manifest": run_dir / "manifest.json", "diff": daydream_dir / "diff.patch",
+                "diff": daydream_dir / "diff.patch",
                 "deep": daydream_dir / "deep"}
     for field, path in expected.items():
         assert getattr(artifacts, field) == path
         assert not path.exists(), "handoff references must survive the recorder's later flush"
+    assert artifacts.manifest is None, "optional persistence cannot promise a manifest"
 
 
 

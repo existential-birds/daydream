@@ -396,6 +396,7 @@ def _assert_partial_evidence_published(repo: Path, archive_dir: Path) -> None:
 @pytest.mark.parametrize("failure_mode", ["none", "destination", "archive"])
 async def test_artifact_session_runner_controlled_custom_flow_publishes_after_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path, failure_mode: str,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     repo = _feature_repo(tmp_path)
     _write_probe_flow(ext_dir, "artifact-probe")
@@ -404,7 +405,7 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     if failure_mode == "archive":
         (repo / ".review-output.md").write_bytes(b"operator baseline\x00")
         def fail_archive(**_kwargs: Any) -> None:
-            raise ArchiveFinalizationError("injected strict archive failure")
+            raise ArchiveFinalizationError("credential=SECRET_COLLECTION_FAILURE /private/runtime")
         monkeypatch.setattr("daydream.archive.finalize_archive_run", fail_archive)
     external_trajectory = tmp_path / "external trajectory.json"
     external_trajectory.write_text("operator baseline\n", encoding="utf-8")
@@ -427,23 +428,74 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
                 replacement.write_text("concurrent replacement\n", encoding="utf-8")
                 os.replace(replacement, external_trajectory)
             backend.release.set()
-    if failure_mode != "none":
+    if failure_mode == "destination":
         assert result == [1]
         assert not list((archive_dir / "runs").glob("*"))
-        if failure_mode == "destination":
-            assert external_trajectory.read_text(encoding="utf-8") == "concurrent replacement\n"
-            assert not (repo / ".daydream").exists()
-        else:
-            assert external_trajectory.read_text(encoding="utf-8") == "operator baseline\n"
-            assert (repo / ".review-output.md").read_bytes() == b"operator baseline\x00"
-            assert not (repo / ".daydream" / "runs").exists()
+        assert external_trajectory.read_text(encoding="utf-8") == "concurrent replacement\n"
+        assert not (repo / ".daydream").exists()
         return
     assert result == [0]
+    if failure_mode == "archive":
+        public_runs = list((repo / ".daydream" / "runs").iterdir())
+        assert len(public_runs) == 1
+        assert external_trajectory.read_bytes() == (public_runs[0] / "trajectory.json").read_bytes()
+        assert (repo / ".review-output.md").read_bytes() == b"operator baseline\x00"
+        assert not list((archive_dir / "runs").glob("*"))
+        output = capsys.readouterr().out
+        assert "Data Collection" in output
+        assert "SECRET_COLLECTION_FAILURE" not in output
+        assert "/private/runtime" not in output
+        return
     public_run, archived_run = _assert_one_published_run(repo, archive_dir)
     archived_bytes = (archived_run / "trajectory.json").read_bytes()
     assert (public_run / "trajectory.json").read_bytes() == archived_bytes
     assert external_trajectory.read_bytes() == archived_bytes
     assert json.loads((archived_run / "manifest.json").read_text())["session_id"] == public_run.name
+
+@pytest.mark.parametrize("failure", ["identity", "frozen_tree", "dump_publication"])
+async def test_archive_integrity_and_output_publication_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path, failure: str,
+) -> None:
+    from daydream.archive import finalize_archive_run
+    from daydream.archive.dump import publish_dump
+
+    repo = _feature_repo(tmp_path)
+    _write_probe_flow(ext_dir, "artifact-integrity")
+    monkeypatch.setattr(runner, "create_backend", lambda *_a, **_k: _ControlledBackend())
+    explicit = tmp_path / "trajectory.json"
+    explicit.write_bytes(b"prior trajectory")
+    dump = tmp_path / "dump"
+    dump.mkdir()
+    (dump / "prior.txt").write_bytes(b"prior dump")
+
+    def corrupt_identity(**kwargs: Any) -> None:
+        kwargs["artifacts"] = replace(kwargs["artifacts"], session_id="foreign-session")
+        finalize_archive_run(**kwargs)
+
+    def corrupt_frozen_tree(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        (args[0] / "diff.patch").write_text("changed after freeze")
+        raise OSError("evaluation failed after changing frozen input")
+
+    def fail_dump(assembly: Path, destination: Path, session_id: str) -> bool:
+        publish_dump(assembly, destination, session_id)
+        raise OSError("dump publication failed")
+
+    if failure == "identity":
+        monkeypatch.setattr("daydream.archive.finalize_archive_run", corrupt_identity)
+    elif failure == "frozen_tree":
+        monkeypatch.setattr("daydream.eval.analyzer.analyze_session", corrupt_frozen_tree)
+    else:
+        monkeypatch.setattr("daydream.archive.dump.publish_dump", fail_dump)
+    result = await _run_private(RunConfig(
+        target=str(repo), base="main", flow_name="artifact-integrity", trajectory_path=explicit,
+        archive=True, run_eval=failure == "frozen_tree", dump_artifacts=str(dump), non_interactive=True,
+    ), tmp_path)
+    assert result == 1
+    assert explicit.read_bytes() == b"prior trajectory"
+    assert not (repo / ".daydream").exists()
+    assert (dump / "prior.txt").read_bytes() == b"prior dump"
+    assert not list((archive_dir / "runs").glob("*"))
+
 
 async def test_forced_ephemeral_runner_records_source_while_backend_uses_worktree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path

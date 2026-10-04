@@ -332,7 +332,10 @@ Full contract: `docs/extensions.md`.
   owner and the active artifact session through workspace, recorder, and flow composition. Route
   generated files through the session. Join all writers before freezing immutable evidence;
   archive/evaluate/publish only after that boundary. Never reconstruct public output paths or
-  broaden backend read roots.
+  broaden backend read roots. Optional archive/evaluation/index/upload failures emit value-free
+  data-collection diagnostics and do not change review results or runtime output dispositions.
+  Identity, frozen-tree integrity, findings projection, and output publication failures remain
+  closed failures. Handoffs must not promise nonexistent optional archive manifests.
 - **Conventional Commits** (`feat(backends): ...`). Stage explicitly (`git add <path>`), never `git add -A`.
 - Fix bugs at the root. Never bypass the hook, skip tests, or `git push --no-verify`.
 - Own your own bugs in plain language. Never describe your defect as the tool being buggy.

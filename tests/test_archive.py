@@ -846,7 +846,7 @@ def test_bundle_rejects_a_sibling_document_bound_to_another_session(tmp_path: Pa
         status="complete", cutoff_at="2026-01-01T00:00:01Z", root_trajectory_id=recorder.session_id,
         documents=(root, TrajectoryDocumentSnapshot("fork-1", target / "fork.json", foreign)),
     )
-    with pytest.raises(ValueError, match="frozen trajectory document identity"):
+    with pytest.raises(ArchiveFinalizationError, match="frozen trajectory projection failed"):
         _assemble_bundle(target, run_dir, recorder, write_snapshot=snapshot)
     assert not (run_dir / "trajectories").exists()
 
@@ -2250,7 +2250,7 @@ def test_archive_rejects_a_sibling_document_from_another_session(
         documents=(root, TrajectoryDocumentSnapshot("fork-1", target / "fork.json", foreign)),
     )
 
-    with pytest.raises(ArchiveFinalizationError, match="archive finalization failed"):
+    with pytest.raises(ArchiveFinalizationError, match="frozen trajectory projection failed"):
         _strict_archive(target=target, session_id=recorder.session_id, config=make_config(target, archive=True),
             write_snapshot=snapshot,
         )
