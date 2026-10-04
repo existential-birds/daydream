@@ -95,35 +95,13 @@ def _assert_fields(event: Any, expected: dict[str, Any]) -> None:
                 "cost_usd": 0.001,
             }, id="metrics-event",
         ),
+        pytest.param(TurnEndEvent, {}, {}, id="turn-end-event"),
     ],
 )
 def test_event_field_values(cls: type, kwargs: dict[str, Any], expected: dict[str, Any]) -> None:
-    _assert_fields(cls(**kwargs), expected)
-
-@pytest.mark.parametrize(
-    ("cls", "kwargs"),
-    [
-        pytest.param(TextEvent, {"text": "hi"}, id="text-event"),
-        pytest.param(DiagnosticEvent, {"code": "parser_gap", "message": "unknown item"}, id="diagnostic-event"),
-        pytest.param(ThinkingEvent, {"text": "reasoning"}, id="thinking-event"),
-        pytest.param(
-            ToolStartEvent, {"id": "abc", "name": "Read", "input": {"file_path": "/tmp/a"}}, id="tool-start-event"
-        ), pytest.param(ToolResultEvent, {"id": "abc", "output": "ok", "is_error": False}, id="tool-result-event"),
-        pytest.param(
-            CostEvent, {"cost_usd": 0.5, "input_tokens": 10, "output_tokens": 20, "cached_tokens": 3}, id="cost-event",
-        ),
-        pytest.param(
-            MetricsEvent,
-            {
-                "message_id": "msg_01", "prompt_tokens": 10, "completion_tokens": 20, "cached_tokens": 5,
-                "cost_usd": 0.001,
-            }, id="metrics-event",
-        ), pytest.param(ResultEvent, {"structured_output": None, "continuation": None}, id="result-event"),
-        pytest.param(TurnEndEvent, {}, id="turn-end-event"),
-    ],
-)
-def test_event_has_default_z_timestamp(cls: type, kwargs: dict[str, Any]) -> None:
     event = cls(**kwargs)
+    _assert_fields(event, expected)
+    # Every event class inherits the default Z-suffixed UTC timestamp.
     assert isinstance(event.timestamp, str)
     assert event.timestamp.endswith("Z"), f"timestamp must end with Z: {event.timestamp!r}"
 

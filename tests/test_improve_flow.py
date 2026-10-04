@@ -1,8 +1,6 @@
 import json
 import os
 import re
-import shutil
-import sys
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, cast
@@ -66,6 +64,7 @@ from tests.harness.git_helpers import (
     configure_identity,
     git,
     init_repo,
+    install_diff_base_git_shim,
 )
 from tests.harness.improve_backend import (
     ImproveStubBackend,
@@ -205,29 +204,8 @@ async def test_branch_improve_redacts_malformed_external_git_probe_before_model(
     before_status = _git_status_porcelain(repo)
     before_refs = git(repo, "for-each-ref", "--format=%(refname) %(objectname)")
     backend = install_improve_stub(monkeypatch, repo)
-    real_git = shutil.which("git")
-    assert real_git is not None
-    shim_dir = tmp_path / "private git shim"
-    shim_dir.mkdir()
-    shim = shim_dir / "git"
-    shim.write_text(
-        f"#!{sys.executable}\n"
-        "import os, subprocess, sys\n"
-        "args = sys.argv[1:]\n"
-        "head = os.environ['DAYDREAM_TEST_HEAD']\n"
-        "if args[:2] == ['rev-parse', '--verify'] and "
-        "len(args) == 3 and args[2] == head + '^{commit}':\n"
-        "    print('PRIVATE_STDOUT_SENTINEL')\n"
-        "    raise SystemExit(0)\n"
-        "raise SystemExit(subprocess.run([os.environ['DAYDREAM_TEST_REAL_GIT'], *args]).returncode)\n",
-        encoding="utf-8",
-    )
-    shim.chmod(0o755)
-    monkeypatch.setenv("DAYDREAM_TEST_REAL_GIT", real_git)
-    monkeypatch.setenv("DAYDREAM_TEST_HEAD", head)
-    monkeypatch.setenv("PATH", str(shim_dir))
-
-    code = await _run_improve(make_config, repo, improve_focus="branch")
+    with install_diff_base_git_shim(tmp_path, monkeypatch, mode="malformed-head", head=head):
+        code = await _run_improve(make_config, repo, improve_focus="branch")
     captured = capsys.readouterr()
     output = captured.out + captured.err
 

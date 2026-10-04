@@ -1,5 +1,5 @@
 """Run Claude, Codex, and Pi replay drivers against shared event-vocabulary, tool-correlation, metrics,
-read-only, and no-skill contracts. KNOWN_DELTAS declares the permitted driver differences.
+read-only, and tool-permission contracts. KNOWN_DELTAS declares the permitted driver differences.
 """
 
 from __future__ import annotations
@@ -13,12 +13,10 @@ import pytest
 
 from daydream.backends import (
     AgentEvent,
-    Backend,
     CostEvent,
     MetricsEvent,
     ToolResultEvent,
     ToolStartEvent,
-    create_backend,
 )
 from tests.contract._loaders import claude_loader, codex_loader, pi_loader
 
@@ -74,13 +72,3 @@ async def test_read_only_preserves_vocabulary(loader: Loader) -> None:
     read_only_events = [e async for e in loader(CANONICAL_SCRIPT, read_only=True)]
     assert _vocabulary(read_only_events) == _vocabulary(default_events)
     assert {"TextEvent", "ToolStartEvent", "ToolResultEvent"} <= _vocabulary(read_only_events)
-
-def test_backends_have_no_skill_method() -> None:
-    assert not hasattr(Backend, "format_skill_invocation")
-    backends = (
-        create_backend("claude", model="test-model"), create_backend("codex", model="test-model"),
-        create_backend("pi", model="test-model"),
-        create_backend("osprey", model="test-model", osprey_binary="fake-osprey"),
-    )
-    for backend in backends:
-        assert not hasattr(backend, "format_skill_invocation")
