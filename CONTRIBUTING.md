@@ -113,8 +113,6 @@ being rejected.
 
 ## Testing policy
 
-Run-finalization tests must distinguish optional data collection failures, which preserve review results and completed outputs, from identity, frozen-evidence, findings projection, and output publication failures, which fail closed. A requested diagnostic dump may be withheld when its bundle cannot be assembled; a prepared dump survives optional index or upload failure.
-
 For the [terminal findings contract](README.md#terminal-review-findings-contract), exercise the production runner with real Git/public outputs, stub provider/GitHub seams, and inject filesystem faults at actual read/write/install operations.
 
 Every user-visible behavior must have at least one **real-path test**: a test
