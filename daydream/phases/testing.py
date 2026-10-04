@@ -22,6 +22,7 @@ from daydream.backends import (
     Backend,
     ContinuationToken,
 )
+from daydream.deep.repair_job import record_diagnostic
 from daydream.extensions import get_registry
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.generated_files import (
@@ -47,11 +48,20 @@ from daydream.phases.inputs import (
     _tail_test_output,
     append_extended_facts,
 )
+from daydream.phases.repair_checkpoint import (
+    RepairCheckpoint,
+    bounded_result_excerpt,
+    command_label,
+    failure_identity,
+    next_experiment_for,
+    write_repair_checkpoint,
+)
 from daydream.phases.repair_outcome import RepairOutcome, classify_repair_outcome
 from daydream.phases.test_evidence import (
     RepairAttemptEvidence,
     TestAndHealResult,
     TestAttemptEvidence,
+    _canonical_test_cmd,
     phase_test_once,
 )
 from daydream.redaction import redact_text
@@ -82,6 +92,127 @@ def _repair_excerpt(text: str) -> tuple[str, ...]:
     if len(excerpt) > _REPAIR_EXCERPT_MAX_CHARS:
         excerpt = excerpt[-_REPAIR_EXCERPT_MAX_CHARS:]
     return (excerpt,)
+
+
+def _resolve_test_argv(config: Any, recipe: TestRecipe | None) -> list[str]:
+    """Return the host's resolved test argv for the checkpoint, or ``[]``.
+
+    An unresolvable command is recorded as unknown rather than guessed: the
+    checkpoint names what the job ran, and a guessed command would let a
+    resuming job re-run something the host never executed.
+    """
+    if recipe is not None and recipe.command.resolved:
+        # A resolved recipe command is argv; the defensive string case would be a
+        # fact the recipe type forbids, so it is named rather than executed.
+        value = recipe.command.value
+        return list(value) if isinstance(value, tuple) else [value] if isinstance(value, str) else []
+    try:
+        return _canonical_test_cmd(config) or []
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def _capture_repair_checkpoint(
+    work: WorkContext,
+    *,
+    job_id: str,
+    execution_id: str,
+    base_ref: str,
+    failure_output: str,
+    turn_output: str,
+    abort_reason: str | None,
+    base_tree_key: str,
+    retained_tree_key: str,
+    footprint: AuthorizedFixFootprint,
+    repair_instance: Backend,
+    wall_budget_s: float,
+    tool_call_budget: int | None,
+    elapsed_s: float,
+    config: Any,
+    recipe: TestRecipe | None,
+    artifact_session: ArtifactSession | None,
+    allow_standalone: bool,
+) -> str:
+    """Persist this turn's authorized work and return the checkpoint's file name.
+
+    The patch is read from the *live tree* and restricted to the authorized
+    paths, at this exact point in ``_launch_fix``: confinement, the
+    generated-file guard, and any rerun all restore files, so a later read could
+    find nothing left to capture. Raises ``OSError``/``ValueError`` when the
+    checkpoint cannot be persisted or verified — an uncaptured repair is a repair
+    that never happened, so the caller must treat it as blocking.
+    """
+    outcome = classify_repair_outcome(abort_reason, turn_output)
+    deep_path = (
+        artifact_dir_for(work.repo, session=artifact_session, allow_standalone=allow_standalone) / "deep"
+    )
+    consumed: dict[str, float] = {"wall_budget_s": wall_budget_s, "elapsed_s": elapsed_s}
+    if tool_call_budget is not None:
+        consumed["tool_call_budget"] = float(tool_call_budget)
+    checkpoint = RepairCheckpoint(
+        job_id=job_id,
+        execution_id=execution_id,
+        candidate_patch=git_ops.build_recommended_patch_strict(
+            work.repo, base_ref, sorted(footprint.run_allowed_paths),
+        ).decode("utf-8", errors="replace"),
+        base_tree_key=base_tree_key,
+        retained_tree_key=retained_tree_key,
+        authorized_scope=tuple(sorted(footprint.run_allowed_paths)),
+        policy_revision=footprint.policy_revision,
+        failure_identity=failure_identity(failure_output),
+        test_command=command_label(_resolve_test_argv(config, recipe)),
+        focused_results=(bounded_result_excerpt(failure_output),) if failure_output.strip() else (),
+        next_experiment=next_experiment_for(outcome),
+        backend_name=type(repair_instance).__name__.removesuffix("Backend").lower(),
+        model=repair_instance.model,
+        consumed_budget=consumed,
+    )
+    return write_repair_checkpoint(deep_path, checkpoint).name
+
+
+def _capture_or_note(
+    work: WorkContext,
+    error: BaseException,
+    *,
+    output: str,
+    turn_output: str,
+    abort_reason: str | None,
+    job_id: str,
+    execution_id: str,
+    snapshot: str | None,
+    input_tree_key: str,
+    retained_tree_key: str,
+    footprint: AuthorizedFixFootprint,
+    repair_instance: Backend,
+    wall_budget_s: float,
+    tool_call_budget: int | None,
+    elapsed_s: float,
+    config: Any,
+    recipe: TestRecipe | None,
+    artifact_session: ArtifactSession | None,
+    allow_standalone: bool,
+) -> str | None:
+    """Capture the checkpoint on a turn that raised, noting rather than replacing the error.
+
+    The dying turn still owns a tree, so the capture happens before confinement
+    here too. A capture that fails is attached to the propagating error as a
+    note: the host error is the caller's answer and must not be swallowed by a
+    secondary storage failure, but the missing evidence must not vanish either.
+    """
+    try:
+        return _capture_repair_checkpoint(
+            work, job_id=job_id, execution_id=execution_id,
+            base_ref=snapshot or "HEAD", failure_output=output, turn_output=turn_output,
+            abort_reason=abort_reason, base_tree_key=input_tree_key,
+            retained_tree_key=retained_tree_key, footprint=footprint,
+            repair_instance=repair_instance, wall_budget_s=wall_budget_s,
+            tool_call_budget=tool_call_budget, elapsed_s=elapsed_s,
+            config=config, recipe=recipe, artifact_session=artifact_session,
+            allow_standalone=allow_standalone,
+        )
+    except Exception as exc:  # noqa: BLE001 -- the note is the report, not a crash
+        error.add_note(f"repair checkpoint not captured: {type(exc).__name__}: {exc}")
+        return None
 
 
 def _continuation_ref(token: ContinuationToken | None) -> str | None:
@@ -476,6 +607,8 @@ async def phase_test_and_heal(
         nonlocal retries_used, continuation
         # Snapshot each healing turn because deep's earlier batch guard cannot
         # protect existing generated files from subsequent test-healing edits.
+        # The snapshot is also the checkpoint's base ref, which is why it is taken
+        # before the turn rather than reconstructed afterwards.
         try:
             snapshot = git_ops.stash_create(work.repo)
             pre_untracked = set(git_ops.list_untracked(work.repo))
@@ -511,12 +644,21 @@ async def phase_test_and_heal(
                 wall_budget_s=wall_budget_s,
                 run_context=run_context,
             )
-        except Exception:
-            # A turn that died still left a tree behind, so confinement runs on
-            # this path too. The original error is what the caller must see: a
-            # confinement failure here is reported, never raised over it.
-            # Cancellation is not this branch's business -- it already carries its
-            # own cleanup contract.
+        except Exception as exc:
+            # A turn that died still left a tree behind, so the checkpoint is
+            # captured and confinement runs on this path too. The original error
+            # is what the caller must see: a capture or confinement failure here
+            # is recorded, never raised over it. Cancellation is not this branch's
+            # business -- it already carries its own cleanup contract.
+            _capture_or_note(work, exc, output=output, turn_output="",
+                abort_reason=None, job_id=job_id, execution_id=f"{job_id}:execution:{retries_used + 1}",
+                snapshot=snapshot, input_tree_key=input_tree_key,
+                retained_tree_key=capture_tree_key(), footprint=footprint,
+                repair_instance=repair_instance, wall_budget_s=wall_budget_s,
+                tool_call_budget=tool_call_budget, elapsed_s=time.monotonic() - started,
+                config=config, recipe=recipe, artifact_session=artifact_session,
+                allow_standalone=allow_standalone,
+            )
             _confine_repaired_tree(confinement)
             raise
         # The host, not the turn, decides what happened: the abort reason outranks
@@ -525,6 +667,49 @@ async def phase_test_and_heal(
         turn_output = partial_output if isinstance(partial_output, str) else ""
         retries_used += 1
         diagnostics: list[str] = []
+        # Capture the turn's authorized work HERE, from the live tree, before any
+        # restoration: confinement, the generated-file guard, and every rerun
+        # restore files, so a read after this point could find nothing left to
+        # capture. `run_agent`'s partial is not a substitute -- the agent discards
+        # it at the moment of interruption -- and this ordering is load-bearing:
+        # do not "simplify" it into the guard's own after-the-fact diff.
+        checkpoint_ref: str | None = None
+        checkpoint_blocked = False
+        try:
+            checkpoint_ref = _capture_repair_checkpoint(
+                work, job_id=job_id, execution_id=f"{job_id}:execution:{retries_used}",
+                # Without a pre-turn stash the honest base is HEAD; the capture is
+                # still confined to the authorized paths either way.
+                base_ref=snapshot or "HEAD", failure_output=output, turn_output=turn_output,
+                abort_reason=abort_reason, base_tree_key=input_tree_key,
+                retained_tree_key=capture_tree_key(), footprint=footprint,
+                repair_instance=repair_instance, wall_budget_s=wall_budget_s,
+                tool_call_budget=tool_call_budget, elapsed_s=time.monotonic() - started,
+                config=config, recipe=recipe, artifact_session=artifact_session,
+                allow_standalone=allow_standalone,
+            )
+        except (OSError, ValueError) as exc:
+            # The last valid checkpoint is retained and the blocker is named in
+            # both the repair record and the job record. This blocks the repair
+            # below: work that cannot be captured is work the job cannot resume.
+            checkpoint_blocked = True
+            diagnostics.append(f"checkpoint_write_failed: {type(exc).__name__}: {exc}")
+            record_diagnostic(
+                artifact_dir_for(work.repo, session=artifact_session, allow_standalone=allow_standalone)
+                / "deep",
+                job_id,
+                f"checkpoint_write_failed: {type(exc).__name__}: {exc}",
+            )
+        except GitError as exc:
+            # No Git read means no candidate patch can exist at all, which is the
+            # same degraded mode the generated-file guard below already fails open
+            # on: it names the miss and lets the turn stand rather than pretending
+            # the tree is empty. Distinct from a storage blocker, which blocks.
+            diagnostics.append(f"checkpoint_capture_unavailable: {exc}")
+            ui.print_warning(
+                agent.console,
+                f"Could not capture a repair checkpoint (no Git read available): {exc}",
+            )
         # Git-observed paths, never the feedback items' targets: only the tree
         # itself says what the turn actually changed.
         changed: tuple[str, ...] = ()
@@ -564,10 +749,20 @@ async def phase_test_and_heal(
             # invalidates the evidence bound to the pre-confinement tree.
             output_tree_key=capture_tree_key(),
             changed_paths=changed,
+            checkpoint_ref=checkpoint_ref,
             focused_evidence=_repair_excerpt(turn_output),
             continuation_ref=_continuation_ref(continuation_token),
             diagnostics=tuple(diagnostics),
         ))
+        if checkpoint_blocked:
+            # An uncaptured repair cannot be resumed, so it is not a candidate the
+            # host will rerun a test suite against. The record above is what says so.
+            ui.print_warning(
+                agent.console,
+                "Repair checkpoint could not be persisted; not rerunning tests against an "
+                "uncaptured repair tree.",
+            )
+            return False
         # Each repair turn still starts a fresh context; the token is recorded for
         # a resuming job, never fed to the next turn of this loop.
         continuation = None

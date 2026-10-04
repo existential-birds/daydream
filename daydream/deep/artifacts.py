@@ -63,6 +63,10 @@ class DeepArtifact(StrEnum):
     PUSH_VERDICT = "push-verdict.json"
     REMOTE_CI_VERDICT = "remote-ci-verdict.json"
     REMOTE_CI_HANDOFF = "remote-ci-handoff.json"
+    # Repair-job state and its per-turn checkpoint survive the process; the
+    # checkpoint carries captured work, the record carries the job's own state.
+    REPAIR_CHECKPOINT = "repair-checkpoint.json"
+    REPAIR_JOB = "repair-job.json"
     # Routing evidence is append-only and never a decision input.
     LATENCY_ROUTING = "latency-routing.json"
     DIFF_KEY = "diff-key"

@@ -93,6 +93,7 @@ from daydream.phases.inputs import (
 from daydream.phases.publish import (
     _do_commit,
 )
+from daydream.phases.repair_checkpoint import read_repair_checkpoint
 from daydream.phases.repair_outcome import (
     RepairOutcome,
     classify_repair_outcome,
@@ -3987,9 +3988,10 @@ async def test_phase_test_and_heal_records_each_agent_attempt_and_heal_scope(
     footprint = AuthorizedFixFootprint.build(tmp_path, {"readme.md"}, feedback)
     backend = ScriptedBackend(script=[_FAIL_TURN, _FIX_TURN, _PASS_TURN])
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *args, **kwargs: "2")
-    # Two keys per test attempt plus one pair per repair turn, which records the
-    # tree the repair started from and the tree it left behind.
-    keys = iter(["in-1", "out-1", "fix-in-1", "fix-out-1", "in-2", "out-2",])
+    # Two keys per test attempt plus three per repair turn: the tree the repair
+    # started from, the tree its checkpoint captured before any restoration, and
+    # the tree it left behind after confinement.
+    keys = iter(["in-1", "out-1", "fix-in-1", "fix-captured-1", "fix-out-1", "in-2", "out-2",])
     result = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), feedback_items=feedback, session_id="session-2",
         capture_tree_key=lambda: next(keys), footprint=footprint, allow_standalone=True,
@@ -4000,6 +4002,12 @@ async def test_phase_test_and_heal_records_each_agent_attempt_and_heal_scope(
     assert [(a.input_tree_key, a.output_tree_key) for a in result.attempts] == [("in-1", "out-1"), ("in-2", "out-2",),]
     assert all(a.kind == "agent" and a.command is None for a in result.attempts)
     assert [(r.input_tree_key, r.output_tree_key) for r in result.repairs] == [("fix-in-1", "fix-out-1"),]
+    # Without Git there is no candidate patch to capture: the capture is skipped
+    # and named, exactly as the generated-file guard fails open in the same mode.
+    read = read_repair_checkpoint(tmp_path / ".daydream" / "deep")
+    assert (read.checkpoint, read.blocked) == (None, False)
+    assert any("checkpoint_capture_unavailable" in diagnostic
+        for diagnostic in result.repairs[0].diagnostics)
     heal_prompt = backend.prompts[1]
     assert "Authorized edit scope" in heal_prompt
     assert "a.py" in heal_prompt and "readme.md" in heal_prompt
