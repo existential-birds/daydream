@@ -277,6 +277,62 @@ expires. The runtime does not start another shutdown against that exporter.
 For a custom destination, see the
 [trace exporter extension contract](extensions.md#trace-exporters).
 
+## Repair jobs
+
+A repair job (#1210) makes an interrupted test repair resumable, which means an
+operator has to be able to tell an interrupted repair from a completed one
+*without* reading the transcript. Two affordances provide that.
+
+**Concise reason codes on the enclosing step's telemetry.** After the `test`
+step runs, every repair turn of the job — across every execution it dispatched —
+emits one `repair_outcome` phase event on the TEST scope through
+`TrajectoryRecorder.emit_repair_outcome(...)`. The event's metadata carries only
+names and counts:
+
+| Metadata key | Type | Meaning |
+|--------------|------|---------|
+| `execution_id` | string | The one bounded execution this turn was. |
+| `outcome` | string | The host's classification: `candidate_complete`, `diagnosis_unresolved`, `budget_interrupted`, `execution_error`, or `scope_blocked`. |
+| `abort_reason` | string or null | The host's stop reason verbatim, e.g. `wall_budget_exceeded`; null when the turn ended on its own. |
+| `repair_reason_code` | string or null | The same stop converged onto the existing public `ReasonCode` vocabulary; null when the turn ended on its own. |
+| `changed_paths` | array(string) | Authorized paths the tree actually changed. |
+
+These are **recorder phase events, not span attributes**: they carry no model
+prose, no prompt, and no token counts, so they need no content policy, and they
+are recorded whether or not trace export is enabled. The converged reason travels
+as this event's metadata and never replaces the lifecycle `reason_code` of the
+step or attempt that owns it. A turn's per-attempt span hierarchy is unchanged by
+a repair — a repair is an ordinary agent invocation inside the step.
+
+**The persisted records.** Two generated artifacts, private during the run and
+published into the checkout at finalization like every other output:
+
+- `.daydream/deep/test-verdict.json` carries a `repairs` array — one
+  `RepairAttemptEvidence.payload()` per repair turn of the job. It is always
+  present, never omitted, so a consumer never has to tell "no repair happened"
+  from "this writer predates repair records".
+- `.daydream/deep/repair-job.json` is the job's own `RepairJobRecord`, and
+  `.daydream/deep/repair-checkpoint.json` is the authorized work an interrupted
+  turn left behind. Both carry a `format_version`; a stale or corrupt one is a
+  named recovery blocker, never an empty job.
+
+**Inspecting a job from the record alone.** `repair-job.json` is sufficient to
+answer, without the trajectory or any backend output:
+
+| Question | Field |
+|----------|-------|
+| Where does the job stand? | `state` — `running`, `paused`, `ready_to_resume`, `validating`, `completed`, `blocked`, `exhausted` |
+| What is left? | `consumed_s` against `policy.job_total_s` (minus the non-configurable `policy.reserve_s`), plus any `granted_allowance_s` |
+| How many executions has it run? | `executions` against `policy.max_executions` |
+| Why did it last change state? | `last_transition_reason` — prose that names the bound or the evidence |
+| What did it learn? | `completed_experiments`, `disproven_hypotheses`, `progress_evidence`, `unchanged_evidence`, `next_experiment` |
+| What bounds were it granted? | the captured `policy` (`execution_s`, `job_total_s`, `max_executions`, `reserve_s`, `max_cost_usd`) |
+| What work is recoverable? | `checkpoint_ref`, the authorized-scope path list, and `diagnostics` for host degradations such as a checkpoint that could not be persisted |
+
+A `state` other than `completed` is structurally barred from reporting a passing
+verdict or authorizing a commit, so the record alone also answers whether the run
+may claim green.
+
 ## Field contract and versioned matrix
 
 Every emitted field is frozen in [observability-fields.md](observability-fields.md):

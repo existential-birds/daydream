@@ -336,6 +336,124 @@ when no kind is eligible (which costs zero agent calls). The rendered blocks
 reach the PR summary through `ctx.diagrams` and `review-output.md` through a
 `## Diagrams` section.
 
+#### Repair jobs (`test` step, issue #1210)
+
+Step 17 (`test`) owns repair work. When the retained tree's suite is red, the
+step may dispatch bounded *repair turns*; those turns are one **repair job** that
+outlives a single call, and the contract below is what a fork's own phase needs
+in order to participate honestly. Nothing here extends the `Backend` protocol:
+`run_agent` still returns exactly three values, and the repair turn consumes all
+three — the final text, the continuation token, and the abort reason.
+
+**The five-case outcome vocabulary.** `daydream.phases.repair_outcome.RepairOutcome`
+is a `StrEnum`, and it is the *host's* classification, never the model's claim.
+A host abort always wins over whatever the turn said: prose claiming a fix inside
+an interrupted turn is partial diagnosis, not completion.
+
+| Member | `value` | Reached when |
+|--------|---------|--------------|
+| `CANDIDATE_COMPLETE` | `candidate_complete` | The turn's own structured payload claimed a complete candidate and the host validated it. Reachable only from the explicit completion path. |
+| `DIAGNOSIS_UNRESOLVED` | `diagnosis_unresolved` | The turn ended on its own without narrowing the failure — including a blank turn, because silence is not a success claim. |
+| `BUDGET_INTERRUPTED` | `budget_interrupted` | A budget stopped the turn. The only case a later execution may continue from. |
+| `EXECUTION_ERROR` | `execution_error` | A non-budget host stop (transport or backend failure). |
+| `SCOPE_BLOCKED` | `scope_blocked` | The turn's only candidate was outside the authorization policy and no widening was granted. |
+
+`RepairOutcome` is **not** a `ReasonCode` extension and adds no new public stop
+reason. `repair_reason_code(abort_reason)` maps a turn's abort reason onto the
+existing vocabulary (budget reasons through `reason_for_budget`, an already-valid
+code through `ReasonCode`, anything unrecognised to `ReasonCode.BACKEND_FAILURE`,
+and a turn that ended on its own to `None`).
+
+**The evidence record.** Every repair turn produces one
+`daydream.phases.test_evidence.RepairAttemptEvidence` (frozen dataclass). Its
+fields are host observations, not turn claims — `changed_paths` is what the tree
+actually holds, `output_tree_key` is read from the tree, and a value the host
+cannot produce is left empty rather than invented:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `job_id` | `str` | The repair job's identity (`repair-<session_id>`). |
+| `execution_id` | `str` | This one bounded execution. |
+| `run_id` | `str` | The run the execution belongs to. |
+| `outcome` | `RepairOutcome` | The host's classification (above). |
+| `abort_reason` | `str \| None` | The host's stop reason, verbatim; `None` when the turn ended on its own. |
+| `backend_name` / `model` | `str` | The backend that actually served the repair turn (the FIX backend, not the TEST one). |
+| `execution_elapsed_s` / `job_elapsed_s` | `float` | Wall seconds for this execution, and for the job so far. |
+| `input_tree_key` / `output_tree_key` | `str` | Full-delta tree identity before and after the turn. |
+| `changed_paths` | `tuple[str, ...]` | Authorized paths the tree actually changed. |
+| `checkpoint_ref` | `str \| None` | The durable checkpoint written for this turn, if any. |
+| `focused_evidence` | `tuple[str, ...]` | Bounded, redacted excerpts of the failure output the turn worked from. |
+| `scope_request` | `Mapping \| None` | The turn's parsed scope request (see below). |
+| `continuation_ref` | `str \| None` | Digest of the continuation token, never the token itself. |
+| `diagnostics` | `tuple[str, ...]` | Named degradation of the host's own accounting; never a swallowed failure. |
+
+`reason_code` is a derived property (the converged public reason for the stop).
+`payload()` is its JSON form, used verbatim in `test-verdict.json`'s `repairs`
+array.
+
+**The phase result.** `TestAndHealResult` gained `repairs:
+tuple[RepairAttemptEvidence, ...] = ()` alongside `attempts`, so a caller can
+tell an interrupted repair from a completed one without re-reading the
+transcript. The field defaults empty, so a phase that never runs a repair turn is
+unchanged. The `test` step merges the records of **every** execution of the job
+before writing the verdict, so a green run that went through an interrupted
+repair reports that interruption.
+
+**The scope-request return path.** A repair turn may not edit outside the
+authorized scope; it may *ask*. When a correct fix needs a repository-relative
+path the turn cannot edit, the fix prompt instructs it to name the path in its
+final message with the `file:line` evidence that requires it and stop there.
+`repair_scope_request(repo, payload)` parses that request: it canonicalizes every
+named path through `repository_paths` (absolute paths, traversal, and symlink
+crossings raise `InvalidRepositoryFilePath` rather than being dropped), keeps
+bounded redacted per-path `evidence`, records `evidence_source`, and sorts the
+paths so two equivalent requests read identically. A payload that is not an
+object, or whose `paths` is not a list, requests nothing; a malformed `paths`
+list is an error, never a narrower-than-asked authorization.
+
+Granting is the coordinator's call, never the parser's: only the turn's *own*
+request with its own per-path evidence may widen the policy, through
+`AuthorizedFixFootprint.authorize_scope_request(...)` — the same shape and the
+same audited `origin="scope_request"` event as `authorize_new_generated`. A path
+that merely appears in test output is not evidence of authorization, and a
+request that cannot be canonicalized grants nothing.
+
+**Durable state.** Two artifacts under the run's deep directory, both private
+during the run and published at finalization like every other generated output:
+
+- `.daydream/deep/repair-checkpoint.json` (`DeepArtifact.REPAIR_CHECKPOINT`) — the
+  authorized-path-only patch captured from the **live tree** before any
+  restoration, plus structured facts, digests, and bounded redacted excerpts. It
+  never carries raw model prose, environment values, or an unbounded command
+  line. Reading is deliberately asymmetric: a *corrupt* checkpoint is a recovery
+  blocker (`CheckpointRead.blocked`), never an empty job.
+- `.daydream/deep/repair-job.json` (`DeepArtifact.REPAIR_JOB`) — the job's
+  `RepairJobRecord`: `state`, the captured `policy` (`execution_s`,
+  `job_total_s`, `max_executions`, `reserve_s`, `max_cost_usd`), `consumed_s`,
+  `cumulative_cost_usd`, `granted_allowance_s`, `executions`, `scope_request`,
+  `unchanged_evidence`, `progress_evidence`, `next_experiment`,
+  `completed_experiments`, `disproven_hypotheses`, `last_transition_reason`,
+  `checkpoint_ref`, `last_execution_budget`, and `diagnostics`. Both files carry
+  a `format_version`; both are merged read-modify-write, in the shape of
+  `deep/routing_record.py`, so a resume never erases an earlier execution's
+  evidence.
+
+Job states are `running`, `paused`, `ready_to_resume`, `validating`, `completed`,
+`blocked`, and `exhausted`. A job is **structurally fail-closed**: only
+`completed` may report a passing verdict or authorize a commit
+(`cannot_report_green` / `cannot_authorize_commit`). No absolute clock reading is
+ever persisted — `execution_allowance_s()` derives each execution's allowance from
+the stored consumption, so every deadline is process-local. A job's bounds are
+stored, not re-resolved, so a resumed job cannot inherit a broader policy than it
+was granted. A green run that never repaired writes no job record and takes no
+owner lock, so an ordinary run's artifact set is unchanged.
+
+**Ownership and continuation.** `daydream.deep.repair_coordinator` is the only
+component that dispatches a further execution, from inside the existing
+`runner.run` flow. Exactly one live repair owner may exist per job: an in-process
+owner registry plus the exclusive workspace `flock` exclude a second process, and
+a lock-contention result warns and continues instead of running a second worker.
+
 #### `diagram` (`daydream --diagram-only KIND <target>`)
 
 | # | Step | Registered step key |
