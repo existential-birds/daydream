@@ -333,6 +333,22 @@ def test_redactor_preserves_certificate_block() -> None:
     assert "[REDACTED_PEM_KEY]" not in out.message
     assert "BEGIN CERTIFICATE" in out.message
 
+@pytest.mark.parametrize("marker", ["[REDACTED_API_KEY]", "<redacted>"])
+def test_structured_redaction_leaves_an_existing_marker_alone(marker: str) -> None:
+    """A later pass must not swap one host redaction marker for another."""
+    text = f"api_key = already {marker}"
+    assert redact_value({"note": text}) == {"note": text}
+
+
+def test_structured_redaction_still_masks_a_real_literal() -> None:
+    assert redact_value({"api_key": "s3cr3tplaintext"}) == {
+        "api_key": "[REDACTED_CREDENTIAL]"
+    }
+    assert redact_value({"note": "api_key = s3cr3tplaintext"}) == {
+        "note": 'api_key = "[REDACTED_CREDENTIAL]"'
+    }
+
+
 def test_redact_value_recurses_redacts_keys_and_values_without_mutating() -> None:
     sentinel = "ghp_" + "x" * 16
     payload = {"token": sentinel, sentinel: "key-secret", "nested": {"path": f"/Users/{sentinel}"},
@@ -348,6 +364,13 @@ def test_redact_value_recurses_redacts_keys_and_values_without_mutating() -> Non
     assert out["items"] == ["[REDACTED_API_KEY]", 42, None]  # scalars preserved
     assert out["flag"] is True and out[1] == "non-string-key"  # non-string keys untouched
     assert redact_value(("sk-" + "x" * 16,)) == ("[REDACTED_API_KEY]",)  # tuple rebuilt
+    opaque = object()
+    assert redact_value(opaque) is opaque  # non-container leaves keep identity
+    # Nested container shapes used by improve artifacts: tuple of list of dict,
+    # with non-sensitive keys redacted by flat/structured text rules only.
+    assert redact_value(([{"note": "credential sk-abcdef123456 in the note"}],)) == (
+        [{"note": "credential [REDACTED_API_KEY] in the note"}],
+    )
 
 
 @pytest.mark.parametrize("sensitive_key", [

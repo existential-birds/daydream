@@ -8,7 +8,7 @@ from datetime import date
 from typing import Any
 
 from daydream.improve.prioritize import plan_priority
-from daydream.improve.redaction import redact_model_value
+from daydream.redaction import redact_value
 from daydream.trajectory import redact_text
 
 _SLUG_SEPARATOR = re.compile(r"[^a-z0-9]+")
@@ -237,8 +237,8 @@ def render_plan(
     run_session_id: str | None = None,
 ) -> str:
     """Render validated PlanWriterResult data without authored Markdown."""
-    finding = redact_model_value(finding)
-    plan = redact_model_value(plan)
+    finding = redact_value(finding)
+    plan = redact_value(plan)
     scope = plan["scope"]
     why = plan["why_this_matters"]
     current_state: list[str] = []

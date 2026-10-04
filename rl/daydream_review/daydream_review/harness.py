@@ -174,37 +174,31 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
         if runtime.type == "docker":
             # The image bakes agent-owned repository/mirror trees. Probe writability through
             # run-as-agent, since a root probe would pass via CAP_DAC_OVERRIDE and hide missing
-            # ownership. Failure requires rebuilding the image, never runtime ownership repair.
-            preflight = await runtime.run(
+            # ownership. One sh -c chains every surface so any unwritable one short-circuits to a
+            # non-zero exit: the two tree roots, plus the per-file surfaces (.git, refs) whose
+            # ownership writable roots alone do not guarantee, since commits and pushes must be
+            # able to write their files. Failure requires rebuilding the image, never runtime
+            # ownership repair. Quote configured paths in the privileged sh -c command to prevent
+            # whitespace splitting or shell metacharacter execution under the agent UID.
+            writability = await runtime.run(
                 [
                     "run-as-agent",
                     "sh",
                     "-c",
-                    f"test -w {shlex.quote(self.config.repo_path)} && test -w /srv/mirror.git",
+                    f"test -w {shlex.quote(self.config.repo_path)}"
+                    f" && test -w {shlex.quote(self.config.repo_path)}/.git"
+                    " && test -w /srv/mirror.git && test -w /srv/mirror.git/refs",
                 ],
                 env,
             )
-            # Also probe .git and mirror refs: writable roots alone do not guarantee commits/pushes
-            # can write their files. Partial ownership requires rebuilding. Quote configured paths
-            # in the privileged sh -c command to prevent whitespace splitting or shell metacharacter
-            # execution under the agent UID.
-            surfaces = await runtime.run(
-                [
-                    "run-as-agent",
-                    "sh",
-                    "-c",
-                    f"test -w {shlex.quote(self.config.repo_path)}/.git && test -w /srv/mirror.git/refs",
-                ],
-                env,
-            )
-            if preflight.exit_code != 0 or surfaces.exit_code != 0:
+            if writability.exit_code != 0:
                 raise RuntimeError(
                     "repo and mirror are not agent-writable (tree roots plus the per-file "
                     "write surfaces: the checkout's .git and the mirror's refs); the image "
                     "was likely built without the ownership layer. Rebuild it with "
                     "images/build_images.py, which bakes agent ownership for "
                     f"{self.config.repo_path} and /srv/mirror.git: "
-                    f"{preflight.stdout}{preflight.stderr}{surfaces.stdout}{surfaces.stderr}"
+                    f"{writability.stdout}{writability.stderr}"
                 )
             # Use the root-owned wrapper to drop Docker launches and all backend subprocesses to the
             # agent UID, which cannot write sealed surfaces. The local smoke runtime has no root

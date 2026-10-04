@@ -22,19 +22,56 @@ from tests.test_benchmark_harbor_build import (
     _stub_wheel,
 )
 
+# The runtime-requirements lock is committed, not generated at package time: nothing in the
+# production packaging path runs `uv export`. These helpers ARE that regeneration recipe, so
+# they live with the only test that uses them and with the committed lock they must reproduce.
+_GENERATION_COMMAND = "uv export --frozen --no-dev --no-emit-project --format requirements-txt"
 
-def test_runtime_lock_header_and_render(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    ver = importlib.metadata.version("daydream")
-    uv_lock = tmp_path / "uv.lock"
-    uv_lock.write_text("LOCKBODY\n")
-    monkeypatch.setattr(pkg, "_uv_export_body", lambda path: "httpx==0.28.1 \\\n    --hash=sha256:abc\n")
-    header, body = pkg.render_runtime_lock(uv_lock, daydream_version=ver)
-    assert f"daydream=={ver}" not in body
-    assert "--hash=sha256:" in body
-    assert "uv export --frozen --no-dev --no-emit-project" in header
-    assert f"template_version: {TEMPLATE_VERSION}" in header
-    assert f"source_uv_lock_sha256: {hashlib.sha256(uv_lock.read_bytes()).hexdigest()}" in header
-    assert f"daydream_version: {ver}" in header
+
+def _strip_uv_header(text: str) -> str:
+    """Strip uv's leading generated-comment block while preserving requirement comments."""
+    lines = text.splitlines(keepends=True)
+    index = 0
+    while index < len(lines) and (lines[index].startswith("#") or not lines[index].strip()):
+        index += 1
+    return "".join(lines[index:])
+
+
+def _uv_export_body(uv_lock_path: Path) -> str:
+    """Export hash-pinned runtime requirements from *uv_lock_path*."""
+    command = _GENERATION_COMMAND.split()
+    try:
+        result = subprocess.run(
+            command, cwd=uv_lock_path.resolve().parent, capture_output=True, text=True, check=False,
+        )
+    except OSError as exc:
+        raise pkg.PackageError(f"cannot run `{_GENERATION_COMMAND}`: {exc}") from exc
+    if result.returncode != 0:
+        raise pkg.PackageError(
+            f"`{_GENERATION_COMMAND}` failed with exit {result.returncode}: {result.stderr.strip()}"
+        )
+    body = _strip_uv_header(result.stdout)
+    if "--hash=sha256:" not in body:
+        raise pkg.PackageError(f"`{_GENERATION_COMMAND}` did not produce hash-pinned requirements")
+    return body
+
+
+def _render_runtime_lock(uv_lock_path: Path, *, daydream_version: str) -> tuple[str, str]:
+    """Return the deterministic header and exported requirements body."""
+    source_sha256 = hashlib.sha256(uv_lock_path.read_bytes()).hexdigest()
+    body = _uv_export_body(uv_lock_path)
+    if f"daydream=={daydream_version}" in body:
+        raise pkg.PackageError("runtime lock unexpectedly includes the Daydream project")
+    header = (
+        "# Daydream Harbor runtime requirements (generated; do not edit)\n"
+        f"# daydream_version: {daydream_version}\n"
+        f"# source_uv_lock_sha256: {source_sha256}\n"
+        f"# generation_command: {_GENERATION_COMMAND}\n"
+        f"# template_version: {TEMPLATE_VERSION}\n"
+        "\n"
+    )
+    return header, body
+
 
 def test_runtime_lock_regeneration_is_noop_on_unchanged(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
@@ -45,11 +82,10 @@ def test_runtime_lock_regeneration_is_noop_on_unchanged(tmp_path: Path) -> None:
     (repo / "pyproject.toml").write_bytes((root / "pyproject.toml").read_bytes())
     ver = importlib.metadata.version("daydream")
     committed = (root / "daydream/benchmark/harbor/runtime-requirements.lock").read_bytes()
-    regenerated = "".join(pkg.render_runtime_lock(uv_lock, daydream_version=ver)).encode()
-    assert regenerated == committed
+    # Byte-identity is the whole header contract: every field, in order, plus the pinned body.
+    assert "".join(_render_runtime_lock(uv_lock, daydream_version=ver)).encode() == committed
     uv_lock.write_bytes(uv_lock.read_bytes() + b"\n# drift\n")
-    regenerated2 = "".join(pkg.render_runtime_lock(uv_lock, daydream_version=ver)).encode()
-    assert regenerated2 != committed
+    assert "".join(_render_runtime_lock(uv_lock, daydream_version=ver)).encode() != committed
 
 def test_validate_wheel_accepts_matching_and_rejects_mismatch(tmp_path: Path) -> None:
     good, ver = _stub_wheel(tmp_path)

@@ -104,13 +104,19 @@ def init_repo(repo: Path) -> None:
 
 
 def seed_feature_branch(repo: Path, *, base: dict[str, str], feature: dict[str, str], base_message: str = "base",
-    feature_message: str = "feature",
+    feature_message: str = "feature", base_ref: str | None = None,
 ) -> str:
-    """Create main and feature commits from path/content maps; return feature HEAD."""
+    """Create main and feature commits from path/content maps; return feature HEAD.
+
+    ``base_ref`` additionally branches the base commit under that name, for callers whose
+    review config resolves ``--base`` against a literal ref rather than a SHA.
+    """
     init_repo(repo)
     for name, content in base.items():
         write_and_stage(repo, name, content)
     commit(repo, base_message)
+    if base_ref is not None:
+        git(repo, "branch", base_ref)
     git(repo, "checkout", "-b", "feature")
     for name, content in feature.items():
         write_and_stage(repo, name, content)
