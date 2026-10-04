@@ -1,7 +1,9 @@
 """Simple message and prompt components.
 
-The error/warning/success/cost/info/skipped/dim print helpers,
-the selection menu, and the interactive ``prompt_user`` input.
+The error/warning/success/cost/info/skipped/dim print helpers and the
+selection menu. Interactive input is owned by ``RunContext.choice`` in
+``daydream.run_context``; the raw reader ``_read_user_input`` below is that
+gateway's stdin-only leaf.
 """
 
 from rich import box
@@ -121,15 +123,3 @@ def _read_user_input(console: Console, message: str, default: str) -> str:
         )
         return default
     return user_input if user_input else default
-
-
-def prompt_user(console: Console, message: str, default: str = "") -> str:
-    """Resolve a free-form prompt through the current run's interaction gateway."""
-    from daydream.run_context import resolve_run_context
-
-    return resolve_run_context().choice(
-        message,
-        default=default,
-        safe_default=default,
-        console=console,
-    )

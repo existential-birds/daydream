@@ -20,13 +20,12 @@ import daydream.ui.tools as ui_tools
 from daydream.agent import run_agent
 from daydream.backends import ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
 from daydream.exploration import Convention, Dependency, ExplorationContext, FileInfo
-from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
+from daydream.run_context import InteractionPolicy, RunContext, resolve_run_context
 from daydream.trajectory import DaydreamPhase
 from daydream.ui import (
     AgentTextRenderer,
     format_verdict_join,
     print_verification_summary,
-    prompt_user,
     render_exploration_summary,
 )
 from daydream.ui.agent_stream import _summarize_input
@@ -55,6 +54,11 @@ def _capture_console(fn: Callable[[Console], None]) -> str:
     console = Console(file=StringIO(), record=True, force_terminal=True, width=200)
     fn(console)
     return console.export_text()
+
+
+def _ask(console: Console, message: str, default: str = "n") -> str:
+    """Ask through the run's interaction gateway, the sole owner of prompt policy."""
+    return resolve_run_context().choice(message, default=default, safe_default=default, console=console)
 
 
 def _write_verdicts_artifact(directory: Path, *, verdicts: list[dict[str, Any]], selected: int, skipped: int) -> Path:
@@ -157,30 +161,25 @@ def test_render_exploration_summary_empty_is_quiet() -> None:
     out = console.export_text()
     assert "{" not in out and "[" not in out  # never dumps a structure; one dim line at most
 
-def test_prompt_user_returns_default_on_eof(monkeypatch: pytest.MonkeyPatch) -> None:
-
-
+def test_choice_returns_default_on_eof(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The raw reader behind RunContext.choice renders its EOF notice and takes the default."""
     monkeypatch.setattr("builtins.input", Mock(side_effect=EOFError("EOF when reading a line")))
     console = Console(file=StringIO(), record=True)
-    assert prompt_user(console, "Apply fixes now?", default="n") == "n"
+    assert _ask(console, "Apply fixes now?") == "n"
     output = console.export_text()
     assert "EOF" in output, f"expected EOF warning in output, got: {output!r}"
 
-def test_prompt_user_non_interactive_skips_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
-
-
+def test_choice_non_interactive_skips_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unattended policy resolves the safe default without touching stdin."""
     sentinel = Mock(side_effect=AssertionError("input() must not be called"))
     monkeypatch.setattr("builtins.input", sentinel)
     context = RunContext(InteractionPolicy(interactive=False))
-    with bind_run_context(context):
-        assert prompt_user(Console(), "Apply fixes now?", default="n") == "n"
+    assert context.choice("Apply fixes now?", default="n", safe_default="n", console=Console()) == "n"
     sentinel.assert_not_called()
 
-def test_prompt_user_returns_typed_value_interactively(monkeypatch: pytest.MonkeyPatch) -> None:
-
-
+def test_choice_returns_typed_value_interactively(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("builtins.input", lambda: "y")
-    assert prompt_user(Console(), "Confirm?", default="n") == "y"
+    assert _ask(Console(), "Confirm?", default="n") == "y"
 
 def test_panel_refresh_survives_a_tool_finishing_mid_render() -> None:
     registry = LiveToolPanelRegistry(Console(file=StringIO()))
