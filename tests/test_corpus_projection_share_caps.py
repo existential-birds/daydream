@@ -1,8 +1,8 @@
 """Tests for the projection share-cap stage and its build wiring."""
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -24,6 +24,18 @@ def _mk_record(rid: str, stack: str | None, repo: str, profile: str | None) -> d
     return {"record_id": rid, "tier": "silver", "stack": stack, "profile": {"profile_name": profile},
         "lineage": {"repo_slug": repo, "split": "train"},
     }
+
+
+def _assert_shares_within(records: Sequence[Any], dims: Sequence[tuple[str, Callable[[Any], str], float]]) -> None:
+    """Assert every per-value share of ``records`` is within each dimension's limit (M4)."""
+    total = len(records)
+    assert total > 0, "cap stage must never silently empty the corpus"
+    for key, getter, limit in dims:
+        counts: dict[str, int] = {}
+        for r in records:
+            counts[getter(r)] = counts.get(getter(r), 0) + 1
+        for value, count in counts.items():
+            assert count / total <= limit + 1e-9, f"{key}={value}: {count}/{total} > {limit}"
 
 
 class TestApplyShareCaps:
@@ -58,17 +70,9 @@ class TestApplyShareCaps:
             for i in range(10)
         ]
         kept, _ = _apply_share_caps(records, max_stack_share=0.6, max_repo_share=None, max_profile_share=0.5)
-        total = len(kept)
-        assert total > 0
-        checks: list[tuple[str, float, Callable[[dict[str, Any]], str]]] = [
-            ("stack", 0.6, lambda r: str(r["stack"])), ("profile", 0.5, lambda r: str(r["profile"]["profile_name"])),
-        ]
-        for key, limit, getter in checks:
-            counts: dict[str, int] = {}
-            for r in kept:
-                counts[getter(r)] = counts.get(getter(r), 0) + 1
-            for value, count in counts.items():
-                assert count / total <= limit + 1e-9, f"{key}={value} share {count}/{total}"
+        _assert_shares_within(kept, [
+            ("stack", lambda r: str(r["stack"]), 0.6), ("profile", lambda r: str(r["profile"]["profile_name"]), 0.5),
+        ])
 
     def test_sequential_passes_reconverge_correlated_dimensions(self) -> None:
         # F1-shaped correlated fixture: python is concentrated in repo-a while
@@ -93,17 +97,9 @@ class TestApplyShareCaps:
         # repaired by re-running the stack pass after the repository pass's
         # exclusions.
         assert [r["record_id"] for r in kept] == ["r000", "r001", "r002", "r007", "r008", "r009"]
-        total = len(kept)
-        stack: dict[str, int] = {}
-        repo: dict[str, int] = {}
-        for raw in kept:
-            r = cast(dict[str, Any], raw)
-            stack[str(r["stack"])] = stack.get(str(r["stack"]), 0) + 1
-            repo[str(r["lineage"]["repo_slug"])] = repo.get(str(r["lineage"]["repo_slug"]), 0) + 1
-        for value, count in stack.items():
-            assert count / total <= 0.5 + 1e-9, f"stack={value} share {count}/{total}"
-        for value, count in repo.items():
-            assert count / total <= 0.6 + 1e-9, f"repo={value} share {count}/{total}"
+        _assert_shares_within(kept, [
+            ("stack", lambda r: str(r["stack"]), 0.5), ("repo", lambda r: str(r["lineage"]["repo_slug"]), 0.6),
+        ])
         # The repository pass excluded 3; a later fixed-point pass re-ran the
         # stack pass (1 further exclusion) to repair the drift.
         assert exclusions == {"repo:owner/repo-a": 3, "stack:python": 1}
@@ -198,13 +194,7 @@ class TestBuildWiring:
     def test_share_caps_exceed_and_exclusions_recorded(self, tmp_path: Path) -> None:
         out, summary = self._build(tmp_path, max_stack_share=0.5)
         emitted = [json.loads(line) for line in (out / "corpus.jsonl").read_text().splitlines() if line]
-        assert emitted, "cap stage must never silently empty the corpus"
-        stack_counts: dict[str, int] = {}
-        for r in emitted:
-            stack_counts[str(r["stack"])] = stack_counts.get(str(r["stack"]), 0) + 1
-        total = len(emitted)
-        for value, count in stack_counts.items():
-            assert count / total <= 0.5 + 1e-9, f"stack {value} exceeded cap"
+        _assert_shares_within(emitted, [("stack", lambda r: str(r["stack"]), 0.5)])
         assert summary["share_caps"]["configured"]["stack"] == 0.5
         assert summary["share_caps"]["version"] == 1
         assert summary["exclusions_by_reason"]  # tier/np keys present
@@ -243,18 +233,10 @@ class TestBuildWiring:
             out, bundle, max_stack_share=0.6, max_repo_share=0.6, max_profile_share=0.6,
         ))
         emitted = [json.loads(line) for line in (out / "corpus.jsonl").read_text().splitlines() if line]
-        total = len(emitted)
-        assert total > 0
-        dims: list[tuple[str, Callable[[dict[str, Any]], str], float]] = [
+        _assert_shares_within(emitted, [
             ("stack", lambda r: str(r["stack"]), 0.6), ("repo", lambda r: str(r["lineage"]["repo_slug"]), 0.6),
             ("profile", lambda r: str(r["profile"]["profile_name"]), 0.6),
-        ]
-        for key, getter, limit in dims:
-            counts: dict[str, int] = {}
-            for r in emitted:
-                counts[getter(r)] = counts.get(getter(r), 0) + 1
-            for value, count in counts.items():
-                assert count / total <= limit + 1e-9, f"{key}={value}: {count}/{total} > {limit}"
+        ])
         # The exclusion path executed: the over-share profile value was
         # trimmed at entry and reported as a share-cap exclusion.
         assert any(key.startswith("share-cap:") for key in summary["exclusions_by_reason"]

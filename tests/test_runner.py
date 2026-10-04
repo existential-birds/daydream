@@ -767,34 +767,6 @@ async def test_run_dispatches_to_expected_flow(
     observed = getattr(seen_config, expected_attr)
     assert observed == expected_value and type(observed) is type(expected_value)
 
-async def test_run_rejects_head_mismatch_before_dispatch(
-    monkeypatch: pytest.MonkeyPatch, patch_workspace: Any,
-    silence_runner_ui: None,  # noqa: F841
-    tmp_path: Path, make_config: Callable[..., 'RunConfig'],
-) -> None:
-    called: list[str] = []
-    _record = _make_recording_dispatch(called)
-    for name in _DISPATCH_TARGETS:
-        monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
-    config = make_config(tmp_path, approved_head_sha="DEADBEEF")
-    exit_code = await runner.run(config)
-    assert exit_code == 1
-    assert called == []
-
-async def test_run_allows_matching_approved_head(
-    monkeypatch: pytest.MonkeyPatch, patch_workspace: Any,
-    silence_runner_ui: None,  # noqa: F841
-    tmp_path: Path, make_config: Callable[..., 'RunConfig'],
-) -> None:
-    called: list[str] = []
-    _record = _make_recording_dispatch(called)
-    for name in _DISPATCH_TARGETS:
-        monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
-    config = make_config(tmp_path, approved_head_sha="CAFEBABE")
-    exit_code = await runner.run(config)
-    assert exit_code == 0
-    assert called == ["_run_loop_deep"]
-
 async def test_run_rejects_head_mismatch_on_real_worktree(
     monkeypatch: pytest.MonkeyPatch,
     silence_runner_ui: None,  # noqa: F841

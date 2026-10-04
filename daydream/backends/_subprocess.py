@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import logging
-import math
 import os
 import signal
 
 import anyio
 
-logger = logging.getLogger(__name__)
+from daydream.backends import _parsed_nonnegative_float
 
 # Reset idle detection on each complete line. Codex can remain silent for a
 # whole generation/tool call, so use 2700s (2.7x its largest observed turn).
@@ -50,33 +48,13 @@ def stream_idle_timeout_s(
 ) -> float | None:
     """Read DAYDREAM_STREAM_IDLE_TIMEOUT_S; zero disables detection.
 
-    Malformed, nonfinite, or negative values warn and use the default.
+    Malformed, nonfinite, or negative values warn and use the default. A blank
+    value stays silent (absent), matching the rest of the env handling.
     """
-    raw = os.environ.get(STREAM_IDLE_TIMEOUT_ENV)
-    if raw:
-        try:
-            value = float(raw)
-        except ValueError:
-            logger.warning(
-                "%s=%r is not a valid float; using default %g",
-                STREAM_IDLE_TIMEOUT_ENV, raw, default,
-            )
-        else:
-            if not math.isfinite(value):
-                logger.warning(
-                    "%s=%r is not finite; using default %g",
-                    STREAM_IDLE_TIMEOUT_ENV, raw, default,
-                )
-            elif value < 0:
-                logger.warning(
-                    "%s=%r is negative; using default %g",
-                    STREAM_IDLE_TIMEOUT_ENV, raw, default,
-                )
-            elif value == 0:
-                return None
-            else:
-                return value
-    return default
+    if not os.environ.get(STREAM_IDLE_TIMEOUT_ENV):
+        return default
+    value = _parsed_nonnegative_float(os.environ, STREAM_IDLE_TIMEOUT_ENV, default)
+    return None if value == 0 else value
 
 
 async def readline_with_idle_timeout(
