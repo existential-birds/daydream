@@ -20,7 +20,7 @@ from typing import Any, cast
 from daydream.json_utils import atomic_write_json
 from daydream.training import gate as gate_mod
 from daydream.training.gate import FrozenSplit, GateConfig, GateReport
-from daydream.training.lineage import ResumeAborted, RunIdentity, stage_digests, validate_resume
+from daydream.training.lineage import ResumeAborted, RunIdentity, validate_resume
 from daydream.training.reward import DEFAULT_WEIGHTS, REWARD_VERSION
 from daydream.training.reward_model import OutcomeModel, train_outcome_model
 from daydream.training.rft import validate_full_sha
@@ -484,7 +484,6 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
         "run_identity": identity.to_dict(),
         "dry_run": dry_run,
         "stages": stage_entries,
-        "stage_digests": stage_digests({stage: {"records": records} for stage in stage_entries}),
         "adapter_path": adapter_path,
         "corpus": str(corpus_path),
     }
