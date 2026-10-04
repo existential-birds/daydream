@@ -655,6 +655,7 @@ def _emit_diagram_findings(
     target_dir: Path, config: RunConfig, payload: dict[str, Any], *,
     run_info: str,
     renderers: "pr_review.ReviewRenderers",
+    captured_pr: "pr_review.PRInfo",
     auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
 ) -> int:
     """Write a diagram artifact with no findings or mermaid render.
@@ -663,7 +664,7 @@ def _emit_diagram_findings(
     """
     return _write_findings_for_parsed(
         target_dir, config, [], kind="diagram", diagrams=payload, auth=auth,
-        run_info=run_info, renderers=renderers,
+        run_info=run_info, renderers=renderers, captured_pr=captured_pr,
     )
 
 
@@ -701,39 +702,21 @@ def _write_findings_for_parsed(
     run_info: str,
     renderers: "pr_review.ReviewRenderers",
     auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
-    captured_pr: "pr_review.PRInfo | None" = None,
+    captured_pr: "pr_review.PRInfo",
     terminal_result: dict[str, Any] | None = None,
     snapshot_diff: str | None = None,
 ) -> int:
-    """Resolve a PR and write its strict findings artifact.
+    """Write the artifact for the PR identity the caller captured at run start.
 
-    An unresolved PR is actionable because the artifact must declare a target.
-    Empty findings still produce an artifact so Phase B can clear stale comments.
+    The writer never resolves a target itself, so an artifact always declares
+    the commit its analysis read. Empty findings still produce an artifact so
+    Phase B can clear stale comments.
     """
     assert config.findings_out is not None  # caller gates on findings_out
-    pr: pr_review.PRInfo | None
-    try:
-        if captured_pr is not None:
-            pr = captured_pr
-        elif config.pr_number is not None:
-            pr = pr_review.find_pr_by_number(target_dir, config.pr_number, auth=auth)
-        else:
-            pr = pr_review.find_open_pr(target_dir, auth=auth)
-    except GitError as exc:
-        print_error(console, "Findings Artifact", f"cannot resolve target PR: {exc}")
-        return 1
-    if pr is None:
-        print_error(
-            console,
-            "Findings Artifact",
-            "no PR resolvable for --findings-out — the artifact must declare its "
-            "target (pass --pr-number or open a PR for this branch)",
-        )
-        return 1
 
     artifact = build_findings_artifact(
         target_dir,
-        pr,
+        captured_pr,
         parsed,
         run_info=run_info,
         review_warnings=review_warnings,

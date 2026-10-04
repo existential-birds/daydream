@@ -699,6 +699,7 @@ async def _step_post_diagram(ctx: FlowContext) -> Stop:
     deep_state = DeepState(ctx.data)
     from daydream.git_ops import GitError
     from daydream.pr_review import (
+        PRInfo,
         _resolve_pr,
         diagram_comment_kinds,
         post_diagram_comment_to_pr,
@@ -716,10 +717,24 @@ async def _step_post_diagram(ctx: FlowContext) -> Stop:
         run_info = render_live_run_info(LiveRunInfoSource(get_current_recorder(), ctx.artifacts))
         if run_info.diagnostic is not None:
             print_warning(console, run_info.diagnostic)
+        # The artifact declares the commit this run analysed, so its identity is
+        # the one captured at run start -- never a fresh lookup, which would
+        # relabel an analysis of one checkout with a later PR head.
+        pr = ctx.data.get("analyzed_pr")
+        if not isinstance(pr, PRInfo):
+            print_error(
+                console,
+                "Findings Artifact",
+                "no captured PR identity for --findings-out — the artifact must "
+                "declare the commit it analysed; re-run the diagram flow so the "
+                "PR is captured at run start",
+            )
+            return Stop(1)
         return Stop(
             _emit_diagram_findings(
                 ctx.work.repo, ctx.config, payload, auth=ctx.github_execution.auth,
                 run_info=run_info.markdown, renderers=resolve_review_renderers(ctx.registry),
+                captured_pr=pr,
             )
         )
 

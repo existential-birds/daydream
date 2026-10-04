@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +20,10 @@ from daydream.config import DIAGRAM_MAX_NODES
 from daydream.deep import diagram_steps
 from daydream.findings import write_findings_artifact
 from daydream.pr_review import diagram_marker, parse_diagram_markers, validate_diagram_payload
+from daydream.reviews.models import PRInfo
 from daydream.runner import run
 from tests.harness import diagram_repos as dr
+from tests.harness.console import collapse_panel_text
 from tests.harness.diagram_repos import build_large_cross_module_repo, load_diagram_artifact as _artifact
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git
@@ -39,10 +42,13 @@ def diagram_run(monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., Any]
 ) -> Callable[..., Any]:
     """Run a ``--diagram-only`` flow with a diagram-scripted stub backend."""
     for module in (
-        "daydream.deep.orchestrator", "daydream.deep.review_steps", "daydream.deep.diagram_steps", "daydream.phases",
+        "daydream.deep.review_steps", "daydream.deep.diagram_steps", "daydream.phases",
         "daydream.runner", "daydream.pr_review",
     ):
         silence_console(module)
+    # The orchestrator's error panels stay observable: a run that refuses to
+    # export is only actionable if the operator can read why.
+    silence_console("daydream.deep.orchestrator", keep=("console", "print_error"))
     silence(monkeypatch)
 
     async def _run(target: Path, *, diagram: str = "auto", specs: dict[str, list[dict[str, Any]]] | None = None,
@@ -241,6 +247,7 @@ async def test_findings_out_writes_a_diagram_artifact_phase_b_reposts_it(
     # Phase A stops before any GitHub write.
     assert _issue_comments(fake_gh) == []
     assert artifact["kind"] == "diagram"
+    assert artifact["head_sha"] == git_ops.head_sha(target), "Phase A declares the analyzed commit"
     assert artifact["findings"] == []
     results = artifact["diagrams"]["results"]
     assert results["flowchart"]["status"] == "rendered"
@@ -256,6 +263,132 @@ async def test_findings_out_writes_a_diagram_artifact_phase_b_reposts_it(
     assert len(posted) == 1
     assert expected in posted[0]["body"]
     assert fake_gh.calls("POST", "/repos/acme/widgets/pulls/7/reviews") == []
+
+
+async def test_findings_out_rejects_a_moved_head_before_diagram_export(
+    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A PR head that left the analyzed checkout ends a findings-out diagram run."""
+    target = dr.build_branch_heavy_repo(tmp_path)
+    base = git(target, "rev-parse", "main")
+    fake_gh.serve_pr_view({"number": 7, "state": "OPEN", "headRefName": "feature", "baseRefName": "main",
+        "headRefOid": base, "headRepository": {"name": "widgets", "nameWithOwner": "acme/widgets"},
+        "headRepositoryOwner": {"login": "acme"}, "url": "https://github.com/acme/widgets/pull/7", "body": ""})
+    artifact_path = tmp_path / "findings.json"
+
+    exit_code, stub = await diagram_run(
+        target, diagram="flowchart", specs={"flowchart": [dr.flowchart_spec()]},
+        findings_out=str(artifact_path), pr_number=7,
+    )
+
+    assert exit_code == 1
+    assert not artifact_path.exists()
+    assert stub.calls == [], "the run must reject before spending an agent turn"
+    panel = collapse_panel_text(capsys)
+    assert base[:12] in panel and git_ops.head_sha(target)[:12] in panel
+    assert "re-run against the new head" in panel
+
+
+async def test_findings_out_rejects_a_dirty_diagram_checkout_before_export(
+    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A commit-bound diagram export refuses to describe an uncommitted tree.
+
+    The diagram path still reads its diff (and the diagram grounding) from
+    working-tree content, so an artifact whose ``head_sha`` names the captured
+    commit would not describe the lines it actually read. The clean-checkout
+    gate is therefore mode-independent.
+    """
+    target = dr.build_branch_heavy_repo(tmp_path)
+    fake_gh.serve_open_pr(target)
+    artifact_path = tmp_path / "findings.json"
+    (target / "app/pipeline.py").write_text("DIRTY = True\n", encoding="utf-8")
+
+    exit_code, stub = await diagram_run(
+        target, diagram="flowchart", specs={"flowchart": [dr.flowchart_spec()]},
+        findings_out=str(artifact_path), pr_number=7,
+    )
+
+    assert exit_code == 1
+    assert not artifact_path.exists(), "no artifact may name a commit it did not read"
+    assert stub.calls == [], "the run must reject before spending an agent turn"
+    panel = collapse_panel_text(capsys)
+    assert "clean analyzed checkout" in panel
+
+
+async def test_findings_out_names_a_pr_lookup_failure_instead_of_the_diff(
+    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed PR lookup is reported as a lookup failure, not a diff failure.
+
+    The capture sits outside the diff try-block, so a transport error while
+    resolving the target PR cannot be misreported as "unable to determine base
+    branch for diff" -- the diff was never the thing that failed.
+    """
+    target = dr.build_branch_heavy_repo(tmp_path)
+    fake_gh.serve_open_pr(target)
+    artifact_path = tmp_path / "findings.json"
+
+    def explode(*_a: Any, **_k: Any) -> Any:
+        raise git_ops.GitError("gh pr view: connection reset")
+
+    monkeypatch.setattr("daydream.pr_review.find_pr_by_number", explode)
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", explode)
+
+    exit_code, _stub = await diagram_run(
+        target, diagram="flowchart", specs={"flowchart": [dr.flowchart_spec()]},
+        findings_out=str(artifact_path), pr_number=7,
+    )
+
+    assert exit_code == 1
+    assert not artifact_path.exists()
+    panel = collapse_panel_text(capsys)
+    assert "Unable to resolve pull request for findings export" in panel
+    assert "connection reset" in panel
+    assert "Unable to determine base branch for diff" not in panel
+
+
+async def test_findings_out_binds_a_diagram_artifact_to_the_analyzed_checkout(
+    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The artifact names the analyzed commit even after the served head moves."""
+    target = dr.build_branch_heavy_repo(tmp_path)
+    head = git_ops.head_sha(target)
+    fake_gh.serve_open_pr(target)
+    lookups: list[str] = []
+    pinned = PRInfo(7, head, head, "main", "feature", "acme", "widgets",
+                    "https://github.com/acme/widgets/pull/7")
+    served = pinned
+
+    def lookup(*_a: Any, **_k: Any) -> PRInfo:
+        lookups.append(served.head_sha)
+        return served
+
+    monkeypatch.setattr("daydream.pr_review.find_pr_by_number", lookup)
+    artifact_path = tmp_path / "findings.json"
+    # Mid-run force-push to an ancestor that is present in the local object DB:
+    # every lookup after capture sees the superseded head.
+    original = StubBackend.execute
+
+    async def execute(self: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal served
+        served = replace(pinned, head_sha=git(target, "rev-parse", "main"))
+        async for event in original(self, *args, **kwargs):
+            yield event
+    monkeypatch.setattr(StubBackend, "execute", execute)
+
+    exit_code, _ = await diagram_run(
+        target, diagram="flowchart", specs={"flowchart": [dr.flowchart_spec()]},
+        findings_out=str(artifact_path), pr_number=7,
+    )
+
+    assert exit_code == 0
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert artifact["head_sha"] == head
+    assert git_ops.show(target, artifact["head_sha"], "app/pipeline.py")
+    assert lookups == [head], "the PR is resolved once, at run start"
+
 
 async def test_phase_b_reposts_a_diagram_artifact_without_any_checkout(
     tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], monkeypatch: pytest.MonkeyPatch,

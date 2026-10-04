@@ -89,6 +89,7 @@ from daydream.ui import print_error, print_info, print_preflight_notice, print_w
 from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
+    from daydream.pr_review import PRInfo
     from daydream.run_artifacts import _RunArtifacts
     from daydream.run_config import RunConfig
 
@@ -209,6 +210,54 @@ def _has_non_daydream_worktree_changes(status: str) -> bool:
         ):
             return True
     return False
+
+
+def _print_findings_target_mismatch(analyzed_head: str, pr_head: str | None) -> None:
+    """Report a findings export target that is not the analyzed checkout.
+
+    Shared by every mode that writes a findings artifact, so review and diagram
+    runs reject a moved head with the same sentence: both commits, and what the
+    operator can do next.
+    """
+    if pr_head is None:
+        detail = "no pull request matches the analyzed checkout"
+    else:
+        detail = f"analyzed {analyzed_head[:12]}, PR now points at {pr_head[:12]}"
+    print_error(console, "Findings Artifact",
+                f"Target PR does not match the analyzed checkout ({detail}); "
+                "re-run against the new head, or check out and review the superseded commit deliberately.")
+
+
+def _capture_findings_target(
+    target_dir: Path,
+    config: RunConfig,
+    github_execution: GitHubExecutionInput,
+    captured_head: str,
+    captured_base: str,
+    *,
+    capture_base_tip: bool,
+) -> tuple[PRInfo, str | None] | None:
+    """Resolve and verify the PR that owns a commit-bound findings export.
+
+    One trust gate for every mode that writes a findings artifact: resolve the
+    PR, reject a head that moved, and rebind the base to the captured merge
+    base. Returns ``(captured_pr, pr_base_sha)``, or ``None`` when the resolved
+    PR does not match the captured head (already reported). Raises ``GitError``
+    when the lookup itself fails, so the caller can name that failure instead of
+    reporting it as a diff/base-branch problem.
+
+    ``capture_base_tip`` is off for diagram runs: they carry no coverage record,
+    so the base tip has no consumer.
+    """
+    from daydream.pr_review import capture_pr_base_tip, find_open_pr, find_pr_by_number
+
+    captured_pr = (find_pr_by_number(target_dir, config.pr_number, auth=github_execution.auth)
+                   if config.pr_number is not None else find_open_pr(target_dir, auth=github_execution.auth))
+    if captured_pr is None or captured_pr.head_sha != captured_head:
+        _print_findings_target_mismatch(captured_head, None if captured_pr is None else captured_pr.head_sha)
+        return None
+    pr_base_sha = capture_pr_base_tip(target_dir, captured_pr, auth=github_execution.auth) if capture_base_tip else None
+    return replace(captured_pr, base_sha=captured_base), pr_base_sha
 
 
 def _remote_ci_enabled(ctx: FlowContext) -> bool:
@@ -497,34 +546,55 @@ async def run_deep(
 
     target_dir = work.repo
 
-    # Findings export is commit-bound. Capture target once and diff explicit SHA endpoints.
-    from daydream.pr_review import capture_pr_base_tip, find_open_pr, find_pr_by_number
+    # Findings export is commit-bound, in every mode that writes an artifact:
+    # capture the target once, before any work happens, and diff explicit SHA
+    # endpoints. Diagram mode captures the same identity but keeps its own
+    # two-dot diff selection below.
     from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
 
     captured_pr = None
     pr_base_sha = None
     dirty_snapshot = False
+    diff: str | None
     try:
         captured_head = git_ops.head_sha(target_dir)
         captured_base = git_ops.resolve_diff_merge_base(target_dir, work.base_branch, captured_head)
-        if config.findings_out is not None and mode != "diagram":
-            captured_pr = (find_pr_by_number(target_dir, config.pr_number, auth=github_execution.auth)
-                           if config.pr_number is not None else find_open_pr(target_dir, auth=github_execution.auth))
-            if captured_pr is None or captured_pr.head_sha != captured_head:
-                print_error(console, "Findings Artifact", "Target PR does not match the analyzed checkout")
-                return 1
-            pr_base_sha = capture_pr_base_tip(target_dir, captured_pr, auth=github_execution.auth)
-            captured_pr = replace(captured_pr, base_sha=captured_base)
-            dirty_snapshot = _has_non_daydream_worktree_changes(git_ops.status_porcelain(target_dir))
-            paths = [".", *(f":(exclude){p.rstrip('/')}" for p in config.ignore_paths or [])]
-            diff = git_ops.diff_paths(target_dir, captured_base, captured_head, paths)
-        else:
-            diff = git_ops.diff(work.repo, work.base_branch, exclude=config.ignore_paths)
     except GitTimeoutError as exc:
         print_error(console, "Git Timeout", f"git timed out under load: {exc}")
         return 1
     except GitError:
         diff = None
+    else:
+        if config.findings_out is not None:
+            try:
+                captured = _capture_findings_target(
+                    target_dir, config, github_execution, captured_head, captured_base,
+                    capture_base_tip=mode != "diagram",
+                )
+            except GitTimeoutError as exc:
+                print_error(console, "Git Timeout", f"git timed out under load: {exc}")
+                return 1
+            except GitError as exc:
+                print_error(console, "Git Error", f"Unable to resolve pull request for findings export: {exc}")
+                return 1
+            if captured is None:
+                return 1
+            captured_pr, pr_base_sha = captured
+            # Commit-bound, in every artifact mode: a dirty analyzed checkout is
+            # rejected below, because the diagram path still reads the diff (and
+            # its grounding) from working-tree content.
+            dirty_snapshot = _has_non_daydream_worktree_changes(git_ops.status_porcelain(target_dir))
+        try:
+            if config.findings_out is not None and mode != "diagram":
+                paths = [".", *(f":(exclude){p.rstrip('/')}" for p in config.ignore_paths or [])]
+                diff = git_ops.diff_paths(target_dir, captured_base, captured_head, paths)
+            else:
+                diff = git_ops.diff(work.repo, work.base_branch, exclude=config.ignore_paths)
+        except GitTimeoutError as exc:
+            print_error(console, "Git Timeout", f"git timed out under load: {exc}")
+            return 1
+        except GitError:
+            diff = None
     log = _git_log(target_dir)
     branch = work.head_branch or _git_branch(target_dir)
 
@@ -774,10 +844,13 @@ async def run_deep(
         from daydream.deep.review_terminal import finalize_review
         from daydream.review_result import reason_for_exception
 
-        if dirty_snapshot and coverage is not None:
-            coverage.require_phase("snapshot")
-            coverage.record_phase("snapshot", "failed", reasons=["dirty_snapshot"])
-            finalize_review(ctx, "failed")
+        if dirty_snapshot:
+            # Diagram runs carry no coverage record, so the reject is reported
+            # without a phase entry there; the gate itself is mode-independent.
+            if coverage is not None:
+                coverage.require_phase("snapshot")
+                coverage.record_phase("snapshot", "failed", reasons=["dirty_snapshot"])
+                finalize_review(ctx, "failed")
             print_error(console, "Findings Artifact", "Commit-bound export requires a clean analyzed checkout")
             return 1
         if no_diff and coverage is not None:
