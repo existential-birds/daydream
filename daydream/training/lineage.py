@@ -1,19 +1,16 @@
-"""Locked run identity and deterministic per-stage record-lineage digests.
+"""Locked run identity for auditable adapter lineage.
 
-Resume must fail on identity drift to preserve auditable adapter lineage.
-Digests hash canonical JSON content, independent of record ordering.
+Resume must fail on identity drift. The locked ``corpus_digest`` is a directory
+digest over the projection tree, so any change to a carried lineage field also
+changes it and aborts :func:`validate_resume`.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import asdict, dataclass, fields
 from typing import Any
 
-from daydream.training.corpus import _trajectory_set_hash
-
-__all__ = ["LOCKED_FIELDS", "ResumeAborted", "RunIdentity", "stage_digests", "validate_resume"]
+__all__ = ["LOCKED_FIELDS", "ResumeAborted", "RunIdentity", "validate_resume"]
 
 
 @dataclass(frozen=True)
@@ -88,51 +85,3 @@ def validate_resume(prior: RunIdentity, changed: RunIdentity) -> None:
         raise ResumeAborted(
             f"resume aborted: locked run-identity fields differ from the prior run: {details}"
         )
-
-
-_RECORD_LINEAGE_FIELDS: tuple[str, ...] = (
-    "session_id",
-    "evidence_tier",
-    "base_sha",
-    "head_sha",
-    "diff_identity",
-    "daydream_version",
-    "profile_digest",
-    "detected_stack",
-    "label_source",
-    "label_version",
-    "reward_version",
-    "split",
-)
-"""Corpus-record lineage fields carried through (validated present), not re-derived (M16)."""
-
-
-def _content_hash(payload: Any) -> str:
-    """sha256 of canonical JSON — order-independent, content-addressed."""
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=sorted).encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()
-
-
-def _lineage_digest(records: list[dict[str, Any]]) -> str:
-    """Hash present carried-through lineage fields; never re-derive validated evidence."""
-    payloads = sorted(
-        json.dumps({f: r.get(f) for f in _RECORD_LINEAGE_FIELDS if f in r}, sort_keys=True, default=str)
-        for r in records
-    )
-    return _content_hash(payloads)
-
-
-def stage_digests(stage_outputs: dict[str, dict[str, Any]]) -> dict[str, dict[str, str]]:
-    """Emit ``split_digest`` and ``lineage_digest`` per stage (M16).
-
-    ``stage_outputs`` maps stage name → dict with a ``records`` list of corpus
-    records. Digests are content-addressed and order-independent.
-    """
-    digests: dict[str, dict[str, str]] = {}
-    for stage, outputs in stage_outputs.items():
-        records = list(outputs.get("records", []))
-        digests[stage] = {
-            "split_digest": _trajectory_set_hash([r.get("session_id", "") for r in records]),
-            "lineage_digest": _lineage_digest(records),
-        }
-    return digests

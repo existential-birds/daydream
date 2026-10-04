@@ -110,14 +110,9 @@ class PlanIndexEntry:
     member_aliases: tuple[str, ...]
     priority: str
     effort: str
-    risk: str
-    category: str
     planned_at: str
     status: str
     host_blocked: bool
-    change_shape: str
-    maintenance_signals: tuple[str, ...]
-    reuse_target: str
 
     @property
     def path(self) -> str | None:
@@ -275,14 +270,9 @@ def _entry_from_payload(payload: Any) -> PlanIndexEntry | None:
         member_aliases=member_aliases,
         priority=_index_field(payload.get("priority")),
         effort=_index_field(payload.get("effort")),
-        risk=_index_field(payload.get("risk")),
-        category=_index_field(payload.get("category")),
         planned_at=_index_field(payload.get("planned_at")),
         status=status,
         host_blocked=bool(payload.get("host_blocked")),
-        change_shape=_index_field(payload.get("change_shape") or "unknown"),
-        maintenance_signals=_string_tuple(payload.get("maintenance_signals")),
-        reuse_target=_index_field(payload.get("reuse_target")),
     )
 
 
@@ -355,14 +345,9 @@ def _rendered_index_entries(plans_dir: Path) -> dict[str, PlanIndexEntry]:
             member_aliases=(),
             priority=_index_field(cells[2]),
             effort=_index_field(cells[3]),
-            risk="",
-            category="",
             planned_at="",
             status=status,
             host_blocked=_HOST_BLOCKED_STATUS.fullmatch(status) is not None,
-            change_shape="unknown",
-            maintenance_signals=(),
-            reuse_target="",
         )
     return entries
 
@@ -523,12 +508,7 @@ def _index_entry(
         member_aliases=_string_sequence(finding.get("member_aliases")),
         priority=plan_priority(finding),
         effort=_index_field(finding.get("effort")),
-        risk=_index_field(finding.get("risk")),
-        category=_index_field(finding.get("category")),
         planned_at=planned_at,
         status=status,
         host_blocked=host_blocked,
-        change_shape=_index_field(finding.get("change_shape") or "unknown"),
-        maintenance_signals=_string_tuple(finding.get("maintenance_signals")),
-        reuse_target=_index_field(finding.get("reuse_target")),
     )

@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from daydream import pr_review
-from daydream.pr_review import DAYDREAM_FOOTER, PRInfo, build_payload, finding_marker
+from daydream.pr_review import DAYDREAM_FOOTER, PRInfo, finding_marker
 from daydream.training import labeler_signals
 from daydream.training.labeler_signals import (
     CommentResolutionSignal,
@@ -25,6 +25,7 @@ from daydream.training.labeler_signals import (
     pr_merge_signal,
     reviewer_logins_signal,
 )
+from tests.harness.review_payload import payload_for
 from tests.harness.trajectory import diff_adding
 
 
@@ -47,7 +48,7 @@ def test_reviewed_commit_line_does_not_break_daydream_footer_detection() -> None
     pr = PRInfo(number=1, head_sha="f" * 40, base_sha="0" * 40, base_ref="main", head_ref="feature", owner="acme",
         repo="widgets", url="https://github.com/acme/widgets/pull/1",
     )
-    payload = build_payload(pr, pr_review.ClassifiedIssues(),
+    payload = payload_for(pr, pr_review.ClassifiedIssues(),
         renderers=pr_review.ReviewRenderers(pr_review.default_render_finding, pr_review.default_render_summary),
         run_info="Fixture run info",
     )

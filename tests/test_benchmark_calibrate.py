@@ -15,7 +15,6 @@ from daydream.benchmark.harbor.calibrate import (
     _build_calibration_client,
     _build_receipt,
     _class_balanced_accuracy,
-    _confusion_matrix,
     _invalidation_inputs,
     _judge_host_from_env,
     _judge_pairs,
@@ -165,8 +164,18 @@ def test_majority_and_stability(sr: Any) -> None:
 def test_balanced_accuracy_and_confusion(sr: Any) -> None:
     assert _class_balanced_accuracy({"tp": 12, "fp": 0, "tn": 12, "fn": 0}) == pytest.approx(1.0)
     assert _class_balanced_accuracy({"tp": 9, "fp": 3, "tn": 12, "fn": 0}) == pytest.approx(0.9)
-    assert _confusion_matrix([True, True, False, False],
-                             [True, False, True, False]) == {"tp": 1, "fp": 1, "tn": 1, "fn": 1}
+    pairs = [{"label": "match"}, {"label": "match"}, {"label": "nonmatch"}, {"label": "nonmatch"}]
+    majority = [True, False, True, False]  # gold-majority disagreement on pairs 1 and 2
+    runs = [
+        [_v(sr, True, .9), _v(sr, True, .9), _v(sr, False, .1)],
+        [_v(sr, False, .1), _v(sr, False, .1), _v(sr, True, .9)],
+        [_v(sr, True, .9), _v(sr, True, .9), _v(sr, False, .1)],
+        [_v(sr, False, .1), _v(sr, False, .1), _v(sr, False, .1)],
+    ]
+    assert [_majority_label(r) for r in runs] == majority
+    _, failures, matrix, _ = _pass_gate(pairs, runs, sr.verifier_core.CONFIDENCE_THRESHOLD)
+    assert matrix == {"tp": 1, "fp": 1, "tn": 1, "fn": 1}
+    assert failures["majority"] == [1, 2]
 
 def test_pass_gate_reports_instability_only(sr: Any) -> None:
     pairs = [{"label": "match"}, {"label": "match"}, {"label": "nonmatch"}]

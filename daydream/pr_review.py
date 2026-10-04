@@ -822,33 +822,6 @@ def _is_clean_review(classified: ClassifiedIssues, approve_on_clean: bool) -> bo
     )
 
 
-def build_payload(
-    pr: PRInfo,
-    classified: ClassifiedIssues,
-    *,
-    run_info: str,
-    renderers: ReviewRenderers,
-    approve_on_clean: bool = False,
-    diagram_blocks: str | None = None,
-) -> dict[str, Any]:
-    """Build the legacy dictionary payload after applying the approval gate."""
-    event = (
-        ReviewEvent.APPROVE
-        if _is_clean_review(classified, approve_on_clean)
-        else ReviewEvent.COMMENT
-    )
-    return _review_payload_dict(
-        build_payload_for_event(
-            pr,
-            classified,
-            event=event,
-            run_info=run_info,
-            renderers=renderers,
-            diagram_blocks=diagram_blocks,
-        )
-    )
-
-
 def post_classified_review(
     plan: ClassifiedReviewPlan,
     *,

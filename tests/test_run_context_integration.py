@@ -20,8 +20,8 @@ from daydream.run_context import (
     active_backends,
     bind_run_context,
     current_run_context,
+    resolve_run_context,
 )
-from daydream.ui import prompt_user
 from daydream.workspace import WorkContext
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
@@ -123,7 +123,9 @@ async def test_overlapping_runs_keep_prompt_and_console_policy(
             else:
                 plain_entered.set()
                 await logged_observed.wait()
-            choices[label] = prompt_user(console, f"{label} choice", "safe-default")
+            choices[label] = resolve_run_context().choice(
+                f"{label} choice", default="safe-default", safe_default="safe-default", console=console,
+            )
             console.print(f"{label}-token={sentinel}", markup=False, highlight=False)
             if label == "logged":
                 logged_observed.set()
@@ -196,7 +198,9 @@ async def test_failed_run_releases_policy_and_backends_before_later_run(
             if cwd == failed_repo:
                 console.print(f"failed-token={sentinel}", markup=False, highlight=False)
                 raise ValueError("intentional backend failure")
-            choices.append(prompt_user(console, "Later choice", "safe-default"))
+            choices.append(resolve_run_context().choice(
+                "Later choice", default="safe-default", safe_default="safe-default", console=console,
+            ))
             console.print(f"later-token={sentinel}", markup=False, highlight=False)
             yield ResultEvent(structured_output=None, continuation=None)
 

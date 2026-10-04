@@ -2336,14 +2336,13 @@ def test_repair_prompt_drops_malformed_detail_segment() -> None:
     assert "bad,stuff!" not in prompt
     assert '"detail"' not in prompt
 
-def test_plan_index_persists_package_aliases_and_maintenance_metadata(repo: Path, head_sha: str,) -> None:
+def test_plan_index_persists_package_and_member_identities(repo: Path, head_sha: str,) -> None:
+    """The sidecar carries only identities it is read for; finding metadata stays in the finding."""
     plans_dir = repo / "daydream_plans"
     finding = _finding(fingerprint="pkg-parser-cleanup")
     finding.update({
             "package_fingerprint": "pkg-parser-cleanup", "member_fingerprints": ["fp-local-parser", "fp-parser-tests"],
-            "member_aliases": ["member:local", "member:tests"], "maintenance_signals": ["dead_code", "reuse_existing"],
-            "change_shape": "reuse",
-            "reuse_target": "repo:src/http.py#parse_headers",
+            "member_aliases": ["member:local", "member:tests"],
         }
     )
 
@@ -2354,9 +2353,6 @@ def test_plan_index_persists_package_aliases_and_maintenance_metadata(repo: Path
     assert entry["package_fingerprint"] == "pkg-parser-cleanup"
     assert entry["member_fingerprints"] == ["fp-local-parser", "fp-parser-tests",]
     assert entry["member_aliases"] == ["member:local", "member:tests"]
-    assert entry["maintenance_signals"] == ["dead_code", "reuse_existing"]
-    assert entry["change_shape"] == "reuse"
-    assert entry["reuse_target"] == "repo:src/http.py#parse_headers"
     assert _planned_fingerprints(plans_dir) == {
         "pkg-parser-cleanup", "fp-local-parser", "fp-parser-tests", "member:local", "member:tests",
     }
@@ -2426,9 +2422,7 @@ def test_legacy_singleton_index_entry_recovers_as_its_own_package(repo: Path, he
     _write_plans(plans_dir, [_selection(repo)], planned_at=head_sha)
     sidecar_path = plans_dir / PLAN_INDEX_FILENAME
     sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
-    for key in ("package_fingerprint", "member_fingerprints", "member_aliases", "maintenance_signals", "change_shape",
-        "reuse_target",
-    ):
+    for key in ("package_fingerprint", "member_fingerprints", "member_aliases"):
         sidecar["plans"][0].pop(key)
     sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
     assert _planned_fingerprints(plans_dir) == {"fp-fix-n-plus-one"}
@@ -2500,9 +2494,8 @@ def _write_single_entry_sidecar(plans_dir: Path, status: str) -> None:
     entry = PlanIndexEntry(
         number=1, slug="batch-catalog-queries", title="Fix N+1 catalog queries", fingerprint="fp-fix-n-plus-one",
         package_fingerprint="fp-fix-n-plus-one", member_fingerprints=("fp-fix-n-plus-one",), member_aliases=(),
-        priority="P1", effort="M", risk="MED", category="performance",
-        planned_at="0000000000000000000000000000000000000000", status=status, host_blocked=False,
-        change_shape="unknown", maintenance_signals=(), reuse_target="",
+        priority="P1", effort="M", planned_at="0000000000000000000000000000000000000000",
+        status=status, host_blocked=False,
     )
     (plans_dir / ".index.json").write_text(
         json.dumps({"schema_version": 1, "plans": [asdict(entry)],}), encoding="utf-8",

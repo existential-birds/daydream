@@ -22,7 +22,6 @@ from daydream.ui.messages import (
     print_menu,
     print_success,
     print_warning,
-    prompt_user,
 )
 from daydream.ui.panels import (
     LiveToolPanelRegistry,
@@ -79,7 +78,6 @@ __all__ = [
     "print_thinking",
     "print_verification_summary",
     "print_warning",
-    "prompt_user",
     "render_exploration_summary",
     "set_shutdown_panel",
 ]

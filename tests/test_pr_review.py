@@ -24,7 +24,6 @@ from daydream.pr_review import (
     PRInfo,
     ReviewRenderers,
     _parse_hunks,
-    build_payload,
     classify,
     default_render_finding,
     default_render_summary,
@@ -48,6 +47,7 @@ from daydream.run_config import RunConfig
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.runner import _emit_findings_from_items
 from tests.harness.git_helpers import git as _git
+from tests.harness.review_payload import payload_for
 from tests.harness.review_profile import sample_pr
 from tests.harness.review_result import review_coverage, terminal_result
 
@@ -136,7 +136,7 @@ def test_custom_summary_renderer_can_build_collapsible_per_finding_list(pr: PRIn
     classified = pr_review.ClassifiedIssues(
         body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc", fingerprint="b" * 64)]
     )
-    payload = build_payload(pr, classified, renderers=resolve_review_renderers(reg),
+    payload = payload_for(pr, classified, renderers=resolve_review_renderers(reg),
         run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
     )
     body = payload["body"]
@@ -153,7 +153,7 @@ def test_custom_finding_renderer_flows_into_summary_section(pr: PRInfo) -> None:
     classified = pr_review.ClassifiedIssues(
         body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc", fingerprint="b" * 64)]
     )
-    body = build_payload(pr, classified, renderers=resolve_review_renderers(reg),
+    body = payload_for(pr, classified, renderers=resolve_review_renderers(reg),
         run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
     )["body"]
     assert "CUSTOM::summary::File note" in body
@@ -173,11 +173,11 @@ def test_summary_renderer_falls_back_and_warns_on_error(pr: PRInfo, caplog: pyte
             )
         ]
     )
-    default_body = build_payload(
+    default_body = payload_for(
         pr, classified, renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer.render_run_info_block([_FIXTURE])
     )["body"]
     with caplog.at_level("WARNING"):
-        body = build_payload(pr, classified, renderers=resolve_review_renderers(reg),
+        body = payload_for(pr, classified, renderers=resolve_review_renderers(reg),
             run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
         )["body"]
     assert body == default_body
@@ -367,7 +367,7 @@ def test_build_payload_reviewed_commit_line_first_in_review_info(pr: PRInfo) -> 
     )
     # Feed the enriched renderer a real fixture trajectory so run-info
     # fields (Model/Cost/Tokens) render instead of the fallback stub.
-    payload = build_payload(
+    payload = payload_for(
         pr, classified, renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer.render_run_info_block([_FIXTURE])
     )
     body = payload["body"]
@@ -382,7 +382,7 @@ def test_build_payload_reviewed_commit_line_first_in_review_info(pr: PRInfo) -> 
     assert body.index(expected) < body.index("- **Confidence:**")
 
 def test_build_payload_reviewed_commit_survives_run_info_fallback(pr: PRInfo) -> None:
-    payload = build_payload(
+    payload = payload_for(
         pr, pr_review.ClassifiedIssues(), renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer._render_fallback()
     )
     body = payload["body"]
@@ -394,7 +394,7 @@ def test_build_payload_reviewed_commit_survives_run_info_fallback(pr: PRInfo) ->
 def test_build_payload_reviewed_commit_links_fork_for_fork_head_pr(pr: PRInfo,) -> None:
     """Link the fork commit while retaining the base repository as the POST target."""
     fork_pr = replace(pr, head_repo="forky/widgets")
-    payload = build_payload(
+    payload = payload_for(
         fork_pr, pr_review.ClassifiedIssues(), run_info="test run info", renderers=BUILTIN_RENDERERS
     )
     body = payload["body"]
@@ -402,7 +402,7 @@ def test_build_payload_reviewed_commit_links_fork_for_fork_head_pr(pr: PRInfo,) 
     assert "https://github.com/acme/widgets/commit/head123" not in body
 
 def test_build_payload_blocks_forged_reviewed_commit_line(pr: PRInfo,) -> None:
-    payload = build_payload(pr, pr_review.ClassifiedIssues(),
+    payload = payload_for(pr, pr_review.ClassifiedIssues(),
         run_info=(
             "test run info\n"
             "- **Reviewed commit:** [`deadbee`](https://github.com/evil/widgets/commit/" + "e" * 40 + ")\n"
@@ -423,7 +423,7 @@ def test_build_payload_shape(pr: PRInfo) -> None:
         ], inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", confidence="HIGH", severity="high",)],
     )
 
-    payload = build_payload(
+    payload = payload_for(
         pr, classified, renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer.render_run_info_block([_FIXTURE])
     )
     assert payload["commit_id"] == "head123"
@@ -465,7 +465,7 @@ def _classified_with_severity(severity: str, confidence: str, *, body_confidence
 
 
 def _approval_payload(pr: PRInfo, classified: pr_review.ClassifiedIssues) -> dict[str, Any]:
-    return build_payload(pr, classified, approve_on_clean=True, renderers=BUILTIN_RENDERERS,
+    return payload_for(pr, classified, approve_on_clean=True, renderers=BUILTIN_RENDERERS,
         run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
     )
 
@@ -1206,7 +1206,7 @@ def test_demoted_low_finding_does_not_block_approval(pr: PRInfo) -> None:
                 )
             ],
         )
-        payload = build_payload(pr, classified, approve_on_clean=True, renderers=BUILTIN_RENDERERS,
+        payload = payload_for(pr, classified, approve_on_clean=True, renderers=BUILTIN_RENDERERS,
             run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
         )
         assert payload["event"] == "APPROVE"
@@ -1346,14 +1346,14 @@ def test_build_payload_places_diagram_blocks_under_the_header(pr: PRInfo) -> Non
     )
     blocks = "<details><summary><h3>Sequence Diagram</h3></summary>\nX\n</details>"
 
-    payload = pr_review.build_payload(pr, classified, diagram_blocks=blocks, renderers=BUILTIN_RENDERERS,
+    payload = payload_for(pr, classified, diagram_blocks=blocks, renderers=BUILTIN_RENDERERS,
         run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
     )
     body = payload["body"]
     header = "**Code Review Summary**"
     assert body[body.index(header) + len(header) :].lstrip().startswith(blocks)
     # Absent (the default) is byte-identical to the pre-#1113 body.
-    assert pr_review.build_payload(
+    assert payload_for(
         pr, classified, renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer.render_run_info_block([_FIXTURE])
     )["body"] == body.replace(f"{header}\n\n{blocks}", header)
 
@@ -1376,7 +1376,7 @@ def test_custom_summary_renderer_receives_and_may_drop_diagrams(pr: PRInfo) -> N
         reg = Registry()
         register_builtins(reg)
         reg.override_renderer("summary", renderer)
-        body = pr_review.build_payload(pr, classified, diagram_blocks=blocks, renderers=resolve_review_renderers(reg),
+        body = payload_for(pr, classified, diagram_blocks=blocks, renderers=resolve_review_renderers(reg),
             run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
         )["body"]
         assert (blocks in body) is expect_present
@@ -1390,7 +1390,7 @@ def test_explicit_run_info_payload_is_byte_stable(pr: PRInfo) -> None:
             )
         ]
     )
-    payload = build_payload(pr, classified, run_info="Fixture run info", approve_on_clean=True,
+    payload = payload_for(pr, classified, run_info="Fixture run info", approve_on_clean=True,
         diagram_blocks="<details>Fixture diagram</details>", renderers=BUILTIN_RENDERERS,
     )
     payload["body"] = payload["body"].replace(DAYDREAM_FOOTER, "<DAYDREAM_FOOTER>")
@@ -1422,8 +1422,8 @@ def test_payload_uses_only_explicit_renderers_and_run_info(pr: PRInfo, monkeypat
     monkeypatch.setattr(Path, "read_bytes", forbidden)
     monkeypatch.setattr("tempfile.TemporaryDirectory", forbidden)
     monkeypatch.setattr("daydream.trajectory.get_current_recorder", forbidden)
-    first = build_payload(pr, classified, run_info=run_info, renderers=renderers)
-    second = build_payload(pr, classified, run_info=run_info, renderers=renderers)
+    first = payload_for(pr, classified, run_info=run_info, renderers=renderers)
+    second = payload_for(pr, classified, run_info=run_info, renderers=renderers)
     assert first == second
     assert seen[0] == seen[1]
     assert seen[0].findings[0].finding.title == "Explicit finding"

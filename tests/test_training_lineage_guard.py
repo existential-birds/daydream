@@ -1,4 +1,4 @@
-"""Tests for the LOCKED_FIELDS resume guard and per-stage lineage digests (M16, M18)."""
+"""Tests for the LOCKED_FIELDS resume guard (M18)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from daydream.training.lineage import (
     LOCKED_FIELDS,
     ResumeAborted,
     RunIdentity,
-    stage_digests,
     validate_resume,
 )
 
@@ -66,28 +65,3 @@ def test_identity_is_frozen() -> None:
     a = RunIdentity(base_model="Qwen/Qwen3.5-9B", lora_rank=64, corpus_digest="d1", **_defaults())
     with pytest.raises(Exception):
         a.base_model = "other"  # type: ignore[misc]
-
-def test_stage_digests_emitted() -> None:
-    outputs = {"stage1": {"records": [{"session_id": "s1"}, {"session_id": "s2"}]},
-        "stage2": {"records": [{"session_id": "s1"}]},
-    }
-    d = stage_digests(outputs)
-    for stage in ("stage1", "stage2"):
-        assert d[stage]["split_digest"]
-        assert d[stage]["lineage_digest"]  # M16: per-stage digests
-    assert d["stage1"]["split_digest"] != d["stage2"]["split_digest"]
-
-def test_stage_digests_deterministic() -> None:
-    outputs = {"stage1": {"records": [{"session_id": "b"}, {"session_id": "a"}]}}
-    again = {"stage1": {"records": [{"session_id": "a"}, {"session_id": "b"}]}}
-    assert stage_digests(outputs)["stage1"] == stage_digests(again)["stage1"]
-
-def test_stage_digests_covers_record_lineage_fields() -> None:
-    base = {
-        "session_id": "s1", "evidence_tier": "gold", "base_sha": "aaa", "head_sha": "bbb", "daydream_version": "1.0",
-        "reward_version": "2026.05.28-2", "split": "train",
-    }
-    mutated = {**base, "evidence_tier": "weak"}
-    d1 = stage_digests({"stage1": {"records": [base]}})["stage1"]["lineage_digest"]
-    d2 = stage_digests({"stage1": {"records": [mutated]}})["stage1"]["lineage_digest"]
-    assert d1 != d2

@@ -77,18 +77,17 @@ def test_invalid_explicit_fails_naming_source(monkeypatch: pytest.MonkeyPatch) -
         rp.resolve_profile(explicit_path=str(bad))
     assert "bad-profile.toml" in str(e.value)
 
-def test_runconfig_carries_resolved_profile_and_is_used(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_runconfig_carries_resolved_profile_and_is_used(tmp_path: Path) -> None:
+    """RunConfig carries the profile path, and the composition-root seam consumes it."""
     p = tmp_path / "prof.toml"
     p.write_text('schema_version = 1\nname = "r"\n[strategies.intent]\ncontent = "C"\nsource = "copied: a"')
     cfg = RunConfig(target=str(tmp_path), review_profile_path=str(p))
     assert cfg.review_profile_path == str(p)     # path carried on RunConfig
 
-def test_resolve_from_runconfig_happens_once_at_composition_root() -> None:
-    cfg = RunConfig(target="/tmp")
     resolved = rp.resolve_from_runconfig(cfg)     # seam: composition root resolves once
-    assert resolved.profile.name and resolved.source_kind == "default"
+    assert resolved.profile.name == "r" and resolved.source_kind == "explicit"
 
-def test_real_cli_entry_resolves_profile_and_inspects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_real_cli_entry_resolves_profile_and_inspects(tmp_path: Path) -> None:
 
     # A real Git target reaches profile resolution after workspace opening.
     init_repo(tmp_path)
