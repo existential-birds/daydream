@@ -267,7 +267,6 @@ def test_runner_flags_a_truncated_output_buffer_as_incomplete(tmp_path: Path) ->
     res = _run([sys.executable, "-c", "import sys; sys.stdout.write('x' * 600000)"], tmp_path,)
 
     assert res.exit_status == 0
-    assert res.completed is True            # the process ran to its own exit
     assert res.passed is True               # exit status remains the only pass source
     assert res.output_truncated is True     # ...but the retained buffer is incomplete
     assert res.incomplete is True
@@ -276,11 +275,11 @@ def test_runner_flags_a_truncated_output_buffer_as_incomplete(tmp_path: Path) ->
 def test_timed_out_result_is_incomplete(tmp_path: Path) -> None:
     res = _run([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path, wall_budget_s=0.2)
 
-    assert (res.timed_out, res.completed, res.incomplete, res.passed) == (True, False, True, False)
+    assert (res.timed_out, res.incomplete, res.passed) == (True, True, False)
 
-def test_result_serialises_completion_timeout_and_truncation_explicitly(tmp_path: Path) -> None:
+def test_result_serialises_timeout_and_truncation_explicitly(tmp_path: Path) -> None:
     payload = asdict(_run([sys.executable, "-c", "pass"], tmp_path))
-    assert set(payload) >= {"exit_status", "timed_out", "completed", "output_truncated", "incomplete"}
+    assert set(payload) >= {"exit_status", "timed_out", "output_truncated", "incomplete"}
 
 @pytest.mark.parametrize("cli", [None, "uv run pytest"])
 @pytest.mark.parametrize("lockfile", [None, "uv.lock", "requirements.txt"])

@@ -260,7 +260,7 @@ def resolve_package(repo_root: Path, start: Path) -> PackageResolution:
 
 @dataclass
 class TestExecutionResult:
-    """Host test outcome: completed excludes timeouts; incomplete includes timeout or capped output.
+    """Host test outcome: incomplete covers a timeout or capped output.
 
     These evidence flags do not change passed.
     """
@@ -271,7 +271,6 @@ class TestExecutionResult:
     exit_status: int
     timed_out: bool
     merged_output: str
-    completed: bool = True
     output_truncated: bool = False
     incomplete: bool = False
 
@@ -550,7 +549,6 @@ async def run_test_command(
             exit_status=exit_status,
             timed_out=timed_out,
             merged_output=_redact_merged("".join(chunks), effective_env),
-            completed=not timed_out,
             output_truncated=truncated,
             incomplete=timed_out or truncated,
         )
