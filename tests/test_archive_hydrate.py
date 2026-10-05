@@ -590,11 +590,12 @@ def test_enriched_evidence_matches_declared_evidence_contract(tmp_path: Path) ->
     _seed_admitted_runs(stage, [("sess-declared", "acme/widget", {"spdx_id": "MIT", "source": "producer"}),
         ("sess-enriched", "acme/widget", None),
     ])
-    evidence = license_enrich.enrich_license_evidence(stage, resolver=_FakeLicenseResolver())
+    license_enrich.enrich_license_evidence(stage, resolver=_FakeLicenseResolver())
     policy, _digest = load_license_policy("daydream/training/schema/license-policy-production.json")
     declared = resolve_repo_decision("acme/widget", {"spdx_id": "MIT"}, policy, frozenset())
+    enriched_manifest = json.loads((stage / "runs" / "sess-enriched" / "manifest.json").read_text())
     enriched = resolve_repo_decision(
-        "acme/widget", {"spdx_id": evidence["sess-enriched"]["spdx_id"]}, policy, frozenset())
+        "acme/widget", {"spdx_id": enriched_manifest["license_evidence"]["spdx_id"]}, policy, frozenset())
     assert (declared.status, declared.reason_code) == (enriched.status, enriched.reason_code)
     assert (declared.status, declared.reason_code) == ("admitted", None)
 

@@ -2162,8 +2162,7 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
     from daydream.archive.license_enrich import publish_enrichment_cache  # noqa: PLC0415  # avoid import cycle
 
     publish_enrichment_cache(
-        config.stage_dir, revision=source_commit,
-        curated_dir=config.stage_dir / "curated" / curation_id,
+        config.stage_dir, curated_dir=config.stage_dir / "curated" / curation_id,
     )
     ledger = build_import_ledger(
         config.stage_dir, revision=source_commit, source_commit=source_commit, binding=binding,
