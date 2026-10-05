@@ -28,6 +28,7 @@ from daydream.archive.hydrate import (
     _manifest_repo_slug,
     _require_manifest_dict,
 )
+from daydream.json_utils import iter_jsonl_records
 from daydream.training.corpus_projection.license import normalize_repo_slug
 from daydream.trajectory import RUNS_DIRNAME, redact_text
 
@@ -191,17 +192,8 @@ def _load_cache(stage: Path) -> tuple[dict[str, dict[str, Any]], dict[str, dict[
     """Load the enrichment cache: latest entry per session and first resolved per repo."""
     by_session: dict[str, dict[str, Any]] = {}
     by_repo: dict[str, dict[str, Any]] = {}
-    path = _cache_path(stage)
-    if not path.is_file():
-        return by_session, by_repo
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(entry, dict) or not entry.get("session_id"):
+    for entry in iter_jsonl_records(_cache_path(stage)):
+        if not entry.get("session_id"):
             continue
         by_session[str(entry["session_id"])] = entry
         slug = entry.get("repo_slug")

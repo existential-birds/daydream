@@ -45,7 +45,8 @@ class DaydreamFileConfig:
     the runtime resolver promotes unknown names to forensic. ``review_profile``
     is only a path here; review_profile.py owns strict profile validation.
     ``extra_risk_categories`` likewise gets fail-loud vocabulary validation at
-    verification, and can only widen mandatory selection.
+    verification; the declared vocabulary is the mandatory set, so it can
+    change nothing.
 
     Improve service roots/groups and partition bounds come from ``[improve]``;
     issue publication requires explicit ``[improve.github] publish_issues=true``.

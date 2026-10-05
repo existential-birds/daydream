@@ -32,9 +32,10 @@ from daydream.deep.repair_coordinator import (
 )
 from daydream.deep.repair_job import (
     RepairJobPolicy,
-    merge_repair_job_record,
+    RepairJobRecord,
     read_repair_job_record,
     record_diagnostic,
+    write_repair_job_record,
 )
 from daydream.fix_footprint import AuthorizedFixFootprint
 
@@ -79,7 +80,7 @@ class TestDiagnosticNeverBecomesTheGrant:
 
     def test_diagnostic_still_annotates_an_existing_record(self, tmp_path: Path) -> None:
         """The common path is unchanged: annotate, never clobber."""
-        merge_repair_job_record(tmp_path, {"job_id": "repair-s1", "executions": 1})
+        write_repair_job_record(tmp_path, RepairJobRecord(job_id="repair-s1", executions=1))
         recorded = record_diagnostic(tmp_path, "repair-s1", "checkpoint_write_failed: disk full")
         assert recorded is not None
         assert recorded.diagnostics == ("checkpoint_write_failed: disk full",)
@@ -100,7 +101,7 @@ class TestDiagnosticNeverBecomesTheGrant:
 
     def test_diagnostic_for_another_job_is_refused(self, tmp_path: Path) -> None:
         """A diagnostic must not relabel a record belonging to a different job."""
-        merge_repair_job_record(tmp_path, {"job_id": "repair-s1", "executions": 3})
+        write_repair_job_record(tmp_path, RepairJobRecord(job_id="repair-s1", executions=3))
         assert record_diagnostic(tmp_path, "repair-s2", "scope_request_rejected: nope") is None
         stored = read_repair_job_record(tmp_path)
         assert stored is not None

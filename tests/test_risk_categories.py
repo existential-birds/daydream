@@ -4,7 +4,7 @@ from daydream.deep.risk_categories import (
     MANDATORY_RISK_CATEGORIES,
     UnknownRiskCategoryError,
     categories_in,
-    resolve_mandatory_categories,
+    validate_extra_categories,
 )
 
 
@@ -18,10 +18,12 @@ from daydream.deep.risk_categories import (
 def test_each_mandatory_category_matches_its_declared_triggers(category: str, text: str) -> None:
     assert category in categories_in(text)
 
-def test_builtin_categories_cannot_be_removed_and_extras_are_additive() -> None:
-    assert resolve_mandatory_categories(()) == MANDATORY_RISK_CATEGORIES
-    assert resolve_mandatory_categories([])[: len(MANDATORY_RISK_CATEGORIES)] == MANDATORY_RISK_CATEGORIES
+def test_configured_extra_categories_are_validated_and_cannot_widen() -> None:
+    """The declared vocabulary is the mandatory set, so a valid extra is a no-op."""
+    validate_extra_categories(())
+    validate_extra_categories(MANDATORY_RISK_CATEGORIES)
+    validate_extra_categories(["security", "security"])
 
 def test_unknown_extra_category_fails_loudly_naming_the_value() -> None:
     with pytest.raises(UnknownRiskCategoryError, match="public_interface"):
-        resolve_mandatory_categories(["public_interface"])
+        validate_extra_categories(["public_interface"])
