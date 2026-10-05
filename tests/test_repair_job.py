@@ -316,7 +316,6 @@ def test_paused_job_is_structurally_incapable_of_a_passing_verdict() -> None:
         if state is RepairJobState.COMPLETED:
             continue
         assert job.cannot_report_green is True, state
-        assert job.cannot_authorize_commit is True, state
 
 
 def test_execution_deadline_is_the_smallest_remaining_allowance_less_reserve() -> None:

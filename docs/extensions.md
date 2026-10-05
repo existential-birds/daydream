@@ -442,7 +442,7 @@ during the run and published at finalization like every other generated output:
 Job states are `running`, `paused`, `ready_to_resume`, `validating`, `completed`,
 `blocked`, and `exhausted`. A job is **structurally fail-closed**: only
 `completed` may report a passing verdict or authorize a commit
-(`cannot_report_green` / `cannot_authorize_commit`). No absolute clock reading is
+(`cannot_report_green`). No absolute clock reading is
 ever persisted — `execution_allowance_s()` derives each execution's allowance from
 the stored consumption, so every deadline is process-local. A job's bounds are
 stored, not re-resolved, so a resumed job cannot inherit a broader policy than it

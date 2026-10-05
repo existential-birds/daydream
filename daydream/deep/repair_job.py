@@ -172,12 +172,11 @@ class RepairJobRecord:
 
     @property
     def cannot_report_green(self) -> bool:
-        """Whether this job is structurally barred from reporting a passing verdict."""
-        return self.state is not RepairJobState.COMPLETED
+        """Whether this job is structurally barred from reporting a passing verdict.
 
-    @property
-    def cannot_authorize_commit(self) -> bool:
-        """Whether this job is structurally barred from authorizing a commit."""
+        The same fail-closed posture bars the job from authorizing a commit: only
+        ``completed`` may do either.
+        """
         return self.state is not RepairJobState.COMPLETED
 
     # -- budget arithmetic ------------------------------------------------------------------
