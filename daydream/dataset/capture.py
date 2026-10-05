@@ -68,7 +68,7 @@ def capture_run_record(
 ) -> None:
     """Commit one raw run, without archive reconstruction or trace readback."""
     from daydream.dataset.privacy import sanitize_evidence
-    from daydream.dataset.schema import Evidence, RunRecord
+    from daydream.dataset.schema import RunRecord
     from daydream.dataset.scoring import capture_scoring
     from daydream.dataset.store import LocalRecordStore
     from daydream.training.harvest import assemble_scoring_inputs
@@ -192,36 +192,29 @@ def capture_run_record(
         task["diff_sha256"] = hashlib.sha256(str(task["diff"]).encode()).hexdigest()
         task["redaction"] = {"policy": "daydream.shared.v1", "applied": task["diff"] != original_task["diff"]}
     captured_patch = sanitize_evidence(patch) if patch is not None else None
-    record = RunRecord(
-        run_id=artifacts.session_id, captured_at=selected.cutoff_at if selected else now_iso_utc(), outcome=outcome,
-        original_task=Evidence(status="available", value=task) if task is not None
-            else Evidence(status="unavailable", reason="original task acquisition did not complete"),
-        final_state=Evidence(status="available", value={"head_sha": final_head}),
-        recommended_patch=Evidence(status="available", value={
+    def evidence(value: Any, *, failed: bool = False, absent: str = "unproduced") -> dict[str, Any]:
+        return {"status": "available" if value is not None else "failed" if failed else absent,
+                "value": sanitize_evidence(value)}
+
+    record = RunRecord.model_validate({
+        "run_id": artifacts.session_id, "captured_at": selected.cutoff_at if selected else now_iso_utc(),
+        "outcome": outcome, "original_task": evidence(task, absent="unavailable"),
+        "final_state": evidence({"head_sha": final_head}),
+        "recommended_patch": evidence({
             "patch": captured_patch, "sha256": hashlib.sha256(str(captured_patch).encode()).hexdigest(),
-            "source_sha256": hashlib.sha256(patch.encode()).hexdigest() if patch is not None else None,
-            "capture": sanitize_evidence(verification.get("recommended-capture.json")),
-        }) if patch is not None else Evidence(status="unproduced", reason="no recommended patch was retained"),
-        trajectories=Evidence(status="available", value=sanitize_evidence({
-            "documents": documents, "root_trajectory_id": selected.root_trajectory_id,
-            "status": selected.status, "cutoff_at": selected.cutoff_at,
-        })) if selected is not None else Evidence(status="unproduced", reason="recorder was not opened"),
-        findings=Evidence(status="available", value=sanitize_evidence({
-            "claims": claims, "items": canonical_items, "derivation": derivation, "terminal_coverage": coverage,
-        })) if claims or merged is not None or coverage is not None
-            else Evidence(status="failed", reason="structured review artifacts were malformed")
-                if "merged-items.json" in acquisition_failures
-                or any(name.startswith("stack-") and name.endswith("-records.json") for name in acquisition_failures)
-            else Evidence(status="unproduced", reason="no structured review evidence was produced"),
-        verification=Evidence(status="available", value=sanitize_evidence(verification)) if verification
-            else Evidence(status="failed", reason="verification artifact was malformed")
-                if "recommendation-verdicts.json" in acquisition_failures
-            else Evidence(status="unproduced", reason="verification evidence was not produced"),
-        scoring=Evidence(status="available", value=sanitize_evidence(scoring)) if has_scoring
-            else Evidence(status="unproduced", reason="scoring inputs were not produced"),
-        provenance=sanitize_evidence(provenance),
-        completeness={"artifact_acquisition": "failed" if acquisition_failures else "complete",
-                      "trajectory": "unproduced" if selected is None else selected.status,
-                      "terminal_review": "unproduced" if coverage is None else "available"},
-    )
+            "source_sha256": hashlib.sha256(patch.encode()).hexdigest(),
+            "capture": verification.get("recommended-capture.json"),
+        } if patch is not None else None),
+        "trajectories": evidence({"documents": documents, "root_trajectory_id": selected.root_trajectory_id,
+            "status": selected.status, "cutoff_at": selected.cutoff_at} if selected is not None else None),
+        "findings": evidence({"claims": claims, "items": canonical_items, "derivation": derivation,
+            "terminal_coverage": coverage} if claims or merged is not None or coverage is not None else None,
+            failed="merged-items.json" in acquisition_failures or any(
+                name.startswith("stack-") and name.endswith("-records.json") for name in acquisition_failures)),
+        "verification": evidence(verification or None, failed="recommendation-verdicts.json" in acquisition_failures),
+        "scoring": evidence(scoring if has_scoring else None), "provenance": sanitize_evidence(provenance),
+        "completeness": {"artifact_acquisition": "failed" if acquisition_failures else "complete",
+            "trajectory": "unproduced" if selected is None else selected.status,
+            "terminal_review": "unproduced" if coverage is None else "available"},
+    })
     LocalRecordStore(store_path).commit_run(record)

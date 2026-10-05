@@ -29,6 +29,7 @@ from daydream.backends import (
 )
 from daydream.backends.codex import CodexBackend
 from daydream.config_file import DaydreamFileConfig
+from daydream.dataset import LocalRecordStore, serialize_record
 from daydream.phases import TestAndHealResult, TestAttemptEvidence
 from daydream.phases.review import ReviewOutputError
 from daydream.review_budget import ReviewLimits
@@ -38,6 +39,7 @@ from daydream.training.labeler_signals import fix_applied_signal, local_commit_a
 from tests.deep_orchestrator.support import _only_archived_run
 from tests.harness.backend import ScriptedBackend
 from tests.harness.codex_replay import make_mock_process
+from tests.harness.dataset import read_records
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote, git
 from tests.harness.remote_ci import NoCIRemote
@@ -100,7 +102,7 @@ async def _run_real_phases_deep(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, no_ci_remote: NoCIRemote, *,
     remote_name: str = "origin.git", pr_repo: str | None = None,
     fix_edit_line: str = "# daydream recommended change\n",
-    untracked_fix: str | None = None,
+    untracked_fix: str | None = None, dataset_store: Path | None = None,
 ) -> tuple[Path, int]:
     """Run real internal phases against a bare remote; return ``(remote, exit_code)``.
 
@@ -110,6 +112,9 @@ async def _run_real_phases_deep(
     no_ci_remote.connect(multi_stack_target, remote)
     stub = _install_deep_capture_backend(multi_stack_target, monkeypatch, real_internal_phases=True)
     stub.fix_edit_line = fix_edit_line
+    if dataset_store is not None:
+        assert stub.merge_items is not None
+        stub.merge_items[0]["source_uids"] = ["python:1"]
     if untracked_fix is not None:
         stub.fix_new_generated = untracked_fix
         assert stub.merge_items is not None
@@ -117,6 +122,7 @@ async def _run_real_phases_deep(
         (multi_stack_target / "notes.txt").write_text("pre-existing\n")
     exit_code = await run(_deep_run_config(
             multi_stack_target, pr_number=no_ci_remote.pr_number, pr_repo=pr_repo or no_ci_remote.base_repository,
+            dataset_capture=dataset_store is not None, dataset_store_path=dataset_store,
         )
     )
     return remote, exit_code
@@ -136,7 +142,11 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
 ) -> None:
     """Editing tracked api.py gives real test/heal and commit phases a nonempty recommended diff."""
     head_before = git_ops.head_sha(multi_stack_target)
-    remote, exit_code = await _run_real_phases_deep(multi_stack_target, monkeypatch, archive_dir, no_ci_remote)
+    base_before = git_ops.resolve_diff_merge_base(multi_stack_target, "main", head_before)
+    original_diff = git_ops.diff(multi_stack_target, "main")
+    store = LocalRecordStore(archive_dir.parent / "records")
+    remote, exit_code = await _run_real_phases_deep(
+        multi_stack_target, monkeypatch, archive_dir, no_ci_remote, dataset_store=store.root)
     assert exit_code == 0
     head_after = git_ops.head_sha(multi_stack_target)
     assert head_after != head_before
@@ -173,6 +183,20 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert recommended_text != diff_text
     assert "# daydream recommended change" in recommended_text
     assert "# daydream recommended change" not in diff_text
+    captured = serialize_record(read_records(store).runs[0])
+    task = captured["original_task"]["value"]
+    assert (task["analyzed_revision"]["head_sha"], task["analyzed_revision"]["merge_base_sha"]) == (
+        head_before, base_before)
+    assert task["diff"] == original_diff and captured["final_state"]["value"]["head_sha"] == head_after
+    assert captured["recommended_patch"]["value"]["patch"] == recommended_text
+    item = captured["findings"]["value"]["items"][0]
+    assert item["item_uid"] and item["source_uids"]
+    verification = captured["verification"]["value"]
+    verdicts = verification["recommendation-verdicts.json"]
+    assert verdicts["selection"]["decisions"][0]["item_uid"] == item["item_uid"]
+    assert verdicts["verdicts"][0]["issue_id"] == item["id"]
+    assert verification["fix-outcomes.json"]["outcomes"][item["item_uid"]]["verdict"] == "resolved"
+    assert captured["scoring"]["value"]["persisted_breakdown"]["correctness_per_finding"] == [1.0]
 
 async def test_mixed_case_pr_identity_reaches_remote_ci_and_archives_success(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, no_ci_remote: NoCIRemote,
