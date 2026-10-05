@@ -153,7 +153,7 @@ async def substantiate_check_claims(
                     raise CheckClaimUnavailable(
                         f"Deterministic check unavailable: {shlex.join(argv)}: {exc}"
                     ) from exc
-                if not result.completed or result.incomplete:
+                if result.incomplete:
                     raise CheckClaimUnavailable(
                         f"Deterministic check unavailable: {shlex.join(argv)} produced incomplete evidence "
                         f"(timed_out={result.timed_out}, output_truncated={result.output_truncated})"

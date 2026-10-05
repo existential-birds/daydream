@@ -44,8 +44,7 @@ from daydream.archive.manifest import (
     build_manifest_from_snapshot,
 )
 from daydream.archive.pipeline import (
-    _read_fix_quality_gate,
-    _read_recommended_capture,
+    _read_session_bound_json_artifact,
     derive_phase_states,
     derive_pipeline_status,
 )
@@ -59,6 +58,7 @@ from daydream.artifact_visibility import (
 )
 from daydream.artifacts.filesystem import manifest_tree
 from daydream.backends import MetricsEvent, ResultEvent, TextEvent
+from daydream.deep.artifacts import DeepArtifact
 from daydream.remote_ci import (
     CIObservation,
     PRCIBinding,
@@ -717,34 +717,49 @@ def test_upsert_run_persists_recommended_patch_capture(tmp_path: Path) -> None:
     row = _stored_manifest_row(tmp_path, "s-cap", recommended_patch_capture="post_test")
     assert row["recommended_patch_capture"] == "post_test"
 
-def test_read_fix_quality_gate_requires_matching_session(tmp_path: Path) -> None:
-    gate = {
-        "enabled": True, "session_id": "sess-42", "rounds": [{"round": 1, "per_file": {"api.py": {"flagged": True}}}],
-    }
-    gate_p = tmp_path / ".daydream" / "deep" / "fix-quality-gate.json"
-    gate_p.parent.mkdir(parents=True)
-    gate_p.write_text(json.dumps(gate))
-    assert _read_fix_quality_gate(tmp_path, "sess-42") == gate
-    assert _read_fix_quality_gate(tmp_path, "sess-other") is None
-    assert _read_fix_quality_gate(tmp_path, None) is None
-
-def test_read_fix_quality_gate_unbound_artifact_is_none(tmp_path: Path) -> None:
-    gate_p = tmp_path / ".daydream" / "deep" / "fix-quality-gate.json"
-    gate_p.parent.mkdir(parents=True)
-    gate_p.write_text(json.dumps({"enabled": True, "rounds": [{"round": 1, "per_file": {}}]}))
-    assert _read_fix_quality_gate(tmp_path, "sess-42") is None
-
-def test_read_recommended_capture_requires_matching_session(tmp_path: Path) -> None:
-    cap = {"session_id": "sess-42", "capture_point": "post_test"}
-    p = tmp_path / ".daydream" / "deep" / "recommended-capture.json"
+@pytest.mark.parametrize(
+    ("resolver", "artifact", "payload"),
+    [
+        pytest.param(
+            DeepArtifact.FIX_QUALITY_GATE.at,
+            "fix-quality-gate.json",
+            {
+                "enabled": True,
+                "session_id": "sess-42",
+                "rounds": [{"round": 1, "per_file": {"api.py": {"flagged": True}}}],
+            },
+            id="fix-quality-gate",
+        ),
+        pytest.param(
+            DeepArtifact.RECOMMENDED_CAPTURE.at,
+            "recommended-capture.json",
+            {"session_id": "sess-42", "capture_point": "post_test"},
+            id="recommended-capture",
+        ),
+    ],
+)
+def test_session_bound_artifact_requires_matching_session(
+    tmp_path: Path, resolver: Callable[[Path], Path], artifact: str, payload: dict[str, Any]
+) -> None:
+    p = tmp_path / ".daydream" / "deep" / artifact
     p.parent.mkdir(parents=True)
-    p.write_text(json.dumps(cap))
-    assert _read_recommended_capture(tmp_path, "sess-42") == cap
-    assert _read_recommended_capture(tmp_path, "sess-other") is None
-    assert _read_recommended_capture(tmp_path, None) is None
+    p.write_text(json.dumps(payload))
+    assert _read_session_bound_json_artifact(tmp_path, "sess-42", resolver) == payload
+    assert _read_session_bound_json_artifact(tmp_path, "sess-other", resolver) is None
+    assert _read_session_bound_json_artifact(tmp_path, None, resolver) is None
 
-def test_read_recommended_capture_absent_is_none(tmp_path: Path) -> None:
-    assert _read_recommended_capture(tmp_path, "sess-42") is None
+@pytest.mark.parametrize(
+    "resolver", [DeepArtifact.FIX_QUALITY_GATE.at, DeepArtifact.RECOMMENDED_CAPTURE.at],
+    ids=["fix-quality-gate", "recommended-capture"],
+)
+def test_session_bound_unbound_artifact_is_none(tmp_path: Path, resolver: Callable[[Path], Path]) -> None:
+    p = tmp_path / ".daydream" / "deep" / "fix-quality-gate.json"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({"enabled": True, "rounds": [{"round": 1, "per_file": {}}]}))
+    assert _read_session_bound_json_artifact(tmp_path, "sess-42", resolver) is None
+
+def test_session_bound_absent_artifact_is_none(tmp_path: Path) -> None:
+    assert _read_session_bound_json_artifact(tmp_path, "sess-42", DeepArtifact.RECOMMENDED_CAPTURE.at) is None
 
 def test_manifest_recommended_patch_capture_defaults_pre_test(tmp_path: Path) -> None:
     m = _build(tmp_path)  # no recommended_capture arg => sidecar absent
