@@ -20,12 +20,10 @@ MANDATORY_RISK_CATEGORIES: tuple[str, ...] = (
 )
 """The issue's five mandatory risk categories, in fixed declaration order.
 
-These can never be removed by configuration: a run that names extra categories
-widens the set, never narrows it.
+These are also the whole declared vocabulary: configuration can neither narrow
+nor extend them, so ``extra_risk_categories`` is validated against this tuple
+and nothing more.
 """
-
-RISK_CATEGORIES: tuple[str, ...] = MANDATORY_RISK_CATEGORIES
-"""The full declared category vocabulary; any configured name is drawn from here."""
 
 # Calibration surfaces: match only changed content and post-state paths, never context.
 CATEGORY_TRIGGERS: dict[str, tuple[str, ...]] = {
@@ -71,23 +69,22 @@ def categories_in(text: str) -> tuple[str, ...]:
 
     Deterministic: categories are returned in declaration order.
     """
-    return tuple(category for category in RISK_CATEGORIES if category_matches(category, text))
+    return tuple(category for category in MANDATORY_RISK_CATEGORIES if category_matches(category, text))
 
 
-def resolve_mandatory_categories(extra: Iterable[str]) -> tuple[str, ...]:
-    """Return the built-in categories followed by first-seen, deduplicated extras.
+def validate_extra_categories(extra: Iterable[str]) -> None:
+    """Reject any configured category outside :data:`MANDATORY_RISK_CATEGORIES`.
 
-    Never drops a built-in and never returns an empty set. An unknown name raises
-    :class:`UnknownRiskCategoryError` naming the offending value; it is never
+    The declared vocabulary *is* the mandatory set, so a configured name can
+    only ever be a no-op -- there is nothing to widen. Validating it anyway is the
+    point: a typo must fail the run loudly before the verify pass instead of
+    silently verifying less than the operator asked for. The raised
+    :class:`UnknownRiskCategoryError` names the offending value; it is never
     coerced to a default or silently narrowed.
     """
-    resolved: list[str] = list(MANDATORY_RISK_CATEGORIES)
     for category in extra:
-        if category not in RISK_CATEGORIES:
-            declared = ", ".join(RISK_CATEGORIES)
+        if category not in MANDATORY_RISK_CATEGORIES:
+            declared = ", ".join(MANDATORY_RISK_CATEGORIES)
             raise UnknownRiskCategoryError(
                 f"Unknown risk category: {category!r}; declared vocabulary: {declared}"
             )
-        if category not in resolved:
-            resolved.append(category)
-    return tuple(resolved)
