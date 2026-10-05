@@ -328,20 +328,10 @@ def build_structural_prompt(
     structural findings may require tracing shared helpers or layering elsewhere.
     """
     joined = ", ".join(files)
-    parts: list[str] = []
-    settled = _settled_decisions_block(prior_commits)
-    if settled:
-        parts.append(settled)
-    parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
-    if exploration_dir is not None:
-        parts.append(_exploration_pointer(exploration_dir))
-    parts.append(
-        _context_pointers(
-            intent_path=intent_path,
-            alternatives_path=alternatives_path,
-            intent_authoritative=intent_authoritative,
-            include_alternatives=include_alternatives,
-        )
+    parts: list[str] = _review_context_parts(
+        exploration_dir, cwd, intent_path, alternatives_path,
+        intent_authoritative=intent_authoritative, include_alternatives=include_alternatives,
+        prior_commits=prior_commits,
     )
     parts.append(
         f"You are the structural reviewer. The full change spans: {joined}."

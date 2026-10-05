@@ -774,57 +774,50 @@ def _charge_failure(
         job.checkpoint_ref = repair.checkpoint_ref
     if checkpoint is not None:
         job.failure_identity = job.failure_identity or checkpoint.failure_identity
+    failure = "" if checkpoint is None else checkpoint.failure_identity
+    digest = "" if checkpoint is None else checkpoint.patch_digest[:12]
+    # One record_execution call; the branches below only select its arguments.
+    progress = False
+    # A checkpoint's next experiment is deliberately not adopted when the
+    # execution produced no repair turn at all.
+    next_experiment = None if repair is None else repair_checkpoint_next(checkpoint)
+    completed: tuple[str, ...] = ()
+    unchanged: tuple[str, ...] = ()
+    patch_confirmed = False
+    infrastructure_failed = False
+    changed_paths: tuple[str, ...] = ()
     if repair is None:
         # The execution ran and produced no repair evidence at all. There is
         # nothing to continue from, so the job records the absence and stops.
-        job.record_execution(
-            progress=False, next_experiment=None,
-            unchanged_evidence=(
-                f"execution ran {len(result.attempts) if result is not None else 0} attempt(s) "
-                f"and no repair turn",
-            ),
-            elapsed_s=elapsed_s, cost_usd=cost_usd,
-        )
-        return job
-    if repair.outcome is RepairOutcome.EXECUTION_ERROR:
+        attempts = len(result.attempts) if result is not None else 0
+        unchanged = (f"execution ran {attempts} attempt(s) and no repair turn",)
+    elif repair.outcome is RepairOutcome.EXECUTION_ERROR:
         # An infrastructure failure is not diagnostic evidence about the code
         # under repair. Charging it as progress would buy a retry with a budget
         # the failure just proved does not work.
-        job.record_execution(
-            progress=False, next_experiment=repair_checkpoint_next(checkpoint),
-            unchanged_evidence=(f"execution {repair.execution_id} failed before producing evidence",),
-            infrastructure_failed=True,
-            elapsed_s=elapsed_s, cost_usd=cost_usd,
-        )
-        return job
-    if repair.outcome is not RepairOutcome.BUDGET_INTERRUPTED:
-        job.record_execution(
-            progress=False, next_experiment=repair_checkpoint_next(checkpoint),
-            unchanged_evidence=(f"repair turn {repair.execution_id} ended {repair.outcome.value}",),
-            changed_paths=repair.changed_paths, elapsed_s=elapsed_s, cost_usd=cost_usd,
-        )
-        return job
-
-    failure = "" if checkpoint is None else checkpoint.failure_identity
-    digest = "" if checkpoint is None else checkpoint.patch_digest[:12]
-    if BOUNDED_VALIDATION_EXPERIMENT in job.progress_evidence:
+        unchanged = (f"execution {repair.execution_id} failed before producing evidence",)
+        infrastructure_failed = True
+    elif repair.outcome is not RepairOutcome.BUDGET_INTERRUPTED:
+        unchanged = (f"repair turn {repair.execution_id} ended {repair.outcome.value}",)
+        changed_paths = repair.changed_paths
+    elif BOUNDED_VALIDATION_EXPERIMENT in job.progress_evidence:
         # The candidate already had its one bounded validation. Running it again
         # against the same failure is the loop requirement 41 forbids, so the
         # unchanged evidence is named and the job blocks.
-        job.record_execution(
-            progress=False, next_experiment=repair_checkpoint_next(checkpoint),
-            unchanged_evidence=(
-                f"candidate {digest or 'unknown'} re-validated against the same failure "
-                f"{failure or 'unrecorded'}",
-            ),
-            changed_paths=repair.changed_paths, elapsed_s=elapsed_s, cost_usd=cost_usd,
-        )
-        return job
+        unchanged = (f"candidate {digest or 'unknown'} re-validated against the same failure"
+                     f" {failure or 'unrecorded'}",)
+        changed_paths = repair.changed_paths
+    else:
+        # The one cut-short repair earns its single bounded validation.
+        progress = True
+        completed = (BOUNDED_VALIDATION_EXPERIMENT,)
+        patch_confirmed = bool(checkpoint is not None and checkpoint.candidate_patch.strip())
+        changed_paths = repair.changed_paths
     job.record_execution(
-        progress=True, next_experiment=repair_checkpoint_next(checkpoint),
-        completed_experiments=[BOUNDED_VALIDATION_EXPERIMENT],
-        candidate_patch_confirmed=bool(checkpoint is not None and checkpoint.candidate_patch.strip()),
-        changed_paths=repair.changed_paths, elapsed_s=elapsed_s, cost_usd=cost_usd,
+        progress=progress, next_experiment=next_experiment, completed_experiments=completed,
+        unchanged_evidence=unchanged, candidate_patch_confirmed=patch_confirmed,
+        infrastructure_failed=infrastructure_failed, changed_paths=changed_paths,
+        elapsed_s=elapsed_s, cost_usd=cost_usd,
     )
     return job
 

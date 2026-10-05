@@ -69,17 +69,6 @@ class TestDiagnosticNeverBecomesTheGrant:
         assert job.policy == configured, "a default-bounds record became the captured grant"
         assert job.policy != RepairJobPolicy(), "the run's configured bounds were dropped"
 
-    def test_configured_policy_is_what_the_job_gets(self, tmp_path: Path) -> None:
-        """A diagnostic recorded before job start cannot pre-empt the real policy."""
-        configured = RepairJobPolicy(execution_s=90.0, job_total_s=300.0, max_executions=2)
-        record_diagnostic(tmp_path, "repair-s1", "checkpoint_write_failed: disk full")
-        job = _load_job(
-            tmp_path, job_id="repair-s1", footprint=_footprint(), policy=configured
-        )
-        assert job.policy.execution_s == 90.0
-        assert job.policy.job_total_s == 300.0
-        assert job.policy.max_executions == 2
-
     def test_diagnostics_survive_onto_the_rebuilt_job(self, tmp_path: Path) -> None:
         """Requirement 28: the blocker is still visible to a resuming job."""
         record_diagnostic(tmp_path, "repair-s1", "checkpoint_write_failed: disk full")
