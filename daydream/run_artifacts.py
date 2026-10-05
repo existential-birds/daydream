@@ -9,6 +9,7 @@ from daydream.agent import console
 from daydream.artifact_visibility import (
     ArtifactDisposition,
     ArtifactSession,
+    ArtifactTreeSnapshot,
     ArtifactVisibilityError,
     PrivateWorkspaceOwner,
     RoutedDestination,
@@ -323,7 +324,7 @@ def capture_manifest_run_identity(
 
 
 def _finalize_run_artifacts(
-    run_artifacts: _RunArtifacts, *, selected: RunWriteSnapshot, config: RunConfig,
+    run_artifacts: _RunArtifacts, *, selected: RunWriteSnapshot | None, config: RunConfig,
     work: WorkContext, successful: bool, interrupted: bool = False,
 ) -> None:
     """Freeze once, collect optional data, and publish the joined runtime outputs."""
@@ -335,6 +336,12 @@ def _finalize_run_artifacts(
     )
     from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
 
+    if selected is None:
+        snapshot = run_artifacts.session.freeze_unproduced()
+        _capture_dataset(run_artifacts, snapshot=snapshot, selected=None, config=config,
+                         work=work, successful=successful, interrupted=interrupted)
+        run_artifacts.session.finalize_frozen(snapshot, disposition=ArtifactDisposition.ROLLBACK)
+        return
     if run_artifacts.capture.run_flow is None:
         raise ArtifactVisibilityError("run flow provenance was not retained")
     identity = run_artifacts.capture.manifest_identity
@@ -370,19 +377,15 @@ def _finalize_run_artifacts(
 
 
 def _capture_dataset(
-    run_artifacts: _RunArtifacts, *, snapshot: object, selected: RunWriteSnapshot | None,
+    run_artifacts: _RunArtifacts, *, snapshot: ArtifactTreeSnapshot, selected: RunWriteSnapshot | None,
     config: RunConfig, work: WorkContext, successful: bool, interrupted: bool,
 ) -> None:
     """Keep dataset failures optional while retaining frozen integrity gates."""
-    from daydream.artifact_visibility import ArtifactTreeSnapshot
-
     if not config.dataset_capture:
         return
-    if not isinstance(snapshot, ArtifactTreeSnapshot):
-        raise ArtifactVisibilityError("dataset capture has no frozen artifact boundary")
     from daydream.archive.bundle import _validate_frozen_artifacts
     from daydream.archive.errors import ArchiveIntegrityError
-    from daydream.dataset.capture import capture_run_record
+    from daydream.dataset_capture import capture_run_record
 
     try:
         _validate_frozen_artifacts(snapshot)
@@ -399,16 +402,3 @@ def _capture_dataset(
         _validate_frozen_artifacts(snapshot)
     except ArchiveIntegrityError as exc:
         raise ArtifactVisibilityError(str(exc)) from exc
-
-
-def _finalize_unproduced_run_artifacts(
-    run_artifacts: _RunArtifacts, *, config: RunConfig, work: WorkContext,
-    successful: bool, interrupted: bool,
-) -> None:
-    """Capture supported pre-recorder exits without fabricating a trajectory."""
-    snapshot = run_artifacts.session.freeze_unproduced()
-    _capture_dataset(run_artifacts, snapshot=snapshot, selected=None, config=config,
-                     work=work, successful=successful, interrupted=interrupted)
-    # Before recorder entry the established runtime behavior restores prior
-    # outputs; collecting absent evidence must not change that disposition.
-    run_artifacts.session.finalize_frozen(snapshot, disposition=ArtifactDisposition.ROLLBACK)

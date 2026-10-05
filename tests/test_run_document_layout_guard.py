@@ -51,7 +51,7 @@ _PERMITTED = {
     # Training corpus batches: `batches/<sid>/trajectory.json`, its own producer.
     "daydream/training/corpus_projection/projector.py": frozenset({"root-document"}),
     # Dataset run-record JSONL shards: `runs/<record-hash>.jsonl`, a separate layout.
-    "daydream/dataset/store.py": frozenset({"runs-dir"}),
+    "daydream/dataset.py": frozenset({"runs-dir"}),
     # A standalone package that cannot import `daydream` (reads via a runtime seam).
     "rl/daydream_review/daydream_review/rundir.py": frozenset({"root-document", "runs-dir"}),
 }

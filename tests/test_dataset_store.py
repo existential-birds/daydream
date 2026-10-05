@@ -7,9 +7,12 @@ import stat
 from pathlib import Path
 from typing import Any
 
+import jsonschema
 import pytest
 
-from daydream.dataset import LocalRecordStore, StoreError
+from daydream.dataset import LocalRecordStore, StoreError, parse_run, run_record_schema
+from daydream.dataset_capture import capture_scoring
+from daydream.training.reward import ScoringInputs
 from tests.harness.dataset import observation, read_records, run_record
 
 
@@ -56,8 +59,15 @@ def test_history_pins_temporal_membership_and_preserves_typed_human_decisions(st
 
 @pytest.mark.parametrize(("kind", "raw", "diagnostic"), [
     ("run", run_record(outcome="failed"), "immutable_identity_conflict"),
+    ("run", run_record(scoring={"status": "available", "value": {
+        **capture_scoring(ScoringInputs(None, True, 6), "review"),
+        "reward_policy": {"version": "missing", "configuration": {}}}}), "invalid_or_unknown_record_schema"),
     ("run", b"{private-malformed", "invalid_or_unknown_record_schema"),
     ("run", run_record(schema_version="daydream.run.v99"), "invalid_or_unknown_record_schema"),
+    ("run", {k: v for k, v in run_record().items() if k != "schema_version"}, "invalid_or_unknown_record_schema"),
+    ("run", run_record(**{"PRIVATE-CREDENTIAL-KEY": "PRIVATE-CREDENTIAL-VALUE"}), "invalid_or_unknown_record_schema"),
+    *(('observation', observation(author='gpt-6', role=role), 'invalid_or_unknown_record_schema')
+      for role in ('rater', 'adjudicator')),
     ("run", run_record("dirty", provenance={"url": "https://user:password@github.com/owner/repo"}), "privacy_refused"),
     ("observation", observation("unknown", run_id="unknown"), "unknown_run_reference"),
     ("observation", observation("orphan", item_uid="item:99"), "orphan_finding_reference"),
@@ -67,7 +77,7 @@ def test_invalid_mutations_are_withheld(store: LocalRecordStore, kind: str, raw:
     store.append_observation(observation())
     with pytest.raises(StoreError, match=diagnostic) as error:
         (store.commit_run if kind == "run" else store.append_observation)(raw)
-    assert "password" not in str(error.value) and "private" not in str(error.value)
+    assert "password" not in str(error.value).lower() and "private" not in str(error.value).lower()
     read = read_records(store)
     assert len(read.runs) == len(read.observations) == 1
 
@@ -163,3 +173,34 @@ def test_snapshot_reads_validate_only_pinned_shards(
             store.read_snapshot(identity)
     else:
         assert [run["run_id"] for run in store.read_snapshot(snapshot).runs] == ["run-1"]
+
+
+@pytest.mark.parametrize("field", ["original_task", "trajectories", "findings", "verification", "scoring"])
+def test_available_run_sections_require_complete_semantic_payload(field: str) -> None:
+    raw = parse_run(run_record())
+    raw[field] = {"status": "available", "value": {}}
+    with pytest.raises(ValueError, match="invalid RunRecord"):
+        parse_run(raw)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(raw, run_record_schema())
+    raw[field] = {"status": "unavailable", "reason": "not acquired"}
+    jsonschema.validate(parse_run(raw), run_record_schema())
+
+
+@pytest.mark.parametrize("registered_child", [False, True])
+def test_trajectory_membership_preserves_invocations_and_unproduced_registered_children(registered_child: bool) -> None:
+    summary: dict[str, Any] = ({"trajectory_id": "run-1-child", "invocations": []} if registered_child else
+               {"trajectory_id": "run-1", "invocation_id": "attempt-1", "step_ids": [1], "phase": "review"})
+    raw = run_record(outcome="interrupted", trajectories={"status": "available", "value": {
+        "root_trajectory_id": "run-1", "status": "partial", "cutoff_at": "2026-10-04T12:01:00Z",
+        "documents": [{"schema_version": "ATIF-v1.7", "session_id": "run-1", "trajectory_id": "run-1",
+                       "agent": {"name": "daydream", "version": "test"},
+                       "steps": [{"step_id": 1, "source": "user", "message": "review"}],
+                       "extra": {"subtrajectories": [summary]}}]}})
+    restored = parse_run(raw)
+    assert restored["outcome"] == "interrupted"
+    assert restored["trajectories"]["value"]["documents"][0]["extra"]["subtrajectories"] == [summary]
+    if not registered_child:
+        summary["step_ids"] = [9]
+        with pytest.raises(ValueError, match="invalid RunRecord"):
+            parse_run(raw)

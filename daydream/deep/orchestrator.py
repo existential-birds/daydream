@@ -596,7 +596,7 @@ async def run_deep(
         except GitError:
             diff = None
     if diff is not None and run_artifacts is not None and config.dataset_capture:
-        from daydream.dataset.capture import retain_original_task
+        from daydream.dataset_capture import retain_original_task
 
         try:
             retain_original_task(

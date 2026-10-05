@@ -92,7 +92,6 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         help="Capture validated run evidence in the private local JSONL store (opt-in)"
         if full_help else argparse.SUPPRESS,
     )
-    parser.set_defaults(dataset_capture=False)
     parser.add_argument(
         "--dataset-store", type=Path, dest="dataset_store_path", metavar="DIR",
         help="Local JSONL store directory (default: ~/.daydream/dataset); requires --capture-data"

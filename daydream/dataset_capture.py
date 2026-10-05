@@ -6,17 +6,19 @@ import hashlib
 import json
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlparse
 
 from daydream import git_ops
 from daydream.archive.git_safe import normalize_remote_url
 from daydream.archive.provenance import capture_executable_provenance
 from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.dataset import sanitize_evidence
 from daydream.deep.diff import _diff_changed_files
 from daydream.deep.records import item_source_uids, record_issues, record_uid
 from daydream.pr_review import compute_fingerprint, extract_item_fields
 from daydream.timeutil import now_iso_utc
+from daydream.training.reward import DEFAULT_WEIGHTS, REWARD_VERSION, ScoringInputs, score_trajectory
 
 if TYPE_CHECKING:
     from daydream.artifact_visibility import ArtifactTreeSnapshot
@@ -67,12 +69,8 @@ def capture_run_record(
     forbidden_store_roots: tuple[Path, ...] = (),
 ) -> None:
     """Commit one raw run, without archive reconstruction or trace readback."""
-    from daydream.dataset.privacy import sanitize_evidence
-    from daydream.dataset.schema import parse_run
-    from daydream.dataset.scoring import capture_scoring
-    from daydream.dataset.store import LocalRecordStore
+    from daydream.dataset import LocalRecordStore
     from daydream.training.harvest import assemble_scoring_inputs
-    from daydream.training.reward import ScoringInputs
 
     store_path = config.dataset_store_path or Path.home() / ".daydream" / "dataset"
     resolved_store = store_path.resolve()
@@ -196,7 +194,7 @@ def capture_run_record(
         return {"status": "available" if value is not None else "failed" if failed else absent,
                 "value": sanitize_evidence(value)}
 
-    record = parse_run({"schema_version": "daydream.run.v1",
+    LocalRecordStore(store_path).commit_run({"schema_version": "daydream.run.v1",
         "run_id": artifacts.session_id, "captured_at": selected.cutoff_at if selected else now_iso_utc(),
         "outcome": outcome, "original_task": evidence(task, absent="unavailable"),
         "final_state": evidence({"head_sha": final_head}),
@@ -217,4 +215,29 @@ def capture_run_record(
             "trajectory": "unproduced" if selected is None else selected.status,
             "terminal_review": "unproduced" if coverage is None else "available"},
     })
-    LocalRecordStore(store_path).commit_run(record)
+
+
+def capture_scoring(inputs: ScoringInputs, review_text: str | None) -> dict[str, Any]:
+    """Keep the producer's exact scoring length and existing intrinsic reducer."""
+    captured_text = sanitize_evidence(review_text)
+    return cast(dict[str, Any], sanitize_evidence({
+        "verifier_verdicts": inputs.verifier_verdicts,
+        "format_valid": inputs.format_valid,
+        "review_text": captured_text,
+        "source_review_sha256": hashlib.sha256(review_text.encode()).hexdigest() if review_text is not None else None,
+        "review_text_redaction": {
+            "policy": "daydream.shared.v1",
+            "applied": captured_text != review_text,
+            "captured_sha256": (
+                hashlib.sha256(captured_text.encode()).hexdigest() if captured_text is not None else None
+            ),
+        },
+        "length": inputs.length,
+        "reward_policy": {"version": REWARD_VERSION, "configuration": {
+            **vars(DEFAULT_WEIGHTS),
+            "verdict_map": dict(DEFAULT_WEIGHTS.verdict_map),
+            "fp_penalty_map": dict(DEFAULT_WEIGHTS.fp_penalty_map),
+        }},
+        "persisted_breakdown": score_trajectory(inputs).to_dict(),
+        "posterior_cost": None,
+    }))

@@ -10,9 +10,10 @@ import pytest
 
 from daydream import git_ops
 from daydream.backends import AgentEvent, ToolResultEvent, ToolStartEvent
-from daydream.dataset import LocalRecordStore, parse_observation
+from daydream.dataset import LocalRecordStore, StoreError, parse_observation
 from daydream.run_config import RunConfig
 from daydream.runner import run
+from daydream.training.labeler_versions import reply_evidence_digest
 from tests.harness.backend import ScriptedBackend
 from tests.harness.dataset import observation, read_records
 from tests.harness.git_helpers import bare_remote, git
@@ -66,13 +67,25 @@ async def test_dirty_original_input_and_history_without_archive_or_findings_expo
     assert scoring["length"] == len(review) != len(scoring["review_text"])
     assert scoring["source_review_sha256"] == hashlib.sha256(review.encode()).hexdigest()
     assert scoring["persisted_breakdown"]["composite"] is None
+    assert scoring["persisted_breakdown"]["correctness_per_finding"] is None and scoring["posterior_cost"] is None
     text = "Use [REDACTED] through the environment."
-    correction = parse_observation(observation(run_id=raw["run_id"], item_uid=item["item_uid"], correction={
+    replies = [{"reply_id": "reply:123", "body_sha256": "a" * 64, "disposition": "rejected"}]
+    correction = parse_observation(observation(run_id=raw["run_id"], item_uid=item["item_uid"],
+        semantic_evidence=replies, evidence_digest=reply_evidence_digest(replies),
+        evidence_digest_scheme="reply-evidence-v1", correction={
         "status": "available", "source_reply_id": "reply:123", "text": text, "body_sha256": "a" * 64,
         "captured_sha256": hashlib.sha256(text.encode()).hexdigest(), "redaction_provenance": {"policy": "shared-v1"}}))
     assert config.dataset_store_path is not None
     store = LocalRecordStore(config.dataset_store_path)
     assert store.append_observation(correction).committed and not store.append_observation(correction).committed
+    restored = read_records(store).observations[0]
+    assert restored["semantic_evidence"] == replies and restored["evidence_digest"] == reply_evidence_digest(replies)
+    assert restored["correction"]["text"] == text and restored["correction"]["body_sha256"] == "a" * 64
+    assert restored["correction"]["captured_sha256"] != restored["correction"]["body_sha256"]
+    for changed in ({"correction": {**correction["correction"], "text": "changed"}},
+                    {"semantic_evidence": [{"reply_id": "changed"}]}):
+        with pytest.raises(StoreError, match="invalid_or_unknown_record_schema"):
+            store.append_observation({**correction, **changed})
     pinned = store.select_snapshot(observed_before="2100-01-01T00:00:00Z")
     assert store.read_snapshot(pinned).observations == (correction,)
     later = {**correction, "observation_id": "suggestion", "role": "model-suggested", "author": "model"}
