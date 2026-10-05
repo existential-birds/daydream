@@ -14,7 +14,7 @@ from huggingface_hub.errors import HfHubHTTPError
 from jsonschema import Draft202012Validator
 
 import daydream.git_ops as git_ops
-from daydream.archive import hydrate, hydrate_rules, license_enrich, sanitize
+from daydream.archive import hydrate, hydrate_rules, license_enrich, sanitize, scan
 from daydream.archive.hydrate import admission_summary_buckets
 from daydream.archive.hydrate_client import FakeHub
 from daydream.archive.hydrate_rules import (
@@ -69,6 +69,32 @@ def _admitted_stage(tmp_path: Path, revision: str = "a" * 40) -> Path:
     hydrate.dedupe_admitted(stage, revision=revision)
     hydrate.build_import_ledger(stage, revision=revision, source_commit=revision)
     return stage
+
+
+def test_hydration_refuses_credentials_added_by_license_enrichment_before_payload_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ContaminatingResolver:
+        def resolve(self, repo_slug: str, repo_commit: str | None) -> license_enrich.EnrichedEvidence:
+            return license_enrich.EnrichedEvidence(
+                spdx_id="MIT", source="github:owner/repo@" + "c" * 40 + " ghp_enrichmentcanary",
+                repo_commit="c" * 40,
+            )
+
+    monkeypatch.setattr(license_enrich, "_make_license_resolver", ContaminatingResolver)
+    hub = make_fake_hub(tmp_path)
+    hub.files["bundles/sess-a/manifest.json"] = json.dumps({
+        "session_id": "sess-a", "git": {"remote_url": "https://github.com/owner/repo", "repo_slug": "owner/repo"},
+    }).encode()
+    hub.commit_revision("a" * 40)
+    with pytest.raises(hydrate.HydrationError, match="secret scan") as exc:
+        hydrate.run_hydrate_hub(hydrate.HydrateHubConfig(
+            source_repo=hub.repo_id, source_revision="a" * 40, destination_repo=hub.repo_id,
+            stage_dir=tmp_path / "stage", license_policy_path=_write_policy(tmp_path),
+        ), client=hub)
+    assert "ghp_enrichmentcanary" not in str(exc.value)
+    assert not any("/batches/" in p or p.endswith("_SUCCESS") for p in hub.uploaded_paths)
+    assert all(p.endswith("policy-binding.json") for p in hub.uploaded_paths)
 
 def test_fake_hub_roundtrip_and_revision(tmp_path: Path) -> None:
     hub = make_fake_hub(tmp_path)
@@ -523,6 +549,42 @@ class TestDownloadSnapshot:
         assert not (tmp_path / "stage" / "outside.txt").exists()
 
 class TestPublish:
+    @pytest.mark.parametrize("failure", ["exception", "incomplete", "scan_error"])
+    def test_final_scan_failures_prevent_payload_upload(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+    ) -> None:
+        hub = make_fake_hub(tmp_path)
+        stage = _admitted_stage(tmp_path)
+
+        def failed_scan(_path: Path) -> scan.ScanResult:
+            if failure == "exception":
+                raise RuntimeError("ghp_privateexceptioncanary")
+            findings = [] if failure == "incomplete" else [
+                scan.Finding("supporting-ledger.json", "unreadable", "scan_error", ""),
+            ]
+            return scan.ScanResult(clean=False, findings=findings)
+
+        monkeypatch.setattr(hydrate, "scan_run_dir", failed_scan)
+        with pytest.raises(hydrate.HydrationError, match="secret scan") as exc:
+            hydrate.publish_batches(hub, stage, curation_id="cur-" + "0" * 16)
+        assert "ghp_privateexceptioncanary" not in str(exc.value)
+        assert hub.uploaded_paths == []
+
+    def test_advisory_ledger_allows_upload_and_raw_downloads_are_not_scanned(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        hub = make_fake_hub(tmp_path)
+        stage = _admitted_stage(tmp_path)
+        (stage / "downloads" / "dirty.bin").write_bytes(b"\xffghp_downloadcanary")
+        cid = "cur-" + "0" * 16
+        ledger = stage / "curated" / cid / "supporting-ledger.json"
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(json.dumps({"notes": 'SORT_KEY = "created_at"'}))
+        hydrate.publish_batches(hub, stage, curation_id=cid)
+        assert f"curated/{cid}/supporting-ledger.json" in hub.uploaded_paths
+        output = "".join(capsys.readouterr())
+        assert "advisory" in output and "created_at" not in output and "ghp_downloadcanary" not in output
+
     def test_public_destination_hard_fails(self, tmp_path: Path) -> None:
         hub = make_fake_hub(tmp_path)
         hub.private = False
@@ -555,6 +617,25 @@ class TestPublish:
         before = dict(hub.files)
         hydrate.publish_batches(hub, stage, curation_id=cid)
         assert hub.files == before
+
+    @pytest.mark.parametrize("location", ["batch", "ledger"])
+    def test_final_payload_credential_contamination_refused_before_upload(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], location: str,
+    ) -> None:
+        hub = make_fake_hub(tmp_path)
+        stage = _admitted_stage(tmp_path)
+        cid = "cur-" + "0" * 16
+        contaminated = (
+            stage / "runs" / "sess-a" / "enrichment.json" if location == "batch"
+            else stage / "curated" / cid / "supporting-ledger.json"
+        )
+        contaminated.parent.mkdir(parents=True, exist_ok=True)
+        contaminated.write_text('{"notes": "ghp_finalpayloadcanary"}')
+        with pytest.raises(hydrate.HydrationError, match="secret scan") as exc:
+            hydrate.publish_batches(hub, stage, curation_id=cid)
+        assert "ghp_finalpayloadcanary" not in str(exc.value) + "".join(capsys.readouterr())
+        assert hub.uploaded_paths == []
+        assert not any(p.endswith("_SUCCESS") for p in hub.files)
 
     def test_remote_ledger_checkpoint_enables_resume(self, tmp_path: Path) -> None:
         hub = make_fake_hub(tmp_path)
@@ -688,6 +769,18 @@ def test_resolution_map_wired_from_enrichment_cache_in_pipeline(tmp_path: Path, 
     assert entry["pinned_sha"] != "a" * 40  # never the Hub dataset revision
 
 class TestIngestAndIndex:
+    @pytest.mark.parametrize("invalid", ["manifest", "unsanitizable"])
+    def test_invalid_sources_still_fail_admission(self, tmp_path: Path, invalid: str) -> None:
+        hub = make_fake_hub(tmp_path)
+        if invalid == "manifest":
+            hub.files["bundles/sess-a/manifest.json"] = b"{not json"
+        else:
+            hub.files["bundles/sess-a/binary-evidence.bin"] = b"\xff"
+        stage, results = _stage_and_ingest(hub, tmp_path)
+        assert results[0].status == "quarantined"
+        assert results[0].reason_code == ("bundle_unreadable" if invalid == "manifest" else "sanitize_failed")
+        assert not (stage / "runs" / "sess-a").exists()
+
     def test_clean_bundle_ingested_and_indexed_staging_local(self, tmp_path: Path) -> None:
         stage = _ingested_stage(tmp_path)
         results = hydrate.ingest_bundles(stage, revision="a" * 40)
@@ -702,18 +795,21 @@ class TestIngestAndIndex:
         assert rows[0]["source_path"] is None or not Path(rows[0]["source_path"]).is_absolute() or \
             rows[0]["source_path"].startswith(str(stage))
 
-    def test_dirty_bundle_quarantined_never_visible(self, tmp_path: Path) -> None:
+    def test_credential_bearing_bundle_is_sanitized_and_admitted(self, tmp_path: Path) -> None:
         hub = make_fake_hub(tmp_path)
-        hub.files["bundles/sess-bad/manifest.json"] = \
+        hub.files["bundles/sess-bad/manifest.json"] = (
             b'{"session_id": "sess-bad", "remote_url": "https://user:hunter2@github.com/o/r"}'
+        )
         hub.files["bundles/sess-bad/trajectory.json"] = b"{}"
         stage, results = _stage_and_ingest(hub, tmp_path)
-        bad = [r for r in results if r.session_id == "sess-bad"]
-        assert bad and bad[0].status == "quarantined"
-        assert bad[0].reason_code == "secrets_scan_dirty"
+        admitted = [r for r in results if r.session_id == "sess-bad"]
+        assert admitted and admitted[0].status == "admitted"
+        derivative = stage / "runs" / "sess-bad"
+        assert "hunter2" not in (derivative / "manifest.json").read_text()
+        assert scan_run_dir(derivative).clean
+        assert b"hunter2" in (stage / "downloads" / ("a" * 40) / "bundles" / "sess-bad" / "manifest.json").read_bytes()
         hydrate.rebuild_index(stage)
-        assert all(row["session_id"] != "sess-bad" for row in query_runs(stage))
-        assert (stage / "quarantine" / "sess-bad").exists()
+        assert any(row["session_id"] == "sess-bad" for row in query_runs(stage))
 
     def test_embedded_paths_never_dereferenced(self, tmp_path: Path) -> None:
         hub = make_fake_hub(tmp_path)
@@ -1006,7 +1102,7 @@ class TestDedupeAndLedger:
         assert "hunter2" not in text and "user:" not in text  # no matched secret values (M11)
         assert ledger["pinned_revision"] == "a" * 40
         assert {"imported", "quarantined", "excluded", "rejections"} <= set(ledger)
-        assert any(e["session_id"] == "sess-bad" for e in ledger["quarantined"])
+        assert any(e["session_id"] == "sess-bad" for e in ledger["imported"])
         ledger_path = stage / "curated" / ledger["curation_id"] / "import-ledger.json"
         assert ledger_path.is_file()
         assert json.loads(ledger_path.read_text())["pinned_revision"] == "a" * 40

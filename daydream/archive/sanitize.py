@@ -26,7 +26,7 @@ from daydream.timeutil import now_iso_utc
 from daydream.trajectory import RUNS_DIRNAME, redact_text, redact_value
 
 __all__ = [
-    "ImportResult", "SanitizeResult", "import_bundle", "sanitize_archive", "sanitize_bundle",
+    "SanitizeResult", "sanitize_archive", "sanitize_bundle",
     "sanitize_bundle_files",
 ]
 
@@ -34,7 +34,7 @@ _PROGRESS_FILENAME = "progress.jsonl"
 _AUDIT_FILENAME = "audit.jsonl"
 # Marker written inside a quarantined *derivative* so a later replacement can
 # tell our own copy from an imported source bundle parked in the same
-# ``quarantine/<name>`` namespace by :func:`import_bundle` (M14).
+# ``quarantine/<name>`` namespace (M14).
 _DERIVATIVE_MARKER = ".daydream_derivative_marker"
 
 
@@ -51,15 +51,6 @@ class SanitizeResult:
     def released(self) -> bool:
         """True only when the derivative passed the release scan (M16)."""
         return self.status == "sanitized"
-
-
-@dataclass(frozen=True)
-class ImportResult:
-    """Outcome of the fail-closed Hub-bundle ingest gate (M18)."""
-
-    source: Path
-    imported: bool
-    quarantined: bool
 
 
 class _DerivativeUncleanError(Exception):
@@ -211,7 +202,7 @@ def _quarantine_derivative(
             shutil.rmtree(quarantine_dir)  # our own prior derivative copy, not a source
         if quarantine_dir.exists():
             # The slot is not provably our derivative (e.g. an imported source
-            # parked by import_bundle at quarantine/<name>). Never delete it;
+            # retained at quarantine/<name>). Never delete it;
             # park this failed derivative in a unique sibling slot instead.
             quarantine_dir = quarantine_dir.with_name(f"{session_id}.{int(time.time())}")
         shutil.move(str(derivative_dir), str(quarantine_dir))
@@ -312,28 +303,6 @@ def sanitize_archive(archive_dir: Path) -> list[SanitizeResult]:
             _mark_done(sanitized_dir, result.session_id, result.derivative_digest)
         results.append(result)
     return results
-
-
-def import_bundle(run_dir: Path, archive_dir: Path) -> ImportResult:
-    """Scan downloaded bytes before ingest; quarantine on blocking findings or scan errors.
-
-    Advisories are reported value-free and permit ingest. An occupied quarantine
-    slot is preserved; the incoming bundle remains rejected even if a sanitized
-    derivative exists.
-    """
-    scan_result = scan.scan_run_dir(run_dir)
-    if not scan_result.blocking:
-        if scan_result.findings:
-            _warn(
-                f"Importing bundle {run_dir.name} with advisory-only scan "
-                f"findings ({scan_result.summary()})"
-            )
-        return ImportResult(source=run_dir, imported=True, quarantined=False)
-    quarantine_dir = archive_dir / "quarantine" / run_dir.name
-    quarantine_dir.parent.mkdir(parents=True, exist_ok=True)
-    if not quarantine_dir.exists():
-        shutil.move(str(run_dir), str(quarantine_dir))
-    return ImportResult(source=run_dir, imported=False, quarantined=True)
 
 
 def report_inventory(archive_dir: Path) -> dict[str, int]:

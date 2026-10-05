@@ -18,6 +18,7 @@ from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, fields as dataclass_fields
 from pathlib import Path, PurePosixPath
+from tempfile import TemporaryDirectory
 from typing import Any, Protocol, runtime_checkable
 
 from daydream.archive import hydrate_rules, sanitize
@@ -583,11 +584,11 @@ def _discovered_session_ids(stage: Path, revision: str) -> list[str] | None:
 
 
 def ingest_bundles(stage: Path, *, revision: str) -> list[IngestResult]:
-    """Admit discovered bundles through the shared import and sanitization gates.
+    """Admit discovered bundles through structural checks and sanitization.
 
     Reject unreadable manifests, unsafe session ids, and untrusted remote hosts before
-    using embedded data. ``sanitize.import_bundle`` owns secrets quarantine; strip
-    ``.git`` directories before ``sanitize_bundle`` performs its release scan. Move
+    using embedded data. Strip ``.git`` directories before the sanitized derivative
+    release scan. Move
     released derivatives to ``stage/runs`` and persist one outcome per input bundle.
     Identity collisions are handled by ``dedupe_admitted``.
     """
@@ -618,10 +619,6 @@ def ingest_bundles(stage: Path, *, revision: str) -> list[IngestResult]:
             results.append(
                 IngestResult(session_id, "quarantined", REASON_CODE_UNTRUSTED_REMOTE_HOST)
             )
-            continue
-        gate = sanitize.import_bundle(bundle_dir, stage)
-        if gate.quarantined or not gate.imported:
-            results.append(IngestResult(session_id, "quarantined", REASON_CODE_SECRETS_SCAN_DIRTY))
             continue
         # Task 0B constraint: hydrated staging bundles must exclude .git (the
         # raw download copy is daydream-staged data, safe to prune locally).
@@ -1522,7 +1519,9 @@ def publish_batches(
     The caller must check the policy binding first. Verify upload paths before writing;
     include resolution, resume, and checksum records. ``skip_sessions`` omits verified
     remote batches from uploads while retaining their checksums and resume records.
-    Upload failures remain fatal after retries; content-addressed paths are idempotent.
+    Scan the final selected bytes before upload; blocking findings and scanner
+    failures prevent publication. Upload failures remain fatal after retries;
+    content-addressed paths are idempotent.
     """
     if not client.repo_private:
         raise PublicDestinationError(
@@ -1555,7 +1554,25 @@ def publish_batches(
         )
     }
     if mapping:
-        _retry_upload(client, mapping, f"daydream hydrate {curation_id}: additive batch publication")
+        # Freeze exactly the selected upload files, including ledgers/checksums.
+        # Downloads, bronze inputs and skipped remote batches are outside this scan.
+        with TemporaryDirectory(prefix=".publish-", dir=stage) as temporary:
+            payload = Path(temporary)
+            staged_mapping: dict[str | Path, Path] = {}
+            for remote_path, source in mapping.items():
+                target = payload / source.relative_to(curated)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+                staged_mapping[remote_path] = target
+            try:
+                result = scan_run_dir(payload)
+            except Exception:  # noqa: BLE001 - never expose scanner exception payloads
+                raise HydrationError("final curated payload secret scan failed") from None
+            if result.blocking or any(f.category == "scan_error" for f in result.findings):
+                raise HydrationError(f"final curated payload secret scan refused upload ({result.summary()})")
+            if result.findings:
+                _warn(f"Curated upload proceeding with advisory secret-scan findings ({result.summary()})")
+            _retry_upload(client, staged_mapping, f"daydream hydrate {curation_id}: additive batch publication")
 
 
 def _stage_batches(stage: Path, curated: Path) -> None:

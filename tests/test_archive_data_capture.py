@@ -399,7 +399,9 @@ async def test_dump_artifacts_publishes_bundle_with_advisory_scan_findings(
     )
 
     dump_dir = tmp_path / "uploaded-artifacts"
-    exit_code = await run(_deep_run_config(multi_stack_target, dump_artifacts=str(dump_dir),))
+    exit_code = await run(_deep_run_config(
+        multi_stack_target, dump_artifacts=str(dump_dir), sanitize_dump_artifacts=True,
+    ))
     assert exit_code == 0
 
     run_dir = _only_archived_run(archive_dir)
@@ -422,6 +424,7 @@ async def _assert_target_is_reusable(target: Path) -> None:
     exit_code = await run(_deep_run_config(target, output_mode="review"))
     assert exit_code == 0
 
+@pytest.mark.parametrize("sanitize", [False, True])
 @pytest.mark.parametrize(("filename", "content", "canary", "expected_rule"),
     [pytest.param("creds.py",
             'GITHUB_TOKEN = "ghp_canaryfake123"\n',
@@ -438,21 +441,27 @@ async def _assert_target_is_reusable(target: Path) -> None:
 )
 async def test_dump_artifacts_sanitizes_credentials_in_diff(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path,
-    capfd: pytest.CaptureFixture[str], filename: str, content: str, canary: str, expected_rule: str,
+    capfd: pytest.CaptureFixture[str], filename: str, content: str, canary: str, expected_rule: str, sanitize: bool,
 ) -> None:
     """A sanitized dump passes egress without rewriting the private review evidence."""
     silence(monkeypatch)
     install_stub_backend(monkeypatch, multi_stack_target)
     _commit_scanned_file(multi_stack_target, filename, content)
     dump_dir = tmp_path / "uploaded-artifacts"
-    exit_code = await run(_deep_run_config(multi_stack_target, output_mode="review", dump_artifacts=str(dump_dir)))
+    exit_code = await run(_deep_run_config(
+        multi_stack_target, output_mode="review", dump_artifacts=str(dump_dir), sanitize_dump_artifacts=sanitize,
+    ))
     assert exit_code == 0
     run_dir = _only_archived_run(archive_dir)
     assert query_runs(archive_dir)
     assert (multi_stack_target / ".review-output.md").is_file()
     assert canary in (run_dir / "diff.patch").read_text()
-    assert canary not in (dump_dir / "diff.patch").read_text()
-    assert not scan.scan_run_dir(dump_dir).blocking
+    if sanitize:
+        assert canary not in (dump_dir / "diff.patch").read_text()
+        assert not scan.scan_run_dir(dump_dir).blocking
+    else:
+        assert (dump_dir / "diff.patch").read_bytes() == (run_dir / "diff.patch").read_bytes()
+        assert not (dump_dir / "dump-sanitization.json").exists()
     assert expected_rule in {finding.category for finding in scan.scan_run_dir(run_dir).findings}
     manifest = json.loads((dump_dir / "manifest.json").read_text())
     assert manifest["session_id"] == json.loads((run_dir / "manifest.json").read_text())["session_id"]
@@ -460,8 +469,9 @@ async def test_dump_artifacts_sanitizes_credentials_in_diff(
 
     out = "".join(capfd.readouterr())
     assert canary not in out
-    assert "diff.patch" in out
-    assert expected_rule in out
+    if sanitize:
+        assert "diff.patch" in out
+        assert expected_rule in out
     await _assert_target_is_reusable(multi_stack_target)
 
 async def test_dump_sanitizes_added_and_deleted_url_fixtures_for_hub_upload(
@@ -481,7 +491,9 @@ async def test_dump_sanitizes_added_and_deleted_url_fixtures_for_hub_upload(
     silence(monkeypatch)
     install_stub_backend(monkeypatch, multi_stack_target)
     bundle = tmp_path / "diagnostics" / "bundle"
-    assert await run(_deep_run_config(multi_stack_target, output_mode="review", dump_artifacts=str(bundle),)) == 0
+    assert await run(_deep_run_config(
+        multi_stack_target, output_mode="review", dump_artifacts=str(bundle), sanitize_dump_artifacts=True,
+    )) == 0
 
     run_dir = _only_archived_run(archive_dir)
     assert (run_dir / "diff.patch").read_text().strip() == raw_diff.strip()
@@ -540,7 +552,8 @@ async def test_residual_dump_refusal_preserves_review_exports_and_destination(
     trajectory = tmp_path / "trajectory.json"
     findings = tmp_path / "findings.json"
     exit_code = await run(_deep_run_config(multi_stack_target, output_mode="review", non_interactive=True,
-        pr_number=7, findings_out=str(findings), trajectory_path=trajectory, dump_artifacts=str(dump_dir),
+        pr_number=7, findings_out=str(findings), trajectory_path=trajectory,
+        dump_artifacts=str(dump_dir), sanitize_dump_artifacts=True,
     ))
     assert exit_code == 0
     assert dump_dir.exists() is preexisting
@@ -1199,3 +1212,44 @@ def test_the_manifest_carries_a_retry_and_circuit_summary(archive_run_with_retry
 def test_a_run_without_retry_events_has_no_retry_summary(legacy_archive_run: Path) -> None:
     manifest = json.loads((legacy_archive_run / "manifest.json").read_text(encoding="utf-8"))
     assert "retry_summary" not in manifest
+
+
+@pytest.mark.parametrize("allow", [False, True])
+async def test_direct_upload_override_reaches_finalization(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, allow: bool,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    silence(monkeypatch)
+    install_stub_backend(monkeypatch, multi_stack_target)
+    _commit_scanned_file(multi_stack_target, "credentials.py", 'token = "ghp_finalizationcanary"\n')
+    monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "env/repo")
+    uploaded: list[bytes] = []
+
+    class FakeApi:
+        def create_repo(self, **kwargs: Any) -> None:
+            assert kwargs["private"] is True
+
+        def repo_info(self, **kwargs: Any) -> Any:
+            return type("RepoInfo", (), {"private": True})()
+
+        def upload_folder(self, **kwargs: Any) -> None:
+            assert kwargs["repo_id"] == "env/repo"
+            uploaded.append((Path(kwargs["folder_path"]) / "diff.patch").read_bytes())
+
+    monkeypatch.setattr(hub, "HfApi", FakeApi)
+    assert await run(_deep_run_config(
+        multi_stack_target, output_mode="review", allow_archive_secrets=allow,
+    )) == 0
+    run_dir = _only_archived_run(archive_dir)
+    assert b"ghp_finalizationcanary" in (run_dir / "diff.patch").read_bytes()
+    assert uploaded == ([(run_dir / "diff.patch").read_bytes()] if allow else [])
+    assert "ghp_finalizationcanary" not in "".join(capfd.readouterr())
+
+
+async def test_sanitize_dump_requires_destination_before_dispatch(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str],
+) -> None:
+    assert await run(RunConfig(target=str(tmp_path), sanitize_dump_artifacts=True)) == 1
+    assert not (tmp_path / ".daydream").exists()
+    assert "sanitize_dump_artifacts requires dump_artifacts" in "".join(capfd.readouterr())

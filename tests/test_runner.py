@@ -428,8 +428,8 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
         (args[0] / "diff.patch").write_text("changed after freeze")
         raise OSError("evaluation failed after changing frozen input")
 
-    def fail_dump(assembly: Path, destination: Path, session_id: str) -> bool:
-        publish_dump(assembly, destination, session_id)
+    def fail_dump(assembly: Path, destination: Path, session_id: str, *, sanitize: bool = False) -> bool:
+        publish_dump(assembly, destination, session_id, sanitize=sanitize)
         raise OSError("dump publication failed")
 
     if failure_mode == "evaluation":

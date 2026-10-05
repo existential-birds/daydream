@@ -22,11 +22,9 @@ from daydream.archive.hydrate_rules import (
     REASON_CODE_IMPORT_RUN_LEVEL_ONLY,
     REASON_CODE_IMPORT_STALE_EVIDENCE,
     REASON_CODE_IMPORT_UNMATCHED_SESSION,
-    REASON_CODE_IMPORT_UNREDACTABLE_METADATA,
 )
 from daydream.archive.index import LABEL_OBSERVATION_NAMES, append_label_observation
 from daydream.archive.sanitize import _sanitize_url_string
-from daydream.archive.scan import scan_run_dir
 from daydream.training.labeler_versions import KNOWN_LABELER_VERSIONS, STALE_LEGACY
 from daydream.trajectory import redact_value
 
@@ -155,13 +153,11 @@ def redact_metadata_value(value: Any) -> Any:
     return value
 
 
-def redact_imported_metadata(rows: list[dict[str, Any]], *, scan_dir: Path) -> dict[str, Any]:
-    """Scrub imported rows, write the payload, and apply the publication scan.
+def redact_imported_metadata(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Prepare redacted rows for local import; malformed JSON raises before writes.
 
-    Blocking findings retain the offending rows but set ``blocked`` and the
-    ``import_unredactable_metadata`` reason. Advisory findings remain visible
-    in the value-free summary and allow publication. Malformed JSON blobs
-    raise; no placeholder evidence is substituted. Publication scans again.
+    Preserve free-text evidence outside the existing metadata redaction fields.
+    Remote publication independently scans its final payload.
     """
     payload: list[dict[str, Any]] = []
     for row in rows:
@@ -177,21 +173,7 @@ def redact_imported_metadata(rows: list[dict[str, Any]], *, scan_dir: Path) -> d
         )
         payload.append(redacted)
 
-    scan_dir.mkdir(parents=True, exist_ok=True)
-    payload_path = scan_dir / "payload.json"
-    payload_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8"
-    )
-    scan = scan_run_dir(scan_dir)
-    # Report advisory findings without exposing values; only blocking findings withhold
-    # publication.
-    blocked = scan.blocking
-    return {
-        "payload": payload,
-        "blocked": blocked,
-        "scan_summary": scan.summary(),
-        "blocked_reasons": [REASON_CODE_IMPORT_UNREDACTABLE_METADATA] if blocked else [],
-    }
+    return payload
 
 
 def _planned_append(row: dict[str, Any]) -> dict[str, Any]:

@@ -356,28 +356,33 @@ later findings export failed. Use CLI exit status and validated findings as the
 publication gates, not that manifest field alone. A process/platform kill can
 still prevent finalization or later upload steps.
 
-Dump publication now handles blocking secret-scan findings independently of the
-review result. `--dump-artifacts` copies clean or advisory-only bundles unchanged.
-For blocking findings, it sanitizes a separate private copy, scans that copy,
-and exports it only if no blocking findings remain. The original archive and
-review evidence retain their original bytes. Accepted dumps keep the existing
-bundle layout and manifest session ID, including `bundle/manifest.json` for the
-Hugging Face upload job; no additional CLI flag is required.
+`--dump-artifacts` copies exact assembled bundle bytes by default, including
+credential-shaped strings and binary files, without an archive scan. For shared
+diagnostics, explicitly add `--sanitize-dump-artifacts`. That option scans the
+bundle, sanitizes a separate private copy when blocking findings occur, and
+rescans before release. Accepted dumps preserve bundle layout and manifest
+session ID; sanitized derivatives also include `dump-sanitization.json`. The
+original archive and review evidence retain their bytes, subject to existing
+upstream trajectory redaction.
 
-A remaining blocking finding, scanner error, or sanitization failure withholds
-the dump with a warning. It does not discard completed findings, trajectories,
-or the local archive, and it does not change the review's exit status. Archive
-integrity and output publication errors remain fatal. Accepted dumps merge into
-the destination while preserving unrelated files; refusal leaves the destination
-unchanged. The scan covers generated bundle files, not pre-existing unrelated
-destination content.
+With explicit sanitization, remaining blocking findings, scanner errors or
+sanitizer failures withhold the dump without discarding completed review outputs
+or changing the review exit status. Copy/I/O and archive-integrity failures keep
+their fatal finalization behavior. Dumps merge into the destination, preserving
+unrelated files; sanitization refusal preserves the prior destination.
+
+The archive scanner covers limited credential patterns and is no guarantee of
+safe sharing. Direct run-bundle uploads still scan by default. The operator's
+CLI/API-only `--allow-archive-secrets` override permits credential findings only
+for those direct uploads; scanner failures always refuse upload. It does not
+change explicit dump sanitization, hydration or adjudication publication.
 
 The Shelfspace upload job currently assumes `bundle/manifest.json` exists.
 Sanitized bundles satisfy that contract after a Daydream pin update, but an
 irreducible refusal still leaves that separate job without a bundle to upload.
 Handling a missing bundle is a separate workflow change. This Daydream change
 does not update Shelfspace's workflow or pin, or change the direct Hugging Face
-upload policy.
+destination configuration.
 
 Shelfspace was not modified in this session; its PR #2826 must be rolled out
 separately after these Daydream changes become available. Pin analysis and
@@ -393,7 +398,8 @@ For that later rollout:
 
    ```sh
    --trajectory "$RUNNER_TEMP/daydream-debug/trajectory.json" \
-   --dump-artifacts "$RUNNER_TEMP/daydream-debug/bundle"
+   --dump-artifacts "$RUNNER_TEMP/daydream-debug/bundle" \
+   --sanitize-dump-artifacts
    ```
 
 3. Upload `daydream-debug/` in a separate artifact step with `if: always()`,

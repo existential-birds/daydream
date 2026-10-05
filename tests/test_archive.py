@@ -934,7 +934,7 @@ def test_dump_artifacts_sanitizes_credential_bearing_bundle(
     session_id = "abcd1234-0000-0000-0000-000000000000"
     dest = tmp_path / "dump"
     dest.mkdir()
-    config = RunConfig(target=str(tmp_path), archive=True, dump_artifacts=str(dest))
+    config = RunConfig(target=str(tmp_path), archive=True, dump_artifacts=str(dest), sanitize_dump_artifacts=True)
     target, _, recorder = _setup_bundle(tmp_path, session_id)
     traj = json.loads(recorder.path.read_text())
     traj["remote_url"] = "https://user:ghp_canaryfake123@github.com/o/r"
@@ -2783,7 +2783,10 @@ def test_dump_scan_refusal_preserves_archive_and_removes_late_stage(tmp_path: Pa
     """Unredactable scan findings suppress only the diagnostic export."""
     session_id = "strict-dump"
     arguments = _finalizer_arguments(tmp_path, session_id,
-        config=RunConfig(target=str(tmp_path), run_eval=False, archive=True, dump_artifacts="requested"),
+        config=RunConfig(
+            target=str(tmp_path), run_eval=False, archive=True,
+            dump_artifacts="requested", sanitize_dump_artifacts=True,
+        ),
     )
     dump_stage = tmp_path / "late"
     dump_stage.mkdir()

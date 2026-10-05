@@ -22,7 +22,6 @@ from daydream.archive.hydrate_rules import (
     REASON_CODE_IMPORT_RUN_LEVEL_ONLY,
     REASON_CODE_IMPORT_STALE_EVIDENCE,
     REASON_CODE_IMPORT_UNMATCHED_SESSION,
-    REASON_CODE_IMPORT_UNREDACTABLE_METADATA,
 )
 from daydream.archive.importer import (
     IMPORT_REASON_CODES,
@@ -44,7 +43,6 @@ from daydream.archive.index import (
     label_observation_history,
     upsert_run,
 )
-from daydream.archive.scan import scan_run_dir
 from daydream.training.labeler_versions import HUMAN_LABELER_VERSION, STALE_LEGACY
 from tests.harness.trajectory import make_manifest
 
@@ -584,25 +582,19 @@ def _auto_observation_row(**overrides: Any) -> dict[str, Any]:
     row.update(overrides)
     return row
 
-def test_clean_metadata_passes_scan(tmp_path: Path) -> None:
-    scan_dir = tmp_path / "scan"
-    result = redact_imported_metadata([_metadata_row()], scan_dir=scan_dir)
-    assert result["blocked"] is False
-    assert scan_dir.is_dir()
-    assert scan_run_dir(scan_dir).clean
-    payload = json.loads((scan_dir / "payload.json").read_text(encoding="utf-8"))
-    assert payload == result["payload"]
+def test_clean_metadata_preparation_returns_rows() -> None:
+    row = _metadata_row()
+    assert redact_imported_metadata([row]) == [row]
 
 def test_absolute_paths_redacted(tmp_path: Path) -> None:
     row = _metadata_row(remote_url="/Users/k/proj", source_path="/Users/k/proj/inner",
         rubric_json=json.dumps({"workdir": "/Users/k/proj/build", "note": "ok"}),
         reward_json=json.dumps([{"home": "/Users/k/proj/out"}]),
     )
-    result = redact_imported_metadata([row], scan_dir=tmp_path / "scan")
-    assert result["blocked"] is False
-    encoded = json.dumps(result["payload"])
+    result = redact_imported_metadata([row])
+    encoded = json.dumps(result)
     assert "/Users/k" not in encoded
-    out_row = result["payload"][0]
+    out_row = result[0]
     assert REDACTED_PATH in out_row["remote_url"]
     assert REDACTED_PATH in out_row["source_path"]
     rubric = json.loads(out_row["rubric_json"])
@@ -613,42 +605,28 @@ def test_absolute_paths_redacted(tmp_path: Path) -> None:
 
 def test_credential_url_redacted(tmp_path: Path) -> None:
     row = _metadata_row(remote_url="https://user:ghp_secret@github.com/acme/widget.git")
-    result = redact_imported_metadata([row], scan_dir=tmp_path / "scan")
-    assert result["blocked"] is False
-    assert "ghp_secret" not in json.dumps(result["payload"])
-    assert scan_run_dir(tmp_path / "scan").clean
+    result = redact_imported_metadata([row])
+    assert "ghp_secret" not in json.dumps(result)
 
-def test_dirty_metadata_blocks_publish(tmp_path: Path) -> None:
-    # A credential-shaped string in a free-text field the redaction pass does
-    # not own cannot be made clean: the payload is flagged blocked — never
-    # downgraded to a warning, never dropped silently.
+def test_local_metadata_preparation_retains_free_text_without_scan_artifacts(tmp_path: Path) -> None:
+    baseline = list(tmp_path.iterdir())
     dirty = _metadata_row(notes="clone from https://user:secret1@github.com/x/y.git")
-    result = redact_imported_metadata([_metadata_row(), dirty], scan_dir=tmp_path / "scan")
-    assert scan_run_dir(tmp_path / "scan").clean is False
-    assert result["blocked"] is True
-    assert result["blocked_reasons"] == [REASON_CODE_IMPORT_UNREDACTABLE_METADATA]
+    result = redact_imported_metadata([_metadata_row(), dirty])
+    assert result[1]["notes"] == dirty["notes"]
+    assert list(tmp_path.iterdir()) == baseline
 
-def test_advisory_metadata_does_not_block_publish(tmp_path: Path) -> None:
-    """A credential-free KEY assignment remains publishable with a value-free scan summary."""
+def test_advisory_metadata_retains_free_text() -> None:
     row = _metadata_row(notes='FEATURE_FLAG_OVERRIDE_KEY = "override_flag"')
-    result = redact_imported_metadata([row], scan_dir=tmp_path / "scan")
-    scanned = scan_run_dir(tmp_path / "scan")
-    assert scanned.clean is False and scanned.blocking is False  # advisory-only
-    assert result["blocked"] is False
-    assert result["blocked_reasons"] == []
-    assert "env_var" in result["scan_summary"]
-    assert "override_flag" not in result["scan_summary"]  # M11: never a value
-    assert result["payload"][0]["notes"] == 'FEATURE_FLAG_OVERRIDE_KEY = "override_flag"'
+    assert redact_imported_metadata([row])[0]["notes"] == row["notes"]
 
-def test_blocked_payload_carries_marker_skipping(tmp_path: Path) -> None:
+def test_prepared_metadata_preserves_redaction_markers(tmp_path: Path) -> None:
     # Already-redacted markers are safe output, not secrets: a payload whose
     # only "suspicious" text is our own marker scans clean.
     row = _metadata_row(notes=f"workdir was {REDACTED_PATH}")
-    result = redact_imported_metadata([row], scan_dir=tmp_path / "scan")
-    assert result["blocked"] is False
-    assert len(result["payload"]) == 1
+    result = redact_imported_metadata([row])
+    assert len(result) == 1
 
 def test_malformed_rubric_json_raises(tmp_path: Path) -> None:
     row = _metadata_row(rubric_json="{not json")
     with pytest.raises(ValueError, match="rubric_json"):
-        redact_imported_metadata([row], scan_dir=tmp_path / "scan")
+        redact_imported_metadata([row])

@@ -8,6 +8,24 @@ tooling are agent-runnable, but **revocation, rotation, and Hub history
 rewrite are destructive operations that require a human and are never
 automated.**
 
+Ordinary local archives and `--dump-artifacts DIR` preserve assembled evidence;
+local dumps copy credential-shaped strings and binary files without scanning.
+Select `--sanitize-dump-artifacts` explicitly for shared diagnostics (it requires
+a dump destination). Local metadata imports retain their URL/path and JSON
+redaction plus integrity checks without a publication scanner. Hydration instead
+sanitizes incoming sources and verifies derivatives; its final curated payload,
+including supporting ledgers, is scanned before upload and verified afterward.
+
+Direct run-bundle uploads scan and reject blocking credential findings by
+default. `--allow-archive-secrets` deliberately permits those findings only for
+direct uploads, with value-free warnings. Scanner exceptions, `scan_error`
+findings and incomplete results still refuse upload. This CLI/API-only flag
+can accompany an environment-selected Hub destination; neither environment
+variables nor target-file configuration can enable it. It does not override
+dump sanitization, standalone sanitization, hydration, adjudication publication
+or shared redaction. The scanner covers limited credential patterns; a passing
+scan cannot guarantee that a bundle contains no sensitive information.
+
 Audience: the daydream operator (a human with provider dashboards open and the
 archive checkout in their own terminal).
 
@@ -143,7 +161,9 @@ Post-remediation, confirm the incident is closed:
      `user:pass@` userinfo and token-only userinfo (`url_credential`),
      credential-bearing query parameters (`query_credential`), and any
      `scan_error` (a scan that could not complete never reads clean). A
-     blocking finding refuses publication on every egress path.
+     credential finding refuses sanitized publication and default direct uploads.
+     The operator may override credentials only for direct uploads; scanner
+     errors always refuse upload.
    - **Advisory** — shapes the scanner cannot attribute to a credential value:
      a secret-*named* variable whose value is not secret-shaped (`env_var`,
      e.g. `SORT_KEY = "created_at"`), and a userinfo template whose parts are
@@ -159,12 +179,12 @@ Post-remediation, confirm the incident is closed:
    rather than releasing.
 3. **Revocation holds:** attempt authentication with a revoked token from the
    operator's own terminal and confirm it fails.
-4. **Going forward:** the fail-closed scan (upload preflight in
-   `daydream/archive/hub.py`, the `--dump-artifacts` copy gate, the sanitizer
-   release and metadata-import gates, and clean-room verification) blocks any
-   bundle carrying a blocking finding from every egress path, and reports the
-   advisory tier without blocking. Future incidents in a recognized credential
-   format should be caught at that gate, before upload.
+4. **Going forward:** default direct uploads, explicitly sanitized dumps,
+   sanitizer release, curated payload publication and clean-room verification
+   retain blocking credential checks. Adjudication publication independently
+   checks metadata and SQLite payloads. Local copying and metadata import do
+   not impose a publication scanner. Review content before sharing; credentials
+   outside the scanner's recognized patterns can pass undetected.
 
 ## 7. How the harvest clone step authenticates
 

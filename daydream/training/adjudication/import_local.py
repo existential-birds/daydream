@@ -320,18 +320,13 @@ def _write_import_merge(
 ) -> dict[str, Any]:
     """Redact and validate linked rows before seeding or appending to archive_dir.
 
-    Both the raw-row drift/timestamp gate and the redacted-payload secret gate
-    precede archive writes. Delete a blocked scan artifact so later scans do not
-    inherit its dirty bytes. Re-pin redacted payloads before the real merge.
-    Pinned eligible runs override backup metadata; unrelated backup runs stay
-    excluded unless a linked observation needs its parent. state_dir is scratch."""
-    scan = redact_imported_metadata(linked_rows, scan_dir=state_dir / "import-scan")
+    Raw-row digest/timestamp validation and metadata redaction precede archive
+    writes. Re-pin transformed payloads before the real merge. Pinned eligible
+    runs override backup metadata; unrelated backup runs stay excluded unless
+    a linked observation needs its parent. state_dir is scratch.
+    """
+    redacted_rows = redact_imported_metadata(linked_rows)
     merge_imported_observations(state_dir, linked_rows, dry_run=True)
-    if scan["blocked"]:
-        (state_dir / "import-scan" / "payload.json").unlink(missing_ok=True)
-        message = "; ".join(scan["blocked_reasons"]) + f" ({scan['scan_summary']})"
-        raise _ImportGateError(message)
-    redacted_rows = scan["payload"]
     for row in redacted_rows:
         row["payload_digest"] = canonical_payload_digest(
             {k: v for k, v in row.items() if k != "payload_digest"},
@@ -347,7 +342,7 @@ def _write_import_merge(
         "planned": merged["planned"],
         "appended": merged["appended"],
         "deduped": merged["deduped"],
-        "scan": scan,
+        "payload": redacted_rows,
     }
 
 
@@ -359,9 +354,7 @@ def _build_import_report(
     merge_state: dict[str, Any],
     identity_summary: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    """Compose deterministic accounting and identity results.
-
-    Only a real merge includes the redaction block; dry-run has no scan output."""
+    """Compose deterministic accounting and identity results."""
     report: dict[str, Any] = {
         "dry_run": dry_run,
         "sources": sources,
@@ -374,9 +367,4 @@ def _build_import_report(
             "deduped": merge_state["deduped"],
         },
     }
-    if not dry_run:
-        report["redaction"] = {
-            "blocked": bool(merge_state["scan"]["blocked"]),
-            "reasons": list(merge_state["scan"]["blocked_reasons"]),
-        }
     return report

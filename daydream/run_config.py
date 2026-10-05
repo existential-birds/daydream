@@ -57,7 +57,9 @@ class RunConfig:
     output_mode: OutputMode = "loop"
     findings_out: str | None = None
     dump_artifacts: str | None = None
+    sanitize_dump_artifacts: bool = False
     trajectory_hub_repo: str | None = None
+    allow_archive_secrets: bool = False
     force_worktree: bool = False
     shallow: bool = False
     extra_copy: list[Path] = field(default_factory=list)

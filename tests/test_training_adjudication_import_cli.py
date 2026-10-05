@@ -384,7 +384,7 @@ def test_publish_rejects_dry_run_and_missing_manifest() -> None:
     assert exc.value.code == 2
 
 def test_cli_import_persists_redacted_rows(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """Persist the redaction scan's sanitized payload, never the credential-bearing original rubric."""
+    """Persist prepared redacted metadata, never the credential-bearing original rubric."""
 
     src = tmp_path / "src"
     _seed_session(src, "sess-1", evidence_sha="e" * 64, labels=["accepted"],
@@ -404,6 +404,27 @@ def test_cli_import_persists_redacted_rows(tmp_path: Path, capsys: pytest.Captur
     rubric = json.loads(rows[0][0])
     assert rubric["workdir"] == REDACTED_PATH
     assert rubric["note"] == "ok"
+
+
+def test_local_import_retains_scanner_only_free_text_without_scan_scratch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from daydream.archive.index import label_observation_history
+
+    src = tmp_path / "src"
+    canary = "https://user:ghp_localimportcanary@github.com/o/r"
+    _seed_session(src, "sess-1", evidence_sha="e" * 64, labels=["accepted"], reviewer_logins=[canary])
+    state = tmp_path / "state"
+    archive = tmp_path / "archive"
+    assert _handle_corpus_command([
+        "adjudicate", *_import_args(src, state_dir=state, archive_dir=archive, extra=[]),
+    ]) == 0
+    rows = label_observation_history(archive, "sess-1")
+    assert json.loads(rows[0]["reviewer_logins"]) == [canary]
+    assert not (state / "import-scan").exists()
+    report = json.loads((state / "import-report.json").read_text())
+    assert "redaction" not in report and "scan_summary" not in report
+    assert canary not in "".join(capsys.readouterr())
 
 def test_cli_import_reports_full_source_inventory(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """The success count includes deduped source rows as well as bucketed observations."""

@@ -166,7 +166,9 @@ def finalize_archive_run(
             # started first so publication I/O failures still clean the stage.
             dump_started = True
             try:
-                dump_started = publish_dump(assembly_dir, dump_path, session_id)
+                dump_started = publish_dump(
+                    assembly_dir, dump_path, session_id, sanitize=config.sanitize_dump_artifacts,
+                )
             except Exception as exc:
                 raise ArchivePublicationError("dump publication failed") from exc
         if config.archive and upload:
@@ -177,7 +179,9 @@ def finalize_archive_run(
                 hub_repo_id = hub.resolve_hub_repo(config)
                 _validate_frozen_artifacts(artifacts)
                 if hub_repo_id:
-                    hub.upload_run_bundle(assembly_dir, hub_repo_id, session_id)
+                    hub.upload_run_bundle(
+                        assembly_dir, hub_repo_id, session_id, allow_secret_findings=config.allow_archive_secrets,
+                    )
             except Exception as exc:
                 _validate_frozen_artifacts(artifacts)
                 if isinstance(exc, ArchiveIntegrityError):

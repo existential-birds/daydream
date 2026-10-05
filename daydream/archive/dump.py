@@ -22,15 +22,20 @@ def _refuse_dump(dump_path: Path, session_id: str, reason: str) -> bool:
     return False
 
 
-def publish_dump(assembly_dir: Path, dump_path: Path, session_id: str) -> bool:
+def publish_dump(assembly_dir: Path, dump_path: Path, session_id: str, *, sanitize: bool = False) -> bool:
     """Copy accepted bytes into an empty private stage, returning whether ready.
 
-    Clean/advisory bundles retain their exact bytes. Blocking bundles get a
+    By default, copy the assembled bundle's exact bytes without scanning.
+    With explicit sanitization, clean/advisory bundles retain their bytes; blocking bundles get a
     separate sanitized derivative and a second publication scan. Sanitizer or
     scanner failures withhold the dump without invalidating the original run.
     Copy/publication and staging-integrity errors propagate to strict archive
     finalization. The caller handles rollback of any partially copied stage.
     """
+    if not sanitize:
+        shutil.copytree(assembly_dir, dump_path, dirs_exist_ok=True)
+        return True
+
     try:
         source_scan = scan.scan_run_dir(assembly_dir)
     except Exception as exc:  # noqa: BLE001 - optional diagnostics fail closed

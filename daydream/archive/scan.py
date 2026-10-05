@@ -23,7 +23,7 @@ from daydream.credential_patterns import (
 )
 from daydream.redaction import _API_KEY_PATTERN, _ENV_VAR_PATTERN, _JWT_PATTERN, _PEM_KEY_PATTERN
 
-__all__ = ["SEVERITY_ADVISORY", "SEVERITY_BLOCKING", "Finding", "ScanResult", "scan_run_dir", "scan_serialized_record"]
+__all__ = ["SEVERITY_ADVISORY", "SEVERITY_BLOCKING", "Finding", "ScanResult", "scan_run_dir"]
 
 #: A rule whose match is a credential by value shape. Refuses egress.
 SEVERITY_BLOCKING = "blocking"
@@ -259,16 +259,3 @@ def scan_run_dir(run_dir: Path) -> ScanResult:
             )
     result.clean = not result.findings
     return result
-
-
-def scan_serialized_record(text: str) -> ScanResult:
-    """Apply the shared release rules directly to one serialized JSON record.
-
-    This boundary never writes the payload to disk and exposes only safe findings.
-    Scanner failures block release, just as directory scanning does.
-    """
-    try:
-        findings = _scan_file("record.jsonl", text)
-    except Exception:  # noqa: BLE001 - fail closed at the serialized boundary
-        findings = [Finding(path="record.jsonl", location="(unreadable)", category="scan_error", digest="")]
-    return ScanResult(clean=not findings, findings=findings)

@@ -323,7 +323,8 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
 
     p_import = sub.add_parser(
         "import-local-observations",
-        help="Import surviving local archive/backup label-observation histories.",
+        help="Import local label histories with metadata redaction and integrity validation; "
+             "publication scans only with --publish.",
     )
     p_import.add_argument("--archive-root", type=Path, action="append", required=True,
                           metavar="PATH",
@@ -827,7 +828,7 @@ def handle_import_local_observations(argv: list[str]) -> int:
     """Import linked histories through pre-write validation and redaction gates.
 
     The hydrated archive owns imported label history; state_dir holds finding
-    observations, scan/report/ledger files, and optional publish staging.
+    observations, report/ledger files, and optional publish staging.
     Dry-run validates and reports without writing. JSON mode suppresses progress."""
 
     parser = _build_adjudicate_parser()
@@ -863,7 +864,7 @@ def handle_import_local_observations(argv: list[str]) -> int:
         imported_judgments, finding_decisions = project_local_history(linked_rows, sessions)
         # Dry-run still exercises the merge's fail-closed drift gate, but the
         # planned appends are counted, never written (S2). The real path runs
-        # the redaction + secret scan and the drift / malformed-row gate
+        # metadata redaction and the drift / malformed-row gate
         # before any state write (M9/AC6). The merge targets --archive-dir —
         # the hydrated stage's index.db — never the state-dir index.
         merge_state = (
@@ -879,17 +880,10 @@ def handle_import_local_observations(argv: list[str]) -> int:
         )
         if not args.dry_run:
             imported_judgments, finding_decisions = project_local_history(
-                merge_state["scan"]["payload"], sessions,
+                merge_state["payload"], sessions,
             )
             for judgment in imported_judgments:
                 append_observation(args.state_dir / _OBSERVATIONS_FILENAME, judgment)
-    except _ImportGateError as exc:
-        print_error(
-            console,
-            "adjudicate import-local-observations blocked by unredactable metadata",
-            str(exc),
-        )
-        return 1
     except (ValueError, sqlite3.Error, OSError, HubUnavailableError, HydrationError) as exc:
         print_error(console, "adjudicate import-local-observations failed", str(exc))
         return 1

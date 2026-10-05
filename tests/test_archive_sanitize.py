@@ -187,18 +187,6 @@ def test_corpus_projection_admits_only_clean_batches(tmp_path: Path) -> None:
     with pytest.raises(BundleError):
         load_curated_bundle(bundle_dir)
 
-def test_import_bundle_refuses_affected_bundle_without_derivative(tmp_path: Path) -> None:
-    """M17 successor (fail-closed): an affected bronze bundle with no
-    released derivative is quarantined at ingest — never imported raw."""
-    archive_dir = tmp_path / "archive"
-    run_dir = _seed_bronze_bundle(archive_dir, "s1", "https://user:***@github.com/o/r")
-    result = sanitize.import_bundle(run_dir, archive_dir)
-    assert result.quarantined is True
-    assert result.imported is False
-    # The bundle was moved to quarantine/<name> — never read raw.
-    assert not run_dir.exists()
-    assert (archive_dir / "quarantine" / "s1" / "manifest.json").exists()
-
 def test_inventory_counts_by_category_without_values(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     archive_dir = tmp_path / "archive"
     _seed_bronze_bundle(archive_dir, "s1", "https://user:p@github.com/o/r")
