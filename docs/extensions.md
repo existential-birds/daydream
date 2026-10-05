@@ -434,7 +434,7 @@ during the run and published at finalization like every other generated output:
   `cumulative_cost_usd`, `granted_allowance_s`, `executions`, `scope_request`,
   `unchanged_evidence`, `progress_evidence`, `next_experiment`,
   `completed_experiments`, `disproven_hypotheses`, `last_transition_reason`,
-  `checkpoint_ref`, `last_execution_budget`, and `diagnostics`. Both files carry
+  `checkpoint_ref`, and `diagnostics`. Both files carry
   a `format_version`; both are merged read-modify-write, in the shape of
   `deep/routing_record.py`, so a resume never erases an earlier execution's
   evidence.

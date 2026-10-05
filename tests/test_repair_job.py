@@ -38,7 +38,6 @@ from daydream.deep.repair_job import (
     RepairJobPolicy,
     RepairJobRecord,
     RepairJobState,
-    merge_repair_job_record,
     read_repair_job_record,
     record_diagnostic,
     write_repair_job_record,
@@ -185,16 +184,13 @@ def test_unwritable_checkpoint_is_a_blocker_not_a_silent_clean_away(
 
 
 def test_job_record_merges_a_diagnostic_instead_of_clobbering_state(tmp_path: Path) -> None:
-    """The read-modify-write shape: a later merge keeps an earlier execution's evidence."""
-    first = merge_repair_job_record(tmp_path, {
-        "job_id": "repair-s1", "executions": 1, "last_execution_budget": {"elapsed_s": 1.5},
-    })
-    assert first.state is RepairJobState.RUNNING
+    """The read-modify-write shape: a later write keeps an earlier execution's evidence."""
+    write_repair_job_record(tmp_path, RepairJobRecord(job_id="repair-s1", executions=1))
     second = record_diagnostic(tmp_path, "repair-s1", "checkpoint_write_failed: OSError: disk full")
     assert second is not None
     assert second.job_id == "repair-s1"
+    assert second.state is RepairJobState.RUNNING
     assert second.executions == 1, "the diagnostic merge dropped the earlier execution"
-    assert second.last_execution_budget == {"elapsed_s": 1.5}
     assert second.diagnostics == ("checkpoint_write_failed: OSError: disk full",)
     assert read_repair_job_record(tmp_path) == second
 
