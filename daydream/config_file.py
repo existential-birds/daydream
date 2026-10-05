@@ -110,18 +110,6 @@ class DaydreamFileConfig:
     test_command_wall_s: float | None = None
     test_required_suites: list[str] = field(default_factory=list)
 
-    def phase_model(self, phase: str) -> str | None:
-        """Return the configured model for a phase."""
-        return self.phases.get(phase, {}).get("model")
-
-    def phase_backend(self, phase: str) -> str | None:
-        """Return the configured backend for a phase."""
-        return self.phases.get(phase, {}).get("backend")
-
-    def phase_reasoning_effort(self, phase: str) -> str | None:
-        """Return the configured reasoning effort for a phase."""
-        return self.phases.get(phase, {}).get("reasoning_effort")
-
 
 def load_toml_or_empty(path: Path) -> dict[str, Any]:
     """Read optional TOML without failing callers such as pricing and workspace-copy config.
