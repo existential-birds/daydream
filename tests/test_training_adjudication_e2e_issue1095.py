@@ -1,4 +1,4 @@
-"""Exercise SQLite archive writers, CLI history import, and preview/materialize/canonical harvest together.
+"""Exercise SQLite archive writers and preview/materialize/canonical harvest together.
 Every finding appears once; no boundaries are mocked.
 """
 
@@ -7,7 +7,6 @@ from pathlib import Path
 
 from daydream.archive.index import append_label_observation, label_observation_history, upsert_run
 from daydream.training.adjudication.canonical import run_canonical_harvest
-from daydream.training.adjudication.cli import handle_adjudicate
 from daydream.training.adjudication.materialize import run_materialize
 from daydream.training.adjudication.preview import run_preview
 from daydream.training.adjudication.queue import build_queue
@@ -75,14 +74,6 @@ def _seed_hydrated_archive(tmp_path: Path) -> Path:
     return root
 
 
-def _seed_local_backup(tmp_path: Path, base: str, head: str) -> Path:
-    """A byte-identical copied observation must dedupe without creating a conflicting generation."""
-    backup = tmp_path / "backup"
-    upsert_run(backup, make_manifest(session_id="s-acc", repo_slug="org/repo", head_sha=head, base_sha=base))
-    _seed_observation(backup, "s-acc", "fp-acc", "accepted", "d0" * 32, labels=["finding-accepted"])
-    return backup
-
-
 def test_hydrated_to_canonical_harvest_end_to_end(tmp_path: Path) -> None:
     root = _seed_hydrated_archive(tmp_path)
     # The queue contains only nondecisive findings, while materialization and drift checks include
@@ -94,27 +85,16 @@ def test_hydrated_to_canonical_harvest_end_to_end(tmp_path: Path) -> None:
     assert mat["record_count"] == 4
     # A conflicting ambiguous finding is task-only and must never become gold.
     rows = [json.loads(line) for line in (tmp_path / "snapshot" / "sessions.jsonl").read_text().splitlines() if line]
+    assert len(rows) == len({row["record_id"] for row in rows}) == 4
     snapshot_records = {row["fingerprint"]: row for row in rows}
     assert snapshot_records["fp-conf"]["conflicting"] is True
     assert snapshot_records["fp-conf"]["disposition"] == "ambiguous"
     queue = build_queue(rows)
     assert snapshot_records["fp-conf"]["record_id"] in {str(item["record_id"]) for item in queue}
-    # A real CLI import of an identical backup must deduplicate without introducing conflict.
-    base, head = "b" + b"s-acc".hex(), "h" + b"s-acc".hex()
-    backup = _seed_local_backup(tmp_path, base, head)
-    rc = handle_adjudicate(["import-local-observations", "--archive-root", str(backup),
-        "--index-root", str(root), "--archive-dir", str(root),
-        "--state-dir", str(tmp_path / "state"), "--dry-run", "--json",
-    ])
-    assert rc == 0
-    rc = handle_adjudicate(["import-local-observations", "--archive-root", str(backup),
-        "--index-root", str(root), "--archive-dir", str(root), "--state-dir", str(tmp_path / "state"),
-    ])
-    assert rc == 0
     out = run_canonical_harvest(index_root=root, materialize_dir=tmp_path / "snapshot", archive_dir=root)
     assert out["record_count"] == 4
     rows = [r for sid in ("s-acc", "s-rej", "s-conf", "s-unres") for r in label_observation_history(root, sid)]
-    assert len(rows) >= 4  # one per session at minimum (import may add generations)
+    assert len(rows) >= 4  # one per session at minimum
     dispositions = set()
     for row in rows:
         rubric = json.loads(row["rubric_json"])

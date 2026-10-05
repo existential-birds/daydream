@@ -3,8 +3,8 @@
 When a Git credential is discovered in an archived bundle — an uploaded Hub
 dataset, a local archive, or a quarantined derivative — this runbook walks the
 remediation from scoping through verification. It exists because the code
-deliberately stops at the safe boundary: the sanitizer, scanner, and inventory
-tooling are agent-runnable, but **revocation, rotation, and Hub history
+deliberately stops at the safe boundary: the sanitizer and scanner
+are agent-runnable, but **revocation, rotation, and Hub history
 rewrite are destructive operations that require a human and are never
 automated.**
 
@@ -12,10 +12,8 @@ Ordinary local archives and `--dump-artifacts DIR` preserve assembled evidence;
 diagnostic dumps always copy the exact assembled bytes, including
 credential-shaped strings and binary files, without scanning or sanitization.
 Byte preservation does not undo upstream trajectory redaction. For shared
-diagnostics, use standalone `sanitize_archive()` or `sanitize_bundle()` to create
-separate derivatives and review their reports. Local metadata imports retain
-their URL/path and JSON redaction plus integrity checks without a publication
-scanner. Hydration instead
+diagnostics, use standalone `sanitize_bundle()` to create
+separate derivatives and review their reports. Hydration
 sanitizes incoming sources and verifies derivatives; its final curated payload,
 including supporting ledgers, is scanned before upload and verified afterward.
 
@@ -33,26 +31,24 @@ archive checkout in their own terminal).
 
 ## 1. Scope the incident
 
-Run the value-free inventory over the archive:
+Record affected bundle paths, session dates, repository identities, and scan
+categories without copying credential values into the incident record. Use the
+single-bundle sanitizer to create and scan a separate derivative:
 
 ```bash
-python -c "
+uv run python - <<'PYTHON'
 from pathlib import Path
-from daydream.archive.sanitize import report_inventory
-report_inventory(Path('/path/to/archive_dir'))
-"
+from daydream.archive.sanitize import sanitize_bundle
+
+result = sanitize_bundle(Path('/path/to/archive_dir/runs/SESSION'), Path('/path/to/archive_dir'))
+print(result.session_id, result.status, result.derivative_digest)
+PYTHON
 ```
 
-`report_inventory()` classifies each bundle's `git.remote_url` via the
-normalizer and prints **counts by category only** — session counts, never a
-URL fragment or a matched credential value. Categories mirror
-`daydream.archive.git_safe.classify_remote_url`: `userinfo` (covers both
-`user:token`/PAT-shaped userinfo and `x-access-token` token-only `user@`
-forms), `query` (credential-like query parameters), and `clean` (benign URLs),
-plus `unparseable` for manifests it could not read.
-
-Record the output. It tells you how many manifests/bundles are affected per
-category, which determines how wide the revocation net in step 3 must be.
+The source remains untouched. Released derivatives live under `sanitized/`;
+blocked derivatives remain under `quarantine/`. Review the audit record and
+value-free scan diagnostics for each affected bundle. There is no bulk sanitizer,
+resume ledger, or inventory API.
 
 If the incident involves bundles already uploaded to the Hub, also list the
 affected dataset revisions (upload timestamps vs. affected session dates)
@@ -80,12 +76,9 @@ Map affected sessions to the repos they touched:
 1. For each affected `session_id`, read `manifest.json` in the source run
    directory and note the repo identity (owner/repo) — the *identity*, not the
    raw URL.
-2. The inventory's single `userinfo` category covers both `x-access-token`
-   token-only `user@` forms (GitHub App installation tokens) and `user:token`
-   or PAT-shaped userinfo (personal access tokens), so it cannot tell the two
-   apart at category granularity. Distinguish them from the source
-   `manifest.json` `git.remote_url` records instead, not the inventory
-   category counts.
+2. Distinguish GitHub App installation tokens from personal access tokens
+   using the provider settings and original credential source. A scan category
+   alone cannot identify the credential type.
 3. The result is a table of (credential type, repo(s), session ids, date
    range) — safe to share, contains no secret values.
 
@@ -137,9 +130,8 @@ Choose exactly one option, in escalating order of destructiveness:
 
 | Operation | Destructive? | Who runs it | Gate |
 |---|---|---|---|
-| `report_inventory()` scoping | No (read-only, value-free) | Agent or human | — |
 | Reading `sanitized/audit.jsonl` | No | Agent or human | Never print values |
-| `sanitize_archive()` / `sanitize_bundle()` | No (produces derivatives; bronze sources never modified) | Agent or human | Fail-closed scan; blocking findings quarantine, advisory findings are reported and released |
+| `sanitize_bundle()` | No (produces derivatives; bronze sources never modified) | Agent or human | Fail-closed scan; blocking findings quarantine, advisory findings are reported and released |
 | Quarantine **release** (moving a derivative out of `quarantine/` after review) | No | Agent or human | Must pass `scan_run_dir()` with no blocking finding first (see §6.2); advisory findings do not hold a release |
 | Credential revocation / rotation | **Destructive** | **Human only** | Human approval; never automated |
 | Hub revision deletion (4b) | **Destructive** | **Human only** | Approval + executed revocation + written deletion record |
@@ -149,9 +141,9 @@ Choose exactly one option, in escalating order of destructiveness:
 
 Post-remediation, confirm the incident is closed:
 
-1. **Re-run the inventory:** `report_inventory()` again. Every previously
-   affected category must now read zero; only clean categories (and
-   `unparseable`, if pre-existing) remain.
+1. **Check the incident record:** account for every affected bundle and uploaded
+   revision. Original local evidence remains unchanged; verify the derivatives
+   intended for sharing and the remediated remote revisions.
 2. **Re-scan:** run the fail-closed scanner (`daydream.archive.scan.scan_run_dir`)
    over sanitized derivatives and any bundle that will egress. It must report
    **no blocking findings** (`ScanResult.blocking` empty). Direct upload also
@@ -184,7 +176,7 @@ Post-remediation, confirm the incident is closed:
 4. **Going forward:** direct uploads, standalone sanitizer release, curated
    payload publication and clean-room verification retain blocking credential
    checks. Adjudication publication independently
-   checks metadata and SQLite payloads. Local copying and metadata import do
+   checks metadata and SQLite payloads. Local copying does
    not impose a publication scanner. Review content before sharing; credentials
    outside the scanner's recognized patterns can pass undetected.
 
@@ -211,5 +203,5 @@ Authentication for private repos is out-of-band and operator-supplied:
 
 Treat `DAYDREAM_GIT_TOKEN` as a credential in its own right: if it is
 suspected leaked, add it to the step-3 revocation net. It is an input to the
-clone step, not archived data, so it never appears in uploaded bundles or in
-`report_inventory()` output.
+clone step, not archived data, so it must never appear in uploaded bundles
+or incident diagnostics.

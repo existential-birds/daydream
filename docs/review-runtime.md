@@ -364,8 +364,7 @@ Byte preservation remains subject to existing upstream trajectory redaction.
 Copy/I/O and archive-integrity failures keep their fatal finalization behavior
 and rollback.
 
-Review diagnostics before sharing; use standalone `sanitize_archive()` or
-`sanitize_bundle()` to prepare separate derivatives when needed.
+Review diagnostics before sharing; use standalone `sanitize_bundle()` to prepare separate derivatives when needed.
 
 The archive scanner covers limited credential patterns and is no guarantee of
 safe sharing. Direct run-bundle uploads always scan and refuse blocking

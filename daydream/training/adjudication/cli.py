@@ -1,44 +1,23 @@
 """Command parsing and terminal output for the human-adjudication workflow.
 
 Handlers return exit codes; argparse rejects malformed invocations with exit 2.
-Missing state and invalid identifiers return 1. Local import inventory and
-merge live in import_local; publication protocols live in publish.
+Missing state and invalid identifiers return 1. Publication protocols live in publish.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import shutil
-import sqlite3
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from daydream.archive.hydrate import HubUnavailableError, HydrationError, PublicDestinationError, _make_client
-from daydream.archive.importer import (
-    merge_imported_observations,
-    run_pure_import,
-)
 from daydream.json_utils import atomic_write_bytes
 from daydream.training.adjudication.canonical import read_jsonl, run_canonical_harvest
 from daydream.training.adjudication.export import validate_export_rows, write_export_rows
 from daydream.training.adjudication.harvest import build_export_entries
-from daydream.training.adjudication.import_local import (
-    _build_import_report,
-    _hydrated_identity_index,
-    _identity_summary,
-    _ImportGateError,
-    _inventory_import_roots,
-    _link_imported_rows,
-    _load_import_index_runs,
-    _load_import_index_sessions,
-    _pinned_identity_lookup,
-    _projector_findings_map,
-    _write_import_merge,
-)
-from daydream.training.adjudication.local_history import project_local_history
 from daydream.training.adjudication.materialize import run_materialize
 from daydream.training.adjudication.observations import (
     _DISPOSITIONS,
@@ -320,34 +299,6 @@ def _build_adjudicate_parser() -> argparse.ArgumentParser:
                                   help="Fresh directory to install the verified final bundle into")
     p_download_final.add_argument("--hub-repo", type=str, required=True, metavar="REPO",
                                   help="Private Hub dataset repository")
-
-    p_import = sub.add_parser(
-        "import-local-observations",
-        help="Import local label histories with metadata redaction and integrity validation; "
-             "publication scans only with --publish.",
-    )
-    p_import.add_argument("--archive-root", type=Path, action="append", required=True,
-                          metavar="PATH",
-                          help="Source archive/backup root holding index.db (repeatable)")
-    p_import.add_argument("--index-root", type=Path, required=True, metavar="PATH",
-                          help="Pinned hydrated index / materialized snapshot root the "
-                               "import links session identity and finding evidence against")
-    p_import.add_argument("--archive-dir", type=Path, required=True, metavar="PATH",
-                          help="Hydrated archive directory holding the SQLite index the "
-                               "import merges into — the single merge target")
-    _add_state_dir(p_import)
-    p_import.add_argument("--json", action="store_true",
-                          help="Print the digest-stable import report as JSON")
-    p_import.add_argument("--dry-run", action="store_true",
-                          help="Plan the import without writing any state")
-    p_import.add_argument("--publish", action="store_true",
-                          help="Publish the merged state to the private Hub after the import "
-                               "(checkpoint written for fresh-VM resume)")
-    p_import.add_argument("--manifest", type=Path, metavar="PATH",
-                          help="Preview manifest pinning curation_id + snapshot_id "
-                               "(required with --publish)")
-    p_import.add_argument("--hub-repo", type=str, default=_ANNOTATION_HUB_REPO, metavar="REPO",
-                          help=f"Private Hub dataset repo (default: {_ANNOTATION_HUB_REPO})")
 
     return parser
 
@@ -792,150 +743,6 @@ def handle_harvest_snapshot(argv: list[str]) -> int:
     return 0
 
 
-def _publish_import_state(
-    archive_dir: Path, state_dir: Path, hub_repo: str, manifest: Path
-) -> dict[str, Any]:
-    """Stage the merged archive index with adjudication state, then publish it.
-
-    Missing payloads raise an import prerequisite error before Hub access.
-    Publication owns private-repository and secret gates and checkpoints the
-    index digest, so resume restores the imported rows as well as the queue."""
-    # Stage the merge target into the state dir for publication: the import
-    # writes only the --archive-dir index, and publish_annotation_state
-    # uploads state_dir/index.db. Identical dirs are a no-op; a missing
-    # archive index falls through to the gate's standard prerequisite hint.
-    if archive_dir.resolve() != state_dir.resolve() and (archive_dir / "index.db").is_file():
-        state_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(archive_dir / "index.db", state_dir / "index.db")
-    missing = [
-        name
-        for name in ("queue.json", "observations.jsonl", "preview-ledger.json", "index.db")
-        if not (state_dir / name).is_file()
-    ]
-    if missing:
-        raise _ImportGateError(
-            "state archive is missing publishable adjudication-state file(s): "
-            + ", ".join(missing)
-            + "; run `corpus adjudicate build`/`label`/`export` to produce the "
-            "publication payload before --publish"
-        )
-    client = _make_client(hub_repo)
-    published = publish_annotation_state(client, state_dir, manifest=manifest)
-    return {"prefix": published["prefix"], "uploaded": published["uploaded"]}
-
-
-def handle_import_local_observations(argv: list[str]) -> int:
-    """Import linked histories through pre-write validation and redaction gates.
-
-    The hydrated archive owns imported label history; state_dir holds finding
-    observations, report/ledger files, and optional publish staging.
-    Dry-run validates and reports without writing. JSON mode suppresses progress."""
-
-    parser = _build_adjudicate_parser()
-    args = parser.parse_args(["import-local-observations", *argv])
-    if args.publish:
-        if args.dry_run:
-            parser.error("--publish cannot be combined with --dry-run")
-        if args.manifest is None:
-            parser.error("--publish requires --manifest")
-    console = create_console()
-    try:
-        inventory = _inventory_import_roots(
-            args.archive_root, console=None if args.json else console
-        )
-        # Real identity inputs, derived from the pinned index — never empty
-        # literals: the hydrated-index map for session linkage and the
-        # projector's per-finding map for exact run-level evidence matching.
-        sessions = _load_import_index_sessions(args.index_root)
-        index_runs_by_session = _load_import_index_runs(args.index_root, sessions)
-        hydrated_index = _hydrated_identity_index(sessions, args.index_root)
-        projector_findings = _projector_findings_map(
-            sessions, index_runs_by_session
-        )
-        result = run_pure_import(
-            inventory["inventories"],
-            hydrated_index=hydrated_index,
-            repo_slug_sha_lookup=_pinned_identity_lookup(index_runs_by_session),
-            projector_findings=projector_findings,
-            unmatched_identity_less=True,
-        )
-        linked_rows = _link_imported_rows(result)
-        # Validate the finding projection before either canonical store writes.
-        imported_judgments, finding_decisions = project_local_history(linked_rows, sessions)
-        # Dry-run still exercises the merge's fail-closed drift gate, but the
-        # planned appends are counted, never written (S2). The real path runs
-        # metadata redaction and the drift / malformed-row gate
-        # before any state write (M9/AC6). The merge targets --archive-dir —
-        # the hydrated stage's index.db — never the state-dir index.
-        merge_state = (
-            merge_imported_observations(args.archive_dir, linked_rows, dry_run=True)
-            if args.dry_run
-            else _write_import_merge(
-                args.archive_dir,
-                args.state_dir,
-                linked_rows,
-                inventory["runs_by_session"],
-                index_runs_by_session,
-            )
-        )
-        if not args.dry_run:
-            imported_judgments, finding_decisions = project_local_history(
-                merge_state["payload"], sessions,
-            )
-            for judgment in imported_judgments:
-                append_observation(args.state_dir / _OBSERVATIONS_FILENAME, judgment)
-    except (ValueError, sqlite3.Error, OSError, HubUnavailableError, HydrationError) as exc:
-        print_error(console, "adjudicate import-local-observations failed", str(exc))
-        return 1
-
-    report = _build_import_report(
-        inventory["sources"], result, dry_run=bool(args.dry_run), merge_state=merge_state,
-        identity_summary=_identity_summary(result),
-    )
-    report["finding_decisions"] = finding_decisions
-    report["finding_observations"] = len(imported_judgments)
-    if args.publish:
-        try:
-            report["publish"] = _publish_import_state(
-                args.archive_dir, args.state_dir, args.hub_repo, args.manifest
-            )
-        except _ImportGateError as exc:
-            print_error(
-                console, "adjudicate import-local-observations publish failed", str(exc)
-            )
-            return 1
-        except (ValueError, OSError, HubUnavailableError, HydrationError, PublicDestinationError) as exc:
-            print_error(console, "adjudicate import-local-observations failed", str(exc))
-            return 1
-
-    if args.json:
-        print(json.dumps(report, indent=2, sort_keys=True))
-    else:
-        print_success(
-            console,
-            f"Import {'planned' if args.dry_run else 'complete'}: "
-            f"{sum(report['accounting'].values()) + report['deduped_count']} source row(s) across "
-            f"{len(inventory['sources'])} root(s), {report['deduped_count']} deduped; "
-            + (
-                f"{report['merge']['planned']} merge(s) planned; nothing written"
-                if args.dry_run
-                else f"{report['merge']['appended']} appended, "
-                f"{report['merge']['deduped']} deduped by the writer"
-            )
-            + (f"; published to {report['publish']['prefix']}" if args.publish else ""),
-        )
-
-    if not args.dry_run:
-        args.state_dir.mkdir(parents=True, exist_ok=True)
-        (args.state_dir / "import-report.json").write_text(
-            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        (args.state_dir / "import-ledger.json").write_text(
-            json.dumps(result["ledger"], indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-    return 0
-
-
 _HANDLERS = {
     "build": handle_build,
     "show": handle_show,
@@ -948,7 +755,6 @@ _HANDLERS = {
     "harvest-snapshot": handle_harvest_snapshot,
     "publish-final": handle_publish_final,
     "download-final": handle_download_final,
-    "import-local-observations": handle_import_local_observations,
 }
 
 

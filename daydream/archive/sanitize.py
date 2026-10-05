@@ -5,8 +5,7 @@ shared text/value redaction. A publication scan gates release: blocking
 findings quarantine the derivative, while advisory findings remain visible
 in a value-free report.
 
-Digests hash canonical (relative path, file SHA-256) pairs. Resume markers are
-trusted only while the derivative's current bytes match the recorded digest.
+Digests hash canonical (relative path, file SHA-256) pairs for released derivatives.
 """
 
 from __future__ import annotations
@@ -23,14 +22,10 @@ from daydream.archive import scan
 from daydream.archive._console import warn as _warn
 from daydream.archive.git_safe import classify_remote_url, normalize_remote_url
 from daydream.timeutil import now_iso_utc
-from daydream.trajectory import RUNS_DIRNAME, redact_text, redact_value
+from daydream.trajectory import redact_text, redact_value
 
-__all__ = [
-    "SanitizeResult", "sanitize_archive", "sanitize_bundle",
-    "sanitize_bundle_files",
-]
+__all__ = ["SanitizeResult", "sanitize_bundle", "sanitize_bundle_files"]
 
-_PROGRESS_FILENAME = "progress.jsonl"
 _AUDIT_FILENAME = "audit.jsonl"
 # Marker written inside a quarantined *derivative* so a later replacement can
 # tell our own copy from an imported source bundle parked in the same
@@ -139,38 +134,6 @@ def _resolve_session_id(run_dir: Path) -> str:
     return run_dir.name
 
 
-def _read_progress(sanitized_dir: Path) -> dict[str, str]:
-    """Return {session_id: derivative_digest} from the resume marker file."""
-    progress_path = sanitized_dir / _PROGRESS_FILENAME
-    if not progress_path.exists():
-        return {}
-    completed: dict[str, str] = {}
-    for line in progress_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue  # append-only log; a partial last line is the only failure mode
-        session_id = record.get("session_id")
-        digest = record.get("derivative_digest")
-        if isinstance(session_id, str) and isinstance(digest, str):
-            completed[session_id] = digest
-    return completed
-
-
-def _mark_done(sanitized_dir: Path, session_id: str, derivative_digest: str) -> None:
-    _append_jsonl(
-        sanitized_dir / _PROGRESS_FILENAME,
-        {
-            "session_id": session_id,
-            "derivative_digest": derivative_digest,
-            "completed_at": now_iso_utc(),
-        },
-    )
-
-
 def _append_audit(
     sanitized_dir: Path, run_dir: Path, session_id: str, *, status: str, derivative_digest: str = ""
 ) -> None:
@@ -215,7 +178,7 @@ def sanitize_bundle(run_dir: Path, archive_dir: Path) -> SanitizeResult:
 
     The source remains untouched. Blocked output moves to quarantine with an
     audit record. Unexpected failures remove partial output, record quarantine,
-    and propagate for the bulk caller to handle.
+    and propagate to the caller.
     """
     sanitized_dir = archive_dir / "sanitized"
     session_id = _resolve_session_id(run_dir)
@@ -258,7 +221,7 @@ def sanitize_bundle(run_dir: Path, archive_dir: Path) -> SanitizeResult:
     except Exception:
         if derivative_dir.exists():
             shutil.rmtree(derivative_dir, ignore_errors=True)
-        # Unexpected failure: record quarantine, re-raise for the bulk loop.
+        # Unexpected failure: record quarantine, re-raise to the caller.
         _append_audit(sanitized_dir, run_dir, session_id, status="quarantined")
         raise
 
@@ -269,59 +232,3 @@ def sanitize_bundle(run_dir: Path, archive_dir: Path) -> SanitizeResult:
         derivative_digest=digest,
         status="sanitized",
     )
-
-
-def sanitize_archive(archive_dir: Path) -> list[SanitizeResult]:
-    """Sanitize all run bundles, continuing after quarantined failures.
-
-    Skip completed sessions only when derivative bytes still match the resume digest.
-    """
-    sanitized_dir = archive_dir / "sanitized"
-    sanitized_dir.mkdir(parents=True, exist_ok=True)
-    completed = _read_progress(sanitized_dir)
-    results: list[SanitizeResult] = []
-    runs_dir = archive_dir / RUNS_DIRNAME
-    if not runs_dir.is_dir():
-        return results
-    for run_dir in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
-        session_id = _resolve_session_id(run_dir)
-        recorded_digest = completed.get(session_id)
-        if recorded_digest is not None and (sanitized_dir / session_id).is_dir():
-            try:
-                current_digest = _derivative_digest(sanitized_dir / session_id)
-            except OSError:
-                current_digest = None
-            if current_digest == recorded_digest:
-                continue  # M19: completed items are not re-processed
-        try:
-            result = sanitize_bundle(run_dir, archive_dir)
-        except Exception:
-            # sanitize_bundle already recorded the quarantine audit line and
-            # cleaned the partial derivative; one bad bundle never stops the pass.
-            continue
-        if result.released:
-            _mark_done(sanitized_dir, result.session_id, result.derivative_digest)
-        results.append(result)
-    return results
-
-
-def report_inventory(archive_dir: Path) -> dict[str, int]:
-    """Report URL-classification counts without values; malformed manifests count as unparseable."""
-    counts: dict[str, int] = {}
-    runs_dir = archive_dir / RUNS_DIRNAME
-    if runs_dir.is_dir():
-        for run_dir in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
-            manifest = run_dir / "manifest.json"
-            categories: list[str]
-            try:
-                data = json.loads(manifest.read_text())
-                raw = data["git"]["remote_url"]
-            except (OSError, json.JSONDecodeError, KeyError, TypeError):
-                categories = ["unparseable"]
-            else:
-                categories = classify_remote_url(raw) if isinstance(raw, str) else ["unparseable"]
-            for category in categories or ["clean"]:
-                counts[category] = counts.get(category, 0) + 1
-    for category in sorted(counts):
-        print(f"{category}: {counts[category]}")
-    return counts

@@ -216,6 +216,13 @@ def test_adjudicate_unknown_subverb_exits_2() -> None:
     with pytest.raises(SystemExit):
         _handle_corpus_command(["adjudicate", "bogus"])
 
+def test_retired_backup_import_is_an_unknown_command(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as result:
+        handle_adjudicate(["import-local-observations", "--archive-root", "/tmp/backup"])
+    assert result.value.code == 2
+    assert "invalid choice: 'import-local-observations'" in capsys.readouterr().err
+
+
 def test_adjudicate_bare_invocation_exits_2() -> None:
     with pytest.raises(SystemExit):
         _handle_corpus_command(["adjudicate"])

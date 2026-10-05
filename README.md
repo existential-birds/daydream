@@ -328,7 +328,7 @@ Daydream ignores a `trajectory_hub_repo` key in the target checkout file config.
 
 When set, daydream uploads every run's complete archive bundle to the dataset repo as a per-run folder. The upload requires the `huggingface_hub` package and a valid `HF_TOKEN`. If either is missing, or the upload fails, the run is never aborted. Daydream emits a one-line warning and leaves the bundle un-uploaded. On the first upload daydream creates the dataset repo private. It reuses an existing repo with its current visibility. Daydream always scans direct uploads and refuses blocking credential findings, scanner exceptions, any `scan_error` finding regardless of severity, and incomplete results. Advisory-only findings are reported and allowed. Warnings contain no matched values or exception payloads, and upload failure preserves the local bundle.
 
-The scanner recognizes limited credential patterns; a passing scan does not establish that content is safe to share. Standalone archive sanitization produces separate derivatives through `sanitize_archive()` or `sanitize_bundle()`; review their reports before sharing. Curated hydration, adjudication publication and shared trajectory/log redaction retain their independent checks.
+The scanner recognizes limited credential patterns; a passing scan does not establish that content is safe to share. Standalone archive sanitization produces separate derivatives through `sanitize_bundle()`; review their reports before sharing. Curated hydration, adjudication publication and shared trajectory/log redaction retain their independent checks.
 
 ```sh
 export DAYDREAM_TRAJECTORY_HUB_REPO="existentialbirds/daydream-trajectories"

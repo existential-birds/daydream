@@ -1,9 +1,7 @@
-"""Archive index DDL and idempotent migrations, owned by daydream.archive.index."""
+"""Current archive index DDL, owned by daydream.archive.index."""
 
 from __future__ import annotations
 
-import sqlite3
-import warnings
 from collections.abc import Iterable, Sequence
 from typing import NamedTuple
 
@@ -17,80 +15,79 @@ centralised here so all callers stay in sync if the precedence rule ever changes
 """
 
 class Column(NamedTuple):
-    """SQL column declaration with additive-migration and run-upsert membership flags."""
+    """SQL column declaration."""
 
     name: str
     definition: str
-    additive: bool = False
     upserted: bool = False
 
 
 class RunColumn(Column):
     """A runs column in canonical fresh-database order.
 
-    The declaration generates CREATE, additive migration, and UPSERT SQL.
-    Upgraded column order is unconstrained: migrations and reads use names.
+    The declaration generates CREATE and UPSERT SQL.
+    Existing column order is unconstrained: reads use names.
     Label-observation writers own columns excluded from run upserts.
     """
 
 
 RUNS_COLUMNS: tuple[RunColumn, ...] = (
-    RunColumn("session_id", "TEXT PRIMARY KEY", False, True),
-    RunColumn("archived_at", "TEXT NOT NULL", False, True),
-    RunColumn("status", "TEXT NOT NULL DEFAULT 'complete'", False, True),
-    RunColumn("archive_status", "TEXT NOT NULL DEFAULT 'complete'", True, True),
-    RunColumn("pipeline_status", "TEXT NOT NULL DEFAULT 'unknown'", True, True),
-    RunColumn("phase_states", "TEXT", True, True),
-    RunColumn("daydream_version", "TEXT", True, True),
-    RunColumn("daydream_install_source", "TEXT", True, True),
-    RunColumn("daydream_commit", "TEXT", True, True),
-    RunColumn("daydream_dirty", "INTEGER", True, True),
-    RunColumn("daydream_container_digest", "TEXT", True, True),
-    RunColumn("run_flow", "TEXT NOT NULL", False, True),
-    RunColumn("skill", "TEXT", False, True),
-    RunColumn("model", "TEXT", False, True),
-    RunColumn("backend", "TEXT NOT NULL DEFAULT 'claude'", False, True),
-    RunColumn("review_backend", "TEXT", True, True),
-    RunColumn("fix_backend", "TEXT", True, True),
-    RunColumn("test_backend", "TEXT", True, True),
-    RunColumn("per_stack_review_backend", "TEXT", True, True),
-    RunColumn("per_stack_review_model", "TEXT", True, True),
-    RunColumn("review_only", "INTEGER NOT NULL DEFAULT 0", False, True),
-    RunColumn("deep", "INTEGER NOT NULL DEFAULT 0", False, True),
-    RunColumn("remote_url", "TEXT", False, True),
-    RunColumn("repo_slug", "TEXT", False, True),
-    RunColumn("source_path", "TEXT", True, True),
-    RunColumn("branch", "TEXT", False, True),
-    RunColumn("base_branch", "TEXT", False, True),
-    RunColumn("head_sha", "TEXT", False, True),
-    RunColumn("base_sha", "TEXT", True, True),
-    RunColumn("changed_files", "TEXT", True, True),
-    RunColumn("pr_number", "INTEGER", False, True),
-    RunColumn("pr_repo", "TEXT", False, True),
-    RunColumn("total_cost_usd", "REAL", False, True),
-    RunColumn("total_findings", "INTEGER", False, True),
-    RunColumn("cost_per_finding_usd", "REAL", False, True),
-    RunColumn("wall_clock_seconds", "REAL", False, True),
-    RunColumn("erosion", "REAL", True, True),
-    RunColumn("verbosity", "REAL", True, True),
-    RunColumn("location_in_hunk_rate", "REAL", True, True),
-    RunColumn("shipped_duplicate_pairs", "INTEGER", True, True),
-    RunColumn("fix_quality_gate", "TEXT", True, True),
-    RunColumn("recommended_patch_capture", "TEXT", True, True),
-    RunColumn("total_prompt_tokens", "INTEGER", False, True),
-    RunColumn("total_completion_tokens", "INTEGER", False, True),
-    RunColumn("total_cached_tokens", "INTEGER", False, True),
-    RunColumn("outcome_labels", "TEXT NOT NULL DEFAULT '[]'", False, True),
-    RunColumn("labeled_at", "TEXT", False, True),
-    RunColumn("rubric_json", "TEXT", True, False),
-    RunColumn("composite_reward", "REAL", True, True),
-    RunColumn("has_posterior", "INTEGER NOT NULL DEFAULT 0", True, False),
-    RunColumn("archive_path", "TEXT NOT NULL", False, True),
-    RunColumn("schema_version", "INTEGER NOT NULL DEFAULT 1", False, True),
-    RunColumn("profile_schema_version", "INTEGER", True, True),
-    RunColumn("profile_name", "TEXT", True, True),
-    RunColumn("profile_source_kind", "TEXT", True, True),
-    RunColumn("profile_digest", "TEXT", True, True),
+    RunColumn("session_id", "TEXT PRIMARY KEY", True),
+    RunColumn("archived_at", "TEXT NOT NULL", True),
+    RunColumn("status", "TEXT NOT NULL DEFAULT 'complete'", True),
+    RunColumn("archive_status", "TEXT NOT NULL DEFAULT 'complete'", True),
+    RunColumn("pipeline_status", "TEXT NOT NULL DEFAULT 'unknown'", True),
+    RunColumn("phase_states", "TEXT", True),
+    RunColumn("daydream_version", "TEXT", True),
+    RunColumn("daydream_install_source", "TEXT", True),
+    RunColumn("daydream_commit", "TEXT", True),
+    RunColumn("daydream_dirty", "INTEGER", True),
+    RunColumn("daydream_container_digest", "TEXT", True),
+    RunColumn("run_flow", "TEXT NOT NULL", True),
+    RunColumn("skill", "TEXT", True),
+    RunColumn("model", "TEXT", True),
+    RunColumn("backend", "TEXT NOT NULL DEFAULT 'claude'", True),
+    RunColumn("review_backend", "TEXT", True),
+    RunColumn("fix_backend", "TEXT", True),
+    RunColumn("test_backend", "TEXT", True),
+    RunColumn("per_stack_review_backend", "TEXT", True),
+    RunColumn("per_stack_review_model", "TEXT", True),
+    RunColumn("review_only", "INTEGER NOT NULL DEFAULT 0", True),
+    RunColumn("deep", "INTEGER NOT NULL DEFAULT 0", True),
+    RunColumn("remote_url", "TEXT", True),
+    RunColumn("repo_slug", "TEXT", True),
+    RunColumn("source_path", "TEXT", True),
+    RunColumn("branch", "TEXT", True),
+    RunColumn("base_branch", "TEXT", True),
+    RunColumn("head_sha", "TEXT", True),
+    RunColumn("base_sha", "TEXT", True),
+    RunColumn("changed_files", "TEXT", True),
+    RunColumn("pr_number", "INTEGER", True),
+    RunColumn("pr_repo", "TEXT", True),
+    RunColumn("total_cost_usd", "REAL", True),
+    RunColumn("total_findings", "INTEGER", True),
+    RunColumn("cost_per_finding_usd", "REAL", True),
+    RunColumn("wall_clock_seconds", "REAL", True),
+    RunColumn("erosion", "REAL", True),
+    RunColumn("verbosity", "REAL", True),
+    RunColumn("location_in_hunk_rate", "REAL", True),
+    RunColumn("shipped_duplicate_pairs", "INTEGER", True),
+    RunColumn("fix_quality_gate", "TEXT", True),
+    RunColumn("recommended_patch_capture", "TEXT", True),
+    RunColumn("total_prompt_tokens", "INTEGER", True),
+    RunColumn("total_completion_tokens", "INTEGER", True),
+    RunColumn("total_cached_tokens", "INTEGER", True),
+    RunColumn("outcome_labels", "TEXT NOT NULL DEFAULT '[]'", True),
+    RunColumn("labeled_at", "TEXT", True),
+    RunColumn("rubric_json", "TEXT", False),
+    RunColumn("composite_reward", "REAL", True),
+    RunColumn("has_posterior", "INTEGER NOT NULL DEFAULT 0", False),
+    RunColumn("archive_path", "TEXT NOT NULL", True),
+    RunColumn("schema_version", "INTEGER NOT NULL DEFAULT 1", True),
+    RunColumn("profile_schema_version", "INTEGER", True),
+    RunColumn("profile_name", "TEXT", True),
+    RunColumn("profile_source_kind", "TEXT", True),
+    RunColumn("profile_digest", "TEXT", True),
 )
 
 
@@ -155,18 +152,15 @@ _CREATE_TABLE = _create_table_sql(RUNS_COLUMNS)
 # ``corpus-pipeline-architecture`` (silver layer) and ``reward-posterior-corrections`` (C3).
 # ``source`` is the precedence marker (``'auto'`` for automated rubric labels,
 # ``'human'`` for maintainer overrides) — human-sourced rows win in the "latest
-# label" projections regardless of recency. Pre-existing rows default to ``'auto'``
-# via the additive ``_migrate_label_observations_schema`` ALTER-ADD migration.
+# label" projections regardless of recency.
 # ``labeler_policy_version`` mirrors ``labeler_version`` so the policy axis is an
 # explicit column; ``reply_classifier_version`` / ``reply_evidence_digest`` carry
 # the reply-classifier version and a stable digest over the combined reply
 # evidence — together with ``evidence_sha`` they form the auto-dedup key
 # ``(evidence_sha, labeler_policy_version, reply_evidence_digest, labels,
 # has_posterior)``, replacing the older ``(evidence_sha, reward_version)`` key.
-# ``legacy`` marks provenance generation: new rows default ``'auto'``
-# (current-generation); the additive migration stamps every pre-existing row
-# (``labeler_policy_version IS NULL``) ``'legacy'`` exactly once, never touching
-# its labels/observed_at/rubric_json.
+# ``legacy`` marks provenance generation: new rows default ``'auto'``;
+# previously persisted ``'legacy'`` rows retain their historical provenance.
 LABEL_OBSERVATION_COLUMNS: tuple[Column, ...] = (
     Column("session_id", "TEXT NOT NULL"),
     Column("observed_at", "TEXT NOT NULL"),
@@ -181,11 +175,11 @@ LABEL_OBSERVATION_COLUMNS: tuple[Column, ...] = (
     Column("composite_reward", "REAL"),
     Column("reviewer_logins", "TEXT"),
     Column("has_posterior", "INTEGER NOT NULL DEFAULT 0"),
-    Column("source", "TEXT NOT NULL DEFAULT 'auto'", True),
-    Column("labeler_policy_version", "TEXT", True),
-    Column("reply_classifier_version", "TEXT", True),
-    Column("reply_evidence_digest", "TEXT", True),
-    Column("legacy", "TEXT NOT NULL DEFAULT 'auto'", True),
+    Column("source", "TEXT NOT NULL DEFAULT 'auto'"),
+    Column("labeler_policy_version", "TEXT"),
+    Column("reply_classifier_version", "TEXT"),
+    Column("reply_evidence_digest", "TEXT"),
+    Column("legacy", "TEXT NOT NULL DEFAULT 'auto'"),
 )
 LABEL_OBSERVATION_NAMES: tuple[str, ...] = tuple(col.name for col in LABEL_OBSERVATION_COLUMNS)
 
@@ -204,69 +198,3 @@ _CREATE_INDEXES = [
 ]
 
 _UPSERT_SQL = _upsert_sql(RUNS_COLUMNS)
-
-
-def _alter_add_missing(
-    conn: sqlite3.Connection,
-    table: str,
-    migrations: list[tuple[str, str]],
-) -> None:
-    """Add missing columns; tolerate concurrent openers racing to add the same column."""
-    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}  # noqa: S608 - table is a module-local constant at every call site
-    for col, col_type in migrations:
-        if col not in existing:
-            try:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")  # noqa: S608 - col/col_type are module-local constants
-            except sqlite3.OperationalError as exc:
-                if "duplicate column name" not in str(exc).lower():
-                    raise
-
-
-def _migration_entries(columns: Iterable[Column]) -> list[tuple[str, str]]:
-    """Select additive columns for ALTER ADD in declaration order.
-
-    Required legacy columns without defaults cannot be added to populated tables.
-    """
-    return [(col.name, col.definition) for col in columns if col.additive]
-
-
-def _migrate_schema(conn: sqlite3.Connection) -> None:
-    """Add columns that exist in _CREATE_TABLE but are missing from the live DB."""
-    _alter_add_missing(conn, "runs", _migration_entries(RUNS_COLUMNS))
-
-
-def _recreate_label_observations_if_stale(conn: sqlite3.Connection) -> None:
-    """Recreate observations missing structural valid_at or has_posterior columns.
-
-    This intentionally discards obsolete development observations for re-harvest;
-    the runs table is untouched. Later migrations preserve observation rows.
-    """
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(label_observations)").fetchall()}
-    if existing and ("valid_at" not in existing or "has_posterior" not in existing):
-        warnings.warn(
-            "label_observations table predates bitemporal/posterior columns and will be dropped "
-            "and recreated. Existing label rows will be lost — repopulate via `harvest`.",
-            stacklevel=2,
-        )
-        conn.execute("DROP TABLE label_observations")
-        conn.execute(_CREATE_LABEL_OBSERVATIONS_TABLE)
-
-
-def _migrate_label_observations_schema(conn: sqlite3.Connection) -> None:
-    """Add missing observation columns without deleting rows; legacy source defaults to auto."""
-    _alter_add_missing(
-        conn,
-        "label_observations",
-        _migration_entries(LABEL_OBSERVATION_COLUMNS),
-    )
-    # Stamp history exactly once (M17): rows written before the reply-label
-    # columns existed have ``labeler_policy_version IS NULL``. The additional
-    # ``legacy = 'auto'`` condition is the actual idempotency guard — once a
-    # row is marked ``legacy`` it stops matching, so later connection opens do
-    # not re-execute the UPDATE (or rewrite matched rows into the WAL) even
-    # though ``labeler_policy_version`` stays NULL. No row's labels/observed_at/
-    # rubric_json is ever written here.
-    conn.execute(
-        "UPDATE label_observations SET legacy = 'legacy' "
-        "WHERE labeler_policy_version IS NULL AND legacy = 'auto'"
-    )

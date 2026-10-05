@@ -28,7 +28,7 @@ from daydream.backends import (
 )
 from daydream.cli import _signal_handler
 from daydream.deep.artifacts import DeepArtifact
-from daydream.eval.analyzer import analyze_costs, load_trajectories
+from daydream.eval.analyzer import analyze_costs
 from daydream.phases.publish import (
     _do_commit,
 )
@@ -1757,7 +1757,10 @@ async def test_analyze_costs_total_comes_from_root_only(tmp_path: Path) -> None:
 
     session = "sess-fold-0001"
     daydream_dir = tmp_path / ".daydream"
-    recorder = make_recorder(tmp_path, path=daydream_dir / "runs" / session / "trajectory.json", session_id=session,)
+    snapshots: list[trajectory_module.RunWriteSnapshot] = []
+    recorder = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot),
+        path=daydream_dir / "runs" / session / "trajectory.json", session_id=session,
+    )
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             observe_metrics_and_result(inv, "parent", message_id="m-1", prompt_tokens=100,
@@ -1769,7 +1772,7 @@ async def test_analyze_costs_total_comes_from_root_only(tmp_path: Path) -> None:
                     completion_tokens=8, cached_tokens=4, cost_usd=0.5,
                 )
 
-    costs = analyze_costs(load_trajectories(daydream_dir, session))
+    costs = analyze_costs(trajectory_module.snapshot_trajectories(snapshots[-1]))
     assert costs["total_cost_usd"] == pytest.approx(1.5)  # not 2.0 (root 1.5 + fork 0.5)
     assert costs["total_prompt_tokens_raw"] == 140  # not 180
     assert costs["total_completion_tokens"] == 28

@@ -10,7 +10,7 @@ from typing import Literal
 
 from daydream.archive import get_archive_dir
 from daydream.archive.bundle import _project_documents
-from daydream.eval.analyzer import collect_trajectory_paths, load_trajectories
+from daydream.eval.analyzer import collect_trajectory_paths
 from daydream.trajectory import (
     RunWriteSnapshot,
     TrajectoryDocumentSnapshot,
@@ -52,10 +52,6 @@ def test_every_reader_resolves_the_same_document_set(tmp_path: Path) -> None:
     # 1. the analyzer, by run dir and by latest-run fallback
     assert {p.relative_to(run_dir).as_posix() for p in collect_trajectory_paths(run_dir)} == canonical
     assert {p.relative_to(run_dir).as_posix() for p in collect_trajectory_paths(daydream_dir)} == canonical
-    loaded = load_trajectories(daydream_dir, SESSION)
-    assert loaded["main"]["trajectory_id"] == SESSION
-    assert [d["_source_file"] for d in loaded["forked"]] == [SIBLING]
-
     # 2. the producer's frozen projection agrees with the analyzer on the same names
     frozen = snapshot_trajectories(_snapshot(run_dir / "trajectory.json"))
     assert frozen["main"]["_source_file"] == "trajectory.json"
@@ -76,7 +72,6 @@ def test_the_partial_root_is_stripped_by_the_archive_and_ignored_by_readers(tmp_
 
     # readers stay partial-blind: no main document, sibling still resolved
     assert [p.name for p in collect_trajectory_paths(run_dir)] == [SIBLING]
-    assert load_trajectories(target / ".daydream", SESSION)["main"] is None
 
     # the archive strips the suffix at its destination and keeps the frozen bytes
     archive_run_dir = get_archive_dir() / "runs" / SESSION

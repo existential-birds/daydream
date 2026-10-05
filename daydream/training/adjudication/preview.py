@@ -6,10 +6,11 @@ changed finding digests instead of silently merging drift.
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
-from daydream.archive.hydrate import HubUnavailableError, RepoInfo, resolve_source_revision
+from daydream.archive.hydrate import HubUnavailableError, MovingBranchError
 from daydream.json_utils import canonical_json as _canonical
 from daydream.training.adjudication.observations import load_observations, prior_adjudications
 from daydream.training.adjudication.queue import build_queue
@@ -20,32 +21,6 @@ _SESSIONS_OUT_FILENAME = "sessions.jsonl"
 _REVISION_FILENAME = "index-revision.txt"
 
 _ITEM_KEYS = ("disposition", "evidence_digest", "fingerprint", "record_id", "status")
-
-
-class _LocalIndexClient:
-    """Reuse source-revision policy for a local index.
-
-    A full SHA is already pinned; an empty revision list makes symbolic refs
-    raise MovingBranchError. This client never downloads or uploads."""
-
-    def repo_info(self, revision: str | None = None) -> RepoInfo:
-        return RepoInfo(sha=revision or "", private=True)
-
-    def list_repo_files(self, revision: str | None = None) -> list[str]:
-        return []
-
-    def download_file(self, path_in_repo: str, revision: str | None = None) -> bytes:
-        raise HubUnavailableError(f"local index has no downloadable file {path_in_repo!r}")
-
-    def upload_files(self, mapping: dict[str | Path, Path], commit_message: str) -> None:
-        raise HubUnavailableError("local index client never uploads")
-
-    @property
-    def repo_private(self) -> bool:
-        return True
-
-    def list_revisions(self) -> list[str]:
-        return []
 
 
 def preview_ledger_digest(ledger: dict[str, Any]) -> str:
@@ -70,13 +45,11 @@ def _load_sessions(index_root: Path) -> tuple[list[dict[str, Any]], str]:
     index_revision = hashlib.sha256(sessions_path.read_bytes()).hexdigest()
     revision_file = index_root / _REVISION_FILENAME
     if revision_file.is_file():
-        # Delegate pinned-revision resolution to hydrate.py's resolver: a
-        # moving branch/tag raises MovingBranchError, a full SHA passes through.
         raw_revision = revision_file.read_text(encoding="utf-8").strip()
         if raw_revision:
-            index_revision = resolve_source_revision(
-                _LocalIndexClient(), raw_revision, exploratory=False
-            )
+            if re.fullmatch(r"[0-9a-fA-F]{40}", raw_revision) is None:
+                raise MovingBranchError("local index revision must be a pinned full 40-character commit SHA")
+            index_revision = raw_revision.lower()
     return sessions, index_revision
 
 

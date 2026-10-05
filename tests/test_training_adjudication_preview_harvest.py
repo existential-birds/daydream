@@ -79,17 +79,29 @@ def test_preview_missing_sessions_file_raises_hydration_error(tmp_path: Path) ->
     with pytest.raises(HydrationError):
         run_preview(tmp_path, tmp_path / "ledger.json")
 
-def test_preview_moving_branch_revision_is_rejected(tmp_path: Path, root: Path) -> None:
-    (root / "index-revision.txt").write_text("main\n", encoding="utf-8")
+@pytest.mark.parametrize("revision", ["main", "release-tag", "a" * 12, "f" * 39, "g" * 40])
+def test_preview_moving_branch_revision_is_rejected(tmp_path: Path, root: Path, revision: str) -> None:
+    (root / "index-revision.txt").write_text(revision + "\n", encoding="utf-8")
     with pytest.raises(MovingBranchError):
         run_preview(root, tmp_path / "ledger.json")
 
-def test_preview_pinned_sha_revision_lands_in_ledger(tmp_path: Path, root: Path) -> None:
-    sha = "a" * 40
-    (root / "index-revision.txt").write_text(sha + "\n", encoding="utf-8")
+@pytest.mark.parametrize("sha", ["a" * 40, "AB01" * 10])
+def test_preview_pinned_sha_revision_lands_in_ledger(tmp_path: Path, root: Path, sha: str) -> None:
+    (root / "index-revision.txt").write_text("  " + sha + " \n\t", encoding="utf-8")
     result = run_preview(root, tmp_path / "ledger.json")
     ledger = json.loads((tmp_path / "ledger.json").read_text())
-    assert result["index_revision"] == ledger["index_revision"] == sha
+    assert result["index_revision"] == ledger["index_revision"] == sha.lower()
+
+@pytest.mark.parametrize("revision", [None, "", " \n\t"])
+def test_preview_revision_falls_back_to_content_digest(tmp_path: Path, root: Path, revision: str | None) -> None:
+    revision_path = root / "index-revision.txt"
+    if revision is None:
+        revision_path.unlink(missing_ok=True)
+    else:
+        revision_path.write_text(revision, encoding="utf-8")
+    result = run_preview(root, tmp_path / "ledger.json")
+    assert result["index_revision"] == hashlib.sha256((root / "sessions.jsonl").read_bytes()).hexdigest()
+
 
 def test_preview_malformed_evidence_raises_value_error_naming_source(tmp_path: Path, root: Path) -> None:
     sessions_path = root / "sessions.jsonl"

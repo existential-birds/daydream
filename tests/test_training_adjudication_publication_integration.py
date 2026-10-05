@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
@@ -14,8 +13,7 @@ import pytest
 from daydream import cli
 from daydream.archive import hydrate
 from daydream.archive.hydrate_client import FakeHub
-from daydream.archive.index import append_label_observation, label_observation_history, query_runs, upsert_run
-from daydream.archive.manifest import Manifest
+from daydream.archive.index import append_label_observation, label_observation_history
 from daydream.training.adjudication import cli as adjudication_cli
 from daydream.training.adjudication.final_bundle import final_snapshot_id
 from daydream.training.adjudication.publish import publish_final_annotation_bundle
@@ -57,25 +55,7 @@ def _materialize_vm(root: Path, stage: Path, pin: dict[str, Any], capsys: pytest
     return materialized
 
 
-def _import_backup(root: Path, stage: Path, state: Path, capsys: pytest.CaptureFixture[str],) -> None:
-    # Seed a real external-backup producer index, then import through the CLI.
-    # The special history row exists only in SQLite, never state observations.
-    backup = root / "local-backup"
-    row = query_runs(stage, "session_id = ?", ("sess-a",))[0]
-    upsert_run(backup, Manifest(**{field.name: row[field.name] for field in fields(Manifest) if field.name in row}))
-    shutil.copytree(stage / "runs" / "sess-a", backup / "runs" / "sess-a")
-    assert append_label_observation(backup, "sess-a", labels=["accepted"], pr_state=None,
-        labeler_version="980-rubric-r2", evidence_sha=str(row["head_sha"]), reward_version="vm-loss-sqlite-canary",
-        source="human", observed_at="2026-06-01T00:00:00+00:00",
-    )
-    _run_cli(["adjudicate", "import-local-observations", "--archive-root", str(backup),
-        "--index-root", str(stage), "--archive-dir", str(state), "--state-dir", str(state),
-    ], capsys)
-    assert any(row["reward_version"] == "vm-loss-sqlite-canary" for row in label_observation_history(state, "sess-a"))
-    assert "vm-loss-sqlite-canary" not in (state / "observations.jsonl").read_text()
-
-
-def _publish_first_vm(root: Path, hubs: PublicationHubs, capsys: pytest.CaptureFixture[str], *, import_history: bool,
+def _publish_first_vm(root: Path, hubs: PublicationHubs, capsys: pytest.CaptureFixture[str], *, checkpoint_index: bool,
 ) -> str:
     """Return only an operator-known identity; every other input dies with VM 1."""
     root.mkdir()
@@ -94,8 +74,16 @@ def _publish_first_vm(root: Path, hubs: PublicationHubs, capsys: pytest.CaptureF
     ], capsys)
     _run_cli(["adjudicate", "export", "--index-root", str(materialized), "--state-dir", str(state), "--dry-run",
     ], capsys)
-    if import_history:
-        _import_backup(root, stage, state, capsys)
+    if checkpoint_index:
+        # The ordinary checkpoint protocol accepts an existing current index.
+        # This history belongs to the active archive, with no backup import.
+        shutil.copy2(stage / "index.db", state / "index.db")
+        assert append_label_observation(state, "sess-a", labels=["accepted"], pr_state=None,
+            labeler_version="980-rubric-r2", evidence_sha="b" * 40,
+            reward_version="vm-loss-sqlite-canary", source="human",
+            observed_at="2026-06-01T00:00:00+00:00",
+        )
+        assert "vm-loss-sqlite-canary" not in (state / "observations.jsonl").read_text()
     else:
         assert not (state / "index.db").exists()
     _run_cli(["adjudicate", "publish-state", "--state-dir", str(state),
@@ -104,14 +92,14 @@ def _publish_first_vm(root: Path, hubs: PublicationHubs, capsys: pytest.CaptureF
     pointer = f"annotations/{curation_id}/checkpoints/batch-latest.json"
     commit = hubs.annotations.commit_order[-1]
     assert pointer in commit["contains"]
-    assert any(path.endswith("/index.db") for path in commit["contains"]) is import_history
+    assert any(path.endswith("/index.db") for path in commit["contains"]) is checkpoint_index
     assert any(path.endswith("/observations.jsonl") for path in commit["contains"])
     return curation_id
 
 
-@pytest.mark.parametrize("import_history", [False, True], ids=["ordinary-no-backup", "sqlite-backup"])
+@pytest.mark.parametrize("checkpoint_index", [False, True], ids=["ordinary-no-index", "ordinary-current-index"])
 def test_ordinary_checkpoint_survives_total_vm_loss_and_final_cli_download(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], import_history: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], checkpoint_index: bool,
 ) -> None:
     hubs = build_publication_hubs()
 
@@ -124,7 +112,7 @@ def test_ordinary_checkpoint_survives_total_vm_loss_and_final_cli_download(
     monkeypatch.setenv("HF_TOKEN", "offline-fixture-token")
     monkeypatch.setenv("GITHUB_TOKEN", "offline-fixture-token")
     vm1 = tmp_path / "first disposable VM"
-    curation_id = _publish_first_vm(vm1, hubs, capsys, import_history=import_history)
+    curation_id = _publish_first_vm(vm1, hubs, capsys, checkpoint_index=checkpoint_index)
     shutil.rmtree(vm1)
     assert not vm1.exists()
 
@@ -138,7 +126,7 @@ def test_ordinary_checkpoint_survives_total_vm_loss_and_final_cli_download(
     ], capsys)
     assert hubs.annotations.downloaded_revision_log
     assert {revision for _, revision in hubs.annotations.downloaded_revision_log} == {checkpoint_revision}
-    if import_history:
+    if checkpoint_index:
         assert any(row["reward_version"] == "vm-loss-sqlite-canary"
             for row in label_observation_history(state, "sess-a")
         )
@@ -151,7 +139,7 @@ def test_ordinary_checkpoint_survives_total_vm_loss_and_final_cli_download(
     assert json.loads((materialized / "preview-manifest.json").read_text()) == pin
     # Restored archive history takes precedence over hydrated-source history.
     archive = state if (state / "index.db").is_file() else stage
-    assert (archive == state) is import_history
+    assert (archive == state) is checkpoint_index
     _run_cli(["adjudicate", "harvest-snapshot", "--index-root", str(stage),
         "--materialize-dir", str(materialized), "--archive-dir", str(archive), "--state-dir", str(state),
     ], capsys)
@@ -210,5 +198,5 @@ def test_ordinary_checkpoint_survives_total_vm_loss_and_final_cli_download(
         assert hashlib.sha256((downloaded / name).read_bytes()).hexdigest() == expected
     assert json.loads((downloaded / "_SUCCESS").read_text()) == marker
     history = [json.loads(line) for line in (downloaded / "label-observations.jsonl").read_text().splitlines()]
-    assert any(row["reward_version"] == "vm-loss-sqlite-canary" for row in history) is import_history
+    assert any(row["reward_version"] == "vm-loss-sqlite-canary" for row in history) is checkpoint_index
     assert not vm1.exists()

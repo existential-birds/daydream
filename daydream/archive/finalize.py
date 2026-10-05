@@ -125,8 +125,7 @@ def finalize_archive_run(
 
                 evaluation = analyze_session(
                     target_dir / ".daydream",
-                    session_id=session_id,
-                    frozen_trajectories=frozen,
+                    write_snapshot=write_snapshot,
                     artifact_provenance=artifact_provenance,
                     code_workspace=work.repo if work is not None else artifact_provenance.public_source,
                 )

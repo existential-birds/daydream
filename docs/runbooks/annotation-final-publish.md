@@ -76,31 +76,7 @@ missing base SHAs nor writes response-cache or harvest-completion markers.
 only a summary; use `adjudicate materialize` to produce the preview artifacts.
 A failed session, exhausted rate limit, or unmappable finding fails the command
 before it emits a partial snapshot. Checkpoint an active SQLite WAL before
-preview or import; these commands deliberately do not checkpoint it for you.
-
-### Import surviving observation history
-
-Before building the queue, inspect surviving local history against the pinned
-hydrated index:
-
-```bash
-daydream corpus adjudicate import-local-observations --archive-root /tmp/local-archive --index-root /tmp/daydream-hydrate --archive-dir /tmp/daydream-hydrate --state-dir /tmp/state --dry-run --json
-```
-
-Apply the same import after inspecting its reason-coded accounting:
-
-```bash
-daydream corpus adjudicate import-local-observations --archive-root /tmp/local-archive --index-root /tmp/daydream-hydrate --archive-dir /tmp/daydream-hydrate --state-dir /tmp/state
-```
-
-Session identity comes from the pinned curation, never the backup's own
-inventory. Exact fingerprint, record identity, and evidence-digest matches
-append finding judgments to `/tmp/state/observations.jsonl`, which queue,
-precedence, harvest, and publication share. The source remains read-only;
-linked SQLite generations are preserved in the target index. Run-level-only,
-ambiguous, unknown-fingerprint, and stale-evidence rows remain reason-coded
-in `import-report.json` / `import-ledger.json`. Legacy versions require review,
-and conflicting raters remain unresolved until an explicit adjudicator decision.
+preview; these commands deliberately do not checkpoint it for you.
 
 ### Build the queue and adjudicate
 
@@ -119,21 +95,10 @@ daydream corpus adjudicate label --state-dir /tmp/state --batch 10 --disposition
 ```
 
 Repeat `label` with the appropriate disposition, rationale, and labeler until
-the coverage report shows the intended adjudication state.
-
-### Checkpoint imported SQLite history
-
-If a local archive or backup contains additional `label_observations`, merge
-it into the hydrated archive and publish the resulting SQLite history with
-the state checkpoint:
-
-```bash
-daydream corpus adjudicate import-local-observations --archive-root /tmp/local-archive --index-root /tmp/daydream-hydrate --archive-dir /tmp/daydream-hydrate --state-dir /tmp/state --publish --manifest /tmp/snapshot/preview-manifest.json --hub-repo org/annotation-snapshot
-```
-
-The import keeps the source archive read-only, merges into the hydrated
-`index.db`, copies that merged index into the checkpoint state, and then uses
-the same immutable checkpoint protocol as `publish-state`.
+the coverage report shows the intended adjudication state. Conflicting raters
+remain unresolved until an explicit decision recorded with `--role adjudicator`.
+Use `adjudicate report --index-root /tmp/snapshot --state-dir /tmp/state`
+to inspect coverage, or add `--conflicts` to inspect disagreements.
 
 ### Publish every adjudication batch
 
@@ -146,7 +111,12 @@ daydream corpus adjudicate publish-state --state-dir /tmp/state --manifest /tmp/
 Every successful invocation creates one immutable content-addressed batch and
 updates the stable curation pointer in the same guarded commit. The command
 prints both the batch ID and the actual checkpoint revision. Re-publishing
-identical state is idempotent.
+identical state is idempotent. The checkpoint includes queue, observations,
+preview ledger, and preview manifest. An existing current-schema `index.db`
+in the state directory is optional and is also preserved by publication and
+recovery. To checkpoint the active archive's SQLite history, first close its
+writers and checkpoint its WAL, then copy its `index.db` into `/tmp/state`.
+Keep this index current as labeling and canonical harvesting proceed.
 
 ## Recover on an empty replacement VM
 
@@ -178,9 +148,9 @@ daydream corpus adjudicate materialize --index-root /tmp/daydream-hydrate --out-
 
 Select the archive once and use it for both harvest and final publication.
 If the checkpoint restored `/tmp/state/index.db`, use it directly to preserve
-its SQLite-only history; do not copy it into the newly hydrated tree. If you
-did not import a backup and the checkpoint has no optional index, use the
-newly rehydrated, pinned source index instead. Keep `/tmp/state` as the state
+its SQLite-only history; do not copy it into the newly hydrated tree. If the
+checkpoint has no optional index, use the newly rehydrated, pinned source
+index instead. Keep `/tmp/state` as the state
 directory in both cases so your restored annotation decisions are applied.
 
 ```bash
@@ -196,7 +166,7 @@ read-only builder and checks the complete finding population against the
 preview before appending anything. Unchanged evidence retains identical
 record IDs and evidence digests. Changed replies, missing findings, or newly
 recorded findings fail closed with a nonzero exit: materialize again and
-review the affected judgments before retrying. Imported human judgments
+review the affected judgments before retrying. Human judgments
 override automatic dispositions only when identity, evidence, and version
 gates pass; conflicts remain non-gold. Final publication includes the complete
 append-only observation history.
