@@ -335,9 +335,6 @@ async def _run_with_context(
     """Execute with the runner's immutable policy bound before any output."""
     print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
 
-    if config.sanitize_dump_artifacts and not config.dump_artifacts:
-        print_error(console, "Invalid Configuration", "sanitize_dump_artifacts requires dump_artifacts")
-        return 1
 
     # Build the per-run registry (builtins + optional daydream_ext) and set it
     # on the ContextVar so every downstream phase resolves through it.

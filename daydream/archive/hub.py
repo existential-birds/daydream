@@ -37,15 +37,13 @@ def resolve_hub_repo(config: RunConfig) -> str | None:
     return None
 
 
-def upload_run_bundle(
-    run_dir: Path, repo_id: str, session_id: str, *, allow_secret_findings: bool = False,
-) -> bool:
+def upload_run_bundle(run_dir: Path, repo_id: str, session_id: str) -> bool:
     """Upload the complete bundle to dataset ``repo_id`` under ``session_id``.
 
     Return True on success; skips and failures warn and return False. Missing
     ``HF_TOKEN`` or the optional Hub dependency skips upload. New repos are private;
     existing visibility is retained, with a warning before uploading to a public repo.
-    Blocking credentials refuse upload unless explicitly allowed by the operator.
+    Blocking credentials always refuse upload.
     Scanner errors always refuse upload with value-free diagnostics;
     advisory name/template matches are reported and allow upload. Concurrent commit
     conflicts retry up to three total attempts with exponential backoff.
@@ -75,18 +73,13 @@ def upload_run_bundle(
         any(f.category == "scan_error" for f in scan_result.findings)
         or (not scan_result.clean and not scan_result.findings)
     )
-    if scan_failed or (scan_result.blocking and not allow_secret_findings):
+    if scan_failed or scan_result.blocking:
         _warn(
             f"Data Collection: refusing HF upload of {session_id}: bundle secret scan found "
             f"problems ({scan_result.summary()})"
         )
         return False
-    if scan_result.blocking:
-        _warn(
-            f"HF upload of {session_id} proceeding with operator credential override "
-            f"({scan_result.summary()})"
-        )
-    elif scan_result.findings:
+    if scan_result.findings:
         # Advisory-only: a name/template shape, not a credential. Reported
         # value-free so the operator sees it, never silently swallowed.
         _warn(

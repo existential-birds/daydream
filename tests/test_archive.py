@@ -3,7 +3,6 @@
 Covers git_context, manifest, index, and the strict ``finalize_archive_run`` flow.
 """
 import json
-import re
 import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -20,7 +19,6 @@ from daydream.archive import (
     get_archive_dir,
     index,
     pipeline,
-    scan,
 )
 from daydream.archive.bundle import _copy_snapshot_bundle, _project_documents
 from daydream.archive.git_context import GitContext, capture_git_context
@@ -926,30 +924,6 @@ def test_bundle_findings_artifact_skipped_without_route(tmp_path: Path,) -> None
     target, run_dir, recorder = _setup_bundle(tmp_path)
     _assemble_bundle(target, run_dir, recorder)
     assert not (run_dir / "findings.json").exists()
-
-def test_dump_artifacts_sanitizes_credential_bearing_bundle(
-    tmp_path: Path, archive_dir: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Only the sanitized derivative leaves the archive; source evidence is retained."""
-    session_id = "abcd1234-0000-0000-0000-000000000000"
-    dest = tmp_path / "dump"
-    dest.mkdir()
-    config = RunConfig(target=str(tmp_path), archive=True, dump_artifacts=str(dest), sanitize_dump_artifacts=True)
-    target, _, recorder = _setup_bundle(tmp_path, session_id)
-    traj = json.loads(recorder.path.read_text())
-    traj["remote_url"] = "https://user:ghp_canaryfake123@github.com/o/r"
-    recorder.path.write_text(json.dumps(traj))
-    _strict_archive(
-        target=target, session_id=session_id, config=config, write_snapshot=_write_snapshot(recorder), dump_path=dest,
-    )
-    assert (dest / "manifest.json").is_file()
-    assert not scan.scan_run_dir(dest).blocking
-    run_dir = archive_dir / "runs" / session_id
-    assert "ghp_canaryfake123" in (run_dir / "trajectory.json").read_text()
-    assert "ghp_canaryfake123" not in (dest / "trajectory.json").read_text()
-    assert query_runs(archive_dir)
-    captured = capsys.readouterr()
-    assert "ghp_canaryfake123" not in captured.out + captured.err
 
 def test_dump_artifacts_copies_clean_bundle(tmp_path: Path, archive_dir: Path) -> None:
     session_id = "abcd1234-0000-0000-0000-000000000000"
@@ -2777,21 +2751,3 @@ def test_strict_archive_upload_refuses_frozen_tree_mutated_before_publication(
 
     assert uploads == []
     assert not (get_archive_dir() / "runs" / session_id).exists()
-
-def test_dump_scan_refusal_preserves_archive_and_removes_late_stage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Unredactable scan findings suppress only the diagnostic export."""
-    session_id = "strict-dump"
-    arguments = _finalizer_arguments(tmp_path, session_id,
-        config=RunConfig(
-            target=str(tmp_path), run_eval=False, archive=True,
-            dump_artifacts="requested", sanitize_dump_artifacts=True,
-        ),
-    )
-    dump_stage = tmp_path / "late"
-    dump_stage.mkdir()
-    monkeypatch.setattr(scan, "_RULES", ((re.compile(session_id), "unredactable_fixture", scan.SEVERITY_BLOCKING),))
-    finalize_archive_run(**arguments, dump_path=dump_stage)
-    assert not dump_stage.exists()
-    assert (get_archive_dir() / "runs" / session_id / "manifest.json").is_file()
-    assert query_runs(get_archive_dir())

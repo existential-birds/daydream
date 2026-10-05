@@ -110,15 +110,9 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         metavar="DIR",
         help="Merge the finalized run bundle (ATIF trajectory, review output, deep artifacts, diffs, "
              "findings, manifest, evaluation) into DIR for CI upload. Preserves unrelated destination "
-             "files. Copies exact assembled bytes by default, including credentials and binary files. "
-             "Use --sanitize-dump-artifacts to scan and sanitize a separate copy before sharing. "
+             "files. Always copies exact assembled bytes, including credentials and binary files, "
+             "without scanning or sanitizing. "
              "Works on every flow."
-        if full_help else argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--sanitize-dump-artifacts", action="store_true",
-        help="Requires --dump-artifacts. Blocking secret-scan findings trigger sanitization of a separate copy, "
-             "then a rescan. A refused dump warns without failing the review; the local archive stays unchanged."
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -136,14 +130,8 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         metavar="REPO",
         help="Upload each run's archive bundle to this HuggingFace dataset repo "
              "(owner/repo), one folder per run keyed by session id. Opt-in and "
-             "requires HF_TOKEN; creates the repo private if it does not exist."
-        if full_help else argparse.SUPPRESS,
-    )
-    parser.add_argument(
-        "--allow-archive-secrets", action="store_true",
-        help="Allow credential findings only for direct run-bundle Hub uploads (CLI/API only). "
-             "Scanner failures still refuse upload. Does not override dump sanitization, hydration, "
-             "standalone sanitization or adjudication publication."
+             "requires HF_TOKEN; creates the repo private if it does not exist. "
+             "Always refuses blocking credentials and scanner failures. Advisory findings are allowed."
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -274,8 +262,6 @@ def config_from_args(
     Command-specific transformations stay at callers and parser-only flags never enter runtime
     policy.
     """
-    if args.sanitize_dump_artifacts and not args.dump_artifacts:
-        parser.error("--sanitize-dump-artifacts requires --dump-artifacts")
     observability = _resolve_cli_observability(parser, args)
     target_repo, pr_repo, file_config = _resolve_target_provenance(args.target)
     values = {item.name: getattr(args, item.name) for item in fields(RunConfig) if hasattr(args, item.name)}

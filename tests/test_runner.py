@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import signal
 import subprocess
 import threading
@@ -413,7 +414,6 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     exit_code: int, capsys: pytest.CaptureFixture[str],
 ) -> None:
     from daydream.archive import finalize_archive_run
-    from daydream.archive.dump import publish_dump
 
     repo = _feature_repo(tmp_path)
     _write_probe_flow(ext_dir, "artifact-probe", exit_code=exit_code)
@@ -428,9 +428,13 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
         (args[0] / "diff.patch").write_text("changed after freeze")
         raise OSError("evaluation failed after changing frozen input")
 
-    def fail_dump(assembly: Path, destination: Path, session_id: str, *, sanitize: bool = False) -> bool:
-        publish_dump(assembly, destination, session_id, sanitize=sanitize)
-        raise OSError("dump publication failed")
+    copytree = shutil.copytree
+
+    def fail_dump(source: Path, destination: Path, *args: Any, **kwargs: Any) -> Path:
+        copied = copytree(source, destination, *args, **kwargs)
+        if Path(source).name.endswith(".finalizing"):
+            raise OSError("dump publication failed")
+        return copied
 
     if failure_mode == "evaluation":
         monkeypatch.setattr("daydream.eval.analyzer.analyze_session", _fail_evaluation)
@@ -439,7 +443,7 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     elif failure_mode == "frozen_tree":
         monkeypatch.setattr("daydream.eval.analyzer.analyze_session", corrupt_frozen_tree)
     elif failure_mode == "dump_publication":
-        monkeypatch.setattr("daydream.archive.dump.publish_dump", fail_dump)
+        monkeypatch.setattr("daydream.archive.finalize.shutil.copytree", fail_dump)
     store_path, unowned = tmp_path / "records", tmp_path / "unowned"
     if failure_mode == "dataset-runtime-owned":
         store_path = repo / ".daydream" / "dataset"

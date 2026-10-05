@@ -190,10 +190,7 @@ def _upload_fixture(
     """
     uploaded: list[tuple[Any, ...]] = []
 
-    def _fake_upload(
-        run_dir: Path, repo_id: str, session_id: str, *, allow_secret_findings: bool = False,
-    ) -> bool:
-        assert not allow_secret_findings
+    def _fake_upload(run_dir: Path, repo_id: str, session_id: str) -> bool:
         uploaded.append((str(run_dir), repo_id, session_id))
         return True
 

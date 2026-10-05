@@ -387,44 +387,11 @@ def _commit_scanned_file(target: Path, name: str, body: str) -> None:
     git(target, "add", name)
     git(target, "commit", "-m", f"add {name}")
 
-async def test_dump_artifacts_publishes_bundle_with_advisory_scan_findings(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path,
-    capfd: pytest.CaptureFixture[str],
-) -> None:
-    """Credential-free flags and DSN templates must allow an unchanged dump with value-free advisories."""
-    _install_deep_capture_backend(multi_stack_target, monkeypatch)
-    _commit_scanned_file(multi_stack_target, "settings.py",
-        'FEATURE_FLAG_OVERRIDE_KEY = "override_flag"\n'
-        'DSN = f"postgresql://{cfg.DB_USER}:{cfg.DB_PASSWORD}@{cfg.DB_HOST}:{cfg.DB_PORT}/{cfg.DB_NAME}"\n',
-    )
-
-    dump_dir = tmp_path / "uploaded-artifacts"
-    exit_code = await run(_deep_run_config(
-        multi_stack_target, dump_artifacts=str(dump_dir), sanitize_dump_artifacts=True,
-    ))
-    assert exit_code == 0
-
-    run_dir = _only_archived_run(archive_dir)
-    assert (dump_dir / "manifest.json").is_file()
-    assert query_runs(archive_dir)
-    assert (multi_stack_target / ".review-output.md").is_file()
-
-    out = "".join(capfd.readouterr())
-    assert "diff.patch" in out
-    assert "env_var" in out
-    assert "override_flag" not in out
-    assert "DB_PASSWORD" not in out
-
-    dumped = (dump_dir / "diff.patch").read_bytes()
-    assert dumped == (run_dir / "diff.patch").read_bytes()
-    assert b"FEATURE_FLAG_OVERRIDE_KEY" in dumped
-
 async def _assert_target_is_reusable(target: Path) -> None:
-    """Refused diagnostic publication must not leave a wedged transaction."""
+    """Diagnostic publication must leave the target ready for another review."""
     exit_code = await run(_deep_run_config(target, output_mode="review"))
     assert exit_code == 0
 
-@pytest.mark.parametrize("sanitize", [False, True])
 @pytest.mark.parametrize(("filename", "content", "canary", "expected_rule"),
     [pytest.param("creds.py",
             'GITHUB_TOKEN = "ghp_canaryfake123"\n',
@@ -439,134 +406,30 @@ async def _assert_target_is_reusable(target: Path) -> None:
         ),
     ],
 )
-async def test_dump_artifacts_sanitizes_credentials_in_diff(
+async def test_dump_artifacts_copies_credentials_in_diff(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path,
-    capfd: pytest.CaptureFixture[str], filename: str, content: str, canary: str, expected_rule: str, sanitize: bool,
+    capfd: pytest.CaptureFixture[str], filename: str, content: str, canary: str, expected_rule: str,
 ) -> None:
-    """A sanitized dump passes egress without rewriting the private review evidence."""
+    """Diagnostic dumps preserve credential bytes and completed review evidence."""
     silence(monkeypatch)
     install_stub_backend(monkeypatch, multi_stack_target)
     _commit_scanned_file(multi_stack_target, filename, content)
     dump_dir = tmp_path / "uploaded-artifacts"
     exit_code = await run(_deep_run_config(
-        multi_stack_target, output_mode="review", dump_artifacts=str(dump_dir), sanitize_dump_artifacts=sanitize,
+        multi_stack_target, output_mode="review", dump_artifacts=str(dump_dir),
     ))
     assert exit_code == 0
     run_dir = _only_archived_run(archive_dir)
     assert query_runs(archive_dir)
     assert (multi_stack_target / ".review-output.md").is_file()
     assert canary in (run_dir / "diff.patch").read_text()
-    if sanitize:
-        assert canary not in (dump_dir / "diff.patch").read_text()
-        assert not scan.scan_run_dir(dump_dir).blocking
-    else:
-        assert (dump_dir / "diff.patch").read_bytes() == (run_dir / "diff.patch").read_bytes()
-        assert not (dump_dir / "dump-sanitization.json").exists()
+    assert (dump_dir / "diff.patch").read_bytes() == (run_dir / "diff.patch").read_bytes()
     assert expected_rule in {finding.category for finding in scan.scan_run_dir(run_dir).findings}
     manifest = json.loads((dump_dir / "manifest.json").read_text())
     assert manifest["session_id"] == json.loads((run_dir / "manifest.json").read_text())["session_id"]
     assert json.loads((dump_dir / "trajectory.json").read_text())["session_id"] == manifest["session_id"]
 
     out = "".join(capfd.readouterr())
-    assert canary not in out
-    if sanitize:
-        assert "diff.patch" in out
-        assert expected_rule in out
-    await _assert_target_is_reusable(multi_stack_target)
-
-async def test_dump_sanitizes_added_and_deleted_url_fixtures_for_hub_upload(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path,
-) -> None:
-    """The external workflow can still upload bundle/ using its manifest session id."""
-    removed_url = "https://token@api.firecrawl.dev/v1/source"
-    added_url = "https://public-key@sentry.example.com/123"
-    git(multi_stack_target, "checkout", "main")
-    _commit_scanned_file(multi_stack_target, "removed_fixture.py", f'URL = "{removed_url}"\n')
-    git(multi_stack_target, "checkout", "feature")
-    git(multi_stack_target, "merge", "main", "--no-edit")
-    git(multi_stack_target, "rm", "removed_fixture.py")
-    git(multi_stack_target, "commit", "-m", "remove URL fixture")
-    _commit_scanned_file(multi_stack_target, "added_fixture.py", f'URL = "{added_url}"\n')
-    raw_diff = git(multi_stack_target, "diff", "main...HEAD")
-    silence(monkeypatch)
-    install_stub_backend(monkeypatch, multi_stack_target)
-    bundle = tmp_path / "diagnostics" / "bundle"
-    assert await run(_deep_run_config(
-        multi_stack_target, output_mode="review", dump_artifacts=str(bundle), sanitize_dump_artifacts=True,
-    )) == 0
-
-    run_dir = _only_archived_run(archive_dir)
-    assert (run_dir / "diff.patch").read_text().strip() == raw_diff.strip()
-    assert f'-URL = "{removed_url}"' in raw_diff
-    assert f'+URL = "{added_url}"' in raw_diff
-    exported_diff = (bundle / "diff.patch").read_text()
-    assert removed_url not in exported_diff
-    assert added_url not in exported_diff
-    assert "api.firecrawl.dev/v1/source" in exported_diff
-    assert "sentry.example.com/123" in exported_diff
-    assert not scan.scan_run_dir(bundle).blocking
-    session_id = json.loads((bundle / "manifest.json").read_text())["session_id"]
-    assert session_id == json.loads((run_dir / "manifest.json").read_text())["session_id"]
-    uploaded: dict[str, bytes] = {}
-
-    class FakeHub:
-        def create_repo(self, **_kwargs: Any) -> None:
-            pass
-
-        def repo_info(self, **_kwargs: Any) -> Any:
-            return type("RepoInfo", (), {"private": True})()
-
-        def upload_folder(self, *, folder_path: str, path_in_repo: str, **_kwargs: Any) -> None:
-            for file in Path(folder_path).rglob("*"):
-                if file.is_file():
-                    uploaded[f"{path_in_repo}/{file.relative_to(folder_path).as_posix()}"] = file.read_bytes()
-
-    monkeypatch.setattr(hub, "HfApi", FakeHub)
-    monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-    assert hub.upload_run_bundle(bundle, "acme/trajectories", session_id)
-    assert json.loads(uploaded[f"{session_id}/manifest.json"])["session_id"] == session_id
-    assert uploaded[f"{session_id}/diff.patch"] == (bundle / "diff.patch").read_bytes()
-    assert uploaded[f"{session_id}/trajectory.json"] == (bundle / "trajectory.json").read_bytes()
-
-@pytest.mark.parametrize("preexisting", [False, True], ids=["absent", "preexisting"])
-async def test_residual_dump_refusal_preserves_review_exports_and_destination(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path,
-    capfd: pytest.CaptureFixture[str], fake_gh: FakeGh, preexisting: bool,
-) -> None:
-    """A real scanner-only rule simulates a secret the redactor cannot remove."""
-    canary = "unredactable-diagnostic-canary"
-    monkeypatch.setattr(scan, "_RULES", (*scan._RULES, (
-        re.compile(re.escape(canary)), "unredactable_fixture", scan.SEVERITY_BLOCKING,
-    )))
-    silence(monkeypatch)
-    install_stub_backend(monkeypatch, multi_stack_target)
-    _commit_scanned_file(multi_stack_target, "fixture.py", f'VALUE = "{canary}"\n')
-    fake_gh.serve_open_pr(multi_stack_target)
-    dump_dir = tmp_path / "diagnostics" / "bundle"
-    if preexisting:
-        dump_dir.mkdir(parents=True)
-        (dump_dir / "manifest.json").write_bytes(b"prior manifest bytes")
-        (dump_dir / "nested").mkdir()
-        (dump_dir / "nested" / "prior.bin").write_bytes(b"prior unrelated bytes")
-    baseline = {p.relative_to(dump_dir): p.read_bytes() for p in dump_dir.rglob("*") if p.is_file()}
-    trajectory = tmp_path / "trajectory.json"
-    findings = tmp_path / "findings.json"
-    exit_code = await run(_deep_run_config(multi_stack_target, output_mode="review", non_interactive=True,
-        pr_number=7, findings_out=str(findings), trajectory_path=trajectory,
-        dump_artifacts=str(dump_dir), sanitize_dump_artifacts=True,
-    ))
-    assert exit_code == 0
-    assert dump_dir.exists() is preexisting
-    assert {p.relative_to(dump_dir): p.read_bytes() for p in dump_dir.rglob("*") if p.is_file()} == baseline
-    run_dir = _only_archived_run(archive_dir)
-    assert query_runs(archive_dir)
-    assert canary in (run_dir / "diff.patch").read_text()
-    assert (multi_stack_target / ".review-output.md").is_file()
-    assert json.loads(findings.read_text())["findings"]
-    assert json.loads(trajectory.read_text())["steps"]
-    out = "".join(capfd.readouterr())
-    assert "diff.patch" in out
-    assert "unredactable_fixture" in out
     assert canary not in out
     await _assert_target_is_reusable(multi_stack_target)
 
@@ -1214,9 +1077,8 @@ def test_a_run_without_retry_events_has_no_retry_summary(legacy_archive_run: Pat
     assert "retry_summary" not in manifest
 
 
-@pytest.mark.parametrize("allow", [False, True])
-async def test_direct_upload_override_reaches_finalization(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, allow: bool,
+async def test_direct_upload_refuses_credentials_with_environment_destination(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
     capfd: pytest.CaptureFixture[str],
 ) -> None:
     silence(monkeypatch)
@@ -1239,17 +1101,11 @@ async def test_direct_upload_override_reaches_finalization(
 
     monkeypatch.setattr(hub, "HfApi", FakeApi)
     assert await run(_deep_run_config(
-        multi_stack_target, output_mode="review", allow_archive_secrets=allow,
+        multi_stack_target, output_mode="review",
     )) == 0
     run_dir = _only_archived_run(archive_dir)
     assert b"ghp_finalizationcanary" in (run_dir / "diff.patch").read_bytes()
-    assert uploaded == ([(run_dir / "diff.patch").read_bytes()] if allow else [])
-    assert "ghp_finalizationcanary" not in "".join(capfd.readouterr())
-
-
-async def test_sanitize_dump_requires_destination_before_dispatch(
-    tmp_path: Path, capfd: pytest.CaptureFixture[str],
-) -> None:
-    assert await run(RunConfig(target=str(tmp_path), sanitize_dump_artifacts=True)) == 1
-    assert not (tmp_path / ".daydream").exists()
-    assert "sanitize_dump_artifacts requires dump_artifacts" in "".join(capfd.readouterr())
+    assert uploaded == []
+    out = "".join(capfd.readouterr())
+    assert "refusing HF upload" in out
+    assert "ghp_finalizationcanary" not in out

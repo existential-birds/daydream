@@ -321,31 +321,3 @@ async def test_unsharded_arbiter_call_keeps_todays_xhigh_whatever_the_profile(
         await _run_arbiter(ctx, DeepState(ctx.data), plan, [], [], effort_pin=pin,
                            targets_by_group={"arbiter-group-0": []})
     assert observed == ["xhigh", "low", None]
-
-
-@pytest.mark.parametrize("improve", [False, True])
-def test_archive_operator_controls_ignore_target_file_and_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, improve: bool,
-) -> None:
-    from daydream.archive.hub import resolve_hub_repo
-
-    (tmp_path / ".daydream.toml").write_text(
-        'allow_archive_secrets = true\nsanitize_dump_artifacts = true\n'
-        'trajectory_hub_repo = "target/repo"\n'
-    )
-    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "env/repo")
-    monkeypatch.setenv("DAYDREAM_ALLOW_ARCHIVE_SECRETS", "true")
-    monkeypatch.setenv("DAYDREAM_SANITIZE_DUMP_ARTIFACTS", "true")
-    parse = _parse_improve_args if improve else _parse_args
-    default = parse([str(tmp_path)])
-    assert not default.allow_archive_secrets
-    assert not default.sanitize_dump_artifacts
-    assert resolve_hub_repo(default) == "env/repo"
-    explicit = parse([
-        str(tmp_path), "--allow-archive-secrets", "--dump-artifacts", "dump", "--sanitize-dump-artifacts",
-    ])
-    assert explicit.allow_archive_secrets and explicit.sanitize_dump_artifacts
-    assert resolve_hub_repo(explicit) == "env/repo"
-    with pytest.raises(SystemExit) as exc:
-        parse([str(tmp_path), "--sanitize-dump-artifacts"])
-    assert exc.value.code == 2

@@ -9,22 +9,22 @@ rewrite are destructive operations that require a human and are never
 automated.**
 
 Ordinary local archives and `--dump-artifacts DIR` preserve assembled evidence;
-local dumps copy credential-shaped strings and binary files without scanning.
-Select `--sanitize-dump-artifacts` explicitly for shared diagnostics (it requires
-a dump destination). Local metadata imports retain their URL/path and JSON
-redaction plus integrity checks without a publication scanner. Hydration instead
+diagnostic dumps always copy the exact assembled bytes, including
+credential-shaped strings and binary files, without scanning or sanitization.
+Byte preservation does not undo upstream trajectory redaction. For shared
+diagnostics, use standalone `sanitize_archive()` or `sanitize_bundle()` to create
+separate derivatives and review their reports. Local metadata imports retain
+their URL/path and JSON redaction plus integrity checks without a publication
+scanner. Hydration instead
 sanitizes incoming sources and verifies derivatives; its final curated payload,
 including supporting ledgers, is scanned before upload and verified afterward.
 
-Direct run-bundle uploads scan and reject blocking credential findings by
-default. `--allow-archive-secrets` deliberately permits those findings only for
-direct uploads, with value-free warnings. Scanner exceptions, `scan_error`
-findings and incomplete results still refuse upload. This CLI/API-only flag
-can accompany an environment-selected Hub destination; neither environment
-variables nor target-file configuration can enable it. It does not override
-dump sanitization, standalone sanitization, hydration, adjudication publication
-or shared redaction. The scanner covers limited credential patterns; a passing
-scan cannot guarantee that a bundle contains no sensitive information.
+Direct run-bundle uploads always scan and refuse blocking credential findings,
+scanner exceptions, any `scan_error` finding regardless of severity, and
+incomplete results. Advisory-only findings are allowed with value-free warnings;
+matched values and exception payloads are never printed. Upload failure
+preserves local evidence. The scanner covers limited credential patterns; a
+passing scan cannot guarantee that a bundle contains no sensitive information.
 
 Audience: the daydream operator (a human with provider dashboards open and the
 archive checkout in their own terminal).
@@ -154,34 +154,36 @@ Post-remediation, confirm the incident is closed:
    `unparseable`, if pre-existing) remain.
 2. **Re-scan:** run the fail-closed scanner (`daydream.archive.scan.scan_run_dir`)
    over sanitized derivatives and any bundle that will egress. It must report
-   **no blocking findings** (`ScanResult.blocking` empty). The scanner reports
-   two tiers, and only the blocking tier is an acceptance criterion:
+   **no blocking findings** (`ScanResult.blocking` empty). Direct upload also
+   requires a complete result without any `scan_error` finding. The scanner
+   reports two tiers:
    - **Blocking** — high-confidence credential formats: API-key prefixes
      (`api_key`), PEM key material (`pem_key`), JWTs (`jwt`), literal
      `user:pass@` userinfo and token-only userinfo (`url_credential`),
      credential-bearing query parameters (`query_credential`), and any
      `scan_error` (a scan that could not complete never reads clean). A
-     credential finding refuses sanitized publication and default direct uploads.
-     The operator may override credentials only for direct uploads; scanner
-     errors always refuse upload.
+     credential finding refuses sanitized publication and direct uploads.
+     Scanner errors always refuse direct upload, including an advisory-severity
+     `scan_error`, as do scanner exceptions and incomplete results.
    - **Advisory** — shapes the scanner cannot attribute to a credential value:
      a secret-*named* variable whose value is not secret-shaped (`env_var`,
      e.g. `SORT_KEY = "created_at"`), and a userinfo template whose parts are
      entirely `{placeholder}` interpolation. These are reported to the operator
      but no longer refuse egress.
 
-   So a bundle carrying advisory findings will **not** report `clean` yet will
-   still egress. That is deliberate: a rule that cannot identify a credential
-   value must not gate irreversible publication. Read the advisory list anyway —
+   So a complete scan with only advisory findings and no scan errors will **not**
+   report `clean` yet can still allow egress. That is deliberate: a rule that
+   cannot identify a credential value must not gate irreversible publication.
+   Read the advisory list anyway —
    it names the path, location, and category (never a value), and it is where a
    credential in an unrecognized format would show up. If an advisory finding
    looks like a real credential, treat it as an incident and go back to step 1
    rather than releasing.
 3. **Revocation holds:** attempt authentication with a revoked token from the
    operator's own terminal and confirm it fails.
-4. **Going forward:** default direct uploads, explicitly sanitized dumps,
-   sanitizer release, curated payload publication and clean-room verification
-   retain blocking credential checks. Adjudication publication independently
+4. **Going forward:** direct uploads, standalone sanitizer release, curated
+   payload publication and clean-room verification retain blocking credential
+   checks. Adjudication publication independently
    checks metadata and SQLite payloads. Local copying and metadata import do
    not impose a publication scanner. Review content before sharing; credentials
    outside the scanner's recognized patterns can pass undetected.
