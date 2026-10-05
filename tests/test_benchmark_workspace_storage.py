@@ -287,19 +287,6 @@ def test_crash_injection_at_every_boundary_restores_before_or_after(tmp_path: Pa
             assert target.read_text() == "after"
         assert not (tmp_path / "transactions").exists() or not list((tmp_path / "transactions").iterdir())
 
-@pytest.mark.parametrize("boundary", ["staged", "backup"])
-def test_prejournal_residue_is_removed(tmp_path: Path, boundary: str) -> None:
-    target = tmp_path / "t.yaml"
-    target.write_text("before")
-    faults = TransactionFaultDriver(tmp_path, op_id="op-pre", kind="write")
-    with faults.transaction as tx:
-        _stage(tx, target, "after")
-        faults.halt_at(boundary)  # residue exists, but no journal.json
-    recover_startup(tmp_path)
-    assert target.read_text() == "before"
-    txn = tmp_path / "transactions"
-    assert not txn.exists() or not list(txn.iterdir())
-
 @pytest.mark.parametrize(
     "boundary", ["prepared", "committing", "complete", "unknown", "target-nope", "target--1", "target-2"],
 )

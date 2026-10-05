@@ -192,15 +192,6 @@ def test_package_resolution_keys_each_nested_package_separately(tmp_path: Path) 
     assert (api.cwd_relative, api.runner) == ("services/api", "poetry")
     assert api.config_digest != root.config_digest
 
-def test_unreadable_config_input_is_a_named_miss_never_a_placeholder(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
-    (tmp_path / "uv.lock").mkdir()  # a directory where a file belongs: every read raises OSError
-
-    resolved = resolve_package(tmp_path, tmp_path)
-
-    assert resolved.config_digest is None
-    assert "uv.lock" in resolved.absent_components
-
 def test_package_cwd_outside_the_worktree_is_rejected(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 import tomllib
 from pathlib import Path
@@ -41,21 +40,7 @@ def rl_train_configs() -> list[dict[str, Any]]:
     return [tomllib.loads(p.read_text(encoding="utf-8")) for p in sorted(RL_TRAIN_DIR.glob("*.toml"))]
 
 
-def _stage_run_dir(tmp_path: Path) -> Path:
-    run_dir = tmp_path / "run"
-    deep = run_dir / "deep"
-    deep.mkdir(parents=True)
-    (deep / "merged-items.json").write_text(json.dumps({"items": [{
-                        "id": 1, "description": "off-by-one in add() makes every sum wrong", "file": "calc.py",
-                        "line": 4, "confidence": "HIGH", "rationale": "test contradicts implementation",
-                        "evidence": "test_add fails", "lens": "per-stack", "severity": "high", "related_files": None,
-                    }
-                ]
-            }
-        ), encoding="utf-8",
-    )
-    (run_dir / "manifest.json").write_text(json.dumps({"metrics": {}}), encoding="utf-8")
-    return run_dir
+
 
 
 async def test_env_scores_with_stage0_composite(
@@ -95,7 +80,9 @@ async def test_env_scores_with_stage0_composite(
     assert trace.rewards["intrinsic_composite"] == stage0["composite"]
 
 def test_stage0_composition_absent_without_model(tmp_path: Path) -> None:
-    assert stage0_composite_terms(Path(""), _stage_run_dir(tmp_path)) is None
+    # No outcome model short-circuits before any run artifact is read, so a real
+    # (empty) directory is the whole input this branch needs.
+    assert stage0_composite_terms(Path(""), tmp_path) is None
 
 def test_backend_config_pi_only(rl_train_configs: list[dict[str, Any]]) -> None:
     checked = 0
