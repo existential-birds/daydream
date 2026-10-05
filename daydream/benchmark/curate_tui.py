@@ -438,16 +438,8 @@ def _action_edit(
         if not _check_fresh(root, case_id, binding):
             return "rerender"
         return _edit_author_evidence(root, case_id, binding, read_line)
-    text = first
-    if text == "0":
-        return "continue"
-    try:
-        indices = parse_indices(text, len(findings))
-    except ValueError as exc:
-        print(str(exc))
-        return "continue"
-    if len(indices) != 1:
-        print(f"edit takes exactly one finding (got {len(indices)})")
+    indices = _select_indices(first, len(findings), one_of="edit takes exactly one finding")
+    if indices is None:
         return "continue"
     finding = findings[indices[0]]
     return _edit_and_stage_fragment(
@@ -455,6 +447,26 @@ def _action_edit(
         lambda atoms: cu.replace_findings(root, case_id, finding["finding_id"], replacements=atoms),
         success=lambda n: f"replaced finding with {n} atom(s)",
     )
+
+
+def _select_indices(text: str, count: int, one_of: str | None = None) -> list[int] | None:
+    """Resolve one selection line against `count` rendered entries; None means continue.
+
+    The cancel (``0``), unparseable, and wrong-arity failures every selection
+    shares. `one_of` is the caller's own arity diagnostic prefix, so the printed
+    wording stays the caller's to own.
+    """
+    if text == "0":
+        return None
+    try:
+        indices = parse_indices(text, count)
+    except ValueError as exc:
+        print(str(exc))
+        return None
+    if one_of is not None and len(indices) != 1:
+        print(f"{one_of} (got {len(indices)})")
+        return None
+    return indices
 
 
 def _select_evidence_indices(
@@ -465,13 +477,8 @@ def _select_evidence_indices(
     ``None`` covers cancellation, an invalid fragment, and a selected entry
     with no source_id; each path has already printed its diagnostic.
     """
-    text = _prompt(read_line, "evidence (number or range, 0 to cancel): ").strip()
-    if text == "0":
-        return None
-    try:
-        indices = parse_indices(text, len(binding))
-    except ValueError as exc:
-        print(str(exc))
+    indices = _select_indices(_prompt(read_line, "evidence (number or range, 0 to cancel): ").strip(), len(binding))
+    if indices is None:
         return None
     if any(not binding[i] for i in indices):
         print("selected entry has no source_id")
@@ -638,15 +645,8 @@ def _action_accept(
         return "rerender"
     candidates = view.get("candidates") or []
     text = _prompt(read_line, "candidate (number, 0 to cancel): ").strip()
-    if text == "0":
-        return "continue"
-    try:
-        indices = parse_indices(text, len(binding))
-    except ValueError as exc:
-        print(str(exc))
-        return "continue"
-    if len(indices) != 1:
-        print(f"accept takes exactly one candidate (got {len(indices)})")
+    indices = _select_indices(text, len(binding), one_of="accept takes exactly one candidate")
+    if indices is None:
         return "continue"
     sid = binding[indices[0]]
     cand = next((c for c in candidates if c.get("source_id") == sid), None)

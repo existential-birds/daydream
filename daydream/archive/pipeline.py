@@ -104,9 +104,6 @@ def _read_session_bound_json_artifact(
     return data
 
 
-
-
-
 def _manifest_state(
     *,
     target_dir: Path,
