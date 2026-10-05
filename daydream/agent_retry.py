@@ -1,6 +1,5 @@
 """Resolve retry limits and account for useful work versus recovery overhead."""
 
-import logging
 import math
 import os
 import random
@@ -11,12 +10,9 @@ from daydream.backends import Backend
 from daydream.config import DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
 from daydream.diagnostics import exception_text
 from daydream.retry_policy import (
-    decode_retry_recovery_allowance,
+    coerce_declared_retry_allowance,
     parse_message_retry_hint,
-    undeclared_retry_allowance_message,
 )
-
-_logger = logging.getLogger(__name__)
 
 
 def _sample_retry_delay(cap: float) -> float:
@@ -107,7 +103,7 @@ def _resolve_retry_settings(
     resolved_allowance = DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
     declared_allowance = False
     if allowance_source is not None:
-        parsed_allowance = _coerce_retry_recovery_allowance(
+        parsed_allowance = coerce_declared_retry_allowance(
             allowance_source[1], allowance_source[0]
         )
         if parsed_allowance is not None:
@@ -228,22 +224,6 @@ class _RetryTelemetry:
     def spent_retry_overhead(self) -> bool:
         """Count backoff as recovery even when the deadline prevents its retry from dispatching."""
         return self.retry_attempts > 0 or self.backoff_s > 0.0
-
-
-def _coerce_retry_recovery_allowance(raw: Any, source: str) -> float | None:
-    """Decode a declared allowance and warn on malformed values.
-
-    Zero disables recovery; invalid input falls back to the default. The shared
-    decoder owns admission for config, environment, and backend attributes.
-    """
-    value = decode_retry_recovery_allowance(raw)
-    if value is None:
-        _logger.warning(
-            "daydream: %s; using default %s",
-            undeclared_retry_allowance_message(source, raw),
-            DEFAULT_RETRY_RECOVERY_ALLOWANCE_S,
-        )
-    return value
 
 
 def _retry_hint(exc: BaseException) -> float | None:

@@ -23,10 +23,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol, Union, get_args, get_origin, get_type_hints
 
 from daydream.redaction import redact_structured_text
-from daydream.retry_policy import (
-    decode_retry_recovery_allowance,
-    undeclared_retry_allowance_message,
-)
+from daydream.retry_policy import coerce_declared_retry_allowance
 from daydream.timeutil import now_iso
 
 logger = logging.getLogger(__name__)
@@ -79,22 +76,6 @@ def _parsed_nonnegative_float(
     if value < 0:
         logger.warning("%s=%r is negative; using default %g", name, raw, default)
         return default
-    return value
-
-
-def _parsed_optional_retry_allowance(
-    environment: Mapping[str, str], name: str
-) -> float | None:
-    """Decode an optional retry allowance, warning on malformed declarations.
-
-    None means absent or invalid; the caller's fallback remains authoritative.
-    """
-    raw = environment.get(name)
-    if raw is None:
-        return None
-    value = decode_retry_recovery_allowance(raw)
-    if value is None:
-        logger.warning("%s", undeclared_retry_allowance_message(name, raw))
     return value
 
 
@@ -188,8 +169,9 @@ class BackendExecutionInput:
                 # documented top precedence tier (RetryPolicy) before the env, so
                 # the operator knob must be materialised into the policy or it
                 # would be silently dropped on this path only.
-                retry_recovery_allowance_s=_parsed_optional_retry_allowance(
-                    copied, "DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S"
+                retry_recovery_allowance_s=coerce_declared_retry_allowance(
+                    copied.get("DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S"),
+                    "DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S",
                 ),
             ),
             _parsed_positive_int(copied, fanout_name, fanout_default),
