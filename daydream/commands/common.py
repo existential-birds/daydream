@@ -94,7 +94,7 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
     )
     parser.add_argument(
         "--dataset-store", type=Path, dest="dataset_store_path", metavar="DIR",
-        help="Local JSONL store directory (default: ~/.daydream/dataset); requires --capture-data"
+        help="Local JSONL store directory (default: ~/.daydream/dataset); enables data capture"
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -265,6 +265,8 @@ def config_from_args(
     observability = _resolve_cli_observability(parser, args)
     target_repo, pr_repo, file_config = _resolve_target_provenance(args.target)
     values = {item.name: getattr(args, item.name) for item in fields(RunConfig) if hasattr(args, item.name)}
+    if args.dataset_store_path is not None:
+        values["dataset_capture"] = True
     if detect_pr:
         values["pr_number"] = args.pr_number if args.pr_number is not None else _auto_detect_pr_number(target_repo)
     values.update(observability=observability, file_config=file_config, pr_repo=pr_repo, archive=not args.no_archive)

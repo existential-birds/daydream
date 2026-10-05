@@ -38,10 +38,14 @@ single-bundle sanitizer to create and scan a separate derivative:
 ```bash
 uv run python - <<'PYTHON'
 from pathlib import Path
+from daydream.archive.scan import scan_run_dir
 from daydream.archive.sanitize import sanitize_bundle
 
-result = sanitize_bundle(Path('/path/to/archive_dir/runs/SESSION'), Path('/path/to/archive_dir'))
-print(result.session_id, result.status, result.derivative_digest)
+archive_dir = Path('/path/to/archive_dir')
+run_dir = archive_dir / 'runs/SESSION'
+scan_result = scan_run_dir(run_dir)
+result = sanitize_bundle(run_dir, archive_dir)
+print(result.session_id, result.status, result.derivative_digest, scan_result.summary())
 PYTHON
 ```
 

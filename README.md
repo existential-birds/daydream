@@ -244,7 +244,8 @@ During a run, Daydream keeps its working artifacts outside the target checkout. 
 Runtime output publication is all-or-nothing at finalization: invalid run identity, frozen evidence, findings projection, or output publication restores the checkout's prior artifacts. Archive, evaluation, index, and upload failures emit a sanitized data-collection diagnostic and preserve the review result and completed outputs. The archived bundle only exists once archiving has succeeded; handoffs do not promise a manifest from optional persistence.
 
 New runs can also collect raw JSONL evidence with `--capture-data`. Capture is off by default.
-Use `--dataset-store DIR` to choose private local storage (default: `~/.daydream/dataset`).
+Passing `--dataset-store DIR` also enables capture and chooses private local storage
+(default with `--capture-data`: `~/.daydream/dataset`).
 Capture preserves evidence as produced without additional redaction or secret scanning.
 The user controls this local data and is responsible for reviewing it before sharing.
 Collection works with `--no-archive` and tracing disabled.

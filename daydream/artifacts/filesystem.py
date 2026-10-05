@@ -161,7 +161,11 @@ def _create_private_directory(path: Path, *, exist_ok: bool = False) -> None:
             raise ArtifactVisibilityError("artifact runtime ancestry contains a symlink")
     for directory in reversed(missing):
         directory.mkdir(mode=0o700, exist_ok=exist_ok)
-        os.chmod(directory, 0o700)
+        directory_fd = _open_directory_descriptor(directory, label="private storage root")
+        try:
+            os.fchmod(directory_fd, 0o700)
+        finally:
+            os.close(directory_fd)
         _fsync_directory(directory.parent)
     validate_private_directory(path, label="private storage root")
 
