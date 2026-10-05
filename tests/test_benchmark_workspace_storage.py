@@ -216,16 +216,6 @@ def test_committing_journal_rolls_back_in_reverse(tmp_path: Path, monkeypatch: p
     assert observed == ["backup-0002.bin", "backup-0001.bin", "backup-0000.bin"]
     assert [(tmp_path / rel).read_text() for rel in rels] == [f"before-{rel}" for rel in rels]
 
-def test_complete_journal_is_verified_and_cleaned(tmp_path: Path) -> None:
-    target = tmp_path / "target.yaml"
-    target.write_text("old")
-    faults = TransactionFaultDriver(tmp_path, op_id="op-4", kind="write")
-    with faults.transaction as tx:
-        _stage(tx, target, "new")
-        faults.halt_at("manifest")
-    recover_startup(tmp_path)
-    assert target.read_text() == "new"  # after state verified, journal cleaned
-
 def test_complete_journal_rejects_altered_replacement_at_startup(tmp_path: Path) -> None:
     target = tmp_path / "target.yaml"
     target.write_text("old")

@@ -2,18 +2,19 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from daydream.agent import _ToolSupervisorFailure
-from daydream.agent_retry import _coerce_retry_recovery_allowance
 from daydream.backends import BackendExecutionInput
 from daydream.backends.pi import PiError
-from daydream.config_file import _coerce_retry_recovery_allowance as file_coerce
+from daydream.config_file import load_file_config
 from daydream.retry_policy import (
     FailureClass,
     classify_failure,
+    coerce_declared_retry_allowance,
     decode_retry_recovery_allowance,
     derive_retry_summary,
     parse_message_retry_hint,
@@ -149,26 +150,35 @@ def test_the_shared_allowance_decoder_is_one_rule(raw: Any, expected: float | No
 
     assert decode_retry_recovery_allowance(raw) == expected
 
-def test_every_allowance_source_decodes_with_the_same_rule() -> None:
-    """Config, explicit arguments, and environment values must apply identical allowance rules."""
+def test_the_shared_allowance_helper_is_the_one_declared_value_rule() -> None:
+    """One declared-value rule: what is admitted, and what falls through to the default."""
 
-    for raw in (5, 0, 42.5, "42", "0", True, False, -1, "-1", "nonsense", None):
-        argument = _coerce_retry_recovery_allowance(raw, "retry_recovery_allowance_s")
-        file_value = file_coerce({"retry_recovery_allowance_s": raw})
-        assert argument == file_value, raw
+    assert coerce_declared_retry_allowance(42, "retry_recovery_allowance_s") == 42.0
+    assert coerce_declared_retry_allowance("0", "retry_recovery_allowance_s") == 0.0
+    assert coerce_declared_retry_allowance(-1, "retry_recovery_allowance_s") is None
+    assert coerce_declared_retry_allowance("nonsense", "retry_recovery_allowance_s") is None
 
-    # The env source only ever sees strings; it must agree with them too.
-    for raw in ("5", "0", "42.5", "nonsense", "-1", "nan", "inf"):
-        embedded = BackendExecutionInput.from_environment({"DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S": raw}, backend="pi"
-        ).retry_policy.retry_recovery_allowance_s
-        assert embedded == _coerce_retry_recovery_allowance(raw, "DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S"), raw
+def test_an_absent_allowance_declaration_is_silent_on_every_source(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An absent key is not a declaration: none of the None-bearing sources warns.
+
+    ``_resolve_retry_settings`` passes only a source ``_allowance_source`` actually
+    found, so these two plus the helper cover every ``None`` caller of the rule.
+    """
+    with caplog.at_level(logging.WARNING):
+        assert coerce_declared_retry_allowance(None, "retry_recovery_allowance_s") is None
+        assert load_file_config(tmp_path).retry_recovery_allowance_s is None
+        undeclared = BackendExecutionInput.from_environment({}, backend="pi")
+        assert undeclared.retry_policy.retry_recovery_allowance_s is None
+    assert not [record for record in caplog.records if "retry_recovery_allowance" in record.message]
 
 def test_a_refused_allowance_warning_names_the_source_and_the_value(caplog: pytest.LogCaptureFixture,) -> None:
     """One shared warning shape: the source, the raw value, and no restated bound."""
 
 
     with caplog.at_level(logging.WARNING):
-        assert _coerce_retry_recovery_allowance(-1, "retry_recovery_allowance_s") is None
+        assert coerce_declared_retry_allowance(-1, "retry_recovery_allowance_s") is None
 
     message = caplog.records[-1].message
     assert "retry_recovery_allowance_s=-1" in message

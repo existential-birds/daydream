@@ -13,11 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from daydream.config import DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
-from daydream.retry_policy import (
-    decode_retry_recovery_allowance,
-    undeclared_retry_allowance_message,
-)
+from daydream.retry_policy import coerce_declared_retry_allowance
 
 logger = logging.getLogger(__name__)
 
@@ -217,19 +213,6 @@ def _coerce_non_negative_float(raw: Any) -> float | None:
     return value
 
 
-def _coerce_retry_recovery_allowance(merged: dict[str, Any]) -> float | None:
-    """Use the shared retry decoder; invalid declared values warn, absent keys stay silent."""
-    raw = merged.get("retry_recovery_allowance_s")
-    value = None if raw is None else decode_retry_recovery_allowance(raw)
-    if raw is not None and value is None:
-        logger.warning(
-            "daydream config: %s; using default %s",
-            undeclared_retry_allowance_message("retry_recovery_allowance_s", raw),
-            DEFAULT_RETRY_RECOVERY_ALLOWANCE_S,
-        )
-    return value
-
-
 def _coerce_positive_float(raw: Any) -> float | None:
     """Reject non-finite or non-positive timeouts: they disable or immediately expire the deadline."""
     value = _coerce_float(raw)
@@ -320,7 +303,9 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         repair_job_wall_s=_coerce_non_negative_float(merged.get("repair_job_wall_s")),
         repair_max_executions=_coerce_non_negative_int(merged.get("repair_max_executions")),
         repair_grant_job_wall_s=_coerce_non_negative_float(merged.get("repair_grant_job_wall_s")),
-        retry_recovery_allowance_s=_coerce_retry_recovery_allowance(merged),
+        retry_recovery_allowance_s=coerce_declared_retry_allowance(
+            merged.get("retry_recovery_allowance_s"), "retry_recovery_allowance_s"
+        ),
         review_profile=_coerce_review_profile_path(merged.get("review_profile")),
         deep_shard_enabled=_coerce_optional_bool(merged.get("deep_shard_enabled")),
         deep_shard_max_files=_coerce_non_negative_int(merged.get("deep_shard_max_files")),

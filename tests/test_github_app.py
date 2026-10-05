@@ -251,6 +251,13 @@ def test_mint_installation_token_happy_path() -> None:
     for _, kwargs in calls:
         assert kwargs["headers"]["Authorization"].startswith("Bearer ey")
         assert isinstance(kwargs["auth"], git_ops.StaticGitHubAuth)
+    # One shared static JWT auth, reused across both calls, and the environment it
+    # hands out carries that JWT only -- the minted installation token never
+    # leaks into ambient auth state.
+    assert calls[0][1]["auth"] is calls[1][1]["auth"]
+    jwt_environment = calls[0][1]["auth"].environment_for_request()
+    assert jwt_environment["GH_TOKEN"].startswith("ey")
+    assert "ghs_minted" not in jwt_environment["GH_TOKEN"]
     exchange_endpoint, exchange_kwargs = calls[1]
     assert exchange_endpoint == "/app/installations/999/access_tokens"
     assert exchange_kwargs["method"] == "POST"
@@ -281,24 +288,6 @@ def test_mint_installation_token_wraps_gh_api_failure() -> None:
     with patch("daydream.git_ops.gh_api", side_effect=git_ops.GitError("HTTP 401")):
         with pytest.raises(ValueError, match="failed to list App installations"):
             _mint_installation_token(Path("/tmp"), 12345, pem, "myorg", "myrepo")
-
-def test_mint_installation_token_uses_one_explicit_jwt_auth() -> None:
-    """Both App calls use one static JWT auth without ambient state."""
-    pem = generate_rsa_pem()
-    seen_auth: list[Any] = []
-    def fake_gh_api(repo: Any, endpoint: Any, **kwargs: Any) -> Any:
-        seen_auth.append(kwargs["auth"])
-        if "access_tokens" in endpoint:
-            return {"token": "ghs_x", "expires_at": "2099-01-01T00:00:00Z"}
-        return [{"id": 7, "account": {"login": "myorg"}, "app_slug": "daydream-bot"}]
-    with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
-        _mint_installation_token(Path("/tmp"), 12345, pem, "myorg", "myrepo")
-
-    assert len(seen_auth) == 2
-    assert seen_auth[0] is seen_auth[1]
-    jwt_environment = seen_auth[0].environment_for_request()
-    assert jwt_environment["GH_TOKEN"].startswith("ey")
-    assert "ghs_x" not in jwt_environment["GH_TOKEN"]
 
 def test_resolve_run_identity_refreshes_installation_token_after_expiry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:

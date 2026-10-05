@@ -1,9 +1,11 @@
-"""Pure backend-failure classification and cumulative retry-recovery accounting.
+"""Backend-failure classification, cumulative retry-recovery accounting, and the
+one shared retry-recovery allowance rule.
 
 Explicit permanent conditions take precedence over transient message hints.
 Exception messages use the shared safe conversion boundary."""
 from __future__ import annotations
 
+import logging
 import math
 import re
 from collections.abc import Mapping, Sequence
@@ -13,6 +15,8 @@ from typing import Any
 
 from daydream.diagnostics import exception_text
 from daydream.json_utils import extract_json
+
+_logger = logging.getLogger(__name__)
 
 
 class FailureClass(StrEnum):
@@ -133,7 +137,8 @@ def decode_retry_recovery_allowance(raw: Any) -> float | None:
     """Decode a shared backend/config/environment allowance, or None if undeclared.
 
     Numeric strings are accepted; bools, nonnumbers, negatives, and nonfinite values
-    are refused. Zero disables recovery. Callers own logging via the shared warning."""
+    are refused. Zero disables recovery. This is the silent rule; use
+    :func:`coerce_declared_retry_allowance` for a *declared* value that must warn."""
     if isinstance(raw, bool):
         return None
     if isinstance(raw, (int, float)):
@@ -156,6 +161,24 @@ def undeclared_retry_allowance_message(source: str, raw: Any) -> str:
         f"{source}={raw!r} is not a finite non-negative number; "
         "the retry-recovery allowance stays undeclared"
     )
+
+
+def coerce_declared_retry_allowance(raw: Any, source: str) -> float | None:
+    """Decode one *declared* allowance from any source, or ``None`` if not usable.
+
+    The single owner of the declared-value rule for backend attributes, explicit
+    arguments, config files and the environment: an undeclared (``raw is None``)
+    value stays silent because an absent key is not a declaration, while a declared
+    value the decoder refuses warns once and yields ``None`` so the caller's own
+    default remains authoritative. The shared message keeps every source's warning
+    shape identical instead of re-expressed per module.
+    """
+    if raw is None:
+        return None
+    value = decode_retry_recovery_allowance(raw)
+    if value is None:
+        _logger.warning("%s", undeclared_retry_allowance_message(source, raw))
+    return value
 
 
 @dataclass

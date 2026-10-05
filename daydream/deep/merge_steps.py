@@ -362,7 +362,6 @@ async def _step_load_items(ctx: FlowContext) -> Stop | None:
 
 async def _step_findings_out(ctx: FlowContext) -> Stop:
     """Stop at the review boundary; recorder-scoped finalization owns the export."""
-    ctx.data["findings_projection_ready"] = True
     return Stop(0)
 
 
