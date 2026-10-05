@@ -210,3 +210,31 @@ class TestAtomicWritePrimitives:
         target = tmp_path / "durable.json"
         atomic_write_bytes(target, b"durable", dir_fsync=True)
         assert target.read_bytes() == b"durable"
+
+
+class TestIterJsonlRecords:
+    """The shared append-only-log reader every archive cache and ledger goes through."""
+
+    def test_yields_objects_in_file_order_and_skips_unusable_lines(self, tmp_path: Path) -> None:
+        path = tmp_path / "ledger.jsonl"
+        path.write_text('{"sid": "a"}\n\n  \n{"sid": "b"}\n[1, 2]\n7\n{"sid": "tr', encoding="utf-8")
+        assert [record["sid"] for record in json_utils.iter_jsonl_records(path)] == ["a", "b"]
+
+    def test_absent_or_non_file_path_yields_nothing(self, tmp_path: Path) -> None:
+        assert list(json_utils.iter_jsonl_records(tmp_path / "missing.jsonl")) == []
+        directory = tmp_path / "ledger.jsonl"
+        directory.mkdir()
+        assert list(json_utils.iter_jsonl_records(directory)) == []
+
+    def test_unreadable_existing_artifact_still_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "ledger.jsonl"
+        path.write_text('{"sid": "a"}\n', encoding="utf-8")
+
+        def failing_read(self: Path, *args: object, **kwargs: object) -> str:
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(Path, "read_text", failing_read)
+        with pytest.raises(PermissionError):
+            list(json_utils.iter_jsonl_records(path))

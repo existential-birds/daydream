@@ -22,6 +22,7 @@ from typing import Any
 from daydream.archive import scan
 from daydream.archive._console import warn as _warn
 from daydream.archive.git_safe import classify_remote_url, normalize_remote_url
+from daydream.json_utils import iter_jsonl_records
 from daydream.timeutil import now_iso_utc
 from daydream.trajectory import RUNS_DIRNAME, redact_text, redact_value
 
@@ -150,18 +151,8 @@ def _resolve_session_id(run_dir: Path) -> str:
 
 def _read_progress(sanitized_dir: Path) -> dict[str, str]:
     """Return {session_id: derivative_digest} from the resume marker file."""
-    progress_path = sanitized_dir / _PROGRESS_FILENAME
-    if not progress_path.exists():
-        return {}
     completed: dict[str, str] = {}
-    for line in progress_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue  # append-only log; a partial last line is the only failure mode
+    for record in iter_jsonl_records(sanitized_dir / _PROGRESS_FILENAME):
         session_id = record.get("session_id")
         digest = record.get("derivative_digest")
         if isinstance(session_id, str) and isinstance(digest, str):
