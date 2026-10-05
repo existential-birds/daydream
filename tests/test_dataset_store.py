@@ -82,7 +82,8 @@ def test_invalid_mutations_are_withheld(store: LocalRecordStore, kind: str, raw:
     assert len(read.runs) == len(read.observations) == 1
 
 
-def test_oversized_records_and_symlink_ancestors_are_refused(tmp_path: Path, store: LocalRecordStore) -> None:
+@pytest.mark.parametrize("unsafe", ["alias", "missing/.."])
+def test_unsafe_storage_is_refused(tmp_path: Path, store: LocalRecordStore, unsafe: str) -> None:
     with pytest.raises(StoreError, match="record_too_large"):
         LocalRecordStore(tmp_path / "small", max_record_bytes=32).commit_run(run_record())
     real = tmp_path / "real"
@@ -90,8 +91,8 @@ def test_oversized_records_and_symlink_ancestors_are_refused(tmp_path: Path, sto
     alias = tmp_path / "alias"
     alias.symlink_to(real, target_is_directory=True)
     with pytest.raises(StoreError, match="unsafe_storage_path"):
-        LocalRecordStore(alias / "records").commit_run(run_record())
-    assert not (real / "records").exists()
+        LocalRecordStore(tmp_path / unsafe / "records").commit_run(run_record())
+    assert not (real / "records").exists() and not (tmp_path / "missing").exists()
     (real / "operator.tmp").write_text("preserve me")
     (store.root / "unowned").symlink_to(real, target_is_directory=True)
     store.commit_run(run_record("retry"))

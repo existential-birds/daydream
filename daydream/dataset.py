@@ -20,7 +20,7 @@ from pydantic import JsonValue, TypeAdapter
 
 from daydream.archive.git_safe import classify_remote_url, normalize_remote_url
 from daydream.archive.scan import scan_serialized_record
-from daydream.artifacts.filesystem import _create_private_directory
+from daydream.artifacts.filesystem import _create_private_directory, _projection_path
 from daydream.artifacts.models import ArtifactVisibilityError
 from daydream.atif import Trajectory
 from daydream.json_utils import atomic_write_bytes, canonical_json
@@ -422,7 +422,7 @@ class LocalRecordStore:
     def _locked(self) -> Iterator[tuple[str, ...]]:
         try:
             for path in (self.root, *(self.root / name for name in _DIRECTORIES)):
-                _create_private_directory(path, exist_ok=True)
+                _create_private_directory(_projection_path(path), exist_ok=True)
             descriptor = os.open(self.root / ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
             with os.fdopen(descriptor, "rb") as lock:
                 os.fchmod(lock.fileno(), 0o600)
