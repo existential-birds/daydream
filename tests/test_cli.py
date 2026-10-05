@@ -70,8 +70,6 @@ def test_signal_handler_flushes_before_backend_registry_snapshot(monkeypatch: py
         pytest.param(['--capture-data', '--dataset-store', '/tmp/records', '--no-archive', '/tmp/project'],
             {'dataset_capture': True, 'dataset_store_path': Path('/tmp/records'), 'archive': False},
             id='dataset_capture_without_archive'),
-        pytest.param(['--no-capture-data', '/tmp/project'], {'dataset_capture': False},
-            id='dataset_capture_explicit_disable'),
         pytest.param(['/tmp/project', '--ignore-path', '.planning'], {'ignore_paths': ['.planning']},
             id='ignore_paths_single'),
         pytest.param(['/tmp/project', '--ignore-path', '.planning', '--ignore-path', 'vendor'],

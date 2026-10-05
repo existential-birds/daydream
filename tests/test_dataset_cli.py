@@ -11,7 +11,7 @@ from daydream.dataset import LocalRecordStore
 from tests.harness.stub_backend import install_stub_backend, silence
 
 
-def test_cli_capture_is_explicit_and_independent_of_archiving(
+def test_cli_capture_is_independent_of_archiving(
     feature_branch_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     silence(monkeypatch, prompts=False)
@@ -32,11 +32,6 @@ def test_cli_capture_is_explicit_and_independent_of_archiving(
     assert len(captured.runs) == 1
     assert captured.runs[0].outcome == "success"
     assert captured.runs[0].trace_id is None
-    with pytest.raises(SystemExit) as disabled:
-        cli.main(["--no-capture-data", *arguments])
-    assert disabled.value.code == 0
-    later = store.read_snapshot(store.select_snapshot(observed_before="2100-01-01T00:00:00Z"))
-    assert [run.run_id for run in later.runs] == [captured.runs[0].run_id]
 
 
 def test_cli_capture_redacts_review_text_and_preserves_exact_scoring_length(
