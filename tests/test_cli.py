@@ -420,6 +420,29 @@ def test_global_model_flag_populates_runconfig(tmp_path: Path) -> None:
     config = _parse_args(["--model", "claude-opus-5", str(tmp_path)])
     assert config.model == "claude-opus-5"
 
+def _write_fake_gh(bin_dir: Path, log_env: str, login: str) -> None:
+    """Install a child-PATH ``gh`` shim answering exactly the two calls these tests allow.
+
+    Both tests spawn a real ``python -m daydream`` subprocess, so the shim must be on the
+    *child's* PATH rather than patched into this process. Every argv is appended to the
+    env-named log the test asserts on; any other invocation exits 91, which fails the
+    subprocess loudly instead of letting an unexpected API call pass unnoticed.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    gh = bin_dir / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> \"${log_env}\"\n"
+        "case \"$*\" in\n"
+        "  'repo view --json nameWithOwner -q .nameWithOwner') printf '%s\\n' 'acme/widgets' ;;\n"
+        f"  'api /user') printf '%s\\n' '{{\"login\":\"{login}\"}}' ;;\n"
+        "  *) printf '%s\\n' \"unexpected gh call: $*\" >&2; exit 91 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+
+
 @pytest.mark.parametrize("backend_name", ["codex", "pi", "osprey"])
 def test_improve_audit_isolation_rejects_unsupported_cli_before_spawn(tmp_path: Path, backend_name: str,) -> None:
     repo = tmp_path / "repo"
@@ -442,19 +465,7 @@ def test_improve_audit_isolation_rejects_unsupported_cli_before_spawn(tmp_path: 
         path.chmod(0o755)
 
     gh_log = tmp_path / "gh.log"
-    gh = fake_bin / "gh"
-    gh.write_text(
-        "#!/bin/sh\n"
-        "printf '%s\\n' \"$*\" >> \"$GH_LOG\"\n"
-        "case \"$*\" in\n"
-        "  'repo view --json nameWithOwner -q .nameWithOwner') "
-        "printf '%s\\n' 'acme/widgets' ;;\n"
-        "  'api /user') printf '%s\\n' '{\"login\":\"fixture-user\"}' ;;\n"
-        "  *) printf '%s\\n' 'unexpected gh invocation' >&2; exit 91 ;;\n"
-        "esac\n",
-        encoding="utf-8",
-    )
-    gh.chmod(0o755)
+    _write_fake_gh(fake_bin, "GH_LOG", "fixture-user")
     process_tmp = tmp_path / "process-tmp"
     process_tmp.mkdir()
 
@@ -541,25 +552,8 @@ def register(registry):
 def _write_signal_fake_gh(tmp_path: Path) -> tuple[Path, Path]:
     """Create the subprocess's only external API boundary: two read-only gh calls."""
     bin_dir = tmp_path / "signal-bin"
-    bin_dir.mkdir()
     log_path = tmp_path / "signal-gh.log"
-    gh = bin_dir / "gh"
-    gh.write_text(
-        "#!/bin/sh\n"
-        "printf '%s\\n' \"$*\" >> \"$DAYDREAM_SIGNAL_GH_LOG\"\n"
-        "if [ \"$*\" = \"repo view --json nameWithOwner -q .nameWithOwner\" ]; then\n"
-        "  printf '%s\\n' 'acme/widgets'\n"
-        "  exit 0\n"
-        "fi\n"
-        "if [ \"$*\" = \"api /user\" ]; then\n"
-        "  printf '%s\\n' '{\"login\":\"signal-fixture\"}'\n"
-        "  exit 0\n"
-        "fi\n"
-        "printf '%s\\n' \"unexpected gh call: $*\" >&2\n"
-        "exit 91\n",
-        encoding="utf-8",
-    )
-    gh.chmod(0o755)
+    _write_fake_gh(bin_dir, "DAYDREAM_SIGNAL_GH_LOG", "signal-fixture")
     return bin_dir, log_path
 
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
