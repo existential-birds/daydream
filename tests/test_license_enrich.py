@@ -65,14 +65,10 @@ def test_enrich_fills_missing_evidence_and_skips_declared(tmp_path: Path) -> Non
         ("sess-declared", "acme/widget", {"spdx_id": "Apache-2.0", "source": "producer"}),
     ])
     resolver = _make_resolver()
-    evidence = enrich_license_evidence(stage, resolver=resolver)
-    assert evidence["sess-legacy"]["spdx_id"] == "MIT"
-    assert evidence["sess-legacy"]["source"] == f"github:acme/widget@{'b' * 40}"
-    assert "sess-declared" not in [k for k in evidence if evidence[k].get("origin") == "enriched"]
-    assert "sess-declared" not in _as_entries(stage)
-    # The enriched evidence was written into the session manifest for the gate to consume.
+    enrich_license_evidence(stage, resolver=resolver)
     manifest = json.loads((stage / "runs" / "sess-legacy" / "manifest.json").read_text())
     assert manifest["license_evidence"] == {"spdx_id": "MIT", "source": f"github:acme/widget@{'b' * 40}"}
+    assert "sess-declared" not in _as_entries(stage)
     assert resolver.queried == ["acme/widget"]
 
 def test_enrich_publishes_cache_with_provenance_and_no_credentials(tmp_path: Path) -> None:
@@ -110,16 +106,18 @@ def test_enrich_reuses_cached_resolution_across_runs(tmp_path: Path) -> None:
     enrich_license_evidence(stage, resolver=_make_resolver())
     second = _make_resolver()
     seed_admitted_runs(stage, [("sess-2", "acme/widget", None)])
-    evidence = enrich_license_evidence(stage, resolver=second)
+    enrich_license_evidence(stage, resolver=second)
     assert second.queried == []
-    assert evidence["sess-2"]["spdx_id"] == "MIT"
+    manifest = json.loads((stage / "runs" / "sess-2" / "manifest.json").read_text())
+    assert manifest["license_evidence"] == {"spdx_id": "MIT", "source": f"github:acme/widget@{'b' * 40}"}
 
 def test_enrichment_cache_copied_into_curated_prefix(tmp_path: Path) -> None:
     stage = tmp_path / "stage"
     seed_admitted_runs(stage, [("sess-legacy", "acme/widget", None)])
     enrich_license_evidence(stage, resolver=_make_resolver())
-    publish_enrichment_cache(stage, revision="a" * 40)
-    published = _curated_dir(stage, "a" * 40) / "license-evidence.jsonl"
+    curated = _curated_dir(stage, "a" * 40)
+    publish_enrichment_cache(stage, curated_dir=curated)
+    published = curated / "license-evidence.jsonl"
     assert published.is_file()
     assert published.read_text() == (stage / "_enrich" / "evidence.jsonl").read_text()
 

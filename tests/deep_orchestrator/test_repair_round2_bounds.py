@@ -16,8 +16,6 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
-import pytest
-
 from daydream.agent import run_agent
 from daydream.backends.pi import (
     PiBackend,
@@ -180,8 +178,4 @@ def test_module_exports_remain_importable() -> None:
     assert DEFAULT_WALL_BUDGET_S > 0
     # None is the honest "uncapped" default for tool calls, not a bug.
     assert DEFAULT_TOOL_CALL_BUDGET is None or isinstance(DEFAULT_TOOL_CALL_BUDGET, int)
-
-
-if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(pytest.main([__file__, "-v"]))
 

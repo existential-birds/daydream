@@ -22,13 +22,15 @@ from daydream.config_file import DaydreamFileConfig
 from daydream.run_config import RunConfig, _resolved_backend_name, _resolved_model
 from daydream.ui import NEON_THEME, PHASE_SUBTITLES, print_issues_table
 from tests.harness.git_helpers import bare_remote, commit, git, init_repo
+from tests.harness.remote_ci import (
+    finish_remote_ci_fake,
+    seed_pr_identity,
+    start_remote_ci_fake,
+)
 from tests.test_deep_orchestrator import _install_stub_backend, _silence
 from tests.test_integration import (
     _FULL_FLOW_ISSUE,
-    _finish_remote_ci_fake,
     _remote_ci_push_project,
-    _seed_remote_ci_pr,
-    _start_remote_ci_fake_after_push,
     _WorktreeMutatingBackend,
 )
 
@@ -324,10 +326,8 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
 ) -> None:
 
     project, remote, hook_marker, raw_remote = _remote_ci_push_project(tmp_path)
-    _seed_remote_ci_pr(fake_gh, head_sha=git(project, "rev-parse", "HEAD"))
-    seed_thread, seed_errors, seed_stop = _start_remote_ci_fake_after_push(
-        project, fake_gh, hook_marker, outcome=remote_outcome
-    )
+    seed_pr_identity(fake_gh, head_sha=git(project, "rev-parse", "HEAD"))
+    seeder = start_remote_ci_fake(project, fake_gh, hook_marker, outcome=remote_outcome)
 
     monkeypatch.setattr(remote_ci, "DEFAULT_LIMITS",
         remote_ci.RemoteCILimits(poll_seconds=0.01,
@@ -345,7 +345,7 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
         with pytest.raises(SystemExit) as exc_info:
             cli.main(["review", str(project), "--stack", "python", "--shallow", "--yes", "--test-command", "true"])
     finally:
-        _finish_remote_ci_fake(seed_thread, seed_errors, seed_stop)
+        finish_remote_ci_fake(seeder)
 
     assert exc_info.value.code == expected_code
     assert hook_marker.read_text() == "ran\n"

@@ -394,35 +394,23 @@ def _build_tool_header(
 
         return content
 
-    if name == "Glob":
+    if name in ("Glob", "Grep"):
+        # Glob and Grep share one header shape (pattern, then an optional path);
+        # Grep only appends the two optional filter fields, in that order.
         pattern = str(args.get("pattern", ""))
         search_path = str(args.get("path", ""))
 
-        content.append(f" {mystical_term('Glob')}... ", style=f"{STYLE_PURPLE} italic")
+        content.append(f" {mystical_term(name)}... ", style=f"{STYLE_PURPLE} italic")
         content.append(pattern, style=STYLE_ORANGE)
 
         if search_path:
             _append_arg_field(content, "path", search_path, STYLE_CYAN)
 
-        return content
-
-    if name == "Grep":
-        pattern = str(args.get("pattern", ""))
-        search_path = str(args.get("path", ""))
-        glob_filter = str(args.get("glob", ""))
-        file_type = str(args.get("type", ""))
-
-        content.append(f" {mystical_term('Grep')}... ", style=f"{STYLE_PURPLE} italic")
-        content.append(pattern, style=STYLE_ORANGE)
-
-        if search_path:
-            _append_arg_field(content, "path", search_path, STYLE_CYAN)
-
-        if glob_filter:
-            _append_arg_field(content, "glob", glob_filter, STYLE_YELLOW)
-
-        if file_type:
-            _append_arg_field(content, "type", file_type, STYLE_YELLOW)
+        if name == "Grep":
+            for field in ("glob", "type"):
+                value = str(args.get(field, ""))
+                if value:
+                    _append_arg_field(content, field, value, STYLE_YELLOW)
 
         return content
 

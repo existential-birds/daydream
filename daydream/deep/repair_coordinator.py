@@ -780,7 +780,7 @@ def _charge_failure(
     progress = False
     # A checkpoint's next experiment is deliberately not adopted when the
     # execution produced no repair turn at all.
-    next_experiment = None if repair is None else repair_checkpoint_next(checkpoint)
+    next_experiment = None if repair is None or checkpoint is None else checkpoint.next_experiment
     completed: tuple[str, ...] = ()
     unchanged: tuple[str, ...] = ()
     patch_confirmed = False
@@ -820,11 +820,6 @@ def _charge_failure(
         elapsed_s=elapsed_s, cost_usd=cost_usd,
     )
     return job
-
-
-def repair_checkpoint_next(checkpoint: RepairCheckpoint | None) -> str | None:
-    """The experiment the captured turn named as next, when it named one."""
-    return None if checkpoint is None else checkpoint.next_experiment
 
 
 __all__ = [

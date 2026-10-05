@@ -11,12 +11,12 @@ from pathlib import Path
 import pytest
 
 from tests.harness.fake_gh import FakeGh
-from tests.harness.remote_ci import _wait_for_pushed_sha
-from tests.test_integration import (
-    _finish_remote_ci_fake,
-    _start_remote_ci_fake_after_push,
-    _wait_for_remote_ci_pids,
+from tests.harness.remote_ci import (
+    _wait_for_pushed_sha,
+    finish_remote_ci_fake,
+    start_remote_ci_fake,
 )
+from tests.test_integration import _wait_for_remote_ci_pids
 
 
 def _wait_until_exists(path: Path) -> None:
@@ -78,9 +78,7 @@ def test_integration_seeder_waits_for_complete_sha_before_publishing(tmp_path: P
     opened_path = tmp_path / "partial opened"
     release_path = tmp_path / "release remainder"
     expected_sha = "a" * 40
-    seed_thread, seed_errors, seed_stop = _start_remote_ci_fake_after_push(
-        project, fake_gh, hook_marker, outcome="no_ci",
-    )
+    seeder = start_remote_ci_fake(project, fake_gh, hook_marker, outcome="no_ci")
     writer = subprocess.Popen(  # noqa: S603 - fixed test shell and arguments
         ["/bin/sh", "-c",
             (
@@ -97,33 +95,31 @@ def test_integration_seeder_waits_for_complete_sha_before_publishing(tmp_path: P
         _wait_until_exists(opened_path)
         assert sha_path.read_text() == expected_sha[:20]
         deadline = time.monotonic() + 1
-        while seed_thread.is_alive() and not ready_path.exists() and time.monotonic() < deadline:
+        while seeder.thread.is_alive() and not ready_path.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert seed_thread.is_alive(), "partial SHA incorrectly completed the seeder"
+        assert seeder.thread.is_alive(), "partial SHA incorrectly completed the seeder"
         assert not ready_path.exists(), "partial SHA incorrectly released the pre-push hook"
 
         release_path.write_text("go\n")
-        seed_thread.join(timeout=5)
-        assert not seed_thread.is_alive()
-        assert seed_errors == []
+        seeder.thread.join(timeout=5)
+        assert not seeder.thread.is_alive()
+        assert seeder.errors == []
         assert ready_path.read_text() == "ready\n"
         responses = fake_gh._read_responses()
         assert any(expected_sha in key for key in responses)
         assert not any(expected_sha[:20] in key and expected_sha not in key for key in responses)
     finally:
-        seed_stop.set()
+        seeder.stop.set()
         release_path.touch()
         writer.wait(timeout=5)
-        seed_thread.join(timeout=5)
+        seeder.thread.join(timeout=5)
 
 def test_integration_seeder_stops_cleanly_when_push_never_starts(tmp_path: Path, fake_gh: FakeGh,) -> None:
     project = tmp_path / "project"
     (project / ".git" / "hooks").mkdir(parents=True)
     hook_marker = tmp_path / "unused hook marker"
-    seed_thread, seed_errors, seed_stop = _start_remote_ci_fake_after_push(
-        project, fake_gh, hook_marker, outcome="no_ci",
-    )
-    _finish_remote_ci_fake(seed_thread, seed_errors, seed_stop)
+    seeder = start_remote_ci_fake(project, fake_gh, hook_marker, outcome="no_ci")
+    finish_remote_ci_fake(seeder)
 
     assert not hook_marker.with_name(hook_marker.name + " ready").exists()
 
@@ -136,19 +132,17 @@ def test_integration_seeder_joins_and_surfaces_external_fake_failure(
     def fail_to_seed(*args: object, **kwargs: object) -> None:
         raise RuntimeError("external fake rejected seed")
     monkeypatch.setattr(fake_gh, "set_response", fail_to_seed)
-    seed_thread, seed_errors, seed_stop = _start_remote_ci_fake_after_push(
-        project, fake_gh, hook_marker, outcome="no_ci",
-    )
+    seeder = start_remote_ci_fake(project, fake_gh, hook_marker, outcome="no_ci")
     hook_marker.with_name(hook_marker.name + " sha").write_text("b" * 40 + "\n")
     ready_path = hook_marker.with_name(hook_marker.name + " ready")
     _wait_until_exists(ready_path)
     with pytest.raises(AssertionError):
-        _finish_remote_ci_fake(seed_thread, seed_errors, seed_stop)
+        finish_remote_ci_fake(seeder)
 
-    assert not seed_thread.is_alive()
+    assert not seeder.thread.is_alive()
     assert ready_path.read_text() == "failed\n"
-    assert len(seed_errors) == 1
-    assert isinstance(seed_errors[0], RuntimeError)
+    assert len(seeder.errors) == 1
+    assert isinstance(seeder.errors[0], RuntimeError)
 
 @pytest.mark.asyncio
 async def test_pid_wait_fails_when_runner_ends_before_push(tmp_path: Path) -> None:
