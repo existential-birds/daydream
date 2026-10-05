@@ -1,6 +1,8 @@
 """Real-path tests for the corpus adjudicate sub-verbs (style: test_cli_label.py)."""
 import json
+import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -534,3 +536,31 @@ def test_publish_final_missing_artifact_exits_nonzero(tmp_path: Path, capsys: py
     assert "annotations.jsonl" in flattened + captured.err
 
 
+
+
+@pytest.mark.parametrize("version", [0, 7, 8, 9], ids=["populated-zero", "old", "incomplete-current", "future"])
+def test_cli_rejects_unsupported_index_without_changing_evidence(
+    tmp_path: Path, cli_runner: Any, capsys: pytest.CaptureFixture[str], version: int,
+) -> None:
+    index_root = tmp_path / "historical"
+    index_root.mkdir()
+    database = index_root / "index.db"
+    with sqlite3.connect(database) as conn:
+        conn.execute("CREATE TABLE runs (session_id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO runs VALUES ('preserved-history')")
+        conn.execute(f"PRAGMA user_version = {version}")
+    conn.close()
+    before = database.read_bytes()
+    state = tmp_path / "state"
+
+    result = cli_runner.invoke([
+        "corpus", "adjudicate", "export", "--index-root", str(index_root), "--state-dir", str(state), "--dry-run",
+    ])
+
+    assert result.exit_code == 1
+    diagnostic = _console_text(capsys)
+    assert "unsupportedarchiveindexschema" in diagnostic
+    assert "fresharchivedirectory" in diagnostic
+    assert database.read_bytes() == before
+    assert sorted(path.name for path in index_root.iterdir()) == ["index.db"]
+    assert not state.exists()

@@ -161,7 +161,8 @@ def test_fresh_empty_database_is_initialized_with_current_defaults(tmp_path: Pat
 @pytest.mark.parametrize("unsupported", [
     "old", "future", "zero-populated", "old-empty", "future-empty", "missing-runs", "missing-observations",
     "missing-run-column", "missing-observation-column", "missing-index", "wrong-index", "wrong-default",
-    "wrong-type", "missing-primary-key", "zero-unrelated-table", "wrong-index-table", "unique-index", "partial-index",
+    "wrong-type", "missing-primary-key", "extra-run-primary-key", "extra-observation-primary-key",
+    "zero-unrelated-table", "wrong-index-table", "unique-index", "partial-index",
 ])
 @pytest.mark.parametrize("readonly", [False, True], ids=["write", "read"])
 def test_unsupported_schema_is_rejected_without_changing_database(
@@ -208,6 +209,19 @@ def test_unsupported_schema_is_rejected_without_changing_database(
             else:
                 ddl = ddl.replace(",\n    PRIMARY KEY (session_id, observed_at)", "")
             conn.execute(ddl)
+        elif unsupported in {"extra-run-primary-key", "extra-observation-primary-key"}:
+            table = "runs" if unsupported == "extra-run-primary-key" else "label_observations"
+            ddl = _schema._CREATE_TABLE if table == "runs" else _schema._CREATE_LABEL_OBSERVATIONS_TABLE
+            conn.execute(f"DROP TABLE {table}")
+            if table == "runs":
+                ddl = ddl.replace("session_id TEXT PRIMARY KEY", "session_id TEXT")
+                ddl = ddl.removesuffix("\n)\n") + ",\n    extra TEXT,\n    PRIMARY KEY (session_id, extra)\n)\n"
+            else:
+                ddl = ddl.replace("PRIMARY KEY (session_id, observed_at)",
+                    "extra TEXT,\n    PRIMARY KEY (session_id, observed_at, extra)")
+            conn.execute(ddl)
+            for sql in _schema._CREATE_INDEXES:
+                conn.execute(sql)
         # Unrelated historical tables must also survive rejection.
         conn.execute("CREATE TABLE historical_notes (note TEXT)")
         conn.execute("INSERT INTO historical_notes VALUES ('keep historical evidence')")

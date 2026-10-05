@@ -27,6 +27,7 @@ from daydream.archive._schema import (
     _CREATE_TABLE,
     _PRECEDENCE_ORDER,
     _UPSERT_SQL,
+    INDEXES,
     LABEL_OBSERVATION_COLUMNS,
     LABEL_OBSERVATION_NAMES,
     RUNS_COLUMNS,
@@ -120,6 +121,8 @@ def _check_schema(conn: sqlite3.Connection, db_path: Path, *, allow_empty: bool 
     for table, columns in declarations.items():
         existing = {row[1]: row for row in conn.execute(f"PRAGMA table_info({table})")}  # noqa: S608
         primary_key = ("session_id",) if table == runs_table else ("session_id", "observed_at")
+        actual_primary_key = tuple(row[1] for row in sorted(existing.values(), key=lambda row: row[5]) if row[5])
+        compatible = compatible and actual_primary_key == primary_key
         for col in columns:
             row = existing.get(col.name)
             default = col.definition.split(" DEFAULT ", 1)[1] if " DEFAULT " in col.definition else None
@@ -127,14 +130,11 @@ def _check_schema(conn: sqlite3.Connection, db_path: Path, *, allow_empty: bool 
                 row[2] == col.definition.split()[0]
                 and bool(row[3]) == ("NOT NULL" in col.definition)
                 and row[4] == default
-                and row[5] == (primary_key.index(col.name) + 1 if col.name in primary_key else 0)
             )
     indexes = {row[0]: row[1] for row in conn.execute(
         "SELECT name, tbl_name FROM sqlite_master WHERE type = 'index'"
     )}
-    for sql in _CREATE_INDEXES:
-        name = sql.split()[5]
-        table, column = sql.split()[7].removesuffix(")").split("(")
+    for name, table, column in INDEXES:
         index_columns = [row[2] for row in conn.execute(f"PRAGMA index_info({name})")]  # noqa: S608
         properties = next((row for row in conn.execute(f"PRAGMA index_list({table})") if row[1] == name), None)  # noqa: S608
         compatible = compatible and (

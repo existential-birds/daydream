@@ -189,12 +189,14 @@ _CREATE_LABEL_OBSERVATIONS_TABLE = _create_table_sql(
     table_constraints=("PRIMARY KEY (session_id, observed_at)",),
 )
 
-_CREATE_INDEXES = [
-    "CREATE INDEX IF NOT EXISTS idx_runs_repo_slug ON runs(repo_slug)",
-    "CREATE INDEX IF NOT EXISTS idx_runs_archived_at ON runs(archived_at)",
-    "CREATE INDEX IF NOT EXISTS idx_runs_outcome ON runs(outcome_labels)",
-    "CREATE INDEX IF NOT EXISTS idx_label_obs_observed_at ON label_observations(observed_at)",
-    "CREATE INDEX IF NOT EXISTS idx_label_obs_session ON label_observations(session_id)",
-]
+INDEXES = (
+    ("idx_runs_repo_slug", "runs", "repo_slug"),
+    ("idx_runs_archived_at", "runs", "archived_at"),
+    ("idx_runs_outcome", "runs", "outcome_labels"),
+    ("idx_label_obs_observed_at", "label_observations", "observed_at"),
+    ("idx_label_obs_session", "label_observations", "session_id"),
+)
+_CREATE_INDEXES = [f"CREATE INDEX IF NOT EXISTS {name} ON {table}({column})" for name, table, column in INDEXES]
+
 
 _UPSERT_SQL = _upsert_sql(RUNS_COLUMNS)
