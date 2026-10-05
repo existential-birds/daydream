@@ -29,7 +29,7 @@ from daydream.atif.validator import TrajectoryValidator
 def validate(trajectory: dict[str, Any] | str | Path, *, validate_images: bool = True) -> bool:
     """Validate an ATIF trajectory (dict, JSON string, or path).
 
-    Pure passthrough to a freshly-constructed TrajectoryValidator (CONTEXT.md D-08).
+    Pure passthrough to a freshly-constructed TrajectoryValidator.
     Returns True iff the trajectory matches the ATIF v1.0–v1.7 schema accepted by
     the vendored validator. Returns False on any validation failure.
 
