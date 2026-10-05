@@ -273,9 +273,9 @@ async def test_runner_export_outage_warns_and_preserves_review_result_and_output
     store = LocalRecordStore(config.dataset_store_path)
     records = store.read_snapshot(store.select_snapshot(observed_before="2100-01-01T00:00:00Z"))
     assert len(records.runs) == 1
-    assert records.runs[0].outcome == "success"
-    assert records.runs[0].trajectories.status == "available"
-    assert "review completed during outage" in json.dumps(records.runs[0].trajectories.value)
+    assert records.runs[0]["outcome"] == "success"
+    assert records.runs[0]["trajectories"]["status"] == "available"
+    assert "review completed during outage" in json.dumps(records.runs[0]["trajectories"]["value"])
 
 @pytest.mark.parametrize("interruption", ["supervisor", "tools", "wall"])
 async def test_runner_partial_outcome_preserves_veto_and_budget_reasons(

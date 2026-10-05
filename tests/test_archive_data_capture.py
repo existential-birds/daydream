@@ -29,7 +29,7 @@ from daydream.backends import (
 )
 from daydream.backends.codex import CodexBackend
 from daydream.config_file import DaydreamFileConfig
-from daydream.dataset import LocalRecordStore, serialize_record
+from daydream.dataset import LocalRecordStore
 from daydream.phases import TestAndHealResult, TestAttemptEvidence
 from daydream.phases.review import ReviewOutputError
 from daydream.review_budget import ReviewLimits
@@ -183,7 +183,7 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert recommended_text != diff_text
     assert "# daydream recommended change" in recommended_text
     assert "# daydream recommended change" not in diff_text
-    captured = serialize_record(read_records(store).runs[0])
+    captured = read_records(store).runs[0]
     task = captured["original_task"]["value"]
     assert (task["analyzed_revision"]["head_sha"], task["analyzed_revision"]["merge_base_sha"]) == (
         head_before, base_before)

@@ -68,7 +68,7 @@ def capture_run_record(
 ) -> None:
     """Commit one raw run, without archive reconstruction or trace readback."""
     from daydream.dataset.privacy import sanitize_evidence
-    from daydream.dataset.schema import RunRecord
+    from daydream.dataset.schema import parse_run
     from daydream.dataset.scoring import capture_scoring
     from daydream.dataset.store import LocalRecordStore
     from daydream.training.harvest import assemble_scoring_inputs
@@ -196,7 +196,7 @@ def capture_run_record(
         return {"status": "available" if value is not None else "failed" if failed else absent,
                 "value": sanitize_evidence(value)}
 
-    record = RunRecord.model_validate({
+    record = parse_run({"schema_version": "daydream.run.v1",
         "run_id": artifacts.session_id, "captured_at": selected.cutoff_at if selected else now_iso_utc(),
         "outcome": outcome, "original_task": evidence(task, absent="unavailable"),
         "final_state": evidence({"head_sha": final_head}),

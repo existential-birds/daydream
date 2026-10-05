@@ -34,14 +34,14 @@ def test_history_pins_temporal_membership_and_preserves_typed_human_decisions(st
     for raw in (label, license_evidence):
         store.append_observation(raw)
     snapshot = store.select_snapshot(observed_before="2026-10-04T13:00:00Z", valid_before="2026-10-04T11:30:00Z")
-    read = LocalRecordStore(store.root).read_snapshot(snapshot.snapshot_id)
-    assert [run.run_id for run in read.runs] == ["run-1"] and read.snapshot == snapshot
-    assert {obs.observation_id for obs in read.observations} == {"judgment-1", "future", "model", "label", "license"}
-    assert {obs.observation_id for obs in read.eligible_observations} == {"judgment-1", "model", "label", "license"}
-    history = {obs.observation_id: obs for obs in read.observations}
-    assert history["model"].review_required
-    assert history["label"].payload.model_dump()["outcome_prior"] == 0.25
-    assert history["license"].payload.model_dump()["evidence"]["status"] == "unavailable"
+    read = LocalRecordStore(store.root).read_snapshot(snapshot["snapshot_id"])
+    assert [run["run_id"] for run in read.runs] == ["run-1"] and read.snapshot == snapshot
+    assert {obs["observation_id"] for obs in read.observations} == {"judgment-1", "future", "model", "label", "license"}
+    assert {obs["observation_id"] for obs in read.eligible_observations} == {"judgment-1", "model", "label", "license"}
+    history = {obs["observation_id"]: obs for obs in read.observations}
+    assert history["model"]["review_required"]
+    assert history["label"]["payload"]["outcome_prior"] == 0.25
+    assert history["license"]["payload"]["evidence"]["status"] == "unavailable"
     judgment = read.effective_judgment("run-1", "item:1")
     assert judgment["disposition"] == "accepted" and judgment["role"] == "rater"
     store.append_observation(observation("bob", author="bob", observed_at="2026-10-04T14:00:00Z",
@@ -51,7 +51,7 @@ def test_history_pins_temporal_membership_and_preserves_typed_human_decisions(st
     newer = read_records(store)
     judgment = newer.effective_judgment("run-1", "item:1")
     assert judgment["conflict"] and not judgment["gold_eligible"]
-    assert next(obs for obs in newer.observations if obs.observation_id == "bob").payload.model_dump()["record_id"]
+    assert next(obs for obs in newer.observations if obs["observation_id"] == "bob")["payload"]["record_id"]
 
 
 @pytest.mark.parametrize(("kind", "raw", "diagnostic"), [
@@ -72,7 +72,7 @@ def test_invalid_mutations_are_withheld(store: LocalRecordStore, kind: str, raw:
     assert len(read.runs) == len(read.observations) == 1
 
 
-def test_oversized_records_and_symlink_ancestors_are_refused(tmp_path: Path) -> None:
+def test_oversized_records_and_symlink_ancestors_are_refused(tmp_path: Path, store: LocalRecordStore) -> None:
     with pytest.raises(StoreError, match="record_too_large"):
         LocalRecordStore(tmp_path / "small", max_record_bytes=32).commit_run(run_record())
     real = tmp_path / "real"
@@ -82,6 +82,10 @@ def test_oversized_records_and_symlink_ancestors_are_refused(tmp_path: Path) -> 
     with pytest.raises(StoreError, match="unsafe_storage_path"):
         LocalRecordStore(alias / "records").commit_run(run_record())
     assert not (real / "records").exists()
+    (real / "operator.tmp").write_text("preserve me")
+    (store.root / "unowned").symlink_to(real, target_is_directory=True)
+    store.commit_run(run_record("retry"))
+    assert (real / "operator.tmp").read_text() == "preserve me"
 
 
 def _write_concurrently(root: Path, index: int) -> None:
@@ -98,7 +102,7 @@ def test_serialized_process_writers_preserve_all_unique_records(tmp_path: Path) 
     for process in processes:
         process.join(timeout=15)
         assert process.exitcode == 0
-    assert {record.run_id for record in read_records(LocalRecordStore(root)).runs} == {f"run-{i}" for i in range(6)}
+    assert {record["run_id"] for record in read_records(LocalRecordStore(root)).runs} == {f"run-{i}" for i in range(6)}
 
 
 def test_failed_commit_is_not_visible_and_abandoned_staging_recovers_privately(
@@ -117,12 +121,12 @@ def test_failed_commit_is_not_visible_and_abandoned_staging_recovers_privately(
         with pytest.raises(StoreError, match="persistence_failed") as error:
             store.commit_run(run_record("retry"))
         assert "credentials" not in str(error.value)
-    assert [run.run_id for run in read_records(store).runs] == ["run-1"]
-    abandoned = store.root / "staging" / "record-abandoned"
+    assert [run["run_id"] for run in read_records(store).runs] == ["run-1"]
+    abandoned = store.root / "runs" / "record-abandoned.tmp"
     abandoned.write_bytes(b'{"partial":')
     assert store.commit_run(run_record("retry")).diagnostics == ("recovered_interrupted_write",)
-    assert {run.run_id for run in read_records(store).runs} == {"run-1", "retry"}
-    assert not list(abandoned.parent.iterdir()) and stat.S_IMODE(store.root.stat().st_mode) == 0o700
+    assert {run["run_id"] for run in read_records(store).runs} == {"run-1", "retry"}
+    assert not abandoned.exists() and stat.S_IMODE(store.root.stat().st_mode) == 0o700
     assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in (store.root / "runs").iterdir())
 
 
@@ -134,8 +138,8 @@ def test_snapshot_reads_validate_only_pinned_shards(
     store: LocalRecordStore, fault: str, diagnostic: str | None,
 ) -> None:
     snapshot = store.select_snapshot(observed_before="2100-01-01T00:00:00Z")
-    shard = store.root / "runs" / snapshot.runs[0].shard
-    identity = snapshot.snapshot_id
+    shard = store.root / "runs" / snapshot["runs"][0]["shard"]
+    identity = snapshot["snapshot_id"]
     if fault == "later":
         store.commit_run(run_record("later"))
         shard = next(path for path in shard.parent.iterdir() if path != shard)
@@ -158,4 +162,4 @@ def test_snapshot_reads_validate_only_pinned_shards(
         with pytest.raises(StoreError, match=diagnostic):
             store.read_snapshot(identity)
     else:
-        assert [run.run_id for run in store.read_snapshot(snapshot).runs] == ["run-1"]
+        assert [run["run_id"] for run in store.read_snapshot(snapshot).runs] == ["run-1"]

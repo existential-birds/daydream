@@ -15,29 +15,27 @@ import re
 import stat
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, Literal, cast
+from typing import Any
 
-from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
-from pydantic.dataclasses import dataclass
-
+from daydream.artifacts.filesystem import _create_private_directory
+from daydream.artifacts.models import ArtifactVisibilityError
 from daydream.dataset.privacy import record_is_private
 from daydream.dataset.schema import (
-    ObservationRecord,
-    RunRecord,
-    canonical_record_json,
+    Record,
     parse_observation,
     parse_run,
+    parse_snapshot,
 )
-from daydream.json_utils import _fsync_directory, _stage_bytes, canonical_json as _canonical
+from daydream.json_utils import atomic_write_bytes, canonical_json as _canonical
 from daydream.timeutil import parse_iso_timestamp
 from daydream.training.adjudication.precedence import effective_adjudication
 
 _DEFAULT_MAX_RECORD_BYTES = 64 * 1024 * 1024
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
-Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+_DIRECTORIES = ("runs", "observations", "snapshots")
 
 
 class StoreError(ValueError):
@@ -55,59 +53,28 @@ class CommitResult:
     diagnostics: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True, config=ConfigDict(extra="forbid", strict=True))
-class RecordMember:
-    identity: Annotated[str, Field(min_length=1)]
-    record_digest: Digest
-    shard: str
-    shard_digest: Digest
-
-    def __post_init__(self) -> None:
-        if self.shard != _sha(self.identity.encode()) + ".jsonl":
-            raise ValueError("conflicting member identity")
-
-
-@dataclass(frozen=True, config=ConfigDict(extra="forbid", strict=True))
-class DatasetSnapshot:
-    snapshot_id: Digest
-    observed_before: str
-    valid_before: str | None
-    runs: tuple[RecordMember, ...]
-    observations: tuple[RecordMember, ...]
-    schema_version: Literal["daydream.snapshot.v1"] = "daydream.snapshot.v1"
-    diagnostics: tuple[str, ...] = field(default=(), compare=False)
-
-
-    def __post_init__(self) -> None:
-        _timestamp(self.observed_before)
-        if self.valid_before is not None:
-            _timestamp(self.valid_before)
-        for members in (self.runs, self.observations):
-            if len({member.identity for member in members}) != len(members):
-                raise ValueError("duplicate snapshot members")
-
-
 @dataclass(frozen=True)
 class SnapshotRecords:
-    snapshot: DatasetSnapshot
-    runs: tuple[RunRecord, ...]
-    observations: tuple[ObservationRecord, ...]
-    eligible_observations: tuple[ObservationRecord, ...]
+    snapshot: Record
+    runs: tuple[Record, ...]
+    observations: tuple[Record, ...]
+    eligible_observations: tuple[Record, ...]
     diagnostics: tuple[str, ...] = ()
 
     def effective_judgment(self, run_id: str, item_uid: str) -> dict[str, Any]:
         """Resolve eligible finding history with the unchanged precedence reducer."""
         history = []
         for record in self.eligible_observations:
-            if record.run_id != run_id or record.item_uid != item_uid or record.payload.type != "finding-judgment":
+            if (record["run_id"] != run_id or record.get("item_uid") != item_uid
+                    or record["payload"]["type"] != "finding-judgment"):
                 continue
             history.append({
                 "record_id": item_uid,
-                "disposition": record.payload.disposition,
-                "labeler": record.labeler, "role": record.role,
-                "observed_at": record.observed_at,
-                "evidence": record.semantic_evidence, "evidence_digest": record.evidence_digest,
-                "review_required": record.review_required,
+                "disposition": record["payload"]["disposition"],
+                "labeler": record["author"], "role": record["role"],
+                "observed_at": record["observed_at"],
+                "evidence": record["semantic_evidence"], "evidence_digest": record["evidence_digest"],
+                "review_required": record.get("review_required", False),
             })
         if not history:
             raise StoreError("missing_eligible_finding_judgment")
@@ -136,35 +103,31 @@ class LocalRecordStore:
         self.root = Path(root).expanduser().absolute()
         self.max_record_bytes = max_record_bytes
 
-    def commit_run(self, record: RunRecord | Mapping[str, Any] | str | bytes) -> CommitResult:
+    def commit_run(self, record: Mapping[str, Any] | str | bytes) -> CommitResult:
         """Commit one immutable run; an identical retry is a no-op."""
         parsed = self._parse(record, run=True)
-        assert isinstance(parsed, RunRecord)
-        return self._commit(parsed, "runs", parsed.run_id)
+        return self._commit(parsed, "runs", parsed["run_id"])
 
-    def append_observation(self, record: ObservationRecord | Mapping[str, Any] | str | bytes) -> CommitResult:
+    def append_observation(self, record: Mapping[str, Any] | str | bytes) -> CommitResult:
         """Append history without overwriting prior decisions or source evidence."""
         parsed = self._parse(record, run=False)
-        assert isinstance(parsed, ObservationRecord)
-        return self._commit(parsed, "observations", parsed.observation_id)
+        return self._commit(parsed, "observations", parsed["observation_id"])
 
-    def _parse(self, value: Any, *, run: bool) -> RunRecord | ObservationRecord:
+    def _parse(self, value: Any, *, run: bool) -> Record:
         size = len(value.encode() if isinstance(value, str) else value) if isinstance(value, (str, bytes)) else 0
         if size > self.max_record_bytes:
             raise StoreError("record_too_large")
         try:
-            if isinstance(value, (RunRecord, ObservationRecord)):
-                value = value.model_dump(mode="json")
             return parse_run(value) if run else parse_observation(value)
-        except (ValidationError, ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+        except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
             raise StoreError("invalid_or_unknown_record_schema") from None
 
-    def _payload(self, record: RunRecord | ObservationRecord) -> bytes:
-        text = canonical_record_json(record)
+    def _payload(self, record: Record) -> bytes:
+        text = _canonical(record)
         data = (text + "\n").encode("utf-8")
         if len(data) > self.max_record_bytes:
             raise StoreError("record_too_large")
-        if not record_is_private(record.model_dump(mode="json"), text):
+        if not record_is_private(record, text):
             raise StoreError("privacy_refused")
         return data
 
@@ -172,14 +135,14 @@ class LocalRecordStore:
     def _locked(self) -> Iterator[tuple[str, ...]]:
         try:
             self._directory(self.root)
-            for name in ("runs", "observations", "snapshots", "staging"):
+            for name in _DIRECTORIES:
                 self._directory(self.root / name)
             descriptor = os.open(self.root / ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
             with os.fdopen(descriptor, "rb") as lock:
                 os.fchmod(lock.fileno(), 0o600)
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 diagnostics: list[str] = []
-                for abandoned in (self.root / "staging").iterdir():
+                for abandoned in (path for name in _DIRECTORIES for path in (self.root / name).glob("*.tmp")):
                     if abandoned.is_file() and not abandoned.is_symlink():
                         abandoned.unlink()
                         diagnostics.append("recovered_interrupted_write")
@@ -191,36 +154,19 @@ class LocalRecordStore:
 
     @staticmethod
     def _directory(path: Path) -> None:
-        if any(ancestor.is_symlink() for ancestor in (path, *path.parents)):
-            raise StoreError("unsafe_storage_path")
-        missing = []
-        ancestor = path
-        while not ancestor.exists():
-            missing.append(ancestor)
-            ancestor = ancestor.parent
-        for directory in reversed(missing):
-            directory.mkdir(mode=0o700, exist_ok=True)
-            os.chmod(directory, 0o700)
-            _fsync_directory(directory)
-            _fsync_directory(directory.parent)
-        os.chmod(path, 0o700)
+        try:
+            _create_private_directory(path, exist_ok=True)
+        except ArtifactVisibilityError:
+            raise StoreError("unsafe_storage_path") from None
 
     def _atomic_write(self, path: Path, data: bytes) -> None:
         if len(data) > self.max_record_bytes:
             raise StoreError("record_too_large")
-        temporary = _stage_bytes(self.root / "staging" / "record", data, fsync=True, mode=0o600)
-        renamed = False
         try:
-            os.replace(temporary, path)
-            renamed = True
-            _fsync_directory(path.parent)
-            _fsync_directory(self.root / "staging")
+            atomic_write_bytes(path, data, fsync=True, dir_fsync=True, mode=0o600)
         except OSError:
-            if renamed:
-                path.unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
             raise
-        finally:
-            temporary.unlink(missing_ok=True)
 
     def _read_bytes(self, path: Path) -> bytes:
         metadata = path.lstat()
@@ -228,7 +174,7 @@ class LocalRecordStore:
             raise StoreError("unsafe_storage_path")
         if metadata.st_size > self.max_record_bytes:
             raise StoreError("record_too_large")
-        with path.open("rb") as handle:
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as handle:
             data = handle.read(self.max_record_bytes + 1)
         if len(data) > self.max_record_bytes:
             raise StoreError("record_too_large")
@@ -236,7 +182,7 @@ class LocalRecordStore:
             raise StoreError("malformed_or_interrupted_record")
         return data
 
-    def _commit(self, record: RunRecord | ObservationRecord, kind: str, identity: str) -> CommitResult:
+    def _commit(self, record: Record, kind: str, identity: str) -> CommitResult:
         data = self._payload(record)
         digest = _sha(data[:-1])
         shard = _sha(identity.encode()) + ".jsonl"
@@ -248,72 +194,78 @@ class LocalRecordStore:
                 if previous == data:
                     return CommitResult(identity, digest, False, diagnostics)
                 raise StoreError("immutable_identity_conflict")
-            if isinstance(record, ObservationRecord):
+            if kind == "observations":
                 self._validate_target(record)
             self._atomic_write(path, data)
             return CommitResult(identity, digest, True, diagnostics)
 
-    def _validate_target(self, record: ObservationRecord) -> None:
-        path = self.root / "runs" / (_sha(record.run_id.encode()) + ".jsonl")
+    def _validate_target(self, record: Record) -> None:
+        path = self.root / "runs" / (_sha(record["run_id"].encode()) + ".jsonl")
         if not path.exists():
             raise StoreError("unknown_run_reference")
         run = self._parse(self._read_bytes(path), run=True)
-        assert isinstance(run, RunRecord)
-        if run.run_id != record.run_id:
+        if run["run_id"] != record["run_id"]:
             raise StoreError("conflicting_run_reference")
         self._validate_finding_target(record, run)
 
     @staticmethod
-    def _validate_finding_target(record: ObservationRecord, run: RunRecord) -> None:
-        if record.item_uid is not None:
-            value = run.findings.value
+    def _validate_finding_target(record: Record, run: Record) -> None:
+        if record.get("item_uid") is not None:
+            value = run["findings"].get("value")
             items = value.get("items", []) if isinstance(value, dict) else []
-            if not any(isinstance(item, dict) and item.get("item_uid") == record.item_uid for item in items):
+            if not any(isinstance(item, dict) and item.get("item_uid") == record["item_uid"] for item in items):
                 raise StoreError("orphan_finding_reference")
 
-    def _members(self, kind: str) -> list[tuple[RecordMember, RunRecord | ObservationRecord]]:
-        members = []
-        for path in sorted((self.root / kind).iterdir()):
-            if not re.fullmatch(r"[0-9a-f]{64}\.jsonl", path.name):
-                raise StoreError("unknown_shard")
-            data = self._read_bytes(path)
-            record = self._parse(data, run=kind == "runs")
-            if self._payload(record) != data:
-                raise StoreError("noncanonical_record")
-            identity = record.run_id if isinstance(record, RunRecord) else record.observation_id
-            if path.name != _sha(identity.encode()) + ".jsonl":
-                raise StoreError("conflicting_record_identity")
-            members.append((RecordMember(identity, _sha(data[:-1]), path.name, _sha(data)), record))
-        return members
+    def _load(
+        self, kind: str, path: Path, expected: Record | None = None,
+    ) -> tuple[Record, Record]:
+        if not re.fullmatch(r"[0-9a-f]{64}\.jsonl", path.name):
+            raise StoreError("unknown_shard")
+        data = self._read_bytes(path)
+        if expected is not None and (
+            _sha(data) != expected["shard_digest"] or _sha(data[:-1]) != expected["record_digest"]
+        ):
+            raise StoreError("snapshot_record_digest_mismatch")
+        record = self._parse(data, run=kind == "runs")
+        identity = record["run_id" if kind == "runs" else "observation_id"]
+        if (path.name != _sha(identity.encode()) + ".jsonl"
+                or (expected is not None and identity != expected["identity"])):
+            raise StoreError("conflicting_record_identity")
+        if self._payload(record) != data:
+            raise StoreError("noncanonical_record")
+        member = {"identity": identity, "record_digest": _sha(data[:-1]),
+                  "shard": path.name, "shard_digest": _sha(data)}
+        return member, record
+
+    def _members(self, kind: str) -> list[tuple[Record, Record]]:
+        return [self._load(kind, path) for path in sorted((self.root / kind).iterdir())]
 
     def select_snapshot(
         self, *, observed_before: str, valid_before: str | None = None,
         run_ids: Sequence[str] | None = None,
-    ) -> DatasetSnapshot:
+    ) -> Record:
         """Pin observe-time membership; valid-time only controls eligible evidence."""
         observed_cutoff = _timestamp(observed_before)
+        if valid_before is not None:
+            _timestamp(valid_before)
         with self._locked() as diagnostics:
             all_runs = self._members("runs")
-            if run_ids is not None and set(run_ids) - {member.identity for member, _ in all_runs}:
+            if run_ids is not None and set(run_ids) - {member["identity"] for member, _ in all_runs}:
                 raise StoreError("unknown_run_reference")
             runs = tuple(member for member, record in all_runs if
-                         isinstance(record, RunRecord) and _timestamp(record.captured_at) <= observed_cutoff
-                         and (run_ids is None or member.identity in run_ids))
-            selected = {member.identity for member in runs}
+                         _timestamp(record["captured_at"]) <= observed_cutoff
+                         and (run_ids is None or member["identity"] in run_ids))
+            selected = {member["identity"] for member in runs}
             all_observations = self._members("observations")
             for _member, record in all_observations:
-                assert isinstance(record, ObservationRecord)
                 self._validate_target(record)
-            observations = tuple(member for member, record in all_observations
-                                 if isinstance(record, ObservationRecord)
-                                 and record.run_id in selected and _timestamp(record.observed_at) <= observed_cutoff)
+            observations = tuple(member for member, record in all_observations if
+                                 record["run_id"] in selected and _timestamp(record["observed_at"]) <= observed_cutoff)
             value = {"schema_version": "daydream.snapshot.v1", "observed_before": observed_before,
-                     "valid_before": valid_before, "runs": [asdict(member) for member in runs],
-                     "observations": [asdict(member) for member in observations]}
+                     "valid_before": valid_before, "runs": list(runs),
+                     "observations": list(observations)}
             snapshot_id = _sha(_canonical(value).encode())
-            snapshot = DatasetSnapshot(snapshot_id, observed_before, valid_before, runs, observations)
-            document = asdict(snapshot)
-            document.pop("diagnostics")
+            document = parse_snapshot({"snapshot_id": snapshot_id, **value})
             data = (_canonical(document) + "\n").encode()
             path = self.root / "snapshots" / (snapshot_id + ".jsonl")
             if path.exists():
@@ -321,12 +273,11 @@ class LocalRecordStore:
                     raise StoreError("snapshot_content_conflict")
             else:
                 self._atomic_write(path, data)
-            return DatasetSnapshot(snapshot_id, observed_before, valid_before, runs, observations,
-                                   diagnostics=diagnostics)
+            return {**document, "diagnostics": diagnostics}
 
-    def read_snapshot(self, snapshot: DatasetSnapshot | str) -> SnapshotRecords:
+    def read_snapshot(self, snapshot: Mapping[str, Any] | str) -> SnapshotRecords:
         """Read only the immutable shards pinned by a saved snapshot."""
-        snapshot_id = snapshot.snapshot_id if isinstance(snapshot, DatasetSnapshot) else snapshot
+        snapshot_id = snapshot.get("snapshot_id") if isinstance(snapshot, Mapping) else snapshot
         if not isinstance(snapshot_id, str) or not _DIGEST.fullmatch(snapshot_id):
             raise StoreError("invalid_snapshot_identity")
         with self._locked() as diagnostics:
@@ -342,40 +293,30 @@ class LocalRecordStore:
                     raise StoreError("snapshot_digest_mismatch")
                 if value["schema_version"] != "daydream.snapshot.v1":
                     raise StoreError("unknown_snapshot_schema")
-                pinned = TypeAdapter(DatasetSnapshot).validate_json(
-                    _canonical({"snapshot_id": snapshot_id, **value}))
+                pinned = parse_snapshot({"snapshot_id": snapshot_id, **value})
             except (TypeError, KeyError, ValueError, RecursionError) as error:
                 if isinstance(error, StoreError):
                     raise
                 raise StoreError("malformed_snapshot") from None
-            if isinstance(snapshot, DatasetSnapshot) and snapshot != pinned:
+            if isinstance(snapshot, Mapping) and {k: v for k, v in snapshot.items() if k != "diagnostics"} != pinned:
                 raise StoreError("snapshot_content_conflict")
-            typed_runs = tuple(cast(RunRecord, self._read_member(member, "runs")) for member in pinned.runs)
-            typed_observations = tuple(cast(ObservationRecord, self._read_member(member, "observations"))
-                                       for member in pinned.observations)
-            selected_runs = {run.run_id: run for run in typed_runs}
-            cutoff = _timestamp(pinned.observed_before)
-            if any(_timestamp(run.captured_at) > cutoff for run in typed_runs):
+            typed_runs = tuple(self._load("runs", self.root / "runs" / member["shard"], member)[1]
+                               for member in pinned["runs"])
+            typed_observations = tuple(
+                self._load("observations", self.root / "observations" / member["shard"], member)[1]
+                for member in pinned["observations"])
+            selected_runs = {run["run_id"]: run for run in typed_runs}
+            cutoff = _timestamp(pinned["observed_before"])
+            if any(_timestamp(run["captured_at"]) > cutoff for run in typed_runs):
                 raise StoreError("snapshot_temporal_membership_conflict")
             for record in typed_observations:
-                if _timestamp(record.observed_at) > cutoff:
+                if _timestamp(record["observed_at"]) > cutoff:
                     raise StoreError("snapshot_temporal_membership_conflict")
-                if record.run_id not in selected_runs:
+                if record["run_id"] not in selected_runs:
                     raise StoreError("orphan_snapshot_observation")
-                self._validate_finding_target(record, selected_runs[record.run_id])
-            valid_cutoff = _timestamp(pinned.valid_before) if pinned.valid_before else None
+                self._validate_finding_target(record, selected_runs[record["run_id"]])
+            valid_cutoff = _timestamp(pinned["valid_before"]) if pinned["valid_before"] else None
             eligible = tuple(record for record in typed_observations
-                             if valid_cutoff is None or _timestamp(record.valid_at) <= valid_cutoff)
-            return SnapshotRecords(pinned, typed_runs, typed_observations, eligible, diagnostics)
-
-    def _read_member(self, member: RecordMember, kind: str) -> RunRecord | ObservationRecord:
-        data = self._read_bytes(self.root / kind / member.shard)
-        if _sha(data) != member.shard_digest or _sha(data[:-1]) != member.record_digest:
-            raise StoreError("snapshot_record_digest_mismatch")
-        record = self._parse(data, run=kind == "runs")
-        if self._payload(record) != data:
-            raise StoreError("noncanonical_record")
-        identity = record.run_id if isinstance(record, RunRecord) else record.observation_id
-        if identity != member.identity:
-            raise StoreError("conflicting_record_identity")
-        return record
+                             if valid_cutoff is None or _timestamp(record["valid_at"]) <= valid_cutoff)
+            return SnapshotRecords({**pinned, "diagnostics": diagnostics},
+                                   typed_runs, typed_observations, eligible, diagnostics)

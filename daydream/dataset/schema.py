@@ -1,66 +1,31 @@
-"""Versioned raw run and observation contracts for newly collected evidence.
-
-Raw producer payloads retain their existing identities and ordering; these models
-never reconstruct a corpus record or reinterpret a verifier/outcome label.
-"""
-
+"""Versioned JSON contracts for raw run evidence and typed observation history."""
 from __future__ import annotations
 
 import hashlib
 import json
 import re
 from collections.abc import Mapping
+from copy import deepcopy
 from datetime import datetime
-from typing import Annotated, Any, Literal, TypeVar
+from typing import Any
 
 from jsonschema import Draft202012Validator
-from pydantic import (
-    AfterValidator,
-    BaseModel,
-    ConfigDict,
-    Field,
-    JsonValue,
-    TypeAdapter,
-    ValidationError,
-    model_validator,
-)
+from pydantic import JsonValue, TypeAdapter
 
 from daydream.atif import Trajectory
 from daydream.json_utils import canonical_json
 from daydream.training.labeler_versions import reply_evidence_digest
 
-Availability = Literal["available", "unavailable", "unproduced", "withheld", "failed"]
+Record = dict[str, Any]
+_JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue, config={"strict": True, "allow_inf_nan": False})
+_MODEL_AUTHOR_RE = re.compile(
+    r"(?:^|[-_])(?:claude|gpt|llm|model|classifier|anthropic|openai|codex|gemini)(?:$|[-_0-9])", re.IGNORECASE)
 
 
 def _timestamp(value: str) -> str:
     if datetime.fromisoformat(value).tzinfo is None:
         raise ValueError("timestamp must include a UTC offset")
     return value
-
-
-Timestamp = Annotated[str, AfterValidator(_timestamp)]
-Digest = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
-
-
-class _RecordModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, allow_inf_nan=False)
-
-
-class Evidence(_RecordModel):
-    """Explicit evidence availability, including an intentionally empty value."""
-
-    status: Availability = "unproduced"
-    value: Any = None
-    reason: str | None = None
-
-    @model_validator(mode="after")
-    def check_availability(self) -> Evidence:
-        if self.status == "available" and self.value is None:
-            raise ValueError("available evidence requires a value")
-        if self.status != "available" and self.value is not None:
-            raise ValueError("absent evidence must not contain a value")
-        _json_value(self.value)
-        return self
 
 
 def _object(*, optional: tuple[str, ...] = (), extra: bool = False, **properties: Any) -> dict[str, Any]:
@@ -116,228 +81,145 @@ _RUN_PAYLOADS = {
             fp_penalty_map={"type": "object", "additionalProperties": _NUMBER})),
         review_text_redaction=_nullable(_MAP), source_review_sha256=_nullable(_SHA)),
 }
-_PAYLOAD_VALIDATORS = {name: Draft202012Validator(shape) for name, shape in _RUN_PAYLOADS.items()}
-_JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue, config=ConfigDict(strict=True, allow_inf_nan=False))
+_AVAILABILITY = {"enum": ["available", "unavailable", "unproduced", "withheld", "failed"]}
+_EVIDENCE = _object(optional=("value", "reason"), status=_AVAILABILITY, value={}, reason=_nullable(_STRING))
+_EVIDENCE["if"] = {"properties": {"status": {"const": "available"}}}
+_EVIDENCE["then"] = {"required": ["value"], "properties": {"value": {"not": {"type": "null"}}}}
+_EVIDENCE["else"] = {"properties": {"value": {"type": "null"}}}
+_RUN_SCHEMA = _object(schema_version={"const": "daydream.run.v1"}, run_id=_ID, captured_at=_STRING,
+    outcome={"enum": ["success", "failed", "interrupted"]}, provenance=_MAP, completeness=_MAP,
+    trace_id=_nullable(_STRING))
+_RUN_SCHEMA["properties"].update({name: {"allOf": [_EVIDENCE, {
+    "if": {"properties": {"status": {"const": "available"}}},
+    "then": {"properties": {"value": payload}}}]} for name, payload in _RUN_PAYLOADS.items()})
+_RUN_SCHEMA["required"].extend(_RUN_PAYLOADS)
+_CORRECTION = _object(optional=("body_sha256", "text", "captured_sha256", "redaction_provenance", "reason"),
+    status=_AVAILABILITY, source_reply_id=_ID, body_sha256=_nullable(_SHA),
+    text=_nullable(_STRING), captured_sha256=_nullable(_SHA), redaction_provenance=_MAP, reason=_nullable(_STRING))
+_OBSERVATION_SCHEMA = _object(
+    optional=("item_uid", "classifier_version", "correction", "evidence_digest_scheme", "review_required"),
+    schema_version={"const": "daydream.observation.v1"}, observation_id=_ID, run_id=_ID,
+    item_uid=_nullable(_STRING), valid_at=_STRING, observed_at=_STRING, source=_ID, author=_ID,
+    role={"enum": ["rater", "adjudicator", "model-suggested", "automatic"]}, policy_version=_ID, rubric_version=_ID,
+    classifier_version=_nullable(_STRING), evidence_digest=_SHA, semantic_evidence={},
+    correction=_nullable(_CORRECTION),
+    evidence_digest_scheme={"enum": ["canonical-json-v1", "reply-evidence-v1"]}, review_required=_BOOL,
+    payload={"oneOf": [
+        _object(optional=("reviewer_logins", "outcome_prior", "outcome_prior_n", "rubric"),
+            type={"const": "run-label"}, label={"enum": ["accepted", "rejected", "contested", "unknown"]},
+            reviewer_logins=_array(_STRING), outcome_prior=_nullable(_NUMBER), outcome_prior_n=_COUNT, rubric=_MAP),
+        _object(optional=("record_id",), type={"const": "finding-judgment"}, disposition={"enum": [
+            "accepted", "rejected", "ambiguous", "unanswered", "missing", "unknown"]},
+            rationale=_ID, record_id=_nullable(_SHA)),
+        _object(type={"const": "enrichment"}, kind={"enum": ["pr", "base", "license"]}, evidence=_EVIDENCE)]})
+_MEMBER = _object(identity=_ID, record_digest=_SHA, shard={"type": "string", "pattern": "^[a-f0-9]{64}\\.jsonl$"},
+                  shard_digest=_SHA)
+_SNAPSHOT_SCHEMA = _object(schema_version={"const": "daydream.snapshot.v1"}, snapshot_id=_SHA,
+    observed_before=_STRING, valid_before=_nullable(_STRING), runs=_array(_MEMBER), observations=_array(_MEMBER))
+_VALIDATORS = {"daydream.run.v1": Draft202012Validator(_RUN_SCHEMA),
+               "daydream.observation.v1": Draft202012Validator(_OBSERVATION_SCHEMA),
+               "daydream.snapshot.v1": Draft202012Validator(_SNAPSHOT_SCHEMA)}
 
 
-class RunRecord(_RecordModel):
-    """Immutable run identity plus selected frozen producer evidence."""
-
-    schema_version: Literal["daydream.run.v1"] = "daydream.run.v1"
-    run_id: str = Field(min_length=1)
-    captured_at: Timestamp
-    outcome: Literal["success", "failed", "interrupted"]
-    original_task: Evidence = Field(default_factory=Evidence)
-    final_state: Evidence = Field(default_factory=Evidence)
-    recommended_patch: Evidence = Field(default_factory=Evidence)
-    trajectories: Evidence = Field(default_factory=Evidence)
-    findings: Evidence = Field(default_factory=Evidence)
-    verification: Evidence = Field(default_factory=Evidence)
-    scoring: Evidence = Field(default_factory=Evidence)
-    provenance: dict[str, Any] = Field(default_factory=dict)
-    completeness: dict[str, Any] = Field(default_factory=dict)
-    trace_id: str | None = None
-
-    @model_validator(mode="after")
-    def check_task(self) -> RunRecord:
-        _json_value(self.provenance)
-        _json_value(self.completeness)
-        _validate_run_evidence(self)
-
-        return self
+def _defaults(value: Any, defaults: Record) -> Any:
+    return {**defaults, **value} if isinstance(value, dict) else value
 
 
-def _json_value(value: Any) -> None:
-    _JSON.validate_python(value)
-
-
-class CapturedCorrection(_RecordModel):
-    """Captured redacted content has a digest distinct from the original body."""
-
-    status: Availability
-    source_reply_id: str = Field(min_length=1)
-    body_sha256: Digest | None = None
-    text: str | None = None
-    captured_sha256: Digest | None = None
-    redaction_provenance: dict[str, Any] = Field(default_factory=dict)
-    reason: str | None = None
-
-    @model_validator(mode="after")
-    def check_content(self) -> CapturedCorrection:
-        _json_value(self.redaction_provenance)
-        if self.status == "available":
-            if self.text is None or not self.redaction_provenance:
-                raise ValueError("captured text requires redaction provenance")
-            if hashlib.sha256(self.text.encode()).hexdigest() != self.captured_sha256:
-                raise ValueError("captured_sha256 does not match redacted text")
-        elif self.text is not None or self.captured_sha256 is not None:
-            raise ValueError("absent correction text must not contain captured content")
-        return self
-
-
-class RunLabelPayload(_RecordModel):
-    """Run outcome inputs; PR merge state never supplies a finding judgment."""
-
-    type: Literal["run-label"] = "run-label"
-    label: Literal["accepted", "rejected", "contested", "unknown"]
-    reviewer_logins: list[str] = Field(default_factory=list)
-    outcome_prior: float | None = None
-    outcome_prior_n: int = Field(default=0, ge=0)
-    rubric: dict[str, Any] = Field(default_factory=dict)
-
-
-class FindingJudgmentPayload(_RecordModel):
-    """Existing disposition vocabulary with optional derived corpus identity."""
-
-    type: Literal["finding-judgment"] = "finding-judgment"
-    disposition: Literal["accepted", "rejected", "ambiguous", "unanswered", "missing", "unknown"]
-    rationale: str = Field(min_length=1)
-    record_id: Digest | None = None
-
-class EnrichmentPayload(_RecordModel):
-    """Later PR/base/license evidence, preserving explicit missing evidence."""
-
-    type: Literal["enrichment"] = "enrichment"
-    kind: Literal["pr", "base", "license"]
-    evidence: Evidence
-
-
-ObservationPayload = Annotated[
-    RunLabelPayload | FindingJudgmentPayload | EnrichmentPayload,
-    Field(discriminator="type"),
-]
-
-_MODEL_AUTHOR_RE = re.compile(
-    r"(?:^|[-_])(?:claude|gpt|llm|model|classifier|anthropic|openai|codex|gemini)(?:$|[-_0-9])",
-    re.IGNORECASE,
-)
-
-
-class ObservationRecord(_RecordModel):
-    """Append identity and bitemporal evidence, separate from captured reply text."""
-
-    schema_version: Literal["daydream.observation.v1"] = "daydream.observation.v1"
-    observation_id: str = Field(min_length=1)
-    run_id: str = Field(min_length=1)
-    item_uid: str | None = None
-    valid_at: Timestamp
-    observed_at: Timestamp
-    source: str = Field(min_length=1)
-    author: str = Field(min_length=1)
-    role: Literal["rater", "adjudicator", "model-suggested", "automatic"]
-    policy_version: str = Field(min_length=1)
-    rubric_version: str = Field(min_length=1)
-    classifier_version: str | None = None
-    evidence_digest: Digest
-    evidence_digest_scheme: Literal["canonical-json-v1", "reply-evidence-v1"] = "canonical-json-v1"
-    semantic_evidence: Any
-    correction: CapturedCorrection | None = None
-    payload: ObservationPayload
-    review_required: bool = False
-
-    @property
-    def labeler(self) -> str:
-        """The unchanged adjudication reducer names observation authors labelers."""
-        return self.author
-
-    @model_validator(mode="after")
-    def check_observation(self) -> ObservationRecord:
-        _json_value(self.semantic_evidence)
-        _json_value(self.payload.model_dump(mode="json"))
-        if self.evidence_digest_scheme == "reply-evidence-v1":
-            if not isinstance(self.semantic_evidence, list) or any(
-                not isinstance(reply, dict) for reply in self.semantic_evidence
-            ):
-                raise ValueError("reply semantic evidence must be a list of objects")
-            expected = reply_evidence_digest(self.semantic_evidence)
-            if self.correction is not None:
-                matching = [reply for reply in self.semantic_evidence
-                            if str(reply.get("reply_id", reply.get("id", "")))
-                            == self.correction.source_reply_id]
-                if len(matching) != 1:
-                    raise ValueError("correction references an unknown or conflicting source reply")
-                original_hash = matching[0].get("body_sha256")
-                if original_hash != self.correction.body_sha256:
-                    raise ValueError("correction original body hash differs from source evidence")
+def _parse(raw: Mapping[str, Any] | str | bytes, version: str) -> Record:
+    name = {"daydream.run.v1": "RunRecord", "daydream.observation.v1": "ObservationRecord"}.get(version, "Snapshot")
+    try:
+        value = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
+        if not isinstance(value, dict) or value.get("schema_version") != version or version not in _VALIDATORS:
+            raise ValueError("schema_version")
+        evidence_default = {"status": "unproduced", "value": None, "reason": None}
+        if version == "daydream.run.v1":
+            value = _defaults(value, {"provenance": {}, "completeness": {}, "trace_id": None})
+            for field in _RUN_PAYLOADS:
+                value[field] = _defaults(value.get(field, {}), evidence_default)
+            _timestamp(value["captured_at"])
+        elif version == "daydream.observation.v1":
+            _timestamp(value["valid_at"])
+            _timestamp(value["observed_at"])
+        _JSON.validate_python(value)
+        if not _VALIDATORS[version].is_valid(value):
+            raise ValueError("record")
+        if version == "daydream.run.v1":
+            _validate_run_evidence(value)
+        elif version == "daydream.observation.v1":
+            _validate_observation(value)
         else:
-            expected = semantic_evidence_digest(self.semantic_evidence)
-        if expected != self.evidence_digest:
-            raise ValueError("semantic evidence_digest does not match its projection")
-        if self.payload.type == "finding-judgment":
-            if self.semantic_evidence is None:
-                raise ValueError("finding judgment requires explicit semantic evidence")
-            if not self.item_uid:
-                raise ValueError("finding judgment requires item_uid")
-        elif self.item_uid is not None:
-            raise ValueError("run label/enrichment cannot target an item")
-        if self.role in ("rater", "adjudicator") and _MODEL_AUTHOR_RE.search(self.author):
-            raise ValueError("model author cannot hold a human role")
-        if self.role == "model-suggested":
-            object.__setattr__(self, "review_required", True)
-        return self
+            _timestamp(value["observed_before"])
+            if value["valid_before"] is not None:
+                _timestamp(value["valid_before"])
+            for kind in ("runs", "observations"):
+                if len({member["identity"] for member in value[kind]}) != len(value[kind]):
+                    raise ValueError("duplicate snapshot members")
+        return dict(json.loads(canonical_json(value)))
+    except (ValueError, TypeError, KeyError, UnicodeError) as error:
+        field = "schema_version" if str(error) == "schema_version" else "record"
+        raise ValueError(f"invalid {name}: {field}") from None
+
+
+def parse_run(raw: Mapping[str, Any] | str | bytes) -> Record:
+    return _parse(raw, "daydream.run.v1")
+
+
+def parse_observation(raw: Mapping[str, Any] | str | bytes) -> Record:
+    return _parse(raw, "daydream.observation.v1")
+
+
+def parse_snapshot(raw: Mapping[str, Any] | str | bytes) -> Record:
+    return _parse(raw, "daydream.snapshot.v1")
 
 
 def semantic_evidence_digest(value: Any) -> str:
-    """New canonical projection digest; existing replies use their own scheme."""
-    _json_value(value)
+    _JSON.validate_python(value)
     return hashlib.sha256(canonical_json(value).encode()).hexdigest()
 
 
-Record = RunRecord | ObservationRecord
-_Model = TypeVar("_Model", bound=_RecordModel)
+def _validate_observation(record: Record) -> None:
+    evidence, correction = record["semantic_evidence"], record.get("correction")
+    if correction is not None:
+        if correction["status"] == "available":
+            if correction.get("text") is None or not correction.get("redaction_provenance") or hashlib.sha256(
+                correction["text"].encode()).hexdigest() != correction.get("captured_sha256"):
+                raise ValueError("invalid captured correction")
+        elif correction.get("text") is not None or correction.get("captured_sha256") is not None:
+            raise ValueError("absent correction contains captured content")
+    if record.get("evidence_digest_scheme", "canonical-json-v1") == "reply-evidence-v1":
+        if not isinstance(evidence, list) or any(not isinstance(reply, dict) for reply in evidence):
+            raise ValueError("reply semantic evidence must be a list of objects")
+        expected = reply_evidence_digest(evidence)
+        if correction is not None:
+            matching = [reply for reply in evidence if str(reply.get("reply_id", reply.get("id", "")))
+                        == correction["source_reply_id"]]
+            if len(matching) != 1 or matching[0].get("body_sha256") != correction.get("body_sha256"):
+                raise ValueError("correction conflicts with source evidence")
+    else:
+        expected = semantic_evidence_digest(evidence)
+    if expected != record["evidence_digest"]:
+        raise ValueError("semantic evidence digest mismatch")
+    if record["payload"]["type"] == "finding-judgment":
+        if evidence is None or not record.get("item_uid"):
+            raise ValueError("finding judgment requires evidence and an item target")
+    elif record.get("item_uid") is not None:
+        raise ValueError("run-level observation cannot target a finding")
+    if record["role"] in ("rater", "adjudicator") and _MODEL_AUTHOR_RE.search(record["author"]):
+        raise ValueError("model author cannot hold a human role")
+    if record["role"] == "model-suggested":
+        record["review_required"] = True
 
 
-def _parse(raw: Mapping[str, Any] | str | bytes, model: type[_Model]) -> _Model:
-    try:
-        value = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
-        if not isinstance(value, dict) or "schema_version" not in value:
-            raise ValueError(f"invalid {model.__name__}: schema_version is required")
-        return model.model_validate(value)
-    except ValidationError as exc:
-        # Report only declared top-level fields, never rejected keys or values.
-        fields = ", ".join(str(error["loc"][0]) for error in exc.errors(include_input=False)
-                           if error["loc"] and error["loc"][0] in model.model_fields)
-        raise ValueError(f"invalid {model.__name__}: {fields or 'record'}") from None
-    except (TypeError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise ValueError(f"invalid {model.__name__}: malformed JSON object") from exc
-
-
-def parse_run(raw: Mapping[str, Any] | str | bytes) -> RunRecord:
-    """Read a validated current-version run; unknown versions fail closed."""
-    return _parse(raw, RunRecord)
-
-
-def parse_observation(raw: Mapping[str, Any] | str | bytes) -> ObservationRecord:
-    """Read a discriminated current-version observation without legacy coercion."""
-    return _parse(raw, ObservationRecord)
-
-
-def serialize_record(record: Record) -> dict[str, Any]:
-    """Return owned JSON containers after validating the complete record again."""
-    payload = record.model_dump(mode="json")
-    type(record).model_validate(payload)
-    return payload
-
-
-def canonical_record_json(record: Record) -> str:
-    """Canonical complete-record bytes shared by identity and shard pinning."""
-    return canonical_json(serialize_record(record))
-
-
-def _validate_run_evidence(run: RunRecord) -> None:
+def _validate_run_evidence(run: Record) -> None:
     """Validate complete raw sections without rewriting producer payloads."""
-    for name, validator in _PAYLOAD_VALIDATORS.items():
-        section = getattr(run, name)
-        if section.status == "available" and not validator.is_valid(section.value):
-            raise ValueError(f"invalid {name} payload")
     for name, text_key, digest_key in (("original_task", "diff", "diff_sha256"),
                                       ("recommended_patch", "patch", "sha256")):
-        section = getattr(run, name)
-        if section.status == "available" and section.value[digest_key] != hashlib.sha256(
-            section.value[text_key].encode()).hexdigest():
+        section = run[name]
+        if section["status"] == "available" and section["value"][digest_key] != hashlib.sha256(
+            section["value"][text_key].encode()).hexdigest():
             raise ValueError(f"{name} digest does not match captured content")
-    if run.trajectories.status == "available":
-        payload = run.trajectories.value
+    if run["trajectories"]["status"] == "available":
+        payload = run["trajectories"]["value"]
         _timestamp(payload["cutoff_at"])
         documents: dict[str, dict[str, Any]] = {}
         for document in payload["documents"]:
@@ -345,10 +227,10 @@ def _validate_run_evidence(run: RunRecord) -> None:
             identity = document.get("trajectory_id")
             if not isinstance(identity, str) or not identity or identity in documents:
                 raise ValueError("trajectory documents need unique identities")
-            if document.get("session_id") != run.run_id:
+            if document.get("session_id") != run["run_id"]:
                 raise ValueError("trajectory session_id differs from run_id")
             documents[identity] = document
-        if payload["root_trajectory_id"] != run.run_id or run.run_id not in documents:
+        if payload["root_trajectory_id"] != run["run_id"] or run["run_id"] not in documents:
             raise ValueError("trajectory root identity differs from run_id")
         invocation_ids: dict[str, dict[str, Any]] = {}
         for identity, document in documents.items():
@@ -366,8 +248,8 @@ def _validate_run_evidence(run: RunRecord) -> None:
                     for invocation in summary.get("invocations", []):
                         _validate_invocation(invocation, documents, invocation_ids)
     items: set[str] = set()
-    if run.findings.status == "available":
-        findings = run.findings.value
+    if run["findings"]["status"] == "available":
+        findings = run["findings"]["value"]
         claims = [claim["uid"] for stack in findings["claims"] for claim in (
             stack["records"]["issues"] if isinstance(stack["records"], dict) else stack["records"])]
         items = {item["item_uid"] for item in findings["items"]}
@@ -375,13 +257,13 @@ def _validate_run_evidence(run: RunRecord) -> None:
             raise ValueError("findings contain duplicate identities")
         if any(len(set(item["source_uids"])) != len(item["source_uids"]) for item in findings["items"]):
             raise ValueError("finding source_uids contain duplicate identities")
-    if run.verification.status == "available":
-        verification = run.verification.value
+    if run["verification"]["status"] == "available":
+        verification = run["verification"]["value"]
         for association in verification["item_associations"]:
             if association.get("item_uid") not in items:
                 raise ValueError("verification association references an absent finding item")
-    if run.scoring.status == "available":
-        scoring = run.scoring.value
+    if run["scoring"]["status"] == "available":
+        scoring = run["scoring"]["value"]
         if scoring["persisted_breakdown"]["reward_version"] != scoring["reward_policy"]["version"]:
             raise ValueError("reward breakdown version differs from persisted policy")
         if scoring["persisted_breakdown"]["format_valid"] != scoring["format_valid"]:
@@ -412,20 +294,9 @@ def _validate_invocation(
     known[invocation_id] = invocation
 
 
-def run_record_schema() -> dict[str, Any]:
-    """Publish the run contract; parsing also validates links and digests."""
-    schema = RunRecord.model_json_schema()
-    schema["required"].append("schema_version")
-    for name, payload in _RUN_PAYLOADS.items():
-        schema["properties"][name] = {"allOf": [schema["properties"][name], {
-            "if": {"properties": {"status": {"const": "available"}}, "required": ["status"]},
-            "then": {"properties": {"value": payload}, "required": ["value"]},
-            "else": {"properties": {"value": {"type": "null"}}}}]}
-    return schema
+def run_record_schema() -> Record:
+    return deepcopy(_RUN_SCHEMA)
 
 
-def observation_record_schema() -> dict[str, Any]:
-    """Publish the typed history contract; parsing also verifies evidence digests."""
-    schema = ObservationRecord.model_json_schema()
-    schema["required"].append("schema_version")
-    return schema
+def observation_record_schema() -> Record:
+    return deepcopy(_OBSERVATION_SCHEMA)

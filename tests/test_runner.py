@@ -406,6 +406,7 @@ def _fail_evaluation(*_args: Any, **_kwargs: Any) -> Any:
 @pytest.mark.parametrize("failure_mode,exit_code", [
     ("none", 0), ("destination", 0), ("evaluation", 3),
     ("identity", 0), ("frozen_tree", 0), ("dump_publication", 0),
+    ("dataset-file", 0), ("dataset-symlink", 0), ("dataset-runtime-owned", 0),
 ])
 async def test_artifact_session_runner_controlled_custom_flow_publishes_after_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path, failure_mode: str,
@@ -439,6 +440,15 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
         monkeypatch.setattr("daydream.eval.analyzer.analyze_session", corrupt_frozen_tree)
     elif failure_mode == "dump_publication":
         monkeypatch.setattr("daydream.archive.dump.publish_dump", fail_dump)
+    store_path, unowned = tmp_path / "records", tmp_path / "unowned"
+    if failure_mode == "dataset-runtime-owned":
+        store_path = repo / ".daydream" / "dataset"
+    elif failure_mode == "dataset-symlink":
+        unowned.mkdir()
+        (unowned / "prior.txt").write_text("preserve me")
+        store_path.symlink_to(unowned, target_is_directory=True)
+    elif failure_mode == "dataset-file":
+        store_path.write_text("preserve me")
     external_trajectory = tmp_path / "external trajectory.json"
     external_trajectory.write_text("operator baseline\n", encoding="utf-8")
     dump = tmp_path / "dump"
@@ -448,7 +458,8 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     config = RunConfig(
         target=str(repo), base="main", flow_name="artifact-probe", trajectory_path=external_trajectory,
         run_eval=failure_mode in ("evaluation", "frozen_tree"), dump_artifacts=str(dump),
-        archive=True, non_interactive=True,
+        archive=True, non_interactive=True, dataset_capture=failure_mode.startswith("dataset"),
+        dataset_store_path=store_path,
     )
     result: list[int] = []
     async def invoke() -> None:
@@ -475,7 +486,15 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
         assert (dump / "prior.txt").read_text() == "prior dump"
         return
     assert result == [exit_code]
-    assert ("Data Collection" in capsys.readouterr().out) is (failure_mode == "evaluation")
+    assert ("Data Collection" in capsys.readouterr().out) is (
+        failure_mode == "evaluation" or failure_mode.startswith("dataset"))
+    if failure_mode == "dataset-symlink":
+        assert [path.name for path in unowned.iterdir()] == ["prior.txt"]
+        assert (unowned / "prior.txt").read_text() == "preserve me"
+    elif failure_mode == "dataset-file":
+        assert store_path.read_text() == "preserve me"
+    elif failure_mode == "dataset-runtime-owned":
+        assert not store_path.exists()
     assert (repo / ".review-output.md").read_text() == "Completed review\n"
     if failure_mode == "evaluation":
         public_runs = list((repo / ".daydream" / "runs").iterdir())
