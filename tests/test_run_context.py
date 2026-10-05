@@ -36,7 +36,20 @@ def test_interaction_policy_is_frozen_and_keyword_only() -> None:
         InteractionPolicy("yes")  # type: ignore[call-arg]
 
 @pytest.mark.parametrize(("assume", "interactive", "safe_default", "expected"),
-    [("yes", True, False, True), ("no", True, True, False), (None, False, True, True), (None, True, False, None)],
+    [
+        # An explicit assumption wins outright, so a TTY cannot change the answer and
+        # the safe default is unreachable on that branch.
+        ("yes", True, False, True),
+        ("no", True, True, False),
+        # No assumption: a TTY falls back to prompting (None), otherwise the gate's
+        # own safe default decides, whichever way that gate is configured.
+        (None, True, False, None),
+        (None, False, True, True),
+        (None, False, False, False),
+        # "yes"/"no" also decide when unattended (CI --yes, explicit decline).
+        ("yes", False, True, True),
+        ("no", False, False, False),
+    ],
 )
 def test_resolve_gate_remains_pure(assume: str | None, interactive: bool, safe_default: bool, expected: bool | None
 ) -> None:
