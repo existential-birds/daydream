@@ -250,8 +250,7 @@ It retains the original analyzed revisions and input diff, trajectories, structu
 verification/fix associations at the existing frozen finalization boundary, including cooperative
 interruption. SIGKILL and power loss before that boundary can lose uncaptured evidence. Privacy
 or persistence refusal emits a sanitized collection diagnostic and preserves completed review
-outputs. See [the local run evidence API](docs/local-run-evidence.md) for validated reads and pinned
-observation history. Existing archives remain available; historical migration, live outcome
+outputs. Existing archives remain available; historical migration, live outcome
 harvesting, report generation, and corpus cutover are separate work.
 
 ### Corpus commands
