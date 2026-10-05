@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Literal, cast, get_args
+from typing import Any, Literal
 
 from daydream.repository_paths import (
     InvalidRepositoryFilePath,
@@ -34,9 +34,6 @@ FixFootprintOrigin = Literal[
     "staging",
     "scope_request",
 ]
-
-_ACTIONS = frozenset(get_args(FixFootprintAction))
-_ORIGINS = frozenset(get_args(FixFootprintOrigin))
 
 
 @dataclass(frozen=True)
@@ -250,21 +247,19 @@ class AuthorizedFixFootprint:
     def record_git_event(
         self,
         *,
-        action: str,
+        action: FixFootprintAction,
         path: str,
-        origin: str,
+        origin: FixFootprintOrigin,
         phase: str,
         round_number: int | None,
         reason: str,
     ) -> None:
         """Record a decision involving an exact Git-observed path."""
-        if action not in _ACTIONS or origin not in _ORIGINS:
-            raise ValueError("invalid fix-footprint audit event")
         self._append_event(
-            action=cast(FixFootprintAction, action),
+            action=action,
             path=path,
             path_kind="git",
-            origin=cast(FixFootprintOrigin, origin),
+            origin=origin,
             item_uid=None,
             phase=phase,
             round_number=round_number,
