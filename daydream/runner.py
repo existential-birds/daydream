@@ -69,6 +69,7 @@ from daydream.phases.inputs import (
 )
 from daydream.run_artifacts import (
     _finalize_run_artifacts,
+    _finalize_unproduced_run_artifacts,
     _open_recorder,
     _resolve_review_profile,
     _RunArtifacts,
@@ -497,6 +498,7 @@ async def _run_workspace(
                         finalize = partial(
                             _finalize_run_artifacts, run_artifacts, selected=selected,
                             config=dispatch_config, work=work, successful=successful,
+                            interrupted=primary is not None and not isinstance(primary, Exception),
                         )
                         with anyio.CancelScope(shield=True):
                             await anyio.to_thread.run_sync(finalize)
@@ -506,6 +508,14 @@ async def _run_workspace(
                         primary.add_note(
                             f"artifact finalization retained a secondary base failure ({type(exc).__name__})"
                         )
+                elif config.dataset_capture:
+                    finalize_unproduced = partial(
+                        _finalize_unproduced_run_artifacts, run_artifacts, config=dispatch_config,
+                        work=work, successful=primary is None and result == 0,
+                        interrupted=primary is not None and not isinstance(primary, Exception),
+                    )
+                    with anyio.CancelScope(shield=True):
+                        await anyio.to_thread.run_sync(finalize_unproduced)
 
                 if primary is not None:
                     if isinstance(primary, SystemExit) and primary.code == 2 and capture.validation_error is not None:

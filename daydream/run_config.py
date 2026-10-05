@@ -49,6 +49,8 @@ class RunConfig:
     pr_repo: str | None = None
     archive: bool = True
     run_eval: bool = True
+    dataset_capture: bool = False
+    dataset_store_path: Path | None = None
 
     branch: str | None = None
     base: str | None = None

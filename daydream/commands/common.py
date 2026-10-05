@@ -87,6 +87,22 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         action="store_true",
         help="Disable automatic archival to ~/.daydream/archive/" if full_help else argparse.SUPPRESS,
     )
+    capture = parser.add_mutually_exclusive_group()
+    capture.add_argument(
+        "--capture-data", action="store_true", dest="dataset_capture",
+        help="Capture validated run evidence in the private local JSONL store (opt-in)"
+        if full_help else argparse.SUPPRESS,
+    )
+    capture.add_argument(
+        "--no-capture-data", action="store_false", dest="dataset_capture",
+        help="Disable local JSONL run evidence capture" if full_help else argparse.SUPPRESS,
+    )
+    parser.set_defaults(dataset_capture=False)
+    parser.add_argument(
+        "--dataset-store", type=Path, dest="dataset_store_path", metavar="DIR",
+        help="Local JSONL store directory (default: ~/.daydream/dataset); requires --capture-data"
+        if full_help else argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--no-eval",
         action="store_false",

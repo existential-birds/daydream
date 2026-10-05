@@ -595,6 +595,17 @@ async def run_deep(
             return 1
         except GitError:
             diff = None
+    if diff is not None and run_artifacts is not None and config.dataset_capture:
+        from daydream.dataset.capture import retain_original_task
+
+        try:
+            retain_original_task(
+                run_artifacts, work=work, config=config,
+                analyzed_revision=AnalyzedRevision(captured_head, captured_base, diff_key(diff), pr_base_sha).to_dict(),
+                diff=diff,
+            )
+        except Exception as exc:
+            print_warning(console, f"Original run evidence could not be retained ({type(exc).__name__}).")
     log = _git_log(target_dir)
     branch = work.head_branch or _git_branch(target_dir)
 
