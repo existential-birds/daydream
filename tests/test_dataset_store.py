@@ -68,7 +68,6 @@ def test_history_pins_temporal_membership_and_preserves_typed_human_decisions(st
     ("run", run_record(**{"PRIVATE-CREDENTIAL-KEY": "PRIVATE-CREDENTIAL-VALUE"}), "invalid_or_unknown_record_schema"),
     *(('observation', observation(author='gpt-6', role=role), 'invalid_or_unknown_record_schema')
       for role in ('rater', 'adjudicator')),
-    ("run", run_record("dirty", provenance={"url": "https://user:password@github.com/owner/repo"}), "privacy_refused"),
     ("observation", observation("unknown", run_id="unknown"), "unknown_run_reference"),
     ("observation", observation("orphan", item_uid="item:99"), "orphan_finding_reference"),
     ("observation", observation(author="bob"), "immutable_identity_conflict"),

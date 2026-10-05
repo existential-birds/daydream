@@ -1,4 +1,4 @@
-"""Versioned JSONL evidence, privacy checks, and content-pinned local snapshots."""
+"""Versioned JSONL evidence and content-pinned private local snapshots."""
 from __future__ import annotations
 
 import fcntl
@@ -18,13 +18,10 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from pydantic import JsonValue, TypeAdapter
 
-from daydream.archive.git_safe import classify_remote_url, normalize_remote_url
-from daydream.archive.scan import scan_serialized_record
 from daydream.artifacts.filesystem import _create_private_directory, _projection_path
 from daydream.artifacts.models import ArtifactVisibilityError
 from daydream.atif import Trajectory
 from daydream.json_utils import atomic_write_bytes, canonical_json
-from daydream.redaction import redact_value
 from daydream.training.adjudication.precedence import effective_adjudication
 from daydream.training.labeler_versions import reply_evidence_digest
 
@@ -89,7 +86,8 @@ _RUN_PAYLOADS = {
         changed_files=_array(_STRING), input_scope={"enum": ["committed", "committed_and_tracked_worktree"]},
         dirty_tracked=_nullable(_BOOL), untracked_files_included={"const": False}),
     "final_state": _object(head_sha=_nullable(_STRING)),
-    "recommended_patch": _object(patch=_STRING, sha256=_SHA, source_sha256=_nullable(_SHA), capture=_nullable(_MAP)),
+    "recommended_patch": _object(optional=("source_sha256",),
+        patch=_STRING, sha256=_SHA, source_sha256=_nullable(_SHA), capture=_nullable(_MAP)),
     "trajectories": _object(documents={**_array(_MAP), "minItems": 1}, root_trajectory_id=_ID,
                             status={"enum": ["complete", "partial"]}, cutoff_at=_STRING),
     "findings": _object(claims=_array(_object(stack=_ID, records={"anyOf": [
@@ -201,7 +199,7 @@ def _validate_observation(record: Record) -> None:
     evidence, correction = record["semantic_evidence"], record.get("correction")
     if correction is not None:
         if correction["status"] == "available":
-            if correction.get("text") is None or not correction.get("redaction_provenance") or hashlib.sha256(
+            if correction.get("text") is None or hashlib.sha256(
                 correction["text"].encode()).hexdigest() != correction.get("captured_sha256"):
                 raise ValueError("invalid captured correction")
         elif correction.get("text") is not None or correction.get("captured_sha256") is not None:
@@ -322,30 +320,6 @@ def observation_record_schema() -> Record:
     return deepcopy(_OBSERVATION_SCHEMA)
 
 
-def sanitize_evidence(value: Any) -> Any:
-    """Copy/redact producer evidence before its captured-content digests are made."""
-    def normalize(child: Any) -> Any:
-        if isinstance(child, dict):
-            return {key: normalize(item) for key, item in child.items()}
-        if isinstance(child, (list, tuple)):
-            return [normalize(item) for item in child]
-        if isinstance(child, str) and classify_remote_url(child):
-            _identity, canonical = normalize_remote_url(child)
-            return canonical if canonical is not None else child
-        return child
-
-    return redact_value(normalize(value))
-
-
-def record_is_private(value: dict[str, Any], serialized: str) -> bool:
-    """Refuse unsafe immutable input rather than silently changing its digests."""
-    try:
-        return (sanitize_evidence(value) == value and "[REDACTION_FAILED]" not in serialized
-                and not scan_serialized_record(serialized).blocking)
-    except Exception:  # noqa: BLE001 - privacy is fail closed
-        return False
-
-
 _DEFAULT_MAX_RECORD_BYTES = 64 * 1024 * 1024
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _DIRECTORIES = ("runs", "observations", "snapshots")
@@ -414,8 +388,6 @@ class LocalRecordStore:
         data = (text + "\n").encode("utf-8")
         if len(data) > self.max_record_bytes:
             raise StoreError("record_too_large")
-        if not record_is_private(record, text):
-            raise StoreError("privacy_refused")
         return data
 
     @contextmanager

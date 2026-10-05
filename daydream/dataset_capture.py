@@ -6,14 +6,13 @@ import hashlib
 import json
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlparse
 
 from daydream import git_ops
 from daydream.archive.git_safe import normalize_remote_url
 from daydream.archive.provenance import capture_executable_provenance
 from daydream.config import REVIEW_OUTPUT_FILE
-from daydream.dataset import sanitize_evidence
 from daydream.deep.diff import _diff_changed_files
 from daydream.deep.records import item_source_uids, record_issues, record_uid
 from daydream.pr_review import compute_fingerprint, extract_item_fields
@@ -182,25 +181,16 @@ def capture_run_record(
     routing_path = deep / "latency-routing.json"
     provenance["latency_routing"] = read_json(routing_path) if review_sources and routing_path.is_file() else None
     provenance["collection_diagnostics"] = acquisition_failures
-    # Redact captured content before hashing it. Producer/source hashes retain
-    # their original semantics and are identified separately from redacted bytes.
-    task = sanitize_evidence(original_task) if original_task is not None else None
-    if isinstance(task, dict) and original_task is not None:
-        task["source_diff_sha256"] = original_task["diff_sha256"]
-        task["diff_sha256"] = hashlib.sha256(str(task["diff"]).encode()).hexdigest()
-        task["redaction"] = {"policy": "daydream.shared.v1", "applied": task["diff"] != original_task["diff"]}
-    captured_patch = sanitize_evidence(patch) if patch is not None else None
     def evidence(value: Any, *, failed: bool = False, absent: str = "unproduced") -> dict[str, Any]:
         return {"status": "available" if value is not None else "failed" if failed else absent,
-                "value": sanitize_evidence(value)}
+                "value": value}
 
     LocalRecordStore(store_path).commit_run({"schema_version": "daydream.run.v1",
         "run_id": artifacts.session_id, "captured_at": selected.cutoff_at if selected else now_iso_utc(),
-        "outcome": outcome, "original_task": evidence(task, absent="unavailable"),
+        "outcome": outcome, "original_task": evidence(original_task, absent="unavailable"),
         "final_state": evidence({"head_sha": final_head}),
         "recommended_patch": evidence({
-            "patch": captured_patch, "sha256": hashlib.sha256(str(captured_patch).encode()).hexdigest(),
-            "source_sha256": hashlib.sha256(patch.encode()).hexdigest(),
+            "patch": patch, "sha256": hashlib.sha256(patch.encode()).hexdigest(),
             "capture": verification.get("recommended-capture.json"),
         } if patch is not None else None),
         "trajectories": evidence({"documents": documents, "root_trajectory_id": selected.root_trajectory_id,
@@ -210,7 +200,7 @@ def capture_run_record(
             failed="merged-items.json" in acquisition_failures or any(
                 name.startswith("stack-") and name.endswith("-records.json") for name in acquisition_failures)),
         "verification": evidence(verification or None, failed="recommendation-verdicts.json" in acquisition_failures),
-        "scoring": evidence(scoring if has_scoring else None), "provenance": sanitize_evidence(provenance),
+        "scoring": evidence(scoring if has_scoring else None), "provenance": provenance,
         "completeness": {"artifact_acquisition": "failed" if acquisition_failures else "complete",
             "trajectory": "unproduced" if selected is None else selected.status,
             "terminal_review": "unproduced" if coverage is None else "available"},
@@ -219,19 +209,10 @@ def capture_run_record(
 
 def capture_scoring(inputs: ScoringInputs, review_text: str | None) -> dict[str, Any]:
     """Keep the producer's exact scoring length and existing intrinsic reducer."""
-    captured_text = sanitize_evidence(review_text)
-    return cast(dict[str, Any], sanitize_evidence({
+    return {
         "verifier_verdicts": inputs.verifier_verdicts,
         "format_valid": inputs.format_valid,
-        "review_text": captured_text,
-        "source_review_sha256": hashlib.sha256(review_text.encode()).hexdigest() if review_text is not None else None,
-        "review_text_redaction": {
-            "policy": "daydream.shared.v1",
-            "applied": captured_text != review_text,
-            "captured_sha256": (
-                hashlib.sha256(captured_text.encode()).hexdigest() if captured_text is not None else None
-            ),
-        },
+        "review_text": review_text,
         "length": inputs.length,
         "reward_policy": {"version": REWARD_VERSION, "configuration": {
             **vars(DEFAULT_WEIGHTS),
@@ -240,4 +221,4 @@ def capture_scoring(inputs: ScoringInputs, review_text: str | None) -> dict[str,
         }},
         "persisted_breakdown": score_trajectory(inputs).to_dict(),
         "posterior_cost": None,
-    }))
+    }

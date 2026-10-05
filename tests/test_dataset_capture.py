@@ -48,12 +48,13 @@ async def test_dirty_original_input_and_history_without_archive_or_findings_expo
     repo = Path(config.target or "")
     head = git_ops.head_sha(repo)
     base = git_ops.resolve_diff_merge_base(repo, "main", head)
-    (repo / "api.py").write_text("# tracked dirty input\n")
+    (repo / "api.py").write_text(f"# tracked dirty input: {_SENSITIVE}\n")
     diff = git_ops.diff(repo, "main")
     assert await run(config) == 0
     raw = captured(config)
     task = raw["original_task"]["value"]
     assert task["diff"] == diff and task["diff_sha256"] == hashlib.sha256(diff.encode()).hexdigest()
+    assert "redaction" not in task and "source_diff_sha256" not in task
     assert (task["analyzed_revision"]["head_sha"], task["analyzed_revision"]["merge_base_sha"]) == (head, base)
     assert task["input_scope"] == "committed_and_tracked_worktree" and task["dirty_tracked"]
     assert raw["outcome"] == "success" and raw["trace_id"] is None
@@ -62,19 +63,18 @@ async def test_dirty_original_input_and_history_without_archive_or_findings_expo
     assert raw["verification"]["status"] == "unproduced"
     review = (repo / ".review-output.md").read_text()
     scoring = raw["scoring"]["value"]
-    assert _SENSITIVE in review and "sk-offlineplaceholder" not in scoring["review_text"]
-    assert "[REDACTED_API_KEY]" in scoring["review_text"] and scoring["review_text_redaction"]["applied"]
-    assert scoring["length"] == len(review) != len(scoring["review_text"])
-    assert scoring["source_review_sha256"] == hashlib.sha256(review.encode()).hexdigest()
+    assert _SENSITIVE in review and scoring["review_text"] == review
+    assert scoring["length"] == len(review)
+    assert "review_text_redaction" not in scoring and "source_review_sha256" not in scoring
     assert scoring["persisted_breakdown"]["composite"] is None
     assert scoring["persisted_breakdown"]["correctness_per_finding"] is None and scoring["posterior_cost"] is None
-    text = "Use [REDACTED] through the environment."
+    text = f"Use {_SENSITIVE} through the environment."
     replies = [{"reply_id": "reply:123", "body_sha256": "a" * 64, "disposition": "rejected"}]
     correction = parse_observation(observation(run_id=raw["run_id"], item_uid=item["item_uid"],
         semantic_evidence=replies, evidence_digest=reply_evidence_digest(replies),
         evidence_digest_scheme="reply-evidence-v1", correction={
         "status": "available", "source_reply_id": "reply:123", "text": text, "body_sha256": "a" * 64,
-        "captured_sha256": hashlib.sha256(text.encode()).hexdigest(), "redaction_provenance": {"policy": "shared-v1"}}))
+        "captured_sha256": hashlib.sha256(text.encode()).hexdigest()}))
     assert config.dataset_store_path is not None
     store = LocalRecordStore(config.dataset_store_path)
     assert store.append_observation(correction).committed and not store.append_observation(correction).committed

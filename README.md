@@ -245,11 +245,13 @@ Runtime output publication is all-or-nothing at finalization: invalid run identi
 
 New runs can also collect raw JSONL evidence with `--capture-data`. Capture is off by default.
 Use `--dataset-store DIR` to choose private local storage (default: `~/.daydream/dataset`).
+Capture preserves evidence as produced without additional redaction or secret scanning.
+The user controls this local data and is responsible for reviewing it before sharing.
 Collection works with `--no-archive` and tracing disabled.
 It retains the original analyzed revisions and input diff, trajectories, structured claims and
 verification/fix associations at the existing frozen finalization boundary, including cooperative
-interruption. SIGKILL and power loss before that boundary can lose uncaptured evidence. Privacy
-or persistence refusal emits a sanitized collection diagnostic and preserves completed review
+interruption. SIGKILL and power loss before that boundary can lose uncaptured evidence. A
+persistence refusal emits a sanitized collection diagnostic and preserves completed review
 outputs. Existing archives remain available; historical migration, live outcome
 harvesting, report generation, and corpus cutover are separate work.
 
