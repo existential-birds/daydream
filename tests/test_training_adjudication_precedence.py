@@ -20,6 +20,7 @@ def _obs(
     observed: str = "2026-08-30T10:00:00+00:00",
 ) -> dict[str, Any]:
     return {
+        "observation_id": f"{labeler}:{role}:{observed}:{digest}:{disposition}",
         "record_id": R1,
         "disposition": disposition,
         "evidence_digest": digest,

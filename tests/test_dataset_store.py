@@ -12,7 +12,10 @@ import pytest
 
 from daydream.dataset import LocalRecordStore, StoreError, parse_run, run_record_schema
 from daydream.dataset_capture import capture_scoring
+from daydream.training.labeler_versions import reply_evidence_digest
+from daydream.training.record_evidence import sessions_from_snapshot
 from daydream.training.reward import ScoringInputs
+from tests.harness.adjudication import reply_evidence
 from tests.harness.dataset import observation, read_records, run_record
 
 
@@ -125,6 +128,31 @@ def test_history_pins_temporal_membership_and_preserves_typed_human_decisions(st
     judgment = newer.effective_judgment("run-1", "item:1")
     assert judgment["conflict"] and not judgment["gold_eligible"]
     assert next(obs for obs in newer.observations if obs["observation_id"] == "bob")["payload"]["record_id"]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_snapshot_views_resolve_simultaneous_source_generations_consistently(
+    store: LocalRecordStore, reverse: bool,
+) -> None:
+    generations = [("a", "z-producer", "old context"), ("z", "a-producer", "new context")]
+    for identity, author, text in reversed(generations) if reverse else generations:
+        semantic, capture = reply_evidence("123", text)
+        store.append_observation(observation(identity, author=author, role="automatic",
+            semantic_evidence=[semantic], evidence_digest=reply_evidence_digest([semantic]),
+            evidence_digest_scheme="reply-evidence-v1", reply_captures=[capture],
+            payload={"type": "finding-judgment", "disposition": "unanswered", "rationale": "no vote"}))
+    expected, capture = reply_evidence("123", "new context")
+    store.append_observation(observation("human", observed_at="2026-10-05T12:00:00Z",
+        semantic_evidence=[expected], evidence_digest=reply_evidence_digest([expected]),
+        evidence_digest_scheme="reply-evidence-v1"))
+    frozen = read_records(store)
+    common = frozen.effective_judgment("run-1", "item:1")
+    projected = sessions_from_snapshot(frozen)[0]["resolutions"][0]
+    for view in (common, projected):
+        assert view["disposition"] == "accepted"
+        assert view["evidence"] == [expected]
+        assert view["evidence_digest"] == reply_evidence_digest([expected])
+        assert view["reply_captures"] == [capture]
 
 
 @pytest.mark.parametrize(("kind", "raw", "diagnostic"), [

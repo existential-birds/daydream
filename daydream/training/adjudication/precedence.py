@@ -16,6 +16,11 @@ def _is_human(obs: Mapping[str, Any]) -> bool:
     return obs.get("role") in HUMAN_ROLES
 
 
+def observation_recency(observation: Mapping[str, Any]) -> tuple[datetime, str]:
+    """Order source generations by observation time and immutable identity."""
+    return datetime.fromisoformat(str(_required(observation, "observed_at"))), str(observation["observation_id"])
+
+
 def _sorted_by_recency(observations: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     return sorted(
         observations,
@@ -106,7 +111,7 @@ def effective_adjudication(observations: Sequence[Mapping[str, Any]]) -> dict[st
     ordered = _sorted_by_recency(observations)
     automatic = [o for o in ordered if o.get("role") == "automatic"]
     if automatic:
-        current_digest = _required(automatic[-1], "evidence_digest")
+        current_digest = _required(max(automatic, key=observation_recency), "evidence_digest")
         ordered = [o for o in ordered if _required(o, "evidence_digest") == current_digest]
 
     adjudicators = [o for o in ordered if o.get("role") == "adjudicator"]

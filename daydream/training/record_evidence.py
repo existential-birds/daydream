@@ -11,7 +11,11 @@ from typing import Any
 
 from daydream.dataset import SnapshotRecords
 from daydream.json_utils import canonical_json
-from daydream.training.adjudication.precedence import effective_adjudication, retained_reply_content
+from daydream.training.adjudication.precedence import (
+    effective_adjudication,
+    observation_recency,
+    retained_reply_content,
+)
 from daydream.training.labeler_versions import reply_evidence_digest
 from daydream.training.record_identity import record_finding_id
 
@@ -106,7 +110,7 @@ def sessions_from_snapshot(records: SnapshotRecords, *, overlay_judgments: bool 
             # apply only to the same digest, so edited replies reopen prior labels.
             automatic = [o for o in history if o["role"] == "automatic"]
             if automatic:
-                current = max(automatic, key=lambda o: (datetime.fromisoformat(o["observed_at"]), o["observation_id"]))
+                current = max(automatic, key=observation_recency)
                 evidence = current["semantic_evidence"]
                 disposition = current["payload"]["disposition"]
                 digest = current["evidence_digest"]
@@ -115,7 +119,7 @@ def sessions_from_snapshot(records: SnapshotRecords, *, overlay_judgments: bool 
                 digest = raw.get("evidence_digest") or reply_evidence_digest(evidence)
                 scheme = "reply-evidence-v1"
             elif history:
-                current = max(history, key=lambda o: (datetime.fromisoformat(o["observed_at"]), o["observation_id"]))
+                current = max(history, key=observation_recency)
                 evidence = current["semantic_evidence"]
                 digest = current["evidence_digest"]
                 scheme = current.get("evidence_digest_scheme", "canonical-json-v1")
