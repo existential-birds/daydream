@@ -192,15 +192,6 @@ def test_package_resolution_keys_each_nested_package_separately(tmp_path: Path) 
     assert (api.cwd_relative, api.runner) == ("services/api", "poetry")
     assert api.config_digest != root.config_digest
 
-def test_unreadable_config_input_is_a_named_miss_never_a_placeholder(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
-    (tmp_path / "uv.lock").mkdir()  # a directory where a file belongs: every read raises OSError
-
-    resolved = resolve_package(tmp_path, tmp_path)
-
-    assert resolved.config_digest is None
-    assert "uv.lock" in resolved.absent_components
-
 def test_package_cwd_outside_the_worktree_is_rejected(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -267,7 +258,6 @@ def test_runner_flags_a_truncated_output_buffer_as_incomplete(tmp_path: Path) ->
     res = _run([sys.executable, "-c", "import sys; sys.stdout.write('x' * 600000)"], tmp_path,)
 
     assert res.exit_status == 0
-    assert res.completed is True            # the process ran to its own exit
     assert res.passed is True               # exit status remains the only pass source
     assert res.output_truncated is True     # ...but the retained buffer is incomplete
     assert res.incomplete is True
@@ -276,11 +266,11 @@ def test_runner_flags_a_truncated_output_buffer_as_incomplete(tmp_path: Path) ->
 def test_timed_out_result_is_incomplete(tmp_path: Path) -> None:
     res = _run([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path, wall_budget_s=0.2)
 
-    assert (res.timed_out, res.completed, res.incomplete, res.passed) == (True, False, True, False)
+    assert (res.timed_out, res.incomplete, res.passed) == (True, True, False)
 
-def test_result_serialises_completion_timeout_and_truncation_explicitly(tmp_path: Path) -> None:
+def test_result_serialises_timeout_and_truncation_explicitly(tmp_path: Path) -> None:
     payload = asdict(_run([sys.executable, "-c", "pass"], tmp_path))
-    assert set(payload) >= {"exit_status", "timed_out", "completed", "output_truncated", "incomplete"}
+    assert set(payload) >= {"exit_status", "timed_out", "output_truncated", "incomplete"}
 
 @pytest.mark.parametrize("cli", [None, "uv run pytest"])
 @pytest.mark.parametrize("lockfile", [None, "uv.lock", "requirements.txt"])

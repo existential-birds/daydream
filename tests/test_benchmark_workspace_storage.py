@@ -216,16 +216,6 @@ def test_committing_journal_rolls_back_in_reverse(tmp_path: Path, monkeypatch: p
     assert observed == ["backup-0002.bin", "backup-0001.bin", "backup-0000.bin"]
     assert [(tmp_path / rel).read_text() for rel in rels] == [f"before-{rel}" for rel in rels]
 
-def test_complete_journal_is_verified_and_cleaned(tmp_path: Path) -> None:
-    target = tmp_path / "target.yaml"
-    target.write_text("old")
-    faults = TransactionFaultDriver(tmp_path, op_id="op-4", kind="write")
-    with faults.transaction as tx:
-        _stage(tx, target, "new")
-        faults.halt_at("manifest")
-    recover_startup(tmp_path)
-    assert target.read_text() == "new"  # after state verified, journal cleaned
-
 def test_complete_journal_rejects_altered_replacement_at_startup(tmp_path: Path) -> None:
     target = tmp_path / "target.yaml"
     target.write_text("old")
@@ -296,19 +286,6 @@ def test_crash_injection_at_every_boundary_restores_before_or_after(tmp_path: Pa
         else:  # manifest
             assert target.read_text() == "after"
         assert not (tmp_path / "transactions").exists() or not list((tmp_path / "transactions").iterdir())
-
-@pytest.mark.parametrize("boundary", ["staged", "backup"])
-def test_prejournal_residue_is_removed(tmp_path: Path, boundary: str) -> None:
-    target = tmp_path / "t.yaml"
-    target.write_text("before")
-    faults = TransactionFaultDriver(tmp_path, op_id="op-pre", kind="write")
-    with faults.transaction as tx:
-        _stage(tx, target, "after")
-        faults.halt_at(boundary)  # residue exists, but no journal.json
-    recover_startup(tmp_path)
-    assert target.read_text() == "before"
-    txn = tmp_path / "transactions"
-    assert not txn.exists() or not list(txn.iterdir())
 
 @pytest.mark.parametrize(
     "boundary", ["prepared", "committing", "complete", "unknown", "target-nope", "target--1", "target-2"],

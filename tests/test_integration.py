@@ -2,7 +2,6 @@
 import asyncio
 import json
 import re
-import threading
 import time
 from collections.abc import AsyncGenerator, Callable
 from io import StringIO
@@ -40,7 +39,12 @@ from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote, commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.phase_backend import PhaseDispatchBackend
 from tests.harness.processes import wait_for_process_group_exit
-from tests.harness.remote_ci import NoCIRemote, _wait_for_pushed_sha, write_pre_push_sha_hook
+from tests.harness.remote_ci import (
+    NoCIRemote,
+    finish_remote_ci_fake,
+    seed_pr_identity,
+    start_remote_ci_fake,
+)
 from tests.harness.stub_backend import force_interactive, install_stub_backend, silence
 from tests.test_deep_orchestrator import _install_stub_backend, _silence
 from tests.test_runner import _fix_item, _seed_fix_resume
@@ -304,137 +308,6 @@ def _remote_ci_push_project(tmp_path: Path) -> tuple[Path, Path, Path, str]:
     marker = tmp_path / "pre push hook ran"
     return project, remote, marker, raw_remote
 
-def _seed_remote_ci_pr(fake_gh: FakeGh, *, head_sha: str) -> None:
-    """Seed P04 identity; Task 5 extends this with exact REST evidence."""
-    fake_gh.set_response("repo-view", value="base-user/project")
-    fake_gh.serve_pr_view(
-        {
-            "number": 7, "title": "Fix", "body": "", "state": "OPEN", "headRefName": "feature", "baseRefName": "main",
-            "headRefOid": head_sha, "url": "https://github.com/base-user/project/pull/7",
-            "headRepository": {"nameWithOwner": "fork-user/project"}, "headRepositoryOwner": {"login": "fork-user"},
-        }
-    )
-
-def _start_remote_ci_fake_after_push(
-    project: Path, fake_gh: FakeGh, hook_marker: Path, *, outcome: str,
-) -> tuple[threading.Thread, list[BaseException], threading.Event]:
-    """Let the real pre-push hook publish the new SHA to the external fake."""
-    sha_path = hook_marker.with_name(hook_marker.name + " sha")
-    ready_path = hook_marker.with_name(hook_marker.name + " ready")
-    write_pre_push_sha_hook(project, sha_path=sha_path, ready_path=ready_path, marker=hook_marker)
-    errors: list[BaseException] = []
-    stop = threading.Event()
-    def seed() -> None:
-        try:
-            sha = _wait_for_pushed_sha(sha_path, stop)
-            if sha is None:
-                return
-            pr_row = {
-                "number": 7, "html_url": "https://github.com/base-user/project/pull/7", "state": "open",
-                "base": {"ref": "main", "repo": {"full_name": "base-user/project"}},
-                "head": {"ref": "feature", "sha": sha, "repo": {"full_name": "fork-user/project"}},
-                "merge_commit_sha": "e" * 40 if outcome == "merge-delayed" else None,
-            }
-            if outcome == "blocking":
-                fake_gh.serve_blocking_process(
-                    "GET repos/base-user/project/pulls/7", pid_file=hook_marker.with_name(hook_marker.name + " pids"),
-                )
-                ready_path.write_text("ready\n")
-                return
-            fake_gh.set_response("GET", "repos/base-user/project/pulls/7", pr_row)
-            fake_gh.set_response("GET", "repos/base-user/project/rules/branches/main?per_page=100&page=1", [])
-            required_name = "Build [matrix]" if outcome == "failed" else "Build"
-            pinned_checks = (
-                [{"context": required_name, "app_id": 10}]
-                if outcome in {"failed", "delayed", "merge-delayed"}
-                else []
-            )
-            fake_gh.set_response(
-                "GET", "repos/base-user/project/branches/main/protection/required_status_checks",
-                {"strict": False, "contexts": [], "checks": pinned_checks},
-            )
-            fake_gh.set_response(
-                "GET", "repos/base-user/project/actions/workflows?per_page=100&page=1",
-                {"total_count": 0, "workflows": []},
-            )
-            checks: list[dict[str, object]] = []
-            if outcome in {"failed", "delayed", "merge-delayed"}:
-                checks.append(
-                    {
-                        "id": 1, "name": required_name, "head_sha": sha, "app": {"id": 10}, "status": "completed",
-                        "conclusion": "failure" if outcome == "failed" else "success",
-                        "details_url": (
-                            "https://github.com/base-user/project/actions/runs/[matrix]/7"
-                            if outcome == "failed"
-                            else "https://github.com/base-user/project/actions/runs/7"
-                        ),
-                        "output": {
-                            "title": "Build failed", "summary": "secret=top-secret build failed",
-                            "text": "must not persist",
-                        },
-                    }
-                )
-            if outcome == "failed":
-                checks.append(
-                    {
-                        "id": 2, "name": "Lint [optional]", "head_sha": sha, "app": {"id": 20}, "status": "completed",
-                        "conclusion": "failure",
-                        "details_url": "https://github.com/base-user/project/actions/runs/[optional]/8",
-                        "output": {
-                            "title": "Advisory lint failed", "summary": "advisory failure", "text": "must not persist",
-                        },
-                    }
-                )
-            check_key = (
-                "GET repos/base-user/project/commits/"
-                f"{sha}/check-runs?filter=latest&per_page=100&page=1"
-            )
-            if outcome == "delayed":
-                fake_gh.set_response_sequence(
-                    check_key,
-                    [
-                        {"total_count": 0, "check_runs": []}, {"total_count": 1, "check_runs": checks},
-                        {"total_count": 1, "check_runs": checks},
-                    ],
-                )
-            else:
-                fake_gh.set_response(
-                    "GET", check_key.removeprefix("GET "), {"total_count": len(checks), "check_runs": checks},
-                )
-            fake_gh.set_response("GET", f"repos/base-user/project/commits/{sha}/statuses?per_page=100&page=1", [])
-            if outcome == "merge-delayed":
-                merge_sha = "e" * 40
-                merge_key = (
-                    "GET repos/base-user/project/commits/"
-                    f"{merge_sha}/check-runs?filter=latest&per_page=100&page=1"
-                )
-                pending = dict(checks[0], head_sha=merge_sha, status="in_progress", conclusion=None)
-                passed = dict(checks[0], head_sha=merge_sha)
-                fake_gh.set_response_sequence(
-                    merge_key,
-                    [
-                        {"total_count": 1, "check_runs": [pending]}, {"total_count": 1, "check_runs": [passed]},
-                        {"total_count": 1, "check_runs": [passed]},
-                    ],
-                )
-                fake_gh.set_response(
-                    "GET", f"repos/base-user/project/commits/{merge_sha}/statuses?per_page=100&page=1", [],
-                )
-            ready_path.write_text("ready\n")
-        except BaseException as exc:  # thread failures are re-raised by the test
-            errors.append(exc)
-            ready_path.write_text("failed\n")
-    thread = threading.Thread(target=seed, daemon=True)
-    thread.start()
-    return thread, errors, stop
-
-def _finish_remote_ci_fake(thread: threading.Thread, errors: list[BaseException], stop: threading.Event) -> None:
-    """Stop and join a seeder before its owning test releases fixture state."""
-    stop.set()
-    thread.join(timeout=5)
-    assert not thread.is_alive(), "remote-CI seeding thread did not stop"
-    assert errors == []
-
 async def _wait_for_remote_ci_pids(path: Path, *, sha_path: Path, runner_task: asyncio.Task[int]) -> dict[str, int]:
     while not sha_path.exists():
         if runner_task.done():
@@ -484,17 +357,15 @@ async def test_runner_remote_ci_red_fails_after_real_push(
     """A locally green real push cannot complete without exact remote CI."""
     project, remote, hook_marker, raw_remote = _remote_ci_push_project(tmp_path)
     old_sha = _git(project, "rev-parse", "HEAD")
-    _seed_remote_ci_pr(fake_gh, head_sha=old_sha)
-    seed_thread, seed_errors, seed_stop = _start_remote_ci_fake_after_push(
-        project, fake_gh, hook_marker, outcome="failed"
-    )
+    seed_pr_identity(fake_gh, head_sha=old_sha)
+    seeder = start_remote_ci_fake(project, fake_gh, hook_marker, outcome="failed")
     rendered = StringIO()
     monkeypatch.setattr("daydream.deep.remote_ci_steps.console", Console(file=rendered, width=160))
     install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
     try:
         exit_code = await run(_shallow_pr_config(make_config, project))
     finally:
-        _finish_remote_ci_fake(seed_thread, seed_errors, seed_stop)
+        finish_remote_ci_fake(seeder)
     assert exit_code == 1
     new_sha = _git(project, "rev-parse", "HEAD")
     assert new_sha != old_sha
@@ -542,7 +413,7 @@ async def test_runner_remote_ci_replaces_stale_and_waits_for_exact_sha(
     """Old green evidence cannot satisfy a new push that registers later."""
     project, remote, hook_marker, _raw_remote = _remote_ci_push_project(tmp_path)
     old_sha = _git(project, "rev-parse", "HEAD")
-    _seed_remote_ci_pr(fake_gh, head_sha=old_sha)
+    seed_pr_identity(fake_gh, head_sha=old_sha)
     stale = project / ".daydream" / "deep" / "remote-ci-verdict.json"
     stale.parent.mkdir(parents=True)
     stale.write_text(
@@ -550,7 +421,7 @@ async def test_runner_remote_ci_replaces_stale_and_waits_for_exact_sha(
             {"schema_version": 1, "session_id": "old-session", "status": "passed", "target": {"pushed_sha": old_sha}}
         )
     )
-    seed_thread, seed_errors, seed_stop = _start_remote_ci_fake_after_push(
+    seeder = start_remote_ci_fake(
         project, fake_gh, hook_marker, outcome=ci_variant
     )
     monkeypatch.setattr(
@@ -561,7 +432,7 @@ async def test_runner_remote_ci_replaces_stale_and_waits_for_exact_sha(
     try:
         exit_code = await run(_shallow_pr_config(make_config, project))
     finally:
-        _finish_remote_ci_fake(seed_thread, seed_errors, seed_stop)
+        finish_remote_ci_fake(seeder)
     assert exit_code == 0
     new_sha = _git(project, "rev-parse", "HEAD")
     assert new_sha != old_sha
@@ -598,10 +469,8 @@ async def test_runner_remote_ci_keyboard_interrupt_preserves_interrupted_phase_r
     """A host interrupt stays distinct after its cancelled handoff is persisted."""
     project, remote, hook_marker, _raw_remote = _remote_ci_push_project(tmp_path)
     old_sha = _git(project, "rev-parse", "HEAD")
-    _seed_remote_ci_pr(fake_gh, head_sha=old_sha)
-    seed_thread, seed_errors, seed_stop = _start_remote_ci_fake_after_push(
-        project, fake_gh, hook_marker, outcome="delayed"
-    )
+    seed_pr_identity(fake_gh, head_sha=old_sha)
+    seeder = start_remote_ci_fake(project, fake_gh, hook_marker, outcome="delayed")
     async def interrupt_fetch(
         _self: remote_ci.GitHubRemoteCIFetcher, _target: remote_ci.RemoteCITarget, *, budget: Any,
     ) -> remote_ci.RemoteCISnapshot:
@@ -613,7 +482,7 @@ async def test_runner_remote_ci_keyboard_interrupt_preserves_interrupted_phase_r
         with pytest.raises(KeyboardInterrupt):
             await run(_shallow_pr_config(make_config, project, archive=False))
     finally:
-        _finish_remote_ci_fake(seed_thread, seed_errors, seed_stop)
+        finish_remote_ci_fake(seeder)
     new_sha = _git(project, "rev-parse", "HEAD")
     assert new_sha != old_sha
     assert _git(remote, "rev-parse", "refs/heads/feature") == new_sha
@@ -660,10 +529,8 @@ async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
     unrelated.write_bytes(b'{"keep":"operator notes"}\n')
     if resume:
         _seed_fix_resume(project, [_fix_item()])
-    _seed_remote_ci_pr(fake_gh, head_sha=old_sha)
-    seed_thread, seed_errors, seed_stop = _start_remote_ci_fake_after_push(
-        project, fake_gh, hook_marker, outcome="blocking"
-    )
+    seed_pr_identity(fake_gh, head_sha=old_sha)
+    seeder = start_remote_ci_fake(project, fake_gh, hook_marker, outcome="blocking")
     install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
     task = asyncio.create_task(
         run(_shallow_pr_config( make_config, project, archive=False, start_at="fix" if resume else "ttt", ))
@@ -693,7 +560,7 @@ async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
             with pytest.raises(asyncio.CancelledError):
                 await task
         finally:
-            _finish_remote_ci_fake(seed_thread, seed_errors, seed_stop)
+            finish_remote_ci_fake(seeder)
             if pids is not None:
                 await wait_for_process_group_exit(pids["direct"])
     verdict = json.loads(verdict_path.read_text())

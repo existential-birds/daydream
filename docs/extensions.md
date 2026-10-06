@@ -413,8 +413,9 @@ list is an error, never a narrower-than-asked authorization.
 
 Granting is the coordinator's call, never the parser's: only the turn's *own*
 request with its own per-path evidence may widen the policy, through
-`AuthorizedFixFootprint.authorize_scope_request(...)` — the same shape and the
-same audited `origin="scope_request"` event as `authorize_new_generated`. A path
+`AuthorizedFixFootprint.authorize_widened_path(..., action="approve_scope",
+origin="scope_request")` — the same widening shape as a policy-approved
+generated path, recorded under its own `origin="scope_request"`. A path
 that merely appears in test output is not evidence of authorization, and a
 request that cannot be canonicalized grants nothing.
 
@@ -433,7 +434,7 @@ during the run and published at finalization like every other generated output:
   `cumulative_cost_usd`, `granted_allowance_s`, `executions`, `scope_request`,
   `unchanged_evidence`, `progress_evidence`, `next_experiment`,
   `completed_experiments`, `disproven_hypotheses`, `last_transition_reason`,
-  `checkpoint_ref`, `last_execution_budget`, and `diagnostics`. Both files carry
+  `checkpoint_ref`, and `diagnostics`. Both files carry
   a `format_version`; both are merged read-modify-write, in the shape of
   `deep/routing_record.py`, so a resume never erases an earlier execution's
   evidence.
@@ -441,8 +442,8 @@ during the run and published at finalization like every other generated output:
 Job states are `running`, `paused`, `ready_to_resume`, `validating`, `completed`,
 `blocked`, and `exhausted`. A job is **structurally fail-closed**: only
 `completed` may report a passing verdict or authorize a commit
-(`cannot_report_green` / `cannot_authorize_commit`). No absolute clock reading is
-ever persisted — `execution_allowance_s()` derives each execution's allowance from
+(`cannot_report_green`). No absolute clock reading is ever persisted —
+`execution_allowance_s()` derives each execution's allowance from
 the stored consumption, so every deadline is process-local. A job's bounds are
 stored, not re-resolved, so a resumed job cannot inherit a broader policy than it
 was granted. A green run that never repaired writes no job record and takes no

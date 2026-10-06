@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from daydream.config_file import DaydreamFileConfig, _coerce_non_negative_float, load_file_config
-from tests.harness.config import write_daydream_pyproject, write_target_hub_key
+from tests.harness.config import write_daydream_pyproject
 
 
 def test_improve_config_table_parses_service_roots(tmp_path: Path) -> None:
@@ -75,20 +75,20 @@ def test_dotfile_wins_over_pyproject(tmp_path: Path) -> None:
     (tmp_path / ".daydream.toml").write_text('model = "from-dotfile"\n[phases.fix]\nbackend = "codex"\n')
     cfg = load_file_config(tmp_path)
     assert cfg.model == "from-dotfile"  # .daydream.toml overrides pyproject, per-key
-    assert cfg.phase_backend("fix") == "codex"
-    assert cfg.phase_model("review") is None
+    assert cfg.phases["fix"]["backend"] == "codex"
+    assert "review" not in cfg.phases
 
 def test_absent_config_is_empty(tmp_path: Path) -> None:
     cfg = load_file_config(tmp_path)
-    assert cfg.model is None and cfg.backend is None and cfg.phase_model("fix") is None
-    assert cfg.reasoning_effort is None and cfg.phase_reasoning_effort("fix") is None
+    assert cfg.model is None and cfg.backend is None and cfg.phases == {}
+    assert cfg.reasoning_effort is None
 
 def test_reasoning_effort_global_and_phase_override(tmp_path: Path) -> None:
     (tmp_path / ".daydream.toml").write_text('reasoning_effort = "medium"\n[phases.fix]\nreasoning_effort = "high"\n')
     cfg = load_file_config(tmp_path)
     assert cfg.reasoning_effort == "medium"
-    assert cfg.phase_reasoning_effort("fix") == "high"
-    assert cfg.phase_reasoning_effort("review") is None
+    assert cfg.phases["fix"]["reasoning_effort"] == "high"
+    assert "review" not in cfg.phases
 
 def test_malformed_toml_raises_valueerror(tmp_path: Path) -> None:
     (tmp_path / ".daydream.toml").write_text("model = =bad")
@@ -101,8 +101,8 @@ def test_per_key_merge_preserves_pyproject_phase(tmp_path: Path) -> None:
     )
     (tmp_path / ".daydream.toml").write_text('[phases.fix]\nbackend = "codex"\n')
     cfg = load_file_config(tmp_path)
-    assert cfg.phase_model("review") == "pyproject-review"
-    assert cfg.phase_backend("fix") == "codex"
+    assert cfg.phases["review"]["model"] == "pyproject-review"
+    assert cfg.phases["fix"]["backend"] == "codex"
     assert cfg.backend == "claude"
 
 def test_config_has_no_bench_field(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
@@ -127,7 +127,7 @@ def test_bool_key_non_bool_degrades_to_none(tmp_path: Path, key: str) -> None:
     assert getattr(cfg, key) is None
 
 def test_target_trajectory_hub_repo_key_is_ignored(tmp_path: Path) -> None:
-    write_target_hub_key(tmp_path)
+    write_daydream_pyproject(tmp_path, trajectory_hub_repo="evil/repo")
     cfg = load_file_config(tmp_path)
     assert not hasattr(cfg, "trajectory_hub_repo")  # field removed from the model
 
@@ -155,7 +155,7 @@ def test_supervision_config(tmp_path: Path, content: str, expected: tuple[str | 
 def test_empty_config_helper() -> None:
     cfg = DaydreamFileConfig()
     assert cfg.model is None and cfg.backend is None
-    assert cfg.phase_model("fix") is None and cfg.phase_backend("review") is None
+    assert cfg.phases == {}
 
 @pytest.mark.parametrize(("raw", "expected"),
     [pytest.param(-0.1, None, id="negative"), pytest.param(float("nan"), None, id="nan"),

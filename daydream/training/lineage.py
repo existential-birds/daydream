@@ -54,14 +54,10 @@ Covers exactly the AC5 list — base model, tokenizer/renderer, max sequence
 length, LoRA rank + target modules, optimizer + learning rate, corpus digest,
 split digest, profile policy, reward version + weights, and exact stack pins
 (verifiers + prime-rl versions). The AC5 list is the floor, not the ceiling:
-adding a field to :class:`RunIdentity` automatically locks it.
+adding a field to :class:`RunIdentity` automatically locks it. That floor is
+asserted in ``tests/test_training_lineage_guard.py``, so it is enforced once,
+in CI, instead of as a second executable copy of the list here.
 """
-
-assert frozenset(LOCKED_FIELDS) >= {
-    "base_model", "tokenizer_renderer", "max_seq_len", "lora_rank", "lora_targets",
-    "optimizer", "learning_rate", "corpus_digest", "split_digest", "profile_policy",
-    "reward_version", "reward_weights", "stack_pins",
-}
 
 
 class ResumeAborted(ValueError):

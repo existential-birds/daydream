@@ -75,29 +75,27 @@ def _absent_names(
     return tuple(sorted(set(identity.absent_components) | set(target.absent_components)))
 
 
+def _component_matches(
+    name: str, identity: TestExecutionIdentity, target: ReuseTarget
+) -> bool:
+    """Compare one named component; ``tree_key`` binds both identity tree keys."""
+    if name == "tree_key":
+        return (
+            identity.input_tree_key == target.tree_key
+            and identity.output_tree_key == target.tree_key
+        )
+    return bool(getattr(identity, name) == getattr(target, name))
+
+
 def _component_mismatches(
     identity: TestExecutionIdentity, target: ReuseTarget
 ) -> tuple[str, ...]:
     """Return the mismatching component names in the fixed compare order."""
-    comparisons: dict[str, bool] = {
-        "session_id": identity.session_id == target.session_id,
-        "argv": identity.argv == target.argv,
-        "cwd_relative": identity.cwd_relative == target.cwd_relative,
-        "runner": identity.runner == target.runner,
-        "interpreter": identity.interpreter == target.interpreter,
-        "config_digest": identity.config_digest == target.config_digest,
-        "tree_key": (
-            identity.input_tree_key == target.tree_key
-            and identity.output_tree_key == target.tree_key
-        ),
-        "head_sha": identity.head_sha == target.head_sha,
-        "branch": identity.branch == target.branch,
-    }
     exempt = {"head_sha", "branch"} if target.post_commit_verified else set()
     return tuple(
         name
         for name in _COMPONENT_ORDER
-        if name not in exempt and not comparisons[name]
+        if name not in exempt and not _component_matches(name, identity, target)
     )
 
 

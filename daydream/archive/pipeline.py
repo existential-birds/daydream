@@ -104,26 +104,6 @@ def _read_session_bound_json_artifact(
     return data
 
 
-def _read_fix_quality_gate(target_dir: Path, session_id: str | None) -> dict[str, Any] | None:
-    """Read session-bound fix quality rounds through `_read_session_bound_json_artifact`.
-
-    The ``{enabled, session_id, rounds}`` payload holds per-file erosion and verbosity deltas.
-    """
-    from daydream.deep.artifacts import DeepArtifact
-
-    return _read_session_bound_json_artifact(target_dir, session_id, DeepArtifact.FIX_QUALITY_GATE.at)
-
-
-def _read_recommended_capture(target_dir: Path, session_id: str | None) -> dict[str, Any] | None:
-    """Read session-bound post-test capture provenance through `_read_session_bound_json_artifact`.
-
-    Its ``capture_point`` identifies which tree produced ``recommended.patch``.
-    """
-    from daydream.deep.artifacts import DeepArtifact
-
-    return _read_session_bound_json_artifact(target_dir, session_id, DeepArtifact.RECOMMENDED_CAPTURE.at)
-
-
 def _manifest_state(
     *,
     target_dir: Path,
@@ -137,6 +117,7 @@ def _manifest_state(
     adopts prior state. The ``derive_*`` helpers never raise on absent or
     malformed artifacts, so this can never abort an archive.
     """
+    from daydream.deep.artifacts import DeepArtifact
     from daydream.retry_policy import derive_retry_summary
 
     recorder_provenance = run.recorder_provenance
@@ -151,7 +132,13 @@ def _manifest_state(
     # A deep fix run that hit per-group failures left partial/reverted edits in
     # the tree; the run is NOT "complete".
     fix_failures = _read_fix_failures(target_dir) if runs_fix else None
-    recommended = _read_recommended_capture(target_dir, session_id) if runs_fix else None
+    # The recommended-capture sidecar's ``capture_point`` identifies which tree
+    # produced ``recommended.patch``.
+    recommended = (
+        _read_session_bound_json_artifact(target_dir, session_id, DeepArtifact.RECOMMENDED_CAPTURE.at)
+        if runs_fix
+        else None
+    )
     if fix_failures or frozen_extra.get("partial") is True:
         status = "partial"
     phase_states = derive_phase_states(
@@ -170,7 +157,13 @@ def _manifest_state(
         "status": status,
         "fix_failures": fix_failures,
         "fix_leftover_untracked": _read_fix_leftover_untracked(target_dir) if runs_fix else None,
-        "fix_quality_gate": _read_fix_quality_gate(target_dir, session_id) if runs_fix else None,
+        # The quality-gate sidecar's ``{enabled, session_id, rounds}`` payload holds
+        # per-file erosion and verbosity deltas.
+        "fix_quality_gate": (
+            _read_session_bound_json_artifact(target_dir, session_id, DeepArtifact.FIX_QUALITY_GATE.at)
+            if runs_fix
+            else None
+        ),
         "recommended_capture": (recommended or {}).get("capture_point"),
         "phase_states": phase_states,
         "retry_summary": derive_retry_summary(frozen_extra.get("phase_events")),

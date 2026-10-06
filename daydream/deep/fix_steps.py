@@ -1017,16 +1017,16 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
                     repairs=(*result.repairs, *continuation.result.repairs),
                 )
             job = continuation.job
-            if job is not None and (job.cannot_report_green or job.cannot_authorize_commit):
+            if job is not None and job.cannot_report_green:
                 # Fail closed, at the only place a verdict is produced: the
                 # coordinator may hand back a caller's passing result verbatim
                 # next to a job that never completed, and a job that is not
                 # `completed` is structurally barred both from reporting a
                 # passing verdict and from authorizing a commit — so the run is
                 # stopped here, before the retained tree is committed and pushed.
-                if result.passed and job.cannot_report_green:
+                if result.passed:
                     result = replace(result, passed=False)
-                if result.proceed and job.cannot_authorize_commit:
+                if result.proceed:
                     result = replace(result, proceed=False)
                 print_warning(
                     console,

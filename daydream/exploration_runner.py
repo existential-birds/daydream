@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import stat
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Callable, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Literal, TypeAlias
 
 import anyio
 
@@ -74,8 +74,15 @@ EXPLORATION_MAX_TURNS = 50
 _PRE_SCAN_STRATEGIES = (
     "exploration.pattern_scan", "exploration.dependency_trace", "exploration.test_mapping",
 )
+_SURVEY_STRATEGY = "exploration.repository_survey"
 _STATIC_DIFF_MAX_BYTES = 65_536
 _STATIC_GUIDANCE_MAX_BYTES = 8192
+
+
+def _packaged_strategies(names: Iterable[str]) -> dict[str, str]:
+    """Packaged strategy text for `names`, so callers need no resolved profile."""
+    defaults = _rp.build_default_profile().strategies
+    return {name: defaults[name].content for name in names}
 
 
 def _static_guidance(repo_root: Path, modified_files: list[FileInfo]) -> str:
@@ -251,12 +258,7 @@ async def pre_scan(
     run_context = resolve_run_context(run_context)
     defaults = _rp.build_default_profile().strategies
     if strategies is None:
-        strategies = {
-            "exploration.pattern_scan": defaults["exploration.pattern_scan"].content,
-            "exploration.dependency_trace": defaults["exploration.dependency_trace"].content,
-            "exploration.test_mapping": defaults["exploration.test_mapping"].content,
-            "exploration.repository_survey": defaults["exploration.repository_survey"].content,
-        }
+        strategies = _packaged_strategies((*_PRE_SCAN_STRATEGIES, _SURVEY_STRATEGY))
     static_files: list[FileInfo] = []
     try:
         static_files = detect_affected_files(diff_text, repo_root)
@@ -297,15 +299,6 @@ async def pre_scan(
     has_mapping_targets = bool(source_files) or strategies["exploration.test_mapping"] != defaults[
         "exploration.test_mapping"
     ].content
-    descriptors = (
-        ("explore-dependency_tracer",)
-        if tier == "single"
-        else (
-            "explore-pattern_scanner",
-            "explore-dependency_tracer",
-            *(("explore-test_mapper",) if has_mapping_targets else ()),
-        )
-    )
     async def _run_specialist(
         name: str,
         prompt: str,
@@ -350,6 +343,42 @@ async def pre_scan(
     # topology, which points at the sibling main worktree.
     static_files_abs = [replace(f, path=str(repo_root / f.path)) for f in static_files]
 
+    # One ordered roster drives both the dispatch descriptors and the launches,
+    # so a specialist cannot be added, dropped, or reordered in one place only.
+    # Prompts are built here, before the dispatch scope opens, so the
+    # recorder-visible ordering is unchanged.
+    plan: list[tuple[str, str, dict[str, Any]]] = []
+    if tier != "single":
+        plan.append((
+            "pattern_scanner",
+            build_pattern_scanner_prompt(
+                static_files_abs, diff_ref, cwd=repo_root,
+                strategy=strategies["exploration.pattern_scan"], inline_diff=diff_text,
+            ),
+            PATTERN_SCANNER_SCHEMA,
+        ))
+    plan.append((
+        "dependency_tracer",
+        build_dependency_tracer_prompt(
+            static_files_abs, diff_ref, cwd=repo_root,
+            strategy=strategies["exploration.dependency_trace"], inline_diff=diff_text,
+        ),
+        DEPENDENCY_TRACER_SCHEMA,
+    ))
+    if tier != "single" and has_mapping_targets:
+        plan.append((
+            "test_mapper",
+            build_test_mapper_prompt(
+                static_files_abs, diff_ref, cwd=repo_root,
+                strategy=strategies["exploration.test_mapping"], inline_diff=diff_text,
+                source_only=strategies["exploration.test_mapping"] == defaults[
+                    "exploration.test_mapping"
+                ].content,
+            ),
+            TEST_MAPPER_SCHEMA,
+        ))
+    descriptors = tuple(f"explore-{name}" for name, _, _ in plan)
+
     async with dispatch_scope(
         recorder,
         phase=DaydreamPhase.EXPLORATION,
@@ -357,58 +386,8 @@ async def pre_scan(
     ) as dispatch:
         with anyio.move_on_after(_PRE_SCAN_TIMEOUT_SECONDS * review_scale_for_scope()) as timeout_scope:
             async with anyio.create_task_group() as tg:
-                if tier == "single":
-                    dep_prompt = build_dependency_tracer_prompt(
-                        static_files_abs,
-                        diff_ref,
-                        cwd=repo_root,
-                        strategy=strategies["exploration.dependency_trace"],
-                        inline_diff=diff_text,
-                    )
-                    tg.start_soon(
-                        _run_specialist,
-                        "dependency_tracer",
-                        dep_prompt,
-                        DEPENDENCY_TRACER_SCHEMA,
-                        dispatch,
-                    )
-                else:  # parallel
-                    tg.start_soon(
-                        _run_specialist, "pattern_scanner",
-                        build_pattern_scanner_prompt(
-                            static_files_abs,
-                            diff_ref,
-                            cwd=repo_root,
-                            strategy=strategies["exploration.pattern_scan"],
-                            inline_diff=diff_text,
-                        ), PATTERN_SCANNER_SCHEMA, dispatch,
-                    )
-                    tg.start_soon(
-                        _run_specialist, "dependency_tracer",
-                        build_dependency_tracer_prompt(
-                            static_files_abs,
-                            diff_ref,
-                            cwd=repo_root,
-                            strategy=strategies["exploration.dependency_trace"],
-                            inline_diff=diff_text,
-                        ),
-                        DEPENDENCY_TRACER_SCHEMA,
-                        dispatch,
-                    )
-                    if has_mapping_targets:
-                        tg.start_soon(
-                            _run_specialist, "test_mapper",
-                            build_test_mapper_prompt(
-                                static_files_abs,
-                                diff_ref,
-                                cwd=repo_root,
-                                strategy=strategies["exploration.test_mapping"],
-                                inline_diff=diff_text,
-                                source_only=strategies["exploration.test_mapping"] == defaults[
-                                    "exploration.test_mapping"
-                                ].content,
-                            ), TEST_MAPPER_SCHEMA, dispatch,
-                        )
+                for name, prompt, schema in plan:
+                    tg.start_soon(_run_specialist, name, prompt, schema, dispatch)
         _finish_exploration_dispatch(dispatch, timeout_scope, specialist_failed, results)
 
     if not results:
@@ -447,11 +426,7 @@ async def repo_scan(
     strategies may override repository_survey; None uses its packaged default."""
     run_context = resolve_run_context(run_context)
     if strategies is None:
-        strategies = {
-            "exploration.repository_survey": _rp.build_default_profile().strategies[
-                "exploration.repository_survey"
-            ].content,
-        }
+        strategies = _packaged_strategies((_SURVEY_STRATEGY,))
     paths: list[str] = []
     try:
         paths = git_ops.ls_files(repo_root)
@@ -475,7 +450,7 @@ async def repo_scan(
                         sample,
                         len(paths),
                         cwd=repo_root,
-                        strategy=strategies["exploration.repository_survey"],
+                        strategy=strategies[_SURVEY_STRATEGY],
                     ),
                     output_schema=PATTERN_SCANNER_SCHEMA,
                     max_turns=EXPLORATION_MAX_TURNS,

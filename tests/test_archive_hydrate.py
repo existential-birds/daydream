@@ -29,6 +29,7 @@ from daydream.archive.provenance import ExecutableProvenance
 from daydream.archive.scan import scan_run_dir
 from daydream.training.corpus_projection.license import load_license_policy, resolve_repo_decision
 from tests.fixtures.training.build_hub_snapshot import SNAPSHOT_REVISION, build_snapshot
+from tests.harness.adjudication import sha256sums_text
 
 
 def _write_policy(tmp_path: Path) -> str:
@@ -670,11 +671,12 @@ def test_enriched_evidence_matches_declared_evidence_contract(tmp_path: Path) ->
     _seed_admitted_runs(stage, [("sess-declared", "acme/widget", {"spdx_id": "MIT", "source": "producer"}),
         ("sess-enriched", "acme/widget", None),
     ])
-    evidence = license_enrich.enrich_license_evidence(stage, resolver=_FakeLicenseResolver())
+    license_enrich.enrich_license_evidence(stage, resolver=_FakeLicenseResolver())
     policy, _digest = load_license_policy("daydream/training/schema/license-policy-production.json")
     declared = resolve_repo_decision("acme/widget", {"spdx_id": "MIT"}, policy, frozenset())
+    enriched_manifest = json.loads((stage / "runs" / "sess-enriched" / "manifest.json").read_text())
     enriched = resolve_repo_decision(
-        "acme/widget", {"spdx_id": evidence["sess-enriched"]["spdx_id"]}, policy, frozenset())
+        "acme/widget", {"spdx_id": enriched_manifest["license_evidence"]["spdx_id"]}, policy, frozenset())
     assert (declared.status, declared.reason_code) == (enriched.status, enriched.reason_code)
     assert (declared.status, declared.reason_code) == ("admitted", None)
 
@@ -952,9 +954,8 @@ def _publish_verifiable_curation(tmp_path: Path, batch_files: dict[str, str]) ->
     (local / "curation-manifest.json").write_text(json.dumps(doc, indent=2) + "\n")
     relpaths = sorted(p.relative_to(local).as_posix() for p in local.rglob("*") if p.is_file())
     files = {f"{prefix}{rel}": (local / rel).read_bytes() for rel in relpaths}
-    files[f"{prefix}SHA256SUMS"] = "".join(
-        f"{hashlib.sha256((local / rel).read_bytes()).hexdigest()}  {prefix}{rel}\n"
-        for rel in relpaths
+    files[f"{prefix}SHA256SUMS"] = sha256sums_text(
+        ((rel, (local / rel).read_bytes()) for rel in relpaths), prefix=prefix
     ).encode()
     hub = FakeHub(repo_id="org/private-ds", private=True, files=files)
     hub.commit_revision("b" * 40)

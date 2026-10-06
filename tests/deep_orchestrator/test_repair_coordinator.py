@@ -6,14 +6,12 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import anyio
 import pytest
 
-from daydream.backends import AgentEvent
 from daydream.deep.repair_job import read_repair_job_record
 from daydream.runner import run
 from tests.harness.git_helpers import git as _git
@@ -33,25 +31,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CANDIDATE_LINE = "\n# candidate repair\n"
 
 
-class _PartialCandidateStub(StubBackend):
-    """An interrupted heal turn that also writes the edit it was working on."""
-
-    def __init__(self, target: Path, edit: str = "api.py") -> None:
-        super().__init__(target)
-        self._edit = edit
-
-    async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
-    ) -> AsyncIterator[AgentEvent]:
-        if self.heal_fix_partial is not None and prompt.lower().startswith("the tests failed"):
-            edited = cwd / self._edit
-            edited.write_text(edited.read_text() + CANDIDATE_LINE)
-        async for event in super().execute(cwd, prompt, *args, **kwargs):
-            yield event
-
-
-def _install_interrupted_heal(monkeypatch: pytest.MonkeyPatch, target: Path) -> _PartialCandidateStub:
+def _install_interrupted_heal(monkeypatch: pytest.MonkeyPatch, target: Path) -> StubBackend:
     """Install one stub whose repair turn is cut short by the host wall budget."""
-    stub = _PartialCandidateStub(target)
+    stub = StubBackend(target)
+    stub.heal_fix_authorized = "api.py"
+    stub.heal_fix_authorized_line = CANDIDATE_LINE
     stub.heal_fix_partial = "PARTIAL-DIAGNOSIS-abc123"
     stub.runaway_fix_sleep_s = 0.05
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kw: stub)
@@ -177,17 +161,6 @@ run_context._prompt_user = lambda *a, **k: "2"
 phase_config.DEFAULT_TOOL_CALL_BUDGET = 2
 
 
-class CandidateStub(StubBackend):
-    """An interrupted heal turn that also lands the authorized edit."""
-
-    async def execute(self, cwd, prompt, *args, **kwargs):
-        if self.heal_fix_partial is not None and prompt.lower().startswith("the tests failed"):
-            edited = cwd / AUTHORIZED
-            edited.write_text(edited.read_text() + CANDIDATE_LINE)
-        async for event in super().execute(cwd, prompt, *args, **kwargs):
-            yield event
-
-
 def work_context():
     head = git_ops.head_sha(REPO)
     return WorkContext(repo=REPO, source=REPO, base_branch="main", base_sha=head,
@@ -215,7 +188,9 @@ async def main():
     work = work_context()
     footprint = AuthorizedFixFootprint(run_allowed_paths=frozenset({AUTHORIZED}), policy_revision=1)
     deep = REPO / ".daydream" / "deep"
-    stub = CandidateStub(REPO)
+    stub = StubBackend(REPO)
+    stub.heal_fix_authorized = AUTHORIZED
+    stub.heal_fix_authorized_line = CANDIDATE_LINE
     stub.heal_fix_partial = "PARTIAL-DIAGNOSIS-abc123"
     stub.runaway_fix_sleep_s = 0.0
     stub.fail_first_test_run = MODE == "first"

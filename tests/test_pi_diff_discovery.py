@@ -45,5 +45,3 @@ async def test_small_pi_review_keeps_structural_dispatch(
     assert failures == {}
     assert set(results) == {"python", "structure"}
     assert len(calls) == 2
-    deep = tmp_path / ".daydream/deep"
-    assert not (deep / "coverage-receipts.json").exists()

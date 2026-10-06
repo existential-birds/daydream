@@ -24,13 +24,15 @@ from daydream.run_config import RunConfig, _resolved_backend_name, _resolved_mod
 from daydream.ui import NEON_THEME, PHASE_SUBTITLES, print_issues_table
 from tests.harness.dataset import read_records
 from tests.harness.git_helpers import bare_remote, commit, git, init_repo
+from tests.harness.remote_ci import (
+    finish_remote_ci_fake,
+    seed_pr_identity,
+    start_remote_ci_fake,
+)
 from tests.test_deep_orchestrator import _install_stub_backend, _silence
 from tests.test_integration import (
     _FULL_FLOW_ISSUE,
-    _finish_remote_ci_fake,
     _remote_ci_push_project,
-    _seed_remote_ci_pr,
-    _start_remote_ci_fake_after_push,
     _WorktreeMutatingBackend,
 )
 
@@ -334,10 +336,8 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
 ) -> None:
 
     project, remote, hook_marker, raw_remote = _remote_ci_push_project(tmp_path)
-    _seed_remote_ci_pr(fake_gh, head_sha=git(project, "rev-parse", "HEAD"))
-    seed_thread, seed_errors, seed_stop = _start_remote_ci_fake_after_push(
-        project, fake_gh, hook_marker, outcome=remote_outcome
-    )
+    seed_pr_identity(fake_gh, head_sha=git(project, "rev-parse", "HEAD"))
+    seeder = start_remote_ci_fake(project, fake_gh, hook_marker, outcome=remote_outcome)
 
     monkeypatch.setattr(remote_ci, "DEFAULT_LIMITS",
         remote_ci.RemoteCILimits(poll_seconds=0.01,
@@ -355,7 +355,7 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
         with pytest.raises(SystemExit) as exc_info:
             cli.main(["review", str(project), "--stack", "python", "--shallow", "--yes", "--test-command", "true"])
     finally:
-        _finish_remote_ci_fake(seed_thread, seed_errors, seed_stop)
+        finish_remote_ci_fake(seeder)
 
     assert exc_info.value.code == expected_code
     assert hook_marker.read_text() == "ran\n"
@@ -430,6 +430,29 @@ def test_global_model_flag_populates_runconfig(tmp_path: Path) -> None:
     config = _parse_args(["--model", "claude-opus-5", str(tmp_path)])
     assert config.model == "claude-opus-5"
 
+def _write_fake_gh(bin_dir: Path, log_env: str, login: str) -> None:
+    """Install a child-PATH ``gh`` shim answering exactly the two calls these tests allow.
+
+    Both tests spawn a real ``python -m daydream`` subprocess, so the shim must be on the
+    *child's* PATH rather than patched into this process. Every argv is appended to the
+    env-named log the test asserts on; any other invocation exits 91, which fails the
+    subprocess loudly instead of letting an unexpected API call pass unnoticed.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    gh = bin_dir / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> \"${log_env}\"\n"
+        "case \"$*\" in\n"
+        "  'repo view --json nameWithOwner -q .nameWithOwner') printf '%s\\n' 'acme/widgets' ;;\n"
+        f"  'api /user') printf '%s\\n' '{{\"login\":\"{login}\"}}' ;;\n"
+        "  *) printf '%s\\n' \"unexpected gh call: $*\" >&2; exit 91 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+
+
 @pytest.mark.parametrize("backend_name", ["codex", "pi", "osprey"])
 def test_improve_audit_isolation_rejects_unsupported_cli_before_spawn(tmp_path: Path, backend_name: str,) -> None:
     repo = tmp_path / "repo"
@@ -452,19 +475,7 @@ def test_improve_audit_isolation_rejects_unsupported_cli_before_spawn(tmp_path: 
         path.chmod(0o755)
 
     gh_log = tmp_path / "gh.log"
-    gh = fake_bin / "gh"
-    gh.write_text(
-        "#!/bin/sh\n"
-        "printf '%s\\n' \"$*\" >> \"$GH_LOG\"\n"
-        "case \"$*\" in\n"
-        "  'repo view --json nameWithOwner -q .nameWithOwner') "
-        "printf '%s\\n' 'acme/widgets' ;;\n"
-        "  'api /user') printf '%s\\n' '{\"login\":\"fixture-user\"}' ;;\n"
-        "  *) printf '%s\\n' 'unexpected gh invocation' >&2; exit 91 ;;\n"
-        "esac\n",
-        encoding="utf-8",
-    )
-    gh.chmod(0o755)
+    _write_fake_gh(fake_bin, "GH_LOG", "fixture-user")
     process_tmp = tmp_path / "process-tmp"
     process_tmp.mkdir()
 
@@ -551,25 +562,8 @@ def register(registry):
 def _write_signal_fake_gh(tmp_path: Path) -> tuple[Path, Path]:
     """Create the subprocess's only external API boundary: two read-only gh calls."""
     bin_dir = tmp_path / "signal-bin"
-    bin_dir.mkdir()
     log_path = tmp_path / "signal-gh.log"
-    gh = bin_dir / "gh"
-    gh.write_text(
-        "#!/bin/sh\n"
-        "printf '%s\\n' \"$*\" >> \"$DAYDREAM_SIGNAL_GH_LOG\"\n"
-        "if [ \"$*\" = \"repo view --json nameWithOwner -q .nameWithOwner\" ]; then\n"
-        "  printf '%s\\n' 'acme/widgets'\n"
-        "  exit 0\n"
-        "fi\n"
-        "if [ \"$*\" = \"api /user\" ]; then\n"
-        "  printf '%s\\n' '{\"login\":\"signal-fixture\"}'\n"
-        "  exit 0\n"
-        "fi\n"
-        "printf '%s\\n' \"unexpected gh call: $*\" >&2\n"
-        "exit 91\n",
-        encoding="utf-8",
-    )
-    gh.chmod(0o755)
+    _write_fake_gh(bin_dir, "DAYDREAM_SIGNAL_GH_LOG", "signal-fixture")
     return bin_dir, log_path
 
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])

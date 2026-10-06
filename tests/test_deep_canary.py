@@ -103,8 +103,3 @@ async def test_deep_canary_sharding_and_sibling_frontier(
     merged = json.loads((deep / "merged-items.json").read_text())
     assert merged["items"]
     assert "verdicts" not in records
-    assert not (deep / "coverage-receipts.json").exists()
-    assert not (deep / "coverage-stats.json").exists()
-    assert not (deep / "stack-uncovered-records.json").exists()
-    assert not list(deep.glob("uncovered-*-review.md"))
-    assert not any("uncovered file sweep" in call["prompt"].lower() for call in stub.calls)

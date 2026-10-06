@@ -141,7 +141,7 @@ def _resolved_review_backend_name(config: RunConfig) -> str | None:
     resolver would let a CLI global mask this override and blur archive provenance.
     """
     file_config = _file_config_or_empty(config)
-    return config.review_backend or file_config.phase_backend("review")
+    return config.review_backend or file_config.phases.get("review", {}).get("backend")
 
 
 def _resolved_model(config: RunConfig, phase: str) -> str | None:

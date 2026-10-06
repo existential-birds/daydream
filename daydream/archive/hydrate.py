@@ -40,7 +40,7 @@ from daydream.archive.hydrate_rules import (
 from daydream.archive.index import query_runs, upsert_run
 from daydream.archive.manifest import Manifest
 from daydream.archive.scan import scan_run_dir
-from daydream.json_utils import atomic_write_json
+from daydream.json_utils import atomic_write_json, iter_jsonl_records
 from daydream.redaction import redact_text
 from daydream.timeutil import now_iso_utc
 from daydream.training.exclusion import EXCLUSION_PATH
@@ -723,17 +723,7 @@ def _iter_enrichment_cache(stage: Path) -> Iterator[dict[str, Any]]:
     )
 
     path = stage / _ENRICH_DIR / _ENRICH_CACHE_NAME
-    if not path.is_file():
-        return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(entry, dict):
-            yield entry
+    yield from iter_jsonl_records(path)
 
 
 def _repo_commit_unresolved_sessions(stage: Path) -> set[str]:
@@ -1070,15 +1060,9 @@ class _DedupeLedger:
     @classmethod
     def load(cls, path: Path) -> _DedupeLedger:
         ledger = cls()
-        if not path.is_file():
-            return ledger
         try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                entry = json.loads(line)
-                if not isinstance(entry, dict) or not entry.get("session_id"):
+            for entry in iter_jsonl_records(path):
+                if not entry.get("session_id"):
                     continue
                 sid = str(entry["session_id"])
                 ledger.latest[sid] = entry
@@ -1087,9 +1071,10 @@ class _DedupeLedger:
                     ledger.admitted[sid] = digest
                     if isinstance(digest, str) and digest:
                         ledger.ever_admitted.setdefault(sid, set()).add(digest)
-        except (OSError, ValueError):
-            ledger.admitted.clear()
-            ledger.ever_admitted.clear()
+        except OSError:
+            # An unreadable ledger has contributed nothing yet, so reading it as
+            # empty is the same outcome a missing one already has.
+            return cls()
         return ledger
 
 
@@ -1641,15 +1626,12 @@ def _write_resume_ledger(curated: Path, curation_id: str) -> None:
     }
     resume_path = curated / "resume" / "ledger.jsonl"
     existing: dict[str, dict[str, Any]] = {}
-    if resume_path.is_file():
-        try:
-            for line in resume_path.read_text(encoding="utf-8").splitlines():
-                if line.strip():
-                    rec = json.loads(line)
-                    if rec.get("session_id"):
-                        existing[str(rec["session_id"])] = rec
-        except (OSError, ValueError):
-            existing = {}
+    try:
+        for rec in iter_jsonl_records(resume_path):
+            if rec.get("session_id"):
+                existing[str(rec["session_id"])] = rec
+    except OSError:
+        existing = {}
     # Additive ledger: first record per session wins; re-publishing identical
     # content never rewrites history (content-addressed idempotence).
     for sid, entry in entries.items():
@@ -2197,8 +2179,7 @@ def run_hydrate_hub(config: HydrateHubConfig, client: HubClient | None = None) -
     from daydream.archive.license_enrich import publish_enrichment_cache  # noqa: PLC0415  # avoid import cycle
 
     publish_enrichment_cache(
-        config.stage_dir, revision=source_commit,
-        curated_dir=config.stage_dir / "curated" / curation_id,
+        config.stage_dir, curated_dir=config.stage_dir / "curated" / curation_id,
     )
     ledger = build_import_ledger(
         config.stage_dir, revision=source_commit, source_commit=source_commit, binding=binding,

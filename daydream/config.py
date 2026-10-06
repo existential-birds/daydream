@@ -216,7 +216,8 @@ DEFAULT_REVIEW_CACHE_MAX_AGE_DAYS: int = 30
 
 # Selective verification is the evidence-approved default; latency is reported,
 # not gated. Config verify_all=true restores every non-exempt finding, while
-# extra_risk_categories may only widen mandatory verification. Neither has a CLI flag.
+# extra_risk_categories is validated against the mandatory vocabulary and can
+# change nothing. Neither has a CLI flag.
 DEFAULT_VERIFY_ALL: bool = False
 DEFAULT_EXTRA_RISK_CATEGORIES: tuple[str, ...] = ()
 

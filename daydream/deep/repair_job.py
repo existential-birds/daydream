@@ -163,21 +163,17 @@ class RepairJobRecord:
     disproven_hypotheses: tuple[str, ...] = ()
     last_transition_reason: str | None = None
     checkpoint_ref: str | None = None
-    #: The most recent execution's own budget breakdown (wall/elapsed/cost), the
-    #: same shape the checkpoint records.
-    last_execution_budget: Mapping[str, float] = field(default_factory=dict)
     diagnostics: tuple[str, ...] = ()
 
     # -- fail-closed posture -----------------------------------------------------------------
 
     @property
     def cannot_report_green(self) -> bool:
-        """Whether this job is structurally barred from reporting a passing verdict."""
-        return self.state is not RepairJobState.COMPLETED
+        """Whether this job is structurally barred from reporting a passing verdict.
 
-    @property
-    def cannot_authorize_commit(self) -> bool:
-        """Whether this job is structurally barred from authorizing a commit."""
+        The same fail-closed posture bars the job from authorizing a commit: only
+        ``completed`` may do either.
+        """
         return self.state is not RepairJobState.COMPLETED
 
     # -- budget arithmetic ------------------------------------------------------------------
@@ -346,7 +342,6 @@ class RepairJobRecord:
             "disproven_hypotheses": list(self.disproven_hypotheses),
             "last_transition_reason": self.last_transition_reason,
             "checkpoint_ref": self.checkpoint_ref,
-            "last_execution_budget": dict(self.last_execution_budget),
             "diagnostics": list(self.diagnostics),
         }
 
@@ -382,7 +377,6 @@ class RepairJobRecord:
             disproven_hypotheses=_str_tuple(raw.get("disproven_hypotheses")),
             last_transition_reason=_opt_str(raw.get("last_transition_reason")),
             checkpoint_ref=_opt_str(raw.get("checkpoint_ref")),
-            last_execution_budget=_float_map(raw.get("last_execution_budget")),
             diagnostics=_str_tuple(raw.get("diagnostics")),
         )
 
@@ -412,33 +406,6 @@ def write_repair_job_record(deep_dir_path: Path, job: RepairJobRecord) -> Path:
     return path
 
 
-def merge_repair_job_record(
-    deep_dir_path: Path, updates: Mapping[str, Any],
-) -> RepairJobRecord:
-    """Merge top-level ``updates`` into the job record and persist the result.
-
-    Mappings merge one level deep (as ``write_routing_record`` does) so a later
-    execution can add ``last_execution_budget`` without dropping an earlier slice.
-    Returns the merged record, which is also what the next execution reads.
-    """
-    stored = read_repair_job_record(deep_dir_path)
-    current = stored.payload() if stored is not None else {}
-    # Start from the stored payload so a partial merge keeps every earlier slice.
-    merged: dict[str, Any] = {key: value for key, value in current.items() if key != "format_version"}
-    merged["format_version"] = REPAIR_JOB_FORMAT
-    for key, value in updates.items():
-        existing = current.get(key)
-        if isinstance(existing, dict) and isinstance(value, dict):
-            nested = dict(existing)
-            nested.update(value)
-            merged[key] = nested
-        else:
-            merged[key] = value
-    job = RepairJobRecord.from_payload(merged)
-    write_repair_job_record(deep_dir_path, job)
-    return job
-
-
 def record_diagnostic(deep_dir_path: Path, job_id: str, diagnostic: str) -> RepairJobRecord | None:
     """Append one named host degradation to an existing job record; return it, or ``None``.
 
@@ -466,16 +433,18 @@ def record_diagnostic(deep_dir_path: Path, job_id: str, diagnostic: str) -> Repa
     existing = read_repair_job_record(deep_dir_path)
     if existing is not None and existing.job_id != job_id:
         return None
-    diagnostics = (
-        *(existing.diagnostics if existing is not None else ()),
-        diagnostic,
+    # Annotate the decoded record in place and persist it whole. ``replace`` on
+    # the already-normalized record is what re-encoding through the payload used
+    # to achieve, so every earlier execution's slices survive untouched.
+    job = replace(
+        existing if existing is not None else RepairJobRecord(job_id=job_id),
+        diagnostics=(*(existing.diagnostics if existing is not None else ()), diagnostic),
     )
     try:
-        return merge_repair_job_record(
-            deep_dir_path, {"job_id": job_id, "diagnostics": list(diagnostics)},
-        )
+        write_repair_job_record(deep_dir_path, job)
     except OSError:
         return None
+    return job
 
 
 def _state(value: object) -> RepairJobState:
@@ -517,16 +486,6 @@ def _plain_int(value: object) -> int | None:
     return value
 
 
-def _float_map(value: object) -> dict[str, float]:
-    if not isinstance(value, Mapping):
-        return {}
-    return {
-        key: number
-        for key, item in value.items()
-        if isinstance(key, str) and (number := _finite_float(item)) is not None
-    }
-
-
 __all__ = [
     "REPAIR_JOB_FORMAT",
     "REPAIR_JOB_RESERVE_S",
@@ -534,7 +493,6 @@ __all__ = [
     "RepairJobPolicy",
     "RepairJobRecord",
     "RepairJobState",
-    "merge_repair_job_record",
     "read_repair_job_record",
     "record_diagnostic",
     "repair_job_id",

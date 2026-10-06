@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from daydream import git_ops
 from daydream.agent import console
 from daydream.deep.state import DeepState
-from daydream.fix_footprint import AuthorizedFixFootprint
+from daydream.fix_footprint import AuthorizedFixFootprint, FixFootprintAction
 from daydream.git_ops import INHERIT_GITHUB_AUTH, GitHubAuth, GitPathState
 from daydream.ui import print_warning
 
@@ -134,7 +134,7 @@ def enforce_authorized_fix_footprint(
 
         for path in sorted(to_restore, key=lambda value: value.encode("utf-8", "surrogateescape")):
             if path in residual_new and path not in preexisting_untracked:
-                action = "remove"
+                action: FixFootprintAction = "remove"
                 reason = "removed a new untracked path outside the authorized run footprint"
             else:
                 action = "restore"

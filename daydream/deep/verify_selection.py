@@ -22,7 +22,7 @@ from daydream.deep.records import item_source_uids, item_uid
 from daydream.deep.risk_categories import (
     UnknownRiskCategoryError,
     categories_in,
-    resolve_mandatory_categories,
+    validate_extra_categories,
 )
 from daydream.hunk_index import parse_hunks
 from daydream.json_utils import canonical_json
@@ -86,15 +86,15 @@ def changed_text_at(diff_text: str, file: str, line: object) -> str:
 
 @dataclass(frozen=True)
 class SelectionConfig:
-    """Resolved policy: verify_all selects every non-exempt item; extras only add risk categories."""
+    """Resolved policy: verify_all selects every non-exempt item; extras are validated, never applied.
+
+    The mandatory vocabulary itself is what selection reads. ``extra_categories``
+    survives only as provenance -- it is echoed into the selection artifact --
+    after :func:`validate_extra_categories` has rejected unknown names.
+    """
 
     verify_all: bool = True
     extra_categories: tuple[str, ...] = ()
-
-    @property
-    def categories(self) -> tuple[str, ...]:
-        """The built-in mandatory categories followed by the validated extras."""
-        return resolve_mandatory_categories(self.extra_categories)
 
 
 @dataclass(frozen=True)
@@ -129,7 +129,7 @@ def resolve_selection_config(
 ) -> SelectionConfig:
     """Default absent verify_all to True and reject unknown categories before dispatch."""
     categories = tuple(extra_categories or ())
-    resolve_mandatory_categories(categories)
+    validate_extra_categories(categories)
     return SelectionConfig(
         verify_all=True if verify_all is None else bool(verify_all),
         extra_categories=categories,
@@ -266,7 +266,7 @@ def _decide(
         return decision(True, "verify_all", "verify_all is enabled")
     if lens == "cross-stack":
         return decision(True, "cross_stack", "cross-stack finding")
-    category = _risk_category(data, diff_text, config)
+    category = _risk_category(data, diff_text)
     if category:
         return decision(
             True, f"risk_category:{category}", f"changed text matches mandatory category {category!r}"
@@ -329,23 +329,19 @@ def _item_provenance(
     return evidence, present, None
 
 
-def _risk_category(
-    data: Mapping[str, Any], diff_text: str, config: SelectionConfig
-) -> str | None:
+def _risk_category(data: Mapping[str, Any], diff_text: str) -> str | None:
     """Return the first mandatory category whose triggers occur, or ``None``.
 
     Reads only the item's own text, its cited file, and the added text of the
-    covered hunk -- never the whole diff (Decision 4).
+    covered hunk -- never the whole diff (Decision 4). ``categories_in`` already
+    enumerates in declaration order, so its first hit *is* that first category.
     """
     file = data.get("file")
     file_text = file if isinstance(file, str) else ""
     text = "\n".join(str(data.get(key, "")) for key in ("description", "rationale", "evidence"))
     text = f"{text}\n{file_text}\n{changed_text_at(diff_text, file_text, data.get('line'))}"
-    matched = set(categories_in(text))
-    for category in config.categories:
-        if category in matched:
-            return category
-    return None
+    matched = categories_in(text)
+    return matched[0] if matched else None
 
 
 def _weak_evidence_reason(data: Mapping[str, Any]) -> str | None:

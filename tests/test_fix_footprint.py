@@ -253,11 +253,15 @@ def test_footprint_rejects_malformed_related_paths(tmp_path: Path, related: obje
 def test_generated_authorization_is_idempotent_and_retarget_is_item_bounded(tmp_path: Path) -> None:
     footprint = AuthorizedFixFootprint.build(tmp_path, set(), _items())
     initial_revision = footprint.policy_revision
-    footprint.authorize_new_generated(
-        tmp_path, "generated/schema.py", phase="generated-guard", round_number=1, reason="approved migration output",
+    footprint.authorize_widened_path(
+        tmp_path, "generated/schema.py",
+        action="approve_generated", origin="generated",
+        phase="generated-guard", round_number=1, reason="approved migration output",
     )
-    footprint.authorize_new_generated(
-        tmp_path, "./generated/schema.py", phase="generated-guard", round_number=2,
+    footprint.authorize_widened_path(
+        tmp_path, "./generated/schema.py",
+        action="approve_generated", origin="generated",
+        phase="generated-guard", round_number=2,
         reason="same generated output observed again",
     )
     assert footprint.policy_revision == initial_revision + 1
@@ -675,7 +679,11 @@ def test_tree_key_is_binary_safe_mode_type_delete_new_and_order_deterministic(gi
 
     footprint = AuthorizedFixFootprint.build(git_repo, {"binary.bin"}, [])
     key = git_ops.tree_key(changed)
-    footprint.authorize_new_generated(git_repo, "generated.py", phase="guard", round_number=1, reason="approved",)
+    footprint.authorize_widened_path(
+        git_repo, "generated.py",
+        action="approve_generated", origin="generated",
+        phase="guard", round_number=1, reason="approved",
+    )
     assert git_ops.tree_key(changed) == key
 
 def test_gitlink_evidence_uses_checked_out_head_not_staged_commit(git_repo: Path) -> None:

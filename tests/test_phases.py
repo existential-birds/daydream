@@ -139,7 +139,7 @@ from daydream.ui.summary import print_fix_complete
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock
-from tests.harness.git_helpers import commit as git_commit, git, init_repo
+from tests.harness.git_helpers import commit as git_commit, configure_identity, git, init_repo
 from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.review_result import merge_result, review_scopes
 from tests.harness.trajectory import make_recorder, read_trajectory
@@ -744,8 +744,7 @@ def _init_committed_repo(path: Path, branch: str) -> Path:
     """A real repo on ``branch`` with one baseline commit of ``app.py``."""
     path.mkdir(parents=True, exist_ok=True)
     git(path, "init", "-b", branch)
-    git(path, "config", "user.email", "t@example.com")
-    git(path, "config", "user.name", "t")
+    configure_identity(path)
     (path / "app.py").write_text("x = 0\n")
     git(path, "add", "app.py")
     git_commit(path, "baseline")
@@ -2508,10 +2507,7 @@ async def test_phase_commit_push_writes_daydream_trailers_host_side(
 def _init_plain_repo(tmp_path: Path) -> Path:
     """Minimal real git repo for decline-path tests (no commit is made)."""
     repo = tmp_path / "repo"
-    repo.mkdir()
-    git(repo, "init", "-b", "main")
-    git(repo, "config", "user.email", "t@example.com")
-    git(repo, "config", "user.name", "t")
+    init_repo(repo)
     return repo
 
 @pytest.mark.asyncio
@@ -2577,10 +2573,6 @@ async def test_declined_commit_without_configured_command_skips_validation(
         pytest.param(
             "make check", ["make", "check"], "Makefile defines `check` as the CI test target", "ok", "make check",
             id="replacement-confirmed",
-        ),
-        pytest.param(
-            "make check", ["make", "check"], "Makefile defines `check` as the CI test target", "ok", "make check",
-            id="foreground-and-summary-contract",
         ),
     ],
 )
@@ -3237,18 +3229,13 @@ async def test_phase_test_and_heal_option1_shows_suggested_command_before_confir
 
 # _changed_files — untracked files must appear in the handoff change list
 
-def _init_git_repo(repo: Path) -> None:
-    """Initialize a minimal git repo with a single tracked commit."""
+def test_changed_files_includes_untracked_new_files(tmp_path: Path) -> None:
+    """A fix that creates a new file is still untracked at abort time."""
+    repo = tmp_path / "repo"
     init_repo(repo)
     (repo / "seed.txt").write_text("seed\n", encoding="utf-8")
     git(repo, "add", "seed.txt")
     git_commit(repo, "seed")
-
-def test_changed_files_includes_untracked_new_files(tmp_path: Path) -> None:
-    """A fix that creates a new file is still untracked at abort time."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _init_git_repo(repo)
     (repo / "seed.txt").write_text("seed\nmore\n", encoding="utf-8")  # tracked + modified
     (repo / "new.py").write_text("print('hi')\n", encoding="utf-8")  # untracked + not ignored
     # Gitignored file must NOT be reported.
@@ -4547,9 +4534,7 @@ async def test_declined_commit_reuses_matching_evidence_without_rerunning(
     config = make_config(repo, test_command="true")
     recipe = resolve_test_recipe(config, config, repo_root=repo)
     identity = _execution_identity(repo, recipe=recipe, argv=("true",))
-    evidence = TestAttemptEvidence(session_id="s", kind="host", command=("true",), passed=True,
-        input_tree_key=identity.output_tree_key, output_tree_key=identity.output_tree_key, identity=identity,
-    )
+    evidence = _reuse_offer(identity)
 
     result = await phase_commit_push(ScriptedBackend(), work, config=config, recipe=recipe, evidence=evidence,
         retained_tree_key=identity.output_tree_key,
@@ -4724,9 +4709,7 @@ async def test_a_reuse_decision_is_reported_and_persisted(
     identity = _execution_identity(repo, recipe=recipe, argv=("true",))
 
     await phase_commit_push(ScriptedBackend(), make_work(repo), config=config, recipe=recipe,
-        evidence=TestAttemptEvidence(session_id="s", kind="host", command=("true",), passed=True,
-            input_tree_key=identity.output_tree_key, output_tree_key=identity.output_tree_key, identity=identity,
-        ), retained_tree_key=identity.output_tree_key,
+        evidence=_reuse_offer(identity), retained_tree_key=identity.output_tree_key,
     )
 
     record = json.loads(DeepArtifact.EVIDENCE_REUSE.at(deep).read_text())

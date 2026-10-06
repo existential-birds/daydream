@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Literal, cast, get_args
+from typing import Any, Literal
 
 from daydream.repository_paths import (
     InvalidRepositoryFilePath,
@@ -34,9 +34,6 @@ FixFootprintOrigin = Literal[
     "staging",
     "scope_request",
 ]
-
-_ACTIONS = frozenset(get_args(FixFootprintAction))
-_ORIGINS = frozenset(get_args(FixFootprintOrigin))
 
 
 @dataclass(frozen=True)
@@ -209,49 +206,27 @@ class AuthorizedFixFootprint:
         )
         return accepted
 
-    def authorize_new_generated(
+    def authorize_widened_path(
         self,
         repo: Path,
         path: str,
         *,
+        action: FixFootprintAction,
+        origin: FixFootprintOrigin,
         phase: str,
         round_number: int | None,
         reason: str,
     ) -> None:
-        """Widen the run policy once for a policy-approved generated path."""
-        normalized = canonicalize_repository_file_path(repo, path)
-        if normalized in self.run_allowed_paths:
-            return
-        self.run_allowed_paths = frozenset((*self.run_allowed_paths, normalized))
-        self.policy_revision += 1
-        self._append_event(
-            action="approve_generated",
-            path=normalized,
-            path_kind="model",
-            origin="generated",
-            item_uid=None,
-            phase=phase,
-            round_number=round_number,
-            reason=reason,
-        )
+        """Widen the run policy once for a path the run did not review.
 
-    def authorize_scope_request(
-        self,
-        repo: Path,
-        path: str,
-        *,
-        phase: str,
-        round_number: int | None,
-        reason: str,
-    ) -> None:
-        """Widen the run policy once for a path a repair turn asked to work on.
-
-        Same shape as :meth:`authorize_new_generated`, and the same two promises:
-        the request is canonicalized before it can enter the union, and an
-        already-authorized path is a no-op so the policy revision counts real
-        widenings only. The event records the request as its own origin, so an
-        auditor can tell a path the run reviewed from one a repair turn
-        demonstrated it needed.
+        Both callers share the same two promises: the path is canonicalized
+        before it can enter the union, and an already-authorized path is a
+        no-op so the policy revision counts real widenings only. They differ
+        only in the audit vocabulary they record — ``approve_generated``/
+        ``generated`` for a policy-approved generated path, and
+        ``approve_scope``/``scope_request`` for a path a repair turn asked to
+        work on, which is how an auditor tells a path the run reviewed from
+        one a repair turn demonstrated it needed.
         """
         normalized = canonicalize_repository_file_path(repo, path)
         if normalized in self.run_allowed_paths:
@@ -259,10 +234,10 @@ class AuthorizedFixFootprint:
         self.run_allowed_paths = frozenset((*self.run_allowed_paths, normalized))
         self.policy_revision += 1
         self._append_event(
-            action="approve_scope",
+            action=action,
             path=normalized,
             path_kind="model",
-            origin="scope_request",
+            origin=origin,
             item_uid=None,
             phase=phase,
             round_number=round_number,
@@ -272,21 +247,19 @@ class AuthorizedFixFootprint:
     def record_git_event(
         self,
         *,
-        action: str,
+        action: FixFootprintAction,
         path: str,
-        origin: str,
+        origin: FixFootprintOrigin,
         phase: str,
         round_number: int | None,
         reason: str,
     ) -> None:
         """Record a decision involving an exact Git-observed path."""
-        if action not in _ACTIONS or origin not in _ORIGINS:
-            raise ValueError("invalid fix-footprint audit event")
         self._append_event(
-            action=cast(FixFootprintAction, action),
+            action=action,
             path=path,
             path_kind="git",
-            origin=cast(FixFootprintOrigin, origin),
+            origin=origin,
             item_uid=None,
             phase=phase,
             round_number=round_number,

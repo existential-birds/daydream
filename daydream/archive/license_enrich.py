@@ -23,11 +23,11 @@ from typing import Any, Protocol, runtime_checkable
 
 from daydream.archive.hydrate import (
     HydrationError,
-    _curated_dir,
     _manifest_license_evidence,
     _manifest_repo_slug,
     _require_manifest_dict,
 )
+from daydream.json_utils import iter_jsonl_records
 from daydream.training.corpus_projection.license import normalize_repo_slug
 from daydream.trajectory import RUNS_DIRNAME, redact_text
 
@@ -191,17 +191,8 @@ def _load_cache(stage: Path) -> tuple[dict[str, dict[str, Any]], dict[str, dict[
     """Load the enrichment cache: latest entry per session and first resolved per repo."""
     by_session: dict[str, dict[str, Any]] = {}
     by_repo: dict[str, dict[str, Any]] = {}
-    path = _cache_path(stage)
-    if not path.is_file():
-        return by_session, by_repo
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(entry, dict) or not entry.get("session_id"):
+    for entry in iter_jsonl_records(_cache_path(stage)):
+        if not entry.get("session_id"):
             continue
         by_session[str(entry["session_id"])] = entry
         slug = entry.get("repo_slug")
@@ -220,38 +211,27 @@ def _append_cache(path: Path, entries: list[dict[str, Any]]) -> None:
             fh.write(json.dumps(entry, sort_keys=True) + "\n")
 
 
-def _write_resolved(
-    derivative: Path, data: dict[str, Any], entry: dict[str, Any]
-) -> dict[str, str]:
-    """Persist *entry*'s resolved evidence into the manifest; return the payload record."""
-    spdx_id, source = str(entry["spdx_id"]), str(entry.get("source") or "")
-    data["license_evidence"] = {"spdx_id": spdx_id, "source": source}
+def _write_resolved(derivative: Path, data: dict[str, Any], entry: dict[str, Any]) -> None:
+    """Persist *entry*'s resolved evidence into the manifest, which is what the gate reads."""
+    data["license_evidence"] = {"spdx_id": str(entry["spdx_id"]), "source": str(entry.get("source") or "")}
     (derivative / "manifest.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
-    return {
-        "spdx_id": spdx_id,
-        "source": source,
-        "repo_commit": str(entry.get("repo_commit") or ""),
-        "origin": "enriched",
-    }
 
 
-def enrich_license_evidence(
-    stage: Path, *, resolver: RepoLicenseResolver
-) -> dict[str, dict[str, str]]:
+def enrich_license_evidence(stage: Path, *, resolver: RepoLicenseResolver) -> None:
     """Enrich admitted manifests with missing license evidence, caching by repo/commit.
 
     Well-formed declared evidence stays unchanged; a declared full commit still
     gets a resolution-map cache row. Each session records resolved evidence,
-    missing repo identity, or unresolved commit. Return enriched evidence by
-    session. Resolver misses remain gate-rejected evidence; network errors
-    propagate as redacted HydrationError exceptions.
+    missing repo identity, or unresolved commit. Resolver misses remain
+    gate-rejected evidence; network errors propagate as redacted HydrationError
+    exceptions. The written manifests are the whole result: the gate reads only
+    the manifest, never the cache or a returned map.
     """
     runs_dir = stage / RUNS_DIRNAME
     by_session, by_repo = _load_cache(stage)
     fresh: list[dict[str, Any]] = []
-    resolved: dict[str, dict[str, str]] = {}
     if not runs_dir.is_dir():
-        return resolved
+        return
     for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
         data = _require_manifest_dict(derivative, label=f"admitted derivative {derivative.name}")
         sid = str(data.get("session_id") or derivative.name)
@@ -286,7 +266,7 @@ def enrich_license_evidence(
                 # evidence-less form. Write the evidence back into the manifest
                 # so the gate consumes it exactly like a freshly-enriched
                 # session: the gate reads only the manifest, never the cache.
-                resolved[sid] = _write_resolved(derivative, data, prior)
+                _write_resolved(derivative, data, prior)
             continue
         raw_slug = _manifest_repo_slug(data)
         slug = normalize_repo_slug(raw_slug) if raw_slug else ""
@@ -321,24 +301,18 @@ def enrich_license_evidence(
                 by_repo.setdefault(slug, entry)
         fresh.append(entry)
         if entry.get("status") == "resolved":
-            resolved[sid] = _write_resolved(derivative, data, entry)
+            _write_resolved(derivative, data, entry)
     _append_cache(_cache_path(stage), fresh)
-    return resolved
 
 
-def publish_enrichment_cache(
-    stage: Path, *, revision: str | None = None, curated_dir: Path | None = None,
-) -> Path | None:
-    """Publish the staging cache as license-evidence.jsonl for audit and replay.
+def publish_enrichment_cache(stage: Path, *, curated_dir: Path) -> Path | None:
+    """Copy the staging cache to ``curated_dir/license-evidence.jsonl`` for audit and replay.
 
-    Use the supplied post-gate curated directory, or the historical pre-identity
-    location when absent. Return None when no cache exists.
+    Return None when no cache exists.
     """
     cache = _cache_path(stage)
     if not cache.is_file():
         return None
-    if curated_dir is None:
-        curated_dir = _curated_dir(stage, str(revision))
     target = curated_dir / _PUBLISHED_CACHE_NAME
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(cache.read_bytes())
