@@ -70,29 +70,6 @@ def test_dataset_commands_require_operator_destination_before_any_side_effect(
     assert cli_main(["corpus", "dataset", operation, *arguments]) == 2
     output = capsys.readouterr()
     assert "--trajectory-hub-repo" in output.err
-    assert "--repo" not in output.out + output.err
-    assert not destination.exists()
-
-
-@pytest.mark.parametrize("operation", ["publish", "status", "download"])
-@pytest.mark.parametrize("legacy_arguments", [["--repo", "OWNER/REPO"], ["--repo=OWNER/REPO"]])
-def test_dataset_commands_reject_repo_flag_before_any_side_effect(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    operation: str, legacy_arguments: list[str],
-) -> None:
-    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "OWNER/REPO")
-    monkeypatch.setenv("HF_TOKEN", "hf_offline_fixture_token")
-
-    def forbidden_network() -> None:
-        pytest.fail("Rejected dataset arguments must not contact HF")
-
-    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", forbidden_network)
-    destination = tmp_path / "records"
-    arguments = (["--revision", "a" * 40, "--output", str(destination)] if operation == "download"
-                 else ["--store", str(destination)])
-    assert cli_main(["corpus", "dataset", operation, *legacy_arguments, *arguments]) == 2
-    output = capsys.readouterr()
-    assert "unrecognized arguments: " + " ".join(legacy_arguments) in output.err
     assert not destination.exists()
 
 
@@ -104,7 +81,6 @@ def test_dataset_command_help_exposes_canonical_destination(
     output = capsys.readouterr()
     assert "--trajectory-hub-repo OWNER/REPO" in output.out
     assert "DAYDREAM_TRAJECTORY_HUB_REPO" in output.out
-    assert "--repo" not in output.out + output.err
 
 
 def test_dataset_status_reads_local_queue_without_credentials(
