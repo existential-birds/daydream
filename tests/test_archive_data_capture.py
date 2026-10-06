@@ -243,6 +243,9 @@ async def test_mixed_case_pr_identity_reaches_remote_ci_and_archives_success(
     verdict = json.loads((multi_stack_target / ".daydream/deep/remote-ci-verdict.json").read_text())
     push = json.loads((multi_stack_target / ".daydream/deep/push-verdict.json").read_text())
     assert verdict["status"] == "no_ci"
+    polling = verdict["polling"]
+    assert polling["elapsed_seconds"] >= polling["discovery_seconds"]
+    assert polling["stable_polls"] >= polling["required_stable_polls"]
     assert push["pushed_repository"] == no_ci_remote.head_repository
     assert verdict["target"]["base_repository"] == lower_base
     assert verdict["target"]["head_repository"] == no_ci_remote.head_repository
