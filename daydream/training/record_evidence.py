@@ -11,7 +11,11 @@ from typing import Any
 
 from daydream.dataset import SnapshotRecords
 from daydream.json_utils import canonical_json
-from daydream.training.adjudication.precedence import effective_adjudication
+from daydream.training.adjudication.precedence import (
+    effective_adjudication,
+    observation_recency,
+    retained_reply_content,
+)
 from daydream.training.labeler_versions import reply_evidence_digest
 from daydream.training.record_identity import record_finding_id
 
@@ -41,7 +45,7 @@ def latest_annotation(records: SnapshotRecords, run_id: str) -> dict[str, Any] |
 
 
 def finding_observations(records: SnapshotRecords) -> list[dict[str, Any]]:
-    """Translate eligible typed judgments for the unchanged precedence reducer."""
+    """Translate eligible typed judgments without reducing their retained evidence."""
     items = {
         run["run_id"]: {i["item_uid"]: i for i in (section_value(run, "findings") or {}).get("items", [])}
         for run in records.runs
@@ -76,6 +80,15 @@ def sessions_from_snapshot(records: SnapshotRecords, *, overlay_judgments: bool 
         run_id = run["run_id"]
         finding_payload = section_value(run, "findings") or {}
         annotation = latest_annotation(records, run_id)
+        annotation_history = [
+            o for o in records.eligible_observations
+            if o["run_id"] == run_id and o["payload"]["type"] == "harvest-annotation"
+        ]
+        latest_harvest = max(
+            annotation_history,
+            key=lambda o: (datetime.fromisoformat(o["observed_at"]), o["author"], o["observation_id"]),
+            default=None,
+        )
         rubric = None
         if annotation and annotation.get("rubric_json"):
             rubric = json.loads(annotation["rubric_json"])
@@ -97,7 +110,7 @@ def sessions_from_snapshot(records: SnapshotRecords, *, overlay_judgments: bool 
             # apply only to the same digest, so edited replies reopen prior labels.
             automatic = [o for o in history if o["role"] == "automatic"]
             if automatic:
-                current = max(automatic, key=lambda o: (datetime.fromisoformat(o["observed_at"]), o["observation_id"]))
+                current = max(automatic, key=observation_recency)
                 evidence = current["semantic_evidence"]
                 disposition = current["payload"]["disposition"]
                 digest = current["evidence_digest"]
@@ -106,7 +119,7 @@ def sessions_from_snapshot(records: SnapshotRecords, *, overlay_judgments: bool 
                 digest = raw.get("evidence_digest") or reply_evidence_digest(evidence)
                 scheme = "reply-evidence-v1"
             elif history:
-                current = max(history, key=lambda o: (datetime.fromisoformat(o["observed_at"]), o["observation_id"]))
+                current = max(history, key=observation_recency)
                 evidence = current["semantic_evidence"]
                 digest = current["evidence_digest"]
                 scheme = current.get("evidence_digest_scheme", "canonical-json-v1")
@@ -155,6 +168,10 @@ def sessions_from_snapshot(records: SnapshotRecords, *, overlay_judgments: bool 
                 ),
                 {},
             )
+            content_history = [o for o in history if o["evidence_digest"] == digest]
+            raw_digest = raw.get("evidence_digest") or reply_evidence_digest(raw.get("evidence") or [])
+            if latest_harvest and raw and raw_digest == digest:
+                content_history.append({**latest_harvest, **raw})
             resolution = {
                 **run.get("provenance", {}),
                 **source,
@@ -165,6 +182,7 @@ def sessions_from_snapshot(records: SnapshotRecords, *, overlay_judgments: bool 
                 "evidence": evidence,
                 "evidence_digest": digest,
                 "evidence_digest_scheme": scheme,
+                **retained_reply_content(content_history),
                 "comment_id": raw.get("comment_id"),
                 "profile": "pr_review"
                 if (rubric or {}).get("posterior_source") == "pr_review"

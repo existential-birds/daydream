@@ -103,14 +103,23 @@ def test_concurrent_manifest_update_preserves_rival_records(tmp_path: Path, api:
     assert {record["run_id"] for record in read_records(downloaded).runs} == {"first", "rival"}
 
 
-@pytest.mark.parametrize("fault", ["public", "secret", "oversized", "partial", "schema", "path"])
+@pytest.mark.parametrize("fault", ["public", "secret", "reply_secret", "oversized", "partial", "schema", "path"])
 def test_rejected_records_are_queued_with_safe_errors(tmp_path: Path, api: Any, fault: str) -> None:
     from tests.harness.dataset_hub import FakeDatasetHub
     hub = FakeDatasetHub(private=fault != "public")
     store = LocalRecordStore(tmp_path / "records")
     secret = "-----BEGIN PRIVATE KEY-----\nprivate-sensitive-body\n-----END PRIVATE KEY-----"
     store.commit_run(run_record(provenance={"nested": secret} if fault == "secret" else {}))
+    if fault == "reply_secret":
+        from daydream.training.labeler_versions import reply_evidence_digest
+        source_hash = hashlib.sha256(secret.encode()).hexdigest()
+        evidence = [{"reply_id": 123, "body_sha256": source_hash}]
+        store.append_observation(observation(semantic_evidence=evidence,
+            evidence_digest=reply_evidence_digest(evidence), evidence_digest_scheme="reply-evidence-v1",
+            reply_captures=[{"status": "available", "source_reply_id": "123", "body_sha256": source_hash,
+                             "captured_sha256": source_hash, "text": secret}]))
     expected = {"public": "public_destination", "secret": "blocking_secret_findings",
+                "reply_secret": "blocking_secret_findings",
                 "oversized": "record_exceeds_shard_limit", "partial": "malformed_or_interrupted_record",
                 "schema": "invalid_or_unknown_record_schema", "path": "unsafe_storage_path"}[fault]
     shard = next((store.root / "runs").iterdir())

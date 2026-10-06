@@ -1,4 +1,4 @@
-"""Posterior signals from archived recommendations and injected Git/GitHub fetchers.
+"""Posterior signals from captured recommendations and injected Git/GitHub fetchers.
 
 PR merge and reply counts provide context; per-finding qualifying replies
 provide semantic outcomes. Applied-change signals inspect recommended hunks
@@ -12,7 +12,7 @@ import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping, cast, get_args
+from typing import Any, Callable, Literal, Mapping, cast
 
 from daydream.hunk_index import parse_hunks
 from daydream.pr_review import parse_finding_markers
@@ -55,8 +55,8 @@ class PRMergeSignal:
 class FixAppliedSignal:
     """Recommended hunks found at the end of an oldest-to-newest commit window.
 
-    Applied means at least half landed; an empty window is unknown. Hunk counts
-    include the legacy diff.patch fallback only for recommendation-unaware archives."""
+    Applied means at least half the captured recommendation landed;
+    an empty window is unknown."""
 
     verdict: Literal["applied", "not_applied", "unknown"]
     hunks_applied: int
@@ -98,7 +98,9 @@ def _reply_evidence(
                 "author": _user_str(reply, "login"),
                 "author_association": reply.get("author_association", ""),
                 "created_at": reply.get("created_at", ""),
-                "body_sha256": hashlib.sha256((reply.get("body") or "").encode("utf-8")).hexdigest(),
+                "body_sha256": hashlib.sha256(
+                    (reply["body"] if isinstance(reply.get("body"), str) else "").encode("utf-8")
+                ).hexdigest(),
                 "reason": qualification_reason(reply, pr_author_logins, review_author_logins),
                 # Per-reply classifier axis (``classify_reply`` output): the field
                 # harvest's ``_decisive_evidence_valid_at`` filters on, so an earlier
@@ -107,7 +109,35 @@ def _reply_evidence(
                 "classifier_label": classify_reply(reply),
             }
         )
-    return evidence
+    return sorted(evidence, key=lambda entry: str(entry["reply_id"]))
+
+
+def _reply_captures(replies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Retain source-bound text separately from the stable semantic projection."""
+    captures = []
+    for reply in replies:
+        reply_id = reply.get("id")
+        if type(reply_id) is not int or reply_id <= 0:
+            raise ValueError("acquired reply has missing or invalid source reply ID")
+        body = reply.get("body")
+        text = body if isinstance(body, str) else None
+        available = text is not None
+        source_body = body if isinstance(body, str) else ""
+        capture: dict[str, Any] = {
+            "status": "available" if available else "unproduced" if body is None else "unavailable",
+            "source_reply_id": str(reply_id),
+            "body_sha256": hashlib.sha256(source_body.encode("utf-8")).hexdigest(),
+            "text": text,
+            "captured_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest() if text is not None else None,
+            "in_reply_to_id": str(reply["in_reply_to_id"]),
+        }
+        for field_name in ("created_at", "updated_at", "html_url"):
+            if isinstance(reply.get(field_name), str):
+                capture[field_name] = reply[field_name]
+        if not available:
+            capture["reason"] = "reply_body_missing" if body is None else "reply_body_malformed"
+        captures.append(capture)
+    return sorted(captures, key=lambda capture: capture["source_reply_id"])
 
 
 def _disposition_from_evidence(evidence: list[dict[str, Any]]) -> PerFindingDisposition:
@@ -127,19 +157,22 @@ class PerFindingResolution:
     threads become accepted/rejected from agreeing qualifying votes, ambiguous
     from conflicting or nondirectional votes, or unanswered without qualifying
     authors. Evidence retains every reply's identity, timestamp, body hash,
-    qualification reason, and classifier label, including excluded replies."""
+    qualification reason, and classifier label, including excluded replies.
+    reply_captures retains exact text, availability and source provenance
+    separately from that semantic evidence and its digest."""
 
     fingerprint: str
     comment_id: int | None
     disposition: PerFindingDisposition
     evidence: Sequence[Mapping[str, Any]] = field(default_factory=list)
     evidence_digest: str = ""
+    reply_captures: Sequence[Mapping[str, Any]] = field(default_factory=list)
 
 
 def resolution_to_dict(r: PerFindingResolution) -> dict[str, Any]:
     """Serialize a ``PerFindingResolution`` to the canonical dict shape.
 
-    Emits exactly the canonical keys; ``evidence`` is copied, never aliased.
+    Semantic evidence and retained reply captures are copied, never aliased.
     """
 
     return {
@@ -148,32 +181,8 @@ def resolution_to_dict(r: PerFindingResolution) -> dict[str, Any]:
         "disposition": r.disposition,
         "evidence": [thaw_json(entry) for entry in r.evidence],
         "evidence_digest": r.evidence_digest,
+        "reply_captures": [thaw_json(capture) for capture in r.reply_captures],
     }
-
-
-def resolution_from_dict(payload: Mapping[str, Any]) -> PerFindingResolution:
-    """Rebuild a ``PerFindingResolution`` from the canonical dict shape.
-
-    Fail-closed: missing required fields raise ``ValueError`` naming the
-    field; never ``None``-coerced, no fallback substitution.
-    """
-
-    fingerprint = payload.get("fingerprint")
-    if not fingerprint:
-        raise ValueError("missing or empty fingerprint")
-    disposition = payload.get("disposition")
-    if disposition not in get_args(PerFindingDisposition):
-        raise ValueError(f"invalid disposition: {disposition!r}")
-    evidence_digest = payload.get("evidence_digest")
-    if not evidence_digest:
-        raise ValueError("missing or empty evidence_digest")
-    return PerFindingResolution(
-        fingerprint=fingerprint,
-        comment_id=payload.get("comment_id"),
-        disposition=cast(PerFindingDisposition, disposition),
-        evidence=list(payload.get("evidence") or []),
-        evidence_digest=evidence_digest,
-    )
 
 
 @dataclass(frozen=True)
@@ -444,6 +453,7 @@ def per_finding_resolution_signal(
                 disposition="missing" if comment_id is None else _disposition_from_evidence(evidence),
                 evidence=evidence,
                 evidence_digest=reply_evidence_digest(evidence),
+                reply_captures=_reply_captures(replies),
             )
         )
     return resolutions

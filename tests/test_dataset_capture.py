@@ -15,11 +15,65 @@ from daydream.run_config import RunConfig
 from daydream.runner import run
 from daydream.training.labeler_versions import reply_evidence_digest
 from tests.harness.backend import ScriptedBackend
-from tests.harness.dataset import observation, read_records
+from tests.harness.dataset import observation, read_records, run_record
 from tests.harness.git_helpers import bare_remote, git
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 
 _SENSITIVE = "Review credential exposure: sk-offlineplaceholder0123456789"
+
+
+@pytest.mark.parametrize("text", ["", "Applied.\n\nCorrection: café 🦉\r\n保留\n"])
+def test_source_bound_reply_captures_preserve_exact_text_and_distinct_hashes(tmp_path: Path, text: str) -> None:
+    store = LocalRecordStore(tmp_path / "records")
+    store.commit_run(run_record())
+    evidence = [{"reply_id": 123, "body_sha256": "a" * 64}, {"reply_id": 124, "body_sha256": "b" * 64}]
+    captures = [{"status": "available", "source_reply_id": "123", "body_sha256": "a" * 64,
+                 "text": text, "captured_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                 "created_at": "2026-10-04T11:00:00Z", "updated_at": "2026-10-04T12:00:00Z",
+                 "html_url": "https://github.com/owner/repo/pull/7#discussion_r123", "in_reply_to_id": "100"},
+                {"status": "unavailable", "source_reply_id": "124", "body_sha256": "b" * 64,
+                 "reason": "Reply body missing from acquired source"}]
+    record = observation(semantic_evidence=evidence, evidence_digest=reply_evidence_digest(evidence),
+                         evidence_digest_scheme="reply-evidence-v1", reply_captures=captures)
+    assert store.append_observation(record).committed
+    assert not store.append_observation(record).committed
+    pinned = store.select_snapshot(observed_before="2100-01-01T00:00:00Z")
+    assert store.read_snapshot(pinned).observations[0]["reply_captures"] == captures
+    assert captures[0]["captured_sha256"] != captures[0]["body_sha256"]
+    assert "text" not in captures[1]
+
+
+@pytest.mark.parametrize("fault", ["captured_hash", "source_hash", "source_id", "duplicate", "absent_text",
+                                  "missing_source_hash", "wrong_scheme", "run_target"])
+def test_invalid_reply_captures_never_enter_the_store(tmp_path: Path, fault: str) -> None:
+    store = LocalRecordStore(tmp_path / "records")
+    store.commit_run(run_record())
+    evidence = [{"reply_id": 123, "body_sha256": "a" * 64}]
+    capture = {"status": "available", "source_reply_id": "123", "body_sha256": "a" * 64,
+               "text": "Applied.", "captured_sha256": hashlib.sha256(b"Applied.").hexdigest()}
+    record = observation(semantic_evidence=evidence, evidence_digest=reply_evidence_digest(evidence),
+                         evidence_digest_scheme="reply-evidence-v1", reply_captures=[capture])
+    if fault == "captured_hash":
+        capture["captured_sha256"] = "c" * 64
+    elif fault == "source_hash":
+        capture["body_sha256"] = "b" * 64
+    elif fault == "source_id":
+        capture["source_reply_id"] = "124"
+    elif fault == "duplicate":
+        record["reply_captures"].append(dict(capture))
+    elif fault == "absent_text":
+        capture["status"] = "unavailable"
+    elif fault == "missing_source_hash":
+        del capture["body_sha256"]
+    elif fault == "wrong_scheme":
+        del record["evidence_digest_scheme"]
+        from daydream.dataset import semantic_evidence_digest
+        record["evidence_digest"] = semantic_evidence_digest(evidence)
+    else:
+        record.update(item_uid=None, payload={"type": "run-label", "label": "accepted"})
+    with pytest.raises(StoreError, match="invalid_or_unknown_record_schema"):
+        store.append_observation(record)
+    assert store.read_records()["observations"] == ()
 
 
 @pytest.fixture

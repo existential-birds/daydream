@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
+from daydream.json_utils import canonical_json
 from daydream.training.dispositions import DECISIVE_DISPOSITIONS as DECISIVE_DISPOSITIONS
 
 HUMAN_ROLES = frozenset({"rater", "adjudicator"})
@@ -15,11 +16,42 @@ def _is_human(obs: Mapping[str, Any]) -> bool:
     return obs.get("role") in HUMAN_ROLES
 
 
+def observation_recency(observation: Mapping[str, Any]) -> tuple[datetime, str]:
+    """Order source generations by observation time and immutable identity."""
+    return datetime.fromisoformat(str(_required(observation, "observed_at"))), str(observation["observation_id"])
+
+
 def _sorted_by_recency(observations: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     return sorted(
         observations,
-        key=lambda o: (datetime.fromisoformat(str(_required(o, "observed_at"))), str(o.get("labeler", ""))),
+        key=lambda o: (
+            datetime.fromisoformat(str(_required(o, "observed_at"))),
+            str(o.get("labeler", o.get("author", ""))),
+            str(o.get("observation_id", "")),
+            canonical_json(o),
+        ),
     )
+
+
+def retained_reply_content(observations: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Retain the latest envelope for every source reply in one evidence generation.
+
+    Callers restrict observations to the selected semantic digest first. A judgment
+    without captured text does not erase content acquired in an earlier observation.
+    Capture-only enrichment replaces the retained representation deterministically.
+    """
+    captures: dict[tuple[str, str | None], Any] = {}
+    correction = None
+    for observation in _sorted_by_recency(observations):
+        singular = observation.get("correction")
+        if singular is not None:
+            correction = singular
+        for capture in [*(observation.get("reply_captures") or []), *([singular] if singular else [])]:
+            captures[(capture["source_reply_id"], capture.get("body_sha256"))] = capture
+    return {
+        "reply_captures": [captures[key] for key in sorted(captures, key=lambda key: (key[0], key[1] or ""))],
+        "correction": correction,
+    }
 
 
 def _required(obs: Mapping[str, Any], field: str) -> Any:
@@ -62,8 +94,10 @@ def reopen_on_digest_change(observation: Mapping[str, Any], current_digest: str)
 
 
 def effective_adjudication(observations: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Resolve one finding by latest adjudicator, else latest human rater, else latest automatic entry,
-    ordered by observed_at then labeler. Empty input raises ValueError.
+    """Resolve current automatic evidence by adjudicator, else human rater, else automatic entry.
+
+    Source edits reopen judgments; capture-only changes retain matching human labels.
+    Recency is observed_at, labeler, then observation identity. Empty input raises ValueError.
 
     Return the effective judgment and provenance plus conflict, review_required, and gold_eligible.
     Gold requires a decisive disposition, nonempty evidence, no unresolved rater conflict, and no
@@ -75,6 +109,10 @@ def effective_adjudication(observations: Sequence[Mapping[str, Any]]) -> dict[st
 
     record_id = _required(observations[0], "record_id")
     ordered = _sorted_by_recency(observations)
+    automatic = [o for o in ordered if o.get("role") == "automatic"]
+    if automatic:
+        current_digest = _required(max(automatic, key=observation_recency), "evidence_digest")
+        ordered = [o for o in ordered if _required(o, "evidence_digest") == current_digest]
 
     adjudicators = [o for o in ordered if o.get("role") == "adjudicator"]
     human_raters = [o for o in ordered if o.get("role") == "rater"]
@@ -93,7 +131,7 @@ def effective_adjudication(observations: Sequence[Mapping[str, Any]]) -> dict[st
     disposition = str(_required(effective, "disposition"))
     evidence_digest = str(_required(effective, "evidence_digest"))
     evidence = _required(effective, "evidence")
-    conflict = has_rater_conflict(observations)
+    conflict = has_rater_conflict(ordered)
 
     if conflict and adjudicators and adjudicators[-1].get("disposition") in DECISIVE_DISPOSITIONS:
         conflict = False
@@ -106,6 +144,7 @@ def effective_adjudication(observations: Sequence[Mapping[str, Any]]) -> dict[st
     gold_eligible = disposition in DECISIVE_DISPOSITIONS and bool(evidence) and not conflict and not review_required
 
     return {
+        **retained_reply_content([o for o in ordered if o["evidence_digest"] == evidence_digest]),
         "disposition": disposition,
         "labeler": str(_required(effective, "labeler")),
         "evidence": evidence,

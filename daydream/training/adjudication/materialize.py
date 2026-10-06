@@ -8,7 +8,6 @@ from typing import Any
 from daydream.dataset import LocalRecordStore, SnapshotRecords
 from daydream.json_utils import atomic_write_bytes, canonical_json
 from daydream.training.adjudication.snapshot import build_canonical_record
-from daydream.training.labeler_signals import resolution_from_dict
 from daydream.training.record_evidence import sessions_from_snapshot, validate_output_path
 
 _MANIFEST_FILENAME = "preview-manifest.json"
@@ -21,7 +20,7 @@ def annotation_records(records: SnapshotRecords) -> list[dict[str, Any]]:
         for resolution in session["resolutions"]:
             item = build_canonical_record(
                 {**session, "resolutions": [resolution]},
-                resolution_from_dict(resolution),
+                resolution,
                 evidence_observed_at=records.snapshot["observed_before"],
                 as_of=records.snapshot["valid_before"],
             )

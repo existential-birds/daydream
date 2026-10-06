@@ -183,7 +183,7 @@ _CORPUS_USAGE = (
     "  build     project a frozen record snapshot offline (pinned --license-policy required)\n"
     "  label     append an authoritative human outcome label\n"
     "  calibrate-reward  emit deterministic reward-calibration artifacts from derived corpus output\n"
-    "  adjudicate  per-finding queue, preview, label, export, report, materialize, and harvest"
+    "  adjudicate  per-finding queue, preview, label, export, report, materialize, and harvest-snapshot"
 )
 
 

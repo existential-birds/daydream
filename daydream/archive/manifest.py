@@ -96,9 +96,6 @@ class Manifest:
     """
 
     schema_version: str = MANIFEST_SCHEMA_VERSION
-    # Missing recommended.patch means no recommendation when supported; only legacy
-    # manifests fall back to diff.patch.
-    recommended_patch_supported: bool = True
     # Capture provenance: post_test is the exact post-heal committed tree; pre_test is
     # the fix-phase fallback. Legacy manifests use None.
     recommended_patch_capture: str | None = None
@@ -178,7 +175,6 @@ class Manifest:
         """Return a JSON-serializable dict."""
         return {
             "schema_version": self.schema_version,
-            "recommended_patch_supported": self.recommended_patch_supported,
             **_omit_falsy(recommended_patch_capture=self.recommended_patch_capture),
             "session_id": self.session_id,
             "archived_at": self.archived_at,

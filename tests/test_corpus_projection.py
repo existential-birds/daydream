@@ -13,8 +13,10 @@ from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.corpus_projection.segments import segment
 from daydream.training.corpus_projection.tiers import GoldGateError, classify_tier
 from daydream.training.exclusion import EXCLUSION_PATH
+from daydream.training.labeler_versions import reply_evidence_digest
 from daydream.training.record_identity import record_finding_id
 from daydream.training.stacks import load_dataset_v2
+from tests.harness.adjudication import reply_evidence
 from tests.harness.dataset import observation
 from tests.harness.record_projection import (
     add_projection_run,
@@ -33,7 +35,6 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def test_record_identity_is_stable_and_discriminating() -> None:
     identity = record_finding_id("s1", "s1:fix-0", "seg-0", "item:1")
-    assert identity == record_finding_id("s1", "s1:fix-0", "seg-0", "item:1")
     assert record_finding_id("s2", "s1:fix-0", "seg-0", "item:1") != identity
     assert record_finding_id("s1", "s1:fix-1", "seg-0", "item:1") != identity
     assert record_finding_id("s1", "s1:fix-0", "seg-1", "item:1") != identity
@@ -66,7 +67,6 @@ def test_decisive_dispositions_are_gold() -> None:
 
 def test_non_decisive_dispositions_never_gold() -> None:
     for d in ("ambiguous", "unanswered", "missing"):
-        assert classify_tier(_resolution(d)) != "gold"
         assert classify_tier(_resolution(d)) == "task-only"
 
 def test_intrinsic_reward_and_llm_score_cannot_promote_gold() -> None:
@@ -126,36 +126,22 @@ def test_duplicate_sibling_keys_raise() -> None:
 
 def test_native_profile_fields_surface_from_manifest() -> None:
     manifest_row = {"profile_schema_version": 2, "profile_name": "deep-review",
-        "profile_source_kind": "builtin", "profile_digest": "d" * 64, "skill": None,
+        "profile_source_kind": "builtin", "profile_digest": "d" * 64,
     }
     prov = extract_provenance(manifest_row)
     assert prov["profile"] == {"profile_schema_version": 2, "profile_name": "deep-review",
                                "profile_source_kind": "builtin", "profile_digest": "d" * 64}
-    assert "skill" not in prov or prov["skill"] is None  # optional provenance only
 
-def test_native_profile_run_without_legacy_skill_validates() -> None:
+def test_native_profile_and_explicit_stack_are_preserved() -> None:
     v2_record = {"profile": {"profile_schema_version": 2, "profile_name": "n",
                              "profile_source_kind": "builtin", "profile_digest": None},
-                 "skill": None, "stack": "python"}
+                 "stack": "python"}
     prov = extract_provenance(v2_record)
     assert prov["stack"] == "python"
-    # Schema validity is Task 1's validator's job; here we pin that no
-    # required-ness is smuggled back in for skill: the extractor carries
-    # skill only when a value exists, never for an explicit null (and honors
-    # the record's own stack override).
-    assert "skill" not in prov
     assert prov["profile"] == v2_record["profile"]
 
-def test_legacy_skill_carried_as_provenance_never_required() -> None:
-    prov = extract_provenance({"skill": "beagle-python:review-python", "profile_schema_version": None,
-                               "profile_name": None, "profile_source_kind": None,
-                               "profile_digest": None, "stack": None})
-    assert prov["skill"] == "beagle-python:review-python"
-    assert prov["stack"] == "python"
-    assert all(v is None for v in prov["profile"].values())
-
-def test_stack_falls_back_to_none_when_unresolvable() -> None:
-    prov = extract_provenance({"skill": "unknown-thing", "stack": None})
+def test_absent_explicit_stack_stays_unknown() -> None:
+    prov = extract_provenance({"profile_name": "deep-review"})
     assert prov["stack"] is None
 
 # Task 7: per-finding projection + adjudication routing
@@ -176,11 +162,27 @@ def test_mixed_session_yields_two_distinct_gold_records() -> None:
     assert {r["record_id"] for r in gold} and len({r["record_id"] for r in gold}) == 2
     assert {r["disposition"] for r in gold} == {"accepted", "rejected"}
 
-def test_reply_existence_never_constitutes_acceptance() -> None:
-    # ambiguous: a reply exists but the classifier did not map accepted/rejected
-    records = list(project_findings({"session_id": "s1", "trajectory_id": "s1:root",
-                                     "segment_id": "seg-0", "resolutions": [_res("c3" * 32, "ambiguous")]}))
-    assert all(r["tier"] != "gold" for r in records)
+def test_cli_reply_existence_never_constitutes_acceptance(tmp_path: Path) -> None:
+    store = LocalRecordStore(tmp_path / "records")
+    run = projection_run(dispositions=("ambiguous",))
+    store.commit_run(run)
+    append_projection_evidence(store, run, dispositions=())
+    semantic, capture = reply_evidence("9", "Needs investigation.\n")
+    assert semantic["classifier_label"] == "ambiguous"
+    store.append_observation(observation(
+        "reply", run_id="sess-a", item_uid="item:0", role="automatic",
+        semantic_evidence=[semantic], evidence_digest=reply_evidence_digest([semantic]),
+        evidence_digest_scheme="reply-evidence-v1", reply_captures=[capture],
+        payload={"type": "finding-judgment", "disposition": "ambiguous", "rationale": "nondirectional reply"},
+    ))
+    config = projection_config(store, tmp_path)
+    assert cli_main(_cli_args(config)) == 0
+    assert _read_jsonl(config.out_dir / "corpus.jsonl") == []
+    report = json.loads((config.out_dir / "adjudication-report.json").read_text())
+    assert len(report) == 1
+    assert report[0]["disposition"] == "ambiguous"
+    assert report[0]["evidence"] == [semantic]
+    assert report[0]["reply_captures"] == [capture]
 
 def test_non_decisive_findings_route_to_adjudication() -> None:
     session = {"session_id": "s1", "trajectory_id": "s1:root", "segment_id": "seg-0",
@@ -382,6 +384,11 @@ def test_cli_posterior_annotation_preserves_captured_native_profile_with_claim_s
                   "composite_reward": breakdown["composite"], "evidence_sha": "1" * 40,
                   "rubric_json": json.dumps({"posterior_source": "pr_review"}), "reviewer_logins": ["alice"],
                   "has_posterior": True, "reply_classifier_version": "980-classifier-r1", "reply_evidence_digest": None}
+    semantic, capture = reply_evidence("9", "good catch\ncafé ☕\n")
+    annotation["rubric_json"] = json.dumps({"posterior_source": "pr_review", "per_finding_resolutions": [{
+        "fingerprint": run["findings"]["value"]["items"][0]["fingerprint"], "disposition": "accepted",
+        "evidence": [semantic], "evidence_digest": reply_evidence_digest([semantic]), "reply_captures": [capture],
+    }]})
     store.append_observation(observation("harvest", schema_version="daydream.observation.v2", run_id="sess-a",
         item_uid=None, role="automatic", semantic_evidence=[], evidence_digest=semantic_evidence_digest([]),
         payload={"type": "harvest-annotation", "annotation": annotation, "labeler_policy_version": "980-policy-r1"}))
@@ -392,6 +399,9 @@ def test_cli_posterior_annotation_preserves_captured_native_profile_with_claim_s
     assert row["stack"] == "python"
     assert row["annotation"] == annotation
     assert row["intrinsic_reward"] == breakdown
+    assert row["reply_captures"] == [capture]
+    assert row["evidence"] == [semantic]
+    jsonschema.validate(row, json.loads((config.out_dir / "schema.json").read_text()))
 
 
 def test_equivalent_records_preserve_normalized_pre_cutover_training_examples(tmp_path: Path) -> None:

@@ -20,7 +20,7 @@ __all__ = ["build_queue", "_NON_DECISIVE_DISPOSITIONS"]
 
 
 def _profile_label(resolution: Mapping[str, object], provenance: Mapping[str, Any]) -> str | None:
-    """Read canonical profile_name or legacy flat/nested profile through extract_provenance.
+    """Read canonical profile_name or flat/nested profile through extract_provenance.
 
     Absent labels remain absent; never stringify None or a profile dictionary.
     """
@@ -43,6 +43,8 @@ _ITEM_KEYS = (
     "evidence",
     "evidence_digest",
     "evidence_digest_scheme",
+    "reply_captures",
+    "correction",
     "session_id",
     "trajectory_id",
     "segment_id",
@@ -135,6 +137,8 @@ def build_queue(
                 "evidence": entry["evidence"],
                 "evidence_digest": fresh_digest,
                 "evidence_digest_scheme": resolution["evidence_digest_scheme"],
+                "reply_captures": resolution.get("reply_captures", []),
+                "correction": resolution.get("correction"),
                 "session_id": session_id,
                 "trajectory_id": trajectory_id,
                 "segment_id": segment_id,

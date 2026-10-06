@@ -7,6 +7,7 @@ from typing import Any
 
 from daydream.training._immutable_json import thaw_json
 from daydream.training.corpus_projection.provenance import extract_provenance
+from daydream.training.dispositions import DECISIVE_DISPOSITIONS, NON_DECISIVE_DISPOSITIONS
 from daydream.training.labeler_versions import (
     ADJUDICATION_LABELER_VERSION,
     ANNOTATION_SNAPSHOT_SCHEMA_VERSION,
@@ -36,7 +37,7 @@ def record_evidence_digest(
 
 def build_canonical_record(
     session: Mapping[str, Any],
-    resolution: Any,
+    resolution: Mapping[str, Any],
     *,
     evidence_observed_at: str,
     as_of: str | None = None,
@@ -47,8 +48,13 @@ def build_canonical_record(
     never trusted from any stored copy. Missing required fields fail closed
     with ``ValueError`` naming the offending field (no fallback coercion).
     """
-    fingerprint = resolution.fingerprint
-    evidence_digest = resolution.evidence_digest
+    fingerprint = resolution.get("fingerprint")
+    if not isinstance(fingerprint, str) or not fingerprint:
+        raise ValueError("build_canonical_record: missing or invalid required field 'fingerprint'")
+    disposition = resolution.get("disposition")
+    if not isinstance(disposition, str) or disposition not in DECISIVE_DISPOSITIONS | NON_DECISIVE_DISPOSITIONS:
+        raise ValueError(f"build_canonical_record: invalid disposition: {disposition!r}")
+    evidence_digest = resolution.get("evidence_digest")
     if not isinstance(evidence_digest, str) or not evidence_digest:
         raise ValueError(
             f"build_canonical_record: resolution for fingerprint {fingerprint!r} is missing "
@@ -73,8 +79,10 @@ def build_canonical_record(
     record: dict[str, Any] = {
         "record_id": record_finding_id(session_id, trajectory_id, segment_id, rows[0]["item_uid"]),
         "fingerprint": fingerprint,
-        "disposition": resolution.disposition,
-        "evidence": [thaw_json(entry) for entry in resolution.evidence],
+        "disposition": disposition,
+        "evidence": thaw_json(resolution.get("evidence") or []),
+        "reply_captures": thaw_json(resolution.get("reply_captures", [])),
+        "correction": thaw_json(resolution.get("correction")),
         "evidence_digest": evidence_digest,
         "session_id": session_id,
         "trajectory_id": trajectory_id,
@@ -90,7 +98,7 @@ def build_canonical_record(
         # projection from canonical records (``project_findings``/``build_queue``)
         # consume the session shape (``resolutions`` list), and the materialized
         # per-finding record must be directly consumable without a second shape.
-        "resolutions": [dict(rows[0])],
+        "resolutions": [thaw_json(rows[0])],
     }
     if rows[0].get("item_uid"):
         record["item_uid"] = rows[0]["item_uid"]

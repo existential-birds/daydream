@@ -4,7 +4,7 @@
 
 Daydream is an automated code-review agent. It reviews a code change, applies fixes, and runs the test suite to validate the result. It records every agent action as a structured trajectory.
 
-The goal of daydream is an open-weight code-review model. Daydream trains this model on the trajectory archive that it collects from its own runs. Training is a staged recipe: reward construction, then SFT cold-start, then RFT (rejection fine-tuning), then online RL. Daydream benchmarks the model against commercial code-review bots on a held-out PR replay corpus.
+The goal of daydream is an open-weight code-review model. Daydream trains this model on immutable JSONL run records and their observation history. Training is a staged recipe: reward construction, then SFT cold-start, then RFT (rejection fine-tuning), then online RL. Daydream benchmarks the model against commercial code-review bots on a held-out PR replay corpus.
 
 ## Requirements
 
@@ -239,7 +239,7 @@ This section is for machine learning researchers. Daydream is a data-collection 
 
 Daydream records every agent interaction as an [ATIF v1.7](https://www.harborframework.com/docs/agents/trajectory-format) trajectory. The trajectory records the review pipeline, the model output, the tool calls, the cost, and the result.
 
-During a run, Daydream keeps its working artifacts outside the target checkout. After finalization, it publishes the trajectory at `<project>/.daydream/runs/<session-id>/trajectory.json` and parallel sub-trajectories in the sibling `trajectories/` directory. Daydream archives the complete run bundle at `~/.daydream/archive/runs/<session-id>/`. The bundle contains the trajectory, the manifest, the review output, the diff, and the evaluation analysis. An SQLite index at `~/.daydream/archive/index.db` supports cross-project querying.
+During a run, Daydream keeps its working artifacts outside the target checkout. After finalization, it publishes the trajectory at `<project>/.daydream/runs/<session-id>/trajectory.json` and parallel sub-trajectories in the sibling `trajectories/` directory. Daydream archives the complete run bundle at `~/.daydream/archive/runs/<session-id>/`. The bundle contains the trajectory, the manifest, the review output, the diff, and the evaluation analysis. A local SQLite index at `~/.daydream/archive/index.db` records finalized run metadata for diagnostics. Cross-project training queries read pinned JSONL snapshots through `LocalRecordStore.read_snapshot`; see [Corpus commands](#corpus-commands).
 
 Runtime output publication is all-or-nothing at finalization: invalid run identity, frozen evidence, findings projection, or output publication restores the checkout's prior artifacts. Archive, evaluation, index, and upload failures emit a sanitized data-collection diagnostic and preserve the review result and completed outputs. The archived bundle only exists once archiving has succeeded; handoffs do not promise a manifest from optional persistence.
 
@@ -303,7 +303,7 @@ in the child environment; it never appears in URLs or command arguments.
 
 ### Scoring
 
-The harvest stage scores each trajectory using verifier correctness and a length penalty:
+Capture and sealed RL runs read producer artifacts through the same scoring owner. Harvest reads those captured signals from immutable run records and adds separate outcome evidence. Intrinsic scoring uses verifier correctness and a length penalty:
 
 ```text
 correctness = mean(consistent: 1.0, uncertain: 0.5, contradicts: 0.0)
@@ -882,7 +882,7 @@ These paths contain finalized output in the source checkout. Live artifacts stay
 | `.daydream/exploration/` | Cached pre-scan grounding |
 | `.review-output.md` | Review findings (removed with `--cleanup`) |
 | `~/.daydream/archive/runs/<id>/` | Archived run: manifest, trajectory, review output, evaluation, deep artifacts |
-| `~/.daydream/archive/index.db` | SQLite index for cross-project querying |
+| `~/.daydream/archive/index.db` | Local diagnostic index of finalized run metadata |
 
 Daydream moves existing untracked `.daydream/` and `.review-output.md` artifacts into private storage for the run. It restores or merges them during finalization. Tracked files at these artifact paths cause a preflight refusal; Daydream does not detach tracked source files. If another process changes an output, Daydream retains the competing bytes and reports a conflict instead of overwriting them. Recovery remains tied to the source checkout after temporary worktree cleanup.
 

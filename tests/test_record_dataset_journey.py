@@ -1,4 +1,5 @@
 """Real capture, CLI annotation, canonical HF publication, and offline projection."""
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -13,6 +14,7 @@ from daydream.pr_review import DAYDREAM_FOOTER, finding_marker
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from daydream.training.license_evidence import EnrichedEvidence, GithubLicenseResolver
+from daydream.training.record_evidence import sessions_from_snapshot
 from tests.harness.dataset import read_records
 from tests.harness.dataset_hub import FakeDatasetHub
 from tests.harness.git_helpers import git
@@ -46,12 +48,22 @@ def test_capture_publish_download_annotate_republish_and_build_offline(
     initial = downloaded.select_snapshot(observed_before="2100-01-01T00:00:00Z")
 
     comments = []
+    expected_text = {}
     for index, item in enumerate(items, start=1):
+        body = "Needs investigation.\n\nCorrection: café 🦉\r\n保留\n" if index == 1 else "Applied."
+        expected_text[str(index * 2 + 1)] = body
         comments += [{"id": index * 2, "user": {"login": "daydream-runner"},
                       "body": f"finding\n{finding_marker(item['fingerprint'])}\n{DAYDREAM_FOOTER}"},
                      {"id": index * 2 + 1, "in_reply_to_id": index * 2, "user": {"login": "reviewer"},
-                      "author_association": "OWNER", "body": "Needs investigation." if index == 1 else "Applied.",
-                      "created_at": "2026-10-06T10:00:00Z"}]
+                      "author_association": "OWNER", "body": body,
+                      "created_at": "2026-10-06T10:00:00Z", "updated_at": "2026-10-06T10:30:00Z",
+                      "html_url": f"https://github.com/owner/repo/pull/7#discussion_r{index * 2 + 1}"}]
+    excluded_id = len(items) * 2 + 2
+    excluded_body = "Disagree.\nUnqualified reply preserved."
+    comments.append({"id": excluded_id, "in_reply_to_id": 2, "user": {"login": "drive-by[bot]"},
+                     "author_association": "NONE", "body": excluded_body,
+                     "created_at": "2026-10-06T10:10:00Z"})
+    expected_text[str(excluded_id)] = excluded_body
 
     def github(repo_path: Path, endpoint: str, **kwargs: Any) -> Any:
         if endpoint.endswith("/pulls") and "/commits/" in endpoint:
@@ -77,6 +89,13 @@ def test_capture_publish_download_annotate_republish_and_build_offline(
                      "--snapshot-id", initial["snapshot_id"], "--cache-dir", str(tmp_path / "cache"),
                      "--gh-spacing-sec", "0"]) == 0
     enriched = downloaded.select_snapshot(observed_before="2100-01-01T00:00:00Z")
+    harvested = downloaded.read_snapshot(enriched)
+    captured_replies = [capture for row in harvested.observations for capture in row.get("reply_captures", [])]
+    assert {capture["source_reply_id"]: capture["text"] for capture in captured_replies} == expected_text
+    for capture in captured_replies:
+        assert capture["body_sha256"] == capture["captured_sha256"] == hashlib.sha256(
+            expected_text[capture["source_reply_id"]].encode()).hexdigest()
+    assert captured_replies[0]["in_reply_to_id"]
     state = tmp_path / "queue"
     assert cli_main(["corpus", "adjudicate", "build", "--store", str(downloaded.root),
                      "--snapshot-id", enriched["snapshot_id"], "--state-dir", str(state)]) == 0
@@ -96,6 +115,14 @@ def test_capture_publish_download_annotate_republish_and_build_offline(
     assert json.dumps(records.runs[0], sort_keys=True) == original
     assert any(o["payload"]["type"] == "harvest-annotation" for o in records.observations)
     assert any(o["role"] == "rater" and o["source"] == "adjudication" for o in records.observations)
+    assert [o for o in records.observations if o.get("reply_captures")] == [
+        o for o in harvested.observations if o.get("reply_captures")]
+    offline_sessions = sessions_from_snapshot(records)
+    assert {capture["source_reply_id"]: capture["text"] for session in offline_sessions
+            for resolution in session["resolutions"] for capture in resolution["reply_captures"]} == expected_text
+    effective = records.effective_judgment(captured["run_id"], items[0]["item_uid"])
+    assert effective["role"] == "rater" and effective["disposition"] == "accepted"
+    assert {capture["source_reply_id"] for capture in effective["reply_captures"]} == {"3", str(excluded_id)}
     assert downloaded.read_snapshot(initial["snapshot_id"]).observations == ()
 
     def no_network(*args: Any, **kwargs: Any) -> Any:

@@ -10,7 +10,7 @@ unchanged evidence and policy; changed evidence appends immutable observations.
 Dry-run suppresses all writes. A disposable response cache can skip completed
 rows; exhausted rate limits abort without losing already persisted evidence.
 PR/base/license enrichment is append-only and leaves captured records sealed.
-The producer-only scoring reader below acquires frozen artifacts at capture.
+Exact reply text is retained separately from semantic evidence and its digest.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from daydream.json_utils import canonical_json
 from daydream.training import labeler_versions, reward
 from daydream.training.adjudication.snapshot import record_evidence_digest
 from daydream.training.backfill_cache import BackfillCache
-from daydream.training.harvest_types import BaseShaStatus, HarvestEvidence, HarvestRow
+from daydream.training.harvest_types import HarvestEvidence, HarvestRow
 from daydream.training.labeler_signals import (
     CommentResolutionSignal,
     FixAppliedSignal,
@@ -59,15 +59,6 @@ from daydream.training.reward import FP_PENALTY_MAP, ScoringInputs, score_trajec
 from daydream.training.rubric import Rubric, derive_outcome_label
 from daydream.trajectory import redact_text as _redact_text
 from daydream.ui import create_console, print_warning
-
-_VERDICTS_FILE = "recommendation-verdicts.json"
-"""Bronze artifact (under ``deep/``) carrying the ``verdicts`` list."""
-
-_RECORDS_GLOB = "stack-*-records.json"
-"""Bronze per-stack finding-record artifacts (under ``deep/``)."""
-
-_REVIEW_OUTPUT_FILE = "review-output.md"
-"""Length-proxy artifact; at the run root for shallow runs, under ``deep/`` for deep runs."""
 
 _PRIOR_SUFFICIENCY_THRESHOLD = 10
 """Minimum pooled prior-run count for the empirical reviewer-set mean penalty to
@@ -103,7 +94,7 @@ class HarvestServices(Protocol):
         repo_clone: Path | None,
         *,
         console: Console,
-    ) -> BaseShaStatus: ...
+    ) -> None: ...
 
     def github(self, repo: str, endpoint: str, **kwargs: Any) -> Any: ...
 
@@ -119,8 +110,6 @@ class HarvestServices(Protocol):
     def set_pr_link(self, row: HarvestRow, number: int, repo: str) -> None: ...
 
     def read_scoring_inputs(self, row: HarvestRow) -> ScoringInputs: ...
-
-    def read_recorded_fingerprints(self, row: HarvestRow) -> tuple[str, ...]: ...
 
     def fix_applied(
         self,
@@ -146,63 +135,6 @@ class HarvestServices(Protocol):
     def backoff_sleep(self, seconds: float) -> None: ...
 
     async def sleep_between_rows(self, seconds: float) -> None: ...
-
-
-def _read_review_output(run_dir: Path) -> str | None:
-    """Read review-output.md from the run root, then deep/; return None when absent.
-
-    Propagate filesystem errors other than FileNotFoundError.
-    """
-    for candidate in (run_dir / _REVIEW_OUTPUT_FILE, run_dir / "deep" / _REVIEW_OUTPUT_FILE):
-        try:
-            return candidate.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            continue
-    return None
-
-
-def assemble_scoring_inputs(run_dir: Path) -> ScoringInputs:
-    """Read verifier verdicts, artifact validity, and output length from a run.
-
-    Missing verifier verdicts leave correctness absent. Malformed structured
-    artifacts fail the format gate; missing evidence never earns credit.
-    """
-    deep_dir = run_dir / "deep"
-
-    verifier_verdicts: list[dict[str, Any]] | None = None
-    format_valid = True
-
-    verdicts_path = deep_dir / _VERDICTS_FILE
-    try:
-        data = json.loads(verdicts_path.read_text(encoding="utf-8"))
-        verdicts = data.get("verdicts") if isinstance(data, dict) else None
-        if isinstance(verdicts, list):
-            verifier_verdicts = verdicts
-    except FileNotFoundError:
-        # No structured verdicts; nothing failed to parse. Expected for a
-        # shallow run and, after the verify relocation, a declined deep run
-        # that skipped recommendation verification at the apply-fixes gate.
-        pass
-    except json.JSONDecodeError:
-        # Present but malformed ⇒ format gate floors.
-        format_valid = False
-
-    # A present-but-malformed records file also trips the format gate.
-    if deep_dir.is_dir():
-        for records_path in sorted(deep_dir.glob(_RECORDS_GLOB)):
-            try:
-                json.loads(records_path.read_text(encoding="utf-8"))
-            except FileNotFoundError:
-                continue
-            except json.JSONDecodeError:
-                format_valid = False
-
-    review_text = _read_review_output(run_dir)
-    return ScoringInputs(
-        verifier_verdicts=verifier_verdicts,
-        format_valid=format_valid,
-        length=len(review_text) if review_text is not None else None,
-    )
 
 
 # Bounded rate-limit backoff for the gh seam (honors parsed Retry-After, capped
@@ -253,8 +185,8 @@ _FIX_APPLIED_STUB = FixAppliedSignal(
     hunks_total=0,
     window_commits=[],
 )
-"""Returned when the fix-applied cascade cannot run (missing recommended.patch
-/ diff.patch, empty changed_files, or any subprocess error). The rubric still
+"""Returned when the fix-applied cascade cannot run (missing captured recommendation,
+empty changed_files, or any subprocess error). The rubric still
 carries the field for schema stability; outcome derivation does not depend on
 it for the PR-review path."""
 
@@ -310,7 +242,7 @@ def _build_rubric_pr(
     signal_row = row.as_signal_row()
     # Fetch + index the PR's review comments once; both resolution signals
     # consume this index instead of each hitting the /comments endpoint.
-    recorded_fingerprints = services.read_recorded_fingerprints(row)
+    recorded_fingerprints = row.findings_fingerprints
     comment_threads = index_pr_review_comments(
         signal_row,
         gh_api=github,
@@ -382,7 +314,7 @@ def _build_rubric_local(
                 disposition="missing",
                 evidence_digest=labeler_versions.reply_evidence_digest([]),
             )
-            for fingerprint in services.read_recorded_fingerprints(row)
+            for fingerprint in row.findings_fingerprints
         ],
     )
 
@@ -431,8 +363,6 @@ def acquire_harvest_evidence(
     *,
     services: HarvestServices,
     repo_resolution: Path | None,
-    base_sha_status: BaseShaStatus,
-    valid_at_override: str | None = None,
 ) -> HarvestEvidence:
     """Acquire one row's complete external evidence in established order."""
     repo_clone = repo_resolution or services.store_dir
@@ -488,9 +418,6 @@ def acquire_harvest_evidence(
         reviewer_logins=tuple(reviewer_logins),
         pooled_prior=pooled_prior,
         prior_n=prior_n,
-        repo_resolution=repo_resolution,
-        base_sha_status=base_sha_status,
-        valid_at_override=valid_at_override,
     )
 
 
@@ -500,8 +427,6 @@ def build_annotation(row: HarvestRow, evidence: HarvestEvidence) -> AnnotationPa
     outcome_label = derive_outcome_label(rubric)
     labels = [outcome_label] if outcome_label != "unknown" else []
     valid_at = _rubric_valid_at(rubric)
-    if evidence.valid_at_override is not None:
-        valid_at = evidence.valid_at_override
 
     # Only a maintainer acting on a real PR is posterior evidence; a local commit
     # containing the recommended lines is a weaker tier and must not enter the
@@ -779,7 +704,7 @@ class _ProductionHarvestServices:
         repo_clone: Path | None,
         *,
         console: Console,
-    ) -> BaseShaStatus:
+    ) -> None:
         if not self._config.dry_run and row.repo_slug and row.head_sha:
             try:
                 license_evidence = GithubLicenseResolver().resolve(row.repo_slug, repo_commit=row.head_sha)
@@ -794,21 +719,17 @@ class _ProductionHarvestServices:
                 evidence = {"status": "failed", "value": None, "reason": "license_acquisition_failed"}
                 print_warning(console, "harvest: license acquisition failed; corpus admission remains unavailable")
             self._append_typed(row.session_id, {"type": "enrichment", "kind": "license", "evidence": evidence}, value)
-        if self._config.dry_run:
-            return "available" if row.base_sha else "unavailable"
-        if row.base_sha:
-            return "available"
+        if self._config.dry_run or row.base_sha:
+            return
         if repo_clone is None or not row.base_branch or not row.head_sha:
-            return "unavailable"
+            return
         try:
             resolved = git_ops.merge_base(repo_clone, row.base_branch, row.head_sha)
         except GitError as exc:
             print_warning(console, f"harvest: base revision enrichment failed: {type(exc).__name__}")
-            return "failed"
-        if resolved is None:
-            return "unavailable"
-        self._append_enrichment(row.session_id, "base", {"base_sha": resolved})
-        return "available"
+            return
+        if resolved is not None:
+            self._append_enrichment(row.session_id, "base", {"base_sha": resolved})
 
     def github(self, repo: str, endpoint: str, **kwargs: Any) -> Any:
         cache = self._cache_instance()
@@ -875,9 +796,6 @@ class _ProductionHarvestServices:
             length=scoring["length"],
         )
 
-    def read_recorded_fingerprints(self, row: HarvestRow) -> tuple[str, ...]:
-        return row.findings_fingerprints or ()
-
     @staticmethod
     def _file_at(repo: Path, path: str, sha: str) -> str:
         try:
@@ -928,6 +846,7 @@ class _ProductionHarvestServices:
         digest: str | None = None,
         valid_at: str | None = None,
         scheme: str = "canonical-json-v1",
+        reply_captures: list[dict[str, Any]] | None = None,
     ) -> bool:
         digest = digest or hashlib.sha256(canonical_json(semantic_evidence).encode()).hexdigest()
         identity = hashlib.sha256(
@@ -938,6 +857,7 @@ class _ProductionHarvestServices:
                     "payload": payload,
                     "evidence_digest": digest,
                     "policy": labeler_versions.LABELER_POLICY_VERSION,
+                    **({"reply_captures": reply_captures} if reply_captures is not None else {}),
                 }
             ).encode()
         ).hexdigest()
@@ -968,6 +888,7 @@ class _ProductionHarvestServices:
                     "evidence_digest_scheme": scheme,
                     "semantic_evidence": semantic_evidence,
                     "payload": payload,
+                    **({"reply_captures": reply_captures} if reply_captures is not None else {}),
                 }
             )
             .committed
@@ -975,6 +896,14 @@ class _ProductionHarvestServices:
 
     def append_annotation(self, row: HarvestRow, payload: AnnotationPayload) -> bool:
         annotation = asdict(payload)
+        rubric = json.loads(payload.rubric_json or "{}")
+        captures_by_fingerprint = {
+            resolution["fingerprint"]: resolution.pop("reply_captures", [])
+            for resolution in rubric.get("per_finding_resolutions") or []
+        }
+        # Retained text is durable observation content, separate from annotation
+        # semantic evidence and the digest that pins human judgments.
+        annotation["rubric_json"] = json.dumps(rubric) if payload.rubric_json is not None else None
         inserted = self._append_typed(
             row.session_id,
             {
@@ -985,14 +914,13 @@ class _ProductionHarvestServices:
             annotation,
             valid_at=payload.valid_at,
         )
-        rubric = json.loads(payload.rubric_json or "{}")
         by_fingerprint = {r["fingerprint"]: r for r in rubric.get("per_finding_resolutions") or []}
         for item in (section_value(self._runs[row.session_id], "findings") or {}).get("items", []):
             resolution = by_fingerprint.get(item["fingerprint"], {})
             evidence = resolution.get("evidence") or []
             disposition = resolution.get("disposition", "unanswered")
             digest = resolution.get("evidence_digest") or labeler_versions.reply_evidence_digest(evidence)
-            self._append_typed(
+            finding_inserted = self._append_typed(
                 row.session_id,
                 {
                     "type": "finding-judgment",
@@ -1004,7 +932,9 @@ class _ProductionHarvestServices:
                 digest=digest,
                 valid_at=payload.valid_at,
                 scheme="reply-evidence-v1",
+                reply_captures=captures_by_fingerprint.get(item["fingerprint"], []),
             )
+            inserted = finding_inserted or inserted
         return inserted
 
     def mark_session_done(self, session_id: str) -> None:
@@ -1038,15 +968,14 @@ def collect_annotation(
     row: HarvestRow,
     *,
     services: HarvestServices,
-    readonly: bool,
     console: Console,
 ) -> tuple[HarvestRow, AnnotationPayload]:
-    """Collect and reduce the same evidence for preview and canonical harvest.
+    """Acquire and reduce evidence for a validated captured record.
 
-    Read-only callers supply dry-run services; linking is then in-memory only.
+    Dry-run services keep discovered PR links in memory only.
     """
     repo_resolution = services.resolve_repo(row, console=console)
-    base_sha_status = services.materialize_base_sha(
+    services.materialize_base_sha(
         row,
         repo_resolution,
         console=console,
@@ -1070,7 +999,7 @@ def collect_annotation(
             link = None
         if link is not None:
             number, slug = link
-            if not readonly:
+            if not services.dry_run:
                 services.set_pr_link(row, number, slug)
             row = replace(row, pr_number=number, pr_repo=slug)
 
@@ -1078,7 +1007,6 @@ def collect_annotation(
         row,
         services=services,
         repo_resolution=repo_resolution,
-        base_sha_status=base_sha_status,
     )
     return row, build_annotation(row, evidence)
 
@@ -1126,7 +1054,6 @@ async def run_harvest(
             row, payload = collect_annotation(
                 row,
                 services=services,
-                readonly=config.dry_run,
                 console=console,
             )
             if config.dry_run:

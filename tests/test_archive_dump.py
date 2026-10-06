@@ -2,13 +2,14 @@
 
 import json
 import shutil
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 
 from daydream.archive import scan
 from daydream.archive.errors import ArchivePublicationError
-from daydream.archive.index import query_runs
 from daydream.run_config import RunConfig
 from tests.test_archive import _setup_bundle, _strict_archive, _write_snapshot
 
@@ -43,7 +44,8 @@ def test_dump_preserves_credentials_and_binary_without_scanning(
     assert (stage / "deep" / "evidence.bin").read_bytes() == b"\xff\x00ghp_binarycanary"
     assert _contents(source) == original
     assert json.loads((stage / "manifest.json").read_text())["session_id"] == session_id
-    assert query_runs(archive_dir)[0]["session_id"] == session_id
+    with closing(sqlite3.connect(f"{(archive_dir / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
+        assert conn.execute("SELECT session_id FROM runs").fetchall() == [(session_id,)]
 
 
 @pytest.mark.parametrize("patch", ["+print('safe')\n", '+SORT_KEY = "created_at"\n'])
@@ -83,5 +85,5 @@ def test_destination_publication_error_stays_fatal(tmp_path: Path, archive_dir: 
     assert stage.stat().st_mode & 0o777 == 0o700
     assert _contents(source) == original
     assert not (archive_dir / "runs" / recorder.session_id).exists()
-    assert query_runs(archive_dir) == []
+    assert not (archive_dir / "index.db").exists()
     assert not list((archive_dir / "runs").glob(".*.finalizing"))
