@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from collections.abc import AsyncIterator
+from contextlib import closing
 from dataclasses import replace
 from io import StringIO
 from pathlib import Path
@@ -18,7 +20,6 @@ from rich.console import Console
 
 from daydream import git_ops
 from daydream.archive import scan
-from daydream.archive.index import query_runs
 from daydream.backends import (
     AgentEvent,
     DiagnosticEvent,
@@ -420,7 +421,8 @@ async def test_dump_artifacts_copies_credentials_in_diff(
     ))
     assert exit_code == 0
     run_dir = _only_archived_run(archive_dir)
-    assert query_runs(archive_dir)
+    with closing(sqlite3.connect(f"{(archive_dir / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
     assert (multi_stack_target / ".review-output.md").is_file()
     assert canary in (run_dir / "diff.patch").read_text()
     assert (dump_dir / "diff.patch").read_bytes() == (run_dir / "diff.patch").read_bytes()

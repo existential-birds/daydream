@@ -92,27 +92,13 @@ def _refuse_posterior_evidence(
             raise ValueError(f"session {session_id!r} finding {fingerprint!r}: refusing posterior outcome evidence")
 
 
-def _merge_nested_profile(prov: dict[str, Any], row: Mapping[str, Any]) -> None:
-    if any(prov["profile"].values()):
-        return
-    nested = row.get("profile")
-    if isinstance(nested, Mapping):
-        for name in prov["profile"]:
-            if nested.get(name) is not None:
-                prov["profile"][name] = nested[name]
-
-
 def _provenance_for(resolution: Mapping[str, Any], run: Mapping[str, Any]) -> dict[str, Any]:
     prov = extract_provenance(resolution)
-    _merge_nested_profile(prov, resolution)
     captured = extract_provenance(run)
-    _merge_nested_profile(captured, run)
     if not any(prov["profile"].values()):
         prov["profile"] = captured["profile"]
     if prov["stack"] is None:
         prov["stack"] = captured["stack"]
-    if prov.get("skill") is None and captured.get("skill") is not None:
-        prov["skill"] = captured["skill"]
     return prov
 
 
@@ -183,7 +169,6 @@ def project_findings(
         disposition = resolution.get("disposition")
         evidence = list(resolution.get("evidence") or [])
         provenance = extract_provenance(resolution)
-        _merge_nested_profile(provenance, resolution)
         item_uid = resolution.get("item_uid")
         if not isinstance(item_uid, str) or not item_uid:
             raise ValueError(f"project_findings: session {session_id!r} resolution missing host item_uid")
@@ -199,6 +184,8 @@ def project_findings(
             "disposition": disposition,
             "outcome_label": disposition if tier == "gold" else None,
             "evidence": evidence,
+            "reply_captures": resolution.get("reply_captures", []),
+            "correction": resolution.get("correction"),
             "profile": provenance["profile"],
             "stack": provenance["stack"],
         }
@@ -211,6 +198,8 @@ def project_findings(
                     "item_uid": item_uid,
                     "disposition": disposition,
                     "evidence": evidence,
+                    "reply_captures": resolution.get("reply_captures", []),
+                    "correction": resolution.get("correction"),
                     "exclusion_reason": (
                         f"non-decisive disposition {disposition!r} — missing decisive "
                         "human verdict (evidence carried for the adjudication pass)"

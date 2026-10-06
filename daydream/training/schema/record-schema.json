@@ -341,6 +341,167 @@
     "item_uid": {
       "type": "string",
       "minLength": 1
+    },
+    "correction": {
+      "$ref": "#/$defs/correction"
+    },
+    "reply_captures": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/replyCapture"
+      }
+    }
+  },
+  "$defs": {
+    "correction": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "available",
+                "unavailable",
+                "unproduced",
+                "withheld",
+                "failed"
+              ]
+            },
+            "source_reply_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "body_sha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "text": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "captured_sha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "redaction_provenance": {
+              "type": "object"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "source_reply_id"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "replyCapture": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "available",
+            "unavailable",
+            "unproduced",
+            "withheld",
+            "failed"
+          ]
+        },
+        "source_reply_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "body_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "captured_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "redaction_provenance": {
+          "type": "object"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "html_url": {
+          "type": "string"
+        },
+        "in_reply_to_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "source_reply_id",
+        "body_sha256"
+      ]
     }
   }
 }

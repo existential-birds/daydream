@@ -5,7 +5,7 @@ from pathlib import Path
 from daydream.dataset import LocalRecordStore
 from daydream.training.adjudication.harvest import build_export_entries
 from daydream.training.adjudication.preview import run_preview
-from tests.harness.adjudication import record_store, snapshot_id
+from tests.harness.adjudication import append_replies, record_store, snapshot_id
 
 
 def test_preview_and_export_identity_digest_stability_gate(tmp_path: Path) -> None:
@@ -22,19 +22,7 @@ def test_preview_and_export_identity_digest_stability_gate(tmp_path: Path) -> No
 
 
 def _edited_snapshot(store: LocalRecordStore) -> str:
-    from daydream.training.labeler_versions import reply_evidence_digest
-
-    original = store.read_records()["observations"][0]
-    evidence = [{"reply_id": 9, "body": "edited reply"}]
-    store.append_observation(
-        {
-            **original,
-            "observation_id": "edited",
-            "observed_at": "2026-10-06T12:00:00Z",
-            "semantic_evidence": evidence,
-            "evidence_digest": reply_evidence_digest(evidence),
-        }
-    )
+    append_replies(store)
     return snapshot_id(store)
 
 

@@ -69,7 +69,7 @@ def capture_run_record(
 ) -> None:
     """Commit one raw run, without archive reconstruction or trace readback."""
     from daydream.dataset import LocalRecordStore
-    from daydream.training.harvest import assemble_scoring_inputs
+    from daydream.dataset_scoring import assemble_scoring_inputs
 
     store_path = config.dataset_store_path or Path.home() / ".daydream" / "dataset"
     resolved_store = store_path.resolve()

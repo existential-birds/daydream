@@ -37,19 +37,9 @@ def _fake_gh_responder(responses: Any) -> Any:
     return responder
 
 
-def _row(tmp_path: Path, **overrides: Any) -> dict[str, Any]:
-    """Canonical labeler-signal manifest row; callers add branch/base_branch."""
-    row: dict[str, Any] = {
-        "repo_slug": "org/repo",
-        "head_sha": "abc",
-        "recommended_patch": (tmp_path / "recommended.patch").read_text()
-        if (tmp_path / "recommended.patch").is_file()
-        else (tmp_path / "diff.patch").read_text()
-        if (tmp_path / "diff.patch").is_file()
-        else "",
-    }
-    row.update(overrides)
-    return row
+def _row(**overrides: Any) -> dict[str, Any]:
+    """Captured labeler inputs; callers supply the recommendation and branches."""
+    return {"repo_slug": "org/repo", "head_sha": "abc", "recommended_patch": "", **overrides}
 
 
 def test_reviewed_commit_line_does_not_break_daydream_footer_detection() -> None:
@@ -92,11 +82,10 @@ def test_pr_merge_signal_no_pr() -> None:
     assert pr_merge_signal(row, gh_api=_fake_gh_responder({})) == PRMergeSignal(merged=False, merged_at=None)
 
 
-def test_fix_applied_signal_layered_cascade_returns_applied(tmp_path: Path) -> None:
-    """Hunk content from diff.patch appears verbatim in a post-head commit
+def test_fix_applied_signal_captured_recommendation_returns_applied(tmp_path: Path) -> None:
+    """Hunk content from the captured recommendation appears verbatim in a post-head commit
     on the default branch."""
-    (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
-    row = _row(tmp_path, base_branch="main")
+    row = _row(recommended_patch=diff_adding("foo = 1"), base_branch="main")
     sig = fix_applied_signal(
         row,
         changed_files=["app.py"],
@@ -119,8 +108,7 @@ def test_fix_applied_signal_layered_cascade_returns_applied(tmp_path: Path) -> N
 def test_fix_applied_signal_without_matching_changes(
     tmp_path: Path, files: list[str], commits: list[str], verdict: str
 ) -> None:
-    (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
-    row = _row(tmp_path, base_branch="main")
+    row = _row(recommended_patch=diff_adding("foo = 1"), base_branch="main")
     sig = fix_applied_signal(
         row,
         changed_files=["app.py"],
@@ -133,8 +121,8 @@ def test_fix_applied_signal_without_matching_changes(
 
 
 def test_fix_applied_signal_50pct_hunk_threshold(tmp_path: Path) -> None:
-    (tmp_path / "diff.patch").write_text(
-        # Distinct new-side line numbers assign each added line to exactly one hunk.
+    # Distinct new-side line numbers assign each added line to exactly one hunk.
+    row = _row(recommended_patch=(
         "diff --git a/app.py b/app.py\n"
         "--- a/app.py\n"
         "+++ b/app.py\n"
@@ -147,8 +135,7 @@ def test_fix_applied_signal_50pct_hunk_threshold(tmp_path: Path) -> None:
         "@@ -20,1 +21,2 @@\n"
         " existing\n"
         "+baz = 3\n"
-    )
-    row = _row(tmp_path, base_branch="main")
+    ), base_branch="main")
     sig = fix_applied_signal(
         row,
         changed_files=["app.py"],
@@ -258,8 +245,7 @@ def test_disposition_evidence_digest_changes_with_reply_edit() -> None:
 
 
 def test_local_commit_applied_signal_positive(tmp_path: Path) -> None:
-    (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
-    row = _row(tmp_path, branch="feat/x")
+    row = _row(recommended_patch=diff_adding("foo = 1"), branch="feat/x")
     sig = local_commit_applied_signal(
         row,
         repo_clone=tmp_path,
@@ -300,8 +286,7 @@ def test_reviewer_logins_signal_collects_humans_excludes_bots_and_daydream() -> 
 
 
 def test_local_commit_applied_signal_no_local_commits_returns_rejected(tmp_path: Path) -> None:
-    (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
-    row = _row(tmp_path, branch="feat/x")
+    row = _row(recommended_patch=diff_adding("foo = 1"), branch="feat/x")
     sig = local_commit_applied_signal(
         row,
         repo_clone=tmp_path,
@@ -315,8 +300,7 @@ def test_local_commit_applied_signal_unreadable_window_returns_unknown(tmp_path:
     """An unreadable commit window is unknown, not rejection. The fixture also lacks the change on base, so
     fallback cannot upgrade it.
     """
-    (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
-    row = _row(tmp_path, branch="feat/x", base_branch="main")
+    row = _row(recommended_patch=diff_adding("foo = 1"), branch="feat/x", base_branch="main")
     sig = local_commit_applied_signal(
         row,
         repo_clone=tmp_path,
@@ -339,8 +323,7 @@ def test_local_commit_applied_signal_base_branch_fallback(
     expected_refs: list[str],
 ) -> None:
     """A deleted branch uses the remote base before the possibly stale local tip."""
-    (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
-    row = _row(tmp_path, branch="feat/squashed-away", base_branch="main")
+    row = _row(recommended_patch=diff_adding("foo = 1"), branch="feat/squashed-away", base_branch="main")
     seen_refs: list[str] = []
 
     def _file_at(repo: Path, path: str, ref: str) -> str:
@@ -359,8 +342,7 @@ def test_local_commit_applied_signal_base_branch_fallback(
 
 def test_local_commit_applied_signal_unreadable_window_no_hunks_is_unknown(tmp_path: Path) -> None:
     """No recommended hunks means no applied change; an empty search must not vacuously prove success."""
-    (tmp_path / "diff.patch").write_text("")
-    row = _row(tmp_path, branch="feat/squashed-away", base_branch="main")
+    row = _row(recommended_patch="", branch="feat/squashed-away", base_branch="main")
     sig = local_commit_applied_signal(
         row,
         repo_clone=tmp_path,

@@ -78,8 +78,11 @@ def github(
     *,
     state: str = "merged",
     merged_at: str = "2026-10-04T13:00:00Z",
+    run_id: str | None = None,
 ) -> Any:
-    items = store.read_records()["runs"][0]["findings"]["value"]["items"]
+    runs = store.read_records()["runs"]
+    run = next(run for run in runs if run["run_id"] == run_id) if run_id is not None else runs[0]
+    items = run["findings"]["value"]["items"]
     comments = []
     for index, (item, reply) in enumerate(zip(items, replies), start=1):
         comments.append(
@@ -98,6 +101,7 @@ def github(
                     "author_association": "OWNER",
                     "body": reply,
                     "created_at": "2026-10-04T11:00:00Z",
+                    "updated_at": "2026-10-05T12:00:00Z",
                 }
             )
 
@@ -130,6 +134,9 @@ def test_cli_harvest_captures_record_judgments_rewards_and_license(
     store = store_run(tmp_path / "records")
     before = store.read_records()["runs"]
     monkeypatch.setattr(git_ops, "gh_api", github(store, (reply,)))
+    assert harvest_cli(store, tmp_path / "dry-run-cache", "--dry-run") == 0
+    assert not store.read_records()["observations"]
+    assert not (tmp_path / "dry-run-cache").exists()
     assert (
         cli_main(
             [
@@ -152,11 +159,210 @@ def test_cli_harvest_captures_record_judgments_rewards_and_license(
     judgment = next(o for o in history if o["payload"]["type"] == "finding-judgment")
     assert judgment["payload"]["disposition"] == expected
     assert judgment["item_uid"] == "item:0"
+    captures = judgment["reply_captures"]
+    assert len(captures) == (1 if reply is not None else 0)
+    if reply is not None:
+        assert captures[0]["text"] == reply
+        assert captures[0]["source_reply_id"] == "101"
+        assert captures[0]["body_sha256"] == hashlib.sha256(reply.encode()).hexdigest()
+        assert captures[0]["captured_sha256"] == hashlib.sha256(reply.encode()).hexdigest()
+        assert captures[0]["status"] == "available"
+        assert captures[0]["in_reply_to_id"] == "1"
     assert annotation["payload"]["annotation"]["composite_reward"] is not None
     assert annotation["valid_at"] == ("2026-10-04T11:00:00Z" if reply else "2026-10-04T13:00:00Z")
     assert any(o["payload"]["type"] == "enrichment" and o["payload"]["kind"] == "license" for o in history)
     assert store.read_records()["runs"] == before
     assert not (store.root / "index.db").exists()
+
+
+def test_cli_harvest_retains_every_scoped_reply_and_explicit_content_availability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = store_run(tmp_path / "records", dispositions=("unanswered", "unanswered", "unanswered"))
+    before = store.read_records()["runs"]
+    response = github(store, (None, None, None))
+    comments = response("owner/repo", "repos/owner/repo/pulls/1/comments")
+    comments.extend([
+        {"id": 101, "in_reply_to_id": 1, "user": {"login": "alice"}, "author_association": "OWNER",
+         "body": "Applied\nπ 👩🏽‍💻\n", "created_at": "2026-10-04T11:00:00Z",
+         "updated_at": "2026-10-05T12:00:00Z", "html_url": "https://github.com/owner/repo/pull/1#discussion_r101"},
+        {"id": 102, "in_reply_to_id": 1, "user": {"login": "alice"}, "author_association": "OWNER",
+         "body": "False positive"},
+        {"id": 103, "in_reply_to_id": 1, "user": {"login": "visitor[bot]"}, "author_association": "NONE",
+         "body": "Applied by visitor\n"},
+        {"id": 201, "in_reply_to_id": 2, "user": {"login": "alice"}, "author_association": "OWNER", "body": ""},
+        {"id": 202, "in_reply_to_id": 2, "user": {"login": "alice"}, "author_association": "OWNER", "body": None},
+        {"id": 203, "in_reply_to_id": 2, "user": {"login": "alice"}, "author_association": "OWNER", "body": {"bad": 1}},
+        {"id": 204, "in_reply_to_id": 2, "user": {"login": "alice"}, "author_association": "OWNER"},
+        {"id": 301, "in_reply_to_id": 3, "user": {"login": "visitor[bot]"},
+         "author_association": "NONE", "body": "Applied"},
+        {"id": 4, "user": {"login": "daydream-runner"}, "body": f"{finding_marker('f' * 64)}\n{DAYDREAM_FOOTER}"},
+        {"id": 401, "in_reply_to_id": 4, "user": {"login": "alice"},
+         "author_association": "OWNER", "body": "Outside run"},
+    ])
+    monkeypatch.setattr(git_ops, "gh_api", response)
+    assert harvest_cli(store, tmp_path / "cache") == 0
+    judgments = {o["item_uid"]: o for o in store.read_records()["observations"]
+                 if o["payload"]["type"] == "finding-judgment"}
+    assert [judgments[f"item:{i}"]["payload"]["disposition"] for i in range(3)] == [
+        "ambiguous", "ambiguous", "unanswered",
+    ]
+    captures = [capture for judgment in judgments.values() for capture in judgment["reply_captures"]]
+    assert {capture["source_reply_id"] for capture in captures} == {
+        "101", "102", "103", "201", "202", "203", "204", "301",
+    }
+    by_id = {capture["source_reply_id"]: capture for capture in captures}
+    assert by_id["101"]["text"] == "Applied\nπ 👩🏽‍💻\n"
+    assert by_id["101"]["created_at"] == "2026-10-04T11:00:00Z"
+    assert judgments["item:0"]["valid_at"] == "2026-10-04T13:00:00Z"
+    assert by_id["101"]["updated_at"] == "2026-10-05T12:00:00Z"
+    assert by_id["101"]["html_url"] == "https://github.com/owner/repo/pull/1#discussion_r101"
+    assert by_id["103"]["text"] == "Applied by visitor\n"
+    assert by_id["201"]["status"] == "available" and by_id["201"]["text"] == ""
+    assert by_id["201"]["captured_sha256"] == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    for reply_id, status, reason in [("202", "unproduced", "reply_body_missing"),
+                                      ("203", "unavailable", "reply_body_malformed"),
+                                      ("204", "unproduced", "reply_body_missing")]:
+        assert by_id[reply_id]["status"] == status and by_id[reply_id]["reason"] == reason
+        assert by_id[reply_id]["text"] is None and by_id[reply_id]["captured_sha256"] is None
+    for judgment in judgments.values():
+        for capture in judgment["reply_captures"]:
+            source = next(reply for reply in judgment["semantic_evidence"]
+                          if str(reply["reply_id"]) == capture["source_reply_id"])
+            assert source["body_sha256"] == capture["body_sha256"]
+            assert "text" not in source and "updated_at" not in source
+    annotations = [o for o in store.read_records()["observations"] if o["payload"]["type"] == "harvest-annotation"]
+    assert "reply_captures" not in annotations[0]["semantic_evidence"]["rubric_json"]
+    frozen = store.read_records()
+    comments.reverse()
+    assert harvest_cli(store, tmp_path / "fresh-cache") == 0 and store.read_records() == frozen
+    assert store.read_records()["runs"] == before
+
+
+def test_cli_capture_only_enrichment_preserves_semantic_history_and_human_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daydream.training.record_evidence import sessions_from_snapshot
+
+    source = store_run(tmp_path / "source")
+    monkeypatch.setattr(git_ops, "gh_api", github(source, ("applied",)))
+    assert harvest_cli(source, tmp_path / "source-cache") == 0
+    history = source.read_records()
+    store = LocalRecordStore(tmp_path / "records")
+    store.commit_run(history["runs"][0])
+    for original in history["observations"]:
+        prior = dict(original)
+        if prior["payload"]["type"] == "finding-judgment":
+            prior.pop("reply_captures")
+            prior["observation_id"] = "hash-only"
+        store.append_observation(prior)
+    old_snapshot = snapshot_id(store)
+    original_judgment = next(o for o in history["observations"] if o["payload"]["type"] == "finding-judgment")
+    store.append_observation({
+        **original_judgment, "observation_id": "human", "role": "rater", "author": "alice",
+        "payload": {"type": "finding-judgment", "disposition": "rejected", "rationale": "human confirmed"},
+    })
+    responder = github(store, ("applied",))
+    monkeypatch.setattr(git_ops, "gh_api", responder)
+    assert harvest_cli(store, tmp_path / "enrich-cache") == 0
+    observations = store.read_records()["observations"]
+    automatic = [o for o in observations if o["payload"]["type"] == "finding-judgment" and o["role"] == "automatic"]
+    assert len(automatic) == 2 and {o["evidence_digest"] for o in automatic} == {original_judgment["evidence_digest"]}
+    assert sum(o["payload"]["type"] == "harvest-annotation" for o in observations) == 1
+    enriched = next(o for o in automatic if o["observation_id"] != "hash-only")
+    assert enriched["reply_captures"][0]["text"] == "applied"
+    effective = sessions_from_snapshot(store.read_snapshot(snapshot_id(store)))[0]["resolutions"][0]
+    assert effective["disposition"] == "rejected"
+    frozen = store.read_records()
+    assert harvest_cli(store, tmp_path / "unchanged-cache") == 0 and store.read_records() == frozen
+    # Edited provenance changes retained representation without changing the source
+    # body, semantic generation, or creation-time pin.
+    comments = responder("owner/repo", "repos/owner/repo/pulls/1/comments")
+    comments[1]["updated_at"] = "2026-10-06T12:00:00Z"
+    assert harvest_cli(store, tmp_path / "metadata-cache") == 0
+    automatic = [o for o in store.read_records()["observations"]
+                 if o["payload"]["type"] == "finding-judgment" and o["role"] == "automatic"]
+    assert len(automatic) == 3 and {o["evidence_digest"] for o in automatic} == {original_judgment["evidence_digest"]}
+    assert all(o["valid_at"] == "2026-10-04T11:00:00Z" for o in automatic)
+    assert sum(o["payload"]["type"] == "harvest-annotation" for o in store.read_records()["observations"]) == 1
+    earlier = store.read_snapshot(old_snapshot)
+    earlier_judgments = [o for o in earlier.observations if o["payload"]["type"] == "finding-judgment"]
+    assert [o["observation_id"] for o in earlier_judgments] == ["hash-only"]
+    assert all("reply_captures" not in o for o in earlier.observations if o["payload"]["type"] == "finding-judgment")
+    # A real source-body edit creates a new evidence generation even when its
+    # classifier vote remains accepted, so the old human judgment stops applying.
+    metadata_snapshot = snapshot_id(store)
+    comments[1]["body"] = "applied\nAdditional context."
+    assert harvest_cli(store, tmp_path / "source-edit-cache") == 0
+    automatic = [o for o in store.read_records()["observations"]
+                 if o["payload"]["type"] == "finding-judgment" and o["role"] == "automatic"]
+    edited = next(o for o in automatic if o["evidence_digest"] != original_judgment["evidence_digest"])
+    assert edited["payload"]["disposition"] == "accepted"
+    original_label = original_judgment["semantic_evidence"][0]["classifier_label"]
+    assert edited["semantic_evidence"][0]["classifier_label"] == original_label
+    assert edited["reply_captures"][0]["body_sha256"] != original_judgment["reply_captures"][0]["body_sha256"]
+    assert edited["reply_captures"][0]["text"] == "applied\nAdditional context."
+    effective = sessions_from_snapshot(store.read_snapshot(snapshot_id(store)))[0]["resolutions"][0]
+    previous = sessions_from_snapshot(store.read_snapshot(metadata_snapshot))[0]["resolutions"][0]
+    assert effective["disposition"] == "accepted" and previous["disposition"] == "rejected"
+
+
+@pytest.mark.parametrize("reply_id", [None, "101", 0, True])
+def test_cli_invalid_reply_binding_is_row_isolated_without_fabricating_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reply_id: Any
+) -> None:
+    store = store_run(tmp_path / "records", "one")
+    store_run(store.root, "two", number=2)
+    original = store.read_records()["runs"]
+    first = github(store, ("applied",), run_id="one")
+    second = github(store, ("applied",), run_id="two")
+
+    def request(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        result = (first if "/pulls/1" in endpoint else second)(repo, endpoint, **kwargs)
+        if endpoint.endswith("/1/comments"):
+            return [result[0], {**result[1], "id": reply_id}]
+        return result
+
+    monkeypatch.setattr(git_ops, "gh_api", request)
+    assert harvest_cli(store, tmp_path / "cache") == 1
+    judgments = [o for o in store.read_records()["observations"] if o["payload"]["type"] == "finding-judgment"]
+    assert len(judgments) == 1 and judgments[0]["run_id"] == "two"
+    assert judgments[0]["reply_captures"][0]["source_reply_id"] == "101"
+    assert store.read_records()["runs"] == original
+
+
+def test_cli_interruption_keeps_captured_replies_and_resumes_remaining_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = store_run(tmp_path / "records", "one")
+    store_run(store.root, "two", number=2)
+    original = store.read_records()["runs"]
+    first = github(store, ("applied\nFirst reply π",), run_id="one")
+    second = github(store, ("not applicable\nSecond reply",), run_id="two")
+
+    def interrupted(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if "/pulls/2" in endpoint:
+            raise KeyboardInterrupt
+        return first(repo, endpoint, **kwargs)
+
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(git_ops, "gh_api", interrupted)
+    assert harvest_cli(store, cache) == 130
+    completed = [o for o in store.read_records()["observations"] if o["payload"]["type"] == "finding-judgment"]
+    assert len(completed) == 1 and completed[0]["run_id"] == "one"
+    assert completed[0]["reply_captures"][0]["text"] == "applied\nFirst reply π"
+    progress = [json.loads(line) for line in (cache / "progress.jsonl").read_text().splitlines()]
+    assert [entry["session_id"] for entry in progress] == ["one"]
+    assert all(set(entry) == {"session_id", "labeler_policy_version", "completed_at"} for entry in progress)
+    monkeypatch.setattr(git_ops, "gh_api", second)
+    assert harvest_cli(store, cache) == 0
+    judgments = [o for o in store.read_records()["observations"] if o["payload"]["type"] == "finding-judgment"]
+    assert len(judgments) == 2 and completed[0] in judgments
+    later = next(o for o in judgments if o["run_id"] == "two")
+    assert later["reply_captures"][0]["text"] == "not applicable\nSecond reply"
+    frozen = store.read_records()
+    assert harvest_cli(store, cache) == 0 and store.read_records() == frozen
+    assert store.read_records()["runs"] == original
 
 
 @pytest.mark.parametrize("state", ["open", "closed", "merged"])
@@ -197,6 +403,13 @@ def test_harvest_record_idempotence_policy_bump_and_dry_run(tmp_path: Path, monk
     monkeypatch.setattr(labeler_versions, "LABELER_POLICY_VERSION", "new-policy")
     assert run()["annotated"] == 1
     assert len([o for o in store.read_records()["observations"] if o["payload"]["type"] == "harvest-annotation"]) == 2
+
+
+@pytest.mark.parametrize("field_name", ["changed_files", "findings_fingerprints"])
+@pytest.mark.parametrize("value", ['["file.py"]', None, [1]])
+def test_harvest_row_refuses_nonrecord_collection_shapes(field_name: str, value: Any) -> None:
+    with pytest.raises(ValueError, match=field_name):
+        HarvestRow.from_mapping({"session_id": "run", field_name: value}, row_number=1)
 
 
 def pure_annotation(
@@ -296,7 +509,8 @@ def test_harvest_rate_limit_preserves_successful_record_progress(
     second = projection_run("two")
     second["original_task"]["value"]["pr"]["number"] = 2
     store.commit_run(second)
-    successful = github(store)
+    original = store.read_records()["runs"]
+    successful = github(store, ("applied\nCaptured before rate limit",), run_id="one")
 
     def request(repo: str, endpoint: str, **kwargs: Any) -> Any:
         if "/pulls/2" in endpoint:
@@ -306,11 +520,12 @@ def test_harvest_rate_limit_preserves_successful_record_progress(
     monkeypatch.setattr(git_ops, "gh_api", request)
     monkeypatch.setattr("daydream.training.harvest.time.sleep", lambda seconds: None)
     config = HarvestConfig(store.root, snapshot_id(store), cache_dir=tmp_path / "cache", gh_request_spacing_sec=0)
-    import anyio
-
-    summary = anyio.run(lambda: run_harvest(config, services=make_harvest_services(config)))
-    assert summary["aborted"] == 1 and summary["annotated"] == 1
+    assert harvest_cli(store, tmp_path / "cache") == 1
     assert make_harvest_services(config).completed_sessions() == {"one"}
+    judgments = [o for o in store.read_records()["observations"] if o["payload"]["type"] == "finding-judgment"]
+    assert len(judgments) == 1 and judgments[0]["run_id"] == "one"
+    assert judgments[0]["reply_captures"][0]["text"] == "applied\nCaptured before rate limit"
+    assert store.read_records()["runs"] == original
 
 
 def test_run_label_human_precedence_and_temporal_eligibility_preserve_intrinsic_reward(tmp_path: Path) -> None:

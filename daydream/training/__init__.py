@@ -1,7 +1,7 @@
 """Training-record exporter and downstream training-data utilities.
 
-This package owns *reading from* the daydream archive for downstream training
-consumers. The archive package (`daydream.archive`) owns *writing to* it.
+Training consumers read validated run records and their pinned observations
+from the common dataset store.
 """
 
 from daydream.training.labeler_signals import (

@@ -22,6 +22,8 @@ EXPORT_KEYS = (
     "fingerprint",
     "disposition",
     "evidence",
+    "reply_captures",
+    "correction",
     "exclusion_reason",
     "profile",
     "stack",
@@ -39,7 +41,7 @@ def validate_export_rows(rows: list[dict[str, Any]]) -> None:
 
     - Every key in ``EXPORT_KEYS`` must be present.
     - ``record_id`` must be recomputable from the four identity components
-      ``(session_id, trajectory_id, segment_id, fingerprint)``.
+      ``(session_id, trajectory_id, segment_id, item_uid)``.
     - ``evidence_digest`` must be a non-empty string.
     """
     for row in rows:
@@ -55,7 +57,7 @@ def validate_export_rows(rows: list[dict[str, Any]]) -> None:
                 f"export row record_id {row['record_id']!r} does not match the identity "
                 f"recomputed from (session_id={row['session_id']!r}, "
                 f"trajectory_id={row['trajectory_id']!r}, segment_id={row['segment_id']!r}, "
-                f"fingerprint={row['fingerprint']!r}): expected {recomputed!r}"
+                f"item_uid={row['item_uid']!r}): expected {recomputed!r}"
             )
         if not str(row["evidence_digest"]):
             raise ValueError(f"export row for record_id {shown_id!r} has an empty 'evidence_digest'")

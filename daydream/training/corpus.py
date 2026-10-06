@@ -1,4 +1,4 @@
-"""Shared decoding, identity and gold-admission helpers for training projections.
+"""Shared identity and gold-admission helpers for training projections.
 
 Posterior leakage is excluded by valid_at as well as the snapshot's observed_at
 pin; intrinsic capture-time rewards survive. Callers normalize as_of once so
@@ -10,35 +10,6 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime
 from typing import Any
-
-# Legacy skill->stack decode map for historically captured corpus metadata.
-# Built-in reviews no longer emit skills (#886): this maps archived manifest
-# `skill` fields to stack labels so legacy runs stay stratifiable. It is only
-# a decoding table for already-captured runs -- never a source of new skill
-# invocations -- and is intentionally local to the training corpus, not exported.
-_LEGACY_SKILL_TO_STACK: dict[str, str] = {
-    "beagle-python:review-python": "python",
-    "beagle-react:review-frontend": "react",
-    "beagle-elixir:review-elixir": "elixir",
-    "beagle-go:review-go": "go",
-    "beagle-rust:review-rust": "rust",
-    "beagle-ios:review-ios": "ios",
-}
-# Dual keys: both the full skill string and the short stack name map to the
-# lowercase stack label, so _stack_for_skill is one dict lookup regardless of
-# which form the manifest stored.
-_SKILL_TO_STACK: dict[str, str] = {
-    entry: stack
-    for skill, stack in _LEGACY_SKILL_TO_STACK.items()
-    for entry in (skill, stack)
-}
-
-
-def _stack_for_skill(skill: str | None) -> str | None:
-    """Decode a captured legacy skill name or short stack name; unknown/None yields None."""
-    if skill is None:
-        return None
-    return _SKILL_TO_STACK.get(skill)
 
 
 def _is_posterior_leak(annotation: dict[str, Any] | None, as_of: str | None) -> bool:
@@ -83,4 +54,3 @@ def _trajectory_set_hash(session_ids: list[str]) -> str:
     """Hash sorted session IDs joined by newlines, without a trailing newline."""
     joined = "\n".join(sorted(session_ids)).encode("utf-8")
     return hashlib.sha256(joined).hexdigest()
-

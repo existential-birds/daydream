@@ -13,8 +13,10 @@ from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.corpus_projection.segments import segment
 from daydream.training.corpus_projection.tiers import GoldGateError, classify_tier
 from daydream.training.exclusion import EXCLUSION_PATH
+from daydream.training.labeler_versions import reply_evidence_digest
 from daydream.training.record_identity import record_finding_id
 from daydream.training.stacks import load_dataset_v2
+from tests.harness.adjudication import reply_evidence
 from tests.harness.dataset import observation
 from tests.harness.record_projection import (
     add_projection_run,
@@ -126,36 +128,22 @@ def test_duplicate_sibling_keys_raise() -> None:
 
 def test_native_profile_fields_surface_from_manifest() -> None:
     manifest_row = {"profile_schema_version": 2, "profile_name": "deep-review",
-        "profile_source_kind": "builtin", "profile_digest": "d" * 64, "skill": None,
+        "profile_source_kind": "builtin", "profile_digest": "d" * 64,
     }
     prov = extract_provenance(manifest_row)
     assert prov["profile"] == {"profile_schema_version": 2, "profile_name": "deep-review",
                                "profile_source_kind": "builtin", "profile_digest": "d" * 64}
-    assert "skill" not in prov or prov["skill"] is None  # optional provenance only
 
-def test_native_profile_run_without_legacy_skill_validates() -> None:
+def test_native_profile_and_explicit_stack_are_preserved() -> None:
     v2_record = {"profile": {"profile_schema_version": 2, "profile_name": "n",
                              "profile_source_kind": "builtin", "profile_digest": None},
-                 "skill": None, "stack": "python"}
+                 "stack": "python"}
     prov = extract_provenance(v2_record)
     assert prov["stack"] == "python"
-    # Schema validity is Task 1's validator's job; here we pin that no
-    # required-ness is smuggled back in for skill: the extractor carries
-    # skill only when a value exists, never for an explicit null (and honors
-    # the record's own stack override).
-    assert "skill" not in prov
     assert prov["profile"] == v2_record["profile"]
 
-def test_legacy_skill_carried_as_provenance_never_required() -> None:
-    prov = extract_provenance({"skill": "beagle-python:review-python", "profile_schema_version": None,
-                               "profile_name": None, "profile_source_kind": None,
-                               "profile_digest": None, "stack": None})
-    assert prov["skill"] == "beagle-python:review-python"
-    assert prov["stack"] == "python"
-    assert all(v is None for v in prov["profile"].values())
-
-def test_stack_falls_back_to_none_when_unresolvable() -> None:
-    prov = extract_provenance({"skill": "unknown-thing", "stack": None})
+def test_absent_explicit_stack_stays_unknown() -> None:
+    prov = extract_provenance({"profile_name": "deep-review"})
     assert prov["stack"] is None
 
 # Task 7: per-finding projection + adjudication routing
@@ -382,6 +370,11 @@ def test_cli_posterior_annotation_preserves_captured_native_profile_with_claim_s
                   "composite_reward": breakdown["composite"], "evidence_sha": "1" * 40,
                   "rubric_json": json.dumps({"posterior_source": "pr_review"}), "reviewer_logins": ["alice"],
                   "has_posterior": True, "reply_classifier_version": "980-classifier-r1", "reply_evidence_digest": None}
+    semantic, capture = reply_evidence("9", "good catch\ncafé ☕\n")
+    annotation["rubric_json"] = json.dumps({"posterior_source": "pr_review", "per_finding_resolutions": [{
+        "fingerprint": run["findings"]["value"]["items"][0]["fingerprint"], "disposition": "accepted",
+        "evidence": [semantic], "evidence_digest": reply_evidence_digest([semantic]), "reply_captures": [capture],
+    }]})
     store.append_observation(observation("harvest", schema_version="daydream.observation.v2", run_id="sess-a",
         item_uid=None, role="automatic", semantic_evidence=[], evidence_digest=semantic_evidence_digest([]),
         payload={"type": "harvest-annotation", "annotation": annotation, "labeler_policy_version": "980-policy-r1"}))
@@ -392,6 +385,9 @@ def test_cli_posterior_annotation_preserves_captured_native_profile_with_claim_s
     assert row["stack"] == "python"
     assert row["annotation"] == annotation
     assert row["intrinsic_reward"] == breakdown
+    assert row["reply_captures"] == [capture]
+    assert row["evidence"] == [semantic]
+    jsonschema.validate(row, json.loads((config.out_dir / "schema.json").read_text()))
 
 
 def test_equivalent_records_preserve_normalized_pre_cutover_training_examples(tmp_path: Path) -> None:

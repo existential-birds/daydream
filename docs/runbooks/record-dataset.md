@@ -21,6 +21,41 @@ its exact commit into a fresh store and select a new snapshot with the intended
 observe-time and optional valid-time cutoffs. This retains all eligible durable
 judgment history. Local queue state is disposable and is not published.
 
+Harvest retains each acquired reply in the finding observation's `reply_captures`
+collection, including replies excluded from voting. Each entry carries its exact
+`source_reply_id`, source `body_sha256`, content availability, and, when available,
+the full `text` with an independently verified `captured_sha256`. Available empty
+text is preserved; missing or malformed bodies carry an explicit status and reason.
+Available creation/edit times, thread IDs, and source URLs are retained as provenance.
+The source hash belongs to the semantic evidence; the captured hash verifies the
+retained text. Capture metadata does not participate in the semantic digest.
+
+Read all replies offline from the selected snapshot, alongside the recorded claims
+and original code context:
+
+```python
+from pathlib import Path
+from daydream.dataset import LocalRecordStore
+from daydream.training.record_evidence import sessions_from_snapshot
+
+records = LocalRecordStore(Path("FRESH_STORE")).read_snapshot("SNAPSHOT_ID")
+for run in records.runs:
+    print(run["findings"], run["original_task"])
+for session in sessions_from_snapshot(records):
+    for finding in session["resolutions"]:
+        print(finding["item_uid"], finding["disposition"], finding["evidence"])
+        for reply in finding["reply_captures"]:
+            print(reply["source_reply_id"], reply["status"], reply.get("text"))
+```
+
+Finding materialization and adjudication exports also retain these captures when a
+human label supplies the effective disposition. Adding captured content to the same
+source evidence appends immutable history and keeps matching human judgments valid.
+A source reply edit changes the semantic digest and reopens the old judgment. Earlier
+snapshot IDs retain their original text and membership. Publish and exact-commit
+download preserve complete reply captures through the common dataset workflow;
+the existing publication secret scanner checks retained reply text too.
+
 ```bash
 daydream corpus build --store FRESH_STORE --snapshot-id SNAPSHOT_ID \
   --license-policy LICENSE_POLICY --out PROJECTION_DIR/corpus.jsonl

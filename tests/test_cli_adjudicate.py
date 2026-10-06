@@ -7,7 +7,7 @@ import pytest
 
 from daydream.dataset import LocalRecordStore
 from daydream.training.record_evidence import sessions_from_snapshot
-from tests.harness.adjudication import judgment, record_store, snapshot_id
+from tests.harness.adjudication import append_replies, judgment, record_store, reply_evidence, snapshot_id
 from tests.harness.scripts import cli_main
 
 
@@ -69,10 +69,30 @@ def test_cli_complete_population_report_export_materialize(tmp_path: Path, capsy
     assert command(store, "materialize", "--out-dir", str(out)) == 0
     records = [json.loads(line) for line in (out / "annotations.jsonl").read_text().splitlines()]
     assert len(records) == 4 and len({r["record_id"] for r in records}) == 4
+    assert all(row["reply_captures"][0]["text"] == "context" for row in records)
+    assert all(row["resolutions"][0]["reply_captures"] == row["reply_captures"] for row in records)
     assert command(store, "harvest-snapshot", "--materialize-dir", str(out)) == 0
     assert command(store, "export", "--state-dir", str(state), "--out", str(tmp_path / "export.jsonl")) == 0
     assert (tmp_path / "export.jsonl").is_file()
+    exported = [json.loads(line) for line in (tmp_path / "export.jsonl").read_text().splitlines()]
+    assert all(row["reply_captures"][0]["text"] == "context" for row in exported)
     assert not (store.root / "index.db").exists()
+
+
+def test_cli_retains_source_bound_correction_after_human_judgment(tmp_path: Path) -> None:
+    store = record_store(tmp_path / "records", ("unanswered",))
+    automatic = store.read_records()["observations"][0]
+    _semantic, capture = reply_evidence(automatic["item_uid"], "context")
+    store.append_observation({**automatic, "observation_id": "captured", "correction": capture})
+    store.append_observation(judgment(store))
+    pin = snapshot_id(store)
+    state, out = tmp_path / "state", tmp_path / "materialized"
+    assert command(store, "build", "--state-dir", str(state), pin=pin) == 0
+    assert json.loads((state / "queue.json").read_text())[0]["correction"] == capture
+    assert command(store, "materialize", "--out-dir", str(out), pin=pin) == 0
+    row = json.loads((out / "annotations.jsonl").read_text())
+    assert row["disposition"] == "accepted" and row["correction"] == capture
+    assert store.read_snapshot(pin).effective_judgment("run-1", automatic["item_uid"])["correction"] == capture
 
 
 def test_cli_conflicting_raters_resolve_only_with_adjudicator(
@@ -91,31 +111,40 @@ def test_cli_conflicting_raters_resolve_only_with_adjudicator(
 
 
 def test_cli_reopens_changed_evidence_without_reusing_human_judgment(tmp_path: Path) -> None:
-    store = record_store(tmp_path / "records", ("unanswered",))
+    store = record_store(tmp_path / "records", ("unanswered",), retain_replies=False)
+    replies = (("9", "context\ncafé ☕\n"), ("10", "second perspective\n"))
+    append_replies(store, replies, observed_at="2026-10-04T13:00:00Z", retain_replies=False)
     store.append_observation(judgment(store))
     first = snapshot_id(store)
-    old = store.read_records()["observations"][0]
-    from daydream.training.labeler_versions import reply_evidence_digest
-
-    evidence = [{"reply_id": "edited", "body": "new reply"}]
-    store.append_observation(
-        {
-            **old,
-            "observation_id": "edited-evidence",
-            "observed_at": "2026-10-06T12:00:00Z",
-            "semantic_evidence": evidence,
-            "evidence_digest": reply_evidence_digest(evidence),
-        }
-    )
+    append_replies(store, replies, observation_id="captured", observed_at="2026-10-05T12:00:00Z")
+    enriched = snapshot_id(store)
+    enriched_resolution = sessions_from_snapshot(store.read_snapshot(enriched))[0]["resolutions"][0]
+    assert enriched_resolution["disposition"] == "accepted"
+    assert {capture["text"] for capture in enriched_resolution["reply_captures"]} == {text for _, text in replies}
+    effective = store.read_snapshot(enriched).effective_judgment("run-1", "item:0")
+    assert effective["reply_captures"] == enriched_resolution["reply_captures"]
+    state = tmp_path / "state"
+    assert command(store, "build", "--state-dir", str(state), pin=enriched) == 0
+    assert json.loads((state / "queue.json").read_text())[0]["status"] == "open"
+    # A later hash-only automatic observation must not discard acquired content.
+    append_replies(store, replies, observation_id="hash-only-again", observed_at="2026-10-05T13:00:00Z",
+                   retain_replies=False)
+    still_captured = store.read_snapshot(snapshot_id(store)).effective_judgment("run-1", "item:0")
+    assert still_captured["disposition"] == "accepted"
+    assert still_captured["reply_captures"] == enriched_resolution["reply_captures"]
+    append_replies(store, (("9", "new reply\n"), replies[1]), observation_id="edited-evidence")
     state = tmp_path / "state"
     assert command(store, "build", "--state-dir", str(state)) == 0
     row = json.loads((state / "queue.json").read_text())[0]
     assert row["status"] == "reopened" and row["prior_disposition"] == "accepted"
     assert sessions_from_snapshot(store.read_snapshot(first))[0]["resolutions"][0]["disposition"] == "accepted"
-    assert (
-        sessions_from_snapshot(store.read_snapshot(snapshot_id(store)))[0]["resolutions"][0]["disposition"]
-        == "unanswered"
-    )
+    assert sessions_from_snapshot(store.read_snapshot(first))[0]["resolutions"][0]["reply_captures"] == []
+    assert sessions_from_snapshot(store.read_snapshot(enriched))[0]["resolutions"][0] == enriched_resolution
+    latest = store.read_snapshot(snapshot_id(store))
+    assert latest.effective_judgment("run-1", "item:0")["disposition"] == "unanswered"
+    resolution = sessions_from_snapshot(latest)[0]["resolutions"][0]
+    assert resolution["disposition"] == "unanswered"
+    assert {capture["text"] for capture in row["reply_captures"]} == {"new reply\n", replies[1][1]}
 
 
 @pytest.mark.parametrize("batch", ["0", "-1", "bad"])

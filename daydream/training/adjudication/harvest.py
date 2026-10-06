@@ -24,7 +24,7 @@ def build_export_entries(
     ledger_path: Path,
 ) -> list[dict[str, Any]]:
     """Build corpus adjudicate export rows sorted by record_id. Verify preview digests against a fresh
-    hydrated-index queue before applying effective_adjudication precedence; never re-pin drifted
+    frozen-record queue before applying effective_adjudication precedence; never re-pin drifted
     evidence. Missing ledgers, unknown IDs, and digest drift fail before writing. Rows use the
     projector adjudication shape plus record_id and evidence_digest.
     """
@@ -50,7 +50,7 @@ def build_export_entries(
         if fresh is None:
             raise ValueError(
                 f"preview ledger record_id {record_id!r} is absent from the "
-                "freshly built adjudication queue over the index"
+                "freshly built adjudication queue over the selected snapshot"
             )
         if str(fresh["evidence_digest"]) != str(ledger_item["evidence_digest"]):
             drifted.append(record_id)
@@ -99,6 +99,8 @@ def build_export_entries(
             "fingerprint": str(item["fingerprint"]),
             "disposition": disposition,
             "evidence": evidence,
+            "reply_captures": item["reply_captures"],
+            "correction": item["correction"],
             "exclusion_reason": None,
             "profile": profile,
             "stack": item["stack"],

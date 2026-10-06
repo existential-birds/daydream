@@ -5,6 +5,7 @@ Covers git_context, manifest, index, and the strict ``finalize_archive_run`` flo
 import json
 import sqlite3
 from collections.abc import Callable, Mapping
+from contextlib import closing
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
@@ -20,10 +21,7 @@ from daydream.archive import (
 )
 from daydream.archive.bundle import _copy_snapshot_bundle, _project_documents
 from daydream.archive.git_context import GitContext, capture_git_context
-from daydream.archive.index import (
-    query_runs,
-    upsert_run,
-)
+from daydream.archive.index import upsert_run
 from daydream.archive.manifest import (
     Manifest,
     archive_recorder_provenance_from_snapshot,
@@ -340,10 +338,8 @@ def _assert_archive_omits_fix_test_backend(archive_dir: Path, flow: str) -> None
     assert manifest["run"]["flow"] == flow
     assert "fix_backend" not in manifest["run"]
     assert "test_backend" not in manifest["run"]
-    rows = query_runs(archive_dir)
-    assert len(rows) == 1
-    assert rows[0]["fix_backend"] is None
-    assert rows[0]["test_backend"] is None
+    with closing(sqlite3.connect(f"{(archive_dir / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
+        assert conn.execute("SELECT fix_backend, test_backend FROM runs").fetchall() == [(None, None)]
 
 async def test_improve_archive_real_path_omits_fix_test_backend(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: MakeConfig,
@@ -485,55 +481,42 @@ def test_upsert_run_creates_db(tmp_path: Path) -> None:
 
 def _stored_manifest_row(archive_dir: Path, session_id: str, **fields: Any) -> dict[str, Any]:
     upsert_run(archive_dir, make_manifest(session_id=session_id, **fields))
-    return query_runs(archive_dir, where="session_id = ?", params=(session_id,))[0]
+    with closing(sqlite3.connect(f"{(archive_dir / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        return dict(conn.execute("SELECT * FROM runs WHERE session_id = ?", (session_id,)).fetchone())
 
 def test_upsert_run_never_persists_credential_bearing_url(tmp_path: Path) -> None:
     # M4: even if upstream normalization is bypassed, the row is clean.
     m = make_manifest(remote_url="https://user:ghp_bypassfake@github.com/o/r.git")
     upsert_run(tmp_path, m)
-    row = query_runs(tmp_path)[0]
+    with closing(sqlite3.connect(f"{(tmp_path / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = dict(conn.execute("SELECT * FROM runs").fetchone())
     assert row["remote_url"] == "https://github.com/o/r"
     assert row["repo_slug"] == "o/r"
     assert "ghp_bypassfake" not in (row["remote_url"] or "")
 
-def test_upsert_and_query_round_trip(tmp_path: Path) -> None:
+def test_upsert_run_persists_runtime_identity(tmp_path: Path) -> None:
     m = make_manifest()
     upsert_run(tmp_path, m)
-    rows = query_runs(tmp_path)
-    assert len(rows) == 1
-    assert rows[0]["session_id"] == "sess-0001"
-    assert rows[0]["skill"] == "python"
-    assert rows[0]["status"] == "complete"
+    with closing(sqlite3.connect(f"{(tmp_path / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
+        rows = conn.execute("SELECT session_id, skill, status FROM runs").fetchall()
+        assert rows == [("sess-0001", "python", "complete")]
 
-
-def test_query_runs_with_where(tmp_path: Path) -> None:
-    upsert_run(tmp_path, make_manifest(session_id="s1", repo_slug="org/a"))
-    upsert_run(tmp_path, make_manifest(session_id="s2", repo_slug="org/b", archive_path="/tmp/s2"),)
-    upsert_run(tmp_path, make_manifest(session_id="s3", repo_slug="org/a", archive_path="/tmp/s3"),)
-    rows = query_runs(tmp_path, where="repo_slug = ?", params=("org/a",))
-    assert len(rows) == 2
-    ids = {r["session_id"] for r in rows}
-    assert ids == {"s1", "s3"}
 
 def test_upsert_run_persists_erosion_verbosity(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest(session_id="s-q1", erosion=0.34, verbosity=0.19))
     upsert_run(tmp_path, make_manifest(session_id="s-q2", archive_path="/tmp/s-q2"))
     upsert_run(tmp_path, make_manifest(session_id="s-q3", erosion=0.51, verbosity=0.07, archive_path="/tmp/s-q3"),)
 
-    row = query_runs(tmp_path, where="session_id = ?", params=("s-q1",))[0]
-    assert row["erosion"] == pytest.approx(0.34)
-    assert row["verbosity"] == pytest.approx(0.19)
-
-    scored = query_runs(tmp_path, where="erosion IS NOT NULL")
-    assert {r["session_id"] for r in scored} == {"s-q1", "s-q3"}
-
-    # The columns are sortable (NULLs sort first in SQLite).
-    conn = sqlite3.connect(str(tmp_path / "index.db"))
-    try:
-        ordered = [r[0] for r in conn.execute("SELECT session_id FROM runs ORDER BY erosion")]
-    finally:
-        conn.close()
-    assert ordered == ["s-q2", "s-q1", "s-q3"]
+    with closing(sqlite3.connect(f"{(tmp_path / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
+        row = conn.execute("SELECT erosion, verbosity FROM runs WHERE session_id = ?", ("s-q1",)).fetchone()
+        assert row == pytest.approx((0.34, 0.19))
+        scored = conn.execute("SELECT session_id FROM runs WHERE erosion IS NOT NULL").fetchall()
+        assert {session_id for (session_id,) in scored} == {"s-q1", "s-q3"}
+        # The columns are sortable (NULLs sort first in SQLite).
+        ordered = conn.execute("SELECT session_id FROM runs ORDER BY erosion").fetchall()
+        assert ordered == [("s-q2",), ("s-q1",), ("s-q3",)]
 
 
 def test_build_manifest_projects_location_and_duplication_metrics(tmp_path: Path,) -> None:
@@ -884,9 +867,8 @@ def test_finalize_archive_run_round_trip(tmp_path: Path, archive_dir: Path) -> N
     assert manifest_data["run"]["flow"] == "normal"
     assert manifest_data["run"]["skill"] == "python"
 
-    rows = query_runs(archive_dir)
-    assert len(rows) == 1
-    assert rows[0]["session_id"] == session_id
+    with closing(sqlite3.connect(f"{(archive_dir / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
+        assert conn.execute("SELECT session_id FROM runs").fetchall() == [(session_id,)]
 
 
 def test_manifest_includes_source_path() -> None:
@@ -904,8 +886,8 @@ def test_source_path_indexed_in_sqlite(tmp_path: Path) -> None:
         source_path="/original/repo/path", archive_path=str(tmp_path),
     )
     upsert_run(idx_dir, m)
-    rows = query_runs(idx_dir)
-    assert rows[0]["source_path"] == "/original/repo/path"
+    with closing(sqlite3.connect(f"{(idx_dir / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
+        assert conn.execute("SELECT source_path FROM runs").fetchone()[0] == "/original/repo/path"
 
 def test_source_path_defaults_to_none() -> None:
     m = Manifest(session_id="old")
@@ -972,7 +954,9 @@ def test_manifest_splits_status_from_pipeline() -> None:
 
 def test_legacy_manifest_reads_new_fields_as_unknown(tmp_path: Path) -> None:
     upsert_run(tmp_path, Manifest())
-    row = query_runs(tmp_path)[0]
+    with closing(sqlite3.connect(f"{(tmp_path / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = dict(conn.execute("SELECT * FROM runs").fetchone())
     assert row["pipeline_status"] == "unknown"
     assert row["archive_status"] == "complete"
     assert row["daydream_version"] is None
@@ -1620,7 +1604,8 @@ def test_current_archive_survives_invalid_utf8_fix_failures(target: Path, archiv
         "remote_ci": {"ran": False, "status": "absent"},
     }
     assert manifest["pipeline_status"] == "succeeded"
-    assert [row["session_id"] for row in query_runs(archive_dir)] == [session_id]
+    with closing(sqlite3.connect(f"{(archive_dir / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
+        assert conn.execute("SELECT session_id FROM runs").fetchall() == [(session_id,)]
 
 def test_start_at_fix_archive_does_not_require_or_inherit_merge(
     target: Path, archive_dir: Path, make_config: MakeConfig,
@@ -1698,7 +1683,7 @@ def test_archive_rejects_a_sibling_document_from_another_session(
             write_snapshot=snapshot,
         )
     assert not (archive_dir / "runs" / recorder.session_id).exists()
-    assert query_runs(archive_dir) == []
+    assert not (archive_dir / "index.db").exists()
 
 def test_project_documents_destinations_are_the_layout_surface(tmp_path: Path) -> None:
     """The bundle's destination names come from the owner; `.partial` is stripped there."""
@@ -1881,7 +1866,9 @@ def test_upsert_run_persists_pipeline_fields(tmp_path: Path) -> None:
         ),
     )
     index.upsert_run(tmp_path, m)
-    row = index.query_runs(tmp_path, "session_id = ?", ("s-2",))[0]
+    with closing(sqlite3.connect(f"{(tmp_path / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
+        conn.row_factory = sqlite3.Row
+        row = dict(conn.execute("SELECT * FROM runs WHERE session_id = ?", ("s-2",)).fetchone())
     assert row["archive_status"] == "complete"
     assert row["pipeline_status"] == "failed"
     assert row["daydream_version"] == "0.27.0"
@@ -2047,13 +2034,13 @@ def test_strict_archive_rejects_frozen_receipt_changed_by_evaluator(
         finalize_archive_run(**arguments)
 
     archive_dir = get_archive_dir()
-    rows = query_runs(archive_dir, "session_id = ?", (session_id,))
     if mutate:
         assert not (archive_dir / "runs" / session_id).exists()
-        assert rows == []
+        assert not (archive_dir / "index.db").exists()
     else:
         assert (archive_dir / "runs" / session_id / "manifest.json").is_file()
-        assert len(rows) == 1
+        with closing(sqlite3.connect(f"{(archive_dir / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
+            assert conn.execute("SELECT session_id FROM runs").fetchall() == [(session_id,)]
 
 def test_strict_archive_does_not_publish_historical_bundles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2071,7 +2058,8 @@ def test_strict_archive_does_not_publish_historical_bundles(tmp_path: Path, monk
     finalize_archive_run(**arguments)
     archive_dir = get_archive_dir()
     assert (archive_dir / "runs" / session_id / "manifest.json").is_file()
-    assert len(query_runs(archive_dir, "session_id = ?", (session_id,))) == 1
+    with closing(sqlite3.connect(f"{(archive_dir / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
+        assert conn.execute("SELECT session_id FROM runs").fetchall() == [(session_id,)]
     assert not list(archive_dir.glob("runs/.*.finalizing"))
     assert hub.commits == []
 

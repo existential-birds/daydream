@@ -19,7 +19,7 @@ import pytest
 import verifiers.v1 as vf
 from conftest import FakeRuntime, passed_gate_report
 from daydream.atif import validate
-from daydream.training.harvest import assemble_scoring_inputs
+from daydream.dataset_scoring import assemble_scoring_inputs
 from daydream.training.reward import REWARD_VERSION, score_trajectory
 from verifiers.v1.runtimes.subprocess import SubprocessRuntime
 

@@ -129,12 +129,20 @@ deep FlowSteps -> phases/ -> agent.py -> Backend.execute()
 | `pr_comment_renderer.py` | Pure renderer: trajectory in, markdown out (no I/O) |
 | `training/` vs `eval/` | Corpus pipeline (harvest, reward, projection, JSONL) vs deterministic trajectory analysis; `eval/quality.py` owns source-quality analysis and `eval/latency_report.py` renders the per-profile report |
 | `dataset.py`, `dataset_capture.py`, `dataset_hub.py`, `hub.py` | Frozen run capture, immutable local records and snapshots, canonical JSONL publication/download, and the single lazy HF SDK client |
+| `dataset_scoring.py` | Shared acquisition of live producer scoring artifacts for frozen capture and RL; harvest reads recorded scoring inputs |
 | `training/harvest.py`, `training/harvest_types.py` | Record-based acquisition and immutable observation persistence; pure reward/rubric reduction preserves scoring semantics |
 | `training/corpus_projection/`, `training/calibration.py` | Offline projection from frozen record snapshots with eligible observations, followed by fail-closed calibration of derived corpus exports |
 | `prompts/` | Authorial intent, exploration subagents, CWD grounding |
 
 Self-describing modules are not listed: `findings.py`, `pricing.py`, `github_app.py`,
 `bot_identity.py`, `bot_setup.py`, `summarize.py`, `archive/`, `benchmark/`.
+
+Harvested finding observations retain complete source-bound `reply_captures` separately
+from their semantic reply evidence. Capture-only enrichment preserves semantic digests
+and matching human judgments; source-body edits create a new evidence generation.
+Pinned snapshot readers, materialization, and exports retain the captures even when
+human precedence supplies the disposition. Local capture keeps fetched text intact;
+common private HF publication applies the existing complete-record secret scanner.
 
 **Latency-profile naming.** The concept is `latency_profile` (config key `latency_profile`, CLI
 `--latency-profile`, config-file scalar, `RunConfig.latency_profile`). `forensic` names one profile and

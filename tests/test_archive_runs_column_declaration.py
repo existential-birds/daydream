@@ -22,10 +22,8 @@ def test_local_diagnostic_index_records_runs_without_annotation_tables(tmp_path:
     with closing(sqlite3.connect(tmp_path / "index.db")) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 9
         assert connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [("runs",)]
-    row = index.query_runs(tmp_path)[0]
-    assert row["session_id"] == "historical"
-    assert row["status"] == "complete" and row["pipeline_status"] == "unknown"
-    assert row["repo_slug"] == "org/repo"
+        assert connection.execute("SELECT session_id, status, pipeline_status, repo_slug FROM runs").fetchall() == [
+            ("historical", "complete", "unknown", "org/repo")]
 
 
 @pytest.mark.parametrize("unsupported", [
@@ -34,9 +32,8 @@ def test_local_diagnostic_index_records_runs_without_annotation_tables(tmp_path:
     "missing-primary-key", "extra-primary-key", "zero-unrelated-table", "wrong-index-table",
     "unique-index", "partial-index",
 ])
-@pytest.mark.parametrize("readonly", [False, True], ids=["write", "read"])
 def test_unsupported_schema_is_rejected_without_changing_database(
-    tmp_path: Path, unsupported: str, readonly: bool, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, unsupported: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _current_database(tmp_path)
     db_path = tmp_path / "index.db"
@@ -94,9 +91,8 @@ def test_unsupported_schema_is_rejected_without_changing_database(
         return connection
 
     monkeypatch.setattr(sqlite3, "connect", tracked_connect)
-    opener = index.readonly_connection if readonly else index._get_connection
     with pytest.raises(ValueError, match="unsupported archive index schema.*fresh archive directory"):
-        opener(tmp_path)
+        index.upsert_run(tmp_path, make_manifest(session_id="refused"))
     assert len(opened) == 1
     with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
         opened[0].execute("SELECT 1")
@@ -107,7 +103,7 @@ def test_unsupported_schema_is_rejected_without_changing_database(
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
 
 
-def test_local_diagnostic_queries_preserve_unrelated_history_and_files(tmp_path: Path) -> None:
+def test_local_diagnostic_writes_preserve_unrelated_history(tmp_path: Path) -> None:
     _current_database(tmp_path)
     db_path = tmp_path / "index.db"
     with closing(sqlite3.connect(db_path)) as connection, connection:
@@ -115,11 +111,6 @@ def test_local_diagnostic_queries_preserve_unrelated_history_and_files(tmp_path:
         connection.execute("UPDATE runs SET retired_metric = 0.75")
         connection.execute("CREATE TABLE historical_notes (note TEXT)")
         connection.execute("INSERT INTO historical_notes VALUES ('keep me')")
-    before = db_path.read_bytes()
-    tree = sorted(path.name for path in tmp_path.iterdir())
-    assert index.query_runs(tmp_path, "session_id = ?", ("historical",))[0]["retired_metric"] == 0.75
-    assert db_path.read_bytes() == before
-    assert sorted(path.name for path in tmp_path.iterdir()) == tree
     index.upsert_run(tmp_path, make_manifest(session_id="new"))
     with closing(sqlite3.connect(db_path)) as connection:
         assert connection.execute("SELECT note FROM historical_notes").fetchone()[0] == "keep me"

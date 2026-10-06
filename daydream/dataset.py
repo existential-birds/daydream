@@ -118,13 +118,20 @@ _RUN_SCHEMA["required"].extend(_RUN_PAYLOADS)
 _CORRECTION = _object(optional=("body_sha256", "text", "captured_sha256", "redaction_provenance", "reason"),
     status=_AVAILABILITY, source_reply_id=_ID, body_sha256=_nullable(_SHA),
     text=_nullable(_STRING), captured_sha256=_nullable(_SHA), redaction_provenance=_MAP, reason=_nullable(_STRING))
+_REPLY_CAPTURE = _object(optional=("text", "captured_sha256", "redaction_provenance", "reason",
+    "created_at", "updated_at", "html_url", "in_reply_to_id"),
+    status=_AVAILABILITY, source_reply_id=_ID, body_sha256=_SHA,
+    text=_nullable(_STRING), captured_sha256=_nullable(_SHA), redaction_provenance=_MAP, reason=_nullable(_STRING),
+    created_at=_STRING, updated_at=_STRING, html_url=_STRING, in_reply_to_id=_ID)
 _OBSERVATION_SCHEMA = _object(
-    optional=("item_uid", "classifier_version", "correction", "evidence_digest_scheme", "review_required"),
+    optional=("item_uid", "classifier_version", "correction", "reply_captures", "evidence_digest_scheme",
+              "review_required"),
     schema_version={"const": "daydream.observation.v1"}, observation_id=_ID, run_id=_ID,
     item_uid=_nullable(_STRING), valid_at=_STRING, observed_at=_STRING, source=_ID, author=_ID,
     role={"enum": ["rater", "adjudicator", "model-suggested", "automatic"]}, policy_version=_ID, rubric_version=_ID,
     classifier_version=_nullable(_STRING), evidence_digest=_SHA, semantic_evidence={},
     correction=_nullable(_CORRECTION),
+    reply_captures=_array(_REPLY_CAPTURE),
     evidence_digest_scheme={"enum": ["canonical-json-v1", "reply-evidence-v1"]}, review_required=_BOOL,
     payload={"oneOf": [
         _object(optional=("reviewer_logins", "outcome_prior", "outcome_prior_n", "rubric"),
@@ -242,21 +249,28 @@ def semantic_evidence_digest(value: Any) -> str:
 
 def _validate_observation(record: Record) -> None:
     evidence, correction = record["semantic_evidence"], record.get("correction")
-    if correction is not None:
-        if correction["status"] == "available":
-            if correction.get("text") is None or hashlib.sha256(
-                correction["text"].encode()).hexdigest() != correction.get("captured_sha256"):
+    captures = record.get("reply_captures", [])
+    contents = ([correction] if correction is not None else []) + captures
+    for content in contents:
+        if content["status"] == "available":
+            if content.get("text") is None or hashlib.sha256(
+                content["text"].encode()).hexdigest() != content.get("captured_sha256"):
                 raise ValueError("invalid captured correction")
-        elif correction.get("text") is not None or correction.get("captured_sha256") is not None:
+        elif content.get("text") is not None or content.get("captured_sha256") is not None:
             raise ValueError("absent correction contains captured content")
+    if len({capture["source_reply_id"] for capture in captures}) != len(captures):
+        raise ValueError("duplicate source reply capture")
+    if captures and (record["payload"]["type"] != "finding-judgment"
+                     or record.get("evidence_digest_scheme") != "reply-evidence-v1"):
+        raise ValueError("reply captures require source-bound finding evidence")
     if record.get("evidence_digest_scheme", "canonical-json-v1") == "reply-evidence-v1":
         if not isinstance(evidence, list) or any(not isinstance(reply, dict) for reply in evidence):
             raise ValueError("reply semantic evidence must be a list of objects")
         expected = reply_evidence_digest(evidence)
-        if correction is not None:
+        for content in contents:
             matching = [reply for reply in evidence if str(reply.get("reply_id", reply.get("id", "")))
-                        == correction["source_reply_id"]]
-            if len(matching) != 1 or matching[0].get("body_sha256") != correction.get("body_sha256"):
+                        == content["source_reply_id"]]
+            if len(matching) != 1 or matching[0].get("body_sha256") != content.get("body_sha256"):
                 raise ValueError("correction conflicts with source evidence")
     else:
         expected = semantic_evidence_digest(evidence)

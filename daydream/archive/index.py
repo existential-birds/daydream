@@ -1,7 +1,7 @@
 """Local diagnostic index of frozen archive manifests.
 
 Training annotations and HF publication read the canonical record store. This
-index supports local archive queries without authoring annotation history.
+index records finalized run metadata for diagnostics without authoring annotation history.
 """
 
 from __future__ import annotations
@@ -23,21 +23,6 @@ from daydream.archive._schema import (
 )
 from daydream.archive.git_safe import normalize_remote_url
 from daydream.archive.manifest import Manifest
-
-
-def readonly_connection(archive_dir: Path) -> sqlite3.Connection:
-    """Read a checkpointed index without schema changes or SQLite sidecars."""
-    db_path = archive_dir / "index.db"
-    if db_path.with_name(db_path.name + "-wal").exists():
-        raise ValueError(f"index {db_path} has an uncheckpointed WAL; checkpoint before reading")
-    conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro&immutable=1", uri=True)
-    conn.row_factory = sqlite3.Row
-    try:
-        _check_schema(conn, db_path)
-        return conn
-    except BaseException:
-        conn.close()
-        raise
 
 
 def _check_schema(conn: sqlite3.Connection, db_path: Path, *, allow_empty: bool = False) -> bool:
@@ -107,9 +92,9 @@ def _get_connection(archive_dir: Path) -> sqlite3.Connection:
 
 
 @contextmanager
-def _connection(archive_dir: Path, *, readonly: bool = False) -> Iterator[sqlite3.Connection]:
-    """Yield an index connection, closing it on exit — read-only when *readonly*."""
-    conn = readonly_connection(archive_dir) if readonly else _get_connection(archive_dir)
+def _connection(archive_dir: Path) -> Iterator[sqlite3.Connection]:
+    """Yield a writer connection and close it on exit."""
+    conn = _get_connection(archive_dir)
     try:
         yield conn
     finally:
@@ -160,17 +145,4 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
     with _connection(archive_dir) as conn:
         conn.execute(_UPSERT_SQL, values)
         conn.commit()
-
-
-def query_runs(archive_dir: Path, where: str = "", params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-    """Query diagnostics without mutating existing archive evidence."""
-    if not (archive_dir / "index.db").exists():
-        return []
-    with _connection(archive_dir, readonly=True) as conn:
-        sql = "SELECT * FROM runs"
-        if where:
-            sql += f" WHERE {where}"  # noqa: S608 - caller-supplied SQL fragment with bound params
-        cursor = conn.execute(sql, params)
-        return [dict(row) for row in cursor.fetchall()]
-
 
