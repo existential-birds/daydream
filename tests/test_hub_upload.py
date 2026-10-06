@@ -210,6 +210,28 @@ def test_upload_refused_when_bundle_contains_credential(hf_run_dir: Path, monkey
     assert hub.upload_run_bundle(hf_run_dir, "org/ds", "s1") is False
     assert uploads == []  # upload_folder never invoked
 
+
+@pytest.mark.parametrize("failure", ["exception", "scan_error", "mixed", "incomplete"])
+def test_upload_refuses_scanner_failures(
+    hf_run_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    failure: str,
+) -> None:
+    def failed_scan(_path: Path) -> scan.ScanResult:
+        if failure == "exception":
+            raise RuntimeError("ghp_scannerpayloadcanary")
+        findings = [] if failure == "incomplete" else [
+            scan.Finding("payload.json", "unreadable", "scan_error", "", severity=scan.SEVERITY_ADVISORY),
+        ]
+        if failure == "mixed":
+            findings.append(scan.Finding("payload.json", "line 1", "api_key", "digest"))
+        return scan.ScanResult(clean=False, findings=findings)
+
+    monkeypatch.setattr(scan, "scan_run_dir", failed_scan)
+    uploads = _install_fake_hfapi(monkeypatch)
+    assert not hub.upload_run_bundle(hf_run_dir, "org/ds", "s1")
+    assert uploads == []
+    assert "ghp_scannerpayloadcanary" not in "".join(capsys.readouterr())
+
 def test_upload_canary_never_echoed_in_warning(
     hf_run_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:

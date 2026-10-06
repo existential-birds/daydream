@@ -88,6 +88,16 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         help="Disable automatic archival to ~/.daydream/archive/" if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--capture-data", action="store_true", dest="dataset_capture",
+        help="Capture validated run evidence in the private local JSONL store (opt-in)"
+        if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--dataset-store", type=Path, dest="dataset_store_path", metavar="DIR",
+        help="Local JSONL store directory (default: ~/.daydream/dataset); enables data capture"
+        if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--no-eval",
         action="store_false",
         dest="run_eval",
@@ -100,9 +110,9 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         metavar="DIR",
         help="Merge the finalized run bundle (ATIF trajectory, review output, deep artifacts, diffs, "
              "findings, manifest, evaluation) into DIR for CI upload. Preserves unrelated destination "
-             "files. Blocking secret-scan findings trigger sanitization of a separate copy, then a "
-             "rescan. A refused dump warns without failing the review; the local archive stays "
-             "unchanged. Opt-in because logs may contain sensitive data. Works on every flow."
+             "files. Always copies exact assembled bytes, including credentials and binary files, "
+             "without scanning or sanitizing. "
+             "Works on every flow."
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -120,7 +130,8 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         metavar="REPO",
         help="Upload each run's archive bundle to this HuggingFace dataset repo "
              "(owner/repo), one folder per run keyed by session id. Opt-in and "
-             "requires HF_TOKEN; creates the repo private if it does not exist."
+             "requires HF_TOKEN; creates the repo private if it does not exist. "
+             "Always refuses blocking credentials and scanner failures. Advisory findings are allowed."
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -254,6 +265,8 @@ def config_from_args(
     observability = _resolve_cli_observability(parser, args)
     target_repo, pr_repo, file_config = _resolve_target_provenance(args.target)
     values = {item.name: getattr(args, item.name) for item in fields(RunConfig) if hasattr(args, item.name)}
+    if args.dataset_store_path is not None:
+        values["dataset_capture"] = True
     if detect_pr:
         values["pr_number"] = args.pr_number if args.pr_number is not None else _auto_detect_pr_number(target_repo)
     values.update(observability=observability, file_config=file_config, pr_repo=pr_repo, archive=not args.no_archive)

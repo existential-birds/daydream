@@ -19,8 +19,10 @@ from daydream.commands.corpus import _build_harvest_parser
 from daydream.commands.improve import _parse_improve_args
 from daydream.commands.review import _build_main_parser, _parse_args
 from daydream.config_file import DaydreamFileConfig
+from daydream.dataset import LocalRecordStore
 from daydream.run_config import RunConfig, _resolved_backend_name, _resolved_model
 from daydream.ui import NEON_THEME, PHASE_SUBTITLES, print_issues_table
+from tests.harness.dataset import read_records
 from tests.harness.git_helpers import bare_remote, commit, git, init_repo
 from tests.harness.remote_ci import (
     finish_remote_ci_fake,
@@ -67,6 +69,14 @@ def test_signal_handler_flushes_before_backend_registry_snapshot(monkeypatch: py
             id='stack_short_flag'),
         pytest.param(['/tmp/project'], {'ignore_paths': []},
             id='ignore_paths_default_empty'),
+        pytest.param(['/tmp/project'], {'dataset_capture': False, 'dataset_store_path': None, 'archive': True},
+            id='dataset_capture_is_opt_in'),
+        pytest.param(['--dataset-store', '/tmp/records', '/tmp/project'],
+            {'dataset_capture': True, 'dataset_store_path': Path('/tmp/records')},
+            id='dataset_store_enables_capture'),
+        pytest.param(['--capture-data', '--dataset-store', '/tmp/records', '--no-archive', '/tmp/project'],
+            {'dataset_capture': True, 'dataset_store_path': Path('/tmp/records'), 'archive': False},
+            id='dataset_capture_without_archive'),
         pytest.param(['/tmp/project', '--ignore-path', '.planning'], {'ignore_paths': ['.planning']},
             id='ignore_paths_single'),
         pytest.param(['/tmp/project', '--ignore-path', '.planning', '--ignore-path', 'vendor'],
@@ -688,19 +698,29 @@ def test_runconfig_uses_stack_terminology() -> None:
     assert cfg.stack == "go"
     assert not hasattr(cfg, "skill")   # old name removed
 
-def test_real_cli_stack_entry(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,) -> None:
+@pytest.mark.parametrize("capture", [False, True], ids=["capture-off", "store-only"])
+def test_real_cli_stack_entry(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capture: bool,
+) -> None:
     _silence(monkeypatch)
     monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.git_ops.gh_repo_view", lambda _repo, **_kwargs: None)
     monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda _repo, _branch, **_kwargs: None)
     _install_stub_backend(monkeypatch, multi_stack_target)
-    monkeypatch.setattr(sys, "argv",
-        ["daydream", "--review", "--stack", "python", "--no-archive", "--no-eval", str(multi_stack_target)],
-    )
+    store = tmp_path / "records"
+    argv = ["daydream", "--review", "--stack", "python", "--no-archive", "--no-eval", str(multi_stack_target)]
+    if capture:
+        argv.extend(["--dataset-store", str(store)])
+    monkeypatch.setattr(sys, "argv", argv)
     with pytest.raises(SystemExit) as exc_info:
         cli.main()
 
     assert exc_info.value.code == 0
+    assert store.exists() is capture
+    if capture:
+        records = read_records(LocalRecordStore(store))
+        assert len(records.runs) == 1
+        assert records.runs[0]["outcome"] == "success"
 
     monkeypatch.setattr(sys, "argv", ["daydream", "--review", "--skill", "python", str(multi_stack_target)],)
     with pytest.raises(SystemExit) as skill_exc:

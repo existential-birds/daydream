@@ -100,7 +100,7 @@ def effective_adjudication(observations: Sequence[Mapping[str, Any]]) -> dict[st
     if conflict and adjudicators and adjudicators[-1].get("disposition") in DECISIVE_DISPOSITIONS:
         conflict = False
 
-    # A fresh explicit adjudication can resolve an imported legacy judgment's
+    # A fresh explicit adjudication can resolve a persisted judgment's
     # review requirement without deleting that immutable historical row.
     review_required = bool(effective.get("review_required", False))
     if not adjudicators:

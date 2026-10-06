@@ -157,8 +157,8 @@ def run_canonical_harvest(
     }
     # The fresh session derivation is the conflict authority, never the
     # materialized snapshot's flags: a session turned conflicting *after*
-    # materialize (runbook step-3b import appending a disagreeing generation
-    # to the same index.db) passes the evidence-digest drift gate below unless
+    # materialize (a disagreeing generation appended to the same index.db)
+    # passes the evidence-digest drift gate below unless
     # the stack re-derives its ``conflicting`` verdict here and stamps it onto
     # the merged records before the decisive-label projection.
     fresh_conflicting_sessions = {

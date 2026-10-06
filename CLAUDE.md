@@ -333,6 +333,9 @@ Full contract: `docs/extensions.md`.
   generated files through the session. Join all writers before freezing immutable evidence;
   archive/evaluate/publish only after that boundary. Never reconstruct public output paths or
   broaden backend read roots.
+- **Archive index**: initialize an empty database or use the complete current schema.
+  Unsupported indexes are preserved and rejected; use a fresh archive directory instead of migrating.
+  Evaluation consumes the immutable write snapshot and leaves unavailable lifecycle timing unmeasured.
 - **Conventional Commits** (`feat(backends): ...`). Stage explicitly (`git add <path>`), never `git add -A`.
 - Fix bugs at the root. Never bypass the hook, skip tests, or `git push --no-verify`.
 - Own your own bugs in plain language. Never describe your defect as the tool being buggy.

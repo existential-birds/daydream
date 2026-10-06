@@ -136,6 +136,50 @@ def test_malformed_identified_interval_is_diagnosed_not_coerced(tmp_path: Path) 
     assert summary.diagnostics["malformed_interval"] == 1
 
 
+def test_timing_diagnostics_clip_scoped_events_without_synthesizing_forks(tmp_path: Path) -> None:
+    session = "diagnostics"
+    def event(kind: str, scope: str | None, timestamp: str, **extra: Any) -> dict[str, Any]:
+        return {"phase": "review", "event": kind, "session_id": session,
+            "scope_id": scope, "timestamp": timestamp, **extra,
+        }
+    start = "2026-01-01T00:00:00Z"
+    end = "2026-01-01T00:00:10Z"
+    invocation = {"trajectory_id": session, "invocation_id": "duplicate", "phase": "review",
+        "started_at": start, "ended_at": end,
+    }
+    root = {"session_id": session, "trajectory_id": session, "steps": [],
+        "extra": {"run_started_at": start, "run_ended_at": end, "phase_events": [
+            event("phase_start", "clipped", "2025-12-31T23:59:59Z"),
+            event("phase_end", "clipped", "2026-01-01T00:00:11Z", status="succeeded"),
+            event("phase_start", "duplicate", start), event("phase_start", "duplicate", start),
+            event("phase_end", "duplicate", end, status="succeeded"),
+            event("phase_start", "orphan", start),
+            event("phase_start", "backward", end), event("phase_end", "backward", start, status="succeeded"),
+            event("phase_start", None, start), event("phase_end", None, end, status="succeeded"),
+        ], "subtrajectories": [invocation, invocation,
+            {"trajectory_id": session, "invocation_id": "malformed", "phase": "review",
+                "started_at": "invalid", "ended_at": end},
+        ]},
+    }
+    child = {"session_id": session, "trajectory_id": "child",
+        "steps": [{"timestamp": start}, {"timestamp": end}], "extra": {},
+    }
+    snapshot = RunWriteSnapshot(status="complete", cutoff_at=end, root_trajectory_id=session,
+        documents=(_snapshot_document(tmp_path / "trajectory.json", root),
+            _snapshot_document(tmp_path / "child.json", child)),
+    )
+
+    summary = compute_timing_summary(snapshot)
+
+    assert summary is not None
+    assert summary.phase_timings == {"review": {"wall_clock_seconds": 10.0, "occurrences": 1}}
+    assert summary.coverage_ratio == 1.0
+    assert summary.diagnostics == {"malformed_interval": 3, "duplicate_interval": 1, "orphaned_interval": 1,
+        "malformed_invocation": 1, "duplicate_invocation": 1,
+    }
+    assert summary.agent_completeness == {"total": 2, "attributed": 0, "unattributed": 2}
+
+
 # --- PhaseEvent.to_dict ----------------------------------------------------
 
 def test_phase_event_to_dict_basic() -> None:

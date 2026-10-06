@@ -125,8 +125,7 @@ def finalize_archive_run(
 
                 evaluation = analyze_session(
                     target_dir / ".daydream",
-                    session_id=session_id,
-                    frozen_trajectories=frozen,
+                    write_snapshot=write_snapshot,
                     artifact_provenance=artifact_provenance,
                     code_workspace=work.repo if work is not None else artifact_provenance.public_source,
                 )
@@ -159,14 +158,10 @@ def finalize_archive_run(
         if config.dump_artifacts:
             if dump_path is None:
                 raise ArchivePublicationError("dump finalization path is missing")
-            from daydream.archive.dump import publish_dump
-
-            # A scan refusal withholds only the optional dump. Raw frozen
-            # evidence and completed review outputs remain intact. Mark copying
-            # started first so publication I/O failures still clean the stage.
+            # Mark copying started before I/O so publication failures clean the stage.
             dump_started = True
             try:
-                dump_started = publish_dump(assembly_dir, dump_path, session_id)
+                shutil.copytree(assembly_dir, dump_path, dirs_exist_ok=True)
             except Exception as exc:
                 raise ArchivePublicationError("dump publication failed") from exc
         if config.archive and upload:

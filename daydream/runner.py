@@ -335,6 +335,7 @@ async def _run_with_context(
     """Execute with the runner's immutable policy bound before any output."""
     print_phase_hero(console, "DAYDREAM", phase_subtitle("DAYDREAM"))
 
+
     # Build the per-run registry (builtins + optional daydream_ext) and set it
     # on the ContextVar so every downstream phase resolves through it.
     try:
@@ -491,12 +492,13 @@ async def _run_workspace(
                     else capture.partial
                 )
                 finalization_error: Exception | None = capture.validation_error
-                if selected is not None:
+                if selected is not None or config.dataset_capture:
                     successful = primary is None and result == 0 and finalization_error is None
                     try:
                         finalize = partial(
                             _finalize_run_artifacts, run_artifacts, selected=selected,
                             config=dispatch_config, work=work, successful=successful,
+                            interrupted=primary is not None and not isinstance(primary, Exception),
                         )
                         with anyio.CancelScope(shield=True):
                             await anyio.to_thread.run_sync(finalize)

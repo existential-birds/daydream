@@ -3,7 +3,6 @@
 Covers git_context, manifest, index, and the strict ``finalize_archive_run`` flow.
 """
 import json
-import re
 import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -15,18 +14,14 @@ import pytest
 
 from daydream.archive import (
     ArchiveFinalizationError,
-    _schema,
     finalize_archive_run,
     get_archive_dir,
     index,
     pipeline,
-    scan,
 )
 from daydream.archive.bundle import _copy_snapshot_bundle, _project_documents
 from daydream.archive.git_context import GitContext, capture_git_context
 from daydream.archive.index import (
-    _CREATE_TABLE,
-    SCHEMA_VERSION,
     append_label_observation,
     canonical_utc_iso,
     label_observation_history,
@@ -489,7 +484,7 @@ def test_build_manifest_snapshot_timing_overrides_conflicting_evaluation(tmp_pat
         "agent_completeness": {"total": 0, "attributed": 0, "unattributed": 0},
         "diagnostics": {
             "malformed_interval": 0, "duplicate_interval": 0, "orphaned_interval": 0, "malformed_invocation": 0,
-            "duplicate_invocation": 0, "legacy_fork_proxy_used": 0,
+            "duplicate_invocation": 0,
         },
     }
     assert manifest.total_prompt_tokens == 7
@@ -582,49 +577,6 @@ def test_upsert_run_persists_erosion_verbosity(tmp_path: Path) -> None:
         conn.close()
     assert ordered == ["s-q2", "s-q1", "s-q3"]
 
-@pytest.mark.parametrize(("fields", "old_version"),
-    [pytest.param({"erosion": 0.42, "verbosity": 0.08}, 0, id="erosion-verbosity"),
-        pytest.param({"location_in_hunk_rate": 0.25, "shipped_duplicate_pairs": 4}, 7, id="location-duplication"),
-        pytest.param(
-            {"per_stack_review_backend": "codex", "per_stack_review_model": "gpt-psr"}, 0, id="review-identity",
-        ), pytest.param({"fix_quality_gate": {"enabled": True, "rounds": []}}, 0, id="fix-quality-gate"),
-        pytest.param({"recommended_patch_capture": "pre_test"}, 0, id="recommended-patch"),
-    ],
-)
-def test_runs_columns_migrate_existing_db(tmp_path: Path, fields: dict[str, Any], old_version: int,) -> None:
-    legacy_ddl = "\n".join(
-        line for line in _CREATE_TABLE.splitlines()
-        if not any(line.strip().startswith(f"{field} ") for field in fields)
-    )
-    assert all(field not in legacy_ddl for field in fields)
-    conn = sqlite3.connect(tmp_path / "index.db")
-    try:
-        conn.execute(legacy_ddl)
-        conn.execute("INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
-            ("legacy-run", "2026-01-01T00:00:00Z", "normal", str(tmp_path / "legacy-run")),
-        )
-        if old_version == 7:
-            conn.execute("UPDATE runs SET erosion = 0.5")
-        conn.execute(f"PRAGMA user_version = {old_version}")
-        conn.commit()
-
-        upsert_run(tmp_path, make_manifest(session_id="new-run", **fields))
-
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
-        assert fields.keys() <= columns
-        if old_version == 7:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 8
-    finally:
-        conn.close()
-
-    legacy = query_runs(tmp_path, where="session_id = ?", params=("legacy-run",))[0]
-    assert all(legacy[field] is None for field in fields)
-    if old_version == 7:
-        assert legacy["erosion"] == pytest.approx(0.5)
-    row = query_runs(tmp_path, where="session_id = ?", params=("new-run",))[0]
-    for field, expected in fields.items():
-        actual = json.loads(row[field]) if isinstance(expected, dict) else row[field]
-        assert actual == (pytest.approx(expected) if isinstance(expected, float) else expected)
 
 def test_build_manifest_projects_location_and_duplication_metrics(tmp_path: Path,) -> None:
     m = _build(tmp_path,
@@ -942,30 +894,6 @@ def test_bundle_findings_artifact_skipped_without_route(tmp_path: Path,) -> None
     _assemble_bundle(target, run_dir, recorder)
     assert not (run_dir / "findings.json").exists()
 
-def test_dump_artifacts_sanitizes_credential_bearing_bundle(
-    tmp_path: Path, archive_dir: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Only the sanitized derivative leaves the archive; source evidence is retained."""
-    session_id = "abcd1234-0000-0000-0000-000000000000"
-    dest = tmp_path / "dump"
-    dest.mkdir()
-    config = RunConfig(target=str(tmp_path), archive=True, dump_artifacts=str(dest))
-    target, _, recorder = _setup_bundle(tmp_path, session_id)
-    traj = json.loads(recorder.path.read_text())
-    traj["remote_url"] = "https://user:ghp_canaryfake123@github.com/o/r"
-    recorder.path.write_text(json.dumps(traj))
-    _strict_archive(
-        target=target, session_id=session_id, config=config, write_snapshot=_write_snapshot(recorder), dump_path=dest,
-    )
-    assert (dest / "manifest.json").is_file()
-    assert not scan.scan_run_dir(dest).blocking
-    run_dir = archive_dir / "runs" / session_id
-    assert "ghp_canaryfake123" in (run_dir / "trajectory.json").read_text()
-    assert "ghp_canaryfake123" not in (dest / "trajectory.json").read_text()
-    assert query_runs(archive_dir)
-    captured = capsys.readouterr()
-    assert "ghp_canaryfake123" not in captured.out + captured.err
-
 def test_dump_artifacts_copies_clean_bundle(tmp_path: Path, archive_dir: Path) -> None:
     session_id = "abcd1234-0000-0000-0000-000000000000"
     dest = tmp_path / "dump"
@@ -1019,55 +947,6 @@ def test_label_observations_has_bitemporal_reward_columns(tmp_path: Path) -> Non
     assert {"valid_at", "reward_version", "reward_json"} <= lo_cols
     assert "composite_reward" in runs_cols
 
-_OLD_LABEL_OBSERVATIONS_DDL = """
-CREATE TABLE IF NOT EXISTS label_observations (
-    session_id       TEXT NOT NULL,
-    observed_at      TEXT NOT NULL,
-    labels           TEXT NOT NULL,
-    pr_state         TEXT,
-    labeler_version  TEXT NOT NULL,
-    evidence_sha     TEXT,
-    rubric_json      TEXT,
-    valid_at         TEXT,
-    reward_version   TEXT,
-    reward_json      TEXT,
-    composite_reward REAL,
-    reviewer_logins  TEXT,
-    has_posterior    INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (session_id, observed_at)
-)
-"""
-
-def _label_obs_columns(archive_dir: Path) -> set[str]:
-    conn = sqlite3.connect(str(archive_dir / "index.db"))
-    try:
-        return {r[1] for r in conn.execute("PRAGMA table_info(label_observations)")}
-    finally:
-        conn.close()
-
-def _seed_legacy_label_row(archive_dir: Path, session_id: str, ddl: str, observed_at: str) -> None:
-    """Insert a label_observations row using ``ddl`` (an older table shape)."""
-    conn = sqlite3.connect(str(archive_dir / "index.db"))
-    try:
-        conn.execute("DROP TABLE IF EXISTS label_observations")
-        conn.execute(ddl)
-        conn.execute("INSERT INTO label_observations "
-            "(session_id, observed_at, labels, pr_state, labeler_version, evidence_sha) "
-            "VALUES (?, ?, ?, ?, ?, ?)", (session_id, observed_at, '["accepted"]', "merged", "v1", "sha1",),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-def test_label_observations_source_column_migrates(tmp_path: Path) -> None:
-    upsert_run(tmp_path, make_manifest(session_id="s-mig"))
-    _seed_legacy_label_row(tmp_path, "s-mig", _OLD_LABEL_OBSERVATIONS_DDL, "2026-01-01T00:00:00+00:00")
-    assert "source" not in _label_obs_columns(tmp_path)  # precondition: legacy shape
-    upsert_run(tmp_path, make_manifest(session_id="s-mig2"))
-    cols = _label_obs_columns(tmp_path)
-    assert "source" in cols
-    rows = label_observation_history(tmp_path, "s-mig")
-    assert rows and rows[0]["source"] == "auto"  # existing row defaulted, non-destructive
 
 def test_human_label_wins_over_newer_auto_in_projection(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest(session_id="s-prec"))
@@ -1270,50 +1149,6 @@ def test_append_label_observation_persists_reviewer_and_posterior_flag(tmp_path:
     runs_row = query_runs(tmp_path, "session_id = ?", ("s1",))[0]
     assert runs_row["has_posterior"] == 1  # SQL consumers split populations without parsing reward_json
 
-def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
-    """Pre-v4 bootstrap adds run columns and recreates incompatible observation tables with a warning."""
-    db_path = tmp_path / "index.db"
-    conn = sqlite3.connect(str(db_path))
-    # Pre-v4 runs schema (DDL minus has_posterior); label_observations lacks posterior cols.
-    pre_v4_runs_ddl = _CREATE_TABLE.replace(
-        "    has_posterior INTEGER NOT NULL DEFAULT 0,\n", ""
-    )
-    assert "has_posterior" not in pre_v4_runs_ddl
-    conn.execute(pre_v4_runs_ddl)
-    conn.execute("CREATE TABLE label_observations ("
-        "session_id TEXT NOT NULL, observed_at TEXT NOT NULL, labels TEXT NOT NULL, "
-        "pr_state TEXT, labeler_version TEXT NOT NULL, evidence_sha TEXT, rubric_json TEXT, "
-        "valid_at TEXT, reward_version TEXT, reward_json TEXT, composite_reward REAL, "
-        "PRIMARY KEY (session_id, observed_at))"
-    )
-    conn.execute("INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
-        ("mig-1", "2026-01-01T00:00:00Z", "normal", str(tmp_path / "mig-1")),
-    )
-    conn.execute("PRAGMA user_version = 3")
-    conn.commit()
-    conn.close()
-
-    # First real-path write triggers _migrate_schema + the drop-and-recreate warning.
-    with pytest.warns(UserWarning, match="predates bitemporal/posterior columns"):
-        append_label_observation(
-            tmp_path, "mig-1", labels=["accepted"], pr_state="merged", labeler_version="2026.05.28-1",
-            evidence_sha=None, reviewer_logins=["bob"], has_posterior=True,
-        )
-
-    conn = sqlite3.connect(str(db_path))
-    runs_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
-    lo_cols = {r[1] for r in conn.execute("PRAGMA table_info(label_observations)")}
-    user_version = conn.execute("PRAGMA user_version").fetchone()[0]
-    conn.close()
-    assert "has_posterior" in runs_cols
-    assert {"reviewer_logins", "has_posterior"} <= lo_cols
-    assert user_version == SCHEMA_VERSION == 8
-
-    obs = latest_label_observation(tmp_path, "mig-1")
-    assert obs is not None
-    assert json.loads(obs["reviewer_logins"]) == ["bob"]
-    assert obs["has_posterior"] == 1
-    assert query_runs(tmp_path, "session_id = ?", ("mig-1",))[0]["has_posterior"] == 1
 
 # ISO 8601 valid times stored verbatim in label_observations.valid_at and
 # compared lexically with a strict ``<`` cutoff; T1 < T2 < T3 lexically.
@@ -2446,16 +2281,6 @@ def test_merge_failed_archives_failed_pipeline(target: Path, archive_dir: Path, 
     assert m["daydream"]["version"]  # executable provenance recorded
     assert m["daydream"]["commit"]  # a real SHA or the "unknown" sentinel, never blank
 
-def test_schema_additive_columns_and_migration(tmp_path: Path) -> None:
-    db = tmp_path / "index.db"
-    conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE runs (session_id TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'complete')")
-    conn.commit()
-    conn.close()
-    _schema._migrate_schema(sqlite3.connect(db))
-    cols = {r[1] for r in sqlite3.connect(db).execute("PRAGMA table_info(runs)").fetchall()}
-    assert "archive_status" in cols and "pipeline_status" in cols and "phase_states" in cols
-    assert "daydream_version" in cols and "daydream_commit" in cols and "daydream_dirty" in cols
 
 def test_upsert_run_persists_pipeline_fields(tmp_path: Path) -> None:
     m = Manifest(session_id="s-2", status="complete", archive_status="complete", pipeline_status="failed",
@@ -2471,29 +2296,6 @@ def test_upsert_run_persists_pipeline_fields(tmp_path: Path) -> None:
     assert row["daydream_version"] == "0.27.0"
     assert row["daydream_dirty"] == 0
 
-
-_LEGACY_ROW_OBSERVED_AT_SNAPSHOT = "2026-03-04T05:06:07+00:00"
-
-# Old DDL: everything up to (but excluding) the four reply-label/legacy columns.
-_PRE_REPLY_LABEL_DDL = """
-CREATE TABLE IF NOT EXISTS label_observations (
-    session_id       TEXT NOT NULL,
-    observed_at      TEXT NOT NULL,
-    labels           TEXT NOT NULL,
-    pr_state         TEXT,
-    labeler_version  TEXT NOT NULL,
-    evidence_sha     TEXT,
-    rubric_json      TEXT,
-    valid_at         TEXT,
-    reward_version   TEXT,
-    reward_json      TEXT,
-    composite_reward REAL,
-    reviewer_logins  TEXT,
-    has_posterior    INTEGER NOT NULL DEFAULT 0,
-    source           TEXT NOT NULL DEFAULT 'auto',
-    PRIMARY KEY (session_id, observed_at)
-)
-"""
 
 def test_append_label_observation_persists_versions_and_digest(tmp_path: Path) -> None:
     _seed_one_run(tmp_path, "sess-1")
@@ -2534,15 +2336,6 @@ def test_human_rows_keep_precedence_over_newer_auto(tmp_path: Path) -> None:
     obs = latest_label_observation(tmp_path, "sess-1")
     assert obs is not None and obs["source"] == "human" and obs["labels"] == '["rejected"]'
 
-def test_migration_marks_legacy_rows(tmp_path: Path) -> None:
-    _seed_one_run(tmp_path, "sess-legacy")
-    _seed_legacy_label_row(tmp_path, "sess-legacy", _PRE_REPLY_LABEL_DDL, _LEGACY_ROW_OBSERVED_AT_SNAPSHOT)
-    upsert_run(tmp_path, make_manifest(session_id="sess-legacy-2"))
-    rows = label_observation_history(tmp_path, "sess-legacy")
-    assert rows
-    assert all(r["legacy"] == "legacy" for r in rows if r["labeler_policy_version"] is None)
-    assert rows[0]["observed_at"] == _LEGACY_ROW_OBSERVED_AT_SNAPSHOT
-    assert rows[0]["labels"] == '["accepted"]'
 
 def test_append_label_observation_preserves_observed_at(tmp_path: Path) -> None:
     """Imported observation time must survive instead of being replaced by the append wall clock."""
@@ -2792,18 +2585,3 @@ def test_strict_archive_upload_refuses_frozen_tree_mutated_before_publication(
 
     assert uploads == []
     assert not (get_archive_dir() / "runs" / session_id).exists()
-
-def test_dump_scan_refusal_preserves_archive_and_removes_late_stage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Unredactable scan findings suppress only the diagnostic export."""
-    session_id = "strict-dump"
-    arguments = _finalizer_arguments(tmp_path, session_id,
-        config=RunConfig(target=str(tmp_path), run_eval=False, archive=True, dump_artifacts="requested"),
-    )
-    dump_stage = tmp_path / "late"
-    dump_stage.mkdir()
-    monkeypatch.setattr(scan, "_RULES", ((re.compile(session_id), "unredactable_fixture", scan.SEVERITY_BLOCKING),))
-    finalize_archive_run(**arguments, dump_path=dump_stage)
-    assert not dump_stage.exists()
-    assert (get_archive_dir() / "runs" / session_id / "manifest.json").is_file()
-    assert query_runs(get_archive_dir())

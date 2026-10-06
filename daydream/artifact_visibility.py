@@ -714,6 +714,16 @@ class ArtifactSession:
                     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
                         raise ArtifactVisibilityError("run snapshot path has unsafe ancestry")
             filesystem._atomic_bytes(self.layout.live_root / relative, document.json_bytes)
+        return self._freeze_tree()
+
+    def freeze_unproduced(self) -> ArtifactTreeSnapshot:
+        """Freeze a supported run that exited before producing a recorder document."""
+        self._require_active()
+        if self._trajectory_route is None:
+            raise ArtifactVisibilityError("unproduced run has no registered trajectory route")
+        return self._freeze_tree()
+
+    def _freeze_tree(self) -> ArtifactTreeSnapshot:
         entries = filesystem.manifest_tree(self.layout.live_root)
         frozen_root = self.layout.live_root.parent / "frozen"
         if frozen_root.exists() or frozen_root.is_symlink():

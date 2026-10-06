@@ -43,7 +43,8 @@ def upload_run_bundle(run_dir: Path, repo_id: str, session_id: str) -> bool:
     Return True on success; skips and failures warn and return False. Missing
     ``HF_TOKEN`` or the optional Hub dependency skips upload. New repos are private;
     existing visibility is retained, with a warning before uploading to a public repo.
-    Blocking secrets or scanner errors refuse upload with value-free diagnostics;
+    Blocking credentials always refuse upload.
+    Scanner errors always refuse upload with value-free diagnostics;
     advisory name/template matches are reported and allow upload. Concurrent commit
     conflicts retry up to three total attempts with exponential backoff.
     """
@@ -63,8 +64,16 @@ def upload_run_bundle(run_dir: Path, repo_id: str, session_id: str) -> bool:
 
     from daydream.archive import scan
 
-    scan_result = scan.scan_run_dir(run_dir)
-    if scan_result.blocking:
+    try:
+        scan_result = scan.scan_run_dir(run_dir)
+    except Exception:  # noqa: BLE001 - scanner failures never release payloads or exception text
+        _warn(f"Data Collection: refusing HF upload of {session_id}: bundle scanner failed")
+        return False
+    scan_failed = (
+        any(f.category == "scan_error" for f in scan_result.findings)
+        or (not scan_result.clean and not scan_result.findings)
+    )
+    if scan_failed or scan_result.blocking:
         _warn(
             f"Data Collection: refusing HF upload of {session_id}: bundle secret scan found "
             f"problems ({scan_result.summary()})"

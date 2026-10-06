@@ -32,19 +32,6 @@ REASON_CODE_LICENSE_EVIDENCE_MISSING = "license_evidence_missing"
 REASON_CODE_REPO_IDENTITY_MISSING = "repo_identity_missing"
 REASON_CODE_REPO_COMMIT_UNRESOLVED = "repo_commit_unresolved"
 
-# Import-specific reason codes (issue #1082 local-observation importer, fixed
-# registry). Every surviving observation row maps to exactly one of these six
-# buckets; byte-identical duplicates dropped by the dedupe are never bucket-
-# accounted, so ``sum(accounting) + deduped_count`` equals the source row
-# inventory count (M7) and the codes are stable strings (KD5).
-REASON_CODE_IMPORT_UNMATCHED_SESSION = "import_unmatched_session"
-REASON_CODE_IMPORT_IDENTITY_CONFLICT = "import_identity_conflict"
-REASON_CODE_IMPORT_STALE_EVIDENCE = "import_stale_evidence"
-REASON_CODE_IMPORT_INVALID_VERSION = "import_invalid_version"
-REASON_CODE_IMPORT_DECISIVE_PER_FINDING = "import_decisive_per_finding"
-REASON_CODE_IMPORT_RUN_LEVEL_ONLY = "import_run_level_only"
-REASON_CODE_IMPORT_UNREDACTABLE_METADATA = "import_unredactable_metadata"
-
 CURATION_ID_RE = re.compile(r"cur-[0-9a-f]{16}")
 
 

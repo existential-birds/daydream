@@ -1,6 +1,6 @@
 """Profile object, source, and digest propagate through trajectories, manifests, and SQLite.
 
-Legacy manifests omit optional fields; legacy databases receive an additive migration.
+Legacy manifests omit optional fields; current databases retain the profile projection.
 """
 import sqlite3
 from pathlib import Path
@@ -45,12 +45,12 @@ def test_legacy_manifest_without_profile_fields_still_serializes() -> None:
     assert "profile_digest" not in d and "profile_name" not in d
     assert "profile_schema_version" not in d and "profile_source_kind" not in d
 
-def test_sqlite_projection_has_profile_columns_and_migration() -> None:
+def test_sqlite_projection_has_profile_columns() -> None:
 
     ddl = _schema._CREATE_TABLE  # the runs CREATE TABLE constant
     assert "profile_digest TEXT" in ddl
     conn = sqlite3.connect(":memory:")
     conn.execute(_schema._CREATE_TABLE)  # current DDL
-    _schema._migrate_schema(conn)  # no-op on current, adds on legacy
     columns = {row[1] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
+    conn.close()
     assert {"profile_schema_version", "profile_name", "profile_source_kind", "profile_digest"} <= columns

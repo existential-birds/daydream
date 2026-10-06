@@ -243,6 +243,19 @@ During a run, Daydream keeps its working artifacts outside the target checkout. 
 
 Runtime output publication is all-or-nothing at finalization: invalid run identity, frozen evidence, findings projection, or output publication restores the checkout's prior artifacts. Archive, evaluation, index, and upload failures emit a sanitized data-collection diagnostic and preserve the review result and completed outputs. The archived bundle only exists once archiving has succeeded; handoffs do not promise a manifest from optional persistence.
 
+New runs can also collect raw JSONL evidence with `--capture-data`. Capture is off by default.
+Passing `--dataset-store DIR` also enables capture and chooses private local storage
+(default with `--capture-data`: `~/.daydream/dataset`).
+Capture preserves evidence as produced without additional redaction or secret scanning.
+The user controls this local data and is responsible for reviewing it before sharing.
+Collection works with `--no-archive` and tracing disabled.
+It retains the original analyzed revisions and input diff, trajectories, structured claims and
+verification/fix associations at the existing frozen finalization boundary, including cooperative
+interruption. SIGKILL and power loss before that boundary can lose uncaptured evidence. A
+persistence refusal emits a sanitized collection diagnostic and preserves completed review
+outputs. Existing archives remain available; historical migration, live outcome
+harvesting, report generation, and corpus cutover are separate work.
+
 ### Corpus commands
 
 The data-pipeline verbs live under the `corpus` namespace:
@@ -314,7 +327,9 @@ Upload of trajectories to Hugging Face is opt-in. Only the operator selects the 
 
 Daydream ignores a `trajectory_hub_repo` key in the target checkout file config. When unset, nothing leaves your machine.
 
-When set, daydream uploads every run's complete archive bundle to the dataset repo as a per-run folder. The upload requires the `huggingface_hub` package and a valid `HF_TOKEN`. If either is missing, or the upload fails, the run is never aborted. Daydream emits a one-line warning and leaves the bundle un-uploaded. On the first upload daydream creates the dataset repo private. It reuses an existing repo with its current visibility.
+When set, daydream uploads every run's complete archive bundle to the dataset repo as a per-run folder. The upload requires the `huggingface_hub` package and a valid `HF_TOKEN`. If either is missing, or the upload fails, the run is never aborted. Daydream emits a one-line warning and leaves the bundle un-uploaded. On the first upload daydream creates the dataset repo private. It reuses an existing repo with its current visibility. Daydream always scans direct uploads and refuses blocking credential findings, scanner exceptions, any `scan_error` finding regardless of severity, and incomplete results. Advisory-only findings are reported and allowed. Warnings contain no matched values or exception payloads, and upload failure preserves the local bundle.
+
+The scanner recognizes limited credential patterns; a passing scan does not establish that content is safe to share. Standalone archive sanitization produces separate derivatives through `sanitize_bundle()`; review their reports before sharing. Curated hydration, adjudication publication and shared trajectory/log redaction retain their independent checks.
 
 ```sh
 export DAYDREAM_TRAJECTORY_HUB_REPO="existentialbirds/daydream-trajectories"
@@ -843,9 +858,13 @@ Daydream moves existing untracked `.daydream/` and `.review-output.md` artifacts
 
 An explicit `--trajectory` path outside the source checkout receives live, atomic full and partial trajectory updates. Other explicit outputs remain deferred until finalization; `--dump-artifacts` merges files without replacing the whole destination directory. External trajectory publication requires the destination filesystem to support the checked atomic operations. An unsupported destination fails before model dispatch; there is no non-atomic fallback.
 
-`--dump-artifacts DIR` scans the finalized bundle before export. Clean bundles and bundles with only advisory findings are copied unchanged. Blocking findings trigger redaction of a separate private copy and a second scan. A sanitized copy includes `dump-sanitization.json` and retains the bundle layout and manifest session ID used by Hugging Face uploads; the original local archive and review evidence remain unchanged. Sanitization failures or remaining blocking findings, including scanner errors, withhold the dump and emit a warning without changing the review's exit status or discarding its findings and trajectory. Archive integrity and output publication errors still fail finalization.
+`--dump-artifacts DIR` always copies the finalized bundle's exact assembled bytes, including credential-shaped strings and binary files, without running the archive scanner or sanitizer. It preserves bundle layout, manifest session ID and unrelated destination files, and works with `--no-archive`. Byte preservation does not undo upstream trajectory redaction. Copy/I/O and archive-integrity failures retain the existing fatal finalization behavior and rollback.
 
-The dump scan covers generated bundle files, not unrelated files already in `DIR`. A refused dump leaves the existing destination unchanged. Consumers must handle a missing bundle after refusal; a successful review does not guarantee that `DIR/manifest.json` was exported. Logs and local archives can still contain sensitive information, so upload only the intended outputs.
+Review diagnostic content before sharing. Use standalone archive sanitization to create a separate derivative when needed; diagnostic dumping itself preserves the assembled evidence.
+
+Local metadata imports retain existing URL/path/rubric/reward redaction and integrity validation without a publication scan. Curated hydration sanitizes incoming archives, verifies derivatives, and scans the final staged payload including supporting ledgers before upload. Adjudication publication keeps its independent metadata and SQLite secret checks.
+
+Logs and local archives can contain sensitive information, so upload only the intended outputs.
 
 Private storage prevents generated artifacts from appearing in ordinary cwd-rooted discovery. It is not an OS sandbox. When a later phase needs a generated file, Daydream passes its exact approved path or, for isolated backend modes, its bounded contents inline. It does not grant access to an entire runtime directory.
 

@@ -14,7 +14,6 @@ from unittest.mock import patch
 import pytest
 
 from daydream import git_ops
-from daydream.archive import sanitize, scan
 from daydream.archive.index import (
     append_label_observation,
     label_observation_history,
@@ -1233,62 +1232,6 @@ def test_token_never_in_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
         joined = " ".join(command)
         assert "ghp_envtokfake123" not in joined
         assert basic not in joined
-
-def test_hub_import_rejects_unsanitized_affected_bundle(tmp_path: Path) -> None:
-    """M18: an affected (credential-bearing) incoming bundle with no released
-    derivative is quarantined locally and skipped — never imported raw."""
-
-    archive_dir = tmp_path / "archive"
-    incoming = archive_dir / "incoming" / "s1"
-    incoming.mkdir(parents=True)
-    (incoming / "manifest.json").write_text(
-        json.dumps({"session_id": "s1", "git": {"remote_url": "https://user:ghp_canaryfake123@github.com/o/r"}})
-    )
-    result = sanitize.import_bundle(incoming, archive_dir)
-    assert result.imported is False or result.quarantined
-    assert (archive_dir / "quarantine" / "s1").is_dir()
-    assert not incoming.exists()
-
-def test_hub_import_accepts_clean_bundle_in_place(tmp_path: Path) -> None:
-    archive_dir = tmp_path / "archive"
-    incoming = archive_dir / "incoming" / "s2"
-    incoming.mkdir(parents=True)
-    (incoming / "manifest.json").write_text(
-        json.dumps({"session_id": "s2", "git": {"remote_url": "https://github.com/o/r"}})
-    )
-    result = sanitize.import_bundle(incoming, archive_dir)
-    assert result.imported is True
-    assert result.quarantined is False
-    assert incoming.exists()
-
-def test_hub_import_accepts_advisory_only_bundle(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """Import an advisory-only uppercase KEY flag without quarantine.
-
-    The name shape is not a credential; diagnostics must remain value-free."""
-
-    archive_dir = tmp_path / "archive"
-    incoming = archive_dir / "incoming" / "s3"
-    incoming.mkdir(parents=True)
-    (incoming / "manifest.json").write_text(json.dumps({
-                "session_id": "s3", "git": {"remote_url": "https://github.com/o/r"},
-                "notes": 'FEATURE_FLAG_OVERRIDE_KEY = "override_flag"',
-            }
-        )
-    )
-    pre = scan.scan_run_dir(incoming)
-    assert pre.clean is False and pre.blocking is False  # advisory-only bundle
-
-    result = sanitize.import_bundle(incoming, archive_dir)
-
-    assert result.imported is True
-    assert result.quarantined is False
-    assert incoming.exists()
-    assert not (archive_dir / "quarantine" / "s3").exists()
-    captured = capsys.readouterr()
-    out = captured.out + captured.err
-    assert "advisory" in out
-    assert "env_var" in out
-    assert "override_flag" not in out  # M11: never a matched value
 
 def test_per_finding_resolution_round_trips_through_canonical_dict() -> None:
     r = PerFindingResolution(fingerprint="fp-1", comment_id=7, disposition="accepted",

@@ -6,7 +6,7 @@ import sqlite3
 import sys
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 import pytest
@@ -38,6 +38,7 @@ from daydream.trajectory import (
     DaydreamRunFlow,
     LifecycleReasonCode,
     RunWriteSnapshot,
+    TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
     now_iso,
 )
@@ -300,6 +301,57 @@ async def test_full_archive_round_trip_fix_test_backend_columns(
         pass
     backend: str | None = None if run_flow is DaydreamRunFlow.IMPROVE else "claude"
     _assert_round_trip_bundle(archive_dir, recorder, fix_backend=backend, test_backend=backend,)
+
+@pytest.mark.parametrize(("status", "lifecycle", "expected_wall"), [
+    ("complete", True, 10.0), ("partial", True, 4.0), ("complete", False, None),
+])
+def test_finalization_evaluates_selected_snapshot_after_files_change(tmp_path: Path, archive_dir: Path,
+    monkeypatch: pytest.MonkeyPatch, status: Literal["complete", "partial"], lifecycle: bool,
+    expected_wall: float | None,
+) -> None:
+    from daydream.eval.analyzer import analyze_session
+
+    target = tmp_path / "frozen"
+    target.mkdir()
+    session = "selected-snapshot"
+    path = target / ".daydream" / "runs" / session / "trajectory.json"
+    path.parent.mkdir(parents=True)
+    extra = {"run_started_at": "2026-01-01T00:00:00Z", "run_ended_at": "2026-01-01T00:00:10Z",
+        "snapshot_at": "2026-01-01T00:00:04Z", "partial": False,
+    } if lifecycle else {}
+    root: dict[str, Any] = {"session_id": session, "trajectory_id": session,
+        "steps": [{"timestamp": "2026-01-01T00:00:02Z"}, {"timestamp": "2026-01-01T00:00:03Z"}],
+        "extra": extra, "final_metrics": {"total_cost_usd": 0.5},
+    }
+    cutoff = "2026-01-01T00:00:04Z" if status == "partial" else "2026-01-01T00:00:10Z"
+    snapshot = RunWriteSnapshot(status=status, cutoff_at=cutoff, root_trajectory_id=session,
+        documents=(TrajectoryDocumentSnapshot(session, path, json.dumps(root).encode()),),
+    )
+    snapshot.validate(session)
+    path.write_bytes(snapshot.documents[0].json_bytes)
+    root["final_metrics"]["total_cost_usd"] = 99.0
+    root["extra"]["run_ended_at"] = "2026-01-01T00:01:00Z"
+    path.write_text(json.dumps(root))
+    evaluated: list[RunWriteSnapshot] = []
+    def evaluate(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        evaluated.append(kwargs["write_snapshot"])
+        return analyze_session(*args, **kwargs)
+    monkeypatch.setattr("daydream.eval.analyzer.analyze_session", evaluate)
+    recorder = make_recorder(target, session_id=session, path=path)
+
+    _finalize_strict_archive(recorder, snapshot, RunConfig(run_eval=True), target, upload=False)
+
+    assert evaluated == [snapshot]
+    assert evaluated[0] is snapshot
+    archived = archive_dir / "runs" / session
+    evaluation = json.loads((archived / "evaluation.json").read_bytes())
+    manifest = json.loads((archived / "manifest.json").read_bytes())
+    assert (archived / "trajectory.json").read_bytes() == snapshot.documents[0].json_bytes
+    assert evaluation["cost"]["total_cost_usd"] == 0.5
+    assert evaluation["timing"]["total_wall_clock_seconds"] == expected_wall
+    assert evaluation["timing"]["by_agent"] == [{"agent": "main", "duration_seconds": 1.0}]
+    assert manifest["metrics"]["wall_clock_seconds"] == expected_wall
+
 
 async def test_archive_round_trip_projects_eval_location_metrics(tmp_path: Path, archive_dir: Path,) -> None:
     recorder = _make_round_trip_fixture(tmp_path, DaydreamRunFlow.NORMAL, run_eval=True)

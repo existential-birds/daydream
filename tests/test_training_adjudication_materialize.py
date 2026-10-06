@@ -7,7 +7,6 @@ import pytest
 
 from daydream.archive.hydrate import HubUnavailableError
 from daydream.archive.index import append_label_observation
-from daydream.training.adjudication.import_local import _hydrated_identity_index
 from daydream.training.adjudication.materialize import _trajectory_resolutions_readonly, run_materialize
 from daydream.trajectory import run_directory, run_document_path
 from tests.harness.adjudication import make_hydrated_sqlite_index, write_sessions_jsonl
@@ -156,7 +155,6 @@ def test_hydrated_readers_address_the_layout_run_directory(tmp_path: Path) -> No
 
     assert run_document_path(run_directory(root, "s1")).is_file()
     assert _trajectory_resolutions_readonly(root, "s1") is not None
-    assert _hydrated_identity_index([{"session_id": "s1"}], root)["s1"]["record_id"] == "s1"
 
 def test_materialize_skips_legacy_labels_only_sessions_without_trajectory(tmp_path: Path,) -> None:
     """A labels-only row without a trajectory is evidence-only and yields no resolutions; it must not abort

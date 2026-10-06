@@ -13,10 +13,9 @@ import pytest
 from daydream import cli, git_ops
 from daydream.archive import hydrate, license_enrich
 from daydream.archive.hydrate_client import FakeHub
-from daydream.archive.index import append_label_observation, label_observation_history, upsert_run
+from daydream.archive.index import label_observation_history, upsert_run
 from daydream.pr_review import DAYDREAM_FOOTER, finding_marker
-from daydream.training.adjudication.observations import load_observations
-from daydream.training.labeler_versions import ADJUDICATION_LABELER_VERSION, REPLY_CLASSIFIER_VERSION
+from daydream.training.adjudication.observations import append_observation, load_observations
 from tests.fixtures.training.build_archive import _MINIMAL_TRAJECTORY
 from tests.fixtures.training.build_hub_snapshot import PINNED_POLICY_FIXTURE
 from tests.harness.git_helpers import git
@@ -133,46 +132,34 @@ def test_fresh_semantic_preview_is_complete_and_readonly(
         (r["fingerprint"], r["disposition"], r["evidence_digest"]) for r in records
     }
 
-@pytest.mark.parametrize("history_kind", ["rater", "conflict", "legacy"])
+@pytest.mark.parametrize("history_kind", ["rater", "conflict"])
 @pytest.mark.parametrize("target_fingerprint", ["1", "3"])
-def test_imported_finding_reaches_queue_and_canonical_harvest(
+def test_human_finding_reaches_queue_and_canonical_harvest(
     fresh_archive: tuple[Path, list[dict[str, Any]]], tmp_path: Path, history_kind: str, target_fingerprint: str,
 ) -> None:
     root, comments = fresh_archive
-    preview, state, backup = (tmp_path / name for name in ("preview", "state", "backup"))
+    preview, state = (tmp_path / name for name in ("preview", "state"))
     assert _materialize(root, preview) == 0
     records = [json.loads(line) for line in (preview / "sessions.jsonl").read_text().splitlines()]
     finding = next(row for row in records if row["fingerprint"] == target_fingerprint * 64)
-    shutil.copytree(root, backup)
-    append_label_observation(backup, "semantic", labels=["accepted"], pr_state=None,
-        labeler_version=ADJUDICATION_LABELER_VERSION, evidence_sha="b" * 40,
-        rubric_json=json.dumps({"per_finding_resolutions": [{
-            **finding, "disposition": "accepted", "human_labeler": "alice", "human_role": "rater",
-        }]}), source="human", observed_at="2026-09-11T00:00:00+00:00",
-        reply_classifier_version="legacy" if history_kind == "legacy" else REPLY_CLASSIFIER_VERSION,
-    )
+    # Ordinary append-only adjudication state also covers decisive findings.
+    append_observation(state / "observations.jsonl", {
+        "record_id": finding["record_id"], "evidence_digest": finding["evidence_digest"],
+        "evidence": finding["evidence"], "disposition": "accepted", "labeler": "alice",
+        "role": "rater", "rationale": "verified against current evidence",
+        "valid_at": "2026-09-11T00:00:00+00:00", "observed_at": "2026-09-11T00:00:00+00:00",
+        "rubric_version": finding["rubric_version"],
+    })
+    assert _cli(["adjudicate", "build", "--index-root", str(preview), "--state-dir", str(state)]) == 0
     if history_kind == "conflict":
-        append_label_observation(backup, "semantic", labels=["rejected"], pr_state=None,
-            labeler_version=ADJUDICATION_LABELER_VERSION, evidence_sha="b" * 40,
-            rubric_json=json.dumps({"per_finding_resolutions": [{
-                **finding, "disposition": "rejected", "human_labeler": "bob", "human_role": "rater",
-            }]}), source="human", observed_at="2026-09-11T01:00:00+00:00",
-            reply_classifier_version=REPLY_CLASSIFIER_VERSION,
-        )
-    source = _tree(backup)
-    args = ["adjudicate", "import-local-observations", "--archive-root", str(backup),
-        "--index-root", str(root), "--archive-dir", str(root), "--state-dir", str(state),
-    ]
-    assert _cli([*args, "--dry-run"]) == 0
-    assert not state.exists()
-    assert _cli(args) == 0
-    assert _tree(backup) == source
+        assert _cli(["adjudicate", "label", "--state-dir", str(state), "--record-id", finding["record_id"],
+            "--disposition", "rejected", "--rationale", "reviewed current evidence",
+            "--labeler", "bob", "--role", "rater",
+        ]) == 0
     observations = load_observations(state / "observations.jsonl")
     assert len(observations) == (2 if history_kind == "conflict" else 1)
     assert observations[0]["record_id"] == finding["record_id"]
     assert observations[0]["labeler"] == "alice"
-    assert _cli(args) == 0
-    assert load_observations(state / "observations.jsonl") == observations
     assert _cli(["adjudicate", "build", "--index-root", str(preview), "--state-dir", str(state)]) == 0
     queue = json.loads((state / "queue.json").read_text())
     assert {item["fingerprint"] for item in queue} == {str(i) * 64 for i in (3, 4, 5)} | {target_fingerprint * 64}
@@ -201,8 +188,9 @@ def test_imported_finding_reaches_queue_and_canonical_harvest(
         assert resolved["resolutions"][0]["disposition"] == "accepted"
     else:
         assert resolved["disposition"] == "ambiguous"
+        assert resolved["conflicting"] is True
     history = label_observation_history(root, "semantic")
-    assert len(history) == (3 if history_kind == "conflict" else 2)
+    assert len(history) == 1
     assert _cli(harvest) == 0
     assert label_observation_history(root, "semantic") == history
     curation, = (root / "curated").glob("*/curation-manifest.json")
@@ -214,9 +202,12 @@ def test_imported_finding_reaches_queue_and_canonical_harvest(
         json.loads(line) for line in (preview / "final-bundle" / "label-observations.jsonl").read_text().splitlines()
     ]
     assert len(immutable_history) == len(history)
-    assert any(row["source"] == "human" and "alice" in row["rubric_json"] for row in immutable_history)
+    assert immutable_history == history
+    assert load_observations(state / "observations.jsonl") == observations
+    if history_kind == "rater":
+        assert any("alice" in row["rubric_json"] for row in immutable_history)
     assert (preview / "final-bundle" / "sessions.jsonl").read_bytes() == (preview / "annotations.jsonl").read_bytes()
-    if history_kind in {"legacy", "conflict"}:
+    if history_kind == "conflict":
         assert _cli(["adjudicate", "label", "--state-dir", str(state), "--record-id", finding["record_id"],
             "--disposition", "accepted", "--rationale", "verified against current evidence",
             "--labeler", "carol", "--role", "adjudicator",
@@ -227,23 +218,6 @@ def test_imported_finding_reaches_queue_and_canonical_harvest(
         assert decision["disposition"] == "accepted"
         assert decision["human_labeler"] == "carol"
         assert len(load_observations(state / "observations.jsonl")) == len(observations) + 1
-
-def test_import_does_not_link_a_backup_to_itself_outside_the_pinned_curation(
-    fresh_archive: tuple[Path, list[dict[str, Any]]], tmp_path: Path,
-) -> None:
-    root, _comments = fresh_archive
-    backup, state = tmp_path / "backup", tmp_path / "state"
-    upsert_run(backup, make_manifest(session_id="outside", repo_slug="org/repo", base_sha="c" * 40, head_sha="d" * 40))
-    append_label_observation(backup, "outside", labels=["accepted"], pr_state=None,
-        labeler_version=ADJUDICATION_LABELER_VERSION, evidence_sha="d" * 40,
-    )
-    assert _cli(["adjudicate", "import-local-observations", "--archive-root", str(backup),
-        "--index-root", str(root), "--archive-dir", str(root), "--state-dir", str(state),
-    ]) == 0
-    report = json.loads((state / "import-report.json").read_text())
-    assert report["identity_summary"]["outside"]["validation_outcome"] == "unmatched"
-    assert report["merge"]["appended"] == 0
-    assert label_observation_history(root, "outside") == []
 
 def test_harvest_dry_run_does_not_prepare_bronze_or_resume_state(
     fresh_archive: tuple[Path, list[dict[str, Any]]], git_repo: Path,
@@ -317,36 +291,3 @@ def test_canonical_harvest_rejects_new_findings_before_writes(
     ]) == 1
     assert _tree(root) == before
     assert not (preview / "annotations.jsonl").exists()
-
-@pytest.mark.parametrize("reason", [
-    "unknown_fingerprint", "record_identity_mismatch", "evidence_digest_mismatch", "ambiguous_fingerprint",
-])
-def test_invalid_imported_finding_mapping_stays_reviewable_without_becoming_a_judgment(
-    fresh_archive: tuple[Path, list[dict[str, Any]]], tmp_path: Path, reason: str,
-) -> None:
-    root, _comments = fresh_archive
-    preview, backup, state = (tmp_path / name for name in ("preview", "backup", "state"))
-    assert _materialize(root, preview) == 0
-    finding = json.loads((preview / "sessions.jsonl").read_text().splitlines()[0])
-    resolution = {**finding, "disposition": "accepted", "human_labeler": "alice"}
-    if reason == "unknown_fingerprint":
-        resolution["fingerprint"] = "f" * 64
-    elif reason == "record_identity_mismatch":
-        resolution["record_id"] = "f" * 64
-    elif reason == "evidence_digest_mismatch":
-        resolution["evidence_digest"] = "f" * 64
-    resolutions = [resolution, resolution] if reason == "ambiguous_fingerprint" else [resolution]
-    shutil.copytree(root, backup)
-    append_label_observation(backup, "semantic", labels=["accepted"], pr_state=None, source="human",
-        labeler_version=ADJUDICATION_LABELER_VERSION, evidence_sha="b" * 40,
-        rubric_json=json.dumps({"per_finding_resolutions": resolutions}),
-        reply_classifier_version=REPLY_CLASSIFIER_VERSION,
-    )
-    assert _cli(["adjudicate", "import-local-observations", "--archive-root", str(backup),
-        "--index-root", str(root), "--archive-dir", str(root), "--state-dir", str(state),
-    ]) == 0
-    assert load_observations(state / "observations.jsonl") == []
-    report = json.loads((state / "import-report.json").read_text())
-    assert {decision["reason"] for decision in report["finding_decisions"]} == {reason}
-    assert len(report["finding_decisions"]) == len(resolutions)
-    assert len(label_observation_history(root, "semantic")) == 1

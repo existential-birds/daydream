@@ -25,9 +25,8 @@ _EXCLUDED_PARTS = frozenset({"tests", "__pycache__", ".venv", "venv", "site-pack
 _IN_SCOPE_CONSUMERS = frozenset({
     "daydream/archive/bundle.py", "daydream/archive/finalize.py",
     "daydream/archive/hydrate.py", "daydream/archive/license_enrich.py",
-    "daydream/archive/sanitize.py", "daydream/eval/analyzer.py", "daydream/artifact_visibility.py",
+    "daydream/eval/analyzer.py", "daydream/artifact_visibility.py",
     "daydream/phases/handoff.py", "daydream/training/adjudication/materialize.py",
-    "daydream/training/adjudication/import_local.py",
     "daydream/run_artifacts.py",
 })
 
@@ -50,6 +49,8 @@ _PERMITTED = {
     "daydream/benchmark/cli.py": frozenset({"root-document"}),
     # Training corpus batches: `batches/<sid>/trajectory.json`, its own producer.
     "daydream/training/corpus_projection/projector.py": frozenset({"root-document"}),
+    # Dataset run-record JSONL shards: `runs/<record-hash>.jsonl`, a separate layout.
+    "daydream/dataset.py": frozenset({"runs-dir"}),
     # A standalone package that cannot import `daydream` (reads via a runtime seam).
     "rl/daydream_review/daydream_review/rundir.py": frozenset({"root-document", "runs-dir"}),
 }
