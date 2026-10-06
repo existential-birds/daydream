@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 from daydream.training.dispositions import DECISIVE_DISPOSITIONS as DECISIVE_DISPOSITIONS
 
 HUMAN_ROLES = frozenset({"rater", "adjudicator"})
-
-# Labeler breaks equal observed_at timestamps deterministically.
-_SORT_TIEBREAK_KEYS = ("observed_at", "labeler")
 
 
 def _is_human(obs: Mapping[str, Any]) -> bool:
@@ -20,7 +18,7 @@ def _is_human(obs: Mapping[str, Any]) -> bool:
 def _sorted_by_recency(observations: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     return sorted(
         observations,
-        key=lambda o: tuple(str(o.get(k, "")) for k in _SORT_TIEBREAK_KEYS),
+        key=lambda o: (datetime.fromisoformat(str(_required(o, "observed_at"))), str(o.get("labeler", ""))),
     )
 
 
@@ -104,15 +102,8 @@ def effective_adjudication(observations: Sequence[Mapping[str, Any]]) -> dict[st
     # review requirement without deleting that immutable historical row.
     review_required = bool(effective.get("review_required", False))
     if not adjudicators:
-        review_required = review_required or any(
-            bool(o.get("review_required", False)) for o in human_raters
-        )
-    gold_eligible = (
-        disposition in DECISIVE_DISPOSITIONS
-        and bool(evidence)
-        and not conflict
-        and not review_required
-    )
+        review_required = review_required or any(bool(o.get("review_required", False)) for o in human_raters)
+    gold_eligible = disposition in DECISIVE_DISPOSITIONS and bool(evidence) and not conflict and not review_required
 
     return {
         "disposition": disposition,

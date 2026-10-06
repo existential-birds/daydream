@@ -23,6 +23,76 @@ def store(tmp_path: Path) -> LocalRecordStore:
     return result
 
 
+def test_current_records_read_all_history_without_creating_snapshot(store: LocalRecordStore) -> None:
+    store.commit_run(run_record("future-run", captured_at="2200-01-01T00:00:00Z"))
+    store.append_observation(observation("future-observation", observed_at="2200-01-02T00:00:00Z"))
+    assert list((store.root / "snapshots").iterdir()) == []
+    current = store.read_records()
+    assert {record["run_id"] for record in current["runs"]} == {"run-1", "future-run"}
+    assert [record["observation_id"] for record in current["observations"]] == ["future-observation"]
+    assert list((store.root / "snapshots").iterdir()) == []
+
+
+@pytest.mark.parametrize("missing", ["run", "finding"])
+def test_current_record_reads_reject_orphaned_observations(store: LocalRecordStore, missing: str) -> None:
+    store.append_observation(observation())
+    path = next((store.root / "runs").iterdir())
+    if missing == "run":
+        path.unlink()
+    else:
+        raw = json.loads(path.read_bytes())
+        raw["findings"]["value"]["items"] = []
+        path.write_text(json.dumps(raw, sort_keys=True, separators=(",", ":")) + "\n")
+    with pytest.raises(StoreError, match="unknown_run_reference" if missing == "run" else "orphan_finding_reference"):
+        store.read_records()
+    assert list((store.root / "snapshots").iterdir()) == []
+
+
+def test_public_record_target_validation_matches_store_reference_rules() -> None:
+    import daydream.dataset as dataset
+
+    dataset.validate_record_targets([parse_run(run_record())], [dataset.parse_observation(observation())])
+    with pytest.raises(StoreError, match="unknown_run_reference"):
+        dataset.validate_record_targets([], [dataset.parse_observation(observation())])
+    with pytest.raises(StoreError, match="orphan_finding_reference"):
+        dataset.validate_record_targets(
+            [parse_run(run_record())], [dataset.parse_observation(observation(item_uid="item:99"))])
+
+
+def test_download_source_records_exact_membership_privately(store: LocalRecordStore) -> None:
+    current = store.read_records()
+    source = {"repository": "test-user/private-trajectories", "revision": "a" * 40}
+    store.record_download_source(source, **current)
+    path = store.root / "source.json"
+    assert json.loads(path.read_bytes()) == source
+    assert store.download_source() == source
+    assert path.read_bytes().endswith(b"\n")
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("change", ["run", "observation", "content"])
+def test_download_source_refuses_changed_membership(store: LocalRecordStore, change: str) -> None:
+    current = store.read_records()
+    if change == "run":
+        store.commit_run(run_record("concurrent", captured_at="2200-01-01T00:00:00Z"))
+    elif change == "observation":
+        store.append_observation(observation())
+    else:
+        current = {**current, "runs": (parse_run(run_record(outcome="failed")),)}
+    with pytest.raises(StoreError, match="download_destination_conflict"):
+        store.record_download_source({"revision": "a" * 40}, **current)
+    assert not (store.root / "source.json").exists()
+
+
+def test_download_source_refuses_symlink_without_touching_target(store: LocalRecordStore, tmp_path: Path) -> None:
+    outside = tmp_path / "outside.json"
+    outside.write_text("operator data")
+    (store.root / "source.json").symlink_to(outside)
+    with pytest.raises(StoreError, match="unsafe_storage_path"):
+        store.record_download_source({"revision": "a" * 40}, **store.read_records())
+    assert outside.read_text() == "operator data"
+
+
 def test_history_pins_temporal_membership_and_preserves_typed_human_decisions(store: LocalRecordStore) -> None:
     assert not store.commit_run(run_record()).committed
     assert store.append_observation(observation()).committed
@@ -204,3 +274,32 @@ def test_trajectory_membership_preserves_invocations_and_unproduced_registered_c
         summary["step_ids"] = [9]
         with pytest.raises(ValueError, match="invalid RunRecord"):
             parse_run(raw)
+
+
+@pytest.mark.parametrize("unsafe", ["malformed", "symlink"])
+def test_download_source_read_refuses_unsafe_provenance(
+    store: LocalRecordStore, tmp_path: Path, unsafe: str,
+) -> None:
+    path = store.root / "source.json"
+    if unsafe == "malformed":
+        path.write_text("[]")
+    else:
+        outside = tmp_path / "outside-source"
+        outside.write_text("operator data")
+        path.symlink_to(outside)
+    with pytest.raises(StoreError, match="invalid_download_source|unsafe_storage_path"):
+        store.download_source()
+    if unsafe == "symlink":
+        assert outside.read_text() == "operator data"
+
+
+def test_snapshot_pins_download_provenance_independently_of_later_source_metadata(store: LocalRecordStore) -> None:
+    records = store.read_records()
+    first_source = {"repository": "test-user/private-trajectories", "revision": "a" * 40}
+    store.record_download_source(first_source, **records)
+    first = store.select_snapshot(observed_before="2100-01-01T00:00:00Z")
+    store.record_download_source({**first_source, "revision": "b" * 40}, **records)
+    second = store.select_snapshot(observed_before="2100-01-01T00:00:00Z")
+    assert first["snapshot_id"] != second["snapshot_id"]
+    assert store.read_snapshot(first["snapshot_id"]).snapshot["source"]["revision"] == "a" * 40
+    assert store.read_snapshot(second["snapshot_id"]).snapshot["source"]["revision"] == "b" * 40

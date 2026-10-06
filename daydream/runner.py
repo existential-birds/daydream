@@ -284,6 +284,14 @@ async def run(
     """Open a workspace and execute the selected daydream flow."""
     if config is None:
         config = RunConfig()
+    if config.dataset_capture_disabled:
+        config = replace(config, dataset_capture=False)
+    else:
+        from daydream.hub import resolve_hub_repo
+
+        hub_repo = resolve_hub_repo(config)
+        if hub_repo:
+            config = replace(config, dataset_capture=True, trajectory_hub_repo=hub_repo)
 
     backend_factory: BackendFactory | None = None
     if execution is not None:

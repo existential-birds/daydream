@@ -1,0 +1,106 @@
+{
+  "description": "Frozen normalized synthetic projections from the pre-cutover implementation. Record IDs, splits, transport references, source digests, and policy-version defaults change explicitly with record-snapshot-v1; all retained semantic fields below must match equivalent run/observation evidence.",
+  "records": [
+    {
+      "diff": "diff --git a/sess-a.py b/sess-a.py\n--- a/sess-a.py\n+++ b/sess-a.py\n@@ -1 +1 @@\n-pass\n+fixed-sess-a\n",
+      "disposition": "accepted",
+      "evidence": [
+        {
+          "classifier_label": "accepted",
+          "comment_id": 1,
+          "created_at": "2026-02-01T00:00:00+00:00",
+          "valid_at": "2026-01-01T00:00:00+00:00"
+        }
+      ],
+      "finding_fingerprint": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "finding_text": "exact localized finding body",
+      "finding_text_sha256": "b4932b32e5861c93785d400361911d8a5ddc9745e5ba5f8bef0ea75ba9a032df",
+      "lineage": {
+        "as_of": null,
+        "diff_digest": "2acd95d320d855bdbf2b2365c2af3f9cd7060894652b199d10c00f319abcd61f",
+        "exclusion_reason": null,
+        "license_decision": {
+          "evidence_ref": "manifest",
+          "policy_version": "1",
+          "reason_code": null,
+          "repo_slug": "owner/repo-e808f6",
+          "spdx_id": "MIT",
+          "status": "admitted"
+        },
+        "repo_slug": "owner/repo-e808f6",
+        "valid_at": "2026-01-01T00:00:00+00:00"
+      },
+      "outcome_label": "accepted",
+      "profile": {
+        "profile_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "profile_name": "deep-review",
+        "profile_schema_version": 2,
+        "profile_source_kind": "builtin"
+      },
+      "record_type": "outcome-finding",
+      "schema_version": "2",
+      "session_id": "sess-a",
+      "stack": "python",
+      "task_identity": {
+        "base_sha": "66cefd1a2110dbd56f08f258798f9c8ab0a4d377",
+        "diff_digest": "2acd95d320d855bdbf2b2365c2af3f9cd7060894652b199d10c00f319abcd61f",
+        "head_sha": "62dae747aff23cdad1bd9e0aa26b423e8b64754b",
+        "repo_slug": "owner/repo-e808f6"
+      },
+      "task_segment": "seg-0",
+      "tier": "gold",
+      "trajectory_id": "sess-a:fix-0"
+    },
+    {
+      "diff": "diff --git a/sess-a.py b/sess-a.py\n--- a/sess-a.py\n+++ b/sess-a.py\n@@ -1 +1 @@\n-pass\n+fixed-sess-a\n",
+      "disposition": "rejected",
+      "evidence": [
+        {
+          "classifier_label": "rejected",
+          "comment_id": 2,
+          "created_at": "2026-02-01T00:00:00+00:00",
+          "valid_at": "2026-01-01T00:00:00+00:00"
+        }
+      ],
+      "finding_fingerprint": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+      "finding_text": "rejected finding body",
+      "finding_text_sha256": "fc8c35f9cb477714a7f71bbd53dd13349009af367375b9d4f30564565ae9ca6e",
+      "lineage": {
+        "as_of": null,
+        "diff_digest": "2acd95d320d855bdbf2b2365c2af3f9cd7060894652b199d10c00f319abcd61f",
+        "exclusion_reason": null,
+        "license_decision": {
+          "evidence_ref": "manifest",
+          "policy_version": "1",
+          "reason_code": null,
+          "repo_slug": "owner/repo-e808f6",
+          "spdx_id": "MIT",
+          "status": "admitted"
+        },
+        "repo_slug": "owner/repo-e808f6",
+        "valid_at": "2026-01-01T00:00:00+00:00"
+      },
+      "outcome_label": "rejected",
+      "profile": {
+        "profile_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "profile_name": "deep-review",
+        "profile_schema_version": 2,
+        "profile_source_kind": "builtin"
+      },
+      "record_type": "outcome-finding",
+      "schema_version": "2",
+      "session_id": "sess-a",
+      "stack": "python",
+      "task_identity": {
+        "base_sha": "66cefd1a2110dbd56f08f258798f9c8ab0a4d377",
+        "diff_digest": "2acd95d320d855bdbf2b2365c2af3f9cd7060894652b199d10c00f319abcd61f",
+        "head_sha": "62dae747aff23cdad1bd9e0aa26b423e8b64754b",
+        "repo_slug": "owner/repo-e808f6"
+      },
+      "task_segment": "seg-0",
+      "tier": "gold",
+      "trajectory_id": "sess-a:fix-0"
+    }
+  ],
+  "source_commit": "dad490231cff36241836377057237820f83ce6e0"
+}

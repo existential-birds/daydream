@@ -44,12 +44,13 @@ def _v2_record(
         "profile": {"profile_schema_version": 1, "profile_name": "decisive-only", "profile_source_kind": "curation",
             "profile_digest": hashlib.sha256(b"profile").hexdigest(),
         }, "stack": "python", "outcome_label": label, "lineage": {
-            "hub_commit": None, "curation_id": "cur-1", "content_digests": [], "labeler_policy_version": "labeler-v3",
+            "hub_commit": None, "snapshot_id": "c" * 64, "source_identity_version": "record-snapshot-v1",
+            "content_digests": [], "labeler_policy_version": "labeler-v3",
             "reply_classifier_version": "rc-1", "rubric_schema_version": "rubric-v2", "as_of": "2026-01-01T00:00:00Z",
             "valid_at": "2026-01-01T00:00:00Z", "split": split, "exclusion_reason": None, "repo_slug": "owner/repo",
             "license_decision": {"status": "admitted", "repo_slug": "owner/repo", "reason_code": None},
         }, "task_identity": {
-            "repo_slug": "owner/repo", "source": "curation-bundle", "base_sha": base_sha, "head_sha": HEAD_SHA,
+            "repo_slug": "owner/repo", "source": "record", "base_sha": base_sha, "head_sha": HEAD_SHA,
             "diff_digest": hashlib.sha256(DIFF_BODY.encode("utf-8")).hexdigest(),
             "diff_ref": {"content_digest": hashlib.sha256(DIFF_BODY.encode("utf-8")).hexdigest(),
                 "relpath": f"batches/{session_id}/diff.patch",

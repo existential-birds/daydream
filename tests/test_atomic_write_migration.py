@@ -8,7 +8,6 @@ that a function was merely called.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import stat
@@ -22,19 +21,12 @@ import pytest
 from daydream.benchmark.harbor import candidate
 from daydream.commands.corpus import _handle_corpus_command
 from daydream.json_utils import atomic_write_bytes, atomic_write_pair
-from daydream.training.adjudication.canonical import run_canonical_harvest
-from daydream.training.adjudication.export import write_export_rows
-from daydream.training.adjudication.final_bundle import build_final_bundle
 from daydream.training.adjudication.materialize import run_materialize
 from daydream.training.calibration import run_calibration
 from daydream.training.corpus_projection import projector
 from daydream.training.corpus_projection.projector import build_frozen_corpus
-from tests.harness.adjudication import write_sessions_index
+from tests.harness.record_projection import projection_config, seed_projection_store
 from tests.test_calibration import _build_fixture, _config
-from tests.test_cli_adjudicate import _seed_adjudicated
-from tests.test_corpus_projection import _config_for, _write_annotations_snapshot, _write_bundle
-from tests.test_training_adjudication_canonical import _PIN, _index
-from tests.test_training_adjudication_final_bundle import seed_final_bundle_state
 
 
 @contextmanager
@@ -79,66 +71,14 @@ def _instrument(monkeypatch: pytest.MonkeyPatch, module: str) -> list[tuple[Path
     return calls
 
 class TestWriterCharacterization:
-    def test_materialize_bytes_and_umask_mode(self, tmp_path: Path) -> None:
-        root = _index(tmp_path)
-        out = tmp_path / "mat"
-        with _umask(0o022):
-            run_materialize(root, out, pin=_PIN)
-        rows = [json.loads(line) for line in (out / "sessions.jsonl").read_text().splitlines()]
-        assert (out / "sessions.jsonl").read_bytes() == "".join(_canonical_line(r) for r in rows).encode("utf-8")
-        # preview-manifest.json is canonical JSON with NO trailing newline (M4).
-        manifest = (out / "preview-manifest.json").read_bytes()
-        assert not manifest.endswith(b"\n")
-        assert manifest == json.dumps(json.loads(manifest), sort_keys=True,
-                                      separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-        assert sorted(p.name for p in out.iterdir()) == ["preview-manifest.json", "sessions.jsonl"]
-        for name in ("sessions.jsonl", "preview-manifest.json"):
-            assert stat.S_IMODE((out / name).stat().st_mode) == 0o644
 
-    def test_export_bytes_mode_and_digest_contract(self, tmp_path: Path) -> None:
-        root, state = _seed_adjudicated(tmp_path)
-        out = tmp_path / "export.jsonl"
-        with _umask(0o022):
-            assert _handle_corpus_command(
-                ["adjudicate", "export", "--index-root", str(root), "--state-dir", str(state), "--out", str(out)]
-            ) == 0
-        rows = [json.loads(line) for line in out.read_text().splitlines()]
-        raw = out.read_bytes()
-        assert raw == "".join(_canonical_line(r) for r in rows).encode("utf-8")
-        # write_export_rows stays public, keeps its signature, and still returns the
-        # sha256 of the written bytes (M8).
-        assert write_export_rows(rows, tmp_path / "again.jsonl") == hashlib.sha256(raw).hexdigest()
-        assert stat.S_IMODE(out.stat().st_mode) == 0o644
 
-    def test_canonical_annotations_bytes_and_mode(self, tmp_path: Path) -> None:
-        index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
-        with _umask(0o022):
-            run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
-        rows = [json.loads(line) for line in (mat / "annotations.jsonl").read_text().splitlines()]
-        assert (mat / "annotations.jsonl").read_bytes() == "".join(_canonical_line(r) for r in rows).encode("utf-8")
-        assert stat.S_IMODE((mat / "annotations.jsonl").stat().st_mode) == 0o644
 
-    def test_final_bundle_copies_are_verbatim_and_mode_is_explicit(self, tmp_path: Path) -> None:
-        index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
-        run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
-        out = tmp_path / "final-bundle"
-        with _umask(0o022):
-            build_final_bundle(index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out)
-        for name, source in (("annotations.jsonl", "annotations.jsonl"), ("sessions.jsonl", "annotations.jsonl"),
-            ("preview-manifest.json", "preview-manifest.json"),
-        ):
-            assert (out / name).read_bytes() == (mat / source).read_bytes(), name
-        assert (out / "coverage-report.json").read_bytes().endswith(b"\n")
-        for name in ("annotations.jsonl", "sessions.jsonl", "label-observations.jsonl",
-                     "coverage-report.json", "lineage.json", "preview-manifest.json",
-                     "policy-binding.json"):
-            assert stat.S_IMODE((out / name).stat().st_mode) == 0o644, name
 
     def test_projection_bytes_and_private_mode(self, tmp_path: Path) -> None:
-        bundle_dir = _write_bundle(tmp_path)
-        _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+        store = seed_projection_store(tmp_path, dispositions=("accepted", "rejected"))
         out = tmp_path / "proj"
-        build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out))
+        build_frozen_corpus(projection_config(store, tmp_path, out_dir=out))
         records = [json.loads(line) for line in (out / "corpus.jsonl").read_text().splitlines()]
         assert (out / "corpus.jsonl").read_bytes() == "".join(_canonical_line(r) for r in records).encode("utf-8")
         assert (out / "_SUCCESS").read_bytes() == b"ok\n"
@@ -162,16 +102,6 @@ class TestWriterCharacterization:
         for name in ("report.md", "calibration.json"):
             assert stat.S_IMODE((config.out_dir / name).stat().st_mode) == 0o644
 
-    def test_queue_bytes_and_private_mode(self, tmp_path: Path) -> None:
-        write_sessions_index(tmp_path)
-        state = tmp_path / "adj"
-        assert _handle_corpus_command(
-            ["adjudicate", "build", "--index-root", str(tmp_path), "--state-dir", str(state)]
-        ) == 0
-        raw = (state / "queue.json").read_bytes()
-        assert raw == (json.dumps(json.loads(raw.decode()), indent=2, sort_keys=True) + "\n").encode("utf-8")
-        assert stat.S_IMODE((state / "queue.json").stat().st_mode) == 0o600
-        assert sorted(p.name for p in state.iterdir()) == ["queue.json"]
 
     def test_candidate_bytes_mode_and_no_stray_temp(self, tmp_path: Path) -> None:
         artifact = candidate.build_candidate_artifact("case-abc123def456", [])
@@ -185,12 +115,12 @@ class TestWriterCharacterization:
         assert list(dest.parent.glob("*.tmp")) == []
 
     def test_projection_failure_leaves_no_stray_temp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        bundle_dir = _write_bundle(tmp_path)
-        _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+        store = seed_projection_store(tmp_path, dispositions=("accepted", "rejected"))
         out = tmp_path / "proj"
+        config = projection_config(store, tmp_path, out_dir=out)
         _fail_all_renames(monkeypatch)
         with pytest.raises(OSError, match="No space left"):
-            build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out))
+            build_frozen_corpus(config)
         assert list(out.iterdir()) == []       # projector's unlink-on-failure must not be weakened
 
     def test_calibration_failure_leaves_no_stray_temp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -200,120 +130,17 @@ class TestWriterCharacterization:
             run_calibration(config)
         assert list(config.out_dir.iterdir()) == []   # its try/finally already unlinks both temps
 
-class TestExportKnobs:
-    def test_export_calls_the_primitive_with_the_documented_knobs(self, tmp_path: Path,
-                                                                  monkeypatch: pytest.MonkeyPatch) -> None:
-        calls = _instrument(monkeypatch, "daydream.training.adjudication.export")
-        root, state = _seed_adjudicated(tmp_path)
-        out = tmp_path / "export.jsonl"
-        # A restrictive umask pins the umask-derived mode: 0o600 here proves the
-        # site passes umask_derived_mode(), not a hard-coded 0o644.
-        with _umask(0o077):
-            assert _handle_corpus_command(
-                ["adjudicate", "export", "--index-root", str(root), "--state-dir", str(state), "--out", str(out)]
-            ) == 0
-        [(target, content, kwargs)] = calls
-        assert target == out
-        assert content == out.read_bytes()          # the site hands over exactly what lands on disk
-        assert kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o600}
 
-    def test_export_failure_keeps_prior_bytes_and_leaves_no_temp(self, tmp_path: Path,
-                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
-        root, state = _seed_adjudicated(tmp_path)
-        out = tmp_path / "export.jsonl"
-        out.write_bytes(b"prior\n")
-        _fail_all_renames(monkeypatch)
-        with pytest.raises(OSError, match="No space left"):
-            _handle_corpus_command(
-                ["adjudicate", "export", "--index-root", str(root), "--state-dir", str(state), "--out", str(out)]
-            )
-        assert out.read_bytes() == b"prior\n"
-        assert list(tmp_path.glob("*.tmp")) == []
 
-class TestMaterializeKnobs:
-    def test_materialize_calls_the_primitive_for_both_artifacts(self, tmp_path: Path,
-                                                               monkeypatch: pytest.MonkeyPatch) -> None:
-        calls = _instrument(monkeypatch, "daydream.training.adjudication.materialize")
-        with _umask(0o077):
-            run_materialize(_index(tmp_path), tmp_path / "mat", pin=_PIN)
-        by_target = {target: (content, kwargs) for target, content, kwargs in calls}
-        assert set(by_target) == {tmp_path / "mat" / "sessions.jsonl", tmp_path / "mat" / "preview-manifest.json"}
-        assert all(kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o600}
-                   for _content, kwargs in by_target.values())
-        for target, (content, _kwargs) in by_target.items():
-            assert target.read_bytes() == content
 
-    def test_materialize_failure_leaves_no_stray_temp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        out = tmp_path / "mat"
-        _fail_all_renames(monkeypatch)
-        with pytest.raises(OSError, match="No space left"):
-            run_materialize(_index(tmp_path), out, pin=_PIN)
-        assert list(out.iterdir()) == []
-
-    def test_materialize_dry_run_still_writes_nothing(self, tmp_path: Path) -> None:
-        out = tmp_path / "mat"
-        run_materialize(_index(tmp_path), out, pin=_PIN, dry_run=True)
-        assert not out.exists()
-
-class TestCanonicalKnobs:
-    def test_canonical_harvest_calls_the_primitive(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
-        calls = _instrument(monkeypatch, "daydream.training.adjudication.canonical")
-        with _umask(0o077):
-            run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
-        [(target, content, kwargs)] = calls
-        assert target == mat / "annotations.jsonl"
-        assert content == target.read_bytes()
-        assert kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o600}
-        assert list(mat.glob("*.tmp")) == []
-
-    def test_canonical_failure_leaves_no_stray_temp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
-        run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
-        before = (mat / "annotations.jsonl").read_bytes()
-        _fail_all_renames(monkeypatch)
-        with pytest.raises(OSError, match="No space left"):
-            run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
-        assert (mat / "annotations.jsonl").read_bytes() == before
-        assert sorted(p.name for p in mat.iterdir()) == sorted(
-            ["annotations.jsonl", "sessions.jsonl", "preview-manifest.json"]
-        )
-
-class TestFinalBundleKnobs:
-    def test_final_bundle_routes_all_seven_files_through_the_primitive(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
-        run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
-        calls = _instrument(monkeypatch, "daydream.training.adjudication.final_bundle")
-        out = tmp_path / "final-bundle"
-        with _umask(0o077):
-            build_final_bundle(index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out)
-        assert {target.name for target, _c, _k in calls} == {
-            "annotations.jsonl", "sessions.jsonl", "preview-manifest.json", "policy-binding.json",
-            "label-observations.jsonl", "coverage-report.json", "lineage.json",
-        }
-        assert all(kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o600} for _t, _c, kwargs in calls)
-        for target, content, _kwargs in calls:
-            assert target.read_bytes() == content
-
-    def test_final_bundle_failure_leaves_no_stray_temp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
-        run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
-        out = tmp_path / "final-bundle"
-        _fail_all_renames(monkeypatch)
-        with pytest.raises(OSError, match="No space left"):
-            build_final_bundle(index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out)
-        assert list(out.iterdir()) == []
 
 class TestProjectorKnobs:
     def test_projection_routes_every_member_through_the_primitive(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        bundle_dir = _write_bundle(tmp_path)
-        _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
+        store = seed_projection_store(tmp_path, dispositions=("accepted", "rejected"))
         out = tmp_path / "proj"
         calls = _instrument(monkeypatch, "daydream.training.corpus_projection.projector")
-        build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out))
+        build_frozen_corpus(projection_config(store, tmp_path, out_dir=out))
         assert {target.name for target, _c, _k in calls} >= {"corpus.jsonl", "adjudication-report.json", "schema.json",
             "lineage.json", "license-report.json", "_SUCCESS",
         }
@@ -372,31 +199,45 @@ class TestCandidateKnobs:
         assert isinstance(failure.value.__cause__, OSError)
         assert list(out.iterdir()) == [dest]           # no uuid temp survives the failure
 
-class TestQueueKnobs:
-    def test_queue_calls_the_primitive_and_keeps_0600(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        write_sessions_index(tmp_path)
-        state = tmp_path / "adj"
-        calls = _instrument(monkeypatch, "daydream.training.adjudication.cli")
-        assert _handle_corpus_command(
-            ["adjudicate", "build", "--index-root", str(tmp_path), "--state-dir", str(state)]
-        ) == 0
-        [(target, content, kwargs)] = calls
-        assert target == state / "queue.json"
-        assert content == target.read_bytes()
-        # mode=None: this site already used mkstemp, so it stays 0600.
-        assert kwargs == {"fsync": False, "dir_fsync": False, "mode": None}
 
-    def test_queue_failure_keeps_prior_bytes_and_leaves_no_temp(self, tmp_path: Path,
-                                                                monkeypatch: pytest.MonkeyPatch) -> None:
-        write_sessions_index(tmp_path)
-        state = tmp_path / "adj"
-        assert _handle_corpus_command(
-            ["adjudicate", "build", "--index-root", str(tmp_path), "--state-dir", str(state)]
-        ) == 0
-        prior = (state / "queue.json").read_bytes()
+
+class TestRecordExportPersistence:
+    def test_materialize_bytes_private_modes_and_fault_preserve_prior(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        store = seed_projection_store(tmp_path, dispositions=("accepted", "rejected"))
+        config = projection_config(store, tmp_path)
+        out = tmp_path / "mat"
+        args = ["adjudicate", "materialize", "--store", str(store.root), "--snapshot-id", config.snapshot_id,
+                "--out-dir", str(out)]
+        assert _handle_corpus_command(args) == 0
+        rows = [json.loads(line) for line in (out / "annotations.jsonl").read_text().splitlines()]
+        assert (out / "annotations.jsonl").read_bytes() == "".join(_canonical_line(r) for r in rows).encode()
+        before = {path.name: path.read_bytes() for path in out.iterdir()}
+        assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in out.iterdir())
         _fail_all_renames(monkeypatch)
-        with pytest.raises(OSError, match="No space left"):
-            _handle_corpus_command(["adjudicate", "build", "--index-root", str(tmp_path), "--state-dir", str(state)]
-            )
-        assert (state / "queue.json").read_bytes() == prior
-        assert sorted(p.name for p in state.iterdir()) == ["queue.json"]
+        assert _handle_corpus_command(args) == 1
+        assert {path.name: path.read_bytes() for path in out.iterdir()} == before
+
+    def test_materialize_dry_run_writes_nothing(self, tmp_path: Path) -> None:
+        store = seed_projection_store(tmp_path)
+        config = projection_config(store, tmp_path)
+        out = tmp_path / "mat"
+        run_materialize(store.root, config.snapshot_id, out, dry_run=True)
+        assert not out.exists()
+
+    def test_queue_publication_private_and_fault_preserves_prior(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        store = seed_projection_store(tmp_path)
+        config = projection_config(store, tmp_path)
+        state = tmp_path / "state"
+        args = ["adjudicate", "build", "--store", str(store.root), "--snapshot-id", config.snapshot_id,
+                "--state-dir", str(state)]
+        assert _handle_corpus_command(args) == 0
+        before = {path.name: path.read_bytes() for path in state.iterdir()}
+        assert "queue.json" in before and "reference.json" in before
+        assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in state.iterdir())
+        _fail_all_renames(monkeypatch)
+        assert _handle_corpus_command(args) == 1
+        assert {path.name: path.read_bytes() for path in state.iterdir()} == before

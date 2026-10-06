@@ -6,18 +6,11 @@ from typing import Any
 
 import pytest
 
-from daydream.commands.corpus import _build_build_corpus_parser, _handle_build_corpus_command
-from daydream.training.corpus_projection import BuildFrozenCorpusConfig
 from daydream.training.corpus_projection.projector import build_frozen_corpus
 from daydream.training.corpus_projection.selection import _apply_share_caps
-from tests.harness.adjudication import write_sha256sums
-from tests.test_corpus_projection import (
-    _admit_second_batch,
-    _config_for,
-    _policy_file,
-    _write_annotations_snapshot,
-    _write_bundle,
-)
+from tests.harness.record_projection import add_projection_run, projection_config, seed_projection_store
+from tests.harness.scripts import cli_main
+from tests.test_corpus_projection import _read_jsonl
 
 
 def _mk_record(rid: str, stack: str | None, repo: str, profile: str | None) -> dict[str, Any]:
@@ -171,192 +164,65 @@ class TestApplyShareCaps:
             _apply_share_caps(records, max_stack_share=0.5, max_repo_share=0.5, max_profile_share=None)
 
 
-class TestBuildWiring:
-    def _share_cfg(self, out: Path, bundle: Path, **share: Any) -> Any:
-        return _config_for(bundle, out.parent, out_dir=out, **share)
-
-    def _build(self, tmp_path: Path, **share: Any) -> tuple[Path, dict[str, Any]]:
-        bundle = _write_bundle(tmp_path)
-        # 3 accepted findings on sess-a (same stack/repo/profile) → over any
-        # small share cap once a second dimension value exists; the 2-record
-        # fixture is exercised for *reporting* here, M4's strict share math
-        # is covered by TestApplyShareCaps.
-        _write_annotations_snapshot(bundle, session_id="sess-a", dispositions=["accepted", "accepted", "rejected"])
-        # Two admitted sessions so the emitted population has a second
-        # stack/repo/profile value and the share cap is actually satisfiable
-        # (the flip needs the annotation lineage to exist first).
-        _admit_second_batch(bundle, "owner/repo-b", spdx_id="MIT")
-        _write_annotations_snapshot(bundle, session_id="sess-b", dispositions=["accepted", "accepted"], stack="rust")
-        out = tmp_path / "out"
-        summary = build_frozen_corpus(self._share_cfg(out, bundle, **share))
-        return out, summary
-
-    def test_share_caps_exceed_and_exclusions_recorded(self, tmp_path: Path) -> None:
-        out, summary = self._build(tmp_path, max_stack_share=0.5)
-        emitted = [json.loads(line) for line in (out / "corpus.jsonl").read_text().splitlines() if line]
-        _assert_shares_within(emitted, [("stack", lambda r: str(r["stack"]), 0.5)])
-        assert summary["share_caps"]["configured"]["stack"] == 0.5
-        assert summary["share_caps"]["version"] == 1
-        assert summary["exclusions_by_reason"]  # tier/np keys present
-
-    def test_sequential_passes_converge_all_final_shares_within_limits(self, tmp_path: Path) -> None:
-        # Real build with ALL THREE caps set tight (0.6) over a correlated
-        # 5-record fixture (python/repo-a vs rust/repo-b) that exercises the
-        # exclusion path: re-profiling every python row plus the first rust
-        # row to deep-review puts four of the five records on one profile
-        # value (4/5 = 0.8 > 0.6), so the profile pass must trim at entry — a
-        # fixture landing every dimension exactly on the cap would never run
-        # the trim branch and could not catch drift from a later pass. Assert
-        # every final per-value share in the emitted corpus is <= its limit
-        # (the M4 contract) against the post-trim final population, and that
-        # the cap stage actually excluded records (its report names them
-        # under ``exclusions_by_reason`` as ``share-cap:*``).
-        bundle = _write_bundle(tmp_path)
-        snap = _write_annotations_snapshot(bundle, session_id="sess-a", n_siblings=6,
-            dispositions=["accepted", "accepted", "accepted"], stack="python",
-        )
-        _admit_second_batch(bundle, "owner/repo-b", spdx_id="MIT")
-        _write_annotations_snapshot(
-            bundle, session_id="sess-b", n_siblings=4, dispositions=["accepted", "accepted"], stack="rust",
-        )
-        # Re-profile only the last accepted row to quick-review so deep-review
-        # holds 4/5 of the emitted population (0.8 > 0.6) and the trim branch
-        # executes.
-        rows = [json.loads(line) for line in snap.read_text().splitlines() if line]
-        rows[-1]["profile"]["profile_name"] = "quick-review"
-        snap.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
-        ann_dir = snap.parent
-        write_sha256sums(ann_dir, skip=frozenset({"SHA256SUMS"}))
-
-        out = tmp_path / "out"
-        summary = build_frozen_corpus(self._share_cfg(
-            out, bundle, max_stack_share=0.6, max_repo_share=0.6, max_profile_share=0.6,
-        ))
-        emitted = [json.loads(line) for line in (out / "corpus.jsonl").read_text().splitlines() if line]
-        _assert_shares_within(emitted, [
-            ("stack", lambda r: str(r["stack"]), 0.6), ("repo", lambda r: str(r["lineage"]["repo_slug"]), 0.6),
-            ("profile", lambda r: str(r["profile"]["profile_name"]), 0.6),
-        ])
-        # The exclusion path executed: the over-share profile value was
-        # trimmed at entry and reported as a share-cap exclusion.
-        assert any(key.startswith("share-cap:") for key in summary["exclusions_by_reason"]
-        ), summary["exclusions_by_reason"]
-
-    def test_lineage_and_summary_share_caps_cannot_drift(self, tmp_path: Path) -> None:
-        out, summary = self._build(tmp_path, max_repo_share=0.5)
-        lineage = json.loads((out / "lineage.json").read_text())
-        assert lineage["share_caps"] == summary["share_caps"]
-        assert lineage["share_caps"]["version"] == 1
-        assert lineage["share_caps"]["configured"]["repo"] == 0.5
-        # one shared spelling across configured/applied/exclusion keys
-        assert "repo" in lineage["share_caps"]["applied"]
-        assert "repository" not in lineage["share_caps"]["applied"]
-        assert any(key.startswith("share-cap:repo:") for key in lineage["exclusions_by_reason"])
-        # final per-value counts + shares are reported against the final population
-        assert "applied" in lineage["share_caps"] and "exclusions" in lineage["share_caps"]
-
-    def test_no_caps_configured_report_block_absent(self, tmp_path: Path) -> None:
-        out, summary = self._build(tmp_path)
-        lineage = json.loads((out / "lineage.json").read_text())
-        assert "share_caps" not in lineage
-        assert "share_caps" not in summary
-
-    def test_zero_population_cap_fails_closed(self, tmp_path: Path) -> None:
-        bundle = _write_bundle(tmp_path)
-        _write_annotations_snapshot(bundle, session_id="sess-a", dispositions=["accepted", "accepted", "accepted"])
-        with pytest.raises(ValueError, match="max_profile_share"):
-            build_frozen_corpus(self._share_cfg(tmp_path / "out2", bundle, max_profile_share=0.1))
-        # fail-closed: nothing written
-        assert not (tmp_path / "out2" / "_SUCCESS").exists()
-
-# Task 5: CLI wiring — build accepts share-cap flags (M2, M9)
 
 
-class TestCliShareFlags:
-    """CLI-level share-cap wiring: parser acceptance, fail-closed range
-    validation before any build work, and dry-run parity over the real
-    projection path."""
+def _store_with_caps_population(tmp_path: Path) -> Any:
+    store = seed_projection_store(tmp_path, dispositions=("accepted", "accepted", "rejected"))
+    add_projection_run(store, run_id="sess-b", dispositions=("accepted", "accepted"), stack="rust",
+                       profile="quick-review", repo_slug="owner/repo-b")
+    return store
 
-    def _base_argv(self, tmp_path: Path) -> list[str]:
-        bundle_dir = _write_bundle(tmp_path)
-        snap = _write_annotations_snapshot(bundle_dir)
-        # A second admitted session with a distinct stack/repo so every
-        # configured share cap is satisfiable (a lone value is 100% of the
-        # population and can never satisfy a <1.0 cap); re-profile the tail
-        # rows to a second profile value so the profile dimension has variety
-        # too. The annotation bundle's SHA256SUMS must be refreshed after the
-        # re-profile (same mechanics as the build-wiring fixtures).
-        _admit_second_batch(bundle_dir, "owner/repo-b", spdx_id="MIT")
-        snap = _write_annotations_snapshot(
-            bundle_dir, session_id="sess-b", dispositions=["accepted", "accepted"], stack="rust",
-        )
-        rows = [json.loads(line) for line in snap.read_text().splitlines() if line]
-        for row in rows[2:]:
-            row["profile"]["profile_name"] = "quick-review"
-        snap.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
-        ann_dir = snap.parent
-        write_sha256sums(ann_dir, skip=frozenset({"SHA256SUMS"}))
-        return ["--bundle-root", str(bundle_dir), "--annotation-bundle-root", str(snap.parent),
-            "--license-policy", str(_policy_file(tmp_path)), "--out", str(tmp_path / "out" / "corpus.jsonl"),
-        ]
 
-    def test_share_flags_accepted_by_parser(self) -> None:
-        args = _build_build_corpus_parser().parse_args(["--bundle-root", "/b", "--annotation-bundle-root", "/a",
-             "--license-policy", "/l", "--out", "/o/corpus.jsonl",
-             "--max-stack-share", "0.5", "--max-repo-share", "0.6", "--max-profile-share", "0.7"]
-        )
-        assert args.max_stack_share == 0.5
-        assert args.max_repo_share == 0.6
-        assert args.max_profile_share == 0.7
+@pytest.mark.parametrize("dimension", ["stack", "repo", "profile"])
+def test_real_cli_applies_caps_and_pins_matching_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], dimension: str,
+) -> None:
+    store = _store_with_caps_population(tmp_path)
+    config = projection_config(store, tmp_path, **{f"max_{dimension}_share": 0.5})
+    args = ["corpus", "build", "--store", str(store.root), "--snapshot-id", config.snapshot_id,
+            "--license-policy", str(config.license_policy_path), "--out", str(config.out_dir / "corpus.jsonl"),
+            f"--max-{dimension}-share", "0.5"]
+    assert cli_main(args + ["--dry-run"]) == 0
+    dry_text = capsys.readouterr().out
+    assert not config.out_dir.exists()
+    assert cli_main(args) == 0
+    records = _read_jsonl(config.out_dir / "corpus.jsonl")
+    assert len(records) == 4
+    assert "4" in dry_text
+    getter = {"stack": lambda r: str(r["stack"]), "repo": lambda r: str(r["lineage"]["repo_slug"]),
+              "profile": lambda r: str(r["profile"]["profile_name"])}[dimension]
+    _assert_shares_within(records, [(dimension, getter, 0.5)])
+    lineage = json.loads((config.out_dir / "lineage.json").read_text())
+    assert lineage["share_caps"]["configured"][dimension] == 0.5
+    assert lineage["share_caps"]["version"] == 1
+    assert any(key.startswith(f"share-cap:{dimension}:") for key in lineage["exclusions_by_reason"])
+    direct = build_frozen_corpus(projection_config(store, tmp_path, out_dir=tmp_path / "direct",
+                                                  **{f"max_{dimension}_share": 0.5}))
+    assert direct["share_caps"] == lineage["share_caps"]
 
-    @pytest.mark.parametrize(("flag", "value"), [("--max-stack-share", "1.5"), ("--max-stack-share", "0"),
-         ("--max-repo-share", "1.5"), ("--max-repo-share", "-0.1"),
-         ("--max-profile-share", "1.5"), ("--max-profile-share", "0")],
-    )
-    def test_share_out_of_range_refuses_before_build(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], flag: str, value: str
-    ) -> None:
-        rc = _handle_build_corpus_command(self._base_argv(tmp_path) + [flag, value])
-        assert rc == 1
-        assert f"Invalid {flag}" in capsys.readouterr().out
-        # refused before any build work: no output written
-        assert not (tmp_path / "out" / "_SUCCESS").exists()
 
-    def test_dry_run_writes_nothing_but_reports_capped_population(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        argv = self._base_argv(tmp_path) + [
-            "--dry-run", "--max-stack-share", "0.5", "--max-repo-share", "0.6", "--max-profile-share", "0.7",
-        ]
-        rc = _handle_build_corpus_command(argv)
-        assert rc == 0
-        # dry run writes nothing into the real output directory
-        assert not (tmp_path / "out").exists() or not any((tmp_path / "out").iterdir())
-        out_text = capsys.readouterr().out
+@pytest.mark.parametrize(("dimension", "value"), [(dimension, value) for dimension in ("stack", "repo", "profile")
+                                                  for value in ("0", "-0.1", "1.5")])
+def test_cli_refuses_invalid_share_before_creating_output(tmp_path: Path, dimension: str, value: str) -> None:
+    store = _store_with_caps_population(tmp_path)
+    config = projection_config(store, tmp_path)
+    assert cli_main(["corpus", "build", "--store", str(store.root), "--snapshot-id", config.snapshot_id,
+                     "--license-policy", str(config.license_policy_path),
+                     "--out", str(config.out_dir / "corpus.jsonl"), f"--max-{dimension}-share", value]) == 1
+    assert not config.out_dir.exists()
 
-        # the printed count names the projected (share-capped) population:
-        # run the same projection directly and compare the emitted counts.
-        bundle_dir = tmp_path / "curated" / "cur-0123456789abcdef"
-        snap = bundle_dir.parent / (bundle_dir.name + "-annotations")
-        direct = build_frozen_corpus(BuildFrozenCorpusConfig(
-            out_dir=tmp_path / "direct", bundle_dir=bundle_dir, annotation_bundle_dir=snap,
-            license_policy_path=_policy_file(tmp_path), max_stack_share=0.5, max_repo_share=0.6, max_profile_share=0.7,
-        ))
-        assert str(direct["emitted"]) in out_text
 
-    def test_dry_run_parity_for_capped_build(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        argv = self._base_argv(tmp_path) + ["--dry-run", "--max-stack-share", "0.5"]
-        rc = _handle_build_corpus_command(argv)
-        assert rc == 0
-        capsys.readouterr()
-        # the real build with the same caps succeeds over the same inputs
-        bundle_dir = tmp_path / "curated" / "cur-0123456789abcdef"
-        snap = bundle_dir.parent / (bundle_dir.name + "-annotations")
-        rc2 = _handle_build_corpus_command(["--bundle-root", str(bundle_dir), "--annotation-bundle-root", str(snap),
-            "--license-policy", str(_policy_file(tmp_path)), "--out", str(tmp_path / "real" / "corpus.jsonl"),
-            "--max-stack-share", "0.5",
-        ])
-        assert rc2 == 0
-        assert (tmp_path / "real" / "_SUCCESS").is_file()
-        lineage = json.loads((tmp_path / "real" / "lineage.json").read_text())
-        assert lineage["share_caps"]["configured"] == {"stack": 0.5}
+def test_build_caps_account_for_final_population_and_fail_closed(tmp_path: Path) -> None:
+    store = _store_with_caps_population(tmp_path)
+    config = projection_config(store, tmp_path, max_stack_share=0.6, max_repo_share=0.6, max_profile_share=0.6,
+                               caps={"gold": 4})
+    summary = build_frozen_corpus(config)
+    records = _read_jsonl(config.out_dir / "corpus.jsonl")
+    _assert_shares_within(records, [("stack", lambda r: str(r["stack"]), 0.6),
+                                  ("repo", lambda r: str(r["lineage"]["repo_slug"]), 0.6),
+                                  ("profile", lambda r: str(r["profile"]["profile_name"]), 0.6)])
+    assert summary["emitted"] + sum(summary["exclusions_by_reason"].values()) == 5
+    with pytest.raises(ValueError, match="max_profile_share"):
+        build_frozen_corpus(projection_config(seed_projection_store(tmp_path / "mono"), tmp_path / "mono",
+                                              max_profile_share=0.1))
+    assert not (tmp_path / "mono" / "out").exists()

@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from daydream.json_utils import canonical_json
 from daydream.training._immutable_json import thaw_json
-from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.labeler_versions import (
     ADJUDICATION_LABELER_VERSION,
@@ -17,28 +14,13 @@ from daydream.training.labeler_versions import (
     REPLY_CLASSIFIER_VERSION,
     reply_evidence_digest,
 )
+from daydream.training.record_identity import record_finding_id
 
 __all__ = [
     "ANNOTATION_SNAPSHOT_SCHEMA_VERSION",
     "build_canonical_record",
     "record_evidence_digest",
-    "snapshot_id",
 ]
-
-# The K2 preview-pin components: the snapshot id is a content-addressed digest
-# over exactly these fields, so idempotence and drift detection are by
-# construction — any pin change produces a new snapshot id (AC 8).
-_PIN_FIELDS = (
-    "curation_id",
-    "sanitized_hub_commit",
-    "source_hub_commit",
-    "archive_index_digest",
-    "evidence_observed_at",
-    "as_of",
-    "labeler_version",
-    "rubric_version",
-    "classifier_version",
-)
 
 
 def record_evidence_digest(
@@ -61,7 +43,7 @@ def build_canonical_record(
 ) -> dict[str, Any]:
     """Build the canonical per-finding annotation record for one resolution.
 
-    ``record_id`` is always recomputed via ``corpus_projection.identity.record_id`` —
+    ``record_id`` is always recomputed via ``record_identity.record_finding_id`` —
     never trusted from any stored copy. Missing required fields fail closed
     with ``ValueError`` naming the offending field (no fallback coercion).
     """
@@ -78,7 +60,9 @@ def build_canonical_record(
     segment_id = session["segment_id"]
 
     # Provenance comes from the session's resolution row joined by fingerprint.
-    rows = [row for row in session.get("resolutions") or [] if row.get("fingerprint") == fingerprint]
+    rows = list(session.get("resolutions") or [])
+    if len(rows) != 1:
+        rows = [row for row in rows if row.get("fingerprint") == fingerprint]
     if len(rows) != 1:
         raise ValueError(
             f"build_canonical_record: session {session_id!r} has {len(rows)} resolution rows "
@@ -87,7 +71,7 @@ def build_canonical_record(
     provenance = extract_provenance(rows[0])
 
     record: dict[str, Any] = {
-        "record_id": record_id(session_id, trajectory_id, segment_id, fingerprint),
+        "record_id": record_finding_id(session_id, trajectory_id, segment_id, rows[0]["item_uid"]),
         "fingerprint": fingerprint,
         "disposition": resolution.disposition,
         "evidence": [thaw_json(entry) for entry in resolution.evidence],
@@ -108,25 +92,8 @@ def build_canonical_record(
         # per-finding record must be directly consumable without a second shape.
         "resolutions": [dict(rows[0])],
     }
+    if rows[0].get("item_uid"):
+        record["item_uid"] = rows[0]["item_uid"]
     if as_of is not None:
         record["as_of"] = as_of
     return record
-
-
-def snapshot_id(pin: Mapping[str, str]) -> str:
-    """Hash canonical sorted-key JSON of exactly _PIN_FIELDS.
-
-    Require nonempty components except as_of: missing/empty as_of has one canonical
-    unpinned identity distinct from every pinned one. Invalid fields raise by name.
-    """
-    components = {}
-    for field in _PIN_FIELDS:
-        value = pin.get(field)
-        if field == "as_of" and value in (None, ""):
-            components[field] = ""
-            continue
-        if not isinstance(value, str) or not value:
-            raise ValueError(f"snapshot_id: pin is missing required component {field!r}")
-        components[field] = value
-    canonical = canonical_json(components)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

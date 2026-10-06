@@ -16,7 +16,6 @@ _SCOPE_ROOTS = ("daydream/training", "daydream/benchmark")
 
 #: Files allowed to call os.replace(): the primitive lives outside the scanned roots.
 _PERMITTED_OS_REPLACE_FILES = frozenset({
-    "daydream/training/adjudication/publish.py",                  # directory promotion (own fsync + identity re-check)
     "daydream/benchmark/harbor/build.py",                         # staged harbor tree promotion
     "daydream/benchmark/storage.py",                              # transactional commit + crash-recovery restore
     "daydream/benchmark/harbor/templates/metric.py",              # stdlib-only, shipped into the container
@@ -25,7 +24,6 @@ _PERMITTED_OS_REPLACE_FILES = frozenset({
 
 #: The private writers deleted by #1215; none may be redefined.
 _DELETED_PRIVATE_WRITERS = {"daydream/training/adjudication/materialize.py": {"_write_atomic"},
-    "daydream/training/adjudication/final_bundle.py": {"_write_atomic", "_write_atomic_bytes"},
     "daydream/training/corpus_projection/projector.py": {"_atomic_write"},
     "daydream/training/adjudication/cli.py": {"_write_queue"},
 }

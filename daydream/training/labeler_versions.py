@@ -16,21 +16,6 @@ ADJUDICATION_LABELER_VERSION = "984-adjudicate-r1"
 HUMAN_LABELER_VERSION = "1055-human-r1"
 ANNOTATION_SNAPSHOT_SCHEMA_VERSION = "1055-snapshot-r1"
 
-# Unknown versions and STALE_LEGACY observations remain importable evidence but are never
-# gold-eligible.
-KNOWN_LABELER_VERSIONS: frozenset[str] = frozenset(
-    {
-        RUBRIC_SCHEMA_VERSION,
-        LABELER_POLICY_VERSION,
-        REPLY_CLASSIFIER_VERSION,
-        ADJUDICATION_LABELER_VERSION,
-        HUMAN_LABELER_VERSION,
-    }
-)
-
-# Missing legacy version columns use this non-gold sentinel.
-STALE_LEGACY = "legacy"
-
 
 def reply_evidence_digest(replies: list[dict[str, Any]]) -> str:
     """Hash canonical reply-evidence JSON with SHA-256. Sort by stringified reply_id, falling back to

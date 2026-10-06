@@ -1,40 +1,37 @@
-"""Exercise corpus label against cache/history state and the prior-label stdout echo."""
-from typing import Any
+"""Run labels preserve authoritative precedence and the prior-label CLI display."""
+from pathlib import Path
 
 import pytest
 
-from daydream.archive.index import (
-    append_label_observation,
-    label_observation_history,
-    query_runs,
-    upsert_run,
-)
-from daydream.commands import corpus as cli_corpus
-from tests.harness.trajectory import make_manifest
+from daydream.dataset import LocalRecordStore, SnapshotRecords
+from daydream.training.record_evidence import latest_annotation
+from tests.harness.dataset import observation, run_record
+from tests.harness.scripts import cli_main
 
 
-def test_label_command_sets_human_label_and_shows_prior(archive_dir: Any, capsys: pytest.CaptureFixture[str],) -> None:
-    upsert_run(archive_dir, make_manifest(session_id="sess-0001"))
-    append_label_observation(
-        archive_dir, "sess-0001", labels=["rejected"], pr_state="closed", labeler_version="auto-v1",
-        evidence_sha="sha1", source="auto",
-    )
-    rc = cli_corpus._handle_label_command(["sess-0001", "--outcome", "accepted"])
-    assert rc == 0
-    row = query_runs(archive_dir, "session_id = ?", ("sess-0001",))[0]
-    assert row["outcome_labels"] == '["accepted"]'
-    hist = label_observation_history(archive_dir, "sess-0001")
-    assert hist[-1]["source"] == "human"
-    assert "rejected" in capsys.readouterr().out  # shows what it overrode (Should-Have)
+def test_label_shows_prior_and_human_unknown_overrides_later_automation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    store = LocalRecordStore(tmp_path / "records")
+    store.commit_run(run_record())
+    store.append_observation(observation("automated", item_uid=None, role="automatic",
+        payload={"type": "run-label", "label": "rejected"}))
+    args = ["corpus", "label", "run-1", "--store", str(store.root), "--author", "alice"]
+    assert cli_main([*args, "--outcome", "accepted"]) == 0
+    assert "rejected" in capsys.readouterr().out
+    assert cli_main([*args, "--outcome", "unknown"]) == 0
+    assert "accepted" in capsys.readouterr().out
+    store.append_observation(observation("later-automated", item_uid=None, role="automatic",
+        observed_at="2100-01-01T00:00:00Z", payload={"type": "run-label", "label": "accepted"}))
+    current = store.read_records()
+    resolved = latest_annotation(SnapshotRecords({}, current["runs"], current["observations"],
+                                                  current["observations"]), "run-1")
+    assert resolved is not None and resolved["labels"] == [] and resolved["human_labeler"] == "alice"
+    assert len(current["observations"]) == 4
 
-def test_label_command_accepts_unknown(archive_dir: Any) -> None:
-    upsert_run(archive_dir, make_manifest(session_id="sess-0002"))
-    assert cli_corpus._handle_label_command(["sess-0002", "--outcome", "unknown"]) == 0
-    row = query_runs(archive_dir, "session_id = ?", ("sess-0002",))[0]
-    assert row["outcome_labels"] == '["unknown"]'
-    history = label_observation_history(archive_dir, "sess-0002")
-    assert history[-1]["labels"] == '["unknown"]'
-    assert history[-1]["source"] == "human"
 
-def test_label_command_unknown_session_returns_1() -> None:
-    assert cli_corpus._handle_label_command(["no-such", "--outcome", "accepted"]) == 1
+def test_label_unknown_run_refuses_without_observations(tmp_path: Path) -> None:
+    store = LocalRecordStore(tmp_path / "records")
+    store.commit_run(run_record())
+    assert cli_main(["corpus", "label", "absent", "--store", str(store.root), "--outcome", "accepted"]) == 1
+    assert store.read_records()["observations"] == ()

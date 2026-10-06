@@ -1,9 +1,8 @@
 """Precedence: explicit adjudicator > latest human rater > automatic; conflicts stay non-gold."""
+
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
 
-from daydream.training.adjudication.observations import append_observation, load_observations
 from daydream.training.adjudication.precedence import (
     effective_adjudication,
     has_rater_conflict,
@@ -13,11 +12,21 @@ from daydream.training.adjudication.precedence import (
 R1 = "b" * 64
 
 
-def _obs(disposition: str, labeler: str, role: str = "rater", digest: str = "d" * 64,
+def _obs(
+    disposition: str,
+    labeler: str,
+    role: str = "rater",
+    digest: str = "d" * 64,
     observed: str = "2026-08-30T10:00:00+00:00",
 ) -> dict[str, Any]:
-    return {"record_id": R1, "disposition": disposition, "evidence_digest": digest, "labeler": labeler, "role": role,
-        "evidence": [{"reply_id": "r1"}], "observed_at": observed,
+    return {
+        "record_id": R1,
+        "disposition": disposition,
+        "evidence_digest": digest,
+        "labeler": labeler,
+        "role": role,
+        "evidence": [{"reply_id": "r1"}],
+        "observed_at": observed,
     }
 
 
@@ -28,13 +37,16 @@ def test_latest_human_rater_wins_over_automatic() -> None:
     assert effective_adjudication([auto, human])["labeler"] == "alice"
     assert effective_adjudication([auto])["role"] == "automatic"
 
+
 def test_explicit_adjudicator_resolution_beats_later_rater() -> None:
     rater = _obs("rejected", "alice", observed="2026-08-30T11:00:00+00:00")
     adjudicator = _obs("accepted", "chief", role="adjudicator", observed="2026-08-30T10:30:00+00:00")
     assert effective_adjudication([rater, adjudicator])["labeler"] == "chief"
 
+
 def test_conflicting_raters_without_adjudicator_are_non_gold() -> None:
-    obs = [_obs("accepted", "alice", observed="2026-08-30T10:00:00+00:00"),
+    obs = [
+        _obs("accepted", "alice", observed="2026-08-30T10:00:00+00:00"),
         _obs("rejected", "bob", observed="2026-08-30T11:00:00+00:00"),
     ]
     result = effective_adjudication(obs)
@@ -42,36 +54,33 @@ def test_conflicting_raters_without_adjudicator_are_non_gold() -> None:
     assert result["gold_eligible"] is False  # AC 6: stays non-gold until adjudicated
     assert result["conflict"] is True
 
+
 def test_conflict_resolved_by_adjudicator_is_gold_eligible_again() -> None:
-    obs = [_obs("accepted", "alice", observed="2026-08-30T10:00:00+00:00"),
+    obs = [
+        _obs("accepted", "alice", observed="2026-08-30T10:00:00+00:00"),
         _obs("rejected", "bob", observed="2026-08-30T11:00:00+00:00"),
         _obs("accepted", "chief", role="adjudicator", observed="2026-08-30T12:00:00+00:00"),
     ]
     result = effective_adjudication(obs)
     assert result["conflict"] is False and result["gold_eligible"] is True
 
+
 def test_conflicting_raters_fixture_order_is_stable() -> None:
-    obs_a: list[Mapping[str, Any]] = [_obs("accepted", "alice", observed="2026-08-30T10:00:00+00:00"),
+    obs_a: list[Mapping[str, Any]] = [
+        _obs("accepted", "alice", observed="2026-08-30T10:00:00+00:00"),
         _obs("rejected", "bob", observed="2026-08-30T11:00:00+00:00"),
     ]
     assert effective_adjudication(obs_a) == effective_adjudication(list(reversed(obs_a)))
+
 
 def test_digest_change_requeues_prior_judgment() -> None:
     human = _obs("accepted", "alice", digest="d" * 64)
     assert reopen_on_digest_change(human, current_digest="d" * 64) is False
     assert reopen_on_digest_change(human, current_digest="e" * 64) is True
 
-def test_model_suggested_queue_item_never_gold_eligible_unreviewed(tmp_path: Path) -> None:
-    # The writer forces review_required for model suggestions, including accepted labels.
-    obs = {"record_id": "c" * 64, "disposition": "accepted", "evidence_digest": "d" * 64,
-           "labeler": "reply-classifier-980-r1", "role": "model-suggested",
-           "rationale": "classifier says accept", "valid_at": "2026-08-30T10:00:00+00:00",
-           "observed_at": "2026-08-30T10:00:00+00:00", "rubric_version": "984-adjudicate-r1",
-           "evidence": [{"reply_id": "r1"}]}  # no review_required: the writer must force it
-    store = tmp_path / "observations.jsonl"
-    append_observation(store, obs)
-    stored = load_observations(store)[0]
-    assert stored["review_required"] is True  # writer forced the flag
-    result = effective_adjudication([stored])
-    assert result["gold_eligible"] is False  # review-required ⇒ not gold, whatever the disposition
-    assert result["review_required"] is True
+
+def test_precedence_orders_fractional_utc_timestamps_chronologically() -> None:
+    earlier = _obs("rejected", "alice", observed="2026-08-30T10:00:00Z")
+    later = _obs("accepted", "bob", observed="2026-08-30T10:00:00.500000+00:00")
+    assert effective_adjudication([earlier, later])["disposition"] == "accepted"
+    assert effective_adjudication([later, earlier])["disposition"] == "accepted"

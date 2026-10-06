@@ -1,275 +1,940 @@
 {
   "adjudication_count": 2,
-  "annotation_bundle": {
-    "annotations_digest": "5363602c8e1b0c8b07962f930a8c70794d2dbb5f05b3b9b0640a0b23ac4ef6b3",
-    "as_of": null,
-    "curation_id": "cur-0123456789abcdef",
-    "sanitized_hub_commit": "0123456789abcdef0123456789abcdef01234567",
-    "snapshot_id": "cur-0123456789abcdef-annotations",
-    "unpinned_as_of": true
-  },
-  "as_of": null,
+  "as_of": "2026-10-05T00:00:00+00:00",
   "caps": {
     "applied": {},
     "configured": {}
   },
   "content_digests": {
-    "annotations.jsonl": "5363602c8e1b0c8b07962f930a8c70794d2dbb5f05b3b9b0640a0b23ac4ef6b3",
-    "sess-a": "1111111111111111111111111111111111111111111111111111111111111111",
-    "sess-amb-a": "49cf5757680e9cf3c1c6dfc396ac6828507f555bfdec76748b256733b940dd5f",
-    "sess-amb-b": "6ab1f6eb918f9e08f1f5f76ac9d5a79f624269ce62b5dfdd2abe164e56c1ee0b",
-    "sess-gold-00": "759e1ca804f53f4f044c56d00644f3ee14ccc628f794aa250594c5a7e4153e54",
-    "sess-gold-01": "fa34db664d635549f24428232d063d2c2f763066b9fa6ccc41d52e4a60fd3888",
-    "sess-gold-02": "8833729fad2a74eb80b846ad492a8f31e09c369c04ddeb59169192fc43c716d3",
-    "sess-gold-03": "f160ac3b28c392419078c94a1a648d69e15d3b407c26da42349f4e708857cedd",
-    "sess-gold-04": "31318c377ade107bb783f880498759155d1b487ad85aadc01f38fccbdafeb08b",
-    "sess-gold-05": "4f53ae7a66098fd768ca447bda8eec030abe291a74552294181a3f077ca4143a",
-    "sess-gold-06": "9fd9e73f52b2c3b66e7a648207899e063eba3feaecb9d42d14e9172e83037397",
-    "sess-gold-07": "90b2835469a5830343762dd72efab5fbf0a75973e3db5847056c6810a66f58ee",
-    "sess-gold-08": "c750fec203ae8449de28b368328f84a30b9b67c959964ee517ebce15cb4aeaa2",
-    "sess-gold-09": "2390b76e589b1300c9255ad62feabd577e5e358ab07fcd4e1ed9f5c61d224654",
-    "sess-gold-10": "819c75112973d3173752444a58740d51af14ec78aeb267ba7e9544f3d10fa663",
-    "sess-gold-11": "db9484715b369f9b84dba38f901faaee02ba5ebab5253289f6b762ccbc8fb4c5",
-    "sess-gold-12": "a1958283fcb6895bfa4bf5d52d33f30c9175477f139684dc991c5c39eea289f5",
-    "sess-gold-13": "06a7138c5c19446cb4671c79d30616b1b46aa74a7e0d5214a5fce940b2b49da9",
-    "sess-gold-14": "b1645a9c83fd69d462a2a7de33a8eb3de18fb78d4433efeeb72ca923b22c8a31",
-    "sess-gold-15": "92b793d3e7ea7169bec7b7e9ad9f74a8065ff8491d4a262a834471189eff5187",
-    "sess-gold-16": "0995770efdf5ea01b495998ba201e3666c3eb976791f821b362579d8dc34944e",
-    "sess-gold-17": "e322b708f04eeb8a7a7768b5ed61d4803dfb1311e38dec4fbb494ee56be33dd1",
-    "sess-gold-18": "2567cd6f376489f5d5b33153f91332fa7e7468253d169b23aa4a1ef9f197b272",
-    "sess-gold-19": "2c9843a90e4b9ff563138dee032a1ab78f3e381027bd199bdb4ae3c50a02ae3e",
-    "sess-gold-20": "99b340f90ef073c8a3fe2b017d855792382f2e0f798cc6549e433639d88136ca",
-    "sess-gold-21": "c6887b3c27039f5d5e2e7ac47987214623307e6f09189cad0a71236e30fb4f7a"
+    "observations/sess-amb-0:item:0:judgment": "e683a8a137951d6d8a3dd88c316decb66f69b409051bfab233235bb2fe9b9b8d",
+    "observations/sess-amb-0:license": "2e995691a2e5fa1f9699729a79ca2affa484c640a49149d6afb5dd3e21d49230",
+    "observations/sess-amb-1:item:0:judgment": "342accb5a665f69780c9a3a42312087398670a0c61bf9cb24c2fc950359e6f5e",
+    "observations/sess-amb-1:license": "97f9c5dae5e4d717704adc063dcb19e006f2840096de9aa62c7290a5b1ce971b",
+    "observations/sess-gold-00:item:0:judgment": "c201c0da8b462027da6c88af8862c03b9d3ec839aa802da093b1c1f5566ea69e",
+    "observations/sess-gold-00:item:1:judgment": "82f7e3454318d2efeac0096d9d52f854c285bc474b7b3a6b46ca89020423dc6f",
+    "observations/sess-gold-00:license": "14c59a55b0ff8e9dbddca490525042254dbdf214a3e01afb03f13083691c11d9",
+    "observations/sess-gold-01:item:0:judgment": "afb7e530036a0692a78e064a00e225a14f0f386711f60057c7d086ea9cfc9791",
+    "observations/sess-gold-01:item:1:judgment": "c1caddefd7a28ee3f3a64cbef5a993fa247cccd396965e3d8f4dce238edf14ec",
+    "observations/sess-gold-01:license": "df5647e08d906aa1c8715d189ce7a52d8483e841b0e3839d19d770529b526e8f",
+    "observations/sess-gold-02:item:0:judgment": "99e664748d69de28eec25cdbe1dbe0187f3cb11f7c43de41df7f2df313b89043",
+    "observations/sess-gold-02:item:1:judgment": "b679842d712e3104748af3872eae0e61c8e6825ac00e0b1568ab19d52b589472",
+    "observations/sess-gold-02:license": "19c3637b537f421308f77f6bb34e898522d0906a5135a95cae44ddea20ed9790",
+    "observations/sess-gold-03:item:0:judgment": "3986ba68a93ea02f231ecda780091c478a36b0631d336b592d4fbe1ac2cf28e0",
+    "observations/sess-gold-03:item:1:judgment": "9097d647b0c3c2220d29de3dd95c8b633fd3505c86669e7932311efc380e2503",
+    "observations/sess-gold-03:license": "d9dcfeea023e6008e3a7f7f54f34e8ba6c8ce3cb9e9fd0942fa092d831aa42c7",
+    "observations/sess-gold-04:item:0:judgment": "6471380d7211ee0be9cdc94ed8f829026d2c0e745d205adc6bf0793504390a31",
+    "observations/sess-gold-04:item:1:judgment": "409aa6b97e988e00531e4837b109b6474b9a655fb5050ed9999b71ede3aeda6b",
+    "observations/sess-gold-04:license": "9946442c563c4b750338a2f12373bc36da08d2982f4796a36613c3ad45e10333",
+    "observations/sess-gold-05:item:0:judgment": "816a3fd5d79d5e0477d395528930a5a8e7474e86480b3f09c5e5bfe70b48fd86",
+    "observations/sess-gold-05:item:1:judgment": "a783cce2a61a03069a30ae80b9d682e3c31c3f243b1ee408acbe31f37772d918",
+    "observations/sess-gold-05:license": "af427bd248df78de7f03a4a7bae1966b1860e4c3673247248a94da5eba111634",
+    "observations/sess-gold-06:item:0:judgment": "293d6cfa9cc823be9e975629192f00e846306d63abf35f6458e8fe7e6674d5e8",
+    "observations/sess-gold-06:item:1:judgment": "1b536946f92b9d2736a4d228c8a477f9ab39d318464684d6479d589802993b48",
+    "observations/sess-gold-06:license": "9a64ac004be519c316b6b93b0e73d25f3df781697eef29c31f402ac81dc90115",
+    "observations/sess-gold-07:item:0:judgment": "432be82c3a0749dff018688c6d41a53d449751d3074e1d6cea4a372742c2758f",
+    "observations/sess-gold-07:item:1:judgment": "e271341d8c6594ed05f83fb02eda12532aca904669e504ada938ea4082d80e0b",
+    "observations/sess-gold-07:license": "107921f884c00e87de21fde8aea6b2e59a1e91a746d5ecd53d893762c97b07f4",
+    "observations/sess-gold-08:item:0:judgment": "dc899643c4429a16d748b21c6634ed2f27e3da3c413f97162c9639185f5150ac",
+    "observations/sess-gold-08:item:1:judgment": "e1f9f93a02ca087a6e2a7d0e3e48ce8d1121ee17ebd2df46410175ee3fbd23e2",
+    "observations/sess-gold-08:license": "0cda1ac27d6ac1682eb5d1710eed7717ec2ff68384c798354823564b78f10151",
+    "observations/sess-gold-09:item:0:judgment": "25e4c5ef6cbd58988a0c0fd699245d2305dbeae73619450f6e1bb30756b343b0",
+    "observations/sess-gold-09:item:1:judgment": "0232bc3a980ae13f40b9c7c7695bc5a7cb205d56e8d67719aaac2c20ceae7059",
+    "observations/sess-gold-09:license": "f99da4028f73705d68cd49cdd67094c6b2cd956c82fce5b904957d5240b16492",
+    "observations/sess-gold-10:item:0:judgment": "0b1bb80fe4042cd0878d27687843de2c6dea7e12debb055015d22c3e77bb2908",
+    "observations/sess-gold-10:item:1:judgment": "31449164f6aedc60a539d64f155042830d3f8986f4775b7e8206db265f6a4680",
+    "observations/sess-gold-10:license": "0a82374539e87a5211c90bcafa619a99db3addb681b33eef375fdfcb433d9695",
+    "observations/sess-gold-11:item:0:judgment": "d16b021f4e8543ea167011e7e0f79497410d12eb2bf96bfb65804857a94cba3f",
+    "observations/sess-gold-11:item:1:judgment": "9e08060169759792468c9ea7467dd1a1695242cafc282cbb07cdab71c503a228",
+    "observations/sess-gold-11:license": "7425fbef581ae782504e9c37be2ee498e828eb7c68e4b2d2be5a9e8197d80e1b",
+    "observations/sess-gold-12:item:0:judgment": "5000ed78ec140a4d8a6d96f145c7d446324903c91adab4628f2c70f14424fd19",
+    "observations/sess-gold-12:item:1:judgment": "74c6fa8e2b40f165fd22b64132f3875eb2195e6f0a8bebb54a2f5fefefcc058d",
+    "observations/sess-gold-12:license": "59cebed08bbce16da198f50918e229c428f03b34bedb4fd151747fad8e553421",
+    "observations/sess-gold-13:item:0:judgment": "3cc1496eaa8c37396f8589ae8cb8d366c495101273a76a0f4e844705c70597c6",
+    "observations/sess-gold-13:item:1:judgment": "d977b8c1626f1da23d142886d3b81346375dc3f92db5c76dd146fe05622f91c9",
+    "observations/sess-gold-13:license": "eb78d225d26863a2508da4ec7fa78c65334a9715f4fbbdd13e388f6a3b76e175",
+    "observations/sess-gold-14:item:0:judgment": "d95428b400cf842b103436409ec74738a7a5abab3dcb4466e906c87ad71fdd5b",
+    "observations/sess-gold-14:item:1:judgment": "54cfb23c146b25eda5c83b6fcb581d7cd9e979f01d711691e31e9d5c31b33369",
+    "observations/sess-gold-14:license": "133902946499c577d868dd105d95fa9fc8f396cc48df9718543bcd2a3ba2a6c5",
+    "observations/sess-gold-15:item:0:judgment": "e081aa50c10b6617d2adfede10809dba735998156394580cdceb655a4d3c9296",
+    "observations/sess-gold-15:item:1:judgment": "a6ba7ff0cb1f9043d821022a0535caafd302b8ba991c62d03a1e8c850c2422d5",
+    "observations/sess-gold-15:license": "712b6731db49827e6e307ac986672631cd8a6a70e65dc74c859fff58695e668d",
+    "observations/sess-gold-16:item:0:judgment": "038c086d76c716bc3c58c6c6e5bbf0e976d675d3369c75be06697a9ac30c2176",
+    "observations/sess-gold-16:item:1:judgment": "783540a5ad6b17ba281eb8023e2dbe8f587e924cbfc292fc9fa65229c1e9daa5",
+    "observations/sess-gold-16:license": "064edc3dd8f34e4d399ccfc8a19d3a856f705860dc0b7b0008f559ed6ef9c882",
+    "observations/sess-gold-17:item:0:judgment": "eb745d99a3d03d71ef0ef6e269b6c993c77f4a6e9b26ffb3f9542a0612b3a1ad",
+    "observations/sess-gold-17:item:1:judgment": "06cb3d22b908794ee4135e48317ef3ee8718bd60c0a6220ca2e63a5d5cf3a096",
+    "observations/sess-gold-17:license": "b4c8504698c9a3e4520ab61178dd620777a39dc7e6a6ce9bad822aae634c3e09",
+    "observations/sess-gold-18:item:0:judgment": "92c84fb5f4771259ae22cf62ae9a0c3997b22f6bb4feb4b834f8298298243d64",
+    "observations/sess-gold-18:item:1:judgment": "9a4010aa52714067c9d81d8cdf2ed02b64860f589d189379972b1e7b6f9efe43",
+    "observations/sess-gold-18:license": "643353bd1341cb8ab488e30059056dfc0e569377268d2e4bc9d9d20cd9b7f54f",
+    "observations/sess-gold-19:item:0:judgment": "2ed6059ddfa601fee2d8c8900f64c0f58779bfce4c8a605b8f1fae6d8a0e784e",
+    "observations/sess-gold-19:item:1:judgment": "057bfbd12542516512b3479b44e9654cbd13e0b742079612a6153a2c1fc445fa",
+    "observations/sess-gold-19:license": "c8cdb19e31aeb11900c15d63871ea57ed244511256881f78eef84c95edfc68e1",
+    "observations/sess-gold-20:item:0:judgment": "a603d26656afc118d7ddc2b0b6c4f199f204d90c67064ee2919bf5b72e955e2f",
+    "observations/sess-gold-20:item:1:judgment": "0fd419abd27d96a7cf41c75c78b73f8ff2eae2d06e2c77e959e016bdb6dc6028",
+    "observations/sess-gold-20:license": "41423c493d8a4861cc27a97da4ec1271381dea0b13d08106c2547fe563dea3bf",
+    "observations/sess-gold-21:item:0:judgment": "552d7229ef7836c353b753c210941e9dba9299706c211a72f5881c2800d32c83",
+    "observations/sess-gold-21:item:1:judgment": "7e0c2d88db5e144edc8bebf2ea040318d55524f1bf7b005892361556de36a468",
+    "observations/sess-gold-21:license": "279e134fc0b96e83a91ec55e82c213a0c5ac9a24791f90c811c4f27931a212d1",
+    "observations/sess-gold-22:item:0:judgment": "64079d849c09f0c63bc272fd8079a5aba9a68d6b0f73f8ea8dba37e57c607e2c",
+    "observations/sess-gold-22:item:1:judgment": "3d438d906dad3be4c667abd450a29015d06d0c71e9e15bb173c5396433366dcb",
+    "observations/sess-gold-22:license": "02e56b1139b23914ebff6a64fe9e6bab8f1f51a65b46f702f552f3c742e3e952",
+    "runs/sess-amb-0": "685be2f3affc901657e9aa1acb3c2cbb91ab5bf659a9d41681619b7449ef135b",
+    "runs/sess-amb-1": "4355a8bcfea7e6886294ce74808f77edefe3a6921e044540ac48363d1e019212",
+    "runs/sess-gold-00": "b9a0d884d8a2eac40d385226340dd7b77bb8d44421fc4f9f5acf36afffbb05db",
+    "runs/sess-gold-01": "58635d52a3c5836302cd5892ffe21f9b443f3b56b354cee49c077287df79d073",
+    "runs/sess-gold-02": "f70cc1360228f35861d6b9bd6f8663dc30d341ab29faa2d8a7a756abe82da748",
+    "runs/sess-gold-03": "c607312c69e044a788409f7f4f4388aae3a1d4e21c0d956b0dd0cfa84e57a5c8",
+    "runs/sess-gold-04": "4a1d697ac53f303e5db5dbb14550fcc415f5cdce16689312e7adaf4f92a52640",
+    "runs/sess-gold-05": "4ffa35dbe28fe819a11c998e661a0700a30d3a462584cf948a97968607f01a14",
+    "runs/sess-gold-06": "c9959cb099c48f679d50948d1209d6c6a65df0af8796e3273fb06a113448ac85",
+    "runs/sess-gold-07": "656d884fd1dc71e71ddfb4d4fc0b2799c9367ab2a22c963309b8d69218586667",
+    "runs/sess-gold-08": "8a6a97b86d2f6010332af3acbe8807a1575c63d058b5693deaa6d8f3c3dae17d",
+    "runs/sess-gold-09": "ab9c97d36c3ecdb94b27a0dde31d08e2b73ce98ca004f3f052940185e1e43aef",
+    "runs/sess-gold-10": "cea79c31d8fe73b346cc4db4755495d2ad1758999acfc3a98d47f1cffa91c427",
+    "runs/sess-gold-11": "43cd2e8886c0f1b2bc57450308d923f6fee9421598476d056601ab4c55b48424",
+    "runs/sess-gold-12": "3e4a61567d74c6c6169e3dace3fbf7a74c0f7ac7d2daa2b60910b25485d6c617",
+    "runs/sess-gold-13": "653f4e2e120ae3784df7701b05708572e2005d19b442f4a07b1f6a50c02456fe",
+    "runs/sess-gold-14": "49f292a306aa1249119679480c80a68d5896fd4ee0e7dfcf56eb27e27bbcd90f",
+    "runs/sess-gold-15": "a02188a3f6b7307934612515caa337a32dc09a7dd7be5541a19e28c5b4a21cd2",
+    "runs/sess-gold-16": "add3913dec7a104279f233321a0e7cd89603eea5e59c9e360a30c9f8c5201f96",
+    "runs/sess-gold-17": "efc6f310efae297d195b10cf6bd5934c2e45f68106478303a851aa83bf53c903",
+    "runs/sess-gold-18": "0a5a92bc1c7d264974838d58a8e2a75f35a7c6d2b896ca159e0290e067b1ef61",
+    "runs/sess-gold-19": "a6b9cf223aa5dade96c83665628bbd25ece7c4747a741471240c6fd16021360f",
+    "runs/sess-gold-20": "d05ee34ddeade4aa6e7f25df0b4d0e41e6de1645bd5baa5d550d3c6ee2957ee5",
+    "runs/sess-gold-21": "f9429f82bf76a934691739bf33045bbb5e4fd244292ecac6ada5c7a5c5d6c73c",
+    "runs/sess-gold-22": "e4dcd208d96311ce2e2fc1c24bcf8eab5eae6496aad852a74d39b3e35ebc2edb"
   },
   "copyleft_opt_ins": [],
-  "curation_id": "cur-0123456789abcdef",
   "exclusion_list_digest": "ad950b01ca14a1c4d0e3c817e04b6da99adfae46159b345eeb95678c2efd87fa",
   "exclusions_by_reason": {
     "non-decisive-adjudication": 0
   },
   "holdout_rate": 0.2,
-  "hub_commit": "0123456789abcdef0123456789abcdef01234567",
-  "labeler_policy_version": "1",
+  "hub_commit": null,
+  "labeler_policy_version": "980-policy-r1",
   "license_decision_distribution": {
     "admitted": 25
   },
   "license_decisions": {
-    "sess-a": {
-      "evidence_ref": "manifest",
+    "sess-amb-0": {
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-e808f6",
+      "repo_slug": "owner/repo-a",
       "spdx_id": "MIT",
       "status": "admitted"
     },
-    "sess-amb-a": {
-      "evidence_ref": "manifest",
+    "sess-amb-1": {
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-49cf57",
-      "spdx_id": "MIT",
-      "status": "admitted"
-    },
-    "sess-amb-b": {
-      "evidence_ref": "manifest",
-      "policy_version": "1",
-      "reason_code": null,
-      "repo_slug": "owner/repo-6ab1f6",
+      "repo_slug": "owner/repo-a",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-00": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-759e1c",
+      "repo_slug": "owner/repo-0",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-01": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-fa34db",
+      "repo_slug": "owner/repo-1",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-02": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-883372",
+      "repo_slug": "owner/repo-2",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-03": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-f160ac",
+      "repo_slug": "owner/repo-0",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-04": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-31318c",
+      "repo_slug": "owner/repo-1",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-05": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-4f53ae",
+      "repo_slug": "owner/repo-2",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-06": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-9fd9e7",
+      "repo_slug": "owner/repo-0",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-07": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-90b283",
+      "repo_slug": "owner/repo-1",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-08": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-c750fe",
+      "repo_slug": "owner/repo-2",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-09": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-2390b7",
+      "repo_slug": "owner/repo-0",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-10": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-819c75",
+      "repo_slug": "owner/repo-1",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-11": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-db9484",
+      "repo_slug": "owner/repo-2",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-12": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-a19582",
+      "repo_slug": "owner/repo-0",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-13": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-06a713",
+      "repo_slug": "owner/repo-1",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-14": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-b1645a",
+      "repo_slug": "owner/repo-2",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-15": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-92b793",
+      "repo_slug": "owner/repo-0",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-16": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-099577",
+      "repo_slug": "owner/repo-1",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-17": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-e322b7",
+      "repo_slug": "owner/repo-2",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-18": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-2567cd",
+      "repo_slug": "owner/repo-0",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-19": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-2c9843",
+      "repo_slug": "owner/repo-1",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-20": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-99b340",
+      "repo_slug": "owner/repo-2",
       "spdx_id": "MIT",
       "status": "admitted"
     },
     "sess-gold-21": {
-      "evidence_ref": "manifest",
+      "evidence_ref": "fixture",
       "policy_version": "1",
       "reason_code": null,
-      "repo_slug": "owner/repo-c6887b",
+      "repo_slug": "owner/repo-0",
+      "spdx_id": "MIT",
+      "status": "admitted"
+    },
+    "sess-gold-22": {
+      "evidence_ref": "fixture",
+      "policy_version": "1",
+      "reason_code": null,
+      "repo_slug": "owner/repo-1",
       "spdx_id": "MIT",
       "status": "admitted"
     }
   },
   "license_policy": {
-    "path_digest": "f3eab72f388aa8c7b7011f2c4683b37ec8672e366962a585a7a25e3227a98eda",
+    "path_digest": "a08c03c336712f4c0c71587efcf83efcb0732eafb571ddbd31459e9bbc673e57",
     "policy_version": "1"
   },
-  "reply_classifier_version": "1",
-  "rubric_schema_version": "per-finding-resolutions-v1",
+  "reply_classifier_version": "980-classifier-r1",
+  "rubric_schema_version": "980-rubric-r2",
   "salt": "issue-1081-fixture-salt",
   "schema_version": "lineage",
-  "source_hub_commit": "0123456789abcdef0123456789abcdef01234567",
+  "snapshot": {
+    "observations": [
+      {
+        "identity": "sess-gold-20:item:1:judgment",
+        "record_digest": "0fd419abd27d96a7cf41c75c78b73f8ff2eae2d06e2c77e959e016bdb6dc6028",
+        "shard": "00421d298ef37a9a67973feabf13f9cebd3944bae6613c1813ef83b669f23a89.jsonl",
+        "shard_digest": "4e2172d525c789a59ae59d997415752d61fa47c51d0950ad9da1b084db7f112e"
+      },
+      {
+        "identity": "sess-gold-18:item:0:judgment",
+        "record_digest": "92c84fb5f4771259ae22cf62ae9a0c3997b22f6bb4feb4b834f8298298243d64",
+        "shard": "0b551f82b66bc55635775eba4056bff7452e8eeec84ae701652865252bc3611d.jsonl",
+        "shard_digest": "e7b77889399c80a118a440b61c8d3d906fb82037f7d9b05a3358316ebca2e414"
+      },
+      {
+        "identity": "sess-gold-14:item:1:judgment",
+        "record_digest": "54cfb23c146b25eda5c83b6fcb581d7cd9e979f01d711691e31e9d5c31b33369",
+        "shard": "0fdd1f8fda64a7b48f3801405b598ac279c67be489b86c6980fa211007e8dec1.jsonl",
+        "shard_digest": "32b637c0d676a139c6ea4bf098065780a515ffaa8b1b5b511283a6bc72dc5f36"
+      },
+      {
+        "identity": "sess-gold-01:item:0:judgment",
+        "record_digest": "afb7e530036a0692a78e064a00e225a14f0f386711f60057c7d086ea9cfc9791",
+        "shard": "117ff8c9f14cce1d2af0df794f266fda2c090a5669cba0915c57c99250d2a9a2.jsonl",
+        "shard_digest": "f717ad033aecd4d7303d12cde7ecbb72268a0e2abf2f3b0820f9f5da1ed7e2d5"
+      },
+      {
+        "identity": "sess-gold-18:item:1:judgment",
+        "record_digest": "9a4010aa52714067c9d81d8cdf2ed02b64860f589d189379972b1e7b6f9efe43",
+        "shard": "11910549422f913fe3c0db1ab95838b8f04605c77b5f5294574b14967d56c23f.jsonl",
+        "shard_digest": "5cac9be503df23580a67c6a3a93d5e0dac1f564240af125bf835f937586d4188"
+      },
+      {
+        "identity": "sess-gold-04:item:1:judgment",
+        "record_digest": "409aa6b97e988e00531e4837b109b6474b9a655fb5050ed9999b71ede3aeda6b",
+        "shard": "127cd71cde8f9ae1fd6defc6813f22ad1dc898dac6e52aba10dbcf7fd804a359.jsonl",
+        "shard_digest": "e6c28f501fdbafab7e587c1efca74ec1a1166cf67b6bfa2a2136d868ae21eeef"
+      },
+      {
+        "identity": "sess-gold-15:item:1:judgment",
+        "record_digest": "a6ba7ff0cb1f9043d821022a0535caafd302b8ba991c62d03a1e8c850c2422d5",
+        "shard": "1744537f01da752928e34e945c14ccada922712846e4133bd5825baf78d5751e.jsonl",
+        "shard_digest": "d93fa5202668f46aee5a26c8708a871ae5b61de7ff25ea09ab15181adf4b61d8"
+      },
+      {
+        "identity": "sess-gold-05:item:1:judgment",
+        "record_digest": "a783cce2a61a03069a30ae80b9d682e3c31c3f243b1ee408acbe31f37772d918",
+        "shard": "1f0a6db08197b21245ef5e0c69481bdb05eece536e2b73ee48eb67b97079f7a3.jsonl",
+        "shard_digest": "03ff2a88b6bb0dc23f0a190e20c3fa1699faa9f36a004889850db43b5fa056e8"
+      },
+      {
+        "identity": "sess-gold-09:license",
+        "record_digest": "f99da4028f73705d68cd49cdd67094c6b2cd956c82fce5b904957d5240b16492",
+        "shard": "202f9dd188634f4caf0c5f5de0bdf0ba685f36badd70c0b8d3bb9ad507231bf2.jsonl",
+        "shard_digest": "d58cb6a871d749cf1729cb37bbf1959ae8dc2864ba92a16f888f8d9a2a32ded9"
+      },
+      {
+        "identity": "sess-gold-08:license",
+        "record_digest": "0cda1ac27d6ac1682eb5d1710eed7717ec2ff68384c798354823564b78f10151",
+        "shard": "22c849644216baf9bca9bd093517c651a17c484b5bc57dbf9c1188b8a11e13bb.jsonl",
+        "shard_digest": "db527d5743370adbc08d3c44490c60eeed06a58d6c6ab30053b4cdb02774754c"
+      },
+      {
+        "identity": "sess-gold-12:item:0:judgment",
+        "record_digest": "5000ed78ec140a4d8a6d96f145c7d446324903c91adab4628f2c70f14424fd19",
+        "shard": "26786ec686fdddd4ae0fcb90949cb5a14e6508901ef21f633fba7f2a898b56db.jsonl",
+        "shard_digest": "8daf4c097c1a62f48c2b7b22b86b2bba21dbc3a59356e596afd975f2df0dac8e"
+      },
+      {
+        "identity": "sess-gold-17:license",
+        "record_digest": "b4c8504698c9a3e4520ab61178dd620777a39dc7e6a6ce9bad822aae634c3e09",
+        "shard": "287218a95c667725f67705df571d8273263368cfcaa6c7e076a54269ca029f56.jsonl",
+        "shard_digest": "7f2b12f7b28c14efe36b5e7584a491a3e1572aba2dd8573e0aa7e31f8a1536a5"
+      },
+      {
+        "identity": "sess-gold-18:license",
+        "record_digest": "643353bd1341cb8ab488e30059056dfc0e569377268d2e4bc9d9d20cd9b7f54f",
+        "shard": "292bbe4be16951eecd7a16233c6b8cc9777d508b3675b28cdf286eed16bcc7cd.jsonl",
+        "shard_digest": "e549283348da39e4ee53501f8665b38e2b7651ff48000c0d631bef56369f9b35"
+      },
+      {
+        "identity": "sess-gold-20:license",
+        "record_digest": "41423c493d8a4861cc27a97da4ec1271381dea0b13d08106c2547fe563dea3bf",
+        "shard": "2e18d01c65fcd47e1e50e1675e50543dbff8271d32e6f92d9d6f2b431d4f301b.jsonl",
+        "shard_digest": "ddc94c266d5124c3c5ceddd1873776bdd2fafb050d654167aae0f8890a10ed72"
+      },
+      {
+        "identity": "sess-gold-07:item:1:judgment",
+        "record_digest": "e271341d8c6594ed05f83fb02eda12532aca904669e504ada938ea4082d80e0b",
+        "shard": "2f8c4a59baf0cfadb73494bfca588fe0131145b08968c231bf19bdb59d1eccf9.jsonl",
+        "shard_digest": "b72a5ec0b5297b2a2c908065c8b2352820d90ec551f90238cde52e6bdacfa239"
+      },
+      {
+        "identity": "sess-gold-22:license",
+        "record_digest": "02e56b1139b23914ebff6a64fe9e6bab8f1f51a65b46f702f552f3c742e3e952",
+        "shard": "3242eb35a0c1f4999acd7876f7b2176b22eb843d85a864679d21778e0893e445.jsonl",
+        "shard_digest": "d0356e82589878d0518982370e6eb3a95b751b8afce334456bda4842b544c51f"
+      },
+      {
+        "identity": "sess-gold-07:item:0:judgment",
+        "record_digest": "432be82c3a0749dff018688c6d41a53d449751d3074e1d6cea4a372742c2758f",
+        "shard": "35d0b12e881b1b06de566d53d8d3766c0d0bc2582d222b44dc45b9a3326d4b26.jsonl",
+        "shard_digest": "cc9f73ddf8981c1266eeb89242aea59f238fee349628a5b1ad34e8b8bfd61a8f"
+      },
+      {
+        "identity": "sess-gold-02:item:0:judgment",
+        "record_digest": "99e664748d69de28eec25cdbe1dbe0187f3cb11f7c43de41df7f2df313b89043",
+        "shard": "37b3a95328a42a7d846ca9adade451852e8105d5aac990989eea90e646160414.jsonl",
+        "shard_digest": "2095fd5d83398b0eb1449b3f406f1173b7d4d92ce004c2cd7610512556287445"
+      },
+      {
+        "identity": "sess-gold-04:license",
+        "record_digest": "9946442c563c4b750338a2f12373bc36da08d2982f4796a36613c3ad45e10333",
+        "shard": "3bac64009d669e018ad9c3d0fb7a85afba65d9b753636513490a5bacca566638.jsonl",
+        "shard_digest": "5d363c32b177c6a27be1b28d4fb23298c7676289b5c8b7339f4be99370741169"
+      },
+      {
+        "identity": "sess-gold-01:license",
+        "record_digest": "df5647e08d906aa1c8715d189ce7a52d8483e841b0e3839d19d770529b526e8f",
+        "shard": "40ae6e5cac7b81816cd786b8607951a5f1260475ef281919bf429b4975752ee9.jsonl",
+        "shard_digest": "e92cf7907d03b8e024c54dd51572ab3c04c2f3b9fa80cb212b450fe1a2be0985"
+      },
+      {
+        "identity": "sess-gold-00:license",
+        "record_digest": "14c59a55b0ff8e9dbddca490525042254dbdf214a3e01afb03f13083691c11d9",
+        "shard": "42b351f7e6a970a48b7df967ba4363cdb90f0a2ada1467d1c5e794b6b60d8c1c.jsonl",
+        "shard_digest": "da7dad9f78105efc4a609154ed7d5e8d2326ff21eddb45c7f69bc76933445c44"
+      },
+      {
+        "identity": "sess-gold-06:license",
+        "record_digest": "9a64ac004be519c316b6b93b0e73d25f3df781697eef29c31f402ac81dc90115",
+        "shard": "44caa107cc0fef6336ddb080b4780ddd981cfd8fd26982ba7aef610fd72f934f.jsonl",
+        "shard_digest": "2bb65c4292657b7308e6d0590ad24716ccb479fd86737d017d4dde84fde9e5c3"
+      },
+      {
+        "identity": "sess-gold-15:license",
+        "record_digest": "712b6731db49827e6e307ac986672631cd8a6a70e65dc74c859fff58695e668d",
+        "shard": "4a53a09572dc7eb0cdff7e5c90187bf6583b05788d63a11a7735810c01bb0575.jsonl",
+        "shard_digest": "df203172ef76b6fd915aa68835836497ea8936a7a247001d9534218afb1cb703"
+      },
+      {
+        "identity": "sess-gold-13:license",
+        "record_digest": "eb78d225d26863a2508da4ec7fa78c65334a9715f4fbbdd13e388f6a3b76e175",
+        "shard": "4a563c0cf7903b41132540b2479c94ecc228fbcb601eb3b4119f566c34317dcb.jsonl",
+        "shard_digest": "68e7ebacca99aaa0774725c3cc5344f4ee331c120273cf6c09fc448ab93dc0f4"
+      },
+      {
+        "identity": "sess-gold-21:item:0:judgment",
+        "record_digest": "552d7229ef7836c353b753c210941e9dba9299706c211a72f5881c2800d32c83",
+        "shard": "530058c95595728933d201fd2407ccf605b62fd3a0703b59e7cbc0fef85b87c4.jsonl",
+        "shard_digest": "110b2b31e36d7fba4cb98e0f952c4f6970e3ac0bb992a4ceb1f9de1461c52145"
+      },
+      {
+        "identity": "sess-gold-02:license",
+        "record_digest": "19c3637b537f421308f77f6bb34e898522d0906a5135a95cae44ddea20ed9790",
+        "shard": "53bad403c4264a7d5230aa0b54379f0f7cad78e7268d7ab46d37bc3675e85ba3.jsonl",
+        "shard_digest": "2f7716ef27b24a93a6a04f6638b2ffdedbf1e6fec788b14908bca3bedd7f9d46"
+      },
+      {
+        "identity": "sess-gold-08:item:1:judgment",
+        "record_digest": "e1f9f93a02ca087a6e2a7d0e3e48ce8d1121ee17ebd2df46410175ee3fbd23e2",
+        "shard": "58a81fe8aca857b46bc70400d6c304cc667d8b3dd62668eac79731288431dbcb.jsonl",
+        "shard_digest": "d77576b54655ed695cca197ece7e0f9e3ad9b9ee47fc205fec195bc07aea5549"
+      },
+      {
+        "identity": "sess-gold-14:license",
+        "record_digest": "133902946499c577d868dd105d95fa9fc8f396cc48df9718543bcd2a3ba2a6c5",
+        "shard": "595685a891424cbe3943131a4261bbf0a725db97b770c997ee5b4b000aa7d064.jsonl",
+        "shard_digest": "ce003abdf6efaab15df34a6652be8a5398cb898acaadb5eec2b709c2ac023ecd"
+      },
+      {
+        "identity": "sess-gold-16:item:0:judgment",
+        "record_digest": "038c086d76c716bc3c58c6c6e5bbf0e976d675d3369c75be06697a9ac30c2176",
+        "shard": "5976475c7b3626b9f3264219af47a55c192edb100c0da210ff652ed655d94bcd.jsonl",
+        "shard_digest": "b8cb8724bb3b83281b5b596983a60d7e6530adff2a4ad5cd0e8778c56cd44d1a"
+      },
+      {
+        "identity": "sess-gold-12:license",
+        "record_digest": "59cebed08bbce16da198f50918e229c428f03b34bedb4fd151747fad8e553421",
+        "shard": "5ac501eca070845a1ac48a4b22bc06dca8573070b0bb5bcfe3dfe0b31c743d92.jsonl",
+        "shard_digest": "2a8e268c36dfa829182d5f699270a1573b0f2a9ebd59d65debdd00666e210ddc"
+      },
+      {
+        "identity": "sess-gold-02:item:1:judgment",
+        "record_digest": "b679842d712e3104748af3872eae0e61c8e6825ac00e0b1568ab19d52b589472",
+        "shard": "5adb2f3cd9edfcc9db4ed51f2fb488596130a7408591208b05a768414cff8099.jsonl",
+        "shard_digest": "04667bdce942f1fcf69fdb2194541aacfc863defb55399a2616726bdc33065bd"
+      },
+      {
+        "identity": "sess-amb-0:item:0:judgment",
+        "record_digest": "e683a8a137951d6d8a3dd88c316decb66f69b409051bfab233235bb2fe9b9b8d",
+        "shard": "5b71507a5d4c0b9374f8a66e17a50f9861ca351981302d52756b929eab01de17.jsonl",
+        "shard_digest": "60c8db7f63b2b15ee0e4559d14e26d284908d48b692a4c15beae00dbb7fa71d5"
+      },
+      {
+        "identity": "sess-gold-05:license",
+        "record_digest": "af427bd248df78de7f03a4a7bae1966b1860e4c3673247248a94da5eba111634",
+        "shard": "5b920be8b6de18c769591f033a7035d62a34a8ad71bf09d686de264e33794948.jsonl",
+        "shard_digest": "e573e2e0431395759f08f8d6243006f83cbe051a05297e2669bf8cf70b4fb2cf"
+      },
+      {
+        "identity": "sess-gold-11:item:1:judgment",
+        "record_digest": "9e08060169759792468c9ea7467dd1a1695242cafc282cbb07cdab71c503a228",
+        "shard": "5e92cabd62df2313e6cd9f13b23c5f05b8b0e5dace4b70f7ded1680631fe5a43.jsonl",
+        "shard_digest": "22ca651fc9478650be74926bb8e8ed17a39f1ab1ade2e5ef2080b6b1c10d84a7"
+      },
+      {
+        "identity": "sess-gold-08:item:0:judgment",
+        "record_digest": "dc899643c4429a16d748b21c6634ed2f27e3da3c413f97162c9639185f5150ac",
+        "shard": "699911c566ce24eb6861fba45fb0ffda90573dee43ac0a7118409ebb40b1e538.jsonl",
+        "shard_digest": "24d8e53728e569b1bf729eff01601b7a1c30c9d1c3768e92fd37a9583a060be9"
+      },
+      {
+        "identity": "sess-gold-21:license",
+        "record_digest": "279e134fc0b96e83a91ec55e82c213a0c5ac9a24791f90c811c4f27931a212d1",
+        "shard": "6c066089803976f4bba4b06a990e74701baa289ada3350aa8c81a6d12ff6347e.jsonl",
+        "shard_digest": "32f9a730faa333885119134655067a5e067300e61a5d9430edab1d4b34594365"
+      },
+      {
+        "identity": "sess-gold-17:item:0:judgment",
+        "record_digest": "eb745d99a3d03d71ef0ef6e269b6c993c77f4a6e9b26ffb3f9542a0612b3a1ad",
+        "shard": "6fc0240120d4435187dea704ef7821c9adc7dd22565b53a2d054d2a6f49c6b6d.jsonl",
+        "shard_digest": "4ee488bba6a09406a80beff5ac4715ccf5aeaabac1362b5ac05e865ebab79b96"
+      },
+      {
+        "identity": "sess-gold-05:item:0:judgment",
+        "record_digest": "816a3fd5d79d5e0477d395528930a5a8e7474e86480b3f09c5e5bfe70b48fd86",
+        "shard": "7385e9c311f55bb4697a64641a13ead84716f461ae7b25d7977bf94fba0b2c2d.jsonl",
+        "shard_digest": "b1dba4685db16a3db81a04a925f2aa1444c8bac37a01d5c645f288979b6a07fd"
+      },
+      {
+        "identity": "sess-gold-16:item:1:judgment",
+        "record_digest": "783540a5ad6b17ba281eb8023e2dbe8f587e924cbfc292fc9fa65229c1e9daa5",
+        "shard": "7a06835315f43fdf0164034707059c966b40fc7ee3d6037439263d27e2a8e9fa.jsonl",
+        "shard_digest": "9beac5cc6ad4d6593477186fe45d584c7453a626364de97937ebcea0b4762295"
+      },
+      {
+        "identity": "sess-gold-12:item:1:judgment",
+        "record_digest": "74c6fa8e2b40f165fd22b64132f3875eb2195e6f0a8bebb54a2f5fefefcc058d",
+        "shard": "8170b2e196c05cfa96728ed82354c6815910776f31b74168e8a94d8369d6526e.jsonl",
+        "shard_digest": "1b9c0ef22170a5befe38e181181f58021c3c6e60d78d9ab01695640c8d6f1b21"
+      },
+      {
+        "identity": "sess-gold-04:item:0:judgment",
+        "record_digest": "6471380d7211ee0be9cdc94ed8f829026d2c0e745d205adc6bf0793504390a31",
+        "shard": "8706bf3fc127a53f51268b8ea9bffe79fd9a55d9b4c015125f02cfeff341f6e6.jsonl",
+        "shard_digest": "99540ec028784d21805532a4bcbbce174bab3b2ade8ebd5c8ce014873ec85c93"
+      },
+      {
+        "identity": "sess-gold-03:license",
+        "record_digest": "d9dcfeea023e6008e3a7f7f54f34e8ba6c8ce3cb9e9fd0942fa092d831aa42c7",
+        "shard": "8a115d6d85b2aa1ecdfac0e2346dc5f9d991bacd890c30bb9ae29743ab618141.jsonl",
+        "shard_digest": "068a33408dcd8d008b62b2cb5b26e2c83da6d4e414dd8bee422ccba8d2073c35"
+      },
+      {
+        "identity": "sess-gold-15:item:0:judgment",
+        "record_digest": "e081aa50c10b6617d2adfede10809dba735998156394580cdceb655a4d3c9296",
+        "shard": "8ab36baf32d4bb88e9777223d6d027d5486e95222c2ed2a1388438b4a358425b.jsonl",
+        "shard_digest": "218649ba63193aae78180af12f1192ecf23ced6a96afeb6028b5ff7a945e72f8"
+      },
+      {
+        "identity": "sess-gold-11:license",
+        "record_digest": "7425fbef581ae782504e9c37be2ee498e828eb7c68e4b2d2be5a9e8197d80e1b",
+        "shard": "8b5e0a56fa88f6165e1cc831d075d9bb501f7bc880a0e82a98ada476295d2e19.jsonl",
+        "shard_digest": "aaa3dce05a3ae5d41bb2ef80d691bdfd6b90c5a81c8ccad7907fdedcf172b300"
+      },
+      {
+        "identity": "sess-gold-13:item:1:judgment",
+        "record_digest": "d977b8c1626f1da23d142886d3b81346375dc3f92db5c76dd146fe05622f91c9",
+        "shard": "8f068a60b55482041142b36f6538c4d3091218db62db66c59509d29dee3450fa.jsonl",
+        "shard_digest": "d80e1fcf9b8805f30ab9445ece7dae931dacd0b8393e26b6e910eb8b4c8f71e9"
+      },
+      {
+        "identity": "sess-gold-00:item:1:judgment",
+        "record_digest": "82f7e3454318d2efeac0096d9d52f854c285bc474b7b3a6b46ca89020423dc6f",
+        "shard": "934cbcd2488fd5a3f8c2bdd60cdb5f6066db1b8e164b55ea4b5aac97f2bfd6ad.jsonl",
+        "shard_digest": "780f8b2bae137ace463c5b1a839d18f286937616b90f7c0f211053f82cb276c1"
+      },
+      {
+        "identity": "sess-gold-06:item:1:judgment",
+        "record_digest": "1b536946f92b9d2736a4d228c8a477f9ab39d318464684d6479d589802993b48",
+        "shard": "9704fdc4a86ebb48dac94921d88fcaf12a7cc015766857e88388862a5349162e.jsonl",
+        "shard_digest": "8558a338113b7e45dac5ddbdd263a0ea67e07b4c6cfc05878bcf05ac994a8ca2"
+      },
+      {
+        "identity": "sess-gold-22:item:1:judgment",
+        "record_digest": "3d438d906dad3be4c667abd450a29015d06d0c71e9e15bb173c5396433366dcb",
+        "shard": "981ec51e7be6a43e4c12cf656c755d157a47212da480f005a0cb80945cc6a056.jsonl",
+        "shard_digest": "27e796de898e7cd3727ceaf8c46cdb1cd048493187c26f5aaf35cd370a1a45f0"
+      },
+      {
+        "identity": "sess-gold-11:item:0:judgment",
+        "record_digest": "d16b021f4e8543ea167011e7e0f79497410d12eb2bf96bfb65804857a94cba3f",
+        "shard": "99c5f7c07cd9d52c1189106350e40084360a688913ab792c50eadd17f0a86629.jsonl",
+        "shard_digest": "16b3d9596ba46a5a591db07f3e455e09ea8c899f0377ba24aebe7095fb1b978a"
+      },
+      {
+        "identity": "sess-gold-10:item:0:judgment",
+        "record_digest": "0b1bb80fe4042cd0878d27687843de2c6dea7e12debb055015d22c3e77bb2908",
+        "shard": "9beb484fabffe265662029a2ea5592608d386347f90dc275168e11da56e21945.jsonl",
+        "shard_digest": "fbc365331415a6cfa2750dde46b02bbcb3ee2ec4d8f87df9f33588b75a3ad122"
+      },
+      {
+        "identity": "sess-gold-21:item:1:judgment",
+        "record_digest": "7e0c2d88db5e144edc8bebf2ea040318d55524f1bf7b005892361556de36a468",
+        "shard": "a6814d6953c1b125385190aa784a1868a20c368c3d581e704fd8a5e557074d8c.jsonl",
+        "shard_digest": "25ae3c864d8e1447f9ba37f850b135a54be400f86fa475c67bec0e97074fbde5"
+      },
+      {
+        "identity": "sess-gold-10:license",
+        "record_digest": "0a82374539e87a5211c90bcafa619a99db3addb681b33eef375fdfcb433d9695",
+        "shard": "b3e209452a027273554d4c82033c0b0f15c12886806b26fe0788df989f99fd5b.jsonl",
+        "shard_digest": "4037f0cc255443eba0ee4bd8aa4352b11ccacd7e5feba26b7380a86f23f3f1ac"
+      },
+      {
+        "identity": "sess-gold-20:item:0:judgment",
+        "record_digest": "a603d26656afc118d7ddc2b0b6c4f199f204d90c67064ee2919bf5b72e955e2f",
+        "shard": "b5e5ef310ddc0fc09608733b1fb0b854b0913e773f5f66a9964f7deec991d668.jsonl",
+        "shard_digest": "684e319c0cc9fbcf4fb7965dc3e489a082dd6994dd3aaf42876d1d5c2b11acf6"
+      },
+      {
+        "identity": "sess-gold-10:item:1:judgment",
+        "record_digest": "31449164f6aedc60a539d64f155042830d3f8986f4775b7e8206db265f6a4680",
+        "shard": "b75dbfbf0fbbec3d665b77c6b82674ab069733053786163bfa92157843c4538a.jsonl",
+        "shard_digest": "57d1fecb238c9c8a061b183fad440c451880916dd6d12dcfc9191fcfd2f909b4"
+      },
+      {
+        "identity": "sess-gold-19:item:1:judgment",
+        "record_digest": "057bfbd12542516512b3479b44e9654cbd13e0b742079612a6153a2c1fc445fa",
+        "shard": "bb0ed241af5b0d43b71ec95ea5404100d28ad50698202bec02695bc21fa3d336.jsonl",
+        "shard_digest": "6d5a77f463f1550841a40a84828abc9f32ef391a00f8f566ea5125e6153f9115"
+      },
+      {
+        "identity": "sess-gold-07:license",
+        "record_digest": "107921f884c00e87de21fde8aea6b2e59a1e91a746d5ecd53d893762c97b07f4",
+        "shard": "c6dfb753f42669fd3b5edfbc419820fcf760d7a9f5289b5d60611f552e3ee57b.jsonl",
+        "shard_digest": "08d90e16aa89cce8f414256044ec7d197be82fd3fa2322431fbcd824dc8930fa"
+      },
+      {
+        "identity": "sess-amb-0:license",
+        "record_digest": "2e995691a2e5fa1f9699729a79ca2affa484c640a49149d6afb5dd3e21d49230",
+        "shard": "c9d886a40cfb92c368846ebca3db8126aa2036ab168e650457e5c6a468dcfdd1.jsonl",
+        "shard_digest": "d0d25be6133a559ba98ae98a44e710655902ff6e21e3f1a86dc945452b5f4ab4"
+      },
+      {
+        "identity": "sess-gold-09:item:1:judgment",
+        "record_digest": "0232bc3a980ae13f40b9c7c7695bc5a7cb205d56e8d67719aaac2c20ceae7059",
+        "shard": "ca621a56362cdab44424c020962e260d4652cdb4d38e8107fae09cadf5958551.jsonl",
+        "shard_digest": "edef4742436a890ac6435c7856cd0c4873805a842ad691f97bc36046ea84f234"
+      },
+      {
+        "identity": "sess-gold-03:item:1:judgment",
+        "record_digest": "9097d647b0c3c2220d29de3dd95c8b633fd3505c86669e7932311efc380e2503",
+        "shard": "cb7b9cd40287e61f57d32b40c2ce489513a6e2629d9d51852f17f0314ccd38d5.jsonl",
+        "shard_digest": "8a76409ae874abba03633d85599397971c5fd0e9c63f197afa7f24db9d90e058"
+      },
+      {
+        "identity": "sess-gold-13:item:0:judgment",
+        "record_digest": "3cc1496eaa8c37396f8589ae8cb8d366c495101273a76a0f4e844705c70597c6",
+        "shard": "d1a459edc9d6c11ea6631572b702a38634cdedfeb2ccec3a3188368d23fc9b9d.jsonl",
+        "shard_digest": "e34b04776f4924beb36cdc8369bc56dadaed0103859edf668c109f6594c31d9e"
+      },
+      {
+        "identity": "sess-gold-14:item:0:judgment",
+        "record_digest": "d95428b400cf842b103436409ec74738a7a5abab3dcb4466e906c87ad71fdd5b",
+        "shard": "d569afd22d3488f270431c998705664aced2858895a308962e5b93f9629eba5e.jsonl",
+        "shard_digest": "3400b0371f524a555581234996eb1ce55a2ea3df617300a5a32760ebe1e748ba"
+      },
+      {
+        "identity": "sess-gold-03:item:0:judgment",
+        "record_digest": "3986ba68a93ea02f231ecda780091c478a36b0631d336b592d4fbe1ac2cf28e0",
+        "shard": "d6cafe16123581ed4017bec2f686fbc9290be4d218dd65af07e3ca6294f39843.jsonl",
+        "shard_digest": "7efe453113967002e634207f99510631c6a67150ef65e1f0ddd93b7d27fafc7e"
+      },
+      {
+        "identity": "sess-amb-1:item:0:judgment",
+        "record_digest": "342accb5a665f69780c9a3a42312087398670a0c61bf9cb24c2fc950359e6f5e",
+        "shard": "de28717064c766c88f75b76a85fb9b9be152943ece4eee1feb2ff666e0b211c2.jsonl",
+        "shard_digest": "de9f60bb50e742f9ef5184db80280433f886214dea694e75dc0c6e85cd8a52c2"
+      },
+      {
+        "identity": "sess-gold-06:item:0:judgment",
+        "record_digest": "293d6cfa9cc823be9e975629192f00e846306d63abf35f6458e8fe7e6674d5e8",
+        "shard": "de38cdea8163c478ccd7cd01f5a00f87620c3f46021b3d549c738985f31bb083.jsonl",
+        "shard_digest": "ba7daffe879cdab86913e005aadec015d16e35fd9159f9cdc24df0e6fc269de1"
+      },
+      {
+        "identity": "sess-gold-19:license",
+        "record_digest": "c8cdb19e31aeb11900c15d63871ea57ed244511256881f78eef84c95edfc68e1",
+        "shard": "e257d31a2659ea64783e056f443a932a678381605b806556af3351a6bd7bcbf4.jsonl",
+        "shard_digest": "3d64b8b92933c2523893223a3e22ca0d54f31a3cd3836a570cceeab703a24b99"
+      },
+      {
+        "identity": "sess-gold-09:item:0:judgment",
+        "record_digest": "25e4c5ef6cbd58988a0c0fd699245d2305dbeae73619450f6e1bb30756b343b0",
+        "shard": "e7c15deea4560b4fe9c09f80cda5e310f1d0ca86b8b1cca05e1f995afc6ce83e.jsonl",
+        "shard_digest": "a892da928127e3018f9c2f3f5f44c365024ad552956428c076e8a98676ca186d"
+      },
+      {
+        "identity": "sess-gold-19:item:0:judgment",
+        "record_digest": "2ed6059ddfa601fee2d8c8900f64c0f58779bfce4c8a605b8f1fae6d8a0e784e",
+        "shard": "ead8988d519b87313590497f199da3f460a41132d2c988bf3314e3f729a541d8.jsonl",
+        "shard_digest": "34327fa1e6d4df94eb6435a54e0d97aef5004d93235e87e9a618f19d79cc6c6d"
+      },
+      {
+        "identity": "sess-gold-00:item:0:judgment",
+        "record_digest": "c201c0da8b462027da6c88af8862c03b9d3ec839aa802da093b1c1f5566ea69e",
+        "shard": "eb474f8bec1225965a3d8bcd0168fe4097b2545252a4e7790b8f111d13e15b39.jsonl",
+        "shard_digest": "8a9e293e2e9d5f95cd635f64f1fb4ef90538b089c911a87b531ccb593584a8e0"
+      },
+      {
+        "identity": "sess-gold-17:item:1:judgment",
+        "record_digest": "06cb3d22b908794ee4135e48317ef3ee8718bd60c0a6220ca2e63a5d5cf3a096",
+        "shard": "ee6a56dbe80e37e4dba910ee9db715f336d4c5efb4fca25cd74a5e91fc759ae9.jsonl",
+        "shard_digest": "8542ce76870e520cc09312d56fdbe2c94f0c7b773d0198a0d45b5d9bdacac2de"
+      },
+      {
+        "identity": "sess-amb-1:license",
+        "record_digest": "97f9c5dae5e4d717704adc063dcb19e006f2840096de9aa62c7290a5b1ce971b",
+        "shard": "f3421f77827f8738787c13134e066c3f480f667ba2e59c5b26d527eb7726371c.jsonl",
+        "shard_digest": "57d431cd472e474ade5d67f30e6fb2256f8d7ed19b0a5dead45dd0693aa931d9"
+      },
+      {
+        "identity": "sess-gold-16:license",
+        "record_digest": "064edc3dd8f34e4d399ccfc8a19d3a856f705860dc0b7b0008f559ed6ef9c882",
+        "shard": "f5f08bfc2a460792b1c6976821e0f0a3dd8c33317a79872e51ae410c07ae7e1f.jsonl",
+        "shard_digest": "4cd24ad8a8c751579e16a70088f96392703a64c9527ee9981606723fbcf87340"
+      },
+      {
+        "identity": "sess-gold-22:item:0:judgment",
+        "record_digest": "64079d849c09f0c63bc272fd8079a5aba9a68d6b0f73f8ea8dba37e57c607e2c",
+        "shard": "f6aedfaf8a0bf2579e959ef5499223abb3ce3c9a32ac7b287c0dd99ffa39256a.jsonl",
+        "shard_digest": "046e902ea6e4390854452643be56f675bb70ea1d7f15722076943ee9f87d7b36"
+      },
+      {
+        "identity": "sess-gold-01:item:1:judgment",
+        "record_digest": "c1caddefd7a28ee3f3a64cbef5a993fa247cccd396965e3d8f4dce238edf14ec",
+        "shard": "fda987173030503fccce6fd234a4093f5cea74a67d4fda495c8f2c298bc9ec3a.jsonl",
+        "shard_digest": "8db6cee6b408d56fbf2583dc0a88e5c7406e837f648c2deb4c3e52055972cbab"
+      }
+    ],
+    "observed_before": "2026-10-05T00:00:00+00:00",
+    "runs": [
+      {
+        "identity": "sess-gold-13",
+        "record_digest": "653f4e2e120ae3784df7701b05708572e2005d19b442f4a07b1f6a50c02456fe",
+        "shard": "06a7138c5c19446cb4671c79d30616b1b46aa74a7e0d5214a5fce940b2b49da9.jsonl",
+        "shard_digest": "c9a191f1d730d1dbf37a7474889e788a82b7026bd44de304cdaf94a89e40f571"
+      },
+      {
+        "identity": "sess-gold-16",
+        "record_digest": "add3913dec7a104279f233321a0e7cd89603eea5e59c9e360a30c9f8c5201f96",
+        "shard": "0995770efdf5ea01b495998ba201e3666c3eb976791f821b362579d8dc34944e.jsonl",
+        "shard_digest": "7b98776d4ac8fbc2472c8ca585a06bb08579547c284168ffee6e5614243eec2e"
+      },
+      {
+        "identity": "sess-gold-09",
+        "record_digest": "ab9c97d36c3ecdb94b27a0dde31d08e2b73ce98ca004f3f052940185e1e43aef",
+        "shard": "2390b76e589b1300c9255ad62feabd577e5e358ab07fcd4e1ed9f5c61d224654.jsonl",
+        "shard_digest": "3eaed4e9d3ca8b534b3c02d71455a2945c081129659b6b9c1c438b018079c8e9"
+      },
+      {
+        "identity": "sess-gold-18",
+        "record_digest": "0a5a92bc1c7d264974838d58a8e2a75f35a7c6d2b896ca159e0290e067b1ef61",
+        "shard": "2567cd6f376489f5d5b33153f91332fa7e7468253d169b23aa4a1ef9f197b272.jsonl",
+        "shard_digest": "004e2067501225809b0bf8d8403f944acd548ccf647060909a559b4e8c2c8c3e"
+      },
+      {
+        "identity": "sess-gold-22",
+        "record_digest": "e4dcd208d96311ce2e2fc1c24bcf8eab5eae6496aad852a74d39b3e35ebc2edb",
+        "shard": "28bb2d7452ae623b9d20c1537a8f62ce5b0a0fde52daff9c19028ba43111aaa7.jsonl",
+        "shard_digest": "89db45bb112054d9a73afcc12770a55b11cff0b71285cf604074e5f38e7aa334"
+      },
+      {
+        "identity": "sess-gold-19",
+        "record_digest": "a6b9cf223aa5dade96c83665628bbd25ece7c4747a741471240c6fd16021360f",
+        "shard": "2c9843a90e4b9ff563138dee032a1ab78f3e381027bd199bdb4ae3c50a02ae3e.jsonl",
+        "shard_digest": "bd5932bdd9ac9c58c4697dc119335d3de03a110f67a94d48f6eb18f00952573e"
+      },
+      {
+        "identity": "sess-gold-04",
+        "record_digest": "4a1d697ac53f303e5db5dbb14550fcc415f5cdce16689312e7adaf4f92a52640",
+        "shard": "31318c377ade107bb783f880498759155d1b487ad85aadc01f38fccbdafeb08b.jsonl",
+        "shard_digest": "12ce932b8a3df140e36cc0980e55dfb9fa203d81248107139928f6de9b27d4fa"
+      },
+      {
+        "identity": "sess-gold-05",
+        "record_digest": "4ffa35dbe28fe819a11c998e661a0700a30d3a462584cf948a97968607f01a14",
+        "shard": "4f53ae7a66098fd768ca447bda8eec030abe291a74552294181a3f077ca4143a.jsonl",
+        "shard_digest": "df8b5220584ff48b826a41d16bec37ba930c0d15fad9b22ab97cf9b3d6994323"
+      },
+      {
+        "identity": "sess-amb-1",
+        "record_digest": "4355a8bcfea7e6886294ce74808f77edefe3a6921e044540ac48363d1e019212",
+        "shard": "7593c015eff473307157f3065abb3ef7e0ad5305f57769b4f1589cc3097ccb3d.jsonl",
+        "shard_digest": "82253ffcd9aa9329f28de97de6ed3af1acd72ad267f43f02637c5353093d5653"
+      },
+      {
+        "identity": "sess-gold-00",
+        "record_digest": "b9a0d884d8a2eac40d385226340dd7b77bb8d44421fc4f9f5acf36afffbb05db",
+        "shard": "759e1ca804f53f4f044c56d00644f3ee14ccc628f794aa250594c5a7e4153e54.jsonl",
+        "shard_digest": "66e7534f9a66606277cea0c072e5c1943af8eb1d14e286bc48a852a252d5c8ad"
+      },
+      {
+        "identity": "sess-gold-10",
+        "record_digest": "cea79c31d8fe73b346cc4db4755495d2ad1758999acfc3a98d47f1cffa91c427",
+        "shard": "819c75112973d3173752444a58740d51af14ec78aeb267ba7e9544f3d10fa663.jsonl",
+        "shard_digest": "f6b3987d51b63ab28649b954e447a312464029d539decf5d2ad0dd16d17ff90b"
+      },
+      {
+        "identity": "sess-gold-02",
+        "record_digest": "f70cc1360228f35861d6b9bd6f8663dc30d341ab29faa2d8a7a756abe82da748",
+        "shard": "8833729fad2a74eb80b846ad492a8f31e09c369c04ddeb59169192fc43c716d3.jsonl",
+        "shard_digest": "c82a3f1f137f5469459f4af34e3550a7e71fd122ecafe246754198a36044c282"
+      },
+      {
+        "identity": "sess-gold-07",
+        "record_digest": "656d884fd1dc71e71ddfb4d4fc0b2799c9367ab2a22c963309b8d69218586667",
+        "shard": "90b2835469a5830343762dd72efab5fbf0a75973e3db5847056c6810a66f58ee.jsonl",
+        "shard_digest": "888bef34b126d078f89fd54208bc3c0c2536e01085b4f25aa336f2bb6ed83698"
+      },
+      {
+        "identity": "sess-gold-15",
+        "record_digest": "a02188a3f6b7307934612515caa337a32dc09a7dd7be5541a19e28c5b4a21cd2",
+        "shard": "92b793d3e7ea7169bec7b7e9ad9f74a8065ff8491d4a262a834471189eff5187.jsonl",
+        "shard_digest": "aacc642053f18137c58fb0cb850bb4396a59634c6a1cb4163b3ca0cbf23a1662"
+      },
+      {
+        "identity": "sess-gold-20",
+        "record_digest": "d05ee34ddeade4aa6e7f25df0b4d0e41e6de1645bd5baa5d550d3c6ee2957ee5",
+        "shard": "99b340f90ef073c8a3fe2b017d855792382f2e0f798cc6549e433639d88136ca.jsonl",
+        "shard_digest": "0ca25310e4599ac56ba2f900e950faad1444f8c92973100074799651a74e9662"
+      },
+      {
+        "identity": "sess-gold-06",
+        "record_digest": "c9959cb099c48f679d50948d1209d6c6a65df0af8796e3273fb06a113448ac85",
+        "shard": "9fd9e73f52b2c3b66e7a648207899e063eba3feaecb9d42d14e9172e83037397.jsonl",
+        "shard_digest": "e5f55ac9b2bf0ac32bf26c718510f870ce7451f2e714b372b8ff475c5f93a37e"
+      },
+      {
+        "identity": "sess-gold-12",
+        "record_digest": "3e4a61567d74c6c6169e3dace3fbf7a74c0f7ac7d2daa2b60910b25485d6c617",
+        "shard": "a1958283fcb6895bfa4bf5d52d33f30c9175477f139684dc991c5c39eea289f5.jsonl",
+        "shard_digest": "6d3a8a70b81ec331564387a97984567fba3312e316196bffdb93e9049fb7e043"
+      },
+      {
+        "identity": "sess-amb-0",
+        "record_digest": "685be2f3affc901657e9aa1acb3c2cbb91ab5bf659a9d41681619b7449ef135b",
+        "shard": "a66cef0ea9cbd1d347acbbec0afdefde0e507a0b5ec6a4d0db3eb7856ecc1ca3.jsonl",
+        "shard_digest": "1d311b118433aa874ee12c981404f9f0273804e47b2b5b93d4769f5c294f04f2"
+      },
+      {
+        "identity": "sess-gold-14",
+        "record_digest": "49f292a306aa1249119679480c80a68d5896fd4ee0e7dfcf56eb27e27bbcd90f",
+        "shard": "b1645a9c83fd69d462a2a7de33a8eb3de18fb78d4433efeeb72ca923b22c8a31.jsonl",
+        "shard_digest": "a82e6ff118461853a0c4fc989b1c916875d663315cfe66c0eb2d4695440aab11"
+      },
+      {
+        "identity": "sess-gold-21",
+        "record_digest": "f9429f82bf76a934691739bf33045bbb5e4fd244292ecac6ada5c7a5c5d6c73c",
+        "shard": "c6887b3c27039f5d5e2e7ac47987214623307e6f09189cad0a71236e30fb4f7a.jsonl",
+        "shard_digest": "47545faad0ced0d3a0c961fbd29403b39a34863b8f0b43a9764d4a11252e9adb"
+      },
+      {
+        "identity": "sess-gold-08",
+        "record_digest": "8a6a97b86d2f6010332af3acbe8807a1575c63d058b5693deaa6d8f3c3dae17d",
+        "shard": "c750fec203ae8449de28b368328f84a30b9b67c959964ee517ebce15cb4aeaa2.jsonl",
+        "shard_digest": "6ce1ccb6507ed7bb27abd6f722034aa9fdef9eb6bd2304d6d5c147e28f4bb690"
+      },
+      {
+        "identity": "sess-gold-11",
+        "record_digest": "43cd2e8886c0f1b2bc57450308d923f6fee9421598476d056601ab4c55b48424",
+        "shard": "db9484715b369f9b84dba38f901faaee02ba5ebab5253289f6b762ccbc8fb4c5.jsonl",
+        "shard_digest": "c0b4a72ab16944d8980c5392a04121bc6bf2dfb600b89c5f139fa1dd5e781821"
+      },
+      {
+        "identity": "sess-gold-17",
+        "record_digest": "efc6f310efae297d195b10cf6bd5934c2e45f68106478303a851aa83bf53c903",
+        "shard": "e322b708f04eeb8a7a7768b5ed61d4803dfb1311e38dec4fbb494ee56be33dd1.jsonl",
+        "shard_digest": "9a8c7f001e3b21402baeb5dd303444e151c7860882c7f1fc8380437cdc811b29"
+      },
+      {
+        "identity": "sess-gold-03",
+        "record_digest": "c607312c69e044a788409f7f4f4388aae3a1d4e21c0d956b0dd0cfa84e57a5c8",
+        "shard": "f160ac3b28c392419078c94a1a648d69e15d3b407c26da42349f4e708857cedd.jsonl",
+        "shard_digest": "11b6399f92c05a127a167e818ddb715fe36090681395589beb8e3e327be1d002"
+      },
+      {
+        "identity": "sess-gold-01",
+        "record_digest": "58635d52a3c5836302cd5892ffe21f9b443f3b56b354cee49c077287df79d073",
+        "shard": "fa34db664d635549f24428232d063d2c2f763066b9fa6ccc41d52e4a60fd3888.jsonl",
+        "shard_digest": "95b0f3c9ed98fa846f4b900ebe37f9b54b51e6e96e53e1b8a5b089b8c4efdd12"
+      }
+    ],
+    "schema_version": "daydream.snapshot.v2",
+    "snapshot_id": "0ebed8498aa9eda8892e82fdf77a21024f3e28f9f7742b9386f1b2d92a9a1d42",
+    "source": null,
+    "valid_before": "2026-10-05T00:00:00+00:00"
+  },
+  "snapshot_id": "0ebed8498aa9eda8892e82fdf77a21024f3e28f9f7742b9386f1b2d92a9a1d42",
+  "source_hub_commit": null,
+  "source_identity_version": "record-snapshot-v1",
+  "source_repository": null,
   "split_counts": {
-    "holdout": 10,
-    "train": 32,
+    "holdout": 14,
+    "train": 28,
     "validation": 8
   },
-  "trajectory_set_hash": "251daaccd3e785886f2987f6e50144fc5c3ee2a3d2cf72f6811a2af044f5741f",
+  "trajectory_set_hash": "012749af5bf7b2fae7753b5c5fd925ed10d32730735afab019796e7fb44e3c8e",
   "val_rate": 0.2,
-  "valid_at": "2026-01-01T00:00:00+00:00"
+  "valid_at": "2026-10-05T00:00:00+00:00"
 }

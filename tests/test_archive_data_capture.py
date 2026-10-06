@@ -17,7 +17,7 @@ import pytest
 from rich.console import Console
 
 from daydream import git_ops
-from daydream.archive import hub, scan
+from daydream.archive import scan
 from daydream.archive.index import query_runs
 from daydream.backends import (
     AgentEvent,
@@ -460,7 +460,7 @@ async def test_collection_failure_preserves_deep_review_exports(
         unavailable.touch()
         monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(unavailable))
     else:
-        monkeypatch.setattr(hub, "upload_run_bundle", fail_collection)
+        monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", fail_collection)
     dump = tmp_path / "uploaded-artifacts"
     dump.mkdir()
     (dump / "prior.txt").write_text("operator baseline")
@@ -472,6 +472,7 @@ async def test_collection_failure_preserves_deep_review_exports(
         multi_stack_target, output_mode="review", non_interactive=True, dump_artifacts=str(dump),
         pr_number=7, findings_out=str(findings), trajectory_path=trajectory,
         trajectory_hub_repo="test/new-runs" if failure == "upload" else None,
+        dataset_store_path=tmp_path / "records",
     ))
     assert exit_code == 0
     assert reached == ([] if failure == "filesystem" else [failure])
@@ -583,46 +584,25 @@ async def test_shallow_run_captures_recommended_patch(
     assert "+# daydream recommended change" in recommended_text
     assert "+# daydream recommended change" not in diff_text
 
-@pytest.mark.parametrize(
-    ("patches", "manifest", "post_window", "expected_verdict", "expected_hunks_total", "expected_hunks_applied",),
-    [
-        # Applied recommendation counts even though the originally reviewed line is absent.
-        pytest.param(("diff.patch", "recommended.patch"), None,
-            "existing\nrecommended = 1\n",
-            "applied", 1, 1, id="prefers-recommended-patch",
-        ),
-        # Legacy archives use diff.patch when recommended.patch is absent.
-        pytest.param(("diff.patch",), None,
-            "existing\nreviewed = 2\n",
-            "applied", 1, None, id="legacy-falls-back-to-diff-patch",
-        ),
-        # New archives distinguish no recommendation from a missing legacy patch;
-        # reviewed lines alone must not count as applied recommendations.
-        pytest.param(("diff.patch",), {"schema_version": "1.0", "recommended_patch_supported": True},
-            "existing\nreviewed = 2\n",
-            "not_applied", 0, None, id="new-format-no-recommendation-skips-fallback",
-        ),
-    ],
-)
-def test_fix_applied_signal_selects_patch_and_verdict(
-    tmp_path: Path, patches: tuple[str, ...], manifest: dict[str, Any] | None, post_window: str, expected_verdict: str,
-    expected_hunks_total: int, expected_hunks_applied: int | None,
+@pytest.mark.parametrize(("has_recommendation", "post_window", "expected_verdict", "expected_hunks"), [
+    (True, "existing\nrecommended = 1\n", "applied", 1),
+    (False, "existing\nreviewed = 2\n", "not_applied", 0),
+])
+def test_fix_applied_signal_uses_captured_recommendation_only(
+    tmp_path: Path, has_recommendation: bool, post_window: str, expected_verdict: str, expected_hunks: int,
 ) -> None:
-
-    added_lines = {"diff.patch": "reviewed = 2", "recommended.patch": "recommended = 1"}
-    for name in patches:
-        (tmp_path / name).write_text(diff_adding(added_lines[name]))
-    if manifest is not None:
-        (tmp_path / "manifest.json").write_text(json.dumps(manifest))
-    row = {"repo_slug": "org/repo", "head_sha": "abc", "base_branch": "main", "archive_path": str(tmp_path),}
-    sig = fix_applied_signal(
+    (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
+    recommended = tmp_path / "recommended.patch"
+    if has_recommendation:
+        recommended.write_text(diff_adding("recommended = 1"))
+    row = {"repo_slug": "org/repo", "head_sha": "abc", "base_branch": "main",
+           "recommended_patch": recommended.read_text() if has_recommendation else ""}
+    signal = fix_applied_signal(
         row, changed_files=["app.py"], repo_clone=tmp_path, diff_fetcher=lambda repo, base, head: ["app.py"],
         commits_in_window_fetcher=lambda repo, base, head: ["c1"], file_at_fetcher=lambda repo, path, sha: post_window,
     )
-    assert sig.verdict == expected_verdict
-    assert sig.hunks_total == expected_hunks_total
-    if expected_hunks_applied is not None:
-        assert sig.hunks_applied == expected_hunks_applied
+    assert signal.verdict == expected_verdict
+    assert signal.hunks_total == signal.hunks_applied == expected_hunks
 
 @pytest.mark.parametrize(("file_contents", "expected_verdict"),
     [
@@ -634,7 +614,8 @@ def test_local_commit_applied_signal_uses_recommended_patch(tmp_path: Path, file
 ) -> None:
     (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
     (tmp_path / "recommended.patch").write_text(diff_adding("recommended = 1"))
-    row = {"repo_slug": "org/repo", "head_sha": "abc", "branch": "feature", "archive_path": str(tmp_path),}
+    row = {"repo_slug": "org/repo", "head_sha": "abc", "branch": "feature",
+           "recommended_patch": (tmp_path / "recommended.patch").read_text()}
     sig = local_commit_applied_signal(
         row, repo_clone=tmp_path, commits_since_fetcher=lambda repo, branch, since: ["c1"],
         file_at_fetcher=lambda repo, path, sha: file_contents,
@@ -1086,26 +1067,19 @@ async def test_direct_upload_refuses_credentials_with_environment_destination(
     _commit_scanned_file(multi_stack_target, "credentials.py", 'token = "ghp_finalizationcanary"\n')
     monkeypatch.setenv("HF_TOKEN", "hf_test_token")
     monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "env/repo")
-    uploaded: list[bytes] = []
+    from daydream.dataset_hub import DatasetUploader
+    from tests.harness.dataset_hub import FakeDatasetHub
 
-    class FakeApi:
-        def create_repo(self, **kwargs: Any) -> None:
-            assert kwargs["private"] is True
-
-        def repo_info(self, **kwargs: Any) -> Any:
-            return type("RepoInfo", (), {"private": True})()
-
-        def upload_folder(self, **kwargs: Any) -> None:
-            assert kwargs["repo_id"] == "env/repo"
-            uploaded.append((Path(kwargs["folder_path"]) / "diff.patch").read_bytes())
-
-    monkeypatch.setattr(hub, "HfApi", FakeApi)
+    backend = FakeDatasetHub()
+    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: backend)
     assert await run(_deep_run_config(
-        multi_stack_target, output_mode="review",
+        multi_stack_target, output_mode="review", dataset_store_path=archive_dir.parent / "raw-records",
     )) == 0
     run_dir = _only_archived_run(archive_dir)
     assert b"ghp_finalizationcanary" in (run_dir / "diff.patch").read_bytes()
-    assert uploaded == []
+    assert backend.commits == []
+    status = DatasetUploader(LocalRecordStore(archive_dir.parent / "raw-records"), "env/repo", backend=backend).status()
+    assert status.failed == 1
     out = "".join(capfd.readouterr())
-    assert "refusing HF upload" in out
+    assert "upload failure" in out
     assert "ghp_finalizationcanary" not in out

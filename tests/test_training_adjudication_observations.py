@@ -1,62 +1,22 @@
-"""Observation store: append-only, idempotent, provenance-complete."""
+"""Typed human observations preserve append-only history and model review gates."""
+
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from daydream.training.adjudication.observations import append_observation, load_observations
-from daydream.training.labeler_versions import ADJUDICATION_LABELER_VERSION
+from daydream.training.adjudication.observations import append_observation
+from daydream.training.record_evidence import sessions_from_snapshot
+from tests.harness.adjudication import judgment, record_store, snapshot_id
 
-R1 = "a" * 64  # record_id-shaped
 
-def _obs(record_id: str, labeler: str, disposition: str = "accepted",
-         digest: str = "e" * 64, **kw: Any) -> dict[str, Any]:
-    base = {"record_id": record_id, "disposition": disposition,
-        "evidence_digest": digest, "labeler": labeler, "role": "rater",
-        "rationale": "matches reply meaning", "valid_at": "2026-08-30T12:00:00+00:00",
-        "observed_at": "2026-08-30T12:00:01+00:00",
-        "rubric_version": ADJUDICATION_LABELER_VERSION, "review_required": False, "evidence": [{"reply_id": "r1"}],
-    }
-    return {**base, **kw}
-
-def test_append_is_append_only_and_load_round_trips(tmp_path: Path) -> None:
-    store = tmp_path / "observations.jsonl"
-    append_observation(store, _obs(R1, "alice"))
-    append_observation(store, _obs(R1, "bob", disposition="rejected"))
-    obs = load_observations(store)
-    assert [o["labeler"] for o in obs] == ["alice", "bob"]  # both kept, newest last
-
-def test_reappend_identical_observation_is_idempotent(tmp_path: Path) -> None:
-    store = tmp_path / "observations.jsonl"
-    o = _obs(R1, "alice")
-    append_observation(store, o)
-    append_observation(store, o)  # re-run of an interrupted labeling session
-    assert len(load_observations(store)) == 1
-
-@pytest.mark.parametrize("field", ["evidence_digest", "evidence"])
-def test_observation_missing_required_field_raises(tmp_path: Path, field: str) -> None:
-    # Reject evidence-less rows here, before the resolver can fail during harvest.
-    o = _obs(R1, "alice")
-    del o[field]
-    with pytest.raises(ValueError, match=field):
-        append_observation(tmp_path / "o.jsonl", o)
-
-def test_invalid_disposition_raises(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="bogus"):
-        append_observation(tmp_path / "o.jsonl", _obs(R1, "alice", disposition="bogus"))
-
-def test_model_suggested_label_is_review_required_and_rejected_as_human(tmp_path: Path) -> None:
-    assert ADJUDICATION_LABELER_VERSION == "984-adjudicate-r1"  # era-pinned equality
-    store = tmp_path / "o.jsonl"
-    # Caller omits review_required entirely; the writer must force it on.
-    model_obs = _obs(R1, "claude-classifier", role="model-suggested")
-    model_obs.pop("review_required")
-    append_observation(store, model_obs)
-    obs = load_observations(store)
-    assert obs[0]["role"] == "model-suggested"
-    assert obs[0]["review_required"] is True
-    assert obs[0]["rubric_version"] == ADJUDICATION_LABELER_VERSION
-
-def test_role_adjudicator_with_model_labeler_raises(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="labeler"):
-        append_observation(tmp_path / "o.jsonl", _obs(R1, "claude-classifier", role="adjudicator"))
+def test_typed_judgment_append_is_immutable_idempotent_and_model_review_required(tmp_path: Path) -> None:
+    store = record_store(tmp_path / "records", ("unanswered",))
+    typed = judgment(store, role="model-suggested", author="gpt-6")
+    row = {**typed, **typed["payload"], "labeler": typed["author"], "evidence": typed["semantic_evidence"]}
+    assert append_observation(store, row, run_id="run-1", item_uid="item:0")
+    assert not append_observation(store, row, run_id="run-1", item_uid="item:0")
+    effective = sessions_from_snapshot(store.read_snapshot(snapshot_id(store)))[0]["resolutions"][0]
+    assert effective["review_required"] and not effective["gold_eligible"]
+    row.update(role="adjudicator")
+    with pytest.raises(ValueError, match="model/LLM"):
+        append_observation(store, row, run_id="run-1", item_uid="item:0")

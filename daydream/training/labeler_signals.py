@@ -9,7 +9,6 @@ propagate unless a signal explicitly defines an unavailable-data result.
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -113,10 +112,7 @@ def _reply_evidence(
 
 def _disposition_from_evidence(evidence: list[dict[str, Any]]) -> PerFindingDisposition:
     """Count only qualifying votes, using the same classification we persist."""
-    labels = {
-        entry["classifier_label"] for entry in evidence
-        if not entry["reason"].startswith("excluded:")
-    }
+    labels = {entry["classifier_label"] for entry in evidence if not entry["reason"].startswith("excluded:")}
     votes = labels & {"accepted", "rejected"}
     if len(votes) == 1:
         return cast(PerFindingDisposition, votes.pop())
@@ -254,30 +250,6 @@ def _count_present_hunks(
     return present
 
 
-def _archive_is_recommended_patch_aware(archive_path: Path) -> bool:
-    """Read the manifest's recommendation-support flag; unreadable means legacy."""
-    try:
-        data = json.loads((archive_path / "manifest.json").read_text())
-    except (OSError, ValueError):
-        return False
-    return data.get("recommended_patch_supported") is True
-
-
-def _read_recommended_patch(archive_path: Path) -> str:
-    """Read recommended.patch, falling back to diff.patch only for legacy archives.
-
-    With recommended_patch_supported=True, a missing recommendation means the
-    run proposed no change (review-only, declined, reverted, or wash); return an
-    empty patch. A missing/unreadable manifest is legacy. Legacy diff read
-    errors propagate."""
-    recommended = archive_path / "recommended.patch"
-    if recommended.is_file():
-        return recommended.read_text()
-    if _archive_is_recommended_patch_aware(archive_path):
-        return ""
-    return (archive_path / "diff.patch").read_text()
-
-
 # Signal extractors
 
 
@@ -329,9 +301,7 @@ def fix_applied_signal(
     read errors, and fetcher failures propagate; counts always describe the patch."""
     head_sha = row["head_sha"]
     base_branch = row["base_branch"]
-    archive_path = Path(row["archive_path"])
-
-    diff_patch = _read_recommended_patch(archive_path)
+    diff_patch = row["recommended_patch"]
     hunks = _parse_diff_hunks(diff_patch)
     hunks_total = len(hunks)
 
@@ -342,9 +312,7 @@ def fix_applied_signal(
         touched = diff_fetcher(repo_clone, head_sha, base_branch)
         overlap = set(changed_files) & set(touched)
         if overlap:
-            hunks_applied = _count_present_hunks(
-                repo_clone, hunks, window[-1], file_at_fetcher, only_files=overlap
-            )
+            hunks_applied = _count_present_hunks(repo_clone, hunks, window[-1], file_at_fetcher, only_files=overlap)
         verdict = "applied" if hunks_total > 0 and hunks_applied / hunks_total >= 0.5 else "not_applied"
     return FixAppliedSignal(
         verdict=verdict,
@@ -546,8 +514,7 @@ def local_commit_applied_signal(
     if not repo_clone.is_dir():
         return LocalCommitAppliedSignal(verdict="unknown")
 
-    archive_path = Path(row["archive_path"])
-    diff_patch = _read_recommended_patch(archive_path)
+    diff_patch = row["recommended_patch"]
     hunks = _parse_diff_hunks(diff_patch)
 
     commits = commits_since_fetcher(repo_clone, row["branch"], row["head_sha"])
@@ -556,9 +523,7 @@ def local_commit_applied_signal(
         # deletes the branch. The question the posterior actually asks ("did
         # the recommended change land?") survives that, so ask it of the
         # default branch instead of giving up.
-        return _default_branch_applied(
-            row, repo_clone=repo_clone, hunks=hunks, file_at_fetcher=file_at_fetcher
-        )
+        return _default_branch_applied(row, repo_clone=repo_clone, hunks=hunks, file_at_fetcher=file_at_fetcher)
     if not commits:
         return LocalCommitAppliedSignal(verdict="rejected")
 
@@ -616,7 +581,5 @@ def reviewer_logins_signal(
         logins.update(replies_by_parent.get(parent_id, []))
 
     # Exclude bots and any login that authored a daydream-footer comment.
-    humans = {
-        login for login in logins if not login.endswith("[bot]") and login not in excluded
-    }
+    humans = {login for login in logins if not login.endswith("[bot]") and login not in excluded}
     return sorted(humans)

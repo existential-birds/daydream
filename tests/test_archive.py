@@ -6,7 +6,6 @@ import json
 import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -22,15 +21,7 @@ from daydream.archive import (
 from daydream.archive.bundle import _copy_snapshot_bundle, _project_documents
 from daydream.archive.git_context import GitContext, capture_git_context
 from daydream.archive.index import (
-    append_label_observation,
-    canonical_utc_iso,
-    label_observation_history,
-    latest_label_observation,
-    normalize_as_of,
     query_runs,
-    reviewer_set_penalty_prior,
-    set_run_pr_link,
-    update_labels,
     upsert_run,
 )
 from daydream.archive.manifest import (
@@ -176,7 +167,7 @@ def _findings_route(live_root: Path, name: str = "findings.json") -> RoutedDesti
 
 def _strict_archive(*, target: Path, session_id: str, config: Any, write_snapshot: RunWriteSnapshot,
     run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL, identity: ManifestRunIdentity | None = None,
-    destinations: tuple[RoutedDestination, ...] = (), work: Any = None, upload: bool = False,
+    destinations: tuple[RoutedDestination, ...] = (), work: Any = None,
     dump_path: Path | None = None,
 ) -> None:
     """Finalize a frozen run; target must exclude the archive directory, as in `_frozen_target`."""
@@ -190,7 +181,7 @@ def _strict_archive(*, target: Path, session_id: str, config: Any, write_snapsho
             # The frozen root is a copy of the live root, so route paths relative
             # to one resolve unchanged inside the other.
             live_root=target,
-        ), config=config, work=work, upload=upload, dump_path=dump_path,
+        ), config=config, work=work, dump_path=dump_path,
     )
 
 def _manifest_identity(**overrides: Any) -> ManifestRunIdentity:
@@ -393,14 +384,12 @@ async def test_custom_flow_archive_real_path_omits_fix_test_backend(
 def test_manifest_to_dict_structure(tmp_path: Path) -> None:
     m = _build(tmp_path)
     d = m.to_dict()
-    assert d["schema_version"] == "1.0"
+    assert d["schema_version"] == "2.0"
     assert d["session_id"] == "abcd1234-0000-0000-0000-000000000000"
     assert "run" in d and d["run"]["flow"] == "normal"
     assert "git" in d
     assert "pr" in d
     assert "metrics" in d
-    assert "outcome" in d
-    assert d["outcome"]["labels"] == []
     assert d["code_context"] == {
         "base_sha": None, "head_sha": None, "base_branch": None, "branch": None, "changed_files": [],
     }
@@ -516,37 +505,6 @@ def test_upsert_and_query_round_trip(tmp_path: Path) -> None:
     assert rows[0]["skill"] == "python"
     assert rows[0]["status"] == "complete"
 
-def test_update_labels_exact(tmp_path: Path) -> None:
-    upsert_run(tmp_path, make_manifest())
-    ok = update_labels(tmp_path, "sess-0001", ["good", "fast"])
-    assert ok is True
-    rows = query_runs(tmp_path)
-    assert json.loads(rows[0]["outcome_labels"]) == ["good", "fast"]
-    assert rows[0]["labeled_at"] is not None
-
-def test_update_labels_prefix(tmp_path: Path) -> None:
-    upsert_run(tmp_path, make_manifest(session_id="abcd1234-full-uuid"))
-    ok = update_labels(tmp_path, "abcd1234", ["label-a"])
-    assert ok is True
-    rows = query_runs(tmp_path)
-    assert json.loads(rows[0]["outcome_labels"]) == ["label-a"]
-
-def test_update_labels_nonexistent(tmp_path: Path) -> None:
-    upsert_run(tmp_path, make_manifest())
-    ok = update_labels(tmp_path, "no-such-session", [])
-    assert ok is False
-
-def test_update_labels_ambiguous_prefix(tmp_path: Path) -> None:
-    upsert_run(tmp_path, make_manifest(session_id="abc-001"))
-    upsert_run(tmp_path, make_manifest(session_id="abc-002", archive_path="/tmp/x"))
-    with pytest.raises(ValueError, match="matches 2 sessions"):
-        update_labels(tmp_path, "abc", ["x"])
-
-def test_set_run_pr_link_backfills_pr_columns(tmp_path: Path) -> None:
-    upsert_run(tmp_path, make_manifest(session_id="s-orphan", pr_number=None, pr_repo=None))
-    set_run_pr_link(tmp_path, "s-orphan", 7, "org/repo")
-    row = query_runs(tmp_path, where="session_id = ?", params=("s-orphan",))[0]
-    assert (row["pr_number"], row["pr_repo"]) == (7, "org/repo")
 
 def test_query_runs_with_where(tmp_path: Path) -> None:
     upsert_run(tmp_path, make_manifest(session_id="s1", repo_slug="org/a"))
@@ -931,295 +889,6 @@ def test_finalize_archive_run_round_trip(tmp_path: Path, archive_dir: Path) -> N
     assert rows[0]["session_id"] == session_id
 
 
-def _seed_one_run(archive_dir: Path, session_id: str) -> None:
-    upsert_run(archive_dir,
-        Manifest(session_id=session_id, archived_at="2026-01-01T00:00:00Z", run_flow="normal", backend="claude",
-            archive_path=str(archive_dir / session_id),
-        ),
-    )
-
-def test_label_observations_has_bitemporal_reward_columns(tmp_path: Path) -> None:
-    upsert_run(tmp_path, make_manifest())  # forces _get_connection to build schema
-    conn = sqlite3.connect(str(tmp_path / "index.db"))
-    lo_cols = {r[1] for r in conn.execute("PRAGMA table_info(label_observations)")}
-    runs_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
-    conn.close()
-    assert {"valid_at", "reward_version", "reward_json"} <= lo_cols
-    assert "composite_reward" in runs_cols
-
-
-def test_human_label_wins_over_newer_auto_in_projection(tmp_path: Path) -> None:
-    upsert_run(tmp_path, make_manifest(session_id="s-prec"))
-    append_label_observation(tmp_path, "s-prec", labels=["rejected"], pr_state="closed",
-                             labeler_version="auto-v1", evidence_sha="sha1", source="auto")
-    append_label_observation(tmp_path, "s-prec", labels=["accepted"], pr_state=None,
-                             labeler_version="human", evidence_sha=None, source="human")
-    append_label_observation(tmp_path, "s-prec", labels=["rejected"], pr_state="closed",
-                             labeler_version="auto-v2", evidence_sha="sha2", source="auto")
-    prec_obs = latest_label_observation(tmp_path, "s-prec")
-    assert prec_obs is not None
-    assert prec_obs["labels"] == '["accepted"]'
-
-def test_append_cache_reflects_winning_human_label(tmp_path: Path) -> None:
-    upsert_run(tmp_path, make_manifest(session_id="s-cache"))
-    append_label_observation(tmp_path, "s-cache", labels=["rejected"], pr_state="closed",
-                             labeler_version="auto-v1", evidence_sha="sha1", source="auto")
-    append_label_observation(tmp_path, "s-cache", labels=["accepted"], pr_state=None,
-                             labeler_version="human", evidence_sha=None, source="human")
-    append_label_observation(tmp_path, "s-cache", labels=["rejected"], pr_state="closed",
-                             labeler_version="auto-v2", evidence_sha="sha2", source="auto")
-    row = query_runs(tmp_path, "session_id = ?", ("s-cache",))[0]
-    assert row["outcome_labels"] == '["accepted"]'
-
-def test_auto_append_dedups_on_unchanged_evidence(tmp_path: Path) -> None:
-    upsert_run(tmp_path, make_manifest(session_id="s-dedup"))
-    first = append_label_observation(tmp_path, "s-dedup", labels=["accepted"], pr_state="merged",
-                                     labeler_version="rv1", evidence_sha="shaA", source="auto")
-    second = append_label_observation(tmp_path, "s-dedup", labels=["accepted"], pr_state="merged",
-                                      labeler_version="rv1", evidence_sha="shaA", source="auto")
-    assert first is True and second is False
-    assert len(label_observation_history(tmp_path, "s-dedup")) == 1
-    # A labeler_policy_version change DOES append: the M14 auto-dedup tuple is
-    # (evidence_sha, labeler_policy_version, reply_evidence_digest, labels,
-    # has_posterior, reward_version), so this append fires on the
-    # labeler_version bump:
-    third = append_label_observation(tmp_path, "s-dedup", labels=["accepted"], pr_state="merged",
-                                     labeler_version="rv2", evidence_sha="shaA",
-                                     reward_version="rv2", source="auto")
-    assert third is True
-    assert len(label_observation_history(tmp_path, "s-dedup")) == 2
-    # An independent reward_version bump (identical evidence AND policy) also
-    # appends: reward_version is part of the M14 tuple, so the freshly
-    # computed reward_json/composite_reward must not be silently discarded.
-    fourth = append_label_observation(tmp_path, "s-dedup", labels=["accepted"], pr_state="merged",
-                                      labeler_version="rv2", evidence_sha="shaA",
-                                      reward_version="rv3", source="auto")
-    assert fourth is True
-    assert len(label_observation_history(tmp_path, "s-dedup")) == 3
-
-def test_auto_append_appends_when_only_has_posterior_changes(tmp_path: Path) -> None:
-    """Posterior membership is an independent generation-identity axis."""
-    upsert_run(tmp_path, make_manifest(session_id="s-pop"))
-    first = append_label_observation(tmp_path, "s-pop", labels=["accepted"], pr_state=None,
-                                     labeler_version="rv1", evidence_sha="shaA",
-                                     reward_version="rv1", has_posterior=True, source="auto")
-    demoted = append_label_observation(tmp_path, "s-pop", labels=["accepted"], pr_state=None,
-                                       labeler_version="rv1", evidence_sha="shaA",
-                                       reward_version="rv1", has_posterior=False, source="auto")
-    assert first is True and demoted is True
-    assert len(label_observation_history(tmp_path, "s-pop")) == 2
-    latest = latest_label_observation(tmp_path, "s-pop")
-    assert latest is not None and latest["has_posterior"] == 0
-    assert append_label_observation(tmp_path, "s-pop", labels=["accepted"], pr_state=None,
-                                    labeler_version="rv1", evidence_sha="shaA",
-                                    reward_version="rv1", has_posterior=False,
-                                    source="auto") is False
-
-def test_human_append_never_dedups(tmp_path: Path) -> None:
-    upsert_run(tmp_path, make_manifest(session_id="s-h"))
-    append_label_observation(
-        tmp_path, "s-h", labels=["accepted"], pr_state=None, labeler_version="human", evidence_sha=None, source="human",
-    )
-    append_label_observation(
-        tmp_path, "s-h", labels=["accepted"], pr_state=None, labeler_version="human", evidence_sha=None, source="human",
-    )
-    assert len(label_observation_history(tmp_path, "s-h")) == 2
-
-def test_append_observation_persists_valid_at_and_reward(tmp_path: Path) -> None:
-    upsert_run(tmp_path, make_manifest(session_id="s1"))
-    append_label_observation(
-        tmp_path, "s1", labels=["accepted"], pr_state="merged", labeler_version="v1", evidence_sha=None,
-        valid_at="2026-01-02T00:00:00+00:00",
-        reward_version="r1", reward_json='{"composite":0.5}', composite_reward=0.5,
-    )
-    obs = latest_label_observation(tmp_path, "s1")
-    assert obs is not None
-    assert obs["valid_at"] == "2026-01-02T00:00:00+00:00"
-    assert obs["reward_version"] == "r1"
-    assert query_runs(tmp_path, "session_id = ?", ("s1",))[0]["composite_reward"] == 0.5
-
-def test_append_observation_defaults_valid_at_to_observed_at(tmp_path: Path) -> None:
-    upsert_run(tmp_path, make_manifest(session_id="s2"))
-    append_label_observation(
-        tmp_path, "s2", labels=[], pr_state=None, labeler_version="v1", evidence_sha=None, valid_at=None,
-    )
-    obs = latest_label_observation(tmp_path, "s2")
-    assert obs is not None
-    assert obs["valid_at"] == obs["observed_at"]   # Q2 collapse for local runs
-
-def test_append_label_observation_writes_history_row(tmp_path: Path) -> None:
-    _seed_one_run(tmp_path, "sess-1")
-    append_label_observation(
-        tmp_path, "sess-1", labels=["accepted"], pr_state="merged", labeler_version="2026.05.22", evidence_sha="abc123",
-    )
-    hist = label_observation_history(tmp_path, "sess-1")
-    assert len(hist) == 1
-    assert json.loads(hist[0]["labels"]) == ["accepted"]
-    assert hist[0]["pr_state"] == "merged"
-
-def test_append_label_observation_writes_through_to_runs_cache(tmp_path: Path) -> None:
-    _seed_one_run(tmp_path, "sess-2")
-    append_label_observation(
-        tmp_path, "sess-2", labels=["contested"], pr_state="merged", labeler_version="2026.05.22", evidence_sha=None,
-    )
-    rows = query_runs(tmp_path, "session_id = ?", ("sess-2",))
-    assert json.loads(rows[0]["outcome_labels"]) == ["contested"]
-    assert rows[0]["labeled_at"] is not None
-
-def test_multiple_observations_preserve_history(tmp_path: Path) -> None:
-    """Same-session multiple observations all persist; latest wins for the cache."""
-    _seed_one_run(tmp_path, "sess-3")
-    append_label_observation(
-        tmp_path, "sess-3", labels=["unknown"], pr_state="open", labeler_version="v1", evidence_sha=None,
-    )
-    append_label_observation(
-        tmp_path, "sess-3", labels=["accepted"], pr_state="merged", labeler_version="v1", evidence_sha="def456",
-    )
-    hist = label_observation_history(tmp_path, "sess-3")
-    assert len(hist) == 2
-    assert [json.loads(r["labels"])[0] for r in hist] == ["unknown", "accepted"]
-    latest = latest_label_observation(tmp_path, "sess-3")
-    assert latest is not None
-    assert json.loads(latest["labels"]) == ["accepted"]
-    rows = query_runs(tmp_path, "session_id = ?", ("sess-3",))
-    assert json.loads(rows[0]["outcome_labels"]) == ["accepted"]
-
-def test_latest_label_observation_filtered_by_as_of(tmp_path: Path) -> None:
-    """The snapshot cutoff includes its exact boundary observation."""
-    _seed_one_run(tmp_path, "sess-4")
-    append_label_observation(
-        tmp_path, "sess-4", labels=["unknown"], pr_state="open", labeler_version="v1", evidence_sha=None,
-    )
-    early_row = latest_label_observation(tmp_path, "sess-4")
-    assert early_row is not None
-    early = early_row["observed_at"]
-    append_label_observation(
-        tmp_path, "sess-4", labels=["accepted"], pr_state="merged", labeler_version="v1", evidence_sha="def456",
-    )
-    pinned = latest_label_observation(tmp_path, "sess-4", as_of=early)
-    assert pinned is not None
-    assert json.loads(pinned["labels"]) == ["unknown"]
-
-def test_same_microsecond_collision_keeps_clean_iso_timestamps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Timestamp collisions must preserve ISO parseability and inclusive cutoff comparisons."""
-    frozen = datetime(2026, 5, 29, 12, 0, 0, tzinfo=timezone.utc)
-
-    class _FrozenDatetime(datetime):
-        @classmethod
-        def now(cls, tz: Any=None) -> Any:
-            return frozen if tz is None else frozen.astimezone(tz)
-
-    monkeypatch.setattr("daydream.archive.index.datetime", _FrozenDatetime)
-
-    _seed_one_run(tmp_path, "sess-collide")
-    append_label_observation(
-        tmp_path, "sess-collide", labels=["unknown"], pr_state="open", labeler_version="v1", evidence_sha="a",
-    )
-    append_label_observation(
-        tmp_path, "sess-collide", labels=["accepted"], pr_state="merged", labeler_version="v1", evidence_sha="b",
-    )
-
-    hist = label_observation_history(tmp_path, "sess-collide")
-    assert len(hist) == 2
-    stamps = [r["observed_at"] for r in hist]
-    assert stamps[0] != stamps[1]
-    for r in hist:
-        datetime.fromisoformat(r["observed_at"])  # parseable, no ~uuid suffix
-        assert r["valid_at"] == r["observed_at"]
-
-    runs_row = query_runs(tmp_path, "session_id = ?", ("sess-collide",))[0]
-    datetime.fromisoformat(runs_row["labeled_at"])
-
-    boundary = stamps[0]
-    pinned = latest_label_observation(tmp_path, "sess-collide", as_of=boundary)
-    assert pinned is not None
-    assert json.loads(pinned["labels"]) == ["unknown"]  # boundary row included
-
-def test_append_label_observation_persists_reviewer_and_posterior_flag(tmp_path: Path,) -> None:
-    _seed_one_run(tmp_path, "s1")
-    append_label_observation(
-        tmp_path, "s1", labels=["rejected"], pr_state="closed", labeler_version="2026.05.28-1", evidence_sha="h",
-        reviewer_logins=["alice"], has_posterior=True,
-    )
-    obs = latest_label_observation(tmp_path, "s1")
-    assert obs is not None
-    assert json.loads(obs["reviewer_logins"]) == ["alice"]
-    assert obs["has_posterior"] == 1
-    runs_row = query_runs(tmp_path, "session_id = ?", ("s1",))[0]
-    assert runs_row["has_posterior"] == 1  # SQL consumers split populations without parsing reward_json
-
-
-# ISO 8601 valid times stored verbatim in label_observations.valid_at and
-# compared lexically with a strict ``<`` cutoff; T1 < T2 < T3 lexically.
-T1 = "2026-01-01T00:00:00+00:00"
-T2 = "2026-02-01T00:00:00+00:00"
-T3 = "2026-03-01T00:00:00+00:00"
-
-def _seed_reviewed_outcomes(archive_dir: Path) -> None:
-    """Seed rejected, accepted, and contested reviewer histories plus an unlabelled current run."""
-    for sid in ("s_a", "s_b", "s_c", "cur"):
-        _seed_one_run(archive_dir, sid)
-    append_label_observation(
-        archive_dir, "s_a", labels=["rejected"], pr_state="closed", labeler_version="2026.05.28-1", evidence_sha=None,
-        valid_at=T1, reviewer_logins=["alice"], has_posterior=True,
-    )
-    append_label_observation(
-        archive_dir, "s_b", labels=["accepted"], pr_state="merged", labeler_version="2026.05.28-1", evidence_sha=None,
-        valid_at=T2, reviewer_logins=["bob"], has_posterior=True,
-    )
-    append_label_observation(
-        archive_dir, "s_c", labels=["contested"], pr_state="merged", labeler_version="2026.05.28-1", evidence_sha=None,
-        valid_at=T3, reviewer_logins=["alice", "carol"], has_posterior=True,
-    )
-
-def test_reviewer_set_penalty_prior_pools_shared_reviewer_runs_strict_cutoff(tmp_path: Path,) -> None:
-    # Current reviewers={alice}, valid_at==t3 -> pool = alice-sharing runs, valid_at < t3:
-    # only s_a (s_c @ t3 excluded by strict <; bob's run shares no reviewer).
-    _seed_reviewed_outcomes(tmp_path)
-    prior, n = reviewer_set_penalty_prior(tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur")
-    assert prior == pytest.approx(1.0) and n == 1
-    prior2, n2 = reviewer_set_penalty_prior(tmp_path, ["alice", "bob"], before_valid_at=T3, exclude_session="cur")
-    assert prior2 == pytest.approx(0.5) and n2 == 2
-    assert reviewer_set_penalty_prior(tmp_path, [], before_valid_at=T3, exclude_session="cur") == (None, 0)
-
-def test_reviewer_set_penalty_prior_scoped_to_repo(tmp_path: Path) -> None:
-    # Two alice rows in distinct repos (s_a: repo-A rejected@T1; s_b: repo-B accepted@T2)
-    # verify per-repo filtering. cur has no repo_slug, excluded by session_id.
-    for sid, slug in (("s_a", "org/repo-A"), ("s_b", "org/repo-B"), ("cur", None)):
-        upsert_run(tmp_path,
-            Manifest(
-                session_id=sid, archived_at="2026-01-01T00:00:00Z", run_flow="normal", backend="claude", repo_slug=slug,
-                archive_path=str(tmp_path / sid),
-            ),
-        )
-    append_label_observation(
-        tmp_path, "s_a", labels=["rejected"], pr_state="closed", labeler_version="2026.05.28-1", evidence_sha=None,
-        valid_at=T1, reviewer_logins=["alice"], has_posterior=True,
-    )
-    append_label_observation(
-        tmp_path, "s_b", labels=["accepted"], pr_state="merged", labeler_version="2026.05.28-1", evidence_sha=None,
-        valid_at=T2, reviewer_logins=["alice"], has_posterior=True,
-    )
-
-    prior_all, n_all = reviewer_set_penalty_prior(tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur")
-    assert prior_all == pytest.approx(0.5) and n_all == 2
-
-    prior_a, n_a = reviewer_set_penalty_prior(
-        tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur", repo_slug="org/repo-A",
-    )
-    assert prior_a == pytest.approx(1.0) and n_a == 1
-
-    prior_b, n_b = reviewer_set_penalty_prior(
-        tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur", repo_slug="org/repo-B",
-    )
-    assert prior_b == pytest.approx(0.0) and n_b == 1
-
-    prior_x, n_x = reviewer_set_penalty_prior(
-        tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur", repo_slug="org/other",
-    )
-    assert (prior_x, n_x) == (None, 0)
-
 def test_manifest_includes_source_path() -> None:
     m = Manifest(
         session_id="test-session", source_path="/home/user/code/myrepo", remote_url="git@github.com:org/repo.git",
@@ -1243,88 +912,10 @@ def test_source_path_defaults_to_none() -> None:
     assert m.source_path is None
     assert m.to_dict()["git"]["source_path"] is None
 
-def test_update_labels_is_backward_compat_thin_wrapper(tmp_path: Path) -> None:
-    _seed_one_run(tmp_path, "sess-5")
-    assert update_labels(tmp_path, "sess-5", ["accepted"]) is True
-    hist = label_observation_history(tmp_path, "sess-5")
-    assert len(hist) == 1
-    rows = query_runs(tmp_path, "session_id = ?", ("sess-5",))
-    assert json.loads(rows[0]["outcome_labels"]) == ["accepted"]
 
 # Canonical UTC timestamp contract: one spelling at write time, strict as_of
 # validation at the entry boundary, and legacy "Z" rows preserved at bootstrap.
 
-def test_canonical_utc_iso_converts_and_rejects() -> None:
-    assert canonical_utc_iso("2026-02-01T00:00:00Z") == "2026-02-01T00:00:00+00:00"
-    assert canonical_utc_iso("2026-02-01T00:00:00+00:00") == "2026-02-01T00:00:00+00:00"
-    assert canonical_utc_iso("2026-02-01T05:30:00+05:30") == "2026-02-01T00:00:00+00:00"
-    assert canonical_utc_iso("2026-02-01T00:00:00.500000Z") == "2026-02-01T00:00:00.500000+00:00"
-    with pytest.raises(ValueError, match="naive"):
-        canonical_utc_iso("2026-02-01T00:00:00")
-    with pytest.raises(ValueError):
-        canonical_utc_iso("not-a-timestamp")
-
-def test_normalize_as_of_is_strict_utc_only() -> None:
-    assert normalize_as_of("2026-04-01T00:00:00Z") == "2026-04-01T00:00:00+00:00"
-    assert normalize_as_of("2026-04-01T00:00:00+00:00") == "2026-04-01T00:00:00+00:00"
-    with pytest.raises(ValueError, match="must be a UTC timestamp"):
-        normalize_as_of("2026-04-01T05:00:00+05:00")
-    with pytest.raises(ValueError, match="must be a UTC timestamp"):
-        normalize_as_of("2026-04-01T00:00:00")
-    with pytest.raises(ValueError, match="not a valid ISO-8601"):
-        normalize_as_of("yesterday")
-
-def test_append_label_observation_canonicalizes_valid_at_spelling(tmp_path: Path,) -> None:
-    _seed_one_run(tmp_path, "sess-z")
-    append_label_observation(
-        tmp_path, "sess-z", labels=["accepted"], pr_state="merged", labeler_version="v1", evidence_sha=None,
-        valid_at="2026-02-01T00:00:00Z",
-    )
-    row = latest_label_observation(tmp_path, "sess-z")
-    assert row is not None
-    assert row["valid_at"] == "2026-02-01T00:00:00+00:00"
-
-def test_append_label_observation_rejects_naive_valid_at(tmp_path: Path) -> None:
-    _seed_one_run(tmp_path, "sess-naive")
-    with pytest.raises(ValueError, match="naive"):
-        append_label_observation(
-            tmp_path, "sess-naive", labels=["accepted"], pr_state="merged", labeler_version="v1", evidence_sha=None,
-            valid_at="2026-02-01T00:00:00",
-        )
-
-def test_reviewer_prior_bound_spelling_cannot_misorder(tmp_path: Path) -> None:
-    """A row half a second after the Z-spelled cutoff must be excluded despite misleading
-    raw lexical order.
-    """
-    _seed_one_run(tmp_path, "s_late")
-    _seed_one_run(tmp_path, "cur")
-    append_label_observation(
-        tmp_path, "s_late", labels=["rejected"], pr_state="closed", labeler_version="v1", evidence_sha=None,
-        valid_at="2026-03-01T00:00:00.500000+00:00", reviewer_logins=["alice"], has_posterior=True,
-    )
-    prior, n = reviewer_set_penalty_prior(
-        tmp_path, ["alice"], before_valid_at="2026-03-01T00:00:00Z", exclude_session="cur",
-    )
-    assert (prior, n) == (None, 0)
-    # And a bound safely after the row still pools it, regardless of spelling.
-    prior2, n2 = reviewer_set_penalty_prior(
-        tmp_path, ["alice"], before_valid_at="2026-03-01T00:00:01Z", exclude_session="cur",
-    )
-    assert prior2 == pytest.approx(1.0) and n2 == 1
-
-def test_legacy_z_valid_at_rows_are_left_untouched(tmp_path: Path) -> None:
-    """Bootstrap cannot rewrite historical observations merely to canonicalize timestamp spelling."""
-    _seed_one_run(tmp_path, "sess-legacy")
-    conn = sqlite3.connect(str(tmp_path / "index.db"))
-    conn.execute("INSERT INTO label_observations "
-        "(session_id, observed_at, labels, labeler_version, valid_at, source) "
-        "VALUES ('sess-legacy', '2026-01-01T00:00:00+00:00', '[\"accepted\"]', 'v0', "
-        "'2026-01-01T00:00:00Z', 'auto')"
-    )
-    conn.commit()
-    conn.close()
-    hist = label_observation_history(tmp_path, "sess-legacy")
-    assert [r["valid_at"] for r in hist] == ["2026-01-01T00:00:00Z"]
 
 async def test_build_manifest_totals_include_fork_trajectories(tmp_path: Path) -> None:
     snapshots: list[RunWriteSnapshot] = []
@@ -2297,75 +1888,6 @@ def test_upsert_run_persists_pipeline_fields(tmp_path: Path) -> None:
     assert row["daydream_dirty"] == 0
 
 
-def test_append_label_observation_persists_versions_and_digest(tmp_path: Path) -> None:
-    _seed_one_run(tmp_path, "sess-1")
-    ok = append_label_observation(
-        tmp_path, "sess-1", labels=["contested"], pr_state="open", labeler_version="980-policy", evidence_sha="abc",
-        reply_classifier_version="980-r1", reply_evidence_digest="d" * 64,
-    )
-    assert ok is True
-    row = latest_label_observation(tmp_path, "sess-1")
-    assert row is not None
-    assert row["reply_classifier_version"] == "980-r1"
-    assert row["reply_evidence_digest"] == "d" * 64
-    assert row["labeler_policy_version"] == "980-policy"
-
-def test_dedup_includes_policy_version_and_digest(tmp_path: Path) -> None:
-    _seed_one_run(tmp_path, "sess-1")
-    kw: dict[str, Any] = dict(labels=["contested"], pr_state="open", labeler_version="980-policy",
-              evidence_sha="abc", reply_classifier_version="980-r1", reply_evidence_digest="d" * 64)
-    assert append_label_observation(tmp_path, "sess-1", **kw) is True
-    assert append_label_observation(tmp_path, "sess-1", **kw) is False       # identical → dedup
-    kw2 = {**kw, "labeler_version": "980-policy2"}
-    assert append_label_observation(tmp_path, "sess-1", **kw2) is True       # policy bump → append
-    kw3 = {**kw2, "reply_evidence_digest": "e" * 64}
-    assert append_label_observation(tmp_path, "sess-1", **kw3) is True       # edited reply → append
-
-def test_human_rows_keep_precedence_over_newer_auto(tmp_path: Path) -> None:
-    _seed_one_run(tmp_path, "sess-1")
-    append_label_observation(tmp_path, "sess-1", labels=["contested"], pr_state="open",
-                             labeler_version="980-policy", evidence_sha="abc",
-                             reply_classifier_version="980-r1", reply_evidence_digest="d" * 64)
-    append_label_observation(tmp_path, "sess-1", labels=["rejected"], pr_state="open",
-                             labeler_version="human", evidence_sha="abc", source="human")
-    append_label_observation(tmp_path, "sess-1", labels=["accepted"], pr_state="open",
-                             labeler_version="980-policy2", evidence_sha="abc",
-                             reply_classifier_version="980-r1", reply_evidence_digest="f" * 64)
-    row = query_runs(tmp_path, "session_id = ?", ("sess-1",))[0]
-    assert row["outcome_labels"] == '["rejected"]' and row["labeled_at"] is not None
-    obs = latest_label_observation(tmp_path, "sess-1")
-    assert obs is not None and obs["source"] == "human" and obs["labels"] == '["rejected"]'
-
-
-def test_append_label_observation_preserves_observed_at(tmp_path: Path) -> None:
-    """Imported observation time must survive instead of being replaced by the append wall clock."""
-    _seed_one_run(tmp_path, "sess-obs")
-    original = "2025-06-01T12:00:00+00:00"
-    appended = append_label_observation(tmp_path, "sess-obs", labels=["accepted"], pr_state="merged",
-        labeler_version="1055-human-r1", evidence_sha=None, source="human",
-        observed_at=original)
-    assert appended is True
-    row = latest_label_observation(tmp_path, "sess-obs")
-    assert row is not None
-    assert row["observed_at"] == "2025-06-01T12:00:00+00:00"
-
-def test_append_label_observation_observed_at_none_uses_wall_clock(tmp_path: Path,) -> None:
-    _seed_one_run(tmp_path, "sess-now")
-    appended = append_label_observation(tmp_path, "sess-now", labels=["accepted"], pr_state="merged",
-        labeler_version="1055-human-r1", evidence_sha=None, source="human")
-    assert appended is True
-    row = latest_label_observation(tmp_path, "sess-now")
-    assert row is not None
-    assert row["observed_at"].startswith("2")
-
-def test_append_label_observation_rejects_non_iso_observed_at(tmp_path: Path) -> None:
-    _seed_one_run(tmp_path, "sess-bad")
-    with pytest.raises(ValueError, match="observed_at"):
-        append_label_observation(tmp_path, "sess-bad", labels=["accepted"], pr_state="merged",
-            labeler_version="1055-human-r1", evidence_sha=None, source="human",
-            observed_at="not-a-timestamp")
-    assert label_observation_history(tmp_path, "sess-bad") == []
-
 def test_diagram_flow_does_not_inherit_a_prior_deep_run_pipeline_state(
     target: Path, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
@@ -2470,7 +1992,7 @@ def test_snapshot_manifest_provenance_rejects_unsafe_session_identity(tmp_path: 
     with pytest.raises(ValueError, match="session_id"):
         archive_recorder_provenance_from_snapshot(write_snapshot=snapshot, run_flow=DaydreamRunFlow.NORMAL,)
 
-def _finalizer_arguments(tmp_path: Path, session_id: str, *, config: RunConfig, upload: bool = False,
+def _finalizer_arguments(tmp_path: Path, session_id: str, *, config: RunConfig,
 ) -> dict[str, Any]:
     """Freeze real trajectory bytes and bind the finalizer's independent roots."""
     frozen = tmp_path / "frozen"
@@ -2481,7 +2003,7 @@ def _finalizer_arguments(tmp_path: Path, session_id: str, *, config: RunConfig, 
     return dict(run=_archive_snapshot(snapshot),
         artifacts=ArtifactTreeSnapshot(session_id, "workspace", frozen, manifest_tree(frozen), ()),
         artifact_provenance=ArtifactEvidenceProvenance("workspace", session_id, tmp_path / "source", tmp_path / "live",
-        ), config=config, work=None, upload=upload,
+        ), config=config, work=None,
     )
 
 def test_strict_archive_evaluation_failure_is_typed_and_never_reports_success(
@@ -2533,55 +2055,42 @@ def test_strict_archive_rejects_frozen_receipt_changed_by_evaluator(
         assert (archive_dir / "runs" / session_id / "manifest.json").is_file()
         assert len(rows) == 1
 
-def test_strict_archive_upload_refusal_removes_incomplete_local_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_strict_archive_does_not_publish_historical_bundles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Upload refusal contains Hub exposure while preserving the completed local archive
-    and index.
-    """
-    session_id = "strict-upload"
+    """Only the new JSONL lifecycle may select a remote destination."""
+    session_id = "strict-local-only"
     arguments = _finalizer_arguments(
-        tmp_path, session_id, config=RunConfig(target=str(tmp_path), run_eval=False, archive=True), upload=True,
+        tmp_path, session_id, config=RunConfig(target=str(tmp_path), run_eval=False, archive=True,
+                                               trajectory_hub_repo="private/repo"),
     )
-    uploaded: list[tuple[Any, ...]] = []
 
-    def _refuse(*args: object, **_kwargs: object) -> bool:
-        uploaded.append(args)
-        return False
+    from tests.harness.dataset_hub import FakeDatasetHub
 
-    monkeypatch.setattr("daydream.archive.hub.resolve_hub_repo", lambda _config: "private/repo")
-    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", _refuse)
-
+    hub = FakeDatasetHub()
+    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
     finalize_archive_run(**arguments)
-
-    assert len(uploaded) == 1, "the upload must still be attempted and refused by the callee"
     archive_dir = get_archive_dir()
     assert (archive_dir / "runs" / session_id / "manifest.json").is_file()
     assert len(query_runs(archive_dir, "session_id = ?", (session_id,))) == 1
     assert not list(archive_dir.glob("runs/.*.finalizing"))
+    assert hub.commits == []
 
-def test_strict_archive_upload_refuses_frozen_tree_mutated_before_publication(
+
+def test_strict_archive_refuses_frozen_tree_mutated_before_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    session_id = "strict-upload-mutated"
+    session_id = "strict-mutated-publication"
     arguments = _finalizer_arguments(
-        tmp_path, session_id, config=RunConfig(target=str(tmp_path), run_eval=False, archive=True), upload=True,
+        tmp_path, session_id, config=RunConfig(target=str(tmp_path), run_eval=False, archive=True),
     )
     document = arguments["run"].trajectories.documents[0]
-    uploads: list[Path] = []
+    from daydream.archive.provenance import capture_executable_provenance
 
-    def mutate_then_resolve(_config: Any) -> str:
+    def mutate_then_capture() -> Any:
         document.path.write_bytes(document.json_bytes + b"\n")
-        return "private/repo"
+        return capture_executable_provenance()
 
-    def record_upload(run_dir: Path, *_args: Any, **_kwargs: Any) -> bool:
-        uploads.append(run_dir)
-        return True
-
-    monkeypatch.setattr("daydream.archive.hub.resolve_hub_repo", mutate_then_resolve)
-    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", record_upload)
-
+    monkeypatch.setattr("daydream.archive.provenance.capture_executable_provenance", mutate_then_capture)
     with pytest.raises(ArchiveFinalizationError, match="frozen artifact tree changed"):
         finalize_archive_run(**arguments)
-
-    assert uploads == []
     assert not (get_archive_dir() / "runs" / session_id).exists()

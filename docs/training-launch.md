@@ -11,7 +11,7 @@ plan rather than a measurement, the source is named as such.
 
 The training pipeline's input is a frozen-corpus projection directory produced
 by `daydream corpus build` (a deterministic per-finding projection over a
-curated bundle plus its pinned annotation bundle). The validated run trained on
+immutable run records plus their eligible observation history). The validated run trained on
 the committed 50-record projection fixture produced by
 `tests/fixtures/training/build_projection_50.py` (both gold classes present on
 the frozen holdout side, silver `process-trace` and `task-only` records
@@ -42,10 +42,10 @@ record is returned, and re-verifies the projection's `_SUCCESS` marker,
 split-digest lineage, and split drift on every load.
 
 The planned real-corpus runs use the same loader over a frozen projection built
-from the private PR archive's curated bundle. The committed fixture is a
+from a frozen private record snapshot. The committed fixture is a
 CI-scale stand-in for that projection. Each projected record carries the full
 RFT task identity (`base_sha`/`head_sha`/`diff`) — the projector embeds the raw
-diff body on every record from the bundle's `batches/<session>/diff.patch`, so
+diff body on every record from the run record's immutable `original_task` section, so
 Stage 2 replays tasks from the frozen record itself with no archive
 materialization.
 
@@ -66,7 +66,7 @@ For real-corpus training, the input is a frozen-corpus projection directory
 produced by the projector. The real-corpus command sequence is:
 
 ```bash
-daydream corpus build --bundle-root BUNDLE_ROOT --annotation-bundle-root ANNOTATION_BUNDLE_ROOT --license-policy LICENSE_POLICY --out PROJECTION_DIR/corpus.jsonl
+daydream corpus build --store RECORD_STORE --snapshot-id SNAPSHOT_ID --license-policy LICENSE_POLICY --out PROJECTION_DIR/corpus.jsonl
 ```
 
 ```bash

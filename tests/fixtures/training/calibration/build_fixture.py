@@ -3,7 +3,7 @@
     uv run python tests/fixtures/training/calibration/build_fixture.py
     uv run python tests/fixtures/training/calibration/build_fixture.py --out /tmp/replay
 
-corpus/ contains corpus.jsonl, lineage.json, curation-manifest.json, SHA256SUMS, and _SUCCESS.
+corpus/ contains corpus.jsonl, lineage.json, SHA256SUMS, and _SUCCESS.
 gold.json maps record IDs to accepted booleans; breakdowns.json supplies intrinsic axes. Aligned
 Stage-0 scores cover every record; misaligned scores drop one and add an unknown ID.
 
@@ -15,6 +15,7 @@ stamps come from production modules.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,6 @@ from daydream.training.labeler_versions import (
     REPLY_CLASSIFIER_VERSION,
     RUBRIC_SCHEMA_VERSION,
 )
-from tests.harness.adjudication import sha256sums_text
 
 REWARD_VERSION = "2026.09.04-1"  # Frozen fixture semantics; never rescore on a production bump.
 
@@ -46,13 +46,15 @@ REPO_SLUGS = [f"acme/widgets-{i % 3}" for i in range(RECORD_COUNT)]
 
 def _record(i: int) -> dict[str, Any]:
     return {"schema_version": "2",
-        "record_id": f"rec-{i:04d}", "session_id": f"sess-{i:04d}", "repo_slug": REPO_SLUGS[i],
+        "record_id": f"rec-{i:04d}", "session_id": f"sess-{i:04d}",
         "reward_version": REWARD_VERSION,
         "lineage": {
             # Stored splits must match calibration's derivation from the bundle salt and 0.2/0.2
             # rates.
             "split": assign_split(f"rec-{i:04d}", holdout_rate=0.2, val_rate=0.2, salt=SALT), "as_of": AS_OF,
-            "valid_at": VALID_AT, "license_decision": "allow", "labeler_policy_version": LABELER_POLICY_VERSION,
+            "valid_at": VALID_AT, "repo_slug": REPO_SLUGS[i],
+            "license_decision": {"status": "admitted", "spdx_id": "MIT", "repo_slug": REPO_SLUGS[i]},
+            "labeler_policy_version": LABELER_POLICY_VERSION,
             "reply_classifier_version": REPLY_CLASSIFIER_VERSION, "rubric_schema_version": RUBRIC_SCHEMA_VERSION,
         },
     }
@@ -93,22 +95,6 @@ def _lineage() -> dict[str, Any]:
     }
 
 
-def _manifest(records: list[dict[str, Any]]) -> dict[str, Any]:
-    gold = _gold()
-    excluded_hits = sorted(set(load_exclusion_list()) & {r["repo_slug"] for r in records})
-    c5_claim = (f"contains excluded repo slug(s): {', '.join(excluded_hits)}"
-        if excluded_hits
-        else "clean corpus repo slugs are synthetic and absent from the exclusion list"
-    )
-    return {
-        "description": "Synthetic projected-corpus bundle for calibrate-reward fixtures (issue #999)",
-        "record_count": RECORD_COUNT, "accepted_count": sum(1 for v in gold.values() if v["accepted"]),
-        "rejected_count": sum(1 for v in gold.values() if not v["accepted"]), "constraints": {"C5_exclusion": c5_claim,
-            "C8_copyleft": "clean corpus repo slugs are absent from the copyleft list", "gpu_free": True,
-        },
-    }
-
-
 def _jsonl_bytes(records: list[dict[str, Any]]) -> bytes:
     return ("\n".join(json.dumps(r, sort_keys=True) for r in records) + "\n").encode()
 
@@ -125,12 +111,10 @@ def _write_bundle(corpus_dir: Path, records: list[dict[str, Any]], *, sums_over_
     corpus_dir.mkdir(parents=True, exist_ok=True)
     (corpus_dir / "corpus.jsonl").write_bytes(_jsonl_bytes(records))
     _write_json(corpus_dir / "lineage.json", _lineage())
-    _write_json(corpus_dir / "curation-manifest.json", _manifest(records))
     (corpus_dir / "_SUCCESS").write_text("")
-    (corpus_dir / "SHA256SUMS").write_text(sha256sums_text(
-        (name, (corpus_dir / name).read_bytes())
-        for name in ("corpus.jsonl", "lineage.json", "curation-manifest.json")
-    ))
+    (corpus_dir / "SHA256SUMS").write_text("".join(
+        f"{hashlib.sha256((corpus_dir / name).read_bytes()).hexdigest()}  {name}\n"
+        for name in ("corpus.jsonl", "lineage.json")))
     if sums_over_tampered:
         tampered = [json.loads(line) for line in (corpus_dir / "corpus.jsonl").read_text().splitlines()]
         tampered[0]["session_id"] = "sess-tampered"
@@ -153,7 +137,7 @@ def build(out: Path) -> None:
 
     # Corruption variants: identical shapes, one deliberate defect each.
     c5 = [json.loads(json.dumps(r)) for r in records]
-    c5[0]["repo_slug"] = C5_SLUG
+    c5[0]["lineage"]["repo_slug"] = C5_SLUG
     _write_bundle(out / "variants" / "c5-excluded", c5)
 
     posterior = [json.loads(json.dumps(r)) for r in records]

@@ -1,5 +1,5 @@
 """Task: projector emits schema-distinct process-trace and task-only records
-behind the ``emit_process_traces`` flag (default off = byte-identical D8
+behind the ``emit_process_traces`` flag (default off preserves outcome projection
 behavior: non-decisive findings land in the adjudication report only)."""
 
 import json
@@ -7,20 +7,14 @@ from pathlib import Path
 from typing import Any
 
 from daydream.training.corpus_projection.projector import build_frozen_corpus
-from tests.test_corpus_projection import (
-    _config_for,
-    _read_jsonl,
-    _write_annotations_snapshot,
-    _write_bundle,
-)
+from tests.harness.record_projection import projection_config, seed_projection_store
+from tests.test_corpus_projection import _read_jsonl
 
 
 def _build(tmp_path: Path, **kw: Any) -> tuple[Path, dict[str, Any]]:
-    bundle_dir = _write_bundle(tmp_path)
-    _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "ambiguous"])
-    out_dir = tmp_path / "out"
-    out = build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out_dir, **kw))
-    return out_dir, out
+    store = seed_projection_store(tmp_path, dispositions=("accepted", "ambiguous"))
+    config = projection_config(store, tmp_path, **kw)
+    return config.out_dir, build_frozen_corpus(config)
 
 
 def test_flag_off_emits_only_outcome_finding_records(tmp_path: Path) -> None:

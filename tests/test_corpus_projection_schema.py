@@ -18,7 +18,8 @@ def _base_record(**overrides: Any) -> dict[str, Any]:
         "profile": {"profile_schema_version": "1", "profile_name": "default", "profile_source_kind": "builtin",
             "profile_digest": "c" * 64,
         }, "stack": "python", "outcome_label": "correct",
-        "lineage": {"hub_commit": "d" * 40, "curation_id": "cur-1", "content_digests": ["e" * 64],
+        "lineage": {"hub_commit": "d" * 40, "snapshot_id": "f" * 64,
+            "source_identity_version": "record-snapshot-v1", "content_digests": ["e" * 64],
             "labeler_policy_version": "1", "reply_classifier_version": "1", "rubric_schema_version": "1",
             "as_of": "2026-01-01T00:00:00Z", "valid_at": "2026-01-01T00:00:00Z", "split": "train",
             "exclusion_reason": None, "repo_slug": "owner/repo",
@@ -30,8 +31,8 @@ def _base_record(**overrides: Any) -> dict[str, Any]:
     record.update(overrides)
     return record
 
-TASK_IDENTITY = {"repo_slug": "owner/repo", "source": "curation", "base_sha": "1" * 40, "head_sha": "2" * 40,
-    "diff_digest": "3" * 64, "diff_ref": {"content_digest": "4" * 64, "path": "batches/s1/diff.patch"},
+TASK_IDENTITY = {"repo_slug": "owner/repo", "source": "record", "base_sha": "1" * 40, "head_sha": "2" * 40,
+    "diff_digest": "3" * 64, "diff_ref": {"record_digest": "4" * 64, "run_id": "s1", "section": "original_task.diff"},
     "replay_verification": {"status": "passed"},
 }
 
@@ -53,7 +54,7 @@ def test_gold_outcome_finding_with_finding_text_and_task_identity_validates() ->
         task_identity=TASK_IDENTITY,
     )
     record["lineage"]["diff_digest"] = "6" * 64
-    record["lineage"]["diff_ref"] = {"content_digest": "4" * 64, "path": "batches/s1/diff.patch"}
+    record["lineage"]["diff_ref"] = {"record_digest": "4" * 64, "run_id": "s1", "section": "original_task.diff"}
     jsonschema.validate(record, SCHEMA)
 
 def test_task_identity_with_bad_base_sha_is_rejected() -> None:
