@@ -206,16 +206,6 @@ def _resolve_cli_observability(parser: argparse.ArgumentParser, args: argparse.N
         parser.error(str(exc))
 
 
-def _add_archive_dir_argument(parser: argparse.ArgumentParser) -> None:
-    """Add the shared ``--archive-dir`` option to a corpus subcommand parser."""
-    parser.add_argument(
-        "--archive-dir",
-        type=Path,
-        metavar="PATH",
-        help="Override the archive root (default: daydream.archive.get_archive_dir()).",
-    )
-
-
 def _add_dry_run_argument(parser: argparse.ArgumentParser, help_text: str) -> None:
     """Add the shared ``--dry-run`` option to a corpus/train subcommand parser."""
     parser.add_argument(

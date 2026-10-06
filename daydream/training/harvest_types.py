@@ -1,4 +1,4 @@
-"""Validated archive rows and immutable acquired harvest evidence."""
+"""Validated record inputs and immutable acquired harvest evidence."""
 
 from __future__ import annotations
 
@@ -17,10 +17,10 @@ BaseShaStatus = Literal["available", "unavailable", "failed"]
 
 @dataclass(frozen=True)
 class HarvestRow:
-    """The consumed archive columns, validated before acquisition side effects."""
+    """Captured run fields, validated before acquisition side effects."""
 
     session_id: str
-    archive_path: Path
+    recommended_patch: str = ""
     source_path: Path | None = None
     remote_url: str | None = None
     repo_slug: str | None = None
@@ -54,11 +54,8 @@ class HarvestRow:
 
         if not isinstance(raw, Mapping):
             raise invalid("row", "must be a mapping")
-        if (
-            not isinstance(session, str) or not session.strip()
-            or session in (".", "..") or any(char in session for char in "/\\\0")
-        ):
-            raise invalid("session_id", "must be a nonempty safe path segment")
+        if not isinstance(session, str) or not session.strip():
+            raise invalid("session_id", "must be a nonempty string")
 
         def text(field: str) -> str | None:
             value = raw.get(field)
@@ -90,8 +87,6 @@ class HarvestRow:
                 raise invalid(field, "must contain safe owner/repository components")
             return value
 
-        archive_path = path("archive_path", required=True)
-        assert archive_path is not None
         number = raw.get("pr_number")
         if number is not None and (type(number) is not int or number <= 0):
             raise invalid("pr_number", "must be a positive integer or null")
@@ -109,11 +104,16 @@ class HarvestRow:
             raise invalid("changed_files", "must contain strings")
         fingerprints = raw.get("findings_fingerprints")
         return cls(
-            session_id=session, archive_path=archive_path,
-            source_path=path("source_path"), remote_url=text("remote_url"),
-            repo_slug=slug("repo_slug"), branch=text("branch"),
-            base_branch=text("base_branch"), head_sha=text("head_sha"),
-            base_sha=text("base_sha"), pr_repo=slug("pr_repo"),
+            session_id=session,
+            recommended_patch=text("recommended_patch") or "",
+            source_path=path("source_path"),
+            remote_url=text("remote_url"),
+            repo_slug=slug("repo_slug"),
+            branch=text("branch"),
+            base_branch=text("base_branch"),
+            head_sha=text("head_sha"),
+            base_sha=text("base_sha"),
+            pr_repo=slug("pr_repo"),
             pr_number=number,
             changed_files=tuple(changed),
             findings_fingerprints=(
@@ -127,14 +127,19 @@ class HarvestRow:
         return bool(self.pr_repo) and self.pr_number is not None
 
     def as_signal_row(self) -> dict[str, Any]:
-        """Project a fresh legacy row for the unchanged external signal helpers."""
+        """Project captured fields for the pure signal helpers."""
         row: dict[str, Any] = {
-            "session_id": self.session_id, "archive_path": str(self.archive_path),
+            "session_id": self.session_id,
+            "recommended_patch": self.recommended_patch,
             "source_path": str(self.source_path) if self.source_path is not None else None,
-            "remote_url": self.remote_url, "repo_slug": self.repo_slug,
-            "branch": self.branch, "base_branch": self.base_branch,
-            "head_sha": self.head_sha, "base_sha": self.base_sha,
-            "pr_repo": self.pr_repo, "pr_number": self.pr_number,
+            "remote_url": self.remote_url,
+            "repo_slug": self.repo_slug,
+            "branch": self.branch,
+            "base_branch": self.base_branch,
+            "head_sha": self.head_sha,
+            "base_sha": self.base_sha,
+            "pr_repo": self.pr_repo,
+            "pr_number": self.pr_number,
             "changed_files": list(self.changed_files),
         }
         if self.findings_fingerprints is not None:
@@ -157,19 +162,31 @@ class HarvestEvidence:
 
     def __post_init__(self) -> None:
         verdicts = self.scoring_inputs.verifier_verdicts
-        object.__setattr__(self, "scoring_inputs", replace(
-            self.scoring_inputs,
-            verifier_verdicts=None if verdicts is None else tuple(freeze_json(item) for item in verdicts),
-        ))
-        resolutions = self.rubric.per_finding_resolutions
-        object.__setattr__(self, "rubric", replace(
-            self.rubric,
-            fix_applied=replace(self.rubric.fix_applied, window_commits=tuple(self.rubric.fix_applied.window_commits)),
-            per_finding_resolutions=(
-                None if resolutions is None else tuple(
-                    replace(resolution, evidence=tuple(freeze_json(entry) for entry in resolution.evidence))
-                    for resolution in resolutions
-                )
+        object.__setattr__(
+            self,
+            "scoring_inputs",
+            replace(
+                self.scoring_inputs,
+                verifier_verdicts=None if verdicts is None else tuple(freeze_json(item) for item in verdicts),
             ),
-        ))
+        )
+        resolutions = self.rubric.per_finding_resolutions
+        object.__setattr__(
+            self,
+            "rubric",
+            replace(
+                self.rubric,
+                fix_applied=replace(
+                    self.rubric.fix_applied, window_commits=tuple(self.rubric.fix_applied.window_commits)
+                ),
+                per_finding_resolutions=(
+                    None
+                    if resolutions is None
+                    else tuple(
+                        replace(resolution, evidence=tuple(freeze_json(entry) for entry in resolution.evidence))
+                        for resolution in resolutions
+                    )
+                ),
+            ),
+        )
         object.__setattr__(self, "reviewer_logins", tuple(self.reviewer_logins))

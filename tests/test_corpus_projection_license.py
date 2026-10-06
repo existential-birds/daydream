@@ -2,7 +2,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from daydream.archive import hydrate_rules
+from daydream.training import admission
 from daydream.training.corpus_projection.license import (
     LicensePolicy,
     RepoDecision,
@@ -35,10 +35,10 @@ def _resolve(
 
 
 def test_reason_codes_are_frozen_strings() -> None:
-    assert hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO == "c5_excluded_repo"
-    assert hydrate_rules.REASON_CODE_C8_COPYLEFT_UNOPTED == "c8_copyleft_unopted"
-    assert hydrate_rules.REASON_CODE_LICENSE_EVIDENCE_MISSING == "license_evidence_missing"
-    assert hydrate_rules.REASON_CODE_REPO_IDENTITY_MISSING == "repo_identity_missing"
+    assert admission.REASON_CODE_C5_EXCLUDED_REPO == "c5_excluded_repo"
+    assert admission.REASON_CODE_C8_COPYLEFT_UNOPTED == "c8_copyleft_unopted"
+    assert admission.REASON_CODE_LICENSE_EVIDENCE_MISSING == "license_evidence_missing"
+    assert admission.REASON_CODE_REPO_IDENTITY_MISSING == "repo_identity_missing"
 
 def test_load_license_policy_pins_version_and_digest(tmp_path: Path) -> None:
     policy_path = tmp_path / "license-policy.json"
@@ -53,14 +53,14 @@ def test_load_license_policy_pins_version_and_digest(tmp_path: Path) -> None:
 def test_resolve_repo_decision_fail_closed_on_missing_evidence() -> None:
     decision = _resolve("owner/repo", None)
     assert decision.status == "rejected"
-    assert decision.reason_code == hydrate_rules.REASON_CODE_LICENSE_EVIDENCE_MISSING
+    assert decision.reason_code == admission.REASON_CODE_LICENSE_EVIDENCE_MISSING
 
 def test_resolve_repo_decision_c5_is_hard() -> None:
     # C5 rejection wins even with evidence saying accepted and even when the
     # slug appears in allow_copyleft (no override exists for C5 — spec M3).
     decision = _resolve("getsentry/sentry", allow=frozenset({"getsentry/sentry"}))
     assert decision.status == "rejected"
-    assert decision.reason_code == hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO
+    assert decision.reason_code == admission.REASON_CODE_C5_EXCLUDED_REPO
 
 def test_resolve_repo_decision_c5_catches_non_canonical_spellings() -> None:
     # A manifest may stamp the clone URL, a '.git'-suffixed slug, or padded
@@ -71,7 +71,7 @@ def test_resolve_repo_decision_c5_catches_non_canonical_spellings() -> None:
     ):
         decision = _resolve(slug)
         assert decision.status == "rejected"
-        assert decision.reason_code == hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO
+        assert decision.reason_code == admission.REASON_CODE_C5_EXCLUDED_REPO
         assert decision.repo_slug == "getsentry/sentry"
 
 def test_resolve_repo_decision_stamps_canonical_identity() -> None:
@@ -84,7 +84,7 @@ def test_resolve_repo_decision_non_canonical_shape_is_identity_missing() -> None
     # fail-closed as repo_identity_missing, never admitted under the raw shape.
     decision = _resolve("owner/repo/extra")
     assert decision.status == "rejected"
-    assert decision.reason_code == hydrate_rules.REASON_CODE_REPO_IDENTITY_MISSING
+    assert decision.reason_code == admission.REASON_CODE_REPO_IDENTITY_MISSING
 
 def test_resolve_repo_decision_c8_exact_slug_opt_in_only() -> None:
     opted = _resolve(
@@ -95,4 +95,4 @@ def test_resolve_repo_decision_c8_exact_slug_opt_in_only() -> None:
         "owner/similar-gpl-repo", _GPL_EVIDENCE, allow=frozenset({"owner/gpl-repo"})
     )
     assert other.status == "rejected"
-    assert other.reason_code == hydrate_rules.REASON_CODE_C8_COPYLEFT_UNOPTED
+    assert other.reason_code == admission.REASON_CODE_C8_COPYLEFT_UNOPTED

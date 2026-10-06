@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.json_utils import atomic_write_pair, umask_derived_mode
+from daydream.training.corpus_projection.license import normalize_repo_slug
 from daydream.training.corpus_projection.splits import assign_split
 from daydream.training.exclusion import load_exclusion_list
 from daydream.training.labeler_versions import (
@@ -54,10 +55,9 @@ _LABEL_VERSION_STAMPS = {
 
 _RECORD_SCHEMA_VERSION = "2"
 _LINEAGE_SCHEMA_VERSION = "lineage"
-_ALLOWED_LICENSE_DECISIONS = frozenset({"allow", "deny-recorded"})
 
-_REQUIRED_RECORD_FIELDS = ("schema_version", "record_id", "session_id", "repo_slug", "reward_version", "lineage")
-_REQUIRED_LINEAGE_FIELDS = ("split", "as_of", "valid_at", "license_decision")
+_REQUIRED_RECORD_FIELDS = ("schema_version", "record_id", "session_id", "reward_version", "lineage")
+_REQUIRED_LINEAGE_FIELDS = ("split", "as_of", "valid_at", "license_decision", "repo_slug")
 # Version stamps (labeler_policy_version, reply_classifier_version,
 # rubric_schema_version, reward_version) are validated by the stamp gate so an
 # absent stamp fails as "unrecognized label version stamp", not a missing field.
@@ -666,16 +666,17 @@ def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
     _gate(len(reward_versions) == 1, "corpus mixes reward versions with different scoring semantics")
     captured_reward_version = next(iter(reward_versions))
 
-    excluded = load_exclusion_list()
+    excluded = {slug.casefold() for slug in load_exclusion_list()}
     for record in records:
         rid = str(record["record_id"])
-        slug = str(record["repo_slug"])
-        _gate(slug not in excluded, f"record {rid}: repository {slug} is in the excluded repository list (C5)")
-        decision = str(record["lineage"]["license_decision"])
-        _gate(
-            decision in _ALLOWED_LICENSE_DECISIONS,
-            f"record {rid}: license decision {decision!r} is not one of {sorted(_ALLOWED_LICENSE_DECISIONS)}",
-        )
+        slug = normalize_repo_slug(str(record["lineage"]["repo_slug"]))
+        _gate(slug.casefold() not in excluded,
+              f"record {rid}: repository {slug} is in the excluded repository list (C5)")
+        decision = record["lineage"]["license_decision"]
+        _gate(isinstance(decision, dict) and decision.get("status") == "admitted"
+              and decision.get("repo_slug") == slug and bool(decision.get("spdx_id")),
+              f"record {rid}: license decision must admit its repository with explicit SPDX evidence")
+
 
     holdout_rate = _rate(bundle["holdout_rate"], "holdout_rate", lineage_path)
     val_rate = _rate(bundle["val_rate"], "val_rate", lineage_path)

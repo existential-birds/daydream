@@ -65,6 +65,7 @@ def test_download_source_records_exact_membership_privately(store: LocalRecordSt
     store.record_download_source(source, **current)
     path = store.root / "source.json"
     assert json.loads(path.read_bytes()) == source
+    assert store.download_source() == source
     assert path.read_bytes().endswith(b"\n")
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
@@ -273,3 +274,32 @@ def test_trajectory_membership_preserves_invocations_and_unproduced_registered_c
         summary["step_ids"] = [9]
         with pytest.raises(ValueError, match="invalid RunRecord"):
             parse_run(raw)
+
+
+@pytest.mark.parametrize("unsafe", ["malformed", "symlink"])
+def test_download_source_read_refuses_unsafe_provenance(
+    store: LocalRecordStore, tmp_path: Path, unsafe: str,
+) -> None:
+    path = store.root / "source.json"
+    if unsafe == "malformed":
+        path.write_text("[]")
+    else:
+        outside = tmp_path / "outside-source"
+        outside.write_text("operator data")
+        path.symlink_to(outside)
+    with pytest.raises(StoreError, match="invalid_download_source|unsafe_storage_path"):
+        store.download_source()
+    if unsafe == "symlink":
+        assert outside.read_text() == "operator data"
+
+
+def test_snapshot_pins_download_provenance_independently_of_later_source_metadata(store: LocalRecordStore) -> None:
+    records = store.read_records()
+    first_source = {"repository": "test-user/private-trajectories", "revision": "a" * 40}
+    store.record_download_source(first_source, **records)
+    first = store.select_snapshot(observed_before="2100-01-01T00:00:00Z")
+    store.record_download_source({**first_source, "revision": "b" * 40}, **records)
+    second = store.select_snapshot(observed_before="2100-01-01T00:00:00Z")
+    assert first["snapshot_id"] != second["snapshot_id"]
+    assert store.read_snapshot(first["snapshot_id"]).snapshot["source"]["revision"] == "a" * 40
+    assert store.read_snapshot(second["snapshot_id"]).snapshot["source"]["revision"] == "b" * 40

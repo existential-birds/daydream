@@ -584,46 +584,25 @@ async def test_shallow_run_captures_recommended_patch(
     assert "+# daydream recommended change" in recommended_text
     assert "+# daydream recommended change" not in diff_text
 
-@pytest.mark.parametrize(
-    ("patches", "manifest", "post_window", "expected_verdict", "expected_hunks_total", "expected_hunks_applied",),
-    [
-        # Applied recommendation counts even though the originally reviewed line is absent.
-        pytest.param(("diff.patch", "recommended.patch"), None,
-            "existing\nrecommended = 1\n",
-            "applied", 1, 1, id="prefers-recommended-patch",
-        ),
-        # Legacy archives use diff.patch when recommended.patch is absent.
-        pytest.param(("diff.patch",), None,
-            "existing\nreviewed = 2\n",
-            "applied", 1, None, id="legacy-falls-back-to-diff-patch",
-        ),
-        # New archives distinguish no recommendation from a missing legacy patch;
-        # reviewed lines alone must not count as applied recommendations.
-        pytest.param(("diff.patch",), {"schema_version": "1.0", "recommended_patch_supported": True},
-            "existing\nreviewed = 2\n",
-            "not_applied", 0, None, id="new-format-no-recommendation-skips-fallback",
-        ),
-    ],
-)
-def test_fix_applied_signal_selects_patch_and_verdict(
-    tmp_path: Path, patches: tuple[str, ...], manifest: dict[str, Any] | None, post_window: str, expected_verdict: str,
-    expected_hunks_total: int, expected_hunks_applied: int | None,
+@pytest.mark.parametrize(("has_recommendation", "post_window", "expected_verdict", "expected_hunks"), [
+    (True, "existing\nrecommended = 1\n", "applied", 1),
+    (False, "existing\nreviewed = 2\n", "not_applied", 0),
+])
+def test_fix_applied_signal_uses_captured_recommendation_only(
+    tmp_path: Path, has_recommendation: bool, post_window: str, expected_verdict: str, expected_hunks: int,
 ) -> None:
-
-    added_lines = {"diff.patch": "reviewed = 2", "recommended.patch": "recommended = 1"}
-    for name in patches:
-        (tmp_path / name).write_text(diff_adding(added_lines[name]))
-    if manifest is not None:
-        (tmp_path / "manifest.json").write_text(json.dumps(manifest))
-    row = {"repo_slug": "org/repo", "head_sha": "abc", "base_branch": "main", "archive_path": str(tmp_path),}
-    sig = fix_applied_signal(
+    (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
+    recommended = tmp_path / "recommended.patch"
+    if has_recommendation:
+        recommended.write_text(diff_adding("recommended = 1"))
+    row = {"repo_slug": "org/repo", "head_sha": "abc", "base_branch": "main",
+           "recommended_patch": recommended.read_text() if has_recommendation else ""}
+    signal = fix_applied_signal(
         row, changed_files=["app.py"], repo_clone=tmp_path, diff_fetcher=lambda repo, base, head: ["app.py"],
         commits_in_window_fetcher=lambda repo, base, head: ["c1"], file_at_fetcher=lambda repo, path, sha: post_window,
     )
-    assert sig.verdict == expected_verdict
-    assert sig.hunks_total == expected_hunks_total
-    if expected_hunks_applied is not None:
-        assert sig.hunks_applied == expected_hunks_applied
+    assert signal.verdict == expected_verdict
+    assert signal.hunks_total == signal.hunks_applied == expected_hunks
 
 @pytest.mark.parametrize(("file_contents", "expected_verdict"),
     [
@@ -635,7 +614,8 @@ def test_local_commit_applied_signal_uses_recommended_patch(tmp_path: Path, file
 ) -> None:
     (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
     (tmp_path / "recommended.patch").write_text(diff_adding("recommended = 1"))
-    row = {"repo_slug": "org/repo", "head_sha": "abc", "branch": "feature", "archive_path": str(tmp_path),}
+    row = {"repo_slug": "org/repo", "head_sha": "abc", "branch": "feature",
+           "recommended_patch": (tmp_path / "recommended.patch").read_text()}
     sig = local_commit_applied_signal(
         row, repo_clone=tmp_path, commits_since_fetcher=lambda repo, branch, since: ["c1"],
         file_at_fetcher=lambda repo, path, sha: file_contents,

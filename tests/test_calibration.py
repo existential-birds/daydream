@@ -52,13 +52,14 @@ CORRUPTION_FLAGS = frozenset(
 
 def _record(i: int) -> dict[str, Any]:
     return {
-        "schema_version": "2", "record_id": f"rec-{i:04d}", "session_id": f"sess-{i:04d}", "repo_slug": "acme/widgets",
+        "schema_version": "2", "record_id": f"rec-{i:04d}", "session_id": f"sess-{i:04d}",
         "reward_version": REWARD_VERSION,
         "lineage": {
             # Stored split must equal the split re-derived by run_calibration
             # from the fixture salt + split rates (0.1/0.1 in lineage.json).
             "split": assign_split(f"rec-{i:04d}", holdout_rate=0.1, val_rate=0.1, salt=SALT), "as_of": AS_OF,
-            "valid_at": VALID_AT, "license_decision": "allow", **LABEL_STAMPS,
+            "valid_at": VALID_AT, "repo_slug": "acme/widgets",
+            "license_decision": {"status": "admitted", "spdx_id": "MIT", "repo_slug": "acme/widgets"}, **LABEL_STAMPS,
         },
     }
 
@@ -121,7 +122,7 @@ def _corrupt_fixture(corpus_dir: Path, flags: frozenset[str]) -> None:
     if "label-version" in flags:
         del first["lineage"]["labeler_policy_version"]
     if "c5-repo" in flags:
-        first["repo_slug"] = "getsentry/sentry"
+        first["lineage"]["repo_slug"] = "getsentry/sentry"
     if "license" in flags:
         first["lineage"]["license_decision"] = "unknown"
     if "split-overlap" in flags:
@@ -319,14 +320,14 @@ def test_committed_fixture_contains_both_classes_and_c5_repo(committed_fixture: 
     labels = {gold[rid]["accepted"] for rid in gold}
     assert labels == {True, False}
     assert len(records) == 12
-    assert all(r["repo_slug"] != C5_SLUG for r in records)
+    assert all(r["lineage"]["repo_slug"] != C5_SLUG for r in records)
     variant_records = [json.loads(line)
         for line in (committed_fixture / "variants" / "c5-excluded" / "corpus.jsonl")
         .read_text()
         .splitlines()
         if line.strip()
     ]
-    assert any(r["repo_slug"] == C5_SLUG for r in variant_records)
+    assert any(r["lineage"]["repo_slug"] == C5_SLUG for r in variant_records)
 
 @pytest.mark.parametrize(("variant", "match"),
     [

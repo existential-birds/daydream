@@ -1,144 +1,106 @@
-"""Exercise corpus dispatch through cli.main, including exit codes and real build output.
-
-Bare corpus prints help and exits 2. Removed top-level data verbs fall through
-to review and fail target validation; only handler/backend boundaries are mocked.
-"""
+"""Public record corpus commands, license gates, and retired command refusals."""
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from daydream.commands import corpus as cli_corpus
-from daydream.training.adjudication import cli as adjudication_cli
-from daydream.training.adjudication.publish import publish_final_annotation_bundle
-from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
-from tests.harness.adjudication import write_checkpoint_inputs
+from daydream.dataset import LocalRecordStore
+from tests.harness.dataset import observation, run_record
+from tests.harness.record_projection import policy_file, projection_config, seed_projection_store
 from tests.harness.scripts import cli_main
-from tests.test_corpus_projection import _write_annotations_snapshot, _write_bundle
-from tests.test_training_adjudication_publish import _final_bundle
 
 
-@pytest.mark.parametrize("summary, expected", [
-    ({"considered": 3, "annotated": 1, "skipped": 0, "errors": 0, "aborted": 1}, 1),
-    ({"considered": 3, "annotated": 1, "skipped": 0, "errors": 2, "aborted": 0}, 1),
-    # Unresolved findings in the data are not process failure (spec KD).
-    ({"considered": 3, "annotated": 1, "skipped": 2, "errors": 0, "aborted": 0}, 0),
-])
-def test_corpus_harvest_exit_code_maps_summary(monkeypatch: pytest.MonkeyPatch, summary: dict[str, Any], expected: int
-) -> None:
-    async def _fake_run_harvest(_config: Any, **_: Any) -> dict[str, Any]:
-        return summary
-    monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
-    assert cli_main(["corpus", "harvest", "--dry-run"]) == expected
-
-def test_corpus_harvest_routes(monkeypatch: pytest.MonkeyPatch) -> None:
-    called = {}
-    async def _fake_run_harvest(_config: Any, **_: Any) -> dict[str, Any]:
-        called["hit"] = True
-        return {"errors": 0, "annotated": 0, "skipped": 0, "total": 0}
-    monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
-    assert cli_main(["corpus", "harvest", "--dry-run"]) == 0
-    assert called["hit"]
-
-def test_corpus_label_route(monkeypatch: pytest.MonkeyPatch) -> None:
-    label_called = {}
-    def _fake_label(argv: list[str]) -> int:
-        label_called["argv"] = argv
-        return 0
-
-    # The dispatcher stores function references; patch its mapping rather than the source module.
-    monkeypatch.setitem(cli_corpus._CORPUS_SUBVERBS, "label", _fake_label)
-    assert cli_main(["corpus", "label", "sess-0001", "--outcome", "accepted"]) == 0
-    assert label_called["argv"] == ["sess-0001", "--outcome", "accepted"]
-
-def test_bare_corpus_prints_help_exits_2(capsys: pytest.CaptureFixture[str]) -> None:
+def test_bare_corpus_prints_supported_help(capsys: pytest.CaptureFixture[str]) -> None:
     assert cli_main(["corpus"]) == 2
-    captured = capsys.readouterr()
-    # Assert help tokens independently of 80-column wrapping.
-    assert "calibrate-reward" in captured.out
-    assert "build" in captured.out
-    assert "hydrate-hub" in captured.out
-    assert "harvest" in captured.out
-    assert "label" in captured.out
-
-def test_adjudicate_publication_commands_run_through_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,) -> None:
-    state, manifest = write_checkpoint_inputs(tmp_path, curation_id="cur-main")
-    hub = AnnotationsHub(repo_id="org/private-annotations")
-    monkeypatch.setattr(adjudication_cli, "_make_client", lambda _repo_id: hub)
-
-    assert cli_main(["corpus", "adjudicate", "publish-state", "--state-dir", str(state), "--manifest", str(manifest),
-        "--hub-repo", hub.repo_id,
-    ]) == 0
-    revision = hub.repo_info("main").sha
-    assert "annotations/cur-main/checkpoints/batch-latest.json" in hub.list_repo_files(revision)
-
-    destination = tmp_path / "restored"
-    assert cli_main([
-        "corpus", "adjudicate", "resume-state", "--curation-id", "cur-main", "--destination", str(destination),
-        "--hub-repo", hub.repo_id,
-    ]) == 0
-    assert (destination / "preview-manifest.json").read_bytes() == manifest.read_bytes()
-
-    bundle, curation_id = _final_bundle(tmp_path)
-    published = publish_final_annotation_bundle(hub, bundle)
-    final_destination = tmp_path / "downloaded-final"
-    assert cli_main(["corpus", "adjudicate", "download-final", "--curation-id", curation_id,
-        "--snapshot-id", published["final_snapshot_id"], "--revision", published["hub_commit_sha"],
-        "--destination", str(final_destination), "--hub-repo", hub.repo_id,
-    ]) == 0
-    assert (final_destination / "_SUCCESS").is_file()
+    output = capsys.readouterr().out
+    assert all(verb in output for verb in ("dataset", "harvest", "build", "label", "adjudicate"))
+    assert "hydrate-hub" not in output
+    assert "checkpoint" not in output
 
 
-# Real projector bundles exercise pinned license policy, exact-slug copyleft opt-ins, and refusal of
-# URL-shaped identities.
-
-
-def _run_build_v2(tmp_path: Path, capsys: pytest.CaptureFixture[str], extra_args: list[str]) -> tuple[int, str]:
-    """Run corpus build through cli.main over fixture bundles; return exit code and captured output."""
-    bundle_dir = _write_bundle(tmp_path)
-    snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted"])
-    out_dir = tmp_path / "corpus-out"
-    rc = cli_main(["corpus", "build", "--bundle-root", str(bundle_dir), "--annotation-bundle-root", str(snap.parent),
-        "--out", str(out_dir / "corpus.jsonl"), *extra_args,
-    ])
-    captured = capsys.readouterr()
-    return rc, captured.out + captured.err
-
-def test_build_v2_accepts_license_policy_and_repeatable_opt_in(tmp_path: Path, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("verb", ["publish-state", "resume-state", "publish-final", "download-final"])
+def test_retired_annotation_commands_rejected_without_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verb: str,
 ) -> None:
-    policy = tmp_path / "license-policy.json"
-    policy.write_text(json.dumps({"policy_version": "1", "spdx_decisions": {"MIT": "accepted"}}))
-    rc, _out = _run_build_v2(tmp_path, capsys, [
-        "--license-policy", str(policy), "--allow-copyleft", "a/b", "--allow-copyleft", "c/d",
-    ])
-    assert rc == 0
-    lineage = json.loads((tmp_path / "corpus-out" / "lineage.json").read_text())
-    assert lineage["license_policy"]["policy_version"] == "1"
-    assert lineage["copyleft_opt_ins"] == ["a/b", "c/d"]
+    monkeypatch.chdir(tmp_path)
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    directories = {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_dir()}
+    assert cli_main(["corpus", "adjudicate", verb]) == 2
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+    assert {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_dir()} == directories
 
-def test_build_v2_requires_license_policy(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    rc, out = _run_build_v2(tmp_path, capsys, [])
-    assert rc == 1
-    assert "license-policy" in out
 
-def test_build_v2_refuses_unknown_policy_version(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    policy_path = tmp_path / "bad-policy.json"
-    policy_path.write_text(json.dumps({"policy_version": "", "spdx_decisions": {}}))
-    rc, out = _run_build_v2(tmp_path, capsys, ["--license-policy", str(policy_path)])
-    assert rc == 1
-    assert "policy_version" in out
-    assert not (tmp_path / "corpus-out").exists()
+def test_retired_hydration_command_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    before = set(tmp_path.rglob("*"))
+    assert cli_main(["corpus", "hydrate-hub"]) == 2
+    assert set(tmp_path.rglob("*")) == before
 
-def test_build_v2_refuses_raw_authenticated_url_as_identity(tmp_path: Path, capsys: pytest.CaptureFixture[str]
+
+def test_run_label_appends_human_history_and_refuses_ambiguous_prefix(tmp_path: Path) -> None:
+    store = LocalRecordStore(tmp_path / "records")
+    store.commit_run(run_record("run-first"))
+    store.commit_run(run_record("run-second"))
+    assert cli_main(["corpus", "label", "run-", "--store", str(store.root), "--outcome", "accepted"]) == 1
+    assert store.read_records()["observations"] == ()
+    assert cli_main(["corpus", "label", "run-first", "--store", str(store.root),
+                     "--outcome", "accepted", "--author", "alice"]) == 0
+    assert cli_main(["corpus", "label", "run-first", "--store", str(store.root),
+                     "--outcome", "unknown", "--author", "alice"]) == 0
+    history = store.read_records()["observations"]
+    assert {r["payload"]["label"] for r in history} == {"accepted", "unknown"}
+    assert all(r["role"] == "rater" and r["run_id"] == "run-first" for r in history)
+
+
+def test_snapshot_cli_freezes_temporal_membership(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    store = LocalRecordStore(tmp_path / "records")
+    store.commit_run(run_record())
+    store.append_observation(observation())
+    assert cli_main(["corpus", "dataset", "snapshot", "--store", str(store.root),
+                     "--observed-before", "2026-10-04T12:00:00Z", "--valid-before", "2026-10-04T10:00:00Z"]) == 0
+    snapshot = json.loads(capsys.readouterr().out)
+    selected = store.read_snapshot(snapshot["snapshot_id"])
+    assert len(selected.observations) == 1
+    assert selected.eligible_observations == ()
+    store.append_observation(observation("later", observed_at="2026-10-05T00:00:00Z"))
+    assert store.read_snapshot(snapshot["snapshot_id"]).observations == selected.observations
+
+
+@pytest.mark.parametrize("policy", ["valid", "missing", "malformed"])
+def test_record_build_cli_license_policy_gate(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], policy: str,
 ) -> None:
-    rc, out = _run_build_v2(tmp_path, capsys, ["--repo-slug", "https://user:token@github.com/owner/repo"])
-    assert rc == 1
-    assert "Unsupported --repo-slug" in out
+    store = seed_projection_store(tmp_path, dispositions=("accepted",))
+    config = projection_config(store, tmp_path)
+    args = ["corpus", "build", "--store", str(store.root), "--snapshot-id", config.snapshot_id,
+            "--out", str(tmp_path / "out" / "corpus.jsonl")]
+    if policy != "missing":
+        path = policy_file(tmp_path)
+        if policy == "malformed":
+            path.write_text(json.dumps({"policy_version": "", "spdx_decisions": {}}))
+        args += ["--license-policy", str(path), "--allow-copyleft", "a/b", "--allow-copyleft", "c/d"]
+    assert cli_main(args) == (0 if policy == "valid" else 1)
+    if policy == "valid":
+        lineage = json.loads((tmp_path / "out" / "lineage.json").read_text())
+        assert lineage["license_policy"]["policy_version"] == "1"
+        assert lineage["copyleft_opt_ins"] == ["a/b", "c/d"]
+    else:
+        assert not (tmp_path / "out").exists()
+        assert "license-policy" in capsys.readouterr().out
 
-def test_bare_harvest_is_unknown_verb_treated_as_review_target(capsys: pytest.CaptureFixture[str],) -> None:
-    # The removed harvest verb parses the review target before reporting the unknown flag.
+
+def test_bare_harvest_is_unknown_verb_treated_as_review_target(capsys: pytest.CaptureFixture[str]) -> None:
     assert cli_main(["harvest", "--dry-run"]) == 2
-    captured = capsys.readouterr()
-    assert "unrecognized arguments" in captured.err
-    assert "--dry-run" in captured.err
+    assert "--dry-run" in capsys.readouterr().err
+
+
+def test_frozen_evidence_consumer_can_enter_fresh_cli_process(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    code = ("from daydream.training.record_evidence import sessions_from_snapshot; "
+            "from daydream.cli import main; main(['corpus', 'harvest', '--help'])")
+    result = subprocess.run([sys.executable, "-c", code], cwd=tmp_path,
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert "usage: daydream corpus harvest" in result.stdout

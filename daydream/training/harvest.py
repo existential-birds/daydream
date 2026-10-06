@@ -5,26 +5,22 @@ validated row and frozen evidence without I/O. Posterior false-positive cost
 stays beside the pure intrinsic composite. Qualifying decisive reply time pins
 PR outcomes, falling back to merge time; local outcomes have no valid-time pin.
 
-Bronze assembly reads deep/recommendation-verdicts.json and stack-*-records.json.
-Absent verdicts preserve the format gate; malformed present JSON closes it.
-Review-output character count is the length proxy (root path, then deep path).
-
-Each pass revisits indexed runs. The archive deduplicates unchanged evidence,
-policy, labels, and posterior population; changed evidence/policy appends a new
-generation for historical as_of queries. Dry-run suppresses all writes. Cache
-resume skips completed rows; exhausted rate limits abort without losing progress.
-Other row failures are isolated. Missing base_sha is materialized during
-acquisition, keeping the later frozen corpus projection free of Git I/O.
+Each pass reads selected frozen run records. The record store deduplicates
+unchanged evidence and policy; changed evidence appends immutable observations.
+Dry-run suppresses all writes. A disposable response cache can skip completed
+rows; exhausted rate limits abort without losing already persisted evidence.
+PR/base/license enrichment is append-only and leaves captured records sealed.
+The producer-only scoring reader below acquires frozen artifacts at capture.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,18 +31,12 @@ from rich.console import Console
 
 from daydream import git_ops
 from daydream.archive.git_safe import _DEFAULT_HOSTS, normalize_remote_url
-from daydream.archive.index import (
-    append_label_observation,
-    query_runs,
-    readonly_connection,
-    reviewer_set_penalty_prior,
-    set_run_pr_link,
-)
+from daydream.dataset import LocalRecordStore
 from daydream.git_ops import GitError, GitHubAuth, RateLimitError
+from daydream.json_utils import canonical_json
 from daydream.training import labeler_versions, reward
 from daydream.training.adjudication.snapshot import record_evidence_digest
 from daydream.training.backfill_cache import BackfillCache
-from daydream.training.base_sha import materialize_base_sha
 from daydream.training.harvest_types import BaseShaStatus, HarvestEvidence, HarvestRow
 from daydream.training.labeler_signals import (
     CommentResolutionSignal,
@@ -63,7 +53,9 @@ from daydream.training.labeler_signals import (
     pr_merge_signal,
     reviewer_logins_signal,
 )
-from daydream.training.reward import ScoringInputs, score_trajectory
+from daydream.training.license_evidence import GithubLicenseResolver, LicenseEvidenceError
+from daydream.training.record_evidence import section_value, validate_output_path
+from daydream.training.reward import FP_PENALTY_MAP, ScoringInputs, score_trajectory
 from daydream.training.rubric import Rubric, derive_outcome_label
 from daydream.trajectory import redact_text as _redact_text
 from daydream.ui import create_console, print_warning
@@ -88,7 +80,13 @@ class HarvestServices(Protocol):
     """All stateful acquisition and persistence used by one harvest pass."""
 
     @property
-    def archive_dir(self) -> Path: ...
+    def store_dir(self) -> Path: ...
+
+    @property
+    def snapshot_id(self) -> str: ...
+
+    @property
+    def dry_run(self) -> bool: ...
 
     @property
     def progress_path(self) -> Path | None: ...
@@ -354,7 +352,7 @@ def _build_rubric_local(
 ) -> Rubric:
     """Build local-branch signals, forcing unknown when no clone was resolved.
 
-    An archive-directory placeholder cannot establish that a fix was rejected.
+    An unresolved repository cannot establish that a fix was rejected.
     """
     # Invariant: the local-commit posterior is valid ONLY for PR-less runs. A
     # degraded PR row's merge evidence was merely unavailable, so emit "unknown"
@@ -379,7 +377,9 @@ def _build_rubric_local(
         posterior_source="local_branch",
         per_finding_resolutions=[
             PerFindingResolution(
-                fingerprint=fingerprint, comment_id=None, disposition="missing",
+                fingerprint=fingerprint,
+                comment_id=None,
+                disposition="missing",
                 evidence_digest=labeler_versions.reply_evidence_digest([]),
             )
             for fingerprint in services.read_recorded_fingerprints(row)
@@ -401,9 +401,9 @@ def _pr_state_for_rubric(rubric: Rubric) -> str | None:
 
 @dataclass(frozen=True)
 class AnnotationPayload:
-    """One run's canonical annotation, ready for append_label_observation.
+    """One run's complete annotation, retained in a typed observation.
 
-    Unknown labels become []; evidence_sha is the archived head. valid_at is
+    Unknown labels become []; evidence_sha is the captured head. valid_at is
     decisive PR reply time, then merge time, or None for local outcomes (the
     writer maps None to observed_at). reward_json retains every score axis;
     composite_reward is intrinsic only and may be uncomputable. rubric_json and
@@ -435,7 +435,7 @@ def acquire_harvest_evidence(
     valid_at_override: str | None = None,
 ) -> HarvestEvidence:
     """Acquire one row's complete external evidence in established order."""
-    repo_clone = repo_resolution or services.archive_dir
+    repo_clone = repo_resolution or services.store_dir
     pr_merge = None
     if row.is_pr:
         try:
@@ -451,7 +451,9 @@ def acquire_harvest_evidence(
     prior_n = 0
     if pr_merge is None:
         rubric = _build_rubric_local(
-            row, services=services, repo_clone=repo_clone,
+            row,
+            services=services,
+            repo_clone=repo_clone,
             clone_resolved=repo_resolution is not None,
         )
     else:
@@ -462,7 +464,10 @@ def acquire_harvest_evidence(
         except GitError:
             pass
         rubric = _build_rubric_pr(
-            row, services=services, github=services.github, repo_clone=repo_clone,
+            row,
+            services=services,
+            github=services.github,
+            repo_clone=repo_clone,
             pr_merge=pr_merge,
             pr_author_logins=frozenset({pr_merge.author_login}) if pr_merge.author_login else frozenset(),
             review_author_logins=frozenset(reviewer_logins),
@@ -502,9 +507,7 @@ def build_annotation(row: HarvestRow, evidence: HarvestEvidence) -> AnnotationPa
     # containing the recommended lines is a weaker tier and must not enter the
     # posterior population (the label is still recorded on `labels`).
     posterior_feedback = outcome_label if rubric.posterior_source == "pr_review" else None
-    outcome_prior = (
-        evidence.pooled_prior if evidence.prior_n >= _PRIOR_SUFFICIENCY_THRESHOLD else None
-    )
+    outcome_prior = evidence.pooled_prior if evidence.prior_n >= _PRIOR_SUFFICIENCY_THRESHOLD else None
     rb = score_trajectory(
         evidence.scoring_inputs,
         pr_feedback=posterior_feedback,
@@ -534,6 +537,7 @@ def build_annotation(row: HarvestRow, evidence: HarvestEvidence) -> AnnotationPa
             [resolution.evidence for resolution in rubric.per_finding_resolutions or []]
         ),
     )
+
 
 def _rubric_valid_at(rubric: Rubric) -> str | None:
     """PR evidence time, falling back to merge time; local labels have no pin."""
@@ -617,9 +621,7 @@ def _resolve_repo_for_row(
             # Issue #981: never clone the archived raw URL. Normalize it to a
             # credential-free HTTPS identity and fail closed on untrusted
             # hosts or unparseable input. Token, if any, travels out-of-band.
-            identity, canonical = normalize_remote_url(
-                remote_url, allowed_hosts=_DEFAULT_HOSTS
-            )
+            identity, canonical = normalize_remote_url(remote_url, allowed_hosts=_DEFAULT_HOSTS)
             if identity is None or canonical is None:
                 return None
             token = os.environ.get("DAYDREAM_GIT_TOKEN")
@@ -635,75 +637,58 @@ def _resolve_repo_for_row(
     return cached_repo
 
 
-def _materialize_base_sha_if_missing(
-    row: HarvestRow,
-    repo_clone: Path | None,
-    *,
-    console: Console | None = None,
-) -> BaseShaStatus:
-    """Opportunistically backfill ``code_context.base_sha`` into the manifest.
-
-    Only acts when ``manifest.json`` exists AND ``repo_clone`` is available.
-    Any failure is swallowed (opportunistic), leaving ``base_sha`` as ``None``.
-    """
-    manifest_path = row.archive_path / "manifest.json"
-    if not manifest_path.exists():
-        return "unavailable"
-    if repo_clone is None:
-        return "unavailable"
-    try:
-        resolved = materialize_base_sha(manifest_path, repo_clone=repo_clone)
-    except (OSError, json.JSONDecodeError, GitError) as exc:
-        print_warning(
-            console or create_console(),
-            f"harvest: base_sha backfill failed for {manifest_path}: {type(exc).__name__}: {exc}",
-        )
-        return "failed"
-    if resolved is None:
-        return "unavailable"
-    return "available"
-
-
 # Orchestrator — idempotent (evidence-hash dedup), re-runnable, per-row isolation
 
 
 @dataclass(frozen=True)
 class HarvestConfig:
-    """Settings for one archive pass.
+    """Settings for one frozen-record harvest pass.
 
-    Dry-run acquires fresh evidence without mutating bronze, SQLite, clones,
+    Dry-run acquires fresh evidence without mutating records or clones,
     caches, or completion markers. cache_dir enables response caching/resume;
     repo_clone_root defaults to its repos/ child, or None without a cache.
     session_filter is a session-id prefix; gh_request_spacing_sec separates rows."""
 
-    archive_dir: Path
+    store_dir: Path
+    snapshot_id: str
     dry_run: bool = False
     cache_dir: Path | None = None
     repo_clone_root: Path | None = None
     session_filter: str | None = None
     gh_request_spacing_sec: float = 0.8
 
+    def __post_init__(self) -> None:
+        for output in (self.cache_dir, self.repo_clone_root):
+            if output is not None:
+                validate_output_path(self.store_dir, output)
+
 
 class _ProductionHarvestServices:
-    """Per-run adapters for archive, repository, GitHub, cache, and clocks."""
+    """Per-run adapters for records, repository, GitHub, cache, and clocks."""
 
     def __init__(self, config: HarvestConfig, github_auth: GitHubAuth) -> None:
         self._config = config
         self._github_auth = github_auth
         self._cache: BackfillCache | None = None
         self._fetched_repos: set[Path] = set()
+        self._records = LocalRecordStore(config.store_dir).read_snapshot(config.snapshot_id)
+        self._runs = {run["run_id"]: run for run in self._records.runs}
 
     @property
-    def archive_dir(self) -> Path:
-        return self._config.archive_dir
+    def store_dir(self) -> Path:
+        return self._config.store_dir
+
+    @property
+    def snapshot_id(self) -> str:
+        return self._config.snapshot_id
+
+    @property
+    def dry_run(self) -> bool:
+        return self._config.dry_run
 
     @property
     def progress_path(self) -> Path | None:
-        return (
-            self._config.cache_dir / "progress.jsonl"
-            if self._config.cache_dir is not None
-            else None
-        )
+        return self._config.cache_dir / "progress.jsonl" if self._config.cache_dir is not None else None
 
     def _uncached_github(self, repo: str, endpoint: str, **kwargs: Any) -> Any:
         return _github_with_retry(
@@ -725,21 +710,48 @@ class _ProductionHarvestServices:
         return self._cache
 
     def query_rows(self, session_filter: str | None) -> Sequence[Mapping[str, Any]]:
-        if not self.archive_dir.exists():
-            raise FileNotFoundError(f"archive_dir does not exist: {self.archive_dir}")
-        if self._config.dry_run:
-            with closing(readonly_connection(self.archive_dir)) as conn:
-                return [dict(row) for row in conn.execute(
-                    "SELECT * FROM runs WHERE session_id LIKE ? || '%'",
-                    (session_filter or "",),
-                )]
-        if session_filter:
-            return query_runs(
-                self.archive_dir,
-                "session_id LIKE ? || '%'",
-                (session_filter,),
+        rows = []
+        for run in sorted(self._records.runs, key=lambda r: r["run_id"]):
+            if session_filter and not run["run_id"].startswith(session_filter):
+                continue
+            task = section_value(run, "original_task") or {}
+            repo = task.get("repository") or {}
+            revision = task.get("analyzed_revision") or {}
+            pr = task.get("pr") or {}
+            base = revision.get("pr_base_sha") or revision.get("merge_base_sha")
+            context = run.get("provenance", {}).get("repository_context", {})
+            for observation in sorted(
+                self._records.eligible_observations,
+                key=lambda o: (datetime.fromisoformat(o["observed_at"]), o["observation_id"]),
+            ):
+                if observation["run_id"] != run["run_id"] or observation["payload"]["type"] != "enrichment":
+                    continue
+                payload = observation["payload"]
+                value = payload["evidence"]["value"] if payload["evidence"]["status"] == "available" else None
+                if value and payload["kind"] == "pr":
+                    pr = value
+                if value and payload["kind"] == "base":
+                    base = value["base_sha"]
+            rows.append(
+                {
+                    "session_id": run["run_id"],
+                    "repo_slug": repo.get("repo_slug"),
+                    "remote_url": repo.get("remote_url"),
+                    "pr_repo": pr.get("repo"),
+                    "pr_number": pr.get("number"),
+                    "branch": context.get("branch"),
+                    "base_branch": context.get("base_branch"),
+                    "source_path": context.get("source_path"),
+                    "head_sha": revision.get("head_sha"),
+                    "base_sha": base,
+                    "changed_files": task.get("changed_files", []),
+                    "findings_fingerprints": [
+                        item["fingerprint"] for item in (section_value(run, "findings") or {}).get("items", [])
+                    ],
+                    "recommended_patch": (section_value(run, "recommended_patch") or {}).get("patch", ""),
+                }
             )
-        return query_runs(self.archive_dir)
+        return rows
 
     def completed_sessions(self) -> set[str]:
         cache = self._cache_instance()
@@ -768,9 +780,35 @@ class _ProductionHarvestServices:
         *,
         console: Console,
     ) -> BaseShaStatus:
+        if not self._config.dry_run and row.repo_slug and row.head_sha:
+            try:
+                license_evidence = GithubLicenseResolver().resolve(row.repo_slug, repo_commit=row.head_sha)
+                value = asdict(license_evidence) if license_evidence is not None else None
+                evidence = {
+                    "status": "available" if value is not None else "unproduced",
+                    "value": value,
+                    "reason": None if value is not None else "license_unavailable",
+                }
+            except LicenseEvidenceError:
+                value = None
+                evidence = {"status": "failed", "value": None, "reason": "license_acquisition_failed"}
+                print_warning(console, "harvest: license acquisition failed; corpus admission remains unavailable")
+            self._append_typed(row.session_id, {"type": "enrichment", "kind": "license", "evidence": evidence}, value)
         if self._config.dry_run:
             return "available" if row.base_sha else "unavailable"
-        return _materialize_base_sha_if_missing(row, repo_clone, console=console)
+        if row.base_sha:
+            return "available"
+        if repo_clone is None or not row.base_branch or not row.head_sha:
+            return "unavailable"
+        try:
+            resolved = git_ops.merge_base(repo_clone, row.base_branch, row.head_sha)
+        except GitError as exc:
+            print_warning(console, f"harvest: base revision enrichment failed: {type(exc).__name__}")
+            return "failed"
+        if resolved is None:
+            return "unavailable"
+        self._append_enrichment(row.session_id, "base", {"base_sha": resolved})
+        return "available"
 
     def github(self, repo: str, endpoint: str, **kwargs: Any) -> Any:
         cache = self._cache_instance()
@@ -786,36 +824,59 @@ class _ProductionHarvestServices:
         exclude_session: str,
         repo_slug: str | None,
     ) -> tuple[float | None, int]:
-        return reviewer_set_penalty_prior(
-            self.archive_dir,
-            list(logins),
-            before_valid_at=before_valid_at,
-            exclude_session=exclude_session,
-            repo_slug=repo_slug,
-            readonly=self._config.dry_run,
+        if not logins:
+            return None, 0
+        winners: dict[str, dict[str, Any]] = {}
+        cutoff = datetime.fromisoformat(before_valid_at)
+        for observation in self._records.eligible_observations:
+            if observation["payload"]["type"] != "harvest-annotation" or observation["run_id"] == exclude_session:
+                continue
+            annotation = observation["payload"]["annotation"]
+            task = section_value(self._runs[observation["run_id"]], "original_task") or {}
+            if repo_slug is not None and (task.get("repository") or {}).get("repo_slug") != repo_slug:
+                continue
+            if datetime.fromisoformat(observation["valid_at"]) >= cutoff or not set(logins).intersection(
+                annotation["reviewer_logins"]
+            ):
+                continue
+            previous = winners.get(observation["run_id"])
+            if previous is None or (
+                datetime.fromisoformat(observation["observed_at"]),
+                observation["observation_id"],
+            ) > (
+                datetime.fromisoformat(previous["observed_at"]),
+                previous["observation_id"],
+            ):
+                winners[observation["run_id"]] = observation
+        penalties = [
+            FP_PENALTY_MAP[a["labels"][0]]
+            for o in winners.values()
+            if (a := o["payload"]["annotation"])["labels"] and a["labels"][0] in FP_PENALTY_MAP
+        ]
+        return (sum(penalties) / len(penalties), len(penalties)) if penalties else (None, 0)
+
+    def _append_enrichment(self, run_id: str, kind: str, value: dict[str, Any]) -> None:
+        self._append_typed(
+            run_id,
+            {"type": "enrichment", "kind": kind, "evidence": {"status": "available", "value": value, "reason": None}},
+            value,
         )
 
     def set_pr_link(self, row: HarvestRow, number: int, repo: str) -> None:
-        set_run_pr_link(self.archive_dir, row.session_id, number, repo)
+        self._append_enrichment(row.session_id, "pr", {"number": number, "repo": repo})
 
     def read_scoring_inputs(self, row: HarvestRow) -> ScoringInputs:
-        return assemble_scoring_inputs(row.archive_path)
+        scoring = section_value(self._runs[row.session_id], "scoring")
+        if scoring is None:
+            return ScoringInputs(verifier_verdicts=None, format_valid=False, length=None)
+        return ScoringInputs(
+            verifier_verdicts=scoring["verifier_verdicts"],
+            format_valid=scoring["format_valid"],
+            length=scoring["length"],
+        )
 
     def read_recorded_fingerprints(self, row: HarvestRow) -> tuple[str, ...]:
-        if row.findings_fingerprints is not None:
-            return row.findings_fingerprints
-        try:
-            data = json.loads((row.archive_path / "findings.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return ()
-        findings = data.get("findings") if isinstance(data, dict) else None
-        if not isinstance(findings, list):
-            return ()
-        return tuple(
-            str(finding["fingerprint"])
-            for finding in findings
-            if isinstance(finding, dict) and "fingerprint" in finding
-        )
+        return row.findings_fingerprints or ()
 
     @staticmethod
     def _file_at(repo: Path, path: str, sha: str) -> str:
@@ -836,9 +897,7 @@ class _ProductionHarvestServices:
             changed_files=list(changed_files),
             repo_clone=repo_clone,
             diff_fetcher=git_ops.diff_name_only,
-            commits_in_window_fetcher=lambda repo, head, base: list(
-                reversed(git_ops.log_shas_since(repo, head, base))
-            ),
+            commits_in_window_fetcher=lambda repo, head, base: list(reversed(git_ops.log_shas_since(repo, head, base))),
             file_at_fetcher=self._file_at,
         )
 
@@ -859,13 +918,94 @@ class _ProductionHarvestServices:
             file_at_fetcher=self._file_at,
         )
 
-    def append_annotation(self, row: HarvestRow, payload: AnnotationPayload) -> bool:
-        return append_label_observation(
-            self.archive_dir,
-            row.session_id,
-            labeler_version=labeler_versions.LABELER_POLICY_VERSION,
-            **asdict(payload),
+    def _append_typed(
+        self,
+        run_id: str,
+        payload: dict[str, Any],
+        semantic_evidence: Any,
+        *,
+        item_uid: str | None = None,
+        digest: str | None = None,
+        valid_at: str | None = None,
+        scheme: str = "canonical-json-v1",
+    ) -> bool:
+        digest = digest or hashlib.sha256(canonical_json(semantic_evidence).encode()).hexdigest()
+        identity = hashlib.sha256(
+            canonical_json(
+                {
+                    "run_id": run_id,
+                    "item_uid": item_uid,
+                    "payload": payload,
+                    "evidence_digest": digest,
+                    "policy": labeler_versions.LABELER_POLICY_VERSION,
+                }
+            ).encode()
+        ).hexdigest()
+        now = self.now_iso()
+        # Preserve the original observation timestamps on idempotent retries.
+        existing = LocalRecordStore(self.store_dir).read_records()["observations"]
+        if any(o["observation_id"] == identity for o in existing):
+            return False
+        return (
+            LocalRecordStore(self.store_dir)
+            .append_observation(
+                {
+                    "schema_version": "daydream.observation.v2"
+                    if payload["type"] == "harvest-annotation"
+                    else "daydream.observation.v1",
+                    "observation_id": identity,
+                    "run_id": run_id,
+                    "item_uid": item_uid,
+                    "valid_at": valid_at or now,
+                    "observed_at": now,
+                    "source": "harvest",
+                    "author": labeler_versions.LABELER_POLICY_VERSION,
+                    "role": "automatic",
+                    "policy_version": labeler_versions.LABELER_POLICY_VERSION,
+                    "rubric_version": labeler_versions.RUBRIC_SCHEMA_VERSION,
+                    "classifier_version": labeler_versions.REPLY_CLASSIFIER_VERSION,
+                    "evidence_digest": digest,
+                    "evidence_digest_scheme": scheme,
+                    "semantic_evidence": semantic_evidence,
+                    "payload": payload,
+                }
+            )
+            .committed
         )
+
+    def append_annotation(self, row: HarvestRow, payload: AnnotationPayload) -> bool:
+        annotation = asdict(payload)
+        inserted = self._append_typed(
+            row.session_id,
+            {
+                "type": "harvest-annotation",
+                "annotation": annotation,
+                "labeler_policy_version": labeler_versions.LABELER_POLICY_VERSION,
+            },
+            annotation,
+            valid_at=payload.valid_at,
+        )
+        rubric = json.loads(payload.rubric_json or "{}")
+        by_fingerprint = {r["fingerprint"]: r for r in rubric.get("per_finding_resolutions") or []}
+        for item in (section_value(self._runs[row.session_id], "findings") or {}).get("items", []):
+            resolution = by_fingerprint.get(item["fingerprint"], {})
+            evidence = resolution.get("evidence") or []
+            disposition = resolution.get("disposition", "unanswered")
+            digest = resolution.get("evidence_digest") or labeler_versions.reply_evidence_digest(evidence)
+            self._append_typed(
+                row.session_id,
+                {
+                    "type": "finding-judgment",
+                    "disposition": disposition,
+                    "rationale": "Automated harvest of recorded finding evidence",
+                },
+                evidence,
+                item_uid=item["item_uid"],
+                digest=digest,
+                valid_at=payload.valid_at,
+                scheme="reply-evidence-v1",
+            )
+        return inserted
 
     def mark_session_done(self, session_id: str) -> None:
         cache = self._cache_instance()
@@ -895,7 +1035,11 @@ def make_harvest_services(
 
 
 def collect_annotation(
-    row: HarvestRow, *, services: HarvestServices, readonly: bool, console: Console,
+    row: HarvestRow,
+    *,
+    services: HarvestServices,
+    readonly: bool,
+    console: Console,
 ) -> tuple[HarvestRow, AnnotationPayload]:
     """Collect and reduce the same evidence for preview and canonical harvest.
 
@@ -944,13 +1088,10 @@ async def run_harvest(
     *,
     services: HarvestServices,
 ) -> dict[str, int]:
-    """Validate the archive queue, acquire evidence, and persist annotations."""
-    requested_archive = config.archive_dir.resolve()
-    services_archive = services.archive_dir.resolve()
-    if requested_archive != services_archive:
-        raise ValueError(
-            f"harvest archive ownership mismatch: requested {requested_archive}, services {services_archive}"
-        )
+    """Validate the frozen run population and append acquired evidence."""
+    if (config.store_dir.resolve() != services.store_dir.resolve()
+            or config.snapshot_id != services.snapshot_id or config.dry_run != services.dry_run):
+        raise ValueError("harvest record-store ownership mismatch")
     raw_queue = services.query_rows(config.session_filter)
     console = create_console()
     queue: list[HarvestRow] = []
@@ -983,7 +1124,10 @@ async def run_harvest(
     for row in queue:
         try:
             row, payload = collect_annotation(
-                row, services=services, readonly=config.dry_run, console=console,
+                row,
+                services=services,
+                readonly=config.dry_run,
+                console=console,
             )
             if config.dry_run:
                 summary["would_annotate"] += 1

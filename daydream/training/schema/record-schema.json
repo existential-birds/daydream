@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Daydream training-record (JSONL) schema v2",
-  "description": "Per-finding training record projected from the curated curation bundle. Each accepted/rejected finding is its own stable, tier-classified, fully-provenanced record. Ship alongside the untouched v1 artifact.",
+  "description": "Per-finding training records projected offline from immutable run and eligible observation snapshots.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -25,13 +25,21 @@
     "record_id": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$",
-      "description": "sha256 hex digest over the canonical (session_id, trajectory_id, segment_id, fingerprint) join."
+      "description": "sha256 of versioned record-snapshot-v1 source identity, run_id, trajectory_id, segment_id, and host item_uid."
     },
     "record_type": {
-      "enum": ["outcome-finding", "process-trace", "task-only"]
+      "enum": [
+        "outcome-finding",
+        "process-trace",
+        "task-only"
+      ]
     },
     "tier": {
-      "enum": ["gold", "silver", "task-only"]
+      "enum": [
+        "gold",
+        "silver",
+        "task-only"
+      ]
     },
     "session_id": {
       "type": "string"
@@ -43,10 +51,19 @@
       "type": "string"
     },
     "finding_fingerprint": {
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "disposition": {
-      "enum": ["accepted", "rejected", "ambiguous", "unanswered", "missing"]
+      "enum": [
+        "accepted",
+        "rejected",
+        "ambiguous",
+        "unanswered",
+        "missing"
+      ]
     },
     "evidence": {
       "type": "array",
@@ -65,22 +82,35 @@
       ],
       "properties": {
         "profile_schema_version": {
-          "type": ["integer", "string", "null"]
+          "type": [
+            "integer",
+            "string",
+            "null"
+          ]
         },
         "profile_name": {
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "profile_source_kind": {
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "profile_digest": {
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },
     "finding_text": {
       "type": "string",
-      "description": "Localized finding/comment text carried from the curated bundle."
+      "description": "Localized host finding text retained in the run record."
     },
     "finding_text_sha256": {
       "type": "string",
@@ -95,12 +125,14 @@
     },
     "diff": {
       "type": "string",
-      "description": "Raw diff body of the reviewed change, embedded from the curated bundle's batches/<session_id>/diff.patch so Stage-2 RFT inputs carry it without an archive-side materialization step."
+      "description": "Immutable analyzed diff retained in original_task.diff."
     },
     "task_identity": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["repo_slug"],
+      "required": [
+        "repo_slug"
+      ],
       "properties": {
         "repo_slug": {
           "type": "string",
@@ -127,22 +159,30 @@
           "type": "object"
         },
         "replay_verification": {
-          "type": ["object", "null"]
+          "type": [
+            "object",
+            "null"
+          ]
         }
       }
     },
     "stack": {
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "outcome_label": {
-      "type": ["string", "null"]
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "lineage": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "hub_commit",
-        "curation_id",
         "content_digests",
         "labeler_policy_version",
         "reply_classifier_version",
@@ -152,15 +192,17 @@
         "split",
         "exclusion_reason",
         "repo_slug",
-        "license_decision"
+        "license_decision",
+        "snapshot_id",
+        "source_identity_version"
       ],
       "properties": {
         "hub_commit": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "pattern": "^[0-9a-f]{40}$"
-        },
-        "curation_id": {
-          "type": ["string", "null"]
         },
         "content_digests": {
           "type": "array",
@@ -169,25 +211,47 @@
           }
         },
         "labeler_policy_version": {
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "reply_classifier_version": {
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "rubric_schema_version": {
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "as_of": {
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "valid_at": {
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "split": {
-          "enum": ["train", "validation", "holdout"]
+          "enum": [
+            "train",
+            "validation",
+            "holdout"
+          ]
         },
         "exclusion_reason": {
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "diff_digest": {
           "type": "string",
@@ -213,13 +277,22 @@
           ],
           "properties": {
             "status": {
-              "enum": ["admitted", "rejected"]
+              "enum": [
+                "admitted",
+                "rejected"
+              ]
             },
             "reason_code": {
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "spdx_id": {
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "policy_version": {
               "type": "string"
@@ -231,8 +304,43 @@
               "type": "string"
             }
           }
+        },
+        "snapshot_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_identity_version": {
+          "const": "record-snapshot-v1"
         }
       }
+    },
+    "reward_version": {
+      "type": "string"
+    },
+    "intrinsic_reward": {
+      "type": "object"
+    },
+    "annotation": {
+      "type": "object"
+    },
+    "has_posterior": {
+      "type": "boolean"
+    },
+    "decisive_only": {
+      "type": "boolean"
+    },
+    "decisive_mix": {
+      "type": "boolean"
+    },
+    "verification": {
+      "type": "object"
+    },
+    "scoring": {
+      "type": "object"
+    },
+    "item_uid": {
+      "type": "string",
+      "minLength": 1
     }
   }
 }

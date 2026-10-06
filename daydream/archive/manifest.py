@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from daydream.archive.provenance import ExecutableProvenance
     from daydream.trajectory import RunWriteSnapshot
 
-MANIFEST_SCHEMA_VERSION = "1.0"
+MANIFEST_SCHEMA_VERSION = "2.0"
 
 
 def archive_recorder_provenance_from_snapshot(
@@ -88,7 +88,6 @@ class Manifest:
     Missing metrics mean uncomputed or undefined, never an imputed zero.
     ``location_in_hunk_rate`` scores the originally cited line before snapping;
     ``shipped_duplicate_pairs`` counts surviving near-duplicate findings.
-    ``composite_reward`` caches the winning label observation.
 
     Fix failures and surviving untracked paths retain evidence of partial
     work; the latter cannot be attributed to an individual parallel group.
@@ -172,11 +171,6 @@ class Manifest:
     location_in_hunk_rate: float | None = None
     shipped_duplicate_pairs: int | None = None
 
-    # Outcome labels (populated via `daydream harvest`)
-    outcome_labels: str = field(default="[]")
-    labeled_at: str | None = None
-    composite_reward: float | None = None
-
     # Archive location
     archive_path: str = ""
 
@@ -253,11 +247,6 @@ class Manifest:
                 "verbosity": self.verbosity,
                 "location_in_hunk_rate": self.location_in_hunk_rate,
                 "shipped_duplicate_pairs": self.shipped_duplicate_pairs,
-            },
-            "outcome": {
-                "labels": json.loads(self.outcome_labels),
-                "labeled_at": self.labeled_at,
-                "composite_reward": self.composite_reward,
             },
             "archive_path": self.archive_path,
         }

@@ -22,7 +22,7 @@ def test_operator_destination_selects_publication_and_pinned_download(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     cli_repo: str | None, expected_repo: str,
 ) -> None:
-    from daydream.dataset_hub_client import HubError
+    from daydream.hub import HubError
     from tests.harness.dataset_hub import FakeDatasetHub
 
     class OperatorHub(FakeDatasetHub):
@@ -156,7 +156,12 @@ def test_dataset_publish_download_round_trip_through_cli(
                      "--output", str(destination)]) == 0
     downloaded = json.loads(capsys.readouterr().out)
     assert downloaded == {"revision": hub.revision, "runs": 1, "observations": 1}
-    assert read_records(LocalRecordStore(destination)) == read_records(store)
+    recovered = read_records(LocalRecordStore(destination))
+    original = read_records(store)
+    assert recovered.runs == original.runs
+    assert recovered.observations == original.observations
+    assert recovered.snapshot["source"]["revision"] == hub.revision
+    assert original.snapshot["source"] is None
     assert not (destination / "index.db").exists()
 
 
@@ -232,14 +237,16 @@ def test_cli_rival_manifest_commit_preserves_both_record_sets(
     rival = LocalRecordStore(tmp_path / "rival")
     first.commit_run(run_record("first"))
     rival.commit_run(run_record("rival"))
+    first.append_observation(observation("first-judgment", run_id="first"))
+    rival.append_observation(observation("rival-judgment", run_id="rival"))
 
     def publish_rival() -> None:
         assert cli_main(["corpus", "dataset", "publish", "--store", str(rival.root)]) == 0
-        assert json.loads(capsys.readouterr().out)["published"] == 1
+        assert json.loads(capsys.readouterr().out)["published"] == 2
 
     hub.before_commit = publish_rival
     assert cli_main(["corpus", "dataset", "publish", "--store", str(first.root)]) == 0
-    assert json.loads(capsys.readouterr().out)["published"] == 1
+    assert json.loads(capsys.readouterr().out)["published"] == 2
     assert len(hub.commits) == 2
     destination = tmp_path / "download"
     assert cli_main(["corpus", "dataset", "download", "--revision", hub.revision,
@@ -247,9 +254,10 @@ def test_cli_rival_manifest_commit_preserves_both_record_sets(
     assert json.loads(capsys.readouterr().out)["runs"] == 2
     records = LocalRecordStore(destination).read_records()
     assert {record["run_id"] for record in records["runs"]} == {"first", "rival"}
+    assert {record["observation_id"] for record in records["observations"]} == {"first-judgment", "rival-judgment"}
     for store in (first, rival):
         assert cli_main(["corpus", "dataset", "status", "--store", str(store.root)]) == 0
-        assert json.loads(capsys.readouterr().out)["published"] == 1
+        assert json.loads(capsys.readouterr().out)["published"] == 2
 
 
 @pytest.mark.parametrize("fault", ["manifest", "shard"])

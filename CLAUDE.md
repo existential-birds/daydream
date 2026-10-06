@@ -128,8 +128,9 @@ deep FlowSteps -> phases/ -> agent.py -> Backend.execute()
 | `pr_review.py`, `reviews/` | Posting orchestration over finding/placement models, host-owned comment identity, captured rendering, and immutable diagram validation |
 | `pr_comment_renderer.py` | Pure renderer: trajectory in, markdown out (no I/O) |
 | `training/` vs `eval/` | Corpus pipeline (harvest, reward, projection, JSONL) vs deterministic trajectory analysis; `eval/quality.py` owns source-quality analysis and `eval/latency_report.py` renders the per-profile report |
-| `training/harvest.py`, `training/harvest_types.py` | Explicit per-run evidence services and validated immutable inputs; `collect_annotation` shares acquisition with read-only semantic preview, and `build_annotation(row, evidence)` reduces completed evidence without I/O |
-| `training/calibration.py` | Fail-closed projection validation, deterministic calibration statistics, `calibration-artifact` emission (`corpus calibrate-reward`) |
+| `dataset.py`, `dataset_capture.py`, `dataset_hub.py`, `hub.py` | Frozen run capture, immutable local records and snapshots, canonical JSONL publication/download, and the single lazy HF SDK client |
+| `training/harvest.py`, `training/harvest_types.py` | Record-based acquisition and immutable observation persistence; pure reward/rubric reduction preserves scoring semantics |
+| `training/corpus_projection/`, `training/calibration.py` | Offline projection from frozen record snapshots with eligible observations, followed by fail-closed calibration of derived corpus exports |
 | `prompts/` | Authorial intent, exploration subagents, CWD grounding |
 
 Self-describing modules are not listed: `findings.py`, `pricing.py`, `github_app.py`,
@@ -334,7 +335,7 @@ Full contract: `docs/extensions.md`.
   archive/evaluate/publish only after that boundary. Never reconstruct public output paths or
   broaden backend read roots.
 - **Archive index**: initialize an empty database or use the complete current schema.
-  Unsupported indexes are preserved and rejected; use a fresh archive directory instead of migrating.
+  The local diagnostic archive uses runs-only schema version 9. Unsupported indexes are preserved and rejected; use a fresh archive directory instead of migrating. Annotation history lives only in LocalRecordStore observations.
   Evaluation consumes the immutable write snapshot and leaves unavailable lifecycle timing unmeasured.
 - **Conventional Commits** (`feat(backends): ...`). Stage explicitly (`git add <path>`), never `git add -A`.
 - Fix bugs at the root. Never bypass the hook, skip tests, or `git push --no-verify`.

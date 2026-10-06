@@ -47,7 +47,7 @@ class FakeApi:
 def install_sdk(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, FakeApi]:
     from huggingface_hub import errors
 
-    from daydream import dataset_hub_client as boundary
+    from daydream import hub as boundary
 
     api = FakeApi()
     sdk = SimpleNamespace(HfApi=lambda **kwargs: api, CommitOperationAdd=lambda **kwargs: SimpleNamespace(**kwargs))
@@ -70,7 +70,7 @@ def test_private_revision_is_a_private_dataset_pin(monkeypatch: pytest.MonkeyPat
 def test_public_or_unconfirmed_destinations_are_rejected(
     monkeypatch: pytest.MonkeyPatch, visibility: object,
 ) -> None:
-    from daydream.dataset_hub_client import HubError
+    from daydream.hub import HubError
 
     client, api = install_sdk(monkeypatch)
     api.info.private = visibility
@@ -82,7 +82,7 @@ def test_public_or_unconfirmed_destinations_are_rejected(
 
 @pytest.mark.parametrize("revision", ["main", "a" * 39, "A" * 40, None])
 def test_invalid_repository_pins_are_rejected(monkeypatch: pytest.MonkeyPatch, revision: object) -> None:
-    from daydream.dataset_hub_client import HubError
+    from daydream.hub import HubError
 
     client, api = install_sdk(monkeypatch)
     api.info.sha = revision
@@ -110,7 +110,7 @@ def test_commit_installs_complete_bytes_in_one_guarded_dataset_commit(monkeypatc
 def test_network_failures_never_expose_payloads_or_claim_conflicts(
     monkeypatch: pytest.MonkeyPatch, status: int,
 ) -> None:
-    from daydream.dataset_hub_client import HubError
+    from daydream.hub import HubError
 
     client, api = install_sdk(monkeypatch)
     api.error = http_error(status)
@@ -127,7 +127,7 @@ def test_network_failures_never_expose_payloads_or_claim_conflicts(
 
 
 def test_only_http_precondition_failed_is_a_commit_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.dataset_hub_client import HubConflict
+    from daydream.hub import HubConflict
 
     client, api = install_sdk(monkeypatch)
     api.error = http_error(412)
@@ -159,7 +159,7 @@ def test_only_missing_remote_entry_returns_none(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_local_cache_miss_never_looks_like_an_absent_remote_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.dataset_hub_client import HubError
+    from daydream.hub import HubError
 
     client, api = install_sdk(monkeypatch)
     api.error = LocalEntryNotFoundError("SECRET offline cache miss")
@@ -172,7 +172,7 @@ def test_local_cache_miss_never_looks_like_an_absent_remote_manifest(monkeypatch
 def test_mutable_or_noncanonical_pins_never_reach_the_network(
     monkeypatch: pytest.MonkeyPatch, operation: str, revision: str,
 ) -> None:
-    from daydream.dataset_hub_client import HubError
+    from daydream.hub import HubError
 
     client, api = install_sdk(monkeypatch)
     with pytest.raises(HubError, match="^invalid_revision$"):
@@ -184,7 +184,7 @@ def test_mutable_or_noncanonical_pins_never_reach_the_network(
 
 
 def test_invalid_commit_response_never_acknowledges_publication(monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.dataset_hub_client import HubError
+    from daydream.hub import HubError
 
     client, api = install_sdk(monkeypatch)
     api.result.oid = "SECRET not a commit"
@@ -193,7 +193,7 @@ def test_invalid_commit_response_never_acknowledges_publication(monkeypatch: pyt
 
 
 def test_constructor_412_is_not_a_remote_commit_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.dataset_hub_client import HubError
+    from daydream.hub import HubError
 
     client, api = install_sdk(monkeypatch)
 
@@ -210,7 +210,7 @@ def test_constructor_412_is_not_a_remote_commit_conflict(monkeypatch: pytest.Mon
 def test_unreadable_or_nonregular_cache_results_fail_closed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str,
 ) -> None:
-    from daydream.dataset_hub_client import HubError
+    from daydream.hub import HubError
 
     client, api = install_sdk(monkeypatch)
     source = tmp_path / "source"
@@ -224,7 +224,7 @@ def test_unreadable_or_nonregular_cache_results_fail_closed(
 
 
 def test_missing_extra_reports_a_sanitized_diagnostic(monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.dataset_hub_client import HfDatasetHub, HubError
+    from daydream.hub import HfDatasetHub, HubError
 
     real_import = builtins.__import__
 

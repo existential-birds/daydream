@@ -24,7 +24,11 @@ def segment(trajectory: dict[str, Any]) -> list[Segment]:
 
     Duplicate trajectory_id values raise ValueError naming the id.
     """
-    refs = trajectory.get("subagent_trajectory_ref") or []
+    summaries = (trajectory.get("extra") or {}).get("subtrajectories") or []
+    refs = [summary for summary in summaries if "invocation_id" not in summary
+            and summary.get("trajectory_id") != trajectory.get("trajectory_id")]
+    if not refs:
+        refs = trajectory.get("subagent_trajectory_ref") or []
     if not refs:
         root_id = str(trajectory.get("trajectory_id", ""))
         return [

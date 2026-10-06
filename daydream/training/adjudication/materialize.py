@@ -1,390 +1,53 @@
-"""Materialize deterministic sessions.jsonl and a pinned preview-manifest.json.
-
-Acquire fresh production evidence through read-only harvest services; legacy
-and index-only history can supply stored resolutions. Serialize all findings
-through snapshot.build_canonical_record. Never append observations, update
-resume/completion markers, or write the hydrated SQLite index.
-"""
+"""Deterministic disposable annotation exports from a frozen record snapshot."""
 
 from __future__ import annotations
 
-import hashlib
-import json
 from pathlib import Path
 from typing import Any
 
-from daydream.archive.hydrate import HubUnavailableError
-from daydream.archive.index import readonly_connection
-from daydream.json_utils import atomic_write_bytes, canonical_json as _canonical, umask_derived_mode
-from daydream.training.adjudication.preview import (
-    _SESSIONS_OUT_FILENAME as _SESSIONS_OUT_FILENAME,
-    _load_sessions,
-)
-from daydream.training.adjudication.snapshot import build_canonical_record, snapshot_id
-from daydream.training.dispositions import DECISIVE_DISPOSITIONS
+from daydream.dataset import LocalRecordStore, SnapshotRecords
+from daydream.json_utils import atomic_write_bytes, canonical_json
+from daydream.training.adjudication.snapshot import build_canonical_record
 from daydream.training.labeler_signals import resolution_from_dict
-
-__all__ = ["run_materialize"]
+from daydream.training.record_evidence import sessions_from_snapshot, validate_output_path
 
 _MANIFEST_FILENAME = "preview-manifest.json"
 _ANNOTATIONS_FILENAME = "annotations.jsonl"
 
-# Disposition written for a conflicted generation's materialized records
-# (sessions.jsonl). The operator queue (``queue.build_queue``'s default
-# non-decisive set) and the final bundle's sessions.jsonl must route the
-# finding to task-only adjudication -- never gold -- and the archive
-# `rubric_json` keeps the real decisive disposition for provenance (the
-# canonical harvest restores it from the fresh queue). Corpus-v2's gold gate
-# (``tiers.classify_tier``) keys solely on disposition/evidence and never
-# reads the ``conflicting`` flag, so a decisive disposition here would still
-# classify gold; a non-decisive disposition forces ``task-only``.
-_CONFLICTED_DISPOSITION = "ambiguous"
 
-
-def index_sessions(index_root: Path) -> tuple[list[dict[str, Any]], str]:
-    """Load sessions from ``sessions.jsonl`` when present, else the hydrated index."""
-    if (index_root / _SESSIONS_OUT_FILENAME).is_file():
-        return _load_sessions(index_root)
-    return _sessions_from_hydrated_stage(index_root)
-
-
-def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]], str]:
-    """Materialize fresh bronze evidence, falling back to stored resolutions for legacy history.
-
-    Acquire production evidence even when annotations exist, so drift checks see
-    current replies. DB-only histories and embedded legacy resolutions use the
-    winning observation adapter; evidence-only sessions emit no records.
-
-    _winning_observation selects deterministic human-first precedence and marks
-    conflicting non-human decisive generations. The conflict flag travels with
-    all session records; run_materialize neutralizes their dispositions to keep
-    them out of gold while canonical harvest retains original provenance.
-
-    Read SQLite without sidecars or writes. Require exactly one downloads/
-    revision directory as the pinned source commit."""
-    if not (index_root / "index.db").is_file():
-        raise HubUnavailableError(
-            f"hydrated index sessions file not found: {index_root / 'sessions.jsonl'}"
-        )
-    rows = _readonly_query(index_root / "index.db", "SELECT * FROM runs")
-    if not rows:
-        raise HubUnavailableError(f"hydrated index at {index_root} has no runs")
-    sessions: list[dict[str, Any]] = []
-    for row in rows:
-        session_id = str(row["session_id"])
-        observations = _readonly_query(
-            index_root / "index.db",
-            "SELECT * FROM label_observations WHERE session_id = ?",
-            (session_id,),
-        )
-        conflicting = False
-        resolutions = _semantic_resolutions_readonly(index_root, row)
-        session: dict[str, Any]
-        if observations:
-            winner, conflicting = _winning_observation(observations)
-            rubric_raw = winner.get("rubric_json")
-            if rubric_raw is not None:
-                try:
-                    rubric = json.loads(rubric_raw)
-                except (KeyError, TypeError, ValueError) as exc:
-                    raise HubUnavailableError(
-                        f"session {session_id!r}: unreadable winning rubric_json: {exc}"
-                    ) from exc
-                if not isinstance(rubric, dict):
-                    raise HubUnavailableError(
-                        f"session {session_id!r}: winning rubric_json is not an object"
-                    )
-                per_finding = rubric.get("per_finding_resolutions")
-                if resolutions is None and isinstance(per_finding, list) and per_finding:
-                    resolutions = per_finding
-        # DB-only history and legacy embedded resolutions remain supported.
-        # Production bronze was already acquired above, independently of the
-        # winner's dispositions and without changing the pinned source tree.
-        if resolutions is None:
-            resolutions = _trajectory_resolutions_readonly(index_root, session_id)
-            if resolutions is None:
-                continue
-        if not resolutions:
-            continue  # An explicitly empty bronze finding inventory has no records.
-        session = {
-            "session_id": session_id,
-            "trajectory_id": session_id,
-            "segment_id": session_id,
-            "resolutions": resolutions,
-        }
-        if conflicting:
-            session["conflicting"] = True
-        sessions.append(session)
-    downloads = index_root / "downloads"
-    if not downloads.is_dir():
-        raise HubUnavailableError(f"hydrated index at {index_root} has no downloads/ revision pin")
-    revisions = sorted(p.name for p in downloads.iterdir() if p.is_dir())
-    if len(revisions) != 1:
-        raise HubUnavailableError(
-            f"hydrated index at {index_root} has {len(revisions)} downloaded revisions; "
-            "expected exactly one pinned source commit"
-        )
-    return sessions, revisions[0]
-
-
-def _semantic_resolutions_readonly(
-    index_root: Path, row: dict[str, Any],
-) -> list[dict[str, Any]] | None:
-    """Acquire live evidence for production bronze, including on re-harvest.
-
-    Legacy snapshots with embedded resolutions and DB-only imported histories
-    retain their stored-evidence adapter. Production trajectories never need
-    an annotation field or a prior canonical write.
-    """
-    from daydream.training.harvest import HarvestConfig, collect_annotation, make_harvest_services
-    from daydream.training.harvest_types import HarvestRow
-    from daydream.trajectory import run_directory, run_document_path
-    from daydream.ui import create_console
-
-    run_dir = run_directory(index_root, str(row["session_id"]))
-    path = run_document_path(run_dir)
-    if not path.is_file():
-        return None
-    try:
-        trajectory = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(trajectory, dict):
-            raise ValueError("trajectory must be an object")
-        if "resolutions" in trajectory:
-            return None
-        findings_path = run_dir / "findings.json"
-        findings = json.loads(findings_path.read_text()).get("findings") if findings_path.is_file() else None
-        if findings == [] or (findings is None and row.get("total_findings") == 0):
-            return []
-        # Hydration owns the bronze path; never follow an archived producer's
-        # absolute archive_path into a different tree.
-        harvest_row = HarvestRow.from_mapping(
-            {**row, "archive_path": str(run_dir.resolve())}, row_number=1,
-        )
-        config = HarvestConfig(archive_dir=index_root, dry_run=True)
-        _linked_row, payload = collect_annotation(
-            harvest_row, services=make_harvest_services(config), readonly=True,
-            console=create_console(),
-        )
-        rubric = json.loads(payload.rubric_json or "{}")
-        resolutions = rubric.get("per_finding_resolutions")
-        if not isinstance(resolutions, list) or not resolutions:
-            raise ValueError("no per-finding resolutions; missing recorded finding identities")
-        by_fingerprint = {str(finding["fingerprint"]): finding for finding in findings or []}
-        provenance_keys = (
-            "profile_schema_version", "profile_name", "profile_source_kind", "profile_digest", "stack",
-        )
-        return [
-            {
-                **{key: row.get(key) for key in provenance_keys},
-                **{key: value for key, value in by_fingerprint.get(resolution["fingerprint"], {}).items()
-                   if key in provenance_keys},
-                **resolution,
-            }
-            for resolution in resolutions
-        ]
-    except Exception as exc:
-        raise HubUnavailableError(
-            f"semantic preview for session {row['session_id']!r} failed: {exc}"
-        ) from exc
-
-
-def _trajectory_resolutions_readonly(
-    index_root: Path, session_id: str
-) -> list[dict[str, Any]] | None:
-    """Read legacy embedded resolutions when observation history cannot materialize them.
-
-    This includes new sessions, human rows with NULL rubric_json, and imported
-    labels-only history. An absent trajectory returns None for evidence-only
-    sessions; present unreadable, malformed, or empty data raises HubUnavailableError
-    naming the session rather than silently dropping it.
-    """
-    from daydream.trajectory import run_directory, run_document_path
-
-    trajectory_path = run_document_path(run_directory(index_root, session_id))
-    if not trajectory_path.is_file():
-        return None
-    try:
-        trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise HubUnavailableError(
-            f"unreadable hydrated trajectory at {trajectory_path}: {exc}"
-        ) from exc
-    resolutions = trajectory.get("resolutions") if isinstance(trajectory, dict) else None
-    if not isinstance(resolutions, list) or not resolutions:
-        raise HubUnavailableError(
-            f"hydrated trajectory for session {session_id!r} carries no "
-            "per-finding resolutions to materialize"
-        )
-    return resolutions
-
-
-def _readonly_query(
-    db_path: Path, sql: str, params: tuple[Any, ...] = ()
-) -> list[dict[str, Any]]:
-    """SELECT through readonly_connection without WAL pragmas or sidecar creation.
-
-    Its immutable read mode refuses surviving uncheckpointed index.db-wal files.
-    """
-    try:
-        conn = readonly_connection(db_path.parent)
-    except ValueError as exc:
-        raise HubUnavailableError(str(exc)) from exc
-    try:
-        return [dict(r) for r in conn.execute(sql, params).fetchall()]
-    finally:
-        conn.close()
-
-
-def _winning_observation(
-    observations: list[dict[str, Any]],
-) -> tuple[dict[str, Any], bool]:
-    """Select the latest row per archive dedup key, then human-first/latest overall.
-
-    Conflict requires distinct decisive label sets among non-human winners.
-    Policy bumps, edited evidence, and label-preserving overlays agree; human
-    overrides are authoritative, and a non-decisive generation resolving to a
-    decisive one is an evolution rather than a conflict."""
-    groups: dict[tuple[Any, ...], dict[str, Any]] = {}
-    for obs in observations:
-        key = (
-            obs.get("evidence_sha"),
-            obs.get("labeler_policy_version"),
-            obs.get("reply_evidence_digest"),
-            obs.get("labels"),
-            obs.get("has_posterior"),
-        )
-        existing = groups.get(key)
-        if existing is None or str(obs.get("observed_at", "")) > str(existing.get("observed_at", "")):
-            groups[key] = obs
-    winners = list(groups.values())
-    winner = max(
-        winners,
-        key=lambda o: (
-            1 if o.get("source") == "human" else 0,
-            str(o.get("observed_at", "")),
-        ),
-    )
-    # Human overrides and non-decisive generations do not compete with
-    # automatic decisive labels; agreeing evidence generations remain gold-eligible.
-    decisive_sets = {
-        o.get("labels")
-        for o in winners
-        if o.get("source") != "human" and _labels_claim_decisive(o.get("labels"))
-    }
-    return winner, len(decisive_sets) > 1
-
-
-def _labels_claim_decisive(labels: Any) -> bool:
-    """Recognize decisive finding-* labels in a list or JSON array string.
-
-    Malformed data, non-finding labels and non-decisive labels claim nothing."""
-    if isinstance(labels, str):
-        try:
-            labels = json.loads(labels)
-        except ValueError:
-            return False
-    if not isinstance(labels, list):
-        return False
-    return any(
-        isinstance(label, str) and label.startswith("finding-") and label[len("finding-"):] in DECISIVE_DISPOSITIONS
-        for label in labels
-    )
-
-
-def run_materialize(
-    index_root: Path,
-    out_dir: Path,
-    *,
-    pin: dict[str, str],
-    dry_run: bool = False,
-) -> dict[str, Any]:
-    """Atomically write canonical sessions sorted by record_id and their preview manifest.
-
-    Include every disposition and all pin components. snapshot_id binds the pin
-    and evidence digests, so changed evidence changes identity. Missing/empty pin
-    fields raise ValueError; missing/unreadable indexes raise HydrationError and
-    symbolic revisions raise MovingBranchError. dry_run validates and returns the
-    same summary without writing. Identical inputs produce identical bytes.
-    """
-    # Validate the pin before touching its components in the loop body:
-    # ``snapshot_id`` raises the documented ValueError naming the missing
-    # component, never a KeyError from ``pin["evidence_observed_at"]``.
-    pin_id = snapshot_id(pin)
-    sessions, index_revision = index_sessions(index_root)
-
-    records: list[dict[str, Any]] = []
-    for session in sessions:
-        resolutions = session.get("resolutions")
-        if not isinstance(resolutions, list):
-            continue
-        for row in resolutions:
-            if not isinstance(row, dict):
-                raise ValueError(f"materialize: non-object resolution row in session data: {row!r}")
-            resolution = resolution_from_dict(row)
-            record = build_canonical_record(
-                session,
-                resolution,
-                evidence_observed_at=pin["evidence_observed_at"],
-                as_of=pin.get("as_of"),
+def annotation_records(records: SnapshotRecords) -> list[dict[str, Any]]:
+    result = []
+    for session in sessions_from_snapshot(records):
+        for resolution in session["resolutions"]:
+            item = build_canonical_record(
+                {**session, "resolutions": [resolution]},
+                resolution_from_dict(resolution),
+                evidence_observed_at=records.snapshot["observed_before"],
+                as_of=records.snapshot["valid_before"],
             )
-            if session.get("conflicting"):
-                # The session-level conflict flag rides on every emitted
-                # per-finding record so downstream consumers (canonical
-                # harvest) can exclude the disposition from decisive labels
-                # while the full record — flag included — lands in rubric_json.
-                # The winner's decisive disposition is neutralized to
-                # ``_CONFLICTED_DISPOSITION``: the operator queue (build_queue's
-                # default non-decisive set) and the final bundle's sessions.jsonl
-                # then route the finding to task-only adjudication — never gold,
-                # one disposition in the bundle — while the canonical harvest
-                # restores the real decisive disposition for the archive
-                # rubric_json provenance from the freshly re-derived queue.
-                record["conflicting"] = True
-                record["disposition"] = _CONFLICTED_DISPOSITION
-                # The record embeds the session-shape view (``resolutions``)
-                # that ``project_findings``/``build_queue`` consume; neutralize
-                # its disposition too, or the operator queue would still
-                # classify the finding gold (``tiers.classify_tier`` reads the
-                # resolution, never the record's top-level disposition).
-                for nested in record.get("resolutions") or []:
-                    if isinstance(nested, dict):
-                        nested["disposition"] = _CONFLICTED_DISPOSITION
-            records.append(record)
-    records.sort(key=lambda r: str(r["record_id"]))
+            item["item_uid"] = resolution["item_uid"]
+            result.append(item)
+    return sorted(result, key=lambda r: r["record_id"])
 
-    id_digest = hashlib.sha256(
-        (
-            pin_id
-            + ":"
-            + hashlib.sha256(
-                "".join(str(r["evidence_digest"]) for r in records).encode("utf-8")
-            ).hexdigest()
-        ).encode("utf-8")
-    ).hexdigest()
 
-    summary: dict[str, Any] = {
-        "snapshot_id": id_digest,
-        "index_revision": index_revision,
-        "record_count": len(records),
-    }
-    if dry_run:
-        return summary
-
-    atomic_write_bytes(
-        out_dir / _SESSIONS_OUT_FILENAME,
-        "".join(_canonical(r) + "\n" for r in records).encode("utf-8"),
-        fsync=False,
-        dir_fsync=False,
-        mode=umask_derived_mode(),
-    )
-    manifest: dict[str, Any] = dict(pin)
-    manifest["snapshot_id"] = id_digest
-    manifest["index_revision"] = index_revision
-    atomic_write_bytes(
-        out_dir / _MANIFEST_FILENAME,
-        _canonical(manifest).encode("utf-8"),
-        fsync=False,
-        dir_fsync=False,
-        mode=umask_derived_mode(),
-    )
+def run_materialize(store_dir: Path, snapshot_id: str, out_dir: Path, *, dry_run: bool = False) -> dict[str, Any]:
+    validate_output_path(store_dir, out_dir)
+    records = LocalRecordStore(store_dir).read_snapshot(snapshot_id)
+    annotations = annotation_records(records)
+    summary = {"snapshot_id": snapshot_id, "record_count": len(annotations)}
+    if not dry_run:
+        atomic_write_bytes(
+            out_dir / _ANNOTATIONS_FILENAME,
+            "".join(canonical_json(r) + "\n" for r in annotations).encode(),
+            mode=0o600,
+            fsync=True,
+            dir_fsync=True,
+        )
+        atomic_write_bytes(
+            out_dir / _MANIFEST_FILENAME,
+            (canonical_json({"schema_version": "daydream.annotation-export.v2", **summary}) + "\n").encode(),
+            mode=0o600,
+            fsync=True,
+            dir_fsync=True,
+        )
     return summary

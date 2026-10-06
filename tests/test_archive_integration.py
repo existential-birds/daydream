@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Literal
 
@@ -25,7 +25,6 @@ from daydream.artifacts.filesystem import manifest_tree
 from daydream.atif import Step, validate as atif_validate
 from daydream.backends import AgentEvent, ResultEvent, ToolResultEvent, ToolStartEvent
 from daydream.commands.review import _parse_args
-from daydream.config_file import load_file_config
 from daydream.run_config import RunConfig
 from daydream.run_snapshot import (
     ArchiveRunSnapshot,
@@ -43,7 +42,6 @@ from daydream.trajectory import (
     now_iso,
 )
 from tests.harness.backend import ScriptedBackend
-from tests.harness.config import TARGET_HUB_KEY_CONFIG
 from tests.harness.review_profile import independent_exploration_profile
 from tests.harness.stub_backend import StubBackend
 from tests.harness.trajectory import make_recorder
@@ -180,33 +178,6 @@ def _strict_archive_callback(
         )
 
     return _finalize
-
-def _upload_fixture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, dump_path: Path | None = None,
-    setup: Callable[[Path], dict[str, Any]] | None = None, **config_kwargs: Any,
-) -> tuple[TrajectoryRecorder, list[tuple[Any, ...]], Path]:
-    """Capture strict-archive uploads as ``(run_dir, repo_id, session_id)`` tuples.
-
-    ``setup`` may write checkout files before returning extra RunConfig fields.
-    """
-    uploaded: list[tuple[Any, ...]] = []
-
-    def _fake_upload(run_dir: Path, repo_id: str, session_id: str) -> bool:
-        uploaded.append((str(run_dir), repo_id, session_id))
-        return True
-
-    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", _fake_upload)
-
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    (target_dir / ".review-output.md").write_text("# Review\nLooks good.\n", encoding="utf-8")
-    config_kwargs.update(setup(target_dir) if setup else {})
-    config = RunConfig(run_eval=False, **config_kwargs)
-    recorder = make_recorder(target_dir,
-        on_write=_strict_archive_callback(config, target_dir, dump_path=dump_path),
-    )
-    _add_user_step(recorder)
-    return recorder, uploaded, target_dir
 
 def _findings_route(live_root: Path) -> Any:
     """The registered ``--findings-out`` route the strict bundle relocates."""
@@ -413,39 +384,21 @@ def test_cli_defaults_archive_and_eval(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_archive_callback_keeps_configured_hub_work_local(
     tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    recorder, uploaded, _ = _upload_fixture(
-        tmp_path, monkeypatch, trajectory_hub_repo="acme/dd-trajectories", archive=True, dump_artifacts=None,
-    )
+    from tests.harness.dataset_hub import FakeDatasetHub
+
+    hub = FakeDatasetHub()
+    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
+    target = tmp_path / "project"
+    target.mkdir()
+    (target / ".review-output.md").write_text("# Review\nLooks good.\n", encoding="utf-8")
+    config = RunConfig(run_eval=False, trajectory_hub_repo="acme/dd-trajectories", archive=True)
+    recorder = make_recorder(target, on_write=_strict_archive_callback(config, target))
+    _add_user_step(recorder)
     async with recorder:
         pass
 
-    assert uploaded == []
+    assert hub.commits == []
     assert (archive_dir / "runs" / recorder.session_id / "manifest.json").is_file()
-
-@pytest.mark.parametrize("filename,body,set_hf_token", [
-    (None, None, False), ("pyproject.toml", TARGET_HUB_KEY_CONFIG, True),
-    (".daydream.toml", 'trajectory_hub_repo = "evil/repo"\n', True),
-])
-async def test_archive_callback_does_not_upload_when_unconfigured(
-    tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch, filename: str | None, body: str | None,
-    set_hf_token: bool,
-) -> None:
-    """Target-checkout config cannot select an upload destination, even with HF_TOKEN present."""
-
-    if set_hf_token:
-        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-    monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
-
-    def _setup(target_dir: Path) -> dict[str, Any]:
-        if filename is not None and body is not None:
-            (target_dir / filename).write_text(body, encoding="utf-8")
-        return {"file_config": load_file_config(target_dir) if filename is not None else None}
-
-    recorder, uploaded, _ = _upload_fixture(tmp_path, monkeypatch, archive=True, setup=_setup)
-    async with recorder:
-        pass
-
-    assert uploaded == []
 
 async def test_signal_flush_archive_uses_one_immutable_cutoff_for_all_documents(
     tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
@@ -508,14 +461,21 @@ async def test_archive_callback_no_archive_dump_artifacts_skips_upload(
 ) -> None:
     dump_dir = tmp_path / "dump"
     dump_dir.mkdir()
-    recorder, uploaded, _ = _upload_fixture(
-        tmp_path, monkeypatch, dump_path=dump_dir, trajectory_hub_repo="acme/dd-trajectories", archive=False,
-        dump_artifacts=str(dump_dir),
-    )
+    from tests.harness.dataset_hub import FakeDatasetHub
+
+    hub = FakeDatasetHub()
+    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
+    target = tmp_path / "project"
+    target.mkdir()
+    (target / ".review-output.md").write_text("# Review\nLooks good.\n", encoding="utf-8")
+    config = RunConfig(run_eval=False, trajectory_hub_repo="acme/dd-trajectories", archive=False,
+                       dump_artifacts=str(dump_dir))
+    recorder = make_recorder(target, on_write=_strict_archive_callback(config, target, dump_path=dump_dir))
+    _add_user_step(recorder)
     async with recorder:
         pass
 
-    assert uploaded == []
+    assert hub.commits == []
     assert (dump_dir / "manifest.json").is_file()
     assert (dump_dir / "review-output.md").is_file()
 

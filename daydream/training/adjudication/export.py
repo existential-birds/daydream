@@ -11,12 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from daydream.json_utils import atomic_write_bytes, canonical_json as _canonical, umask_derived_mode
-from daydream.training.corpus_projection.identity import record_id as compute_record_id
+from daydream.training.record_identity import record_finding_id
 
 __all__ = ["EXPORT_KEYS", "validate_export_rows", "write_export_rows"]
 
 EXPORT_KEYS = (
     "record_id",
+    "item_uid",
     "evidence_digest",
     "fingerprint",
     "disposition",
@@ -32,6 +33,7 @@ EXPORT_KEYS = (
     "rubric_version",
 )
 
+
 def validate_export_rows(rows: list[dict[str, Any]]) -> None:
     """Validate the export shape; raise ``ValueError`` naming key + record_id.
 
@@ -44,14 +46,9 @@ def validate_export_rows(rows: list[dict[str, Any]]) -> None:
         shown_id = str(row.get("record_id", "<missing record_id>"))
         for key in EXPORT_KEYS:
             if key not in row:
-                raise ValueError(
-                    f"export row for record_id {shown_id!r} is missing required key {key!r}"
-                )
-        recomputed = compute_record_id(
-            str(row["session_id"]),
-            str(row["trajectory_id"]),
-            str(row["segment_id"]),
-            str(row["fingerprint"]),
+                raise ValueError(f"export row for record_id {shown_id!r} is missing required key {key!r}")
+        recomputed = record_finding_id(
+            str(row["session_id"]), str(row["trajectory_id"]), str(row["segment_id"]), str(row["item_uid"])
         )
         if recomputed != str(row["record_id"]):
             raise ValueError(
@@ -61,9 +58,7 @@ def validate_export_rows(rows: list[dict[str, Any]]) -> None:
                 f"fingerprint={row['fingerprint']!r}): expected {recomputed!r}"
             )
         if not str(row["evidence_digest"]):
-            raise ValueError(
-                f"export row for record_id {shown_id!r} has an empty 'evidence_digest'"
-            )
+            raise ValueError(f"export row for record_id {shown_id!r} has an empty 'evidence_digest'")
 
 
 def write_export_rows(rows: list[dict[str, Any]], out_path: Path) -> str:

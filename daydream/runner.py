@@ -287,7 +287,7 @@ async def run(
     if config.dataset_capture_disabled:
         config = replace(config, dataset_capture=False)
     else:
-        from daydream.archive.hub import resolve_hub_repo
+        from daydream.hub import resolve_hub_repo
 
         hub_repo = resolve_hub_repo(config)
         if hub_repo:

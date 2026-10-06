@@ -1,117 +1,30 @@
-"""Command parsing and terminal output for the human-adjudication workflow.
-
-Handlers return exit codes; argparse rejects malformed invocations with exit 2.
-Missing state and invalid identifiers return 1. Publication protocols live in publish.
-"""
+"""Human judgment commands over canonical records and disposable local queues."""
 
 from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from daydream.archive.hydrate import HubUnavailableError, HydrationError, PublicDestinationError, _make_client
-from daydream.json_utils import atomic_write_bytes
-from daydream.training.adjudication.canonical import read_jsonl, run_canonical_harvest
+from daydream.dataset import LocalRecordStore, SnapshotRecords
+from daydream.json_utils import atomic_write_bytes, canonical_json
+from daydream.training.adjudication.canonical import run_canonical_harvest
 from daydream.training.adjudication.export import validate_export_rows, write_export_rows
 from daydream.training.adjudication.harvest import build_export_entries
 from daydream.training.adjudication.materialize import run_materialize
-from daydream.training.adjudication.observations import (
-    _DISPOSITIONS,
-    append_observation,
-    load_observations,
-    prior_adjudications,
-)
+from daydream.training.adjudication.observations import _DISPOSITIONS, append_observation, prior_adjudications
 from daydream.training.adjudication.precedence import HUMAN_ROLES, has_rater_conflict
-from daydream.training.adjudication.preview import _SESSIONS_OUT_FILENAME, run_preview
-from daydream.training.adjudication.publish import (
-    publish_annotation_state,
-    resume_annotation_state,
-)
+from daydream.training.adjudication.preview import run_preview
 from daydream.training.adjudication.queue import build_queue
-from daydream.training.adjudication.report import build_report
-from daydream.training.labeler_versions import (
-    ADJUDICATION_LABELER_VERSION,
-    REPLY_CLASSIFIER_VERSION,
-    RUBRIC_SCHEMA_VERSION,
-)
+from daydream.training.adjudication.report import build_report, enrich_report_items
+from daydream.training.record_evidence import finding_observations, sessions_from_snapshot, validate_output_path
+from daydream.training.record_identity import record_finding_id
 from daydream.ui import create_console, print_error, print_success
-
-__all__ = [
-    "handle_adjudicate",
-    "handle_build",
-    "handle_download_final",
-    "handle_export",
-    "handle_harvest_snapshot",
-    "handle_label",
-    "handle_materialize",
-    "handle_publish_final",
-    "handle_publish_state",
-    "handle_report",
-    "handle_resume_state",
-    "handle_show",
-]
-
-_ANNOTATION_HUB_REPO = "existentialbirds/daydream-trajectories"
-
-_QUEUE_FILENAME = "queue.json"
-_OBSERVATIONS_FILENAME = "observations.jsonl"
-_PREVIEW_LEDGER_FILENAME = "preview-ledger.json"
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _load_json(path: Path, what: str) -> Any:
-    if not path.is_file():
-        raise ValueError(f"{what} not found: {path}")
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _load_queue(state_dir: Path) -> list[dict[str, Any]]:
-    queue = _load_json(state_dir / _QUEUE_FILENAME, "adjudication queue")
-    if not isinstance(queue, list):
-        raise ValueError(f"adjudication queue {state_dir / _QUEUE_FILENAME} is not a JSON list")
-    return queue
-
-
-def _resolved_record_ids(
-    queue: Sequence[Mapping[str, Any]], observations: Sequence[Mapping[str, Any]]
-) -> set[str]:
-    """Record ids with a human observation matching the item's current digest.
-
-    Matching the ``evidence_digest`` means a stale judgment (the item has
-    since been reopened by digest drift) does not count as resolved — the
-    reopened item stays in the open set.
-    """
-    prior = prior_adjudications(observations)
-    resolved: set[str] = set()
-    for item in queue:
-        record_id = str(item["record_id"])
-        judgment = prior.get(record_id)
-        if (
-            judgment is not None and judgment["role"] in HUMAN_ROLES
-            and judgment["evidence_digest"] == str(item["evidence_digest"])
-            and not judgment["conflict"] and not judgment["review_required"]
-        ):
-            resolved.add(record_id)
-    return resolved
-
-
-def _open_items(queue: Sequence[Mapping[str, Any]], resolved: set[str]) -> list[Mapping[str, Any]]:
-    return [item for item in queue if str(item["record_id"]) not in resolved]
 
 
 def _positive_int(raw: str) -> int:
-    """argparse type converter: reject values < 1 with a usage error (exit 2).
-
-    Replaces a bare ``assert`` (stripped under ``python -O``) so ``--batch 0``
-    or a negative batch is a malformed invocation, never a silent no-op.
-    """
     try:
         value = int(raw)
     except ValueError:
@@ -121,648 +34,181 @@ def _positive_int(raw: str) -> int:
     return value
 
 
-def _add_pin_flags(parser: argparse.ArgumentParser) -> None:
-    """Add preview-pin fields; versions come from labeler_versions.
-
-    Missing components are data errors (exit 1), validated after parsing."""
-    parser.add_argument("--curation-id", type=str, default=None, metavar="ID")
-    parser.add_argument("--sanitized-hub-commit", type=str, default=None, metavar="SHA")
-    parser.add_argument("--source-hub-commit", type=str, default=None, metavar="SHA")
-    parser.add_argument("--archive-index-digest", type=str, default=None, metavar="HEX")
-    parser.add_argument("--evidence-observed-at", type=str, default=None, metavar="ISO_TS")
-    parser.add_argument("--as-of", type=str, default=None, metavar="ISO_TS")
-
-
-def _pin_from_args(args: argparse.Namespace) -> dict[str, str]:
-    """Assemble a versioned preview pin; an absent as_of is the empty unpinned edge."""
-    pin = {
-        "curation_id": args.curation_id or "",
-        "sanitized_hub_commit": args.sanitized_hub_commit or "",
-        "source_hub_commit": args.source_hub_commit or "",
-        "archive_index_digest": args.archive_index_digest or "",
-        "evidence_observed_at": args.evidence_observed_at or "",
-        "as_of": args.as_of or "",
-        "labeler_version": ADJUDICATION_LABELER_VERSION,
-        "rubric_version": RUBRIC_SCHEMA_VERSION,
-        "classifier_version": REPLY_CLASSIFIER_VERSION,
-    }
-    missing = sorted(
-        field for field, value in pin.items() if not value and field != "as_of"
-    )
-    if missing:
-        raise ValueError(f"pin is missing required component(s): {missing}")
-    return pin
-
-
-def _add_state_dir(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--state-dir", type=Path, required=True, metavar="PATH",
-                        help="Adjudication state directory (queue.json + observations.jsonl)")
-
-
-def _build_adjudicate_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="daydream corpus adjudicate",
-        description="Per-finding human adjudication queue + label workflow (issue #984).",
-    )
-    sub = parser.add_subparsers(dest="adjudicate_subverb", required=True)
-
-    p_build = sub.add_parser("build", help="Build the adjudication queue from a hydrated index.")
-    p_build.add_argument("--index-root", type=Path, required=True, metavar="PATH",
-                         help="Hydrated index root containing sessions.jsonl")
-    _add_state_dir(p_build)
-
-    p_show = sub.add_parser("show", help="Show unresolved queue items grouped by disposition.")
-    _add_state_dir(p_show)
-
-    p_label = sub.add_parser("label", help="Record human observation(s) for queue item(s).")
-    _add_state_dir(p_label)
-    target = p_label.add_mutually_exclusive_group(required=True)
-    target.add_argument("--record-id", type=str, default=None, metavar="HEX",
-                        help="Record id (64-hex digest) of a single queue item")
-    target.add_argument("--batch", type=_positive_int, default=None, metavar="N",
-                        help="Label the next N unresolved items in deterministic order")
-    p_label.add_argument("--disposition", type=str, required=True,
-                         choices=sorted(_DISPOSITIONS),
-                         help="Human disposition for the finding(s)")
-    p_label.add_argument("--rationale", type=str, required=True,
-                         help="Why this disposition was chosen (stored provenance)")
-    p_label.add_argument("--labeler", type=str, required=True,
-                         help="Human labeler identity (stored provenance)")
-    p_label.add_argument("--role", type=str, default="rater", choices=sorted(HUMAN_ROLES),
-                         help="Human role: rater (default) or adjudicator (conflict resolution)")
-    p_label.add_argument("--valid-at", type=str, default=None, metavar="ISO_TS",
-                         help="ISO-8601 valid-time pin (default: now)")
-
-    p_export = sub.add_parser(
-        "export", help="Merge the preview ledger + observations into the projector export shape."
-    )
-    p_export.add_argument("--index-root", type=Path, required=True, metavar="PATH",
-                          help="Hydrated index root containing sessions.jsonl")
-    _add_state_dir(p_export)
-    p_export.add_argument("--out", type=Path, default=None, metavar="PATH",
-                          help="Export JSONL path (required unless --dry-run)")
-    p_export.add_argument("--dry-run", action="store_true",
-                          help="Validate the export rows without writing anything")
-
-    p_report = sub.add_parser(
-        "report", help="Print adjudication coverage, class balance, inter-rater, strata."
-    )
-    p_report.add_argument("--index-root", type=Path, required=True, metavar="PATH",
-                          help="Hydrated index root containing sessions.jsonl")
-    _add_state_dir(p_report)
-    p_report.add_argument("--conflicts", action="store_true",
-                          help="List disagreeing-rater findings oldest-first instead of the report")
-    p_report.add_argument("--as-of", type=str, default=None, metavar="ISO_TS",
-                          help="ISO-8601 transaction-time pin; flag evidence observed "
-                               "after this instant (default: no as_of comparison)")
-
-    p_materialize = sub.add_parser(
-        "materialize",
-        help="Materialize the preview annotation snapshot (sessions.jsonl + manifest).",
-    )
-    p_materialize.add_argument("--index-root", type=Path, required=True, metavar="PATH",
-                               help="Hydrated index root containing sessions.jsonl")
-    p_materialize.add_argument("--out-dir", type=Path, required=True, metavar="PATH",
-                               help="Directory for sessions.jsonl + preview-manifest.json")
-    _add_pin_flags(p_materialize)
-
-    p_publish = sub.add_parser(
-        "publish-state",
-        help="Publish adjudication state additively to the private Hub.",
-    )
-    _add_state_dir(p_publish)
-    p_publish.add_argument("--manifest", type=Path, required=True, metavar="PATH",
-                           help="Preview manifest pinning the snapshot")
-    p_publish.add_argument("--hub-repo", type=str, default=_ANNOTATION_HUB_REPO, metavar="REPO",
-                           help=f"Private Hub dataset repo (default: {_ANNOTATION_HUB_REPO})")
-
-    p_resume = sub.add_parser(
-        "resume-state",
-        help="Restore published adjudication state onto a fresh VM (digest-verified).",
-    )
-    resume_identity = p_resume.add_mutually_exclusive_group(required=True)
-    resume_identity.add_argument("--curation-id", type=str, metavar="ID",
-                                 help="Stable curation identity used to discover the checkpoint")
-    resume_identity.add_argument("--manifest", type=Path, metavar="PATH",
-                                 help="Compatibility manifest supplying curation and snapshot identity")
-    p_resume.add_argument("--destination", type=Path, required=True, metavar="PATH",
-                          help="Fresh directory to install the verified state into")
-    p_resume.add_argument("--snapshot-id", type=str, default=None, metavar="ID",
-                          help="Optional expected preview snapshot identity")
-    p_resume.add_argument("--revision", type=str, default=None, metavar="OID",
-                          help="Optional exact 40-hex Hub revision to restore")
-    p_resume.add_argument("--hub-repo", type=str, default=_ANNOTATION_HUB_REPO, metavar="REPO",
-                          help=f"Private Hub dataset repo (default: {_ANNOTATION_HUB_REPO})")
-
-    p_harvest = sub.add_parser(
-        "harvest-snapshot",
-        help="Canonical harvest: drift gate, precedence merge, label_observations append.",
-    )
-    p_harvest.add_argument("--index-root", type=Path, required=True, metavar="PATH",
-                           help="Hydrated index root containing sessions.jsonl")
-    p_harvest.add_argument("--materialize-dir", type=Path, required=True, metavar="PATH",
-                           help="Directory produced by `materialize` (manifest + sessions.jsonl)")
-    p_harvest.add_argument("--archive-dir", type=Path, required=True, metavar="PATH",
-                           help="Archive directory holding the SQLite label-observations index")
-    p_harvest.add_argument("--state-dir", type=Path, required=True, metavar="PATH",
-                           help="Adjudication state directory (observations.jsonl source)")
-
-    p_publish_final = sub.add_parser(
-        "publish-final",
-        help="Construct and publish the final annotation bundle (immutable snapshot).",
-    )
-    p_publish_final.add_argument("--index-root", type=Path, required=True, metavar="PATH",
-                                 help="Hydrated index root containing sessions.jsonl")
-    p_publish_final.add_argument("--materialize-dir", type=Path, required=True, metavar="PATH",
-                                 help="Directory produced by `materialize` (manifest + sessions.jsonl)")
-    _add_state_dir(p_publish_final)
-    p_publish_final.add_argument("--archive-dir", type=Path, required=True, metavar="PATH",
-                                 help="Archive directory holding the SQLite label-observations index")
-    p_publish_final.add_argument("--curation-bundle-dir", type=Path, required=True, metavar="PATH",
-                                 help="Curation bundle root digested into lineage.json's batch_fileset_digest")
-    p_publish_final.add_argument("--hub-repo", type=str, default=_ANNOTATION_HUB_REPO, metavar="REPO",
-                                 help=f"Private Hub dataset repo (default: {_ANNOTATION_HUB_REPO})")
-    p_publish_final.add_argument("--dry-run", action="store_true",
-                                 help="Build and validate the staging bundle without publishing to the Hub")
-
-    p_download_final = sub.add_parser(
-        "download-final",
-        help="Download and verify an exact final annotation success revision.",
-    )
-    p_download_final.add_argument("--curation-id", type=str, required=True, metavar="ID",
-                                  help="Stable curation identity")
-    p_download_final.add_argument("--snapshot-id", type=str, required=True, metavar="ID",
-                                  help="Content-derived final snapshot identity")
-    p_download_final.add_argument("--revision", type=str, required=True, metavar="OID",
-                                  help="Exact 40-hex final success commit")
-    p_download_final.add_argument("--destination", type=Path, required=True, metavar="PATH",
-                                  help="Fresh directory to install the verified final bundle into")
-    p_download_final.add_argument("--hub-repo", type=str, required=True, metavar="REPO",
-                                  help="Private Hub dataset repository")
-
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="daydream corpus adjudicate", description=__doc__)
+    sub = parser.add_subparsers(dest="verb", required=True)
+    for name in ("build", "materialize", "preview", "export", "report", "harvest-snapshot"):
+        p = sub.add_parser(name)
+        p.add_argument("--store", type=Path, required=True)
+        p.add_argument("--snapshot-id", required=True)
+        if name in ("build", "preview", "export"):
+            p.add_argument("--state-dir", type=Path, required=True)
+        if name == "materialize":
+            p.add_argument("--out-dir", type=Path, required=True)
+            p.add_argument("--dry-run", action="store_true")
+        if name == "harvest-snapshot":
+            p.add_argument("--materialize-dir", type=Path, required=True)
+        if name == "export":
+            p.add_argument("--out", type=Path)
+            p.add_argument("--dry-run", action="store_true")
+        if name == "report":
+            p.add_argument("--conflicts", action="store_true")
+    show = sub.add_parser("show")
+    show.add_argument("--state-dir", type=Path, required=True)
+    label = sub.add_parser("label")
+    label.add_argument("--state-dir", type=Path, required=True)
+    target = label.add_mutually_exclusive_group(required=True)
+    target.add_argument("--record-id")
+    target.add_argument("--batch", type=_positive_int)
+    label.add_argument("--disposition", required=True, choices=sorted(_DISPOSITIONS))
+    label.add_argument("--rationale", required=True)
+    label.add_argument("--labeler", required=True)
+    label.add_argument("--role", choices=sorted(HUMAN_ROLES), default="rater")
+    label.add_argument("--valid-at")
     return parser
 
 
-def handle_build(argv: list[str]) -> int:
-    """Handle ``corpus adjudicate build --index-root <path> --state-dir <path>``."""
+def _write(path: Path, value: Any) -> None:
+    atomic_write_bytes(path, (canonical_json(value) + "\n").encode(), mode=0o600)
 
-    args = _build_adjudicate_parser().parse_args(["build", *argv])
-    try:
-        raw = _load_sessions_for_index(args.index_root)
-    except ValueError as exc:
-        print_error(create_console(), "adjudicate build failed", str(exc))
-        return 1
-    observations = load_observations(args.state_dir / _OBSERVATIONS_FILENAME)
+
+def _queue(records: SnapshotRecords) -> list[dict[str, object]]:
+    items = build_queue(
+        sessions_from_snapshot(records, overlay_judgments=False),
+        prior_observations=prior_adjudications([o for o in finding_observations(records) if o["role"] != "automatic"]),
+    )
+    hosts = {
+        record_finding_id(session["session_id"], session["trajectory_id"], session["segment_id"], r["item_uid"]): r[
+            "item_uid"
+        ]
+        for session in sessions_from_snapshot(records)
+        for r in session["resolutions"]
+    }
+    return [{**item, "item_uid": hosts[str(item["record_id"])]} for item in items]
+
+
+def _state(path: Path) -> tuple[LocalRecordStore, SnapshotRecords, list[dict[str, Any]]]:
+    reference = json.loads((path / "reference.json").read_text())
+    if reference.get("schema_version") != "daydream.annotation-queue.v2":
+        raise ValueError("invalid annotation queue reference")
+    store = LocalRecordStore(Path(reference["store"]))
+    records = store.read_snapshot(reference["snapshot_id"])
+    queue = json.loads((path / "queue.json").read_text())
+    if queue != _queue(records):
+        raise ValueError("annotation queue differs from its frozen evidence; rebuild queue")
+    return store, records, queue
+
+
+def _resolved(queue: list[dict[str, Any]], observations: list[dict[str, Any]]) -> set[str]:
     prior = prior_adjudications(observations)
-    try:
-        items = build_queue(raw, prior_observations=prior)
-    except ValueError as exc:
-        print_error(create_console(), "adjudicate build failed", str(exc))
-        return 1
-    path = args.state_dir / _QUEUE_FILENAME
-    atomic_write_bytes(
-        path,
-        (json.dumps(items, indent=2, sort_keys=True) + "\n").encode("utf-8"),
-        fsync=False,
-        dir_fsync=False,
-        mode=None,
-    )
-    reopened = sum(1 for item in items if item["status"] == "reopened")
-    print_success(
-        create_console(),
-        f"Adjudication queue: {len(items)} item(s) "
-        f"({reopened} reopened by evidence drift) -> {path}",
-    )
-    return 0
+    return {
+        str(i["record_id"])
+        for i in queue
+        if (p := prior.get(str(i["record_id"]))) is not None
+        and p["role"] in HUMAN_ROLES
+        and p["evidence_digest"] == i["evidence_digest"]
+        and not p["conflict"]
+        and not p["review_required"]
+    }
 
 
-def handle_show(argv: list[str]) -> int:
-    """Handle ``corpus adjudicate show --state-dir <path>``."""
-
-    args = _build_adjudicate_parser().parse_args(["show", *argv])
-    try:
-        queue = _load_queue(args.state_dir)
-    except ValueError as exc:
-        print_error(create_console(), "adjudicate show failed", str(exc))
-        return 1
-    observations = load_observations(args.state_dir / _OBSERVATIONS_FILENAME)
-    open_items: list[Mapping[str, Any]] = _open_items(queue, _resolved_record_ids(queue, observations))
-
-    by_disposition: dict[str, list[Mapping[str, Any]]] = {}
-    for item in open_items:
-        by_disposition.setdefault(str(item["disposition"]), []).append(item)
-    for disposition in sorted(by_disposition):
-        print(f"{disposition}: {len(by_disposition[disposition])}")
-        for item in by_disposition[disposition]:
-            status = str(item["status"])
-            print(f"  {str(item['record_id'])[:12]}  {status}  {str(item['fingerprint'])}")
-    print(f"unresolved: {len(open_items)} / {len(queue)}")
-    return 0
-
-
-def handle_label(argv: list[str]) -> int:
-    """Handle ``corpus adjudicate label --state-dir <path> ...``."""
-
-    args = _build_adjudicate_parser().parse_args(["label", *argv])
-    try:
-        queue = _load_queue(args.state_dir)
-    except ValueError as exc:
-        print_error(create_console(), "adjudicate label failed", str(exc))
-        return 1
-    observations = load_observations(args.state_dir / _OBSERVATIONS_FILENAME)
-    open_items: list[Mapping[str, Any]] = _open_items(queue, _resolved_record_ids(queue, observations))
-
-    targets: list[Mapping[str, Any]]
-    if args.record_id is not None:
-        matches: list[Mapping[str, Any]] = [item for item in queue if str(item["record_id"]) == args.record_id]
-        if not matches:
-            print_error(
-                create_console(),
-                "adjudicate label failed",
-                f"unknown --record-id: {args.record_id} (not in queue "
-                f"{args.state_dir / _QUEUE_FILENAME})",
-            )
-            return 1
-        open_ids = {str(item["record_id"]) for item in open_items}
-        targets = [item for item in matches if str(item["record_id"]) in open_ids] or matches
-    else:
-        batch = args.batch
-        assert batch is not None  # mutually exclusive group guarantees --record-id xor --batch
-        targets = open_items[:batch]
-
-    if not targets:
-        print_success(create_console(), "Nothing to label: queue drained.")
-        return 0
-
-    valid_at = args.valid_at or _now_iso()
-    observed_at = _now_iso()
-    obs_path = args.state_dir / _OBSERVATIONS_FILENAME
-    for item in targets:
-        append_observation(obs_path, {
-            "record_id": str(item["record_id"]),
-            "disposition": args.disposition,
-            "evidence_digest": str(item["evidence_digest"]),
-            "evidence": item["evidence"],
-            "labeler": args.labeler,
-            "role": args.role,
-            "rationale": args.rationale,
-            "valid_at": valid_at,
-            "observed_at": observed_at,
-            "rubric_version": str(item["rubric_version"]),
-        })
-    remaining = [item for item in open_items if item not in targets]
-    if remaining:
-        next_id = str(remaining[0]["record_id"])
-        print_success(create_console(), f"Labeled {len(targets)} item(s); next: {next_id[:12]}")
-    else:
-        print_success(create_console(), f"Labeled {len(targets)} item(s); queue drained.")
-    return 0
-
-
-def _load_sessions_for_index(index_root: Path) -> list[dict[str, Any]]:
-    """Load the hydrated index's sessions.jsonl (fail-closed on missing/invalid)."""
-    sessions_path = index_root / _SESSIONS_OUT_FILENAME
-    if not sessions_path.is_file():
-        raise ValueError(f"hydrated index sessions file not found: {sessions_path}")
-    return read_jsonl(sessions_path, missing="", invalid="unreadable hydrated index")
-
-
-def handle_export(argv: list[str]) -> int:
-    """Handle ``corpus adjudicate export --index-root <path> --state-dir <path>``."""
-
-    parser = _build_adjudicate_parser()
-    args = parser.parse_args(["export", *argv])
-    if not args.dry_run and args.out is None:
-        parser.error("--out is required unless --dry-run")
-    ledger_path = args.state_dir / _PREVIEW_LEDGER_FILENAME
-    try:
-        # Regenerate the ledger on every run: a re-export after a snapshot
-        # re-materialization must re-pin the digest reference, or the stale
-        # ledger would fail the runbook's 3a "re-run it any time the snapshot
-        # or the observations change" path with AdjudicationDriftError instead
-        # of being the documented recovery (run_preview compares against the
-        # prior ledger and overwrites it).
-        preview = run_preview(
-            args.index_root, ledger_path,
-            observations_path=args.state_dir / _OBSERVATIONS_FILENAME,
-        )
-        if preview["drifted_record_ids"]:
-            print(
-                f"preview drift: {len(preview['drifted_record_ids'])} record(s) changed "
-                f"evidence since the prior ledger: {preview['drifted_record_ids']}"
-            )
-        rows = build_export_entries(
-            args.index_root, ledger_path,
-            observations_path=args.state_dir / _OBSERVATIONS_FILENAME,
-        )
-        validate_export_rows(rows)
-    except (ValueError, FileNotFoundError, HydrationError) as exc:
-        print_error(create_console(), "adjudicate export failed", str(exc))
-        return 1
-    if args.dry_run:
-        print_success(
-            create_console(),
-            f"Dry run OK: {len(rows)} export row(s) validated; nothing written.",
-        )
-        return 0
-    assert args.out is not None
-    sha = write_export_rows(rows, args.out)
-    print_success(
-        create_console(),
-        f"Exported {len(rows)} row(s) -> {args.out} (sha256 {sha[:12]})",
-    )
-    return 0
-
-
-def _report_items(
-    index_root: Path,
-    state_dir: Path,
-    as_of: str | None = None,
-) -> list[dict[str, Any]]:
-    """Enrich the complete queue using final_bundle's shared report implementation.
-
-    Include decisive records so human judgments and the CLI's outcome denominator
-    match the published coverage gate.
-    """
-    from daydream.training.adjudication.final_bundle import _enrich_report_items
-
-    items = build_queue(_load_sessions_for_index(index_root), include_decisive=True)
-    observations = load_observations(state_dir / _OBSERVATIONS_FILENAME)
-    return _enrich_report_items(items, observations, as_of=as_of)
-
-
-def handle_report(argv: list[str]) -> int:
-    """Handle ``corpus adjudicate report --index-root <path> --state-dir <path>``."""
-
-    args = _build_adjudicate_parser().parse_args(["report", *argv])
-    try:
-        enriched = _report_items(args.index_root, args.state_dir, as_of=args.as_of)
-    except ValueError as exc:
-        print_error(create_console(), "adjudicate report failed", str(exc))
-        return 1
-    if args.conflicts:
-        _print_conflicts(enriched)
-        return 0
-    report = build_report(enriched)
-    coverage = report["outcome_coverage"]
-    balance = report["class_balance"]
-    inter_rater = report["inter_rater"]
-    gate = report["admission_gate"]
-    print(f"outcome-bearing coverage: adjudicated {coverage['adjudicated']} / {coverage['total']}")
-    print(f"silver/task-only: {report['silver_task_only_count']}")
-    print(f"class balance: accepted={balance['accepted']} rejected={balance['rejected']}")
-    print(f"unresolved: {report['unresolved']}")
-    print(f"inter-rater: {inter_rater['items']} item(s), {inter_rater['agreeing']} agreeing")
-    print(
-        f"evidence after as_of: {len(report['evidence_after_as_of'])} "
-        f"record(s){': ' + ', '.join(report['evidence_after_as_of']) if report['evidence_after_as_of'] else ''}"
-    )
-    print(
-        f"admission gate: {gate['outcome_bearing_total']}/{gate['total']} outcome-bearing "
-        f"(80% gate {'PASS' if gate['passes_80pct'] else 'FAIL'}, "
-        f"class balance {'ok' if gate['class_balance_ok'] else 'unbalanced'})"
-    )
-    print("strata:")
-    for (stack, profile), count in report["strata"].items():
-        print(f"  ({stack}, {profile}): {count}")
-    return 0
-
-
-def _print_conflicts(enriched: list[dict[str, Any]]) -> None:
-    """List disagreeing-rater findings oldest-first (by earliest observation)."""
-    conflicts: list[tuple[str, str, list[dict[str, Any]]]] = []
-    for item in enriched:
-        human = [o for o in item["observations"] if o.get("role") in HUMAN_ROLES]
-        by_digest: dict[str, list[dict[str, Any]]] = {}
-        for obs in human:
-            by_digest.setdefault(str(obs["evidence_digest"]), []).append(obs)
-        for digest, group in by_digest.items():
-            if len({str(o["disposition"]) for o in group}) > 1 and has_rater_conflict(group):
-                ordered = sorted(group, key=lambda o: str(o.get("observed_at", "")))
-                conflicts.append((str(item["record_id"]), digest, ordered))
-    conflicts.sort(key=lambda c: (str(c[2][0].get("observed_at", "")), c[0]))
-    if not conflicts:
-        print("no rater conflicts")
-        return
-    for record_id, digest, raters in conflicts:
-        item = next(i for i in enriched if str(i["record_id"]) == record_id)
-        print(f"conflict {record_id[:12]} ({item.get('stack')}, {item.get('profile')}) digest {digest[:12]}")
-        for obs in raters:
-            print(
-                f"  {obs['labeler']}: {obs['disposition']} "
-                f"(observed_at {obs.get('observed_at', '')})"
-            )
-
-
-def handle_materialize(argv: list[str]) -> int:
-    """Handle ``corpus adjudicate materialize --index-root <path> --out-dir <path> ...``."""
-
-    parser = _build_adjudicate_parser()
-    args = parser.parse_args(["materialize", *argv])
-    try:
-        pin = _pin_from_args(args)
-        summary = run_materialize(args.index_root, args.out_dir, pin=pin)
-    except (ValueError, HubUnavailableError, HydrationError) as exc:
-        print_error(create_console(), "adjudicate materialize failed", str(exc))
-        return 1
-    print_success(
-        create_console(),
-        f"Materialized snapshot {summary['snapshot_id'][:12]}: "
-        f"{summary['record_count']} record(s) from index revision "
-        f"{summary['index_revision'][:12]} -> {args.out_dir}",
-    )
-    return 0
-
-
-def handle_publish_state(argv: list[str]) -> int:
-    """Handle ``corpus adjudicate publish-state --state-dir <path> --manifest <path>``."""
-
-    args = _build_adjudicate_parser().parse_args(["publish-state", *argv])
-    try:
-        client = _make_client(args.hub_repo)
-        summary = publish_annotation_state(client, args.state_dir, manifest=args.manifest)
-    except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
-        print_error(create_console(), "adjudicate publish-state failed", str(exc))
-        return 1
-    print_success(
-        create_console(),
-        f"Published checkpoint batch {summary['batch_id']} at Hub revision "
-        f"{summary['checkpoint_revision']}: {len(summary['uploaded'])} file(s) "
-        f"under {summary['batch_prefix']}",
-    )
-    return 0
-
-
-def handle_resume_state(argv: list[str]) -> int:
-    """Handle stable-curation checkpoint discovery and verified restoration."""
-
-    args = _build_adjudicate_parser().parse_args(["resume-state", *argv])
-    try:
-        curation_id = args.curation_id
-        expected_snapshot_id = args.snapshot_id
-        if args.manifest is not None:
-            manifest = _load_json(args.manifest, "preview manifest")
-            if not isinstance(manifest, dict):
-                raise ValueError("preview manifest must be a JSON object")
-            manifest_curation_id = manifest.get("curation_id")
-            manifest_snapshot_id = manifest.get("snapshot_id")
-            if not isinstance(manifest_curation_id, str) or not manifest_curation_id:
-                raise ValueError("preview manifest is missing curation_id")
-            if not isinstance(manifest_snapshot_id, str) or not manifest_snapshot_id:
-                raise ValueError("preview manifest is missing snapshot_id")
-            if expected_snapshot_id is not None and expected_snapshot_id != manifest_snapshot_id:
-                raise ValueError("--snapshot-id does not match the compatibility manifest")
-            curation_id = manifest_curation_id
-            expected_snapshot_id = manifest_snapshot_id
-        if not isinstance(curation_id, str) or not curation_id:
-            raise ValueError("resume-state requires a curation identity")
-        client = _make_client(args.hub_repo)
-        summary = resume_annotation_state(
-            client,
-            curation_id=curation_id,
-            destination=args.destination,
-            expected_snapshot_id=expected_snapshot_id,
-            revision=args.revision,
-        )
-    except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, OSError) as exc:
-        print_error(create_console(), "adjudicate resume-state failed", str(exc))
-        return 1
-    print_success(
-        create_console(),
-        f"Restored {len(summary['restored'])} file(s) for curation {summary['curation_id']} "
-        f"from checkpoint revision {summary['checkpoint_revision']} -> {args.destination}",
-    )
-    return 0
-
-
-def handle_publish_final(argv: list[str]) -> int:
-    """Build and validate before Hub access; dry-run reports the gate without a client."""
-    from daydream.training.adjudication.final_bundle import build_final_bundle, final_snapshot_id
-    from daydream.training.adjudication.publish import publish_final_annotation_bundle
-
-    args = _build_adjudicate_parser().parse_args(["publish-final", *argv])
-    bundle_dir = args.materialize_dir / "final-bundle"
-    try:
-        summary = build_final_bundle(
-            index_root=args.index_root,
-            materialize_dir=args.materialize_dir,
-            archive_dir=args.archive_dir,
-            out_dir=bundle_dir,
-            curation_bundle_dir=args.curation_bundle_dir,
-            observations_path=args.state_dir / _OBSERVATIONS_FILENAME,
-        )
-        complete_id, _digests = final_snapshot_id(bundle_dir)
-    except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
-        print_error(create_console(), "adjudicate publish-final failed", str(exc))
-        return 1
-    if args.dry_run:
-        counts = " ".join(
-            f"{disposition}={count}" for disposition, count in summary["disposition_counts"].items()
-        )
-        try:
-            report = json.loads(
-                (bundle_dir / "coverage-report.json").read_text(encoding="utf-8")
-            )
-            gate = report["admission_gate"]
-            coverage = report["outcome_coverage"]
-        except (OSError, ValueError, KeyError) as exc:
-            print_error(create_console(), "adjudicate publish-final failed", str(exc))
-            return 1
-        print_success(
-            create_console(),
-            f"Dry-run: final bundle validated at {bundle_dir} — "
-            f"{summary['record_count']} record(s) across "
-            f"{', '.join(summary['files'])} ({counts}); "
-            f"final snapshot {complete_id}; "
-            f"80% admission gate {'PASS' if gate['passes_80pct'] else 'FAIL'} "
-            f"({coverage['adjudicated']}/{coverage['total']} outcome-bearing "
-            f"adjudicated); nothing published",
-        )
-        return 0
-    try:
-        client = _make_client(args.hub_repo)
-        result = publish_final_annotation_bundle(client, bundle_dir)
-    except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
-        print_error(create_console(), "adjudicate publish-final failed", str(exc))
-        return 1
-    print_success(
-        create_console(),
-        f"Published final annotation bundle ({summary['record_count']} record(s)) "
-        f"under {result['prefix']} (hub commit {result['hub_commit_sha']}, "
-        f"final snapshot {result['final_snapshot_id']})",
-    )
-    return 0
-
-
-def handle_download_final(argv: list[str]) -> int:
-    """Handle a pinned clean-room download of a final annotation bundle."""
-    from daydream.training.adjudication.publish import download_final_annotation_bundle
-
-    args = _build_adjudicate_parser().parse_args(["download-final", *argv])
-    try:
-        client = _make_client(args.hub_repo)
-        result = download_final_annotation_bundle(
-            client,
-            curation_id=args.curation_id,
-            snapshot_id=args.snapshot_id,
-            revision=args.revision,
-            destination=args.destination,
-        )
-    except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, OSError) as exc:
-        print_error(create_console(), "adjudicate download-final failed", str(exc))
-        return 1
-    print_success(
-        create_console(),
-        f"Verified final snapshot {result['final_snapshot_id']} at Hub revision "
-        f"{result['hub_commit_sha']}: {len(result['files'])} file(s) -> {args.destination}",
-    )
-    return 0
-
-
-def handle_harvest_snapshot(argv: list[str]) -> int:
-    """Handle ``corpus adjudicate harvest-snapshot --index-root --materialize-dir ...``."""
-
-    args = _build_adjudicate_parser().parse_args(["harvest-snapshot", *argv])
-    try:
-        summary = run_canonical_harvest(
-            args.index_root,
-            args.materialize_dir,
-            args.archive_dir,
-            observations_path=args.state_dir / _OBSERVATIONS_FILENAME,
-        )
-    except (ValueError, HubUnavailableError, HydrationError, FileNotFoundError) as exc:
-        print_error(create_console(), "adjudicate harvest-snapshot failed", str(exc))
-        return 1
-    print_success(
-        create_console(),
-        f"Harvested {summary['record_count']} record(s): "
-        f"{summary['appended_sessions']} session(s) appended, "
-        f"{summary['skipped_sessions']} skipped (already harvested), "
-        f"{summary['human_adjudicated']} human-adjudicated",
-    )
-    return 0
-
-
-_HANDLERS = {
-    "build": handle_build,
-    "show": handle_show,
-    "label": handle_label,
-    "export": handle_export,
-    "report": handle_report,
-    "materialize": handle_materialize,
-    "publish-state": handle_publish_state,
-    "resume-state": handle_resume_state,
-    "harvest-snapshot": handle_harvest_snapshot,
-    "publish-final": handle_publish_final,
-    "download-final": handle_download_final,
-}
+def _current_observations(store: LocalRecordStore, frozen: SnapshotRecords) -> list[dict[str, Any]]:
+    # Queue evidence remains frozen; only judgment history for those selected runs
+    # advances during labeling. This never reads mutable run or bundle evidence.
+    runs = {r["run_id"] for r in frozen.runs}
+    history = tuple(o for o in store.read_records()["observations"] if o["run_id"] in runs)
+    return finding_observations(SnapshotRecords(frozen.snapshot, frozen.runs, history, history))
 
 
 def handle_adjudicate(argv: list[str]) -> int:
-    """Dispatch a known sub-verb; argparse rejects bare or unknown invocations."""
-    if not argv:
-        _build_adjudicate_parser().parse_args([])
-    subverb, rest = argv[0], argv[1:]
-    if subverb not in _HANDLERS:
-        _build_adjudicate_parser().parse_args([subverb])
-    return int(_HANDLERS[subverb](rest))
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.verb == "export" and args.out is None and not args.dry_run:
+        parser.error("--out is required unless --dry-run")
+    try:
+        if args.verb in ("show", "label"):
+            store, records, queue = _state(args.state_dir)
+            observations = _current_observations(store, records)
+            resolved = _resolved(queue, observations)
+            open_items = [i for i in queue if i["record_id"] not in resolved]
+            if args.verb == "show":
+                for item in open_items:
+                    print(f"{item['record_id'][:12]} {item['disposition']} {item['status']} {item['fingerprint']}")
+                print(f"unresolved: {len(open_items)} / {len(queue)}")
+                return 0
+            targets = (
+                [i for i in queue if i["record_id"] == args.record_id] if args.record_id else open_items[: args.batch]
+            )
+            if args.record_id and not targets:
+                raise ValueError("unknown --record-id")
+            now = datetime.now(timezone.utc).isoformat()
+            for item in targets:
+                append_observation(
+                    store,
+                    {
+                        "record_id": item["record_id"],
+                        "disposition": args.disposition,
+                        "rationale": args.rationale,
+                        "labeler": args.labeler,
+                        "role": args.role,
+                        "valid_at": args.valid_at or now,
+                        "observed_at": now,
+                        "rubric_version": item["rubric_version"],
+                        "evidence_digest": item["evidence_digest"],
+                        "evidence_digest_scheme": item["evidence_digest_scheme"],
+                        "evidence": item["evidence"],
+                    },
+                    run_id=item["session_id"],
+                    item_uid=item["item_uid"],
+                )
+            print_success(create_console(), f"Labeled {len(targets)} item(s)")
+            return 0
+        store = LocalRecordStore(args.store)
+        if args.verb in {"build", "preview", "export"}:
+            validate_output_path(store.root, args.state_dir)
+        if args.verb == "export" and args.out is not None:
+            validate_output_path(store.root, args.out)
+        records = store.read_snapshot(args.snapshot_id)
+        if args.verb == "build":
+            queue = _queue(records)
+            _write(
+                args.state_dir / "reference.json",
+                {
+                    "schema_version": "daydream.annotation-queue.v2",
+                    "store": str(store.root),
+                    "snapshot_id": args.snapshot_id,
+                },
+            )
+            _write(args.state_dir / "queue.json", queue)
+            print_success(create_console(), f"Adjudication queue: {len(queue)} item(s)")
+        elif args.verb == "materialize":
+            print(canonical_json(run_materialize(args.store, args.snapshot_id, args.out_dir, dry_run=args.dry_run)))
+        elif args.verb == "preview":
+            print(canonical_json(run_preview(args.store, args.snapshot_id, args.state_dir / "preview-ledger.json")))
+        elif args.verb == "harvest-snapshot":
+            print(canonical_json(run_canonical_harvest(args.store, args.snapshot_id, args.materialize_dir)))
+        elif args.verb == "export":
+            ledger = args.state_dir / "preview-ledger.json"
+            run_preview(args.store, args.snapshot_id, ledger)
+            rows = build_export_entries(args.store, args.snapshot_id, ledger)
+            validate_export_rows(rows)
+            if not args.dry_run:
+                write_export_rows(rows, args.out)
+            print_success(create_console(), f"Validated {len(rows)} export row(s)")
+        elif args.verb == "report":
+            items = build_queue(sessions_from_snapshot(records, overlay_judgments=False), include_decisive=True)
+            enriched = enrich_report_items(items, finding_observations(records), as_of=records.snapshot["valid_before"])
+            if args.conflicts:
+                for item in sorted(enriched, key=lambda i: str(i["record_id"])):
+                    if has_rater_conflict(item["observations"]):
+                        print(item["record_id"])
+            else:
+                report = build_report(enriched)
+                report["strata"] = [
+                    {"stack": key[0], "profile": key[1], "count": count} for key, count in report["strata"].items()
+                ]
+                print(json.dumps(report, sort_keys=True, default=str))
+        return 0
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        print_error(create_console(), f"adjudicate {args.verb} failed", str(exc))
+        return 1

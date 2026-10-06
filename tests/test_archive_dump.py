@@ -32,11 +32,7 @@ def test_dump_preserves_credentials_and_binary_without_scanning(
     def unexpected_scan(_path: Path) -> scan.ScanResult:
         pytest.fail("raw dumps must not invoke the scanner")
 
-    def unexpected_sanitize(_path: Path) -> None:
-        pytest.fail("raw dumps must not invoke the sanitizer")
-
     monkeypatch.setattr(scan, "scan_run_dir", unexpected_scan)
-    monkeypatch.setattr("daydream.archive.sanitize.sanitize_bundle_files", unexpected_sanitize)
     _strict_archive(
         target=source, session_id=session_id, config=RunConfig(target=str(source), dump_artifacts=str(stage)),
         write_snapshot=_write_snapshot(recorder), dump_path=stage,

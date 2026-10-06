@@ -1,8 +1,8 @@
 """Shared decoding, identity and gold-admission helpers for training projections.
 
-Posterior leakage is excluded by valid_at as well as the archive's observed_at
+Posterior leakage is excluded by valid_at as well as the snapshot's observed_at
 pin; intrinsic capture-time rewards survive. Callers normalize as_of once so
-SQL selection and chronological leakage checks share the same boundary.
+Snapshot selection and chronological leakage checks share the same boundary.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ def _stack_for_skill(skill: str | None) -> str | None:
 def _is_posterior_leak(annotation: dict[str, Any] | None, as_of: str | None) -> bool:
     """Exclude posterior evidence whose valid_at is later than the as_of pin.
 
-    The archive already filters observed_at. Compare parsed datetimes so offsets,
+    The snapshot already filters observed_at. Compare parsed datetimes so offsets,
     Z/+00:00 spelling and subsecond precision cannot reorder evidence. Equality
     is in-time; a missing annotation, pin or valid_at applies no exclusion."""
     if annotation is None or as_of is None:

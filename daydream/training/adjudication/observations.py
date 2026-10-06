@@ -5,10 +5,9 @@ resume without rewriting history.
 
 from __future__ import annotations
 
-import json
+import hashlib
 import re
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 # Recognize versioned model/classifier identities so they cannot act as human adjudicators.
@@ -23,6 +22,7 @@ _REQUIRED_FIELDS = (
     "record_id",
     "disposition",
     "evidence_digest",
+    "evidence_digest_scheme",
     "labeler",
     "role",
     "rationale",
@@ -61,32 +61,36 @@ def validate_observation(obs: Mapping[str, Any]) -> None:
             raise ValueError(f"observation field is not ISO-8601: {field}={obs[field]!r}") from e
 
 
-def _canonical(obs: Mapping[str, Any]) -> str:
-    return json.dumps(obs, sort_keys=True)
+def append_observation(store: Any, obs: Mapping[str, Any], *, run_id: str, item_uid: str) -> bool:
+    """Append a validated judgment to the canonical record store."""
+    from daydream.json_utils import canonical_json
+    from daydream.training.labeler_versions import HUMAN_LABELER_VERSION
 
-
-def append_observation(path: Path, obs: Mapping[str, Any]) -> None:
-    """Validate before writing; append only when the canonical observation is new."""
     validate_observation(obs)
-    if obs["role"] == "model-suggested":
-        # Force review_required so model-suggestion callers cannot omit or clear it.
-        obs = {**obs, "review_required": True}
-    line = _canonical(obs)
-    if path.exists():
-        for existing in path.read_text(encoding="utf-8").splitlines():
-            if existing.strip() == line:
-                return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(line + "\n")
-        f.flush()
-
-
-def load_observations(path: Path) -> list[dict[str, Any]]:
-    """Return observations in append order; a missing file is an empty store."""
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    value = {
+        "schema_version": "daydream.observation.v1",
+        "run_id": run_id,
+        "item_uid": item_uid,
+        "valid_at": obs["valid_at"],
+        "observed_at": obs["observed_at"],
+        "source": "adjudication",
+        "author": obs["labeler"],
+        "role": obs["role"],
+        "policy_version": HUMAN_LABELER_VERSION,
+        "rubric_version": obs["rubric_version"],
+        "evidence_digest": obs["evidence_digest"],
+        "evidence_digest_scheme": obs["evidence_digest_scheme"],
+        "semantic_evidence": obs["evidence"],
+        "review_required": obs["role"] == "model-suggested",
+        "payload": {
+            "type": "finding-judgment",
+            "disposition": obs["disposition"],
+            "rationale": obs["rationale"],
+            "record_id": obs["record_id"],
+        },
+    }
+    identity = hashlib.sha256(canonical_json(value).encode()).hexdigest()
+    return bool(store.append_observation({"observation_id": identity, **value}).committed)
 
 
 def prior_adjudications(observations: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:

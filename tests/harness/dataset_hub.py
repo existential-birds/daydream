@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Mapping
 
-from daydream.dataset_hub_client import HubConflict, HubError
+from daydream.hub import HubConflict, HubError
 
 
 class FakeDatasetHub:

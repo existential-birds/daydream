@@ -134,17 +134,35 @@ _OBSERVATION_SCHEMA = _object(
             "accepted", "rejected", "ambiguous", "unanswered", "missing", "unknown"]},
             rationale=_ID, record_id=_nullable(_SHA)),
         _object(type={"const": "enrichment"}, kind={"enum": ["pr", "base", "license"]}, evidence=_EVIDENCE)]})
+_HARVEST_ANNOTATION = _object(
+    labels=_array(_STRING), pr_state=_nullable(_STRING), valid_at=_nullable(_STRING),
+    reward_version=_ID, reward_json=_STRING, composite_reward=_nullable(_NUMBER),
+    evidence_sha=_nullable(_STRING), rubric_json=_nullable(_STRING), reviewer_logins=_array(_STRING),
+    has_posterior=_BOOL, reply_classifier_version=_nullable(_STRING), reply_evidence_digest=_nullable(_SHA))
+_OBSERVATION_V2_SCHEMA = deepcopy(_OBSERVATION_SCHEMA)
+_OBSERVATION_V2_SCHEMA["properties"]["schema_version"] = {"const": "daydream.observation.v2"}
+_OBSERVATION_V2_SCHEMA["properties"]["payload"]["oneOf"].append(_object(
+    type={"const": "harvest-annotation"}, annotation=_HARVEST_ANNOTATION, labeler_policy_version=_ID))
 _MEMBER = _object(identity=_ID, record_digest=_SHA, shard={"type": "string", "pattern": "^[a-f0-9]{64}\\.jsonl$"},
                   shard_digest=_SHA)
 _SNAPSHOT_SCHEMA = _object(schema_version={"const": "daydream.snapshot.v1"}, snapshot_id=_SHA,
     observed_before=_STRING, valid_before=_nullable(_STRING), runs=_array(_MEMBER), observations=_array(_MEMBER))
+_SNAPSHOT_V2_SCHEMA = deepcopy(_SNAPSHOT_SCHEMA)
+_SNAPSHOT_V2_SCHEMA["properties"].update(
+    schema_version={"const": "daydream.snapshot.v2"},
+    source=_nullable(_object(repository=_ID, revision={"type": "string", "pattern": "^[a-f0-9]{40}$"},
+                            manifest_sha256=_nullable(_SHA))))
+_SNAPSHOT_V2_SCHEMA["required"].append("source")
 _VALIDATORS = {"daydream.run.v1": Draft202012Validator(_RUN_SCHEMA),
                "daydream.observation.v1": Draft202012Validator(_OBSERVATION_SCHEMA),
-               "daydream.snapshot.v1": Draft202012Validator(_SNAPSHOT_SCHEMA)}
+               "daydream.observation.v2": Draft202012Validator(_OBSERVATION_V2_SCHEMA),
+               "daydream.snapshot.v1": Draft202012Validator(_SNAPSHOT_SCHEMA),
+               "daydream.snapshot.v2": Draft202012Validator(_SNAPSHOT_V2_SCHEMA)}
 
 
 def _parse(raw: Mapping[str, Any] | str | bytes, version: str) -> Record:
-    name = {"daydream.run.v1": "RunRecord", "daydream.observation.v1": "ObservationRecord"}.get(version, "Snapshot")
+    name = "ObservationRecord" if version.startswith("daydream.observation.") else (
+        "RunRecord" if version == "daydream.run.v1" else "Snapshot")
     try:
         value = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
         if not isinstance(value, dict) or value.get("schema_version") != version or version not in _VALIDATORS:
@@ -156,14 +174,14 @@ def _parse(raw: Mapping[str, Any] | str | bytes, version: str) -> Record:
             for field in _RUN_PAYLOADS:
                 value[field] = {**evidence_default, **value.get(field, {})}
             _timestamp(value["captured_at"])
-        elif version == "daydream.observation.v1":
+        elif version.startswith("daydream.observation."):
             _timestamp(value["valid_at"])
             _timestamp(value["observed_at"])
         if not _VALIDATORS[version].is_valid(value):
             raise ValueError("record")
         if version == "daydream.run.v1":
             _validate_run_evidence(value)
-        elif version == "daydream.observation.v1":
+        elif version.startswith("daydream.observation."):
             _validate_observation(value)
         else:
             _timestamp(value["observed_before"])
@@ -183,11 +201,25 @@ def parse_run(raw: Mapping[str, Any] | str | bytes) -> Record:
 
 
 def parse_observation(raw: Mapping[str, Any] | str | bytes) -> Record:
-    return _parse(raw, "daydream.observation.v1")
+    try:
+        value = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
+        version = value.get("schema_version") if isinstance(value, dict) else None
+    except (ValueError, TypeError, UnicodeError):
+        raise ValueError("invalid ObservationRecord: record") from None
+    if version not in ("daydream.observation.v1", "daydream.observation.v2"):
+        raise ValueError("invalid ObservationRecord: schema_version")
+    return _parse(value, version)
 
 
 def parse_snapshot(raw: Mapping[str, Any] | str | bytes) -> Record:
-    return _parse(raw, "daydream.snapshot.v1")
+    try:
+        value = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
+        version = value.get("schema_version") if isinstance(value, dict) else None
+    except (ValueError, TypeError, UnicodeError):
+        raise ValueError("invalid Snapshot: record") from None
+    if version not in ("daydream.snapshot.v1", "daydream.snapshot.v2"):
+        raise ValueError("invalid Snapshot: schema_version")
+    return _parse(value, version)
 
 
 def validate_record_targets(runs: Sequence[Record], observations: Sequence[Record]) -> None:
@@ -330,7 +362,7 @@ def run_record_schema() -> Record:
 
 
 def observation_record_schema() -> Record:
-    return deepcopy(_OBSERVATION_SCHEMA)
+    return deepcopy(_OBSERVATION_V2_SCHEMA)
 
 
 _DEFAULT_MAX_RECORD_BYTES = 64 * 1024 * 1024
@@ -414,6 +446,30 @@ class LocalRecordStore:
             if path.is_symlink() or (path.exists() and not stat.S_ISREG(path.lstat().st_mode)):
                 raise StoreError("unsafe_storage_path")
             self._atomic_write(path, self._payload(dict(source)))
+
+    def download_source(self) -> Record | None:
+        """Read the authenticated exact-commit provenance saved by canonical download."""
+        with self._locked():
+            return self._download_source()
+
+    def _download_source(self) -> Record | None:
+        path = self.root / "source.json"
+        if not path.exists() and not path.is_symlink():
+            return None
+        try:
+            value = json.loads(self._read_bytes(path))
+            if (not isinstance(value, dict) or not isinstance(value.get("repository"), str)
+                    or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*",
+                                        value["repository"])
+                    or not isinstance(value.get("revision"), str)
+                    or not re.fullmatch(r"[a-f0-9]{40}", value["revision"])
+                    or value.get("manifest_sha256") is not None and (
+                        not isinstance(value["manifest_sha256"], str)
+                        or not _DIGEST.fullmatch(value["manifest_sha256"]))):
+                raise ValueError
+            return value
+        except (ValueError, UnicodeError, RecursionError):
+            raise StoreError("invalid_download_source") from None
 
     def _parse(self, value: Any, *, run: bool) -> Record:
         size = len(value.encode() if isinstance(value, str) else value) if isinstance(value, (str, bytes)) else 0
@@ -549,9 +605,13 @@ class LocalRecordStore:
                 self._validate_target(record)
             observations = tuple(member for member, record in all_observations if
                                  record["run_id"] in selected and _timestamp(record["observed_at"]) <= observed_cutoff)
-            value = {"schema_version": "daydream.snapshot.v1", "observed_before": observed_before,
+            source = self._download_source()
+            frozen_source = None if source is None else {
+                "repository": source["repository"], "revision": source["revision"],
+                "manifest_sha256": source.get("manifest_sha256")}
+            value = {"schema_version": "daydream.snapshot.v2", "observed_before": observed_before,
                      "valid_before": valid_before, "runs": list(runs),
-                     "observations": list(observations)}
+                     "observations": list(observations), "source": frozen_source}
             snapshot_id = _sha(canonical_json(value).encode())
             document = parse_snapshot({"snapshot_id": snapshot_id, **value})
             data = (canonical_json(document) + "\n").encode()
@@ -579,7 +639,7 @@ class LocalRecordStore:
                 expected_id = value.pop("snapshot_id")
                 if expected_id != snapshot_id or _sha(canonical_json(value).encode()) != snapshot_id:
                     raise StoreError("snapshot_digest_mismatch")
-                if value["schema_version"] != "daydream.snapshot.v1":
+                if value["schema_version"] not in ("daydream.snapshot.v1", "daydream.snapshot.v2"):
                     raise StoreError("unknown_snapshot_schema")
                 pinned = parse_snapshot({"snapshot_id": snapshot_id, **value})
             except (TypeError, KeyError, ValueError, RecursionError) as error:

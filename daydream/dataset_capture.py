@@ -15,7 +15,7 @@ from daydream.archive.provenance import capture_executable_provenance
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.deep.diff import _diff_changed_files
 from daydream.deep.records import item_source_uids, record_issues, record_uid
-from daydream.pr_review import compute_fingerprint, extract_item_fields
+from daydream.pr_review import compute_fingerprint, extract_item_fields, parsed_issues_from_items
 from daydream.timeutil import now_iso_utc
 from daydream.training.reward import DEFAULT_WEIGHTS, REWARD_VERSION, ScoringInputs, score_trajectory
 
@@ -123,7 +123,9 @@ def capture_run_record(
                 "status": "failed", "reason": "malformed_shape", "raw_json": merged,
             }
             continue
-        canonical_items.append({**item, "source_uids": item_source_uids(item), "fingerprint": compute_fingerprint(
+        parsed_finding = parsed_issues_from_items([item])[0]
+        canonical_items.append({**item, "body": parsed_finding.body,
+                                "source_uids": item_source_uids(item), "fingerprint": compute_fingerprint(
             fields.path, fields.description, fields.rationale,
         )})
     derivation_names = {
@@ -161,9 +163,16 @@ def capture_run_record(
     except git_ops.GitError:
         final_head = None
     provenance = {"producer": capture_executable_provenance().to_dict(),
+                  "repository_context": {"branch": work.head_branch, "base_branch": work.base_branch,
+                                         "source_path": str(work.source)},
                   "effective_configuration": None if identity is None else asdict(identity),
                   "flow": config.flow_name or ("diagram" if config.output_mode == "diagram" else "deep"),
                   "license": {"status": "unavailable", "reason": "license evidence not acquired"}}
+    if identity is not None and identity.profile is not None:
+        profile = identity.profile
+        provenance["profile"] = {"profile_schema_version": profile.schema_version,
+                                 "profile_name": profile.name, "profile_source_kind": profile.source_kind,
+                                 "profile_digest": profile.digest}
     from daydream.run_config import (
         _resolved_backend_name,
         _resolved_latency_profile,

@@ -17,14 +17,18 @@ from daydream.archive.scan import SEVERITY_BLOCKING, _scan_file, _scan_text
 from daydream.artifacts.filesystem import _create_private_directory, _projection_path
 from daydream.artifacts.models import ArtifactVisibilityError
 from daydream.dataset import LocalRecordStore, Record, StoreError, parse_observation, parse_run, validate_record_targets
-from daydream.dataset_hub_client import DatasetHub, HfDatasetHub, HubConflict, HubError
+from daydream.hub import DatasetHub, HfDatasetHub, HubConflict, HubError
 from daydream.json_utils import atomic_write_bytes, canonical_json
 
 MANIFEST_PATH = "manifest.json"
-_SCHEMAS = {"runs": "daydream.run.v1", "observations": "daydream.observation.v1"}
+_SCHEMAS = {"runs": ["daydream.run.v1"], "observations": ["daydream.observation.v1", "daydream.observation.v2"]}
+_MANIFEST_SCHEMAS = {
+    "daydream.hub.v1": {"runs": "daydream.run.v1", "observations": "daydream.observation.v1"},
+    "daydream.hub.v2": _SCHEMAS,
+}
 _IDENTITY_FIELDS = {"runs": "run_id", "observations": "observation_id"}
 _PARSERS = {"runs": parse_run, "observations": parse_observation}
-_VERSION = "daydream.hub.v1"
+_VERSION = "daydream.hub.v2"
 _DIGEST = re.compile(r"[a-f0-9]{64}")
 _REVISION = re.compile(r"[a-f0-9]{40}")
 _REPO = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*")
@@ -62,7 +66,9 @@ def _manifest(raw: bytes) -> Record:
             raise ValueError
         value = json.loads(raw)
         if (not isinstance(value, dict) or set(value) != {"schema_version", "record_schemas", "shards"}
-                or value["schema_version"] != _VERSION or value["record_schemas"] != _SCHEMAS
+                or not isinstance(value["schema_version"], str)
+                or value["schema_version"] not in _MANIFEST_SCHEMAS
+                or value["record_schemas"] != _MANIFEST_SCHEMAS[value["schema_version"]]
                 or not isinstance(value["shards"], dict) or set(value["shards"]) != set(_SCHEMAS)):
             raise ValueError
         for kind in _SCHEMAS:
@@ -116,7 +122,7 @@ def _identity(record: Record, kind: str) -> str:
     return str(record[_IDENTITY_FIELDS[kind]])
 
 
-def _validate_shard(data: bytes, shard: Record, kind: str) -> tuple[Record, ...]:
+def _validate_shard(data: bytes, shard: Record, kind: str, schemas: Sequence[str]) -> tuple[Record, ...]:
     if len(data) != shard["bytes"] or _sha(data) != shard["sha256"]:
         raise StoreError("shard_digest_mismatch")
     lines = data.splitlines(keepends=True)
@@ -126,6 +132,8 @@ def _validate_shard(data: bytes, shard: Record, kind: str) -> tuple[Record, ...]
     for line, member in zip(lines, shard["records"], strict=True):
         try:
             record = _PARSERS[kind](line)
+            if record["schema_version"] not in schemas:
+                raise ValueError
         except (ValueError, TypeError, RecursionError, OverflowError):
             raise StoreError("invalid_or_unknown_record_schema") from None
         if (_identity(record, kind) != member["identity"] or _sha(line[:-1]) != member["sha256"]
@@ -146,7 +154,9 @@ def _remote_records(
             data = backend.read_file(repo_id, shard["path"], revision)
             if data is None:
                 raise StoreError("missing_shard")
-            loaded.extend(_validate_shard(data, shard, kind))
+            declared = manifest["record_schemas"][kind]
+            schemas = [declared] if isinstance(declared, str) else declared
+            loaded.extend(_validate_shard(data, shard, kind, schemas))
         records[kind] = tuple(loaded)
     validate_record_targets(records["runs"], records["observations"])
     return records
@@ -312,6 +322,8 @@ class DatasetUploader:
                         merged["shards"][kind].extend(shards)
                         files.update(additions)
                     if files:
+                        merged["schema_version"] = _VERSION
+                        merged["record_schemas"] = _SCHEMAS
                         files[MANIFEST_PATH] = _json_bytes(merged)
                         _manifest(files[MANIFEST_PATH])
                         try:

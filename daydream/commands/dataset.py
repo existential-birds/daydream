@@ -63,8 +63,26 @@ def _handle_download(argv: list[str]) -> int:
     return _handle_dataset_operation(argv, operation="download")
 
 
+def _handle_snapshot(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="daydream corpus dataset snapshot")
+    parser.add_argument("--store", type=Path, default=Path.home() / ".daydream" / "dataset")
+    parser.add_argument("--observed-before", required=True, help="Observe-time membership cutoff (ISO-8601).")
+    parser.add_argument("--valid-before", help="Optional valid-time eligibility cutoff (ISO-8601).")
+    args = parser.parse_args(argv)
+    try:
+        snapshot = LocalRecordStore(args.store).select_snapshot(
+            observed_before=args.observed_before, valid_before=args.valid_before)
+        print(json.dumps(snapshot, sort_keys=True))
+        return 0
+    except (StoreError, ValueError, OSError) as exc:
+        code = exc.code if isinstance(exc, StoreError) else type(exc).__name__
+        print_error(create_console(), "Data Collection", f"Dataset snapshot failed ({code}).")
+        return 1
+
+
 def handle_dataset(argv: list[str]) -> int:
     return common._dispatch_namespace(argv, {
         "publish": _handle_publish, "status": _handle_status, "download": _handle_download,
-    }, "usage: daydream corpus dataset {publish,status,download} ...\n"
-       "\nPublish the local queue, inspect upload status, or download an exact private Hub commit.")
+        "snapshot": _handle_snapshot,
+    }, "usage: daydream corpus dataset {publish,status,download,snapshot} ...\n"
+       "\nPublish the local queue, inspect status, download an exact private Hub commit, or freeze local membership.")

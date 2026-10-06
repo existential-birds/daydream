@@ -660,12 +660,12 @@ def test_cli_preserves_other_errors_beside_grouped_interrupt(monkeypatch: pytest
 
 def test_harvest_parser_accepts_repo_clone_root() -> None:
     parser = _build_harvest_parser()
-    args = parser.parse_args(["--repo-clone-root", "/tmp/clones"])
+    args = parser.parse_args(["--snapshot-id", "a" * 64, "--repo-clone-root", "/tmp/clones"])
     assert args.repo_clone_root == Path("/tmp/clones")
 
 def test_harvest_parser_repo_clone_root_defaults_to_none() -> None:
     parser = _build_harvest_parser()
-    args = parser.parse_args([])
+    args = parser.parse_args(["--snapshot-id", "a" * 64])
     assert args.repo_clone_root is None
 
 def test_pr_repo_falls_back_to_cwd_without_target(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

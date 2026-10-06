@@ -121,3 +121,63 @@ async def test_explicit_capture_disable_overrides_hub_destination(
     assert config.dataset_store_path is not None
     assert not config.dataset_store_path.exists()
     assert hub.commits == []
+
+
+@pytest.mark.parametrize(("cli_repo", "env_repo", "expected_repo"), [
+    ("operator/cli", "operator/env", "operator/cli"),
+    ("operator/cli", None, "operator/cli"),
+    ("", "operator/env", "operator/env"),
+    (None, "operator/env", "operator/env"),
+    (None, "", None),
+    (None, None, None),
+])
+async def test_operator_destination_precedence_controls_real_review_publication(
+    config: RunConfig, monkeypatch: pytest.MonkeyPatch,
+    cli_repo: str | None, env_repo: str | None, expected_repo: str | None,
+) -> None:
+    from daydream import dataset_hub
+    from tests.harness.dataset_hub import FakeDatasetHub
+
+    class DestinationHub(FakeDatasetHub):
+        destinations: list[str] = []
+
+        def private_revision(self, repo_id: str) -> str:
+            self.destinations.append(repo_id)
+            return super().private_revision(repo_id)
+
+    hub = DestinationHub()
+    monkeypatch.setenv("HF_TOKEN", "hf_offline_fixture_token")
+    if env_repo is not None:
+        monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", env_repo)
+    monkeypatch.setattr(dataset_hub, "HfDatasetHub", lambda: hub)
+    assert await run(replace(config, trajectory_hub_repo=cli_repo)) == 0
+    assert config.dataset_store_path is not None
+    if expected_repo is None:
+        assert not config.dataset_store_path.exists()
+        assert hub.commits == [] and hub.destinations == []
+    else:
+        assert len(hub.commits) == 1 and set(hub.destinations) == {expected_repo}
+        assert len(read_records(LocalRecordStore(config.dataset_store_path)).runs) == 1
+
+
+@pytest.mark.parametrize("filename,body", [
+    ("pyproject.toml", '[tool.daydream]\ntrajectory_hub_repo = "evil/repo"\n'),
+    (".daydream.toml", 'trajectory_hub_repo = "evil/repo"\n'),
+])
+async def test_hostile_checkout_config_cannot_enable_record_uploads(
+    config: RunConfig, monkeypatch: pytest.MonkeyPatch, filename: str, body: str,
+) -> None:
+    from daydream import dataset_hub
+    from daydream.config_file import load_file_config
+    from tests.harness.dataset_hub import FakeDatasetHub
+
+    hub = FakeDatasetHub()
+    target = Path(config.target or "")
+    (target / filename).write_text(body, encoding="utf-8")
+    monkeypatch.setenv("HF_TOKEN", "hf_offline_fixture_token")
+    monkeypatch.setattr(dataset_hub, "HfDatasetHub", lambda: hub)
+    assert await run(replace(config, trajectory_hub_repo=None, file_config=load_file_config(target))) == 0
+    assert config.dataset_store_path is not None
+    assert not config.dataset_store_path.exists()
+    assert hub.commits == []
+    assert (target / ".review-output.md").is_file()

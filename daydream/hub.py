@@ -6,7 +6,10 @@ import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from daydream.run_config import RunConfig
 
 _REVISION = re.compile(r"[0-9a-f]{40}")
 
@@ -105,3 +108,12 @@ class HfDatasetHub:
                 raise HubConflict("concurrent_update") from None
             raise HubError("network_failed") from None
         return _revision(getattr(result, "oid", None))
+
+
+def resolve_hub_repo(config: RunConfig) -> str | None:
+    """Select an operator destination from CLI config, then the environment.
+
+    Empty values are unset. Credentials and target-checkout config cannot enable
+    publication or choose its destination.
+    """
+    return config.trajectory_hub_repo or os.environ.get("DAYDREAM_TRAJECTORY_HUB_REPO") or None
