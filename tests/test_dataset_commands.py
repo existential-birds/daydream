@@ -36,7 +36,7 @@ def test_operator_destination_selects_publication_and_pinned_download(
     monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
     store = LocalRecordStore(tmp_path / "records")
     store.commit_run(run_record("operator-run"))
-    arguments = [] if cli_repo is None else ["--repo", cli_repo]
+    arguments = [] if cli_repo is None else ["--trajectory-hub-repo", cli_repo]
     assert cli_main(["corpus", "dataset", "publish", *arguments, "--store", str(store.root)]) == 0
     assert json.loads(capsys.readouterr().out)["published"] == 1
     assert cli_main(["corpus", "dataset", "status", *arguments, "--store", str(store.root)]) == 0
@@ -69,8 +69,42 @@ def test_dataset_commands_require_operator_destination_before_any_side_effect(
                  else ["--store", str(destination)])
     assert cli_main(["corpus", "dataset", operation, *arguments]) == 2
     output = capsys.readouterr()
-    assert "--repo" in output.out + output.err
+    assert "--trajectory-hub-repo" in output.err
+    assert "--repo" not in output.out + output.err
     assert not destination.exists()
+
+
+@pytest.mark.parametrize("operation", ["publish", "status", "download"])
+@pytest.mark.parametrize("legacy_arguments", [["--repo", "OWNER/REPO"], ["--repo=OWNER/REPO"]])
+def test_dataset_commands_reject_repo_flag_before_any_side_effect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    operation: str, legacy_arguments: list[str],
+) -> None:
+    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "OWNER/REPO")
+    monkeypatch.setenv("HF_TOKEN", "hf_offline_fixture_token")
+
+    def forbidden_network() -> None:
+        pytest.fail("Rejected dataset arguments must not contact HF")
+
+    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", forbidden_network)
+    destination = tmp_path / "records"
+    arguments = (["--revision", "a" * 40, "--output", str(destination)] if operation == "download"
+                 else ["--store", str(destination)])
+    assert cli_main(["corpus", "dataset", operation, *legacy_arguments, *arguments]) == 2
+    output = capsys.readouterr()
+    assert "unrecognized arguments: " + " ".join(legacy_arguments) in output.err
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("operation", ["publish", "status", "download"])
+def test_dataset_command_help_exposes_canonical_destination(
+    capsys: pytest.CaptureFixture[str], operation: str,
+) -> None:
+    assert cli_main(["corpus", "dataset", operation, "--help"]) == 0
+    output = capsys.readouterr()
+    assert "--trajectory-hub-repo OWNER/REPO" in output.out
+    assert "DAYDREAM_TRAJECTORY_HUB_REPO" in output.out
+    assert "--repo" not in output.out + output.err
 
 
 def test_dataset_status_reads_local_queue_without_credentials(
@@ -81,7 +115,7 @@ def test_dataset_status_reads_local_queue_without_credentials(
     store = LocalRecordStore(tmp_path / "records")
     store.commit_run(run_record())
     store.append_observation(observation())
-    assert cli_main(["corpus", "dataset", "status", "--repo", "test-user/private-trajectories",
+    assert cli_main(["corpus", "dataset", "status", "--trajectory-hub-repo", "test-user/private-trajectories",
                      "--store", str(store.root)]) == 0
     summary = json.loads(capsys.readouterr().out)
     assert summary["queued"] == 2 and summary["published"] == 0 and summary["failed"] == 0
@@ -128,19 +162,21 @@ def test_dataset_publish_download_round_trip_through_cli(
     from tests.harness.dataset_hub import FakeDatasetHub
 
     hub = FakeDatasetHub()
+    monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
     monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
     store = LocalRecordStore(tmp_path / "records")
     store.commit_run(run_record())
     store.append_observation(observation())
-    assert cli_main(["corpus", "dataset", "publish", "--store", str(store.root)]) == 0
+    arguments = ["--trajectory-hub-repo", "OWNER/REPO"]
+    assert cli_main(["corpus", "dataset", "publish", *arguments, "--store", str(store.root)]) == 0
     published = json.loads(capsys.readouterr().out)
     assert published["published"] == 2 and published["queued"] == 0
     assert published["revision"] == hub.revision
-    assert cli_main(["corpus", "dataset", "status", "--store", str(store.root)]) == 0
+    assert cli_main(["corpus", "dataset", "status", *arguments, "--store", str(store.root)]) == 0
     assert json.loads(capsys.readouterr().out)["published"] == 2
 
     destination = tmp_path / "download"
-    assert cli_main(["corpus", "dataset", "download", "--revision", hub.revision,
+    assert cli_main(["corpus", "dataset", "download", *arguments, "--revision", hub.revision,
                      "--output", str(destination)]) == 0
     downloaded = json.loads(capsys.readouterr().out)
     assert downloaded == {"revision": hub.revision, "runs": 1, "observations": 1}

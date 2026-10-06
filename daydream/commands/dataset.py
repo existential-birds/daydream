@@ -18,7 +18,8 @@ def _handle_dataset_operation(argv: list[str], *, operation: str) -> int:
 
     parser = argparse.ArgumentParser(prog=f"daydream corpus dataset {operation}")
     configured_repo = os.environ.get("DAYDREAM_TRAJECTORY_HUB_REPO") or None
-    parser.add_argument("--repo", default=configured_repo, required=configured_repo is None, metavar="OWNER/REPO",
+    parser.add_argument("--trajectory-hub-repo", default=configured_repo,
+                        required=configured_repo is None, metavar="OWNER/REPO",
                         help="Private Hugging Face dataset; overrides DAYDREAM_TRAJECTORY_HUB_REPO.")
     if operation == "download":
         parser.add_argument("--revision", required=True, help="Exact 40-character Hub commit SHA.")
@@ -31,13 +32,13 @@ def _handle_dataset_operation(argv: list[str], *, operation: str) -> int:
         if operation == "download":
             if re.fullmatch(r"[0-9a-f]{40}", args.revision) is None:
                 raise StoreError("exact_revision_required")
-            store = download_snapshot(args.repo, args.revision, args.output)
+            store = download_snapshot(args.trajectory_hub_repo, args.revision, args.output)
             records = store.read_records()
             summary = {"revision": args.revision, "runs": len(records["runs"]),
                        "observations": len(records["observations"])}
             failed = False
         else:
-            uploader = DatasetUploader(LocalRecordStore(args.store), args.repo)
+            uploader = DatasetUploader(LocalRecordStore(args.store), args.trajectory_hub_repo)
             status = uploader.upload() if operation == "publish" else uploader.status()
             summary = asdict(status)
             failed = bool(status.failed or status.error)

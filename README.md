@@ -263,9 +263,9 @@ only. Live outcome harvesting, report generation, and corpus cutover are separat
 The data-pipeline verbs live under the `corpus` namespace:
 
 ```bash
-daydream corpus dataset publish --repo OWNER/PRIVATE_DATASET --store ~/.daydream/dataset   # retry queued JSONL uploads
-daydream corpus dataset status --repo OWNER/PRIVATE_DATASET --store ~/.daydream/dataset    # queued/published/failed counts
-daydream corpus dataset download --repo OWNER/PRIVATE_DATASET --revision <40-character-commit-sha> --output /tmp/daydream-records
+daydream corpus dataset publish --trajectory-hub-repo OWNER/REPO --store ~/.daydream/dataset   # retry queued JSONL uploads
+daydream corpus dataset status --trajectory-hub-repo OWNER/REPO --store ~/.daydream/dataset    # queued/published/failed counts
+daydream corpus dataset download --trajectory-hub-repo OWNER/REPO --revision <40-character-commit-sha> --output /tmp/daydream-records
 daydream corpus harvest                              # annotate all archived runs
 daydream corpus harvest --dry-run
 daydream corpus build --bundle-root BUNDLE_ROOT --annotation-bundle-root ANNOTATION_BUNDLE_ROOT \
@@ -325,7 +325,8 @@ RFT winner thresholds support `composite`, `correctness_per_finding` (mean score
 
 ### Upload to a private Hugging Face dataset
 
-Upload of trajectories to Hugging Face is opt-in. Only the operator selects the destination. It comes from two sources, highest first:
+Upload of trajectories to Hugging Face is opt-in. Runs and `corpus dataset` commands share one
+operator-selected repository setting. It comes from two sources, highest first:
 
 1. The `--trajectory-hub-repo` CLI flag
 2. The `DAYDREAM_TRAJECTORY_HUB_REPO` environment variable
@@ -349,17 +350,17 @@ replacing existing entries. The review result and completed outputs survive uplo
 collection diagnostics contain no matched credentials or exception payloads.
 
 ```sh
-export DAYDREAM_TRAJECTORY_HUB_REPO="OWNER/PRIVATE_DATASET"
+export DAYDREAM_TRAJECTORY_HUB_REPO="OWNER/REPO"
 export HF_TOKEN="hf_..."
 daydream --review /path/to/project
 
-daydream corpus dataset publish --repo OWNER/PRIVATE_DATASET --store ~/.daydream/dataset
-daydream corpus dataset status --repo OWNER/PRIVATE_DATASET --store ~/.daydream/dataset
-daydream corpus dataset download --repo OWNER/PRIVATE_DATASET --revision <40-character-commit-sha> --output /tmp/daydream-records
+daydream corpus dataset publish --trajectory-hub-repo OWNER/REPO --store ~/.daydream/dataset
+daydream corpus dataset status --trajectory-hub-repo OWNER/REPO --store ~/.daydream/dataset
+daydream corpus dataset download --trajectory-hub-repo OWNER/REPO --revision <40-character-commit-sha> --output /tmp/daydream-records
 ```
 
 The `corpus dataset publish`, `status`, and `download` commands require an operator-selected
-repository through `--repo OWNER/REPO` or `DAYDREAM_TRAJECTORY_HUB_REPO`; the flag takes
+repository through `--trajectory-hub-repo OWNER/REPO` or `DAYDREAM_TRAJECTORY_HUB_REPO`; the flag takes
 precedence over the environment variable. Without either, the command stops before accessing
 the store or contacting HF. `status` reports JSON counts
 for queued, published, and failed records, plus sanitized errors and the last confirmed commit.
