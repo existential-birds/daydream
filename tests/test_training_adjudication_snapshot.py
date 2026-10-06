@@ -1,5 +1,6 @@
 """Tests for the shared per-finding annotation snapshot serializer (issue #1055, Task 1)."""
 
+import hashlib
 import json
 from collections.abc import Mapping
 from typing import Any
@@ -64,13 +65,19 @@ def test_build_canonical_record_serializes_frozen_shared_evidence_canonically() 
     mutable_record = build_canonical_record(session, mutable, evidence_observed_at="2026-01-01T00:00:00Z")
     frozen_record = build_canonical_record(session, frozen, evidence_observed_at="2026-01-01T00:00:00Z")
 
+    expected = [{"reply_id": 1, "body_sha256": "abc", "context": {"labels": ["accepted", "reviewed"]}}]
+    assert frozen_record["evidence"] == mutable_record["evidence"] == expected
     assert json.dumps(frozen_record, sort_keys=True) == json.dumps(mutable_record, sort_keys=True)
 
 
 def test_record_evidence_digest_matches_frozen_shared_digest_with_nested_json() -> None:
     mutable, frozen = _mutable_and_frozen_resolution()
 
-    assert record_evidence_digest([frozen["evidence"]]) == record_evidence_digest([mutable["evidence"]])
+    canonical = (b'[{"body": "", "body_sha256": "abc", "context": {"labels": ["accepted", "reviewed"]}, '
+                 b'"reply_id": 1}]')
+    expected = hashlib.sha256(canonical).hexdigest()
+    assert record_evidence_digest([frozen["evidence"]]) == expected
+    assert record_evidence_digest([mutable["evidence"]]) == expected
 
 
 def test_record_evidence_digest_flattens_and_orders_per_finding_evidence() -> None:
@@ -94,14 +101,16 @@ def test_build_canonical_record_rejects_missing_digest() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [("fingerprint", None), ("fingerprint", ""), ("fingerprint", []),
-     ("disposition", None), ("disposition", "other"), ("disposition", [])],
+     ("disposition", None), ("disposition", "other"), ("disposition", []),
+     pytest.param("fingerprint", ..., id="fingerprint-absent"),
+     pytest.param("disposition", ..., id="disposition-absent")],
 )
 def test_build_canonical_record_rejects_invalid_required_resolution_fields(field: str, value: Any) -> None:
     resolution = _resolution()
-    resolution[field] = value
-    with pytest.raises(ValueError, match=field):
-        build_canonical_record(_snapshot_session(), resolution, evidence_observed_at="2026-01-01")
-    del resolution[field]
+    if value is ...:
+        del resolution[field]
+    else:
+        resolution[field] = value
     with pytest.raises(ValueError, match=field):
         build_canonical_record(_snapshot_session(), resolution, evidence_observed_at="2026-01-01")
 

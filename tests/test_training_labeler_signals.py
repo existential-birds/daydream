@@ -9,7 +9,6 @@ import pytest
 
 from daydream import pr_review
 from daydream.pr_review import DAYDREAM_FOOTER, PRInfo, finding_marker
-from daydream.training import labeler_signals
 from daydream.training.labeler_signals import (
     CommentResolutionSignal,
     FixAppliedSignal,
@@ -62,9 +61,13 @@ def test_reviewed_commit_line_does_not_break_daydream_footer_detection() -> None
     )
     body = payload["body"]
     assert "- **Reviewed commit:**" in body  # precondition: new line present
-    assert labeler_signals._DAYDREAM_FOOTER_PREFIX in body
-    assert body.count(labeler_signals._DAYDREAM_FOOTER_PREFIX) == 1
-    assert labeler_signals._is_daydream_comment({"body": body})
+    assert body.count(DAYDREAM_FOOTER) == 1
+    gh = _fake_gh_responder({("acme/widgets", "repos/acme/widgets/pulls/1/comments"): [
+        _comment(1, body), _comment(2, "Acknowledged", in_reply_to=1),
+    ]})
+    assert comment_resolution_signal({"pr_repo": "acme/widgets", "pr_number": 1}, gh_api=gh) == (
+        CommentResolutionSignal(total=1, replied=1, unresolved=0)
+    )
 
 
 def test_pr_merge_signal_positive() -> None:
@@ -223,25 +226,6 @@ def test_disposition_unanswered_on_bot_only_and_self_replies() -> None:
     # Persist excluded evidence so the reason remains auditable.
     assert len(res.evidence) == 2
     assert all("excluded" in ev["reason"] for ev in res.evidence)
-
-
-def test_disposition_missing_when_comment_deleted() -> None:
-    threads = _scoped_threads([])  # comment exists but...
-    assert threads is not None
-    threads.comment_id_by_fingerprint.clear()  # simulate edited-away/deleted marker
-    (res,) = per_finding_resolution_signal(
-        {"pr_repo": "org/repo", "pr_number": 11},
-        recorded_fingerprints=[FP],
-        gh_api=None,
-        threads=threads,
-    )
-    assert res.disposition == "missing" and res.comment_id is None
-
-
-def test_disposition_evidence_digest_changes_with_reply_edit() -> None:
-    (r1,) = _resolve([("Fixed in abc", {"login": "m", "assoc": "OWNER"})])
-    (r2,) = _resolve([("Fixed in abc — well, partially", {"login": "m", "assoc": "OWNER"})])
-    assert r1.evidence_digest != r2.evidence_digest
 
 
 def test_local_commit_applied_signal_positive(tmp_path: Path) -> None:

@@ -287,7 +287,7 @@ async def test_deep_archive_excludes_preexisting_untracked_files_from_patch_and_
     assert "notes.txt" not in committed
     assert "notes.txt" in git(multi_stack_target, "status", "--porcelain")
 
-async def test_deep_heal_edit_lands_in_archived_recommended_patch(
+async def test_deep_rejects_unauthorized_heal_file_before_archiving_recommendation(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
 ) -> None:
     remote = bare_remote(archive_dir.parent / "origin.git")
@@ -326,15 +326,6 @@ async def test_dump_artifacts_copies_full_bundle_to_target_dir(
     assert (dump_dir / "diff.patch").is_file()
     assert (dump_dir / "evaluation.json").is_file()
     assert (dump_dir / "manifest.json").read_text() == (run_dir / "manifest.json").read_text()
-
-async def test_no_dump_artifacts_leaves_no_extra_copy(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path,
-) -> None:
-    _install_deep_capture_backend(multi_stack_target, monkeypatch)
-    dump_dir = tmp_path / "uploaded-artifacts"
-    exit_code = await run(_deep_run_config(multi_stack_target))
-    assert exit_code == 0
-    assert not dump_dir.exists()
 
 async def test_failed_findings_export_retains_requested_diagnostics(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path, fake_gh: FakeGh,

@@ -75,8 +75,15 @@ def test_cli_complete_population_report_export_materialize(tmp_path: Path, capsy
     assert command(store, "export", "--state-dir", str(state), "--out", str(tmp_path / "export.jsonl")) == 0
     assert (tmp_path / "export.jsonl").is_file()
     exported = [json.loads(line) for line in (tmp_path / "export.jsonl").read_text().splitlines()]
+    assert len(exported) == 4
+    assert {row["record_id"] for row in exported} == {row["record_id"] for row in records}
     assert all(row["reply_captures"][0]["text"] == "context" for row in exported)
     assert not (store.root / "index.db").exists()
+    before = {path.name: path.read_bytes() for path in out.iterdir()}
+    append_replies(store)
+    assert command(store, "harvest-snapshot", "--materialize-dir", str(out)) == 1
+    assert "annotation evidence changed" in capsys.readouterr().out
+    assert {path.name: path.read_bytes() for path in out.iterdir()} == before
 
 
 def test_cli_retains_source_bound_correction_after_human_judgment(tmp_path: Path) -> None:

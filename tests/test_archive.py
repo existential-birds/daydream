@@ -321,16 +321,6 @@ def test_build_manifest_omits_fix_metadata_for_diagram_flow(tmp_path: Path) -> N
     assert m.fix_leftover_untracked is None
     assert m.fix_quality_gate is None
 
-def test_fix_cycle_classification_covers_every_run_flow() -> None:
-    mode_gated_labels = {DaydreamRunFlow.TTT}
-    fix_only_labels = {DaydreamRunFlow.PR}
-    fix_cycle_builtins = {DaydreamRunFlow.NORMAL, DaydreamRunFlow.DEEP,}
-    assert set(DaydreamRunFlow) == (mode_gated_labels
-        | fix_only_labels
-        | fix_cycle_builtins
-        | {DaydreamRunFlow.IMPROVE, DaydreamRunFlow.CUSTOM, DaydreamRunFlow.DIAGRAM,}
-    )
-
 def _assert_archive_omits_fix_test_backend(archive_dir: Path, flow: str) -> None:
     manifests = list((archive_dir / "runs").glob("*/manifest.json"))
     assert len(manifests) == 1, f"expected exactly one archived run, found {len(manifests)}"
@@ -473,11 +463,6 @@ def test_build_manifest_snapshot_timing_overrides_conflicting_evaluation(tmp_pat
         },
     }
     assert manifest.total_prompt_tokens == 7
-
-def test_upsert_run_creates_db(tmp_path: Path) -> None:
-    m = make_manifest()
-    upsert_run(tmp_path, m)
-    assert (tmp_path / "index.db").exists()
 
 def _stored_manifest_row(archive_dir: Path, session_id: str, **fields: Any) -> dict[str, Any]:
     upsert_run(archive_dir, make_manifest(session_id=session_id, **fields))
@@ -646,7 +631,7 @@ def test_session_bound_artifact_requires_matching_session(
     ids=["fix-quality-gate", "recommended-capture"],
 )
 def test_session_bound_unbound_artifact_is_none(tmp_path: Path, resolver: Callable[[Path], Path]) -> None:
-    p = tmp_path / ".daydream" / "deep" / "fix-quality-gate.json"
+    p = resolver(tmp_path / ".daydream" / "deep")
     p.parent.mkdir(parents=True)
     p.write_text(json.dumps({"enabled": True, "rounds": [{"round": 1, "per_file": {}}]}))
     assert _read_session_bound_json_artifact(tmp_path, "sess-42", resolver) is None

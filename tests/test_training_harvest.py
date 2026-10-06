@@ -16,7 +16,7 @@ from daydream.dataset_capture import capture_scoring
 from daydream.json_utils import canonical_json
 from daydream.pr_review import DAYDREAM_FOOTER, finding_marker
 from daydream.training import labeler_versions
-from daydream.training.harvest import HarvestConfig, build_annotation, make_harvest_services, run_harvest
+from daydream.training.harvest import HarvestConfig, build_annotation, make_harvest_services
 from daydream.training.harvest_types import HarvestEvidence, HarvestRow
 from daydream.training.labeler_signals import (
     CommentResolutionSignal,
@@ -253,7 +253,7 @@ def test_cli_capture_only_enrichment_preserves_semantic_history_and_human_preced
     for original in history["observations"]:
         prior = dict(original)
         if prior["payload"]["type"] == "finding-judgment":
-            prior.pop("reply_captures")
+            prior.pop("reply_captures", None)
             prior["observation_id"] = "hash-only"
         store.append_observation(prior)
     old_snapshot = snapshot_id(store)
@@ -371,37 +371,37 @@ def test_pr_state_never_infers_acceptance_from_merge(
 ) -> None:
     store = store_run(tmp_path / "records")
     monkeypatch.setattr(git_ops, "gh_api", github(store, state=state))
-    config = HarvestConfig(store.root, snapshot_id(store), gh_request_spacing_sec=0)
-    import anyio
-
-    summary = anyio.run(lambda: run_harvest(config, services=make_harvest_services(config)))
-    assert summary["annotated"] == 1
-    annotation = next(
+    assert harvest_cli(store, tmp_path / "cache") == 0
+    annotations = [
         o["payload"]["annotation"]
         for o in store.read_records()["observations"]
         if o["payload"]["type"] == "harvest-annotation"
-    )
+    ]
+    assert len(annotations) == 1
+    annotation = annotations[0]
     assert annotation["labels"] == [] and annotation["pr_state"] == state
 
 
-def test_harvest_record_idempotence_policy_bump_and_dry_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_harvest_record_idempotence_policy_bump_and_dry_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
     store = store_run(tmp_path / "records")
     monkeypatch.setattr(git_ops, "gh_api", github(store, ("applied",)))
-    import anyio
-
-    def run(*, dry_run: bool = False) -> dict[str, int]:
-        config = HarvestConfig(store.root, snapshot_id(store), dry_run=dry_run, gh_request_spacing_sec=0)
-        return anyio.run(lambda: run_harvest(config, services=make_harvest_services(config)))
-
     before = store.read_records()
-    assert run(dry_run=True)["would_annotate"] == 1
+    assert harvest_cli(store, tmp_path / "dry-run-cache", "--dry-run") == 0
+    assert "'would_annotate': 1" in capsys.readouterr().out
     assert store.read_records() == before
-    assert run()["annotated"] == 1
+    assert not (tmp_path / "dry-run-cache").exists()
+    assert harvest_cli(store, tmp_path / "first-cache") == 0
+    assert "'annotated': 1" in capsys.readouterr().out
     before = store.read_records()
-    assert run()["skipped"] == 1
+    assert len([o for o in before["observations"] if o["payload"]["type"] == "harvest-annotation"]) == 1
+    assert harvest_cli(store, tmp_path / "unchanged-cache") == 0
+    assert "'skipped': 1" in capsys.readouterr().out
     assert store.read_records() == before
     monkeypatch.setattr(labeler_versions, "LABELER_POLICY_VERSION", "new-policy")
-    assert run()["annotated"] == 1
+    assert harvest_cli(store, tmp_path / "new-policy-cache") == 0
+    assert "'annotated': 1" in capsys.readouterr().out
     assert len([o for o in store.read_records()["observations"] if o["payload"]["type"] == "harvest-annotation"]) == 2
 
 

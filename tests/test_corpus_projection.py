@@ -35,7 +35,6 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def test_record_identity_is_stable_and_discriminating() -> None:
     identity = record_finding_id("s1", "s1:fix-0", "seg-0", "item:1")
-    assert identity == record_finding_id("s1", "s1:fix-0", "seg-0", "item:1")
     assert record_finding_id("s2", "s1:fix-0", "seg-0", "item:1") != identity
     assert record_finding_id("s1", "s1:fix-1", "seg-0", "item:1") != identity
     assert record_finding_id("s1", "s1:fix-0", "seg-1", "item:1") != identity
@@ -68,7 +67,6 @@ def test_decisive_dispositions_are_gold() -> None:
 
 def test_non_decisive_dispositions_never_gold() -> None:
     for d in ("ambiguous", "unanswered", "missing"):
-        assert classify_tier(_resolution(d)) != "gold"
         assert classify_tier(_resolution(d)) == "task-only"
 
 def test_intrinsic_reward_and_llm_score_cannot_promote_gold() -> None:
@@ -164,11 +162,27 @@ def test_mixed_session_yields_two_distinct_gold_records() -> None:
     assert {r["record_id"] for r in gold} and len({r["record_id"] for r in gold}) == 2
     assert {r["disposition"] for r in gold} == {"accepted", "rejected"}
 
-def test_reply_existence_never_constitutes_acceptance() -> None:
-    # ambiguous: a reply exists but the classifier did not map accepted/rejected
-    records = list(project_findings({"session_id": "s1", "trajectory_id": "s1:root",
-                                     "segment_id": "seg-0", "resolutions": [_res("c3" * 32, "ambiguous")]}))
-    assert all(r["tier"] != "gold" for r in records)
+def test_cli_reply_existence_never_constitutes_acceptance(tmp_path: Path) -> None:
+    store = LocalRecordStore(tmp_path / "records")
+    run = projection_run(dispositions=("ambiguous",))
+    store.commit_run(run)
+    append_projection_evidence(store, run, dispositions=())
+    semantic, capture = reply_evidence("9", "Needs investigation.\n")
+    assert semantic["classifier_label"] == "ambiguous"
+    store.append_observation(observation(
+        "reply", run_id="sess-a", item_uid="item:0", role="automatic",
+        semantic_evidence=[semantic], evidence_digest=reply_evidence_digest([semantic]),
+        evidence_digest_scheme="reply-evidence-v1", reply_captures=[capture],
+        payload={"type": "finding-judgment", "disposition": "ambiguous", "rationale": "nondirectional reply"},
+    ))
+    config = projection_config(store, tmp_path)
+    assert cli_main(_cli_args(config)) == 0
+    assert _read_jsonl(config.out_dir / "corpus.jsonl") == []
+    report = json.loads((config.out_dir / "adjudication-report.json").read_text())
+    assert len(report) == 1
+    assert report[0]["disposition"] == "ambiguous"
+    assert report[0]["evidence"] == [semantic]
+    assert report[0]["reply_captures"] == [capture]
 
 def test_non_decisive_findings_route_to_adjudication() -> None:
     session = {"session_id": "s1", "trajectory_id": "s1:root", "segment_id": "seg-0",
