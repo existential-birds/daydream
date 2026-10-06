@@ -9,6 +9,70 @@ from tests.harness.dataset import observation, run_record
 from tests.harness.scripts import cli_main
 
 
+@pytest.fixture(autouse=True)
+def operator_hub_destination(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "test-user/private-trajectories")
+
+
+@pytest.mark.parametrize(("cli_repo", "expected_repo"), [
+    (None, "operator/env-trajectories"),
+    ("operator/cli-trajectories", "operator/cli-trajectories"),
+])
+def test_operator_destination_selects_publication_and_pinned_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    cli_repo: str | None, expected_repo: str,
+) -> None:
+    from daydream.dataset_hub_client import HubError
+    from tests.harness.dataset_hub import FakeDatasetHub
+
+    class OperatorHub(FakeDatasetHub):
+        def private_revision(self, repo_id: str) -> str:
+            if repo_id != expected_repo:
+                raise HubError("network_failed")
+            return super().private_revision(repo_id)
+
+    hub = OperatorHub()
+    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "operator/env-trajectories")
+    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
+    store = LocalRecordStore(tmp_path / "records")
+    store.commit_run(run_record("operator-run"))
+    arguments = [] if cli_repo is None else ["--repo", cli_repo]
+    assert cli_main(["corpus", "dataset", "publish", *arguments, "--store", str(store.root)]) == 0
+    assert json.loads(capsys.readouterr().out)["published"] == 1
+    assert cli_main(["corpus", "dataset", "status", *arguments, "--store", str(store.root)]) == 0
+    assert json.loads(capsys.readouterr().out)["published"] == 1
+    destination = tmp_path / "download"
+    assert cli_main(["corpus", "dataset", "download", *arguments, "--revision", hub.revision,
+                     "--output", str(destination)]) == 0
+    assert json.loads(capsys.readouterr().out)["runs"] == 1
+    assert LocalRecordStore(destination).read_records()["runs"][0]["run_id"] == "operator-run"
+
+
+@pytest.mark.parametrize("operation", ["publish", "status", "download"])
+@pytest.mark.parametrize("environment", [None, ""])
+def test_dataset_commands_require_operator_destination_before_any_side_effect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    operation: str, environment: str | None,
+) -> None:
+    if environment is None:
+        monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
+    else:
+        monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", environment)
+    monkeypatch.setenv("HF_TOKEN", "hf_offline_fixture_token")
+
+    def forbidden_network() -> None:
+        pytest.fail("Unconfigured dataset commands must not contact HF")
+
+    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", forbidden_network)
+    destination = tmp_path / "records"
+    arguments = (["--revision", "a" * 40, "--output", str(destination)] if operation == "download"
+                 else ["--store", str(destination)])
+    assert cli_main(["corpus", "dataset", operation, *arguments]) == 2
+    output = capsys.readouterr()
+    assert "--repo" in output.out + output.err
+    assert not destination.exists()
+
+
 def test_dataset_status_reads_local_queue_without_credentials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -17,7 +81,8 @@ def test_dataset_status_reads_local_queue_without_credentials(
     store = LocalRecordStore(tmp_path / "records")
     store.commit_run(run_record())
     store.append_observation(observation())
-    assert cli_main(["corpus", "dataset", "status", "--store", str(store.root)]) == 0
+    assert cli_main(["corpus", "dataset", "status", "--repo", "test-user/private-trajectories",
+                     "--store", str(store.root)]) == 0
     summary = json.loads(capsys.readouterr().out)
     assert summary["queued"] == 2 and summary["published"] == 0 and summary["failed"] == 0
 
@@ -47,7 +112,7 @@ def test_real_review_explicit_capture_opt_out(
     silence(monkeypatch)
     install_stub_backend(monkeypatch, multi_stack_target)
     store = tmp_path / "records"
-    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "existentialbirds/daydream-trajectories")
+    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "test-user/private-trajectories")
     monkeypatch.setattr("daydream.git_ops.gh_repo_view", lambda _repo, **_kwargs: None)
     monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda _repo, _branch, **_kwargs: None)
     assert cli_main(["--review", "--stack", "python", "--no-archive", "--no-eval", "--dataset-store", str(store),

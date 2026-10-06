@@ -14,6 +14,8 @@ import pytest
 from daydream.dataset import LocalRecordStore, StoreError
 from tests.harness.dataset import observation, read_records, run_record
 
+TEST_REPO = "test-user/private-trajectories"
+
 
 @pytest.fixture
 def api() -> Any:
@@ -31,12 +33,12 @@ def test_offline_queue_retry_download_and_immutable_history(tmp_path: Path, api:
     store = LocalRecordStore(tmp_path / "source")
     store.commit_run(run_record())
     store.append_observation(observation())
-    publisher = api.DatasetUploader(store, api.DEFAULT_HUB_REPO, backend=hub)
+    publisher = api.DatasetUploader(store, TEST_REPO, backend=hub)
     hub.fail_before = True
     failure = publisher.upload()
     assert (failure.queued, failure.failed, failure.published, failure.error) == (2, 2, 0, "network_failed")
     hub.fail_before = False
-    publisher = api.DatasetUploader(LocalRecordStore(store.root), api.DEFAULT_HUB_REPO, backend=hub)
+    publisher = api.DatasetUploader(LocalRecordStore(store.root), TEST_REPO, backend=hub)
     result = publisher.upload()
     assert (result.queued, result.published, result.failed) == (0, 2, 0)
     assert publisher.status() == result
@@ -50,7 +52,7 @@ def test_offline_queue_retry_download_and_immutable_history(tmp_path: Path, api:
         assert shard["path"].startswith(kind + "/")
         assert hashlib.sha256(tree[shard["path"]]).hexdigest() == shard["sha256"]
         assert shard["count"] == 1 and shard["bytes"] == len(tree[shard["path"]])
-    downloaded = api.download_snapshot(api.DEFAULT_HUB_REPO, result.revision, tmp_path / "download", backend=hub)
+    downloaded = api.download_snapshot(TEST_REPO, result.revision, tmp_path / "download", backend=hub)
     before = read_records(downloaded)
     assert before.runs == read_records(store).runs and before.observations == read_records(store).observations
     assert before.effective_judgment("run-1", "item:1")["disposition"] == "accepted"
@@ -59,7 +61,7 @@ def test_offline_queue_retry_download_and_immutable_history(tmp_path: Path, api:
     later = publisher.upload()
     assert later.published == 3 and len(hub.commits) == 2
     assert publisher.upload().revision == later.revision and len(hub.commits) == 2
-    old = api.download_snapshot(api.DEFAULT_HUB_REPO, result.revision, tmp_path / "old", backend=hub)
+    old = api.download_snapshot(TEST_REPO, result.revision, tmp_path / "old", backend=hub)
     assert read_records(old).observations == before.observations
 
 
@@ -80,9 +82,9 @@ def test_uncertain_success_is_recovered_without_republishing(tmp_path: Path, api
     store = LocalRecordStore(tmp_path / "records")
     store.commit_run(run_record())
     hub.lose_response = True
-    failure = api.DatasetUploader(store, api.DEFAULT_HUB_REPO, backend=hub).upload()
+    failure = api.DatasetUploader(store, TEST_REPO, backend=hub).upload()
     assert failure.queued == failure.failed == 1 and len(hub.commits) == 1
-    result = api.DatasetUploader(LocalRecordStore(store.root), api.DEFAULT_HUB_REPO, backend=hub).upload()
+    result = api.DatasetUploader(LocalRecordStore(store.root), TEST_REPO, backend=hub).upload()
     assert result.published == 1 and result.queued == 0 and len(hub.commits) == 1
 
 
@@ -92,10 +94,10 @@ def test_concurrent_manifest_update_preserves_rival_records(tmp_path: Path, api:
     first, rival = LocalRecordStore(tmp_path / "first"), LocalRecordStore(tmp_path / "rival")
     first.commit_run(run_record("first"))
     rival.commit_run(run_record("rival"))
-    hub.before_commit = lambda: api.DatasetUploader(rival, api.DEFAULT_HUB_REPO, backend=hub).upload()
-    result = api.DatasetUploader(first, api.DEFAULT_HUB_REPO, backend=hub).upload()
+    hub.before_commit = lambda: api.DatasetUploader(rival, TEST_REPO, backend=hub).upload()
+    result = api.DatasetUploader(first, TEST_REPO, backend=hub).upload()
     assert result.queued == 0 and len(hub.commits) == 2
-    downloaded = api.download_snapshot(api.DEFAULT_HUB_REPO, result.revision, tmp_path / "out", backend=hub)
+    downloaded = api.download_snapshot(TEST_REPO, result.revision, tmp_path / "out", backend=hub)
     assert {record["run_id"] for record in read_records(downloaded).runs} == {"first", "rival"}
 
 
@@ -119,7 +121,7 @@ def test_rejected_records_are_queued_with_safe_errors(tmp_path: Path, api: Any, 
         target.write_bytes(shard.read_bytes())
         shard.unlink()
         shard.symlink_to(target)
-    result = api.DatasetUploader(store, api.DEFAULT_HUB_REPO, backend=hub,
+    result = api.DatasetUploader(store, TEST_REPO, backend=hub,
                                  max_shard_bytes=20 if fault == "oversized" else 1024 * 1024).upload()
     assert result.error == expected and result.published == 0
     assert not hub.commits and "private-sensitive-body" not in str(result)
@@ -132,12 +134,12 @@ def test_bounded_shards_keep_whole_records_and_identity_conflicts_fail(tmp_path:
     store = LocalRecordStore(tmp_path / "records")
     for i in range(5):
         store.commit_run(run_record(f"run-{i}"))
-    result = api.DatasetUploader(store, api.DEFAULT_HUB_REPO, backend=hub, max_shard_records=2).upload()
+    result = api.DatasetUploader(store, TEST_REPO, backend=hub, max_shard_records=2).upload()
     manifest = json.loads(hub.trees[result.revision][api.MANIFEST_PATH])
     assert sorted(shard["count"] for shard in manifest["shards"]["runs"]) == [1, 2, 2]
     rival = LocalRecordStore(tmp_path / "rival")
     rival.commit_run(run_record("run-0", outcome="failed"))
-    failure = api.DatasetUploader(rival, api.DEFAULT_HUB_REPO, backend=hub).upload()
+    failure = api.DatasetUploader(rival, TEST_REPO, backend=hub).upload()
     assert failure.error == "immutable_identity_conflict" and len(hub.commits) == 1
 
 
@@ -147,7 +149,7 @@ def test_corrupt_pinned_snapshots_never_expose_records(tmp_path: Path, api: Any,
     hub = FakeDatasetHub()
     store = LocalRecordStore(tmp_path / "records")
     store.commit_run(run_record())
-    result = api.DatasetUploader(store, api.DEFAULT_HUB_REPO, backend=hub).upload()
+    result = api.DatasetUploader(store, TEST_REPO, backend=hub).upload()
     tree = dict(hub.trees[result.revision])
     manifest = json.loads(tree[api.MANIFEST_PATH])
     shard = manifest["shards"]["runs"][0]
@@ -171,18 +173,18 @@ def test_corrupt_pinned_snapshots_never_expose_records(tmp_path: Path, api: Any,
         shard["path"] = "runs/" + shard["sha256"] + ".jsonl"
         tree[shard["path"]] = data
     tree[api.MANIFEST_PATH] = json.dumps(manifest).encode()
-    revision = hub.commit(api.DEFAULT_HUB_REPO, tree, hub.revision)
+    revision = hub.commit(TEST_REPO, tree, hub.revision)
     if fault == "missing":
         hub.trees[revision].pop(shard["path"], None)
     with pytest.raises(StoreError):
-        api.download_snapshot(api.DEFAULT_HUB_REPO, revision, tmp_path / "download", backend=hub)
+        api.download_snapshot(TEST_REPO, revision, tmp_path / "download", backend=hub)
     assert not (tmp_path / "download" / "runs").exists()
 
 
 def test_download_requires_exact_commit(tmp_path: Path, api: Any) -> None:
     from tests.harness.dataset_hub import FakeDatasetHub
     with pytest.raises(StoreError, match="invalid_revision"):
-        api.download_snapshot(api.DEFAULT_HUB_REPO, "main", tmp_path / "download", backend=FakeDatasetHub())
+        api.download_snapshot(TEST_REPO, "main", tmp_path / "download", backend=FakeDatasetHub())
 
 
 def test_interruption_after_remote_commit_recovers_from_content_identity(tmp_path: Path, api: Any) -> None:
@@ -201,8 +203,8 @@ def test_interruption_after_remote_commit_recovers_from_content_identity(tmp_pat
     store = LocalRecordStore(tmp_path / "records")
     store.commit_run(run_record())
     with pytest.raises(KeyboardInterrupt):
-        api.DatasetUploader(store, api.DEFAULT_HUB_REPO, backend=hub).upload()
-    restarted = api.DatasetUploader(LocalRecordStore(store.root), api.DEFAULT_HUB_REPO, backend=hub)
+        api.DatasetUploader(store, TEST_REPO, backend=hub).upload()
+    restarted = api.DatasetUploader(LocalRecordStore(store.root), TEST_REPO, backend=hub)
     assert restarted.status().queued == 1 and restarted.status().published == 0
     assert restarted.upload().published == 1 and len(hub.commits) == 1
 
@@ -224,10 +226,10 @@ def test_failed_queue_write_keeps_original_and_retries_privately(
 
     with monkeypatch.context() as fault:
         fault.setattr(api, "atomic_write_bytes", fail_write)
-        status = api.DatasetUploader(store, api.DEFAULT_HUB_REPO, backend=hub).upload()
+        status = api.DatasetUploader(store, TEST_REPO, backend=hub).upload()
     assert status.error == "queue_persistence_failed" and status.queued == 1
     assert not hub.commits and len(read_records(store).runs) == 1
-    assert api.DatasetUploader(store, api.DEFAULT_HUB_REPO, backend=hub).upload().published == 1
+    assert api.DatasetUploader(store, TEST_REPO, backend=hub).upload().published == 1
 
 
 def test_download_refuses_unrelated_destination_data(tmp_path: Path, api: Any) -> None:
@@ -237,9 +239,9 @@ def test_download_refuses_unrelated_destination_data(tmp_path: Path, api: Any) -
     source, destination = LocalRecordStore(tmp_path / "source"), LocalRecordStore(tmp_path / "destination")
     source.commit_run(run_record())
     destination.commit_run(run_record("unrelated"))
-    result = api.DatasetUploader(source, api.DEFAULT_HUB_REPO, backend=hub).upload()
+    result = api.DatasetUploader(source, TEST_REPO, backend=hub).upload()
     with pytest.raises(StoreError, match="download_destination_conflict"):
-        api.download_snapshot(api.DEFAULT_HUB_REPO, result.revision, destination.root, backend=hub)
+        api.download_snapshot(TEST_REPO, result.revision, destination.root, backend=hub)
     assert [record["run_id"] for record in read_records(destination).runs] == ["unrelated"]
 
 
@@ -251,7 +253,7 @@ def test_byte_limit_splits_only_between_complete_records(tmp_path: Path, api: An
     for i in range(3):
         store.commit_run(run_record(f"run-{i}"))
     largest = max(path.stat().st_size for path in (store.root / "runs").iterdir())
-    result = api.DatasetUploader(store, api.DEFAULT_HUB_REPO, backend=hub, max_shard_bytes=largest * 2).upload()
+    result = api.DatasetUploader(store, TEST_REPO, backend=hub, max_shard_bytes=largest * 2).upload()
     tree = hub.trees[result.revision]
     shards = json.loads(tree[api.MANIFEST_PATH])["shards"]["runs"]
     assert sorted(shard["count"] for shard in shards) == [1, 2]
@@ -268,13 +270,13 @@ def test_local_upload_writers_serialize_acknowledgements(tmp_path: Path, api: An
     store.append_observation(observation())
 
     def upload() -> Any:
-        return api.DatasetUploader(LocalRecordStore(store.root), api.DEFAULT_HUB_REPO, backend=hub).upload()
+        return api.DatasetUploader(LocalRecordStore(store.root), TEST_REPO, backend=hub).upload()
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(lambda _: upload(), range(4)))
     assert all((result.queued, result.published, result.failed) == (0, 2, 0) for result in results)
     assert len(hub.commits) == 1
-    uploader = api.DatasetUploader(store, api.DEFAULT_HUB_REPO, backend=hub)
+    uploader = api.DatasetUploader(store, TEST_REPO, backend=hub)
     assert uploader.status().revision == hub.revision
     uploads = store.root / "uploads"
     assert all(stat.S_IMODE(path.stat().st_mode) == 0o700 for path in uploads.iterdir())
@@ -289,7 +291,7 @@ def test_download_rejects_concurrent_destination_capture_before_pinning_source(
     source = LocalRecordStore(tmp_path / "source")
     source.commit_run(run_record("pinned"))
     hub = FakeDatasetHub()
-    result = api.DatasetUploader(source, api.DEFAULT_HUB_REPO, backend=hub).upload()
+    result = api.DatasetUploader(source, TEST_REPO, backend=hub).upload()
     destination = tmp_path / "download"
     original = LocalRecordStore.commit_run
 
@@ -301,5 +303,5 @@ def test_download_rejects_concurrent_destination_capture_before_pinning_source(
 
     monkeypatch.setattr(LocalRecordStore, "commit_run", capture_during_install)
     with pytest.raises(StoreError, match="download_destination_conflict"):
-        api.download_snapshot(api.DEFAULT_HUB_REPO, result.revision, destination, backend=hub)
+        api.download_snapshot(TEST_REPO, result.revision, destination, backend=hub)
     assert not (destination / "source.json").exists()

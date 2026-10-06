@@ -61,7 +61,7 @@ def test_public_record_target_validation_matches_store_reference_rules() -> None
 
 def test_download_source_records_exact_membership_privately(store: LocalRecordStore) -> None:
     current = store.read_records()
-    source = {"repository": "existentialbirds/daydream-trajectories", "revision": "a" * 40}
+    source = {"repository": "test-user/private-trajectories", "revision": "a" * 40}
     store.record_download_source(source, **current)
     path = store.root / "source.json"
     assert json.loads(path.read_bytes()) == source

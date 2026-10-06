@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from dataclasses import asdict
 from pathlib import Path
@@ -13,11 +14,12 @@ from daydream.ui import create_console, print_error
 
 
 def _handle_dataset_operation(argv: list[str], *, operation: str) -> int:
-    from daydream.dataset_hub import DEFAULT_HUB_REPO, DatasetUploader, download_snapshot
+    from daydream.dataset_hub import DatasetUploader, download_snapshot
 
     parser = argparse.ArgumentParser(prog=f"daydream corpus dataset {operation}")
-    parser.add_argument("--repo", default=DEFAULT_HUB_REPO, metavar="OWNER/REPO",
-                        help="Explicit private Hugging Face dataset destination.")
+    configured_repo = os.environ.get("DAYDREAM_TRAJECTORY_HUB_REPO") or None
+    parser.add_argument("--repo", default=configured_repo, required=configured_repo is None, metavar="OWNER/REPO",
+                        help="Private Hugging Face dataset; overrides DAYDREAM_TRAJECTORY_HUB_REPO.")
     if operation == "download":
         parser.add_argument("--revision", required=True, help="Exact 40-character Hub commit SHA.")
         parser.add_argument("--output", type=Path, required=True, help="Fresh local record-store directory.")

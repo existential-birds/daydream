@@ -18,7 +18,7 @@ def config(multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
     return RunConfig(target=str(multi_stack_target), output_mode="review", archive=False, run_eval=False,
-        dataset_store_path=tmp_path / "records", trajectory_hub_repo="existentialbirds/daydream-trajectories",
+        dataset_store_path=tmp_path / "records", trajectory_hub_repo="test-user/private-trajectories",
         shallow_fanout_threshold=0, cleanup=False)
 
 

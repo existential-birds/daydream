@@ -12,7 +12,7 @@ import httpx
 import pytest
 from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError, RemoteEntryNotFoundError
 
-REPO = "existentialbirds/daydream-trajectories"
+REPO = "test-user/private-trajectories"
 HEAD = "a" * 40
 NEXT = "b" * 40
 

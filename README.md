@@ -263,9 +263,9 @@ only. Live outcome harvesting, report generation, and corpus cutover are separat
 The data-pipeline verbs live under the `corpus` namespace:
 
 ```bash
-daydream corpus dataset publish --store ~/.daydream/dataset   # retry queued JSONL uploads
-daydream corpus dataset status --store ~/.daydream/dataset    # queued/published/failed counts
-daydream corpus dataset download --revision <40-character-commit-sha> --output /tmp/daydream-records
+daydream corpus dataset publish --repo OWNER/PRIVATE_DATASET --store ~/.daydream/dataset   # retry queued JSONL uploads
+daydream corpus dataset status --repo OWNER/PRIVATE_DATASET --store ~/.daydream/dataset    # queued/published/failed counts
+daydream corpus dataset download --repo OWNER/PRIVATE_DATASET --revision <40-character-commit-sha> --output /tmp/daydream-records
 daydream corpus harvest                              # annotate all archived runs
 daydream corpus harvest --dry-run
 daydream corpus build --bundle-root BUNDLE_ROOT --annotation-bundle-root ANNOTATION_BUNDLE_ROOT \
@@ -334,8 +334,8 @@ Daydream ignores a `trajectory_hub_repo` key in the target checkout file config.
 
 When configured, Daydream captures run records in its private local JSONL store and publishes
 bounded immutable shards with a manifest in one Hub commit. Run records and append-only
-observations are separate datasets. The destination for this project is
-`existentialbirds/daydream-trajectories`. Credentials alone never enable automatic uploads.
+observations are separate datasets in the operator's chosen private repository.
+Credentials alone never enable automatic uploads.
 Create the destination as a private dataset before uploading; existing public repositories are rejected.
 Malformed records, incompatible schemas, unsafe paths, blocking secret findings, scanner
 failures, and incomplete records are refused before publication. Complete oversized records
@@ -349,17 +349,19 @@ replacing existing entries. The review result and completed outputs survive uplo
 collection diagnostics contain no matched credentials or exception payloads.
 
 ```sh
-export DAYDREAM_TRAJECTORY_HUB_REPO="existentialbirds/daydream-trajectories"
+export DAYDREAM_TRAJECTORY_HUB_REPO="OWNER/PRIVATE_DATASET"
 export HF_TOKEN="hf_..."
 daydream --review /path/to/project
 
-daydream corpus dataset publish --store ~/.daydream/dataset
-daydream corpus dataset status --store ~/.daydream/dataset
-daydream corpus dataset download --revision <40-character-commit-sha> --output /tmp/daydream-records
+daydream corpus dataset publish --repo OWNER/PRIVATE_DATASET --store ~/.daydream/dataset
+daydream corpus dataset status --repo OWNER/PRIVATE_DATASET --store ~/.daydream/dataset
+daydream corpus dataset download --repo OWNER/PRIVATE_DATASET --revision <40-character-commit-sha> --output /tmp/daydream-records
 ```
 
-The explicit `corpus dataset publish` and `download` commands default to the project's private
-repository; `--repo OWNER/REPO` selects another private dataset. `status` reports JSON counts
+The `corpus dataset publish`, `status`, and `download` commands require an operator-selected
+repository through `--repo OWNER/REPO` or `DAYDREAM_TRAJECTORY_HUB_REPO`; the flag takes
+precedence over the environment variable. Without either, the command stops before accessing
+the store or contacting HF. `status` reports JSON counts
 for queued, published, and failed records, plus sanitized errors and the last confirmed commit.
 Publication returns a failure exit code while affected evidence remains queued. Downloads
 require an exact commit, verify manifest/shard checksums and schema contracts, and produce a

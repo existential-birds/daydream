@@ -20,7 +20,6 @@ from daydream.dataset import LocalRecordStore, Record, StoreError, parse_observa
 from daydream.dataset_hub_client import DatasetHub, HfDatasetHub, HubConflict, HubError
 from daydream.json_utils import atomic_write_bytes, canonical_json
 
-DEFAULT_HUB_REPO = "existentialbirds/daydream-trajectories"
 MANIFEST_PATH = "manifest.json"
 _SCHEMAS = {"runs": "daydream.run.v1", "observations": "daydream.observation.v1"}
 _IDENTITY_FIELDS = {"runs": "run_id", "observations": "observation_id"}
