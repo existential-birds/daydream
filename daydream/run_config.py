@@ -50,6 +50,7 @@ class RunConfig:
     archive: bool = True
     run_eval: bool = True
     dataset_capture: bool = False
+    dataset_capture_disabled: bool = False
     dataset_store_path: Path | None = None
 
     branch: str | None = None

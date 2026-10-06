@@ -245,7 +245,9 @@ Runtime output publication is all-or-nothing at finalization: invalid run identi
 
 New runs can also collect raw JSONL evidence with `--capture-data`. Capture is off by default.
 Passing `--dataset-store DIR` also enables capture and chooses private local storage
-(default with `--capture-data`: `~/.daydream/dataset`).
+(default with `--capture-data`: `~/.daydream/dataset`). An explicit
+`--trajectory-hub-repo` or `DAYDREAM_TRAJECTORY_HUB_REPO` also enables capture.
+`--no-capture-data` disables collection and upload even with a configured Hub destination.
 Capture preserves evidence as produced without additional redaction or secret scanning.
 The user controls this local data and is responsible for reviewing it before sharing.
 Collection works with `--no-archive` and tracing disabled.
@@ -253,14 +255,17 @@ It retains the original analyzed revisions and input diff, trajectories, structu
 verification/fix associations at the existing frozen finalization boundary, including cooperative
 interruption. SIGKILL and power loss before that boundary can lose uncaptured evidence. A
 persistence refusal emits a sanitized collection diagnostic and preserves completed review
-outputs. Existing archives remain available; historical migration, live outcome
-harvesting, report generation, and corpus cutover are separate work.
+outputs. Existing archives remain available; this workflow accepts newly collected JSONL data
+only. Live outcome harvesting, report generation, and corpus cutover are separate work.
 
 ### Corpus commands
 
 The data-pipeline verbs live under the `corpus` namespace:
 
 ```bash
+daydream corpus dataset publish --store ~/.daydream/dataset   # retry queued JSONL uploads
+daydream corpus dataset status --store ~/.daydream/dataset    # queued/published/failed counts
+daydream corpus dataset download --revision <40-character-commit-sha> --output /tmp/daydream-records
 daydream corpus harvest                              # annotate all archived runs
 daydream corpus harvest --dry-run
 daydream corpus build --bundle-root BUNDLE_ROOT --annotation-bundle-root ANNOTATION_BUNDLE_ROOT \
@@ -327,14 +332,44 @@ Upload of trajectories to Hugging Face is opt-in. Only the operator selects the 
 
 Daydream ignores a `trajectory_hub_repo` key in the target checkout file config. When unset, nothing leaves your machine.
 
-When set, daydream uploads every run's complete archive bundle to the dataset repo as a per-run folder. The upload requires the `huggingface_hub` package and a valid `HF_TOKEN`. If either is missing, or the upload fails, the run is never aborted. Daydream emits a one-line warning and leaves the bundle un-uploaded. On the first upload daydream creates the dataset repo private. It reuses an existing repo with its current visibility. Daydream always scans direct uploads and refuses blocking credential findings, scanner exceptions, any `scan_error` finding regardless of severity, and incomplete results. Advisory-only findings are reported and allowed. Warnings contain no matched values or exception payloads, and upload failure preserves the local bundle.
+When configured, Daydream captures run records in its private local JSONL store and publishes
+bounded immutable shards with a manifest in one Hub commit. Run records and append-only
+observations are separate datasets. The destination for this project is
+`existentialbirds/daydream-trajectories`. Credentials alone never enable automatic uploads.
+Create the destination as a private dataset before uploading; existing public repositories are rejected.
+Malformed records, incompatible schemas, unsafe paths, blocking secret findings, scanner
+failures, and incomplete records are refused before publication. Complete oversized records
+produce an explicit error and are never truncated. Advisory scan findings may proceed.
 
-The scanner recognizes limited credential patterns; a passing scan does not establish that content is safe to share. Standalone archive sanitization produces separate derivatives through `sanitize_bundle()`; review their reports before sharing. Curated hydration, adjudication publication and shared trajectory/log redaction retain their independent checks.
+Upload requires the optional `huggingface_hub` package and HF credentials (`HF_TOKEN`
+or a cached Hugging Face login). Unavailable HF,
+interrupted uploads, and uncertain responses leave evidence queued locally. Retrying checks
+record and shard content identity, and commit conflicts reload the latest manifest without
+replacing existing entries. The review result and completed outputs survive upload failures;
+collection diagnostics contain no matched credentials or exception payloads.
 
 ```sh
 export DAYDREAM_TRAJECTORY_HUB_REPO="existentialbirds/daydream-trajectories"
-export HF_TOKEN="hf_..."   # required for upload to proceed
+export HF_TOKEN="hf_..."
+daydream --review /path/to/project
+
+daydream corpus dataset publish --store ~/.daydream/dataset
+daydream corpus dataset status --store ~/.daydream/dataset
+daydream corpus dataset download --revision <40-character-commit-sha> --output /tmp/daydream-records
 ```
+
+The explicit `corpus dataset publish` and `download` commands default to the project's private
+repository; `--repo OWNER/REPO` selects another private dataset. `status` reports JSON counts
+for queued, published, and failed records, plus sanitized errors and the last confirmed commit.
+Publication returns a failure exit code while affected evidence remains queued. Downloads
+require an exact commit, verify manifest/shard checksums and schema contracts, and produce a
+validated local record store directly. They never reconstruct run directories or an archive
+index. A downloaded store can be read through `LocalRecordStore.select_snapshot` and
+`read_snapshot`, preserving temporal eligibility and observation precedence.
+
+Local evidence preserves raw producer content. The credential scanner recognizes limited
+patterns; a passing scan does not establish that content is safe to share. Training admission
+continues to apply its separate license and eligibility policies.
 
 ### Training roadmap
 

@@ -176,7 +176,7 @@ def _findings_route(live_root: Path, name: str = "findings.json") -> RoutedDesti
 
 def _strict_archive(*, target: Path, session_id: str, config: Any, write_snapshot: RunWriteSnapshot,
     run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL, identity: ManifestRunIdentity | None = None,
-    destinations: tuple[RoutedDestination, ...] = (), work: Any = None, upload: bool = False,
+    destinations: tuple[RoutedDestination, ...] = (), work: Any = None,
     dump_path: Path | None = None,
 ) -> None:
     """Finalize a frozen run; target must exclude the archive directory, as in `_frozen_target`."""
@@ -190,7 +190,7 @@ def _strict_archive(*, target: Path, session_id: str, config: Any, write_snapsho
             # The frozen root is a copy of the live root, so route paths relative
             # to one resolve unchanged inside the other.
             live_root=target,
-        ), config=config, work=work, upload=upload, dump_path=dump_path,
+        ), config=config, work=work, dump_path=dump_path,
     )
 
 def _manifest_identity(**overrides: Any) -> ManifestRunIdentity:
@@ -2470,7 +2470,7 @@ def test_snapshot_manifest_provenance_rejects_unsafe_session_identity(tmp_path: 
     with pytest.raises(ValueError, match="session_id"):
         archive_recorder_provenance_from_snapshot(write_snapshot=snapshot, run_flow=DaydreamRunFlow.NORMAL,)
 
-def _finalizer_arguments(tmp_path: Path, session_id: str, *, config: RunConfig, upload: bool = False,
+def _finalizer_arguments(tmp_path: Path, session_id: str, *, config: RunConfig,
 ) -> dict[str, Any]:
     """Freeze real trajectory bytes and bind the finalizer's independent roots."""
     frozen = tmp_path / "frozen"
@@ -2481,7 +2481,7 @@ def _finalizer_arguments(tmp_path: Path, session_id: str, *, config: RunConfig, 
     return dict(run=_archive_snapshot(snapshot),
         artifacts=ArtifactTreeSnapshot(session_id, "workspace", frozen, manifest_tree(frozen), ()),
         artifact_provenance=ArtifactEvidenceProvenance("workspace", session_id, tmp_path / "source", tmp_path / "live",
-        ), config=config, work=None, upload=upload,
+        ), config=config, work=None,
     )
 
 def test_strict_archive_evaluation_failure_is_typed_and_never_reports_success(
@@ -2533,55 +2533,41 @@ def test_strict_archive_rejects_frozen_receipt_changed_by_evaluator(
         assert (archive_dir / "runs" / session_id / "manifest.json").is_file()
         assert len(rows) == 1
 
-def test_strict_archive_upload_refusal_removes_incomplete_local_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_strict_archive_does_not_publish_historical_bundles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Upload refusal contains Hub exposure while preserving the completed local archive
-    and index.
-    """
-    session_id = "strict-upload"
+    """Only the new JSONL lifecycle may select a remote destination."""
+    session_id = "strict-local-only"
     arguments = _finalizer_arguments(
-        tmp_path, session_id, config=RunConfig(target=str(tmp_path), run_eval=False, archive=True), upload=True,
+        tmp_path, session_id, config=RunConfig(target=str(tmp_path), run_eval=False, archive=True,
+                                               trajectory_hub_repo="private/repo"),
     )
-    uploaded: list[tuple[Any, ...]] = []
 
-    def _refuse(*args: object, **_kwargs: object) -> bool:
-        uploaded.append(args)
-        return False
+    def reject_network(*_args: object, **_kwargs: object) -> bool:
+        raise AssertionError("archive persistence must not upload historical bundles")
 
-    monkeypatch.setattr("daydream.archive.hub.resolve_hub_repo", lambda _config: "private/repo")
-    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", _refuse)
-
+    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", reject_network)
     finalize_archive_run(**arguments)
-
-    assert len(uploaded) == 1, "the upload must still be attempted and refused by the callee"
     archive_dir = get_archive_dir()
     assert (archive_dir / "runs" / session_id / "manifest.json").is_file()
     assert len(query_runs(archive_dir, "session_id = ?", (session_id,))) == 1
     assert not list(archive_dir.glob("runs/.*.finalizing"))
 
-def test_strict_archive_upload_refuses_frozen_tree_mutated_before_publication(
+
+def test_strict_archive_refuses_frozen_tree_mutated_before_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    session_id = "strict-upload-mutated"
+    session_id = "strict-mutated-publication"
     arguments = _finalizer_arguments(
-        tmp_path, session_id, config=RunConfig(target=str(tmp_path), run_eval=False, archive=True), upload=True,
+        tmp_path, session_id, config=RunConfig(target=str(tmp_path), run_eval=False, archive=True),
     )
     document = arguments["run"].trajectories.documents[0]
-    uploads: list[Path] = []
+    from daydream.archive.provenance import capture_executable_provenance
 
-    def mutate_then_resolve(_config: Any) -> str:
+    def mutate_then_capture() -> Any:
         document.path.write_bytes(document.json_bytes + b"\n")
-        return "private/repo"
+        return capture_executable_provenance()
 
-    def record_upload(run_dir: Path, *_args: Any, **_kwargs: Any) -> bool:
-        uploads.append(run_dir)
-        return True
-
-    monkeypatch.setattr("daydream.archive.hub.resolve_hub_repo", mutate_then_resolve)
-    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", record_upload)
-
+    monkeypatch.setattr("daydream.archive.provenance.capture_executable_provenance", mutate_then_capture)
     with pytest.raises(ArchiveFinalizationError, match="frozen artifact tree changed"):
         finalize_archive_run(**arguments)
-
-    assert uploads == []
     assert not (get_archive_dir() / "runs" / session_id).exists()

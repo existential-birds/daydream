@@ -7,7 +7,7 @@ from pathlib import Path
 
 import anyio
 
-from daydream.commands import calibrate, common, hydrate
+from daydream.commands import calibrate, common, dataset, hydrate
 from daydream.ui import create_console, print_error, print_info, print_success
 
 
@@ -339,6 +339,7 @@ def _handle_adjudicate_command(argv: list[str]) -> int:
 
 
 _CORPUS_SUBVERBS: dict[str, Callable[[list[str]], int]] = {
+    "dataset": dataset.handle_dataset,
     "harvest": _handle_harvest_command,
     "build": _handle_build_corpus_command,
     "label": _handle_label_command,
@@ -349,9 +350,10 @@ _CORPUS_SUBVERBS: dict[str, Callable[[list[str]], int]] = {
 
 
 _CORPUS_USAGE = (
-    "usage: daydream corpus {harvest,build,label,hydrate-hub,calibrate-reward,adjudicate} ...\n"
+    "usage: daydream corpus {dataset,harvest,build,label,hydrate-hub,calibrate-reward,adjudicate} ...\n"
     "\n"
     "Data-pipeline sub-verbs:\n"
+    "  dataset   publish/status/download validated JSONL records from a private Hub dataset\n"
     "  harvest   walk the archive and append one bitemporal annotation per indexed run\n"
     "  build  project curated-bundle resolutions into projection records (pinned --license-policy required)\n"
     "  label     record an authoritative human outcome label that overrides automated ones\n"

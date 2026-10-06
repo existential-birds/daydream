@@ -17,7 +17,7 @@ import pytest
 from rich.console import Console
 
 from daydream import git_ops
-from daydream.archive import hub, scan
+from daydream.archive import scan
 from daydream.archive.index import query_runs
 from daydream.backends import (
     AgentEvent,
@@ -460,7 +460,7 @@ async def test_collection_failure_preserves_deep_review_exports(
         unavailable.touch()
         monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(unavailable))
     else:
-        monkeypatch.setattr(hub, "upload_run_bundle", fail_collection)
+        monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", fail_collection)
     dump = tmp_path / "uploaded-artifacts"
     dump.mkdir()
     (dump / "prior.txt").write_text("operator baseline")
@@ -472,6 +472,7 @@ async def test_collection_failure_preserves_deep_review_exports(
         multi_stack_target, output_mode="review", non_interactive=True, dump_artifacts=str(dump),
         pr_number=7, findings_out=str(findings), trajectory_path=trajectory,
         trajectory_hub_repo="test/new-runs" if failure == "upload" else None,
+        dataset_store_path=tmp_path / "records",
     ))
     assert exit_code == 0
     assert reached == ([] if failure == "filesystem" else [failure])
@@ -1086,26 +1087,19 @@ async def test_direct_upload_refuses_credentials_with_environment_destination(
     _commit_scanned_file(multi_stack_target, "credentials.py", 'token = "ghp_finalizationcanary"\n')
     monkeypatch.setenv("HF_TOKEN", "hf_test_token")
     monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "env/repo")
-    uploaded: list[bytes] = []
+    from daydream.dataset_hub import DatasetUploader
+    from tests.harness.dataset_hub import FakeDatasetHub
 
-    class FakeApi:
-        def create_repo(self, **kwargs: Any) -> None:
-            assert kwargs["private"] is True
-
-        def repo_info(self, **kwargs: Any) -> Any:
-            return type("RepoInfo", (), {"private": True})()
-
-        def upload_folder(self, **kwargs: Any) -> None:
-            assert kwargs["repo_id"] == "env/repo"
-            uploaded.append((Path(kwargs["folder_path"]) / "diff.patch").read_bytes())
-
-    monkeypatch.setattr(hub, "HfApi", FakeApi)
+    backend = FakeDatasetHub()
+    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: backend)
     assert await run(_deep_run_config(
-        multi_stack_target, output_mode="review",
+        multi_stack_target, output_mode="review", dataset_store_path=archive_dir.parent / "raw-records",
     )) == 0
     run_dir = _only_archived_run(archive_dir)
     assert b"ghp_finalizationcanary" in (run_dir / "diff.patch").read_bytes()
-    assert uploaded == []
+    assert backend.commits == []
+    status = DatasetUploader(LocalRecordStore(archive_dir.parent / "raw-records"), "env/repo", backend=backend).status()
+    assert status.failed == 1
     out = "".join(capfd.readouterr())
-    assert "refusing HF upload" in out
+    assert "upload failure" in out
     assert "ghp_finalizationcanary" not in out

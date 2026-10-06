@@ -135,7 +135,7 @@ async def _hold_archive_fork(parent: TrajectoryRecorder, name: str, entered: any
             await release.wait()
 
 def _finalize_strict_archive(recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot, config: Any, target: Path, *,
-    destinations: tuple[Any, ...] = (), upload: bool = True, dump_path: Path | None = None,
+    destinations: tuple[Any, ...] = (), dump_path: Path | None = None,
 ) -> None:
     """Run strict finalization; the re-attested target tree must exclude the archive directory."""
     session_id = recorder.session_id
@@ -161,11 +161,11 @@ def _finalize_strict_archive(recorder: TrajectoryRecorder, snapshot: RunWriteSna
             workspace_key="workspace", session_id=session_id, public_source=target,
             # Live-root-relative routes retain their paths inside the frozen copy.
             live_root=target,
-        ), config=config, work=None, upload=upload, dump_path=dump_path,
+        ), config=config, work=None, dump_path=dump_path,
     )
 
 def _strict_archive_callback(
-    config: Any, target: Path, *, destinations: tuple[Any, ...] = (), unsuccessful: bool = False,
+    config: Any, target: Path, *, destinations: tuple[Any, ...] = (),
     dump_path: Path | None = None,
 ) -> Any:
     """Finalize only the first recorder snapshot, emulating the runner's one-time boundary."""
@@ -176,13 +176,13 @@ def _strict_archive_callback(
             return
         finalized.append(snapshot.status)
         _finalize_strict_archive(
-            recorder, snapshot, config, target, destinations=destinations, upload=not unsuccessful, dump_path=dump_path,
+            recorder, snapshot, config, target, destinations=destinations, dump_path=dump_path,
         )
 
     return _finalize
 
 def _upload_fixture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, unsuccessful: bool = False, dump_path: Path | None = None,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, dump_path: Path | None = None,
     setup: Callable[[Path], dict[str, Any]] | None = None, **config_kwargs: Any,
 ) -> tuple[TrajectoryRecorder, list[tuple[Any, ...]], Path]:
     """Capture strict-archive uploads as ``(run_dir, repo_id, session_id)`` tuples.
@@ -203,7 +203,7 @@ def _upload_fixture(
     config_kwargs.update(setup(target_dir) if setup else {})
     config = RunConfig(run_eval=False, **config_kwargs)
     recorder = make_recorder(target_dir,
-        on_write=_strict_archive_callback(config, target_dir, unsuccessful=unsuccessful, dump_path=dump_path),
+        on_write=_strict_archive_callback(config, target_dir, dump_path=dump_path),
     )
     _add_user_step(recorder)
     return recorder, uploaded, target_dir
@@ -339,7 +339,7 @@ def test_finalization_evaluates_selected_snapshot_after_files_change(tmp_path: P
     monkeypatch.setattr("daydream.eval.analyzer.analyze_session", evaluate)
     recorder = make_recorder(target, session_id=session, path=path)
 
-    _finalize_strict_archive(recorder, snapshot, RunConfig(run_eval=True), target, upload=False)
+    _finalize_strict_archive(recorder, snapshot, RunConfig(run_eval=True), target)
 
     assert evaluated == [snapshot]
     assert evaluated[0] is snapshot
@@ -410,7 +410,7 @@ def test_cli_defaults_archive_and_eval(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.archive is True
     assert config.run_eval is True
 
-async def test_archive_callback_uploads_to_hub_when_configured(
+async def test_archive_callback_keeps_configured_hub_work_local(
     tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     recorder, uploaded, _ = _upload_fixture(
@@ -419,12 +419,7 @@ async def test_archive_callback_uploads_to_hub_when_configured(
     async with recorder:
         pass
 
-    assert len(uploaded) == 1
-    repo_id, session = uploaded[0][1], uploaded[0][2]
-    assert repo_id == "acme/dd-trajectories"
-    assert session == recorder.session_id
-    # Upload reads the private stage before installation under the session ID.
-    assert Path(uploaded[0][0]) != archive_dir / "runs" / recorder.session_id
+    assert uploaded == []
     assert (archive_dir / "runs" / recorder.session_id / "manifest.json").is_file()
 
 @pytest.mark.parametrize("filename,body,set_hf_token", [
@@ -452,24 +447,6 @@ async def test_archive_callback_does_not_upload_when_unconfigured(
 
     assert uploaded == []
 
-@pytest.mark.parametrize("successful", [False, True])
-async def test_archive_upload_tracks_run_success(
-    tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch, successful: bool,
-) -> None:
-    """Failed/interrupted runs retain local archives without network upload blocking shutdown."""
-    recorder, uploaded, _ = _upload_fixture(
-        tmp_path, monkeypatch, unsuccessful=not successful, trajectory_hub_repo="acme/dd-trajectories", archive=True,
-        dump_artifacts=None,
-    )
-    async with recorder:
-        pass
-
-    assert (archive_dir / "runs" / recorder.session_id / "manifest.json").is_file()
-    if successful:
-        assert [row[1:] for row in uploaded] == [("acme/dd-trajectories", recorder.session_id)]
-    else:
-        assert uploaded == []
-
 async def test_signal_flush_archive_uses_one_immutable_cutoff_for_all_documents(
     tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -484,7 +461,7 @@ async def test_signal_flush_archive_uses_one_immutable_cutoff_for_all_documents(
     def callback(recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot) -> None:
         snapshots.append(snapshot)
         monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(roots[snapshot.status]))
-        _finalize_strict_archive(recorder, snapshot, config, target, upload=snapshot.status == "complete")
+        _finalize_strict_archive(recorder, snapshot, config, target)
 
     recorder = make_recorder(target, on_write=callback)
     entered = {name: anyio.Event() for name in ("a", "b")}

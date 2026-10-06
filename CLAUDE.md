@@ -350,7 +350,7 @@ Full contract: `docs/extensions.md`.
 | `DAYDREAM_EXT_DIR` | Extensions | Path to `daydream_ext` (overrides `import daydream_ext`) |
 | `DAYDREAM_GH_TIMEOUT_SECONDS` / `_RETRIES` | Git ops | `gh` CLI timeout and retry count |
 | `DAYDREAM_GIT_TOKEN` | Harvest | Optional out-of-band auth for sanitized repo clones during `corpus harvest` of private repos (e.g. a GitHub PAT); injected via git config environment variables (`http.extraHeader`), **never embedded in the remote URL** and **never on the command line**. Without it, plain clone via the ambient credential helper |
-| `DAYDREAM_TRAJECTORY_HUB_REPO` | Archive | Optional HuggingFace dataset repo to upload each run's bundle to; one of the two operator sources (the other is the CLI `--trajectory-hub-repo` flag). The target checkout's file config is ignored for this |
+| `DAYDREAM_TRAJECTORY_HUB_REPO` | Dataset | Explicit private Hugging Face dataset repo for capture and retryable JSONL shard publication; CLI `--trajectory-hub-repo` wins. The target checkout's file config is ignored; `--no-capture-data` disables collection/upload |
 | `DAYDREAM_TRACE_TO` | Observability | Comma-separated trace destinations; empty/unset disables tracing. `--trace-to` overrides this list; `--no-tracing` disables tracing |
 | `DAYDREAM_TRACE_CONTENT` | Observability | Content policy: `full` (default) or `metadata`; overridden by `--trace-content`. Does not enable tracing by itself |
 | `PI_PROVIDER` / `PI_THINKING` | Pi | `--provider` / `--thinking`; `PI_THINKING` loses to a per-phase `reasoning_effort` |

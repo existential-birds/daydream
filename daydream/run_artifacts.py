@@ -362,7 +362,7 @@ def _finalize_run_artifacts(
         finalize_archive_run(
             run=ArchiveRunSnapshot(recorder_provenance, identity, selected), artifacts=snapshot,
             artifact_provenance=run_artifacts.session.provenance, config=config,
-            work=work, upload=successful, dump_path=dump_path,
+            work=work, dump_path=dump_path,
         )
     except (ArchiveIntegrityError, ArchivePublicationError) as exc:
         raise ArtifactVisibilityError(str(exc)) from exc
@@ -399,6 +399,18 @@ def _capture_dataset(
             )
         except Exception as exc:
             print_error(console, "Data Collection", f"Run evidence could not be persisted ({type(exc).__name__}).")
+        else:
+            if config.trajectory_hub_repo:
+                try:
+                    from daydream.dataset import LocalRecordStore
+                    from daydream.dataset_hub import DatasetUploader
+
+                    store = LocalRecordStore(config.dataset_store_path or Path.home() / ".daydream" / "dataset")
+                    status = DatasetUploader(store, config.trajectory_hub_repo).upload()
+                    if status.failed or status.error:
+                        print_error(console, "Data Collection", "Run evidence remains queued after an upload failure.")
+                except Exception as exc:
+                    print_error(console, "Data Collection", f"Run evidence upload failed ({type(exc).__name__}).")
         _validate_frozen_artifacts(snapshot)
     except ArchiveIntegrityError as exc:
         raise ArtifactVisibilityError(str(exc)) from exc

@@ -27,6 +27,8 @@ from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 from tests.test_runner import _feature_repo
 
+pytestmark = pytest.mark.usefixtures("fake_gh")
+
 
 def _write_policy_flow(ext_dir: ExtDir) -> None:
     ext_dir.write_module(

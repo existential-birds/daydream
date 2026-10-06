@@ -190,6 +190,19 @@ def parse_snapshot(raw: Mapping[str, Any] | str | bytes) -> Record:
     return _parse(raw, "daydream.snapshot.v1")
 
 
+def validate_record_targets(runs: Sequence[Record], observations: Sequence[Record]) -> None:
+    """Validate observation references against a complete collection of typed runs."""
+    known = {run["run_id"]: run for run in runs}
+    for record in observations:
+        run = known.get(record["run_id"])
+        if run is None:
+            raise StoreError("unknown_run_reference")
+        if record.get("item_uid") is not None:
+            items = (run["findings"]["value"] or {}).get("items", [])
+            if not any(item["item_uid"] == record["item_uid"] for item in items):
+                raise StoreError("orphan_finding_reference")
+
+
 def semantic_evidence_digest(value: Any) -> str:
     _JSON.validate_python(value)
     return hashlib.sha256(canonical_json(value).encode()).hexdigest()
@@ -374,6 +387,34 @@ class LocalRecordStore:
         parsed = self._parse(record, run=False)
         return self._commit(parsed, "observations", parsed["observation_id"])
 
+    def read_records(self) -> dict[str, tuple[Record, ...]]:
+        """Read all validated current history without applying a temporal cutoff."""
+        with self._locked():
+            runs = tuple(record for _member, record in self._members("runs"))
+            observations = tuple(record for _member, record in self._members("observations"))
+            for record in observations:
+                self._validate_target(record)
+            return {"runs": runs, "observations": observations}
+
+    def record_download_source(
+        self, source: Mapping[str, Any], *, runs: Sequence[Record], observations: Sequence[Record],
+    ) -> None:
+        """Persist download provenance only while exact validated membership still matches."""
+        with self._locked():
+            current = {kind: tuple(record for _member, record in self._members(kind))
+                       for kind in ("runs", "observations")}
+            validate_record_targets(current["runs"], current["observations"])
+            for kind, expected in (("runs", runs), ("observations", observations)):
+                identity = "run_id" if kind == "runs" else "observation_id"
+                if {record[identity]: record for record in current[kind]} != {
+                    record[identity]: record for record in expected
+                }:
+                    raise StoreError("download_destination_conflict")
+            path = self.root / "source.json"
+            if path.is_symlink() or (path.exists() and not stat.S_ISREG(path.lstat().st_mode)):
+                raise StoreError("unsafe_storage_path")
+            self._atomic_write(path, self._payload(dict(source)))
+
     def _parse(self, value: Any, *, run: bool) -> Record:
         size = len(value.encode() if isinstance(value, str) else value) if isinstance(value, (str, bytes)) else 0
         if size > self.max_record_bytes:
@@ -461,10 +502,7 @@ class LocalRecordStore:
 
     @staticmethod
     def _validate_finding_target(record: Record, run: Record) -> None:
-        if record.get("item_uid") is not None:
-            items = (run["findings"]["value"] or {}).get("items", [])
-            if not any(item["item_uid"] == record["item_uid"] for item in items):
-                raise StoreError("orphan_finding_reference")
+        validate_record_targets((run,), (record,))
 
     def _load(
         self, kind: str, path: Path, expected: Record | None = None,
