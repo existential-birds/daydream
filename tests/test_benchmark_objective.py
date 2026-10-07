@@ -41,18 +41,16 @@ def _env(**over: Any) -> Any:
     return base
 
 
-def _append(ws: Path, run_id: Any='run-1') -> None:
+def _append(ws: Path, run_id: Any='run-1', profile_digest: Any=None) -> None:
     run_mod.ledger_append_running(ws, run_id=run_id, compiled_lock_sha256=run_mod._compiled_lock_sha256(ws),
-        job_dir=str((ws / "harbor" / "jobs" / run_id).resolve()),
+        job_dir=str((ws / "harbor" / "jobs" / run_id).resolve()), profile_digest=profile_digest,
     )
 
 
 def _complete_ws(tmp_path: Path, run_id: Any="run-1", trials: Any=None) -> Any:
     """A complete, consistent run whose ledger lock hash matches the seed lock."""
     ws = _ws(tmp_path)
-    run_mod.ledger_append_running(ws, run_id=run_id, compiled_lock_sha256=run_mod._compiled_lock_sha256(ws),
-        job_dir=str((ws / "harbor" / "jobs" / run_id).resolve()),
-    )
+    _append(ws, run_id)
     run_mod.ledger_mark(ws, run_id, state="complete")
     if trials is None:
         trials = [_reward(tp=2, fp=1, fn=0)]
@@ -197,9 +195,7 @@ def _complete_ws_at(tmp_path: Path, name: Any, run_id: Any, trials: Any, digest:
     """
     ws = _ws(tmp_path / name)
     _seed_compiled_lock(ws, wheel=wheel or _WHEEL)
-    run_mod.ledger_append_running(ws, run_id=run_id, compiled_lock_sha256=run_mod._compiled_lock_sha256(ws),
-        job_dir=str((ws / "harbor" / "jobs" / run_id).resolve()), profile_digest=digest,
-    )
+    _append(ws, run_id, profile_digest=digest)
     run_mod.ledger_mark(ws, run_id, state="complete")
     _seed_trials(ws, run_id, trials)
     return ws

@@ -36,13 +36,11 @@ def validate_finding(
         return LocationCheck(False, None, None)
 
     hunks = info.get("hunks") or []
-    in_hunk = False
     best: tuple[int, int] | None = None
     best_dist: int | None = None
     for start, end in ((h["new_start"], h["new_end"]) for h in hunks):
         dist = range_distance(line, start, end)
         if dist == 0:
-            in_hunk = True
             best = (start, end)
             best_dist = 0
             continue
@@ -50,9 +48,9 @@ def validate_finding(
             best_dist = dist
             best = (start, end)
     return LocationCheck(
-        in_hunk=in_hunk,
+        in_hunk=best_dist == 0,
         nearest_hunk=best,
-        distance=0 if in_hunk else best_dist,
+        distance=best_dist,
     )
 
 
@@ -87,7 +85,7 @@ def validate_records(
         check = validate_finding(index, file, line)
         if check.distance is None or check.nearest_hunk is None:
             continue
-        if check.in_hunk or check.distance == 0:
+        if check.in_hunk:
             continue
         # Non-destructive location record (issue #1106): the snap below
         # overwrites ``line``, so preserve what the reviewer actually cited or

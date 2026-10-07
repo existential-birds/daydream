@@ -20,7 +20,6 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.util.types import AttributeValue
 
-from daydream.observability import otlp_compat
 from daydream.observability.config import ObservabilityConfig, ObservabilityError
 from daydream.observability.otlp_compat import (
     DeliveryLedger,
@@ -295,14 +294,7 @@ def _grpc_generic_exporter(timeout: float, config: ObservabilityConfig) -> SpanE
             meter_provider=NoOpMeterProvider(),
         )
         bridge = GrpcBridge(delegate, ledger)
-    return GrpcCompatExporter(bridge, ledger, timeout_s=timeout)
-
-
-class GrpcCompatExporter(CompatSpanExporter):
-    """SpanExporter facade over the pinned gRPC bridge."""
-
-    def __init__(self, bridge: otlp_compat.GrpcBridge, ledger: DeliveryLedger, *, timeout_s: float) -> None:
-        super().__init__(bridge, ledger, timeout_s=timeout_s)
+    return CompatSpanExporter(bridge, ledger, timeout_s=timeout)
 
 
 def _langsmith_usage(attributes: Mapping[str, AttributeValue]) -> dict[str, Any]:
