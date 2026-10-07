@@ -156,18 +156,6 @@ async def test_deep_sharding_off_keeps_single_agent_per_stack(
     deep = shard_many_python_target / ".daydream" / "deep"
     assert not list(deep.glob("stack-python#*-review.md"))  # exactly one agent per stack, as today
 
-async def test_per_stack_prompt_points_at_hunk_index(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Reviewer prompts source changed-line ranges from the hunk index, not
-    a diff.patch re-read (AC#1)."""
-    _silence(monkeypatch)
-    prompts = _install_model_capturing_stubs(monkeypatch, multi_stack_target)
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-    prompt = next(c["prompt"] for c in prompts if "Relevant diff hunks" in c["prompt"])
-    assert "hunk-index.json" in prompt or "changed line ranges" in prompt.lower()
-    assert "do NOT re-Read diff.patch" in prompt or "diff.patch" not in prompt
-
 async def test_no_parse_phase_and_records_from_output_schema(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """AC4: no parse-<stack> fork exists; records come from output_schema."""
@@ -196,6 +184,12 @@ async def test_no_parse_phase_and_records_from_output_schema(multi_stack_target:
     structural = deep_dir_path / "stack-structure-records.json"
     assert structural.is_file(), "expected the structural meta-stack records file"
     assert json.loads(structural.read_text())["issues"][0]["description"] == "Structural maintainability concern"
+
+
+    # Review requests keep the persisted changed-line authority.
+    prompt = next(c["prompt"] for c in prompts if "Relevant diff hunks" in c["prompt"])
+    assert "hunk-index.json" in prompt or "changed line ranges" in prompt.lower()
+    assert "do NOT re-Read diff.patch" in prompt or "diff.patch" not in prompt
 
 def test_structural_gate_resolver_reads_profile_pipeline() -> None:
     assert _config_pipeline(RunConfig(target="/tmp/x")).structural_enabled is True

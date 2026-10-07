@@ -1433,9 +1433,9 @@ def test_gh_pr_diff_raises_without_remote(repo: Path) -> None:
 
 @gh_required
 def test_gh_api_raises_without_auth(repo: Path) -> None:
-    """``gh api`` against a relative endpoint with no GitHub remote fails."""
-    with pytest.raises(GitError):
-        git_ops.gh_api(repo, "repos/{owner}/{repo}")
+    """The installed CLI rejects credentials absent at the actual authentication guard."""
+    with pytest.raises(GitError, match="gh auth login"):
+        git_ops.gh_api(repo, "/user")
 
 def _make_divergent_history(tmp_path: Path) -> tuple[Path, str, str]:
     """Modify shared.txt on both main and feat so direct and merge-base diffs differ."""

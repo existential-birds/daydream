@@ -136,8 +136,7 @@ def test_container_sanitised_env_table(backend: str) -> None:
     observed = set(sanitized) & (env_policy.declared_names() | _PROBES)
     assert observed == _EXPECTED_CONTAINER_KEEP[backend]
 
-@pytest.mark.parametrize("backend", ["pi", "claude"])
-def test_rendered_job_config_table(backend: str) -> None:
+def test_rendered_job_config_table() -> None:
     job = yaml.safe_load(render_job_config(oracle=False).decode())
     present = set(job["agents"][0]["env"]) | set(job["verifier"]["env"])
     assert present & (env_policy.declared_names() | _PROBES) == _EXPECTED_RENDERER_PRESENT

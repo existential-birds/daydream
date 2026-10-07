@@ -401,6 +401,20 @@ def _isolate_github_app_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_github_cli_env(
+    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hide host gh credentials; explicit test auth and live opt-ins remain available."""
+    if request.node.get_closest_marker("live_gh") is not None:
+        return
+    for name in (
+        "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST", "GH_REPO",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GH_CONFIG_DIR", str(tmp_path / "gh-config"))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_trace_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Strip tracing endpoints and credentials for every test."""
     for key in os.environ:

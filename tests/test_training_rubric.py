@@ -162,17 +162,12 @@ def test_version_fingerprint_changes_on_weight_change() -> None:
     f2 = _rubric_fingerprint(RubricV2Weights(w_false_positive=0.5))
     assert f1 != f2  # M7 discipline: formula identity detectable
 
-def test_breakdown_stamps_rubric_version(model: _StubModel) -> None:
-    b = cast(
-        RubricV2Breakdown, score_review(model, findings=[_finding()], fp_count=0, total_findings=1, breakdown=True),
-    )
-    assert b.reward_version.startswith(REWARD_VERSION_RUBRIC)
-
 def test_missing_correctness_is_none_not_zero(model: _StubModel) -> None:
     b = cast(
         RubricV2Breakdown, score_review(model, findings=[_finding()], fp_count=0, total_findings=1, breakdown=True),
     )
     assert b.terms["intrinsic_composite"] is None
+    assert b.reward_version.startswith(REWARD_VERSION_RUBRIC)
     assert "localization" not in b.terms
     assert "tool_grounded" not in b.terms
 

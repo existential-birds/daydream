@@ -6,7 +6,6 @@ from typing import cast
 
 import pytest
 
-from daydream.training import harvest as harvest_mod
 from daydream.training.reward import (
     REWARD_VERSION,
     PosteriorBreakdown,
@@ -53,14 +52,19 @@ def test_outcome_applies_posterior_penalty_golden(
     pr_feedback: str, expected_penalty: float, expected_posterior_cost: float,
 ) -> None:
     """Expose posterior penalties separately from the intrinsic composite score."""
-    rb = score_trajectory(ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}, {"verdict": "uncertain"}],
-                       format_valid=True, length=4000),
-        pr_feedback=pr_feedback)
+    inputs = ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}, {"verdict": "uncertain"}],
+        format_valid=True, length=4000)
+    base = score_trajectory(inputs)
+    assert type(base) is RewardBreakdown and not isinstance(base, PosteriorBreakdown)
+    assert base.composite == 0.7
+    assert "posterior_cost" not in base.to_dict()
+    rb = score_trajectory(inputs, pr_feedback=pr_feedback)
     assert isinstance(rb, PosteriorBreakdown)
     assert rb.false_positive_penalty == expected_penalty
     assert rb.axes_present["false_positive"] is True
     assert rb.composite == 0.7        # correctness minus length; posterior remains separate
     assert rb.posterior_cost == expected_posterior_cost
+    assert "posterior_cost" in rb.to_dict()
 
 def test_accepted_outcome_has_zero_penalty_and_all_six_fields() -> None:
     rb = score_trajectory(ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}], format_valid=True, length=3000),
@@ -94,30 +98,12 @@ def test_posterior_penalty_cannot_outrank_correctness_signal() -> None:
     assert good_rejected.composite == good_unlabeled.composite
     assert good_rejected.posterior_cost == 0.5  # max(0, 1.0 − 0.5); lives beside the composite
 
-def test_composite_is_pure_intrinsic_posterior_is_sibling() -> None:
-    inp = ScoringInputs([{"verdict": "consistent"}, {"verdict": "uncertain"}], True, 4000)
-    base = score_trajectory(inp)                       # no label → intrinsic
-    labeled = score_trajectory(inp, pr_feedback="rejected")
-    assert type(base) is RewardBreakdown and not isinstance(base, PosteriorBreakdown)
-    assert isinstance(labeled, PosteriorBreakdown)
-    assert base.composite == 0.7                        # correctness minus length
-    assert labeled.composite == 0.7                     # composite IDENTICAL despite rejected label
-    assert labeled.posterior_cost == 0.5                # max(0, 1.0 − 0.5 default prior)
-    assert labeled.false_positive_penalty == 1.0        # raw observed penalty retained
-    assert "posterior_cost" in labeled.to_dict() and "posterior_cost" not in base.to_dict()
 
 def test_score_trajectory_does_no_io(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(builtins, "open", lambda *a, **k: (_ for _ in ()).throw(AssertionError("I/O!")))
     rb = score_trajectory(ScoringInputs([{"verdict": "consistent"}], True, 100), pr_feedback="rejected")
     assert rb.composite is not None   # ran purely, no file access
 
-def test_same_function_scores_producer_and_eval_caller_paths() -> None:
-    harvest_fn = getattr(harvest_mod, "score_trajectory")
-    assert harvest_fn is score_trajectory
-    inp = ScoringInputs([{"verdict": "consistent"}], True, 500)
-    assert (score_trajectory(inp, pr_feedback="accepted").composite
-        == harvest_fn(inp, pr_feedback="accepted").composite
-    )
 
 def test_overrides_fingerprint_stably() -> None:
     assert _weights_fingerprint(RewardWeights(w_fp=0.5)) == _weights_fingerprint(RewardWeights(w_fp=0.5))

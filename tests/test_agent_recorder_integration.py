@@ -75,10 +75,6 @@ async def test_user_prompt_becomes_user_step(tmp_path: Path) -> None:
     assert "metrics" not in user_steps[0] or user_steps[0]["metrics"] is None
     assert "model_name" not in user_steps[0] or user_steps[0]["model_name"] is None
     assert "reasoning_content" not in user_steps[0] or user_steps[0]["reasoning_content"] is None
-
-async def test_text_event_creates_agent_step(tmp_path: Path) -> None:
-    backend = _scripted([ TextEvent(text="hello back"), ])
-    traj, _ = await _run_with_recorder(backend, tmp_path, prompt="hi")
     assert _single_agent_step(traj)["message"] == "hello back"
 
 async def test_tool_call_paired_with_observation_in_same_step(tmp_path: Path) -> None:

@@ -25,6 +25,7 @@ from daydream.ui import NEON_THEME, PHASE_SUBTITLES, print_issues_table
 from tests.harness.dataset import read_records
 from tests.harness.git_helpers import bare_remote, commit, git, init_repo
 from tests.harness.remote_ci import (
+    _accelerate_empty_ci_discovery,
     finish_remote_ci_fake,
     seed_pr_identity,
     start_remote_ci_fake,
@@ -346,6 +347,8 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
             discovery_seconds=30, completion_seconds=60, request_seconds=3,
         ),
     )
+    if remote_outcome == "no_ci":
+        _accelerate_empty_ci_discovery(monkeypatch)
     install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
     elsewhere = tmp_path / "different cwd"
     elsewhere.mkdir()
@@ -364,9 +367,13 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
     assert git(project, "config", "--get", "remote.origin.url") == raw_remote
     verdict = json.loads((project / ".daydream" / "deep" / "remote-ci-verdict.json").read_text())
     assert verdict["status"] == remote_outcome
+    assert verdict["target"]["pushed_sha"] == pushed_sha
     assert all(call.cwd == project.resolve() for call in fake_gh.process_calls())
     output = capsys.readouterr().out
     if remote_outcome == "no_ci":
+        assert verdict["evidence_sha"] == pushed_sha
+        assert verdict["polling"]["stable_polls"] >= verdict["polling"]["required_stable_polls"]
+        assert verdict["polling"]["elapsed_seconds"] >= verdict["polling"]["discovery_seconds"]
         assert "Remote CI was observably not configured" in output
         assert "Linux verified" not in output
         assert "coverage verified" not in output.lower()

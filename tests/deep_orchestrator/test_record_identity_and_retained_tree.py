@@ -237,6 +237,46 @@ async def test_every_merged_item_carries_source_uids_on_a_multi_stack_run(
     assert structural, f"no structural item shipped: {items}"
     assert [item["source_uids"] for item in structural] == [["structure:1"]]
 
+
+    # Durable shipped identity and display ordinals are independent of provenance.
+    assert len(items) > 1, f"fixture must ship several items or uniqueness proves nothing: {items}"
+
+    for item in items:
+        assert "item_uid" in item, f"shipped item carries no durable identity key: {item}"
+        assert isinstance(item["item_uid"], str) and item["item_uid"], (
+            f"shipped item carries an empty durable identity: {item}"
+        )
+    uids = _item_uids(deep)
+    assert len(set(uids)) == len(uids), f"two shipped items share one identity: {uids}"
+
+    # Nothing in a fresh run arrives pre-stamped, so the minted handles track the
+    # display ordinals exactly. That agreement is what makes the value
+    # re-derivable for an artifact written before the field existed -- it is a
+    # property of THIS case, not the definition of the field (see the preserve
+    # tests, where the two deliberately diverge).
+    assert uids == [f"item:{item['id']}" for item in items], uids
+
+
+    # The display ordinal is dense and 1-based over the SHIPPED list -- the
+    # evidence gate deletes items after the merge agent numbered them, so this
+    # holds only because ``normalize_items`` renumbers the survivors.
+    assert [item["id"] for item in items] == list(range(1, len(items) + 1)), items
+
+    structural = [item for item in items if item.get("lens") == "structural"]
+    assert structural, f"no structural item shipped: {items}"
+    item = structural[0]
+    # The birth record identity: this item WAS a per-stack record of the
+    # ``structure`` meta-stack, and it never passed through the merge agent.
+    assert item["uid"] == "structure:1", item
+    # Its own item identity, from the same namespace every shipped item uses.
+    assert item["item_uid"].startswith("item:"), item
+    assert item["item_uid"] != item["uid"], f"the item identity collapsed onto the record identity: {item}"
+    # Its derivation, which is the record it is -- a list, because an item can
+    # be a synthesis of several records even though this one is not.
+    assert item["source_uids"] == ["structure:1"], item
+    # And the display ordinal, which is none of the above.
+    assert isinstance(item["id"], int), item
+
 async def test_hallucinated_merge_source_uid_is_dropped_and_reported(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -411,54 +451,6 @@ async def test_merge_resume_rejects_structural_records_missing_host_identity(
     items = json.loads((deep / "merged-items.json").read_text())["items"]
     assert items and not any(item["lens"] == "structural" for item in items)
     assert not any("cross-stack merge agent" in call["prompt"].lower() for call in stub.calls)
-
-async def test_every_shipped_item_carries_a_unique_item_uid_on_a_multi_stack_run(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
-) -> None:
-    deep = await _fresh_uid_run(multi_stack_target, monkeypatch, mute_side_effects)
-    items = _merged_items(deep)
-    assert len(items) > 1, f"fixture must ship several items or uniqueness proves nothing: {items}"
-
-    for item in items:
-        assert "item_uid" in item, f"shipped item carries no durable identity key: {item}"
-        assert isinstance(item["item_uid"], str) and item["item_uid"], (
-            f"shipped item carries an empty durable identity: {item}"
-        )
-    uids = _item_uids(deep)
-    assert len(set(uids)) == len(uids), f"two shipped items share one identity: {uids}"
-
-    # Nothing in a fresh run arrives pre-stamped, so the minted handles track the
-    # display ordinals exactly. That agreement is what makes the value
-    # re-derivable for an artifact written before the field existed -- it is a
-    # property of THIS case, not the definition of the field (see the preserve
-    # tests, where the two deliberately diverge).
-    assert uids == [f"item:{item['id']}" for item in items], uids
-
-async def test_shipped_item_carries_id_item_uid_and_provenance_independently(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
-) -> None:
-    """#1111 real-path: three fields, three questions, one item dict."""
-    deep = await _fresh_uid_run(multi_stack_target, monkeypatch, mute_side_effects)
-    items = _merged_items(deep)
-    # The display ordinal is dense and 1-based over the SHIPPED list -- the
-    # evidence gate deletes items after the merge agent numbered them, so this
-    # holds only because ``normalize_items`` renumbers the survivors.
-    assert [item["id"] for item in items] == list(range(1, len(items) + 1)), items
-
-    structural = [item for item in items if item.get("lens") == "structural"]
-    assert structural, f"no structural item shipped: {items}"
-    item = structural[0]
-    # The birth record identity: this item WAS a per-stack record of the
-    # ``structure`` meta-stack, and it never passed through the merge agent.
-    assert item["uid"] == "structure:1", item
-    # Its own item identity, from the same namespace every shipped item uses.
-    assert item["item_uid"].startswith("item:"), item
-    assert item["item_uid"] != item["uid"], f"the item identity collapsed onto the record identity: {item}"
-    # Its derivation, which is the record it is -- a list, because an item can
-    # be a synthesis of several records even though this one is not.
-    assert item["source_uids"] == ["structure:1"], item
-    # And the display ordinal, which is none of the above.
-    assert isinstance(item["id"], int), item
 
 @pytest.mark.parametrize("scratch_is_related", [False, True])
 def test_retained_tree_uses_full_delta_identity_but_authorized_patch(tmp_path: Path, scratch_is_related: bool,

@@ -307,9 +307,6 @@ def test_build_manifest_serializes_resolved_profile_identity(tmp_path: Path) -> 
         "profile_digest": "e2e-profile-digest",
     }
 
-def test_build_manifest_omits_unresolved_profile_identity(tmp_path: Path) -> None:
-    manifest = _build(tmp_path).to_dict()
-    assert {"profile_schema_version", "profile_name", "profile_source_kind", "profile_digest",}.isdisjoint(manifest)
 
 def test_build_manifest_omits_fix_metadata_for_diagram_flow(tmp_path: Path) -> None:
     m = _build(tmp_path, run_flow=DaydreamRunFlow.DIAGRAM,
@@ -379,6 +376,17 @@ def test_manifest_to_dict_structure(tmp_path: Path) -> None:
     assert d["code_context"] == {
         "base_sha": None, "head_sha": None, "base_branch": None, "branch": None, "changed_files": [],
     }
+    assert m.total_findings is None
+    assert "grounding_rate" not in d["metrics"]
+    assert "coverage_ratio" not in d["metrics"]
+    assert m.cost_per_finding_usd is None
+    assert m.erosion is None
+    assert m.verbosity is None
+    assert m.fix_quality_gate is None
+    assert d["fix_quality_gate"] is None
+    assert m.recommended_patch_capture == "pre_test"
+    assert d["recommended_patch_capture"] == "pre_test"
+    assert {"profile_schema_version", "profile_name", "profile_source_kind", "profile_digest"}.isdisjoint(d)
 
 def test_manifest_to_dict_code_context_carries_git_ctx_fields(tmp_path: Path) -> None:
     m = _build(tmp_path,
@@ -412,14 +420,6 @@ def test_build_manifest_with_quality(tmp_path: Path) -> None:
     assert d["metrics"]["erosion"] == 0.34
     assert d["metrics"]["verbosity"] == 0.19
 
-def test_build_manifest_without_evaluation(tmp_path: Path) -> None:
-    m = _build(tmp_path)
-    assert m.total_findings is None
-    assert "grounding_rate" not in m.to_dict()["metrics"]
-    assert "coverage_ratio" not in m.to_dict()["metrics"]
-    assert m.cost_per_finding_usd is None
-    assert m.erosion is None
-    assert m.verbosity is None
 
 def test_build_manifest_wall_clock_without_evaluation(tmp_path: Path) -> None:
     m = _build(tmp_path,
@@ -581,10 +581,6 @@ def test_build_manifest_carries_fix_quality_gate(tmp_path: Path) -> None:
     assert d["fix_quality_gate"] == gate
     assert d["fix_quality_gate"]["rounds"][0]["per_file"]["api.py"]["flagged"] is True
 
-def test_manifest_fix_quality_gate_none_when_absent(tmp_path: Path) -> None:
-    m = _build(tmp_path)
-    assert m.fix_quality_gate is None
-    assert m.to_dict()["fix_quality_gate"] is None
 
 def test_upsert_run_persists_fix_quality_gate(tmp_path: Path) -> None:
     gate = {"enabled": True, "rounds": [{"round": 1, "per_file": {"api.py": {"flagged": True}}}],}
@@ -639,10 +635,6 @@ def test_session_bound_unbound_artifact_is_none(tmp_path: Path, resolver: Callab
 def test_session_bound_absent_artifact_is_none(tmp_path: Path) -> None:
     assert _read_session_bound_json_artifact(tmp_path, "sess-42", DeepArtifact.RECOMMENDED_CAPTURE.at) is None
 
-def test_manifest_recommended_patch_capture_defaults_pre_test(tmp_path: Path) -> None:
-    m = _build(tmp_path)  # no recommended_capture arg => sidecar absent
-    assert m.recommended_patch_capture == "pre_test"
-    assert m.to_dict()["recommended_patch_capture"] == "pre_test"
 
 def test_manifest_recommended_patch_capture_omitted_when_none() -> None:
     assert "recommended_patch_capture" not in Manifest().to_dict()
@@ -745,20 +737,14 @@ def test_bundle_rejects_a_sibling_document_bound_to_another_session(tmp_path: Pa
         _assemble_bundle(target, run_dir, recorder, write_snapshot=snapshot)
     assert not (run_dir / "trajectories").exists()
 
-@pytest.mark.parametrize(("relative_path", "expected"),
-    [pytest.param("review-output.md", "review findings", id="review-output"),
-        pytest.param("diff.patch", "diff content", id="diff-patch"),
-    ],
-)
-def test_bundle_file_path(tmp_path: Path, relative_path: str, expected: str) -> None:
-    target, run_dir, recorder = _setup_bundle(tmp_path)
-    _assemble_bundle(target, run_dir, recorder)
-    assert (run_dir / relative_path).read_text() == expected
 
 def test_bundle_deep_directory(tmp_path: Path) -> None:
     target, run_dir, recorder = _setup_bundle(tmp_path)
     _assemble_bundle(target, run_dir, recorder)
     assert (run_dir / "deep" / "intent.md").read_text() == "intent"
+    assert (run_dir / "review-output.md").read_text() == "review findings"
+    assert (run_dir / "diff.patch").read_text() == "diff content"
+    assert not (run_dir / "findings.json").exists()
 
 def test_bundle_diagram_flow_excludes_stale_review_artifacts(tmp_path: Path,) -> None:
     target, run_dir, recorder = _setup_bundle(tmp_path)
@@ -815,10 +801,6 @@ def test_bundle_archives_findings_artifact(tmp_path: Path) -> None:
     assert archived.is_file()
     assert json.loads(archived.read_text())["findings"][0]["fingerprint"] == "abc"
 
-def test_bundle_findings_artifact_skipped_without_route(tmp_path: Path,) -> None:
-    target, run_dir, recorder = _setup_bundle(tmp_path)
-    _assemble_bundle(target, run_dir, recorder)
-    assert not (run_dir / "findings.json").exists()
 
 def test_dump_artifacts_copies_clean_bundle(tmp_path: Path, archive_dir: Path) -> None:
     session_id = "abcd1234-0000-0000-0000-000000000000"

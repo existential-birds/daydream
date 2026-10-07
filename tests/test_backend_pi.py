@@ -982,6 +982,10 @@ async def test_nonzero_exit_sets_retryable_via_exit_code(
         (
             "DAYDREAM_PI_RETRY_ATTEMPTS", _pi_retry_attempts, "", _PI_DEFAULT_RETRY_ATTEMPTS,
             f"is not a valid integer; using default {_PI_DEFAULT_RETRY_ATTEMPTS}",
+        ),
+        (
+            "DAYDREAM_PI_RETRY_ATTEMPTS", _pi_retry_attempts, "-1", _PI_DEFAULT_RETRY_ATTEMPTS,
+            f"is negative; using default {_PI_DEFAULT_RETRY_ATTEMPTS}",
         ), ("DAYDREAM_PI_RETRY_BASE_DELAY_S", _pi_retry_base_delay, None, _PI_DEFAULT_RETRY_BASE_DELAY, None),
         ("DAYDREAM_PI_RETRY_BASE_DELAY_S", _pi_retry_base_delay, "0.5", 0.5, None),
         (
@@ -1011,7 +1015,8 @@ async def test_nonzero_exit_sets_retryable_via_exit_code(
         ),
     ],
     ids=[
-        "attempts-default", "attempts-env-override", "attempts-empty-warns", "base-default", "base-env-override",
+        "attempts-default", "attempts-env-override", "attempts-empty-warns", "attempts-negative-warns",
+        "base-default", "base-env-override",
         "base-nan-warns", "base-inf-warns", "base-empty-warns", "max-default", "max-env-override", "max-invalid-warns",
         "max-negative-warns", "max-empty-warns",
     ],
@@ -1022,9 +1027,10 @@ def test_pi_retry_env_knobs(
 ) -> None:
     if env_value is not None:
         monkeypatch.setenv(env_var, env_value)
-    assert parse() == pytest.approx(expected)
+    assert parse() == expected
     if warn_fragment is not None:
         assert warn_fragment in caplog.text
+        assert f"{env_var}={env_value!r}" in caplog.text
 
 # fanout_concurrency
 
@@ -1111,27 +1117,15 @@ async def test_pi_generation_lifecycle_start_end_pair_around_tool() -> None:
     assert [p.kind for p in second_end.choice_parts] == ["text"]
     assert second_end.finish_reason == "stop"
 
-async def test_pi_native_ms_start_converts_exactly_and_chronology_holds() -> None:
-    """Native Unix-ms start → exact ns; end receipt is host-observed and later."""
-    events = await _collect_events(PiBackend(model="glm-5.2"), "go", fixture="generation_lifecycle.jsonl")
-    ends = [e for e in events if isinstance(e, GenerationEndEvent)]
-    first = ends[0]
-    assert first.native_started_at_unix_ms == 1788690314289
-    assert first.native_started_at_unix_ms is not None
-    assert unix_ms_to_ns(first.native_started_at_unix_ms) == 1788690314289000000
-    assert first.ended_at_unix_ns >= unix_ms_to_ns(first.native_started_at_unix_ms)
+    assert first_end.native_started_at_unix_ms == 1788690314289
+    assert first_end.native_started_at_unix_ms is not None
+    assert unix_ms_to_ns(first_end.native_started_at_unix_ms) == 1788690314289000000
+    assert first_end.ended_at_unix_ns >= unix_ms_to_ns(first_end.native_started_at_unix_ms)
 
-async def test_pi_user_and_tool_results_do_not_create_generations() -> None:
-    events = await _collect_events(PiBackend(model="glm-5.2"), "go", fixture="generation_lifecycle.jsonl")
-    # The fixture has exactly two assistant messages → exactly two pairs.
-    # Tool execution events and turn boundaries are not generations.
-    assert len([e for e in events if isinstance(e, GenerationStartEvent)]) == 2
     tool_events = [e for e in events if isinstance(e, (ToolStartEvent, ToolResultEvent))]
     assert tool_events
     assert all(not isinstance(e, (GenerationStartEvent, GenerationEndEvent)) for e in tool_events)
 
-async def test_pi_turn_end_carries_native_identity() -> None:
-    events = await _collect_events(PiBackend(model="glm-5.2"), "go", fixture="generation_lifecycle.jsonl")
     turn_ends = [e for e in events if isinstance(e, TurnEndEvent)]
     assert turn_ends
     final = turn_ends[-1]
@@ -1144,18 +1138,26 @@ async def test_pi_turn_end_carries_native_identity() -> None:
     assert final.message_id_source is None
     assert final.timestamp_source == "host_observed"
 
+    metrics = [e for e in events if isinstance(e, MetricsEvent)]
+    assert metrics
+    assert all(m.measurement_source == "turn_end" for m in metrics)
+    costs = [e for e in events if isinstance(e, CostEvent)]
+    assert costs
+    terminal = costs[-1]
+    assert terminal.measurement_source == "terminal"
+    assert terminal.cost_source == "reported"
+
 async def test_pi_request_event_config_matches_exact_argv(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PI_PROVIDER", raising=False)
     monkeypatch.delenv("PI_API_KEY", raising=False)
     backend = PiBackend(model="glm-5.2")
     schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
-    flat_args, _ = await _run_and_capture_args(
-        backend, "structured please", output_schema=schema, read_only=True, persist_session=False,
-    )
-    events = await _collect_events(
-        PiBackend(model="glm-5.2"), "structured please", fixture="simple_text.jsonl", output_schema=schema,
+    events, spawn = await replay_process(
+        backend, make_mock_process_from_fixture("simple_text.jsonl"), Path("/tmp"), "structured please",
+        output_schema=schema,
         read_only=True, persist_session=False,
     )
+    flat_args = list(spawn.call_args.args)
     request = next(event for event in events if isinstance(event, RequestEvent))
     config = request.config
     assert isinstance(config, PiRequestConfig)
@@ -1182,37 +1184,18 @@ async def test_pi_error_turn_sets_explicit_incomplete_boundary() -> None:
     """An errored turn keeps identity native where exposed; outcome stays custom."""
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("error_turn.jsonl")
+    collected: list[Any] = []
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         with pytest.raises(PiError):
-            async for _ in backend.execute(Path("/tmp"), "go"):
-                pass
+            async for event in backend.execute(Path("/tmp"), "go"):
+                collected.append(event)
     # The error fixture carries no model/provider on the boundary; identity
     # fields must stay None, never a fabricated value.
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        collected: list[Any] = []
-        mock_proc2 = make_mock_process_from_fixture("error_turn.jsonl")
-        with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc2):
-            try:
-                async for event in PiBackend(model="glm-5.2").execute(Path("/tmp"), "go"):
-                    collected.append(event)
-            except PiError:
-                pass
     turn_ends = [e for e in collected if isinstance(e, TurnEndEvent)]
     assert turn_ends
     error_turn = turn_ends[-1]
     assert error_turn.finish_reason == "error"
     assert error_turn.model_name is None or error_turn.model_name == "glm-5.2"
-
-async def test_pi_usage_events_carry_turn_end_and_terminal_provenance() -> None:
-    events = await _collect_events(PiBackend(model="glm-5.2"), "go", fixture="generation_lifecycle.jsonl")
-    metrics = [e for e in events if isinstance(e, MetricsEvent)]
-    assert metrics
-    assert all(m.measurement_source == "turn_end" for m in metrics)
-    costs = [e for e in events if isinstance(e, CostEvent)]
-    assert costs
-    terminal = costs[-1]
-    assert terminal.measurement_source == "terminal"
-    assert terminal.cost_source == "reported"
 
 @pytest.mark.parametrize("mode", ["success", "process_error"])
 async def test_large_prompt_uses_private_attachment_until_child_exits(

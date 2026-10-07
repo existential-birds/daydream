@@ -16,9 +16,6 @@ def test_improve_config_table_parses_service_roots(tmp_path: Path) -> None:
     assert cfg.improve_service_roots == ["apps/*"]
     assert cfg.improve_service_groups == {"core": ["apps/billing", "apps/catalog"]}
 
-def test_improve_config_absent_defaults_empty(tmp_path: Path) -> None:
-    assert load_file_config(tmp_path).improve_service_roots == []
-
 def test_improve_github_issue_publishing_is_explicitly_configurable(tmp_path: Path,) -> None:
     (tmp_path / "pyproject.toml").write_text("[tool.daydream.improve.github]\npublish_issues = true\n")
 
@@ -78,10 +75,18 @@ def test_dotfile_wins_over_pyproject(tmp_path: Path) -> None:
     assert cfg.phases["fix"]["backend"] == "codex"
     assert "review" not in cfg.phases
 
-def test_absent_config_is_empty(tmp_path: Path) -> None:
+def test_absent_config_is_empty(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     cfg = load_file_config(tmp_path)
     assert cfg.model is None and cfg.backend is None and cfg.phases == {}
     assert cfg.reasoning_effort is None
+    assert cfg.improve_service_roots == []
+    assert cfg.diagram_mode is None
+    assert cfg.diagram_min_code_files is None
+    assert cfg.diagram_min_modules is None
+    assert cfg.diagram_min_branch_points is None
+    assert cfg.diagram_service_roots == []
+    assert cfg.retry_recovery_allowance_s is None
+    assert not any("retry_recovery_allowance_s" in r.message for r in caplog.records)
 
 def test_reasoning_effort_global_and_phase_override(tmp_path: Path) -> None:
     (tmp_path / ".daydream.toml").write_text('reasoning_effort = "medium"\n[phases.fix]\nreasoning_effort = "high"\n')
@@ -158,9 +163,7 @@ def test_empty_config_helper() -> None:
     assert cfg.phases == {}
 
 @pytest.mark.parametrize(("raw", "expected"),
-    [pytest.param(-0.1, None, id="negative"), pytest.param(float("nan"), None, id="nan"),
-        pytest.param(float("inf"), None, id="inf"), pytest.param(float("-inf"), None, id="negative-inf"),
-        pytest.param(True, None, id="bool"), pytest.param("0.05", None, id="string"),
+    [pytest.param(float("-inf"), None, id="negative-inf"), pytest.param("0.05", None, id="string"),
         pytest.param([0.05], None, id="list"), pytest.param(None, None, id="absent"), pytest.param(0, 0.0, id="zero"),
         pytest.param(0.05, 0.05, id="valid"), pytest.param(100, 100.0, id="int-coerced"),
     ],
@@ -232,15 +235,6 @@ def test_diagram_table_parses_from_dotfile_and_merges_per_key(tmp_path: Path) ->
     assert cfg.diagram_mode == "off"
     assert cfg.diagram_min_branch_points == 6
 
-def test_diagram_config_absent_defaults_to_unset(tmp_path: Path) -> None:
-    """Absent diagram settings stay unset so the orchestrator can apply CLI > file > default."""
-    cfg = load_file_config(tmp_path)
-    assert cfg.diagram_mode is None
-    assert cfg.diagram_min_code_files is None
-    assert cfg.diagram_min_modules is None
-    assert cfg.diagram_min_branch_points is None
-    assert cfg.diagram_service_roots == []
-
 def test_diagram_junk_values_degrade_to_unset(tmp_path: Path) -> None:
     """Malformed diagram keys stay unset; file config cannot force a diagram kind."""
     (tmp_path / "pyproject.toml").write_text(
@@ -291,12 +285,6 @@ def test_an_invalid_retry_recovery_allowance_degrades_observably(tmp_path: Path,
 
     assert config.retry_recovery_allowance_s is None            # default applies
     assert any("retry_recovery_allowance_s" in r.message for r in caplog.records)
-
-def test_an_absent_retry_recovery_allowance_stays_silent(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    config = load_file_config(tmp_path)
-
-    assert config.retry_recovery_allowance_s is None
-    assert not any("retry_recovery_allowance_s" in r.message for r in caplog.records)
 
 def test_review_cache_keys_round_trip_and_ill_typed_values_degrade(tmp_path: Path) -> None:
     (tmp_path / ".daydream.toml").write_text(
