@@ -134,7 +134,7 @@ def stage_ends(review: ReviewRun, scope_id: str) -> list[dict[str, Any]]:
 
 
 def many_file_review(tmp_path: Path, patch: pytest.MonkeyPatch, *, count: int = 17,
-                     lines: int = 1, wired: bool = True) -> InvestigationRun:
+                     lines: int = 1, wired: bool = True, feature_message: str = 'feature') -> InvestigationRun:
     before = {'api.py': "def hello():\n    return 'world'\n",
               'a_flags.py': 'def parse_flags(args):\n    return {}\n',
               'z_request.py': "def build_request(options):\n    return {'legacy': False}\n"}
@@ -145,7 +145,7 @@ def many_file_review(tmp_path: Path, patch: pytest.MonkeyPatch, *, count: int = 
     after['z_request.py'] = ('def build_request(options):\n'
                              + ("    return {'dry_run': options['dry_run']}\n" if wired else '    return {}\n'))
     repo = tmp_path / 'many_files'
-    seed_feature_branch(repo, base=before, feature=after)
+    seed_feature_branch(repo, base=before, feature=after, feature_message=feature_message)
     return InvestigationRun(repo, tmp_path, patch)
 
 
@@ -264,7 +264,8 @@ async def test_each_stage_builder_receives_current_assignment_and_bounded_triage
         "    r.override_prompt('per-stack', lambda **kw: wrap(build_per_stack_prompt, kw))\n"
         "    r.override_prompt('structural', lambda **kw: wrap(build_structural_prompt, kw))\n"
     )
-    review = many_file_review(tmp_path, monkeypatch)
+    review = many_file_review(tmp_path, monkeypatch,
+                             feature_message='fix: SETTLED_UNRELATED_HISTORY\n\nDaydream-Run: previous-fixture')
     review.backend.sandbox = sandbox
 
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
@@ -278,6 +279,7 @@ async def test_each_stage_builder_receives_current_assignment_and_bounded_triage
         assert 'Error Handling Semantics (QUAL-04)' in prose
         assert 'Confidence and Convention Rules' in prose
         if stage['stage'] == 'first_pass':
+            assert 'SETTLED_UNRELATED_HISTORY' in prose
             assert len(stage['assigned_files']) <= 4
             assert stage['context_transport'] == ('inline' if sandbox else 'exact_paths')
             if sandbox:
@@ -300,6 +302,7 @@ async def test_each_stage_builder_receives_current_assignment_and_bounded_triage
                 output['candidates'] = [candidate(disposition='rejected')] + [candidate() for _ in range(9)]
         else:
             assert stage['stage'] == 'triage'
+            assert 'SETTLED_UNRELATED_HISTORY' not in prose
             assert [item['candidate_id'] for item in stage['candidates']] == stage['assigned_candidate_ids']
             assert all(item['disposition'] == 'open' for item in stage['candidates'])
             assert 'Assigned files:' not in prose

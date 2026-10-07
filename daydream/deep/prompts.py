@@ -333,7 +333,7 @@ def _build_review_stage_prompt(
     triage = stage == "triage"
     structural = stage == "integration"
     parts = [UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY, CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)]
-    settled = _settled_decisions_block(prior_commits)
+    settled = _settled_decisions_block(prior_commits) if not triage else ""
     if settled:
         parts.append(settled)
     parts.append(_confidence_and_convention_instructions(stage_scoped=True))
