@@ -1,10 +1,11 @@
 """Isolated verifier clients and scoring over fake HTTP, CLI runners, and real temp files."""
 import asyncio
 import hashlib as _h
+import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -615,6 +616,54 @@ def _fake_cli_runner(stdout_arg: str, rc: int = 0) -> Any:
     return runner
 
 
+async def _hang_read(_n: int) -> bytes:
+    await asyncio.sleep(3600)  # the wait_for deadline cancels this read
+    raise AssertionError("unreachable")
+
+
+async def _hang() -> None:
+    await asyncio.sleep(3600)
+
+
+class _ScriptedChild:
+    """StreamReader-shaped spawned child covering the CLI streaming seam.
+
+    ``chunks`` yields read() results: an iterator returns each entry then EOF,
+    while a coroutine function is awaited per read (to hang or repeat forever).
+    ``wait`` runs after EOF; ``on_kill`` records each kill, and the default
+    treats a kill as a bug.
+    """
+
+    def __init__(self, chunks: Any, *, wait: Any = None, on_kill: Any = None) -> None:
+        self.stdout = self
+        self._chunks = chunks if callable(chunks) else iter(chunks)
+        self._wait = wait
+        self._on_kill = on_kill
+
+    async def read(self, n: int) -> bytes:
+        if callable(self._chunks):
+            return cast(bytes, await self._chunks(n))
+        return next(self._chunks, b"")
+
+    async def wait(self) -> None:
+        if self._wait is not None and inspect.isawaitable(result := self._wait()):
+            await result
+
+    def kill(self) -> None:
+        if self._on_kill is None:
+            raise AssertionError("a settled child must never be killed")
+        self._on_kill()
+
+
+def _proc_runner(build: Any) -> Any:
+    """Runner seam returning a fresh scripted child on every attempt."""
+
+    async def runner(*args: Any, **kwargs: Any) -> Any:
+        return build()
+
+    return runner
+
+
 @pytest.mark.asyncio
 async def test_both_providers_produce_identical_verdicts_and_errors(sr_module: Any) -> None:
     sr = sr_module
@@ -1160,28 +1209,9 @@ async def test_claude_cli_client_shells_subprocess_and_returns_verdict(sr_module
 async def test_claude_cli_timeout_kills_child_every_attempt(sr_module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     sr = sr_module
     kills: list[int] = []
-
-    class HangingProc:
-        """A spawned child that never produces output; kill() records the call."""
-
-        def __init__(self) -> None:
-            self.stdout = self  # the read() below doubles as the StreamReader seam
-
-        async def read(self, n: int) -> bytes:
-            await asyncio.sleep(3600)  # hang until the wait_for deadline kills us
-            raise AssertionError("unreachable: the deadline kills this read first")
-
-        async def wait(self) -> None:
-            await asyncio.sleep(3600)
-
-        def kill(self) -> None:
-            kills.append(1)
-
-    async def fake_run(*args: Any, **kwargs: Any) -> Any:
-        return HangingProc()
-
     monkeypatch.setattr(sr, "_REQUEST_TIMEOUT", 0.05)
-    client = sr.ClaudeCliJudgeClient(model="m", runner=fake_run)
+    client = sr.ClaudeCliJudgeClient(model="m", runner=_proc_runner(
+        lambda: _ScriptedChild(_hang_read, wait=_hang, on_kill=lambda: kills.append(1))))
     with pytest.raises(sr.VerifierError) as e:
         await client.complete_json(user="u")
     assert "timeout" in str(e.value)
@@ -1235,24 +1265,11 @@ async def test_claude_cli_streaming_oversize_kills_child(sr_module: Any) -> None
     sr = sr_module
     killed: list[int] = []
 
-    class OverflowStream:
-        def __init__(self) -> None:
-            self.stdout = self  # StreamReader-shaped: read() feeds the loop
+    async def chunk(_n: int) -> bytes:
+        return b"x" * int(sr._STDOUT_CHUNK_BYTES)  # never EOF; total grows past the cap
 
-        async def read(self, n: int) -> bytes:
-            size = int(sr._STDOUT_CHUNK_BYTES)
-            return b"x" * size  # never EOF; total grows past the cap
-
-        async def wait(self) -> None:
-            return None
-
-        def kill(self) -> None:
-            killed.append(1)
-
-    async def fake_run(*args: Any, **kwargs: Any) -> Any:
-        return OverflowStream()
-
-    client = sr.ClaudeCliJudgeClient(model="m", runner=fake_run)
+    client = sr.ClaudeCliJudgeClient(model="m", runner=_proc_runner(
+        lambda: _ScriptedChild(chunk, on_kill=lambda: killed.append(1))))
     with pytest.raises(sr.VerifierError) as e:
         await client.complete_json(user="u")
     assert "exceeds" in str(e.value) and "KiB" in str(e.value)
@@ -1269,28 +1286,9 @@ async def test_claude_cli_post_eof_wait_settles(sr_module: Any) -> None:
     sees a settled process."""
     sr = sr_module
     settled: list[int] = []
-
-    class SettlingProc:
-        def __init__(self) -> None:
-            self.stdout = self
-            self.eof = False
-
-        async def read(self, n: int) -> bytes:
-            if self.eof:
-                return b""  # EOF breaks the incremental loop
-            self.eof = True
-            return json.dumps(_OK_ENVELOPE).encode("utf-8")
-
-        async def wait(self) -> None:
-            settled.append(1)  # reached only after stdout EOF
-
-        def kill(self) -> None:
-            raise AssertionError("a settled child must never be killed")
-
-    async def fake_run(*args: Any, **kwargs: Any) -> Any:
-        return SettlingProc()
-
-    client = sr.ClaudeCliJudgeClient(model="m", runner=fake_run)
+    client = sr.ClaudeCliJudgeClient(model="m", runner=_proc_runner(
+        lambda: _ScriptedChild([json.dumps(_OK_ENVELOPE).encode("utf-8")],
+            wait=lambda: settled.append(1))))  # wait reached only after stdout EOF
     raw = await client.complete_json(user="u")
     assert raw == {"match": True, "confidence": 0.9, "reasoning": "same"}
     assert len(settled) == 1
@@ -1300,29 +1298,10 @@ async def test_claude_cli_post_eof_wait_timeout_kills_child(sr_module: Any, monk
     """A child that hangs after stdout EOF is killed at the deadline and retried."""
     sr = sr_module
     killed: list[int] = []
-
-    class StdoutEofThenWaitHangs:
-        def __init__(self) -> None:
-            self.stdout = self
-            self.eof = False
-
-        async def read(self, n: int) -> bytes:
-            if self.eof:
-                return b""
-            self.eof = True
-            return json.dumps(_OK_ENVELOPE).encode("utf-8")
-
-        async def wait(self) -> None:
-            await asyncio.sleep(3600)  # child never settles
-
-        def kill(self) -> None:
-            killed.append(1)
-
-    async def fake_run(*args: Any, **kwargs: Any) -> Any:
-        return StdoutEofThenWaitHangs()
-
     monkeypatch.setattr(sr, "_REQUEST_TIMEOUT", 0.05)
-    client = sr.ClaudeCliJudgeClient(model="m", runner=fake_run)
+    client = sr.ClaudeCliJudgeClient(model="m", runner=_proc_runner(
+        lambda: _ScriptedChild([json.dumps(_OK_ENVELOPE).encode("utf-8")], wait=_hang,
+            on_kill=lambda: killed.append(1))))
     with pytest.raises(sr.VerifierError) as e:
         await client.complete_json(user="u")
     assert "timeout" in str(e.value)

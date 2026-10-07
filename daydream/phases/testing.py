@@ -173,51 +173,6 @@ def _capture_repair_checkpoint(
     return write_repair_checkpoint(deep_path, checkpoint).name
 
 
-def _capture_or_note(
-    work: WorkContext,
-    error: BaseException,
-    *,
-    output: str,
-    turn_output: str,
-    abort_reason: str | None,
-    job_id: str,
-    execution_id: str,
-    snapshot: str | None,
-    input_tree_key: str,
-    retained_tree_key: str,
-    footprint: AuthorizedFixFootprint,
-    repair_instance: Backend,
-    wall_budget_s: float,
-    tool_call_budget: int | None,
-    elapsed_s: float,
-    config: Any,
-    recipe: TestRecipe | None,
-    artifact_session: ArtifactSession | None,
-    allow_standalone: bool,
-) -> str | None:
-    """Capture the checkpoint on a turn that raised, noting rather than replacing the error.
-
-    The dying turn still owns a tree, so the capture happens before confinement
-    here too. A capture that fails is attached to the propagating error as a
-    note: the host error is the caller's answer and must not be swallowed by a
-    secondary storage failure, but the missing evidence must not vanish either.
-    """
-    try:
-        return _capture_repair_checkpoint(
-            work, job_id=job_id, execution_id=execution_id,
-            base_ref=snapshot or "HEAD", failure_output=output, turn_output=turn_output,
-            abort_reason=abort_reason, base_tree_key=input_tree_key,
-            retained_tree_key=retained_tree_key, footprint=footprint,
-            repair_instance=repair_instance, wall_budget_s=wall_budget_s,
-            tool_call_budget=tool_call_budget, elapsed_s=elapsed_s,
-            config=config, recipe=recipe, artifact_session=artifact_session,
-            allow_standalone=allow_standalone,
-        )
-    except Exception as exc:  # noqa: BLE001 -- the note is the report, not a crash
-        error.add_note(f"repair checkpoint not captured: {type(exc).__name__}: {exc}")
-        return None
-
-
 def _continuation_ref(token: ContinuationToken | None) -> str | None:
     """Name a continuation without recording it: tokens carry opaque provider data."""
     if token is None:
@@ -699,15 +654,21 @@ async def phase_test_and_heal(
             # is what the caller must see: a capture or confinement failure here
             # is recorded, never raised over it. Cancellation is not this branch's
             # business -- it already carries its own cleanup contract.
-            _capture_or_note(work, exc, output=output, turn_output="",
-                abort_reason=None, job_id=job_id, execution_id=f"{job_id}:execution:{retries_used + 1}",
-                snapshot=snapshot, input_tree_key=input_tree_key,
-                retained_tree_key=capture_tree_key(), footprint=footprint,
-                repair_instance=repair_instance, wall_budget_s=wall_budget_s,
-                tool_call_budget=tool_call_budget, elapsed_s=time.monotonic() - started,
-                config=config, recipe=recipe, artifact_session=artifact_session,
-                allow_standalone=allow_standalone,
-            )
+            try:
+                _capture_repair_checkpoint(
+                    work, job_id=job_id, execution_id=f"{job_id}:execution:{retries_used + 1}",
+                    base_ref=snapshot or "HEAD", failure_output=output, turn_output="",
+                    abort_reason=None, base_tree_key=input_tree_key,
+                    retained_tree_key=capture_tree_key(), footprint=footprint,
+                    repair_instance=repair_instance, wall_budget_s=wall_budget_s,
+                    tool_call_budget=tool_call_budget, elapsed_s=time.monotonic() - started,
+                    config=config, recipe=recipe, artifact_session=artifact_session,
+                    allow_standalone=allow_standalone,
+                )
+            except Exception as capture_exc:  # noqa: BLE001 -- the note is the report, not a crash
+                exc.add_note(
+                    f"repair checkpoint not captured: {type(capture_exc).__name__}: {capture_exc}"
+                )
             _confine_repaired_tree(confinement)
             raise
         # The host, not the turn, decides what happened: the abort reason outranks

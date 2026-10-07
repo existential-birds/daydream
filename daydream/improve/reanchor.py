@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,32 +19,6 @@ from daydream.artifact_visibility import (
 from daydream.workspace import reject_public_operational_storage
 
 _OPERATIONAL_LOCK_STALE_AFTER_S = 24 * 3600
-
-
-def _prune_stale_locked_worktrees(
-    repo: Path,
-    paths: Iterable[Path],
-    *,
-    stale_after_s: int,
-) -> int:
-    """Remove unlocked or stale-locked worktrees, tolerating individual Git failures.
-
-    Locks no older than stale_after_s belong to active runs and remain untouched.
-    Removal unlocks first; return the number successfully removed.
-    """
-    removed = 0
-    for path in paths:
-        try:
-            locked_at = git_ops.worktree_lock_mtime(path)
-            if locked_at is not None and time.time() - locked_at <= stale_after_s:
-                # Live worktree (lock age near zero): never unlock or remove
-                # it, so a concurrent run mid-write is not destroyed.
-                continue
-            git_ops.worktree_remove_unlocked(repo, path)
-        except git_ops.GitError:
-            continue
-        removed += 1
-    return removed
 
 
 # Re-anchor worktree directory names are built from the run session id, so only
@@ -77,12 +50,25 @@ def _private_reanchor_root(repo: Path, owner: PrivateWorkspaceOwner | None) -> P
 
 
 def prune_stale_reanchor_worktrees(repo: Path, *, private_workspace_owner: PrivateWorkspaceOwner | None = None) -> int:
-    """Prune current private re-anchors, preserving live locks and tolerating individual Git failures."""
-    return _prune_stale_locked_worktrees(
-        repo,
-        _iter_reanchor_worktrees(_private_reanchor_root(repo, private_workspace_owner)),
-        stale_after_s=_OPERATIONAL_LOCK_STALE_AFTER_S,
-    )
+    """Prune current private re-anchors, preserving live locks and tolerating individual Git failures.
+
+    Locks no older than _OPERATIONAL_LOCK_STALE_AFTER_S belong to active runs and
+    remain untouched. Removal unlocks first; return the number successfully removed.
+    """
+    removed = 0
+    root = _private_reanchor_root(repo, private_workspace_owner)
+    for path in _iter_reanchor_worktrees(root):
+        try:
+            locked_at = git_ops.worktree_lock_mtime(path)
+            if locked_at is not None and time.time() - locked_at <= _OPERATIONAL_LOCK_STALE_AFTER_S:
+                # Live worktree (lock age near zero): never unlock or remove
+                # it, so a concurrent run mid-write is not destroyed.
+                continue
+            git_ops.worktree_remove_unlocked(repo, path)
+        except git_ops.GitError:
+            continue
+        removed += 1
+    return removed
 
 
 # Verdicts for a named prune of a single re-anchor worktree. Distinct outcomes

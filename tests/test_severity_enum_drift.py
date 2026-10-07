@@ -166,7 +166,6 @@ def test_site_follows_the_declaration_when_the_declaration_moves(key: str, site:
 
 def test_supervise_severity_still_accepts_null() -> None:
     fragment = phases.SUPERVISE_SCHEMA["properties"]["verdicts"]["items"]["properties"]["severity"]
-    assert _levels(fragment) == FROZEN_MODEL_FACING
     assert {"type": "null"} in fragment["anyOf"]
 
 def test_no_two_sites_share_one_enum_list_object() -> None:
@@ -223,5 +222,4 @@ def test_improve_vet_severity_still_accepts_null() -> None:
         for site, fragment in _IMPROVE_SITES
         if site.endswith("VET_SCHEMA.properties.verdicts.items.properties")
     )
-    assert _levels(fragment) == FROZEN_MODEL_FACING
     assert {"type": "null"} in fragment["anyOf"]

@@ -27,7 +27,6 @@ from opentelemetry.trace import SpanContext
 from daydream.observability.config import ObservabilityConfig, ObservabilityError
 from daydream.observability.exporters import (
     CompatSpanExporter,
-    GrpcCompatExporter,
     langsmith_exporter,
     otlp_exporter,
 )
@@ -289,14 +288,14 @@ def test_private_credential_provider_rejected_before_any_send(monkeypatch: pytes
 @contextmanager
 def _generic_grpc(
     monkeypatch: pytest.MonkeyPatch, receive: GrpcReceiver, **extra: str,
-) -> Iterator[GrpcCompatExporter]:
+) -> Iterator[CompatSpanExporter]:
     with grpc_trace_server(receive) as port:
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc")
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", f"http://127.0.0.1:{port}")
         for key, value in extra.items():
             monkeypatch.setenv(key, value)
         exporter = otlp_exporter(ObservabilityConfig())
-        assert isinstance(exporter, GrpcCompatExporter)
+        assert isinstance(exporter, CompatSpanExporter)
         try:
             yield exporter
         finally:

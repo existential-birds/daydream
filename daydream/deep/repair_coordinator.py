@@ -132,7 +132,6 @@ def _resolve_scope_request(
     granted: frozenset[str] | set[str],
     evidence_source: str = "repair_turn",
     policy_revision: int = 1,
-    evidence: Mapping[str, str] | None = None,
 ) -> ScopeRequestResolution:
     """Resolve a repair turn's requested paths against the current authorization.
 
@@ -198,7 +197,6 @@ def _apply_scope_request(
             granted=footprint.run_allowed_paths,
             evidence_source=request.evidence_source,
             policy_revision=footprint.policy_revision,
-            evidence=request.evidence,
         )
     except InvalidRepositoryFilePath as exc:
         record_diagnostic(deep, job.job_id, f"scope_request_rejected: {exc}")

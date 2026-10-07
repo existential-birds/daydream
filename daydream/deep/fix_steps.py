@@ -749,16 +749,6 @@ def _test_attempt_payload(attempt: TestAttemptEvidence) -> dict[str, Any]:
     return payload
 
 
-def _repair_payload(repair: RepairAttemptEvidence) -> dict[str, Any]:
-    """Serialize one repair record: names, digests, and bounded excerpts only.
-
-    The same discipline ``evidence_reuse.audit_payload`` documents applies — the
-    artifact names what happened and points at the evidence, and never carries a
-    turn's raw prose.
-    """
-    return repair.payload()
-
-
 def _persist_test_verdict(
     ctx: FlowContext,
     state: FixCycleState,
@@ -781,7 +771,7 @@ def _persist_test_verdict(
             "attempts": [_test_attempt_payload(attempt) for attempt in attempts],
             # Always present, never omitted: a consumer must not have to tell
             # "no repair happened" from "this writer predates repair records".
-            "repairs": [_repair_payload(repair) for repair in (repairs or ())],
+            "repairs": [repair.payload() for repair in (repairs or ())],
             "local_host": local_host_facts(),
         },
         sort_keys=True,
