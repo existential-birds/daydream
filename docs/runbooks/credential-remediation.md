@@ -1,193 +1,34 @@
-# Credential Remediation Runbook (issue #981, M22)
+# Credential remediation
 
-When a Git credential is discovered in an archived bundle — an uploaded Hub
-dataset, a local archive, or a quarantined derivative — this runbook walks the
-remediation from scoping through verification. It exists because the code
-deliberately stops at the safe boundary: the sanitizer, scanner, and inventory
-tooling are agent-runnable, but **revocation, rotation, and Hub history
-rewrite are destructive operations that require a human and are never
-automated.**
+When credentials appear in captured evidence, record the affected run IDs,
+observation IDs, repository identities, publication commits, and exposure dates.
+Keep secret values out of incident reports and logs. Credential revocation and
+rotation, and any remote dataset history rewrite, require the operator's explicit
+decision; Daydream does not perform those actions automatically.
 
-Audience: the daydream operator (a human with provider dashboards open and the
-archive checkout in their own terminal).
+Capture and local diagnostic archives/dumps retain assembled evidence, including
+credential-shaped strings and binary files. Existing upstream trajectory redaction
+still applies. Review local evidence before sharing it. Diagnostic byte preservation
+is independent of dataset publication.
 
----
+The canonical JSONL publisher scans complete records and refuses blocking secret
+findings with value-free diagnostics. Failed publication leaves the original local
+records and retry queue available. A passing scan covers only recognized patterns;
+operators remain responsible for deciding what evidence to share.
 
-## 1. Scope the incident
+Use `daydream corpus dataset status --store RECORD_STORE --trajectory-hub-repo OWNER/REPO`
+to inspect queued/published/failed counts. For previously published evidence, use
+`dataset download` at an exact commit to identify affected records without changing
+remote history. Immutable records must never be edited in place to erase evidence
+or defeat integrity checks.
 
-Run the value-free inventory over the archive:
+The operator should revoke exposed credentials with their provider, rotate dependent
+secrets, and verify the old credentials no longer authorize access. Check dependent
+jobs without printing secret values. If remote copies exist, decide separately how
+to restrict access or remediate history. Merely removing a current file does not
+remove earlier commits or caches.
 
-```bash
-python -c "
-from pathlib import Path
-from daydream.archive.sanitize import report_inventory
-report_inventory(Path('/path/to/archive_dir'))
-"
-```
-
-`report_inventory()` classifies each bundle's `git.remote_url` via the
-normalizer and prints **counts by category only** — session counts, never a
-URL fragment or a matched credential value. Categories mirror
-`daydream.archive.git_safe.classify_remote_url`: `userinfo` (covers both
-`user:token`/PAT-shaped userinfo and `x-access-token` token-only `user@`
-forms), `query` (credential-like query parameters), and `clean` (benign URLs),
-plus `unparseable` for manifests it could not read.
-
-Record the output. It tells you how many manifests/bundles are affected per
-category, which determines how wide the revocation net in step 3 must be.
-
-If the incident involves bundles already uploaded to the Hub, also list the
-affected dataset revisions (upload timestamps vs. affected session dates)
-before touching anything.
-
-## 2. Identify affected credentials
-
-Work from `sanitized/audit.jsonl` records under `<archive_dir>/sanitized/`.
-Each record carries, per processed bundle:
-
-- `source` — the original run directory path
-- `session_id` — the archived session
-- `derivative_digest` — content digest of the released derivative
-- `status` — `"sanitized"` or `"quarantined"`
-- `completed_at` — timestamp
-
-**Never print a credential value.** Do not grep for the token itself, do not
-paste matched regions into tickets, logs, or agent tooling. If the operator
-must inspect a value (e.g. to match a token prefix against a provider
-dashboard), they do it **in their own terminal, from the source-of-record**
-(provider settings page, secret store, CI config) — outside agent tooling.
-
-Map affected sessions to the repos they touched:
-
-1. For each affected `session_id`, read `manifest.json` in the source run
-   directory and note the repo identity (owner/repo) — the *identity*, not the
-   raw URL.
-2. The inventory's single `userinfo` category covers both `x-access-token`
-   token-only `user@` forms (GitHub App installation tokens) and `user:token`
-   or PAT-shaped userinfo (personal access tokens), so it cannot tell the two
-   apart at category granularity. Distinguish them from the source
-   `manifest.json` `git.remote_url` records instead, not the inventory
-   category counts.
-3. The result is a table of (credential type, repo(s), session ids, date
-   range) — safe to share, contains no secret values.
-
-## 3. Verify expiry / revoke or rotate
-
-> **Gate: revocation and rotation require human approval. Never automated.
-> No code path in daydream revokes, rotates, or expires a credential.**
-
-Per provider:
-
-- **GitHub PAT (classic / fine-grained):** in GitHub → Settings → Developer
-  settings, check each candidate token's last-used date and expiry against the
-  affected date range. Revoke tokens that overlap, or rotate (issue a
-  replacement, update the secret store, then revoke the old one). Prefer
-  revocation over rotation when the token's scope is uncertain.
-- **GitHub App installation tokens (`x-access-token`):** these are short-lived
-  by construction, but if the *installation's* credential material (the App
-  private key) could have leaked alongside, rotate the App private key from
-  the App settings page. Check the App's installation audit log for anomalous
-  repo access within the affected window.
-- **Other providers:** apply the same rule — verify scope and expiry from the
-  provider's own dashboard, then revoke first, rotate second.
-
-After revocation, confirm in the provider's audit log that the credential no
-longer authenticates.
-
-## 4. Remediate Hub history
-
-Choose exactly one option, in escalating order of destructiveness:
-
-- **(a) Leave quarantined bundles unreleased (non-destructive default).**
-  Bundles that failed the fail-closed scan live under
-  `<archive_dir>/quarantine/<session_id>/` and are never released. Doing
-  nothing is a valid, safe outcome for anything not yet uploaded.
-- **(b) Delete specific Hub uploads.** Delete the affected dataset revision(s)
-  from the HuggingFace dataset repo (revisions uploaded before revocation, or
-  re-upload sanitized derivatives after revocation).
-- **(c) Full history rewrite** of the dataset repo — only when the credential
-  shipped in many revisions and (b) is impractical.
-
-> **Gate for (b) and (c):** all of the following are required before acting:
-> 1. Explicit operator approval, recorded in writing (who, when, what scope).
-> 2. An **executed revocation first** (step 3 is complete) — deleting history
->    is useless if the credential still works.
-> 3. A written record of exactly what was deleted (dataset repo, revision
->    SHAs or date range, operator, timestamp), kept with the incident record.
-
-## 5. Non-destructive vs destructive operations
-
-| Operation | Destructive? | Who runs it | Gate |
-|---|---|---|---|
-| `report_inventory()` scoping | No (read-only, value-free) | Agent or human | — |
-| Reading `sanitized/audit.jsonl` | No | Agent or human | Never print values |
-| `sanitize_archive()` / `sanitize_bundle()` | No (produces derivatives; bronze sources never modified) | Agent or human | Fail-closed scan; blocking findings quarantine, advisory findings are reported and released |
-| Quarantine **release** (moving a derivative out of `quarantine/` after review) | No | Agent or human | Must pass `scan_run_dir()` with no blocking finding first (see §6.2); advisory findings do not hold a release |
-| Credential revocation / rotation | **Destructive** | **Human only** | Human approval; never automated |
-| Hub revision deletion (4b) | **Destructive** | **Human only** | Approval + executed revocation + written deletion record |
-| Hub history rewrite (4c) | **Destructive** | **Human only** | Approval + executed revocation + written deletion record |
-
-## 6. Verify
-
-Post-remediation, confirm the incident is closed:
-
-1. **Re-run the inventory:** `report_inventory()` again. Every previously
-   affected category must now read zero; only clean categories (and
-   `unparseable`, if pre-existing) remain.
-2. **Re-scan:** run the fail-closed scanner (`daydream.archive.scan.scan_run_dir`)
-   over sanitized derivatives and any bundle that will egress. It must report
-   **no blocking findings** (`ScanResult.blocking` empty). The scanner reports
-   two tiers, and only the blocking tier is an acceptance criterion:
-   - **Blocking** — high-confidence credential formats: API-key prefixes
-     (`api_key`), PEM key material (`pem_key`), JWTs (`jwt`), literal
-     `user:pass@` userinfo and token-only userinfo (`url_credential`),
-     credential-bearing query parameters (`query_credential`), and any
-     `scan_error` (a scan that could not complete never reads clean). A
-     blocking finding refuses publication on every egress path.
-   - **Advisory** — shapes the scanner cannot attribute to a credential value:
-     a secret-*named* variable whose value is not secret-shaped (`env_var`,
-     e.g. `SORT_KEY = "created_at"`), and a userinfo template whose parts are
-     entirely `{placeholder}` interpolation. These are reported to the operator
-     but no longer refuse egress.
-
-   So a bundle carrying advisory findings will **not** report `clean` yet will
-   still egress. That is deliberate: a rule that cannot identify a credential
-   value must not gate irreversible publication. Read the advisory list anyway —
-   it names the path, location, and category (never a value), and it is where a
-   credential in an unrecognized format would show up. If an advisory finding
-   looks like a real credential, treat it as an incident and go back to step 1
-   rather than releasing.
-3. **Revocation holds:** attempt authentication with a revoked token from the
-   operator's own terminal and confirm it fails.
-4. **Going forward:** the fail-closed scan (upload preflight in
-   `daydream/archive/hub.py`, the `--dump-artifacts` copy gate, the sanitizer
-   release and metadata-import gates, and clean-room verification) blocks any
-   bundle carrying a blocking finding from every egress path, and reports the
-   advisory tier without blocking. Future incidents in a recognized credential
-   format should be caught at that gate, before upload.
-
-## 7. How the harvest clone step authenticates
-
-`corpus harvest` clones repos from manifests that have no local checkout into
-its clone cache. It never clones the archived raw URL: the URL is rewritten via
-`normalize_remote_url` (see `daydream.archive.git_safe`) into a credential-free
-HTTPS identity like `https://github.com/owner/repo`, and only allowlisted git
-hosts are accepted. All credential material is therefore absent from the URL
-by construction.
-
-Authentication for private repos is out-of-band and operator-supplied:
-
-- Set the `DAYDREAM_GIT_TOKEN` environment variable (e.g. a GitHub PAT with
-  read access to the target repos) when running `corpus harvest`. It is
-  injected into the git command via `-c http.extraHeader` at the argv layer;
-  the URL string never contains the token.
-- Without the variable, the clone falls back to the ambient git credential
-  helper. `GIT_TERMINAL_PROMPT=0` fails closed on auth errors instead of
-  prompting.
-- A clone or fetch failure is warning-only at harvest time (the affected run
-  is skipped, never aborted) and never survives into the archive.
-
-Treat `DAYDREAM_GIT_TOKEN` as a credential in its own right: if it is
-suspected leaked, add it to the step-3 revocation net. It is an input to the
-clone step, not archived data, so it never appears in uploaded bundles or in
-`report_inventory()` output.
+For private repository harvesting, `DAYDREAM_GIT_TOKEN` travels through Git's child
+process configuration, never a URL or command argument. GitHub license acquisition
+uses `GITHUB_TOKEN` from the launching environment and pins the request to an exact
+repository commit. Tokens must not become run or observation evidence.

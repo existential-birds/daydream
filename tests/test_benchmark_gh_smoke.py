@@ -18,7 +18,10 @@ from daydream.benchmark.storage import load_yaml_strict
 from daydream.benchmark.workspace import init_workspace
 
 _run = shutil.which("gh") is not None and os.environ.get("DAYDREAM_LIVE_GH") == "1"
-pytestmark = pytest.mark.skipif(not _run, reason="live gh smoke test disabled (DAYDREAM_LIVE_GH=1 + gh required)")
+pytestmark = [
+    pytest.mark.live_gh,
+    pytest.mark.skipif(not _run, reason="live gh smoke test disabled (DAYDREAM_LIVE_GH=1 + gh required)"),
+]
 
 # The module-level skipif already gates on gh + DAYDREAM_LIVE_GH=1.
 _SMOKE_PRS = os.environ.get("DAYDREAM_SMOKE_PRS", "")

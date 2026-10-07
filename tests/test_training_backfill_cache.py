@@ -28,6 +28,9 @@ def test_cache_refetches_stale_response(tmp_path: Path) -> None:
     first = cache("org/repo", "repos/org/repo/pulls/42")
     assert first == {"merged": True, "n": 1}
     assert calls == [("org/repo", "repos/org/repo/pulls/42")]
+    cached = cache("org/repo", "repos/org/repo/pulls/42")
+    assert first == cached == {"merged": True, "n": 1}
+    assert calls == [("org/repo", "repos/org/repo/pulls/42")]
     # Select the JSON cache beside the archive fixture before aging its timestamp.
     path = next(p for p in tmp_path.iterdir() if p.suffix == ".json")
     old = time.time() - CACHE_TTL_SECONDS - 60
@@ -36,14 +39,6 @@ def test_cache_refetches_stale_response(tmp_path: Path) -> None:
     assert second == {"merged": True, "n": 2}
     assert calls == [("org/repo", "repos/org/repo/pulls/42")] * 2
 
-def test_cache_returns_cached_response_on_second_call(tmp_path: Path) -> None:
-    calls: list[tuple[str, str]] = []
-
-    cache = BackfillCache(cache_dir=tmp_path, inner=_counting_gh(calls))
-    first = cache("org/repo", "repos/org/repo/pulls/42")
-    second = cache("org/repo", "repos/org/repo/pulls/42")
-    assert first == second == {"merged": True, "n": 1}
-    assert calls == [("org/repo", "repos/org/repo/pulls/42")]
 
 def test_cache_misses_for_different_endpoints(tmp_path: Path) -> None:
     calls: list[tuple[str, str]] = []

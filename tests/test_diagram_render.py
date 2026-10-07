@@ -99,28 +99,24 @@ def _both_rendered() -> dict[str, dict[str, Any] | None]:
 def test_sequence_mermaid_matches_golden_fixture_byte_for_byte() -> None:
     # The fixture carries a final newline (.editorconfig insert_final_newline);
     # the renderer emits none because the text is embedded in a ``` fence.
-    assert render_sequence_mermaid(SEQUENCE_SPEC) + "\n" == (FIXTURES / "diagram_sequence.mmd").read_text()
+    golden = (FIXTURES / "diagram_sequence.mmd").read_text()
+    assert render_sequence_mermaid(SEQUENCE_SPEC) + "\n" == golden
+    assert render_diagram_blocks({"sequence": _rendered(SEQUENCE_SPEC)}) == (
+        "<details><summary><h3>Sequence Diagram</h3></summary>\n\n```mermaid\n"
+        + golden.removesuffix("\n") + "\n```\n\n</details>"
+    )
 
 def test_flowchart_mermaid_matches_golden_fixture_byte_for_byte() -> None:
-    assert render_flowchart_mermaid(FLOWCHART_SPEC) + "\n" == (FIXTURES / "diagram_flowchart.mmd").read_text()
-
-@pytest.mark.parametrize("kind,spec", [("sequence", SEQUENCE_SPEC), ("flowchart", FLOWCHART_SPEC)])
-def test_diagram_block_contains_only_the_rendered_diagram(kind: str, spec: dict[str, Any]) -> None:
-    title = "Sequence Diagram" if kind == "sequence" else "Flowchart"
-    mermaid = render_sequence_mermaid(spec) if kind == "sequence" else render_flowchart_mermaid(spec)
-    assert render_diagram_blocks({kind: _rendered(spec)}) == (
-        f"<details><summary><h3>{title}</h3></summary>\n\n```mermaid\n{mermaid}\n```\n\n</details>"
+    golden = (FIXTURES / "diagram_flowchart.mmd").read_text()
+    assert render_flowchart_mermaid(FLOWCHART_SPEC) + "\n" == golden
+    assert render_diagram_blocks({"flowchart": _rendered(FLOWCHART_SPEC)}) == (
+        "<details><summary><h3>Flowchart</h3></summary>\n\n```mermaid\n"
+        + golden.removesuffix("\n") + "\n```\n\n</details>"
     )
 
 
 # Ordering, gating, and the "never read a stored mermaid" rule
 
-def test_blocks_render_sequence_first_then_flowchart() -> None:
-    blocks = render_diagram_blocks(_both_rendered())
-    assert blocks.index("<h3>Sequence Diagram</h3>") < blocks.index("<h3>Flowchart</h3>")
-    # Exactly two top-level folds, joined by one blank line.
-    assert blocks.count("<details><summary><h3>") == 2
-    assert "</details>\n\n<details><summary><h3>Flowchart</h3>" in blocks
 
 @pytest.mark.parametrize("results", [{}, {"sequence": None, "flowchart": None},
     {"sequence": {"status": "omitted", "spec_final": None, "omit_reasons": ["NO_END"]}},
@@ -133,6 +129,20 @@ def test_blocks_are_empty_when_nothing_rendered(results: dict[str, Any]) -> None
     assert render_diagram_blocks(results) == ""
 
 def test_blocks_always_rerender_and_never_echo_a_stored_mermaid_string() -> None:
+    before = copy.deepcopy(_both_rendered())
+    results = copy.deepcopy(before)
+    blocks = render_diagram_blocks(results)
+    assert blocks == render_diagram_blocks(results)
+    assert results == before
+    assert render_sequence_mermaid(SEQUENCE_SPEC) == render_sequence_mermaid(copy.deepcopy(SEQUENCE_SPEC))
+    assert render_flowchart_mermaid(FLOWCHART_SPEC) == render_flowchart_mermaid(copy.deepcopy(FLOWCHART_SPEC))
+    assert blocks.index("<h3>Sequence Diagram</h3>") < blocks.index("<h3>Flowchart</h3>")
+    assert blocks.count("<details><summary><h3>") == 2
+    assert "</details>\n\n<details><summary><h3>Flowchart</h3>" in blocks
+    report = insert_diagrams_section(render_report(_items()), blocks)
+    assert f"## Diagrams\n{blocks}\n" in report
+    assert render_sequence_mermaid(SEQUENCE_SPEC) in report
+    assert render_flowchart_mermaid(FLOWCHART_SPEC) in report
     poisoned = _both_rendered()
     for kind in ("sequence", "flowchart"):
         result = poisoned[kind]
@@ -141,16 +151,6 @@ def test_blocks_always_rerender_and_never_echo_a_stored_mermaid_string() -> None
     blocks = render_diagram_blocks(poisoned)
     assert "pwned" not in blocks
     assert blocks == render_diagram_blocks(_both_rendered())
-
-def test_rendering_is_deterministic_and_does_not_mutate_the_spec() -> None:
-    before = copy.deepcopy(_both_rendered())
-    results = copy.deepcopy(before)
-    first = render_diagram_blocks(results)
-    second = render_diagram_blocks(results)
-    assert first == second
-    assert results == before
-    assert render_sequence_mermaid(SEQUENCE_SPEC) == render_sequence_mermaid(copy.deepcopy(SEQUENCE_SPEC))
-    assert render_flowchart_mermaid(FLOWCHART_SPEC) == render_flowchart_mermaid(copy.deepcopy(FLOWCHART_SPEC))
 
 
 # Render caps: asserted, not enforced
@@ -373,11 +373,3 @@ def test_omission_notice_covers_skipped_failed_and_rendered() -> None:
 def _items() -> list[dict[str, Any]]:
     return [{"id": 1, "lens": "per-stack", "file": "a.py", "line": 9, "description": "bug"},
             {"id": 2, "lens": "cross-stack", "file": "b.py", "line": 2, "description": "drift"}]
-
-def test_diagram_section_survives_a_round_trip_through_the_report_and_back() -> None:
-    blocks = render_diagram_blocks(_both_rendered())
-    report = insert_diagrams_section(render_report(_items()), blocks)
-    # The blocks are embedded verbatim -- the section body is byte-identical.
-    assert f"## Diagrams\n{blocks}\n" in report
-    assert render_sequence_mermaid(SEQUENCE_SPEC) in report
-    assert render_flowchart_mermaid(FLOWCHART_SPEC) in report

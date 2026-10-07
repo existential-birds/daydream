@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
-from daydream.archive.hydrate_rules import (
+from daydream.training.admission import (
     REASON_CODE_C5_EXCLUDED_REPO,
     REASON_CODE_C8_COPYLEFT_UNOPTED,
 )

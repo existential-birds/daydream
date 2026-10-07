@@ -133,7 +133,7 @@ def validate_private_directory(path: Path, *, label: str, allow_absent: bool = F
         raise ArtifactVisibilityError(f"{label} must have mode 0700")
 
 
-def _create_private_directory(path: Path) -> None:
+def _create_private_directory(path: Path, *, exist_ok: bool = False) -> None:
     """Create ``path`` and missing parents as private 0700 directories, durably.
 
     Every created directory is chmod'ed to ``0o700`` immediately after its
@@ -160,8 +160,12 @@ def _create_private_directory(path: Path) -> None:
         if stat.S_ISLNK(metadata.st_mode):
             raise ArtifactVisibilityError("artifact runtime ancestry contains a symlink")
     for directory in reversed(missing):
-        directory.mkdir(mode=0o700)
-        os.chmod(directory, 0o700)
+        directory.mkdir(mode=0o700, exist_ok=exist_ok)
+        directory_fd = _open_directory_descriptor(directory, label="private storage root")
+        try:
+            os.fchmod(directory_fd, 0o700)
+        finally:
+            os.close(directory_fd)
         _fsync_directory(directory.parent)
     validate_private_directory(path, label="private storage root")
 

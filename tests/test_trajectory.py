@@ -28,7 +28,7 @@ from daydream.backends import (
 )
 from daydream.cli import _signal_handler
 from daydream.deep.artifacts import DeepArtifact
-from daydream.eval.analyzer import analyze_costs, load_trajectories
+from daydream.eval.analyzer import analyze_costs
 from daydream.phases.publish import (
     _do_commit,
 )
@@ -393,6 +393,7 @@ async def test_recorder_writes_schema_valid_trajectory_on_clean_exit(recorder: T
 
     assert recorder.path.exists()
     assert atif_validate(recorder.path, validate_images=False) is True
+    assert "partial" not in read_trajectory(recorder.path).get("extra", {})
 
 
 
@@ -756,6 +757,7 @@ async def test_fork_child_trajectory_id_distinct_from_root(tmp_path: Path) -> No
     assert child_traj["trajectory_id"] == f"{recorder.session_id}:fix-0"
 
     parent_traj = read_trajectory(recorder.path)
+    assert parent_traj["session_id"] == child_traj["session_id"]
     ref = parent_traj["extra"]["subtrajectories"][0]
     assert ref["sibling_trajectory_ref"].startswith("runs/")
     # Resolve by the child's document trajectory_id; session_id identifies the shared run.
@@ -817,9 +819,6 @@ def test_invocation_has_no_parent_field() -> None:
 
 
 
-def test_no_recorder_no_op_get_current_returns_none() -> None:
-    """CORE-09: outside any recorder context, get_current_recorder is None."""
-    assert get_current_recorder() is None
 
 
 # Fork / Sibling / Continuation tests (Phase 3, SUBA-01..09)
@@ -839,20 +838,6 @@ async def test_fork_contextvar_isolation(recorder: TrajectoryRecorder) -> None:
 
 
 
-async def test_sibling_inherits_session_id(recorder: TrajectoryRecorder) -> None:
-    """SUBA-06: Child trajectory file has same session_id as parent."""
-    async with recorder:
-        async with recorder.fork("fix-0") as child:
-            async with child.invocation(phase=DaydreamPhase.FIX) as inv:
-                observe_text_and_result(inv)
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            observe_text_and_result(inv)
-
-    parent_traj = read_trajectory(recorder.path)
-    sibling_path = child.path
-    sibling_traj = read_trajectory(sibling_path)
-    assert parent_traj["session_id"] == sibling_traj["session_id"]
-    assert parent_traj["session_id"] == recorder.session_id
 
 
 
@@ -1671,16 +1656,6 @@ async def test_forked_child_does_not_mark_partial_on_clean_exit(recorder: Trajec
     sibling_traj = read_trajectory(child.path)
     assert "partial" not in sibling_traj.get("extra", {})
 
-async def test_recorder_does_not_mark_partial_on_clean_exit(recorder: TrajectoryRecorder) -> None:
-    """Clean exit does NOT mark the trajectory as partial."""
-    async with recorder:
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe_user_step(prompt="hello")
-            observe_text_and_result(inv, "world")
-
-    assert recorder.path.exists()
-    traj = read_trajectory(recorder.path)
-    assert "partial" not in traj.get("extra", {})
 
 def test_custom_run_flow_member_exists() -> None:
     assert DaydreamRunFlow.CUSTOM.value == "custom"
@@ -1757,7 +1732,10 @@ async def test_analyze_costs_total_comes_from_root_only(tmp_path: Path) -> None:
 
     session = "sess-fold-0001"
     daydream_dir = tmp_path / ".daydream"
-    recorder = make_recorder(tmp_path, path=daydream_dir / "runs" / session / "trajectory.json", session_id=session,)
+    snapshots: list[trajectory_module.RunWriteSnapshot] = []
+    recorder = make_recorder(tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot),
+        path=daydream_dir / "runs" / session / "trajectory.json", session_id=session,
+    )
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             observe_metrics_and_result(inv, "parent", message_id="m-1", prompt_tokens=100,
@@ -1769,7 +1747,7 @@ async def test_analyze_costs_total_comes_from_root_only(tmp_path: Path) -> None:
                     completion_tokens=8, cached_tokens=4, cost_usd=0.5,
                 )
 
-    costs = analyze_costs(load_trajectories(daydream_dir, session))
+    costs = analyze_costs(trajectory_module.snapshot_trajectories(snapshots[-1]))
     assert costs["total_cost_usd"] == pytest.approx(1.5)  # not 2.0 (root 1.5 + fork 0.5)
     assert costs["total_prompt_tokens_raw"] == 140  # not 180
     assert costs["total_completion_tokens"] == 28

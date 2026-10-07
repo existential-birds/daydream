@@ -1,7 +1,7 @@
 # Reward calibration (`daydream corpus calibrate-reward`)
 
 Issue #999 ships one documented, GPU-free command that validates a pinned
-calibration bundle (wire format below), computes deterministic
+derived calibration export (wire format below), computes deterministic
 reward-calibration statistics with confidence intervals, and emits a
 byte-reproducible, versioned calibration artifact. The command **never
 mutates any reward default** — every candidate weight and threshold comes
@@ -16,14 +16,13 @@ choosing values for the reward model. It does not choose values for you, does
 not write to `daydream/training/` reward defaults, and does not touch the
 live reward used by the harvest pipeline.
 
-## Input bundle (wire format)
+## Derived corpus input (wire format)
 
 `--corpus-dir` must hold `corpus.jsonl`, `lineage.json`, and `SHA256SUMS`;
 the runtime gates only those named paths and digest-verifies every file
 listed in `SHA256SUMS`, so additional files are tolerated. The in-repo
 reference producer (`tests/fixtures/training/calibration/build_fixture.py`)
-writes five files: the three required ones plus `curation-manifest.json` and
-a `_SUCCESS` completion marker.
+writes the three required files plus a derived `_SUCCESS` completion marker.
 
 - `corpus.jsonl` — one JSON object per line, each with `schema_version: "2"`,
   `record_id`, `session_id`, `repo_slug`, `reward_version`, and a `lineage`
@@ -39,15 +38,12 @@ a `_SUCCESS` completion marker.
 `--gold-labels` and `--breakdowns` must be JSON objects keyed by the same
 `record_id` values.
 
-This wire format matches what `daydream corpus build` (now the projection
-pipeline) emits: build output holds `schema_version: "2"` records with
-`record_id` and a per-record `lineage` (`lineage.split` included), and writes
-a lineage manifest carrying `schema_version: "lineage"` with `salt` /
-`holdout_rate` / `val_rate` / `as_of` / `valid_at`. It still writes no
-`SHA256SUMS`, so pointing `calibrate-reward` at a raw build output directory
-fails the first gate by design; the in-repo reference producer of the
-complete calibration wire format is
-`tests/fixtures/training/calibration/build_fixture.py`.
+`daydream corpus build` emits this derived format from a frozen record snapshot,
+including `SHA256SUMS`. The corpus records carry `schema_version: "2"`, a
+`record_id`, pinned split lineage, and a resolved repository/license decision.
+Source lineage uses `record-snapshot-v1` with host finding identity and immutable
+snapshot membership; it also pins the download provenance captured in the snapshot.
+The calibration fixture builder uses the same derived wire contract.
 
 ## Invocation
 

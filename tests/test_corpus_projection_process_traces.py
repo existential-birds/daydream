@@ -1,5 +1,5 @@
 """Task: projector emits schema-distinct process-trace and task-only records
-behind the ``emit_process_traces`` flag (default off = byte-identical D8
+behind the ``emit_process_traces`` flag (default off preserves outcome projection
 behavior: non-decisive findings land in the adjudication report only)."""
 
 import json
@@ -7,32 +7,22 @@ from pathlib import Path
 from typing import Any
 
 from daydream.training.corpus_projection.projector import build_frozen_corpus
-from tests.test_corpus_projection import (
-    _config_for,
-    _read_jsonl,
-    _write_annotations_snapshot,
-    _write_bundle,
-)
+from tests.harness.record_projection import projection_config, seed_projection_store
+from tests.test_corpus_projection import _read_jsonl
 
 
 def _build(tmp_path: Path, **kw: Any) -> tuple[Path, dict[str, Any]]:
-    bundle_dir = _write_bundle(tmp_path)
-    _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "ambiguous"])
-    out_dir = tmp_path / "out"
-    out = build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out_dir, **kw))
-    return out_dir, out
+    store = seed_projection_store(tmp_path, dispositions=("accepted", "ambiguous"))
+    config = projection_config(store, tmp_path, **kw)
+    return config.out_dir, build_frozen_corpus(config)
 
 
-def test_flag_off_emits_only_outcome_finding_records(tmp_path: Path) -> None:
+def test_flag_off_is_the_default(tmp_path: Path) -> None:
     out_dir, _out = _build(tmp_path)
     records = _read_jsonl(out_dir / "corpus.jsonl")
     assert records
     assert all(r["record_type"] == "outcome-finding" for r in records)
-    summary = _out
-    assert set(summary["records_by_type"]) == {"outcome-finding"}
-
-def test_flag_off_is_the_default(tmp_path: Path) -> None:
-    out_dir, _out = _build(tmp_path)
+    assert set(_out["records_by_type"]) == {"outcome-finding"}
     off_dir, _out_off = _build(tmp_path / "b", emit_process_traces=False)
     assert (off_dir / "corpus.jsonl").read_bytes() == (out_dir / "corpus.jsonl").read_bytes()
 
@@ -59,9 +49,6 @@ def test_flag_on_emits_process_trace_and_task_only_records(tmp_path: Path) -> No
     # Process-trace records count under the silver tier population.
     assert out["records_by_tier"].get("silver", 0) >= len(traces)
 
-def test_flag_on_records_carry_identity_lineage_and_distinct_ids(tmp_path: Path,) -> None:
-    out_dir, _out = _build(tmp_path, emit_process_traces=True)
-    records = _read_jsonl(out_dir / "corpus.jsonl")
     derived = [r for r in records if r["record_type"] in ("process-trace", "task-only")]
     assert derived
     ids = [r["record_id"] for r in records]
@@ -83,12 +70,9 @@ def test_flag_on_records_carry_identity_lineage_and_distinct_ids(tmp_path: Path,
     report = json.loads((out_dir / "adjudication-report.json").read_text())
     assert report
 
-def test_flag_on_split_files_contain_derived_records(tmp_path: Path) -> None:
-    out_dir, _out = _build(tmp_path, emit_process_traces=True)
-    all_records = _read_jsonl(out_dir / "corpus.jsonl")
     derived_types = {"process-trace", "task-only"}
     split_records: list[dict[str, Any]] = []
     for name in ("train.jsonl", "validation.jsonl", "holdout.jsonl"):
         split_records.extend(_read_jsonl(out_dir / name))
-    assert len(split_records) == len(all_records)
+    assert len(split_records) == len(records)
     assert any(r["record_type"] in derived_types for r in split_records)

@@ -1,26 +1,23 @@
-"""Validated archive rows and immutable acquired harvest evidence."""
+"""Validated record inputs and immutable acquired harvest evidence."""
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from daydream.training._immutable_json import freeze_json
 from daydream.training.reward import ScoringInputs
 from daydream.training.rubric import Rubric
 
-BaseShaStatus = Literal["available", "unavailable", "failed"]
-
 
 @dataclass(frozen=True)
 class HarvestRow:
-    """The consumed archive columns, validated before acquisition side effects."""
+    """Captured run fields, validated before acquisition side effects."""
 
     session_id: str
-    archive_path: Path
+    recommended_patch: str = ""
     source_path: Path | None = None
     remote_url: str | None = None
     repo_slug: str | None = None
@@ -31,21 +28,15 @@ class HarvestRow:
     pr_repo: str | None = None
     pr_number: int | None = None
     changed_files: tuple[str, ...] = ()
-    findings_fingerprints: tuple[str, ...] | None = None
+    findings_fingerprints: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "changed_files", tuple(self.changed_files))
-        if self.findings_fingerprints is not None:
-            object.__setattr__(self, "findings_fingerprints", tuple(self.findings_fingerprints))
+        object.__setattr__(self, "findings_fingerprints", tuple(self.findings_fingerprints))
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any], *, row_number: int) -> HarvestRow:
-        """Validate identity/path columns without probing files or GitHub.
-
-        Optional historical columns may be absent. Malformed changed-files JSON
-        retains its established empty-list fallback; invalid identity/path types
-        do not silently select an ambient directory or external repository.
-        """
+        """Validate current record shapes before probing files or GitHub."""
         session = raw.get("session_id") if isinstance(raw, Mapping) else None
         label = repr(session) if isinstance(session, str) else "<unknown>"
 
@@ -54,11 +45,8 @@ class HarvestRow:
 
         if not isinstance(raw, Mapping):
             raise invalid("row", "must be a mapping")
-        if (
-            not isinstance(session, str) or not session.strip()
-            or session in (".", "..") or any(char in session for char in "/\\\0")
-        ):
-            raise invalid("session_id", "must be a nonempty safe path segment")
+        if not isinstance(session, str) or not session.strip():
+            raise invalid("session_id", "must be a nonempty string")
 
         def text(field: str) -> str | None:
             value = raw.get(field)
@@ -70,16 +58,9 @@ class HarvestRow:
                 raise invalid(field, "must not contain NUL")
             return value
 
-        def path(field: str, *, required: bool = False) -> Path | None:
+        def path(field: str) -> Path | None:
             value = text(field)
-            if value is None or value == "":
-                if required:
-                    raise invalid(field, "must be a nonempty absolute path")
-                return None
-            result = Path(value)
-            if required and not result.is_absolute():
-                raise invalid(field, "must be an absolute path")
-            return result
+            return Path(value) if value else None
 
         def slug(field: str) -> str | None:
             value = text(field)
@@ -90,35 +71,30 @@ class HarvestRow:
                 raise invalid(field, "must contain safe owner/repository components")
             return value
 
-        archive_path = path("archive_path", required=True)
-        assert archive_path is not None
         number = raw.get("pr_number")
         if number is not None and (type(number) is not int or number <= 0):
             raise invalid("pr_number", "must be a positive integer or null")
-        changed = raw.get("changed_files")
-        if changed is None:
-            changed = []
-        elif not isinstance(changed, list):
-            try:
-                changed = json.loads(changed)
-            except (TypeError, json.JSONDecodeError):
-                changed = []
-        if not isinstance(changed, list):
-            changed = []
-        if any(not isinstance(item, str) for item in changed):
-            raise invalid("changed_files", "must contain strings")
-        fingerprints = raw.get("findings_fingerprints")
+
+        def strings(field: str) -> tuple[str, ...]:
+            value = raw.get(field, [])
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                raise invalid(field, "must be a list of strings")
+            return tuple(value)
+
         return cls(
-            session_id=session, archive_path=archive_path,
-            source_path=path("source_path"), remote_url=text("remote_url"),
-            repo_slug=slug("repo_slug"), branch=text("branch"),
-            base_branch=text("base_branch"), head_sha=text("head_sha"),
-            base_sha=text("base_sha"), pr_repo=slug("pr_repo"),
+            session_id=session,
+            recommended_patch=text("recommended_patch") or "",
+            source_path=path("source_path"),
+            remote_url=text("remote_url"),
+            repo_slug=slug("repo_slug"),
+            branch=text("branch"),
+            base_branch=text("base_branch"),
+            head_sha=text("head_sha"),
+            base_sha=text("base_sha"),
+            pr_repo=slug("pr_repo"),
             pr_number=number,
-            changed_files=tuple(changed),
-            findings_fingerprints=(
-                tuple(str(item) for item in fingerprints) if isinstance(fingerprints, list) else None
-            ),
+            changed_files=strings("changed_files"),
+            findings_fingerprints=strings("findings_fingerprints"),
         )
 
     @property
@@ -127,19 +103,16 @@ class HarvestRow:
         return bool(self.pr_repo) and self.pr_number is not None
 
     def as_signal_row(self) -> dict[str, Any]:
-        """Project a fresh legacy row for the unchanged external signal helpers."""
-        row: dict[str, Any] = {
-            "session_id": self.session_id, "archive_path": str(self.archive_path),
-            "source_path": str(self.source_path) if self.source_path is not None else None,
-            "remote_url": self.remote_url, "repo_slug": self.repo_slug,
-            "branch": self.branch, "base_branch": self.base_branch,
-            "head_sha": self.head_sha, "base_sha": self.base_sha,
-            "pr_repo": self.pr_repo, "pr_number": self.pr_number,
-            "changed_files": list(self.changed_files),
+        """Project captured fields for the pure signal helpers."""
+        return {
+            "recommended_patch": self.recommended_patch,
+            "repo_slug": self.repo_slug,
+            "branch": self.branch,
+            "base_branch": self.base_branch,
+            "head_sha": self.head_sha,
+            "pr_repo": self.pr_repo,
+            "pr_number": self.pr_number,
         }
-        if self.findings_fingerprints is not None:
-            row["findings_fingerprints"] = list(self.findings_fingerprints)
-        return row
 
 
 @dataclass(frozen=True)
@@ -151,25 +124,38 @@ class HarvestEvidence:
     reviewer_logins: tuple[str, ...] = ()
     pooled_prior: float | None = None
     prior_n: int = 0
-    repo_resolution: Path | None = None
-    base_sha_status: BaseShaStatus = "unavailable"
-    valid_at_override: str | None = None
 
     def __post_init__(self) -> None:
         verdicts = self.scoring_inputs.verifier_verdicts
-        object.__setattr__(self, "scoring_inputs", replace(
-            self.scoring_inputs,
-            verifier_verdicts=None if verdicts is None else tuple(freeze_json(item) for item in verdicts),
-        ))
-        resolutions = self.rubric.per_finding_resolutions
-        object.__setattr__(self, "rubric", replace(
-            self.rubric,
-            fix_applied=replace(self.rubric.fix_applied, window_commits=tuple(self.rubric.fix_applied.window_commits)),
-            per_finding_resolutions=(
-                None if resolutions is None else tuple(
-                    replace(resolution, evidence=tuple(freeze_json(entry) for entry in resolution.evidence))
-                    for resolution in resolutions
-                )
+        object.__setattr__(
+            self,
+            "scoring_inputs",
+            replace(
+                self.scoring_inputs,
+                verifier_verdicts=None if verdicts is None else tuple(freeze_json(item) for item in verdicts),
             ),
-        ))
+        )
+        resolutions = self.rubric.per_finding_resolutions
+        object.__setattr__(
+            self,
+            "rubric",
+            replace(
+                self.rubric,
+                fix_applied=replace(
+                    self.rubric.fix_applied, window_commits=tuple(self.rubric.fix_applied.window_commits)
+                ),
+                per_finding_resolutions=(
+                    None
+                    if resolutions is None
+                    else tuple(
+                        replace(
+                            resolution,
+                            evidence=tuple(freeze_json(entry) for entry in resolution.evidence),
+                            reply_captures=tuple(freeze_json(capture) for capture in resolution.reply_captures),
+                        )
+                        for resolution in resolutions
+                    )
+                ),
+            ),
+        )
         object.__setattr__(self, "reviewer_logins", tuple(self.reviewer_logins))

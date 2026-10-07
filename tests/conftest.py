@@ -3,6 +3,7 @@
 import importlib.util
 import os
 import sys
+import tempfile
 import tomllib
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -78,14 +79,6 @@ def _feature_repo(tmp_path: Path, name: str, initial: dict[str, str], changed: d
 def git_repo(tmp_path: Path) -> Path:
     """Initialize a fresh git repo at tmp_path with one initial commit on `main`."""
     return _make_repo_with_main(tmp_path)
-
-
-@pytest.fixture
-def bundle_dir(tmp_path: Path) -> Path:
-    """A minimal curated corpus-projection bundle written under tmp_path."""
-    from tests.test_corpus_projection import _write_bundle
-
-    return _write_bundle(tmp_path)
 
 
 @pytest.fixture
@@ -409,6 +402,20 @@ def _isolate_github_app_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_github_cli_env(
+    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hide host gh credentials; explicit test auth and live opt-ins remain available."""
+    if request.node.get_closest_marker("live_gh") is not None:
+        return
+    for name in (
+        "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST", "GH_REPO",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GH_CONFIG_DIR", str(tmp_path / "gh-config"))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_trace_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Strip tracing endpoints and credentials for every test."""
     for key in os.environ:
@@ -417,13 +424,11 @@ def _isolate_trace_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _hermetic_skill_availability(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Use an empty plugin registry so stack routing is independent of the host.
+def _hermetic_skill_availability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give native Claude clients a fresh private configuration with an empty registry.
 
-    Tests may override CLAUDE_CONFIG_DIR after this autouse fixture. The data
-    seam covers every flow, including functions imported by value; a missing
-    registry intentionally has different, optimistic routing semantics."""
-    cfg = tmp_path_factory.mktemp("claude-config")
+    Tests may override CLAUDE_CONFIG_DIR after this autouse fixture."""
+    cfg = Path(tempfile.mkdtemp(prefix=f"{tmp_path.name}-claude-config-", dir=tmp_path.parent))
     (cfg / "plugins").mkdir()
     (cfg / "plugins" / "installed_plugins.json").write_text('{"plugins": {}}')
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))

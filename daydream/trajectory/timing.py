@@ -43,7 +43,6 @@ _TIMING_DIAGNOSTIC_KEYS = (
     "orphaned_interval",
     "malformed_invocation",
     "duplicate_invocation",
-    "legacy_fork_proxy_used",
 )
 
 
@@ -156,24 +155,12 @@ def compute_timing_summary(write_snapshot: RunWriteSnapshot) -> TimingSummary | 
     wall: tuple[datetime, datetime] | None = None
     if wall_start is not None and wall_end is not None and wall_start <= wall_end:
         wall = (wall_start, wall_end)
-    elif "run_started_at" not in root_extra:
-        legacy_times: list[datetime] = []
-        for payload in payloads:
-            for step in payload.get("steps", []):
-                if isinstance(step, dict):
-                    timestamp = _timing_timestamp(step.get("timestamp"))
-                    if timestamp is not None:
-                        legacy_times.append(timestamp)
-        if len(legacy_times) >= 2:
-            wall = (min(legacy_times), max(legacy_times))
     if wall is None:
         return None
 
     identified: dict[tuple[str, str, str], dict[str, list[datetime]]] = {}
-    legacy_intervals: list[tuple[str, datetime, datetime]] = []
     for payload in payloads:
         extra = _timing_mapping(payload.get("extra"))
-        pending_legacy: dict[str, list[datetime]] = {}
         events = extra.get("phase_events")
         if not isinstance(events, list):
             continue
@@ -187,31 +174,18 @@ def compute_timing_summary(write_snapshot: RunWriteSnapshot) -> TimingSummary | 
                 continue
             session_id = event.get("session_id")
             scope_id = event.get("scope_id")
-            if session_id is not None or scope_id is not None:
-                if not isinstance(session_id, str) or not session_id or not isinstance(scope_id, str) or not scope_id:
-                    diagnostics["malformed_interval"] += 1
-                    continue
-                if kind == "phase_end" and event.get("status") not in {status.value for status in LifecycleStatus}:
-                    diagnostics["malformed_interval"] += 1
-                    continue
-                key = (session_id, scope_id, phase)
-                bucket = identified.setdefault(key, {"phase_start": [], "phase_end": []})
-                if timestamp is None:
-                    diagnostics["malformed_interval"] += 1
-                else:
-                    bucket[kind].append(timestamp)
-                continue
-            if timestamp is None:
+            if not isinstance(session_id, str) or not session_id or not isinstance(scope_id, str) or not scope_id:
                 diagnostics["malformed_interval"] += 1
                 continue
-            stack = pending_legacy.setdefault(phase, [])
-            if kind == "phase_start":
-                stack.append(timestamp)
-            elif stack:
-                legacy_intervals.append((phase, stack.pop(), timestamp))
+            if kind == "phase_end" and event.get("status") not in {status.value for status in LifecycleStatus}:
+                diagnostics["malformed_interval"] += 1
+                continue
+            key = (session_id, scope_id, phase)
+            bucket = identified.setdefault(key, {"phase_start": [], "phase_end": []})
+            if timestamp is None:
+                diagnostics["malformed_interval"] += 1
             else:
-                diagnostics["orphaned_interval"] += 1
-        diagnostics["orphaned_interval"] += sum(len(stack) for stack in pending_legacy.values())
+                bucket[kind].append(timestamp)
 
     phase_intervals: dict[str, list[tuple[datetime, datetime]]] = {}
     for (_session_id, _scope_id, phase), pair in identified.items():
@@ -228,11 +202,6 @@ def compute_timing_summary(write_snapshot: RunWriteSnapshot) -> TimingSummary | 
             diagnostics["malformed_interval"] += 1
             continue
         phase_intervals.setdefault(phase, []).append((start, end))
-    for phase, start, end in legacy_intervals:
-        if end < start:
-            diagnostics["malformed_interval"] += 1
-        else:
-            phase_intervals.setdefault(phase, []).append((start, end))
 
     clipped_by_phase = {
         phase: _union_intervals(_clip_intervals(intervals, wall)) for phase, intervals in phase_intervals.items()
@@ -252,7 +221,6 @@ def compute_timing_summary(write_snapshot: RunWriteSnapshot) -> TimingSummary | 
     invocation_rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
     malformed_invocations = 0
     for payload in payloads:
-        trajectory_id = payload.get("trajectory_id")
         extra = _timing_mapping(payload.get("extra"))
         summaries = extra.get("subtrajectories")
         direct_invocations = (
@@ -281,33 +249,6 @@ def compute_timing_summary(write_snapshot: RunWriteSnapshot) -> TimingSummary | 
                 malformed_invocations += 1
                 continue
             invocation_rows.setdefault((row_trajectory_id, invocation_id), []).append(invocation)
-        if payload is root or direct_invocations or "run_started_at" in extra:
-            continue
-        step_times = [
-            parsed
-            for step in payload.get("steps", [])
-            if isinstance(step, dict)
-            if (parsed := _timing_timestamp(step.get("timestamp"))) is not None
-        ]
-        if len(step_times) < 2:
-            continue
-        legacy_start, legacy_end = min(step_times), max(step_times)
-        phase = next(
-            (
-                str((step.get("extra") or {}).get("daydream_phase"))
-                for step in payload.get("steps", [])
-                if isinstance(step, dict) and (step.get("extra") or {}).get("daydream_phase")
-            ),
-            "unknown",
-        )
-        invocation_rows[(str(trajectory_id), "legacy_fork_proxy")] = [
-            {
-                "phase": phase,
-                "started_at": legacy_start.isoformat(),
-                "ended_at": legacy_end.isoformat(),
-            }
-        ]
-        diagnostics["legacy_fork_proxy_used"] += 1
 
     diagnostics["malformed_invocation"] += malformed_invocations
     attributed_invocations = 0

@@ -356,28 +356,25 @@ later findings export failed. Use CLI exit status and validated findings as the
 publication gates, not that manifest field alone. A process/platform kill can
 still prevent finalization or later upload steps.
 
-Dump publication now handles blocking secret-scan findings independently of the
-review result. `--dump-artifacts` copies clean or advisory-only bundles unchanged.
-For blocking findings, it sanitizes a separate private copy, scans that copy,
-and exports it only if no blocking findings remain. The original archive and
-review evidence retain their original bytes. Accepted dumps keep the existing
-bundle layout and manifest session ID, including `bundle/manifest.json` for the
-Hugging Face upload job; no additional CLI flag is required.
+`--dump-artifacts` always copies exact assembled bundle bytes, including
+credential-shaped strings and binary files, without an archive scan or
+sanitization. Dumps preserve bundle layout and manifest session ID, merge into
+the destination without removing unrelated files, and work with `--no-archive`.
+Byte preservation remains subject to existing upstream trajectory redaction.
+Copy/I/O and archive-integrity failures keep their fatal finalization behavior
+and rollback.
 
-A remaining blocking finding, scanner error, or sanitization failure withholds
-the dump with a warning. It does not discard completed findings, trajectories,
-or the local archive, and it does not change the review's exit status. Archive
-integrity and output publication errors remain fatal. Accepted dumps merge into
-the destination while preserving unrelated files; refusal leaves the destination
-unchanged. The scan covers generated bundle files, not pre-existing unrelated
-destination content.
+Review diagnostics before sharing; use standalone `sanitize_bundle()` to prepare separate derivatives when needed.
 
-The Shelfspace upload job currently assumes `bundle/manifest.json` exists.
-Sanitized bundles satisfy that contract after a Daydream pin update, but an
-irreducible refusal still leaves that separate job without a bundle to upload.
-Handling a missing bundle is a separate workflow change. This Daydream change
-does not update Shelfspace's workflow or pin, or change the direct Hugging Face
-upload policy.
+The archive scanner covers limited credential patterns and is no guarantee of
+safe sharing. Direct run-bundle uploads always scan and refuse blocking
+credentials, scanner exceptions, any `scan_error` finding regardless of severity,
+and incomplete results. Advisory-only findings are allowed with value-free
+diagnostics. Upload failure preserves local evidence. Hydration and adjudication
+publication retain their independent checks.
+
+This Daydream change does not update Shelfspace's external workflow or pin, or
+change the direct Hugging Face destination configuration.
 
 Shelfspace was not modified in this session; its PR #2826 must be rolled out
 separately after these Daydream changes become available. Pin analysis and

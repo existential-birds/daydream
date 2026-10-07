@@ -4,9 +4,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 import pytest
@@ -25,7 +25,6 @@ from daydream.artifacts.filesystem import manifest_tree
 from daydream.atif import Step, validate as atif_validate
 from daydream.backends import AgentEvent, ResultEvent, ToolResultEvent, ToolStartEvent
 from daydream.commands.review import _parse_args
-from daydream.config_file import load_file_config
 from daydream.run_config import RunConfig
 from daydream.run_snapshot import (
     ArchiveRunSnapshot,
@@ -38,11 +37,11 @@ from daydream.trajectory import (
     DaydreamRunFlow,
     LifecycleReasonCode,
     RunWriteSnapshot,
+    TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
     now_iso,
 )
 from tests.harness.backend import ScriptedBackend
-from tests.harness.config import TARGET_HUB_KEY_CONFIG
 from tests.harness.review_profile import independent_exploration_profile
 from tests.harness.stub_backend import StubBackend
 from tests.harness.trajectory import make_recorder
@@ -134,7 +133,7 @@ async def _hold_archive_fork(parent: TrajectoryRecorder, name: str, entered: any
             await release.wait()
 
 def _finalize_strict_archive(recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot, config: Any, target: Path, *,
-    destinations: tuple[Any, ...] = (), upload: bool = True, dump_path: Path | None = None,
+    destinations: tuple[Any, ...] = (), dump_path: Path | None = None,
 ) -> None:
     """Run strict finalization; the re-attested target tree must exclude the archive directory."""
     session_id = recorder.session_id
@@ -160,11 +159,11 @@ def _finalize_strict_archive(recorder: TrajectoryRecorder, snapshot: RunWriteSna
             workspace_key="workspace", session_id=session_id, public_source=target,
             # Live-root-relative routes retain their paths inside the frozen copy.
             live_root=target,
-        ), config=config, work=None, upload=upload, dump_path=dump_path,
+        ), config=config, work=None, dump_path=dump_path,
     )
 
 def _strict_archive_callback(
-    config: Any, target: Path, *, destinations: tuple[Any, ...] = (), unsuccessful: bool = False,
+    config: Any, target: Path, *, destinations: tuple[Any, ...] = (),
     dump_path: Path | None = None,
 ) -> Any:
     """Finalize only the first recorder snapshot, emulating the runner's one-time boundary."""
@@ -175,37 +174,10 @@ def _strict_archive_callback(
             return
         finalized.append(snapshot.status)
         _finalize_strict_archive(
-            recorder, snapshot, config, target, destinations=destinations, upload=not unsuccessful, dump_path=dump_path,
+            recorder, snapshot, config, target, destinations=destinations, dump_path=dump_path,
         )
 
     return _finalize
-
-def _upload_fixture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, unsuccessful: bool = False, dump_path: Path | None = None,
-    setup: Callable[[Path], dict[str, Any]] | None = None, **config_kwargs: Any,
-) -> tuple[TrajectoryRecorder, list[tuple[Any, ...]], Path]:
-    """Capture strict-archive uploads as ``(run_dir, repo_id, session_id)`` tuples.
-
-    ``setup`` may write checkout files before returning extra RunConfig fields.
-    """
-    uploaded: list[tuple[Any, ...]] = []
-
-    def _fake_upload(run_dir: Path, repo_id: str, session_id: str) -> bool:
-        uploaded.append((str(run_dir), repo_id, session_id))
-        return True
-
-    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", _fake_upload)
-
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    (target_dir / ".review-output.md").write_text("# Review\nLooks good.\n", encoding="utf-8")
-    config_kwargs.update(setup(target_dir) if setup else {})
-    config = RunConfig(run_eval=False, **config_kwargs)
-    recorder = make_recorder(target_dir,
-        on_write=_strict_archive_callback(config, target_dir, unsuccessful=unsuccessful, dump_path=dump_path),
-    )
-    _add_user_step(recorder)
-    return recorder, uploaded, target_dir
 
 def _findings_route(live_root: Path) -> Any:
     """The registered ``--findings-out`` route the strict bundle relocates."""
@@ -301,6 +273,57 @@ async def test_full_archive_round_trip_fix_test_backend_columns(
     backend: str | None = None if run_flow is DaydreamRunFlow.IMPROVE else "claude"
     _assert_round_trip_bundle(archive_dir, recorder, fix_backend=backend, test_backend=backend,)
 
+@pytest.mark.parametrize(("status", "lifecycle", "expected_wall"), [
+    ("complete", True, 10.0), ("partial", True, 4.0), ("complete", False, None),
+])
+def test_finalization_evaluates_selected_snapshot_after_files_change(tmp_path: Path, archive_dir: Path,
+    monkeypatch: pytest.MonkeyPatch, status: Literal["complete", "partial"], lifecycle: bool,
+    expected_wall: float | None,
+) -> None:
+    from daydream.eval.analyzer import analyze_session
+
+    target = tmp_path / "frozen"
+    target.mkdir()
+    session = "selected-snapshot"
+    path = target / ".daydream" / "runs" / session / "trajectory.json"
+    path.parent.mkdir(parents=True)
+    extra = {"run_started_at": "2026-01-01T00:00:00Z", "run_ended_at": "2026-01-01T00:00:10Z",
+        "snapshot_at": "2026-01-01T00:00:04Z", "partial": False,
+    } if lifecycle else {}
+    root: dict[str, Any] = {"session_id": session, "trajectory_id": session,
+        "steps": [{"timestamp": "2026-01-01T00:00:02Z"}, {"timestamp": "2026-01-01T00:00:03Z"}],
+        "extra": extra, "final_metrics": {"total_cost_usd": 0.5},
+    }
+    cutoff = "2026-01-01T00:00:04Z" if status == "partial" else "2026-01-01T00:00:10Z"
+    snapshot = RunWriteSnapshot(status=status, cutoff_at=cutoff, root_trajectory_id=session,
+        documents=(TrajectoryDocumentSnapshot(session, path, json.dumps(root).encode()),),
+    )
+    snapshot.validate(session)
+    path.write_bytes(snapshot.documents[0].json_bytes)
+    root["final_metrics"]["total_cost_usd"] = 99.0
+    root["extra"]["run_ended_at"] = "2026-01-01T00:01:00Z"
+    path.write_text(json.dumps(root))
+    evaluated: list[RunWriteSnapshot] = []
+    def evaluate(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        evaluated.append(kwargs["write_snapshot"])
+        return analyze_session(*args, **kwargs)
+    monkeypatch.setattr("daydream.eval.analyzer.analyze_session", evaluate)
+    recorder = make_recorder(target, session_id=session, path=path)
+
+    _finalize_strict_archive(recorder, snapshot, RunConfig(run_eval=True), target)
+
+    assert evaluated == [snapshot]
+    assert evaluated[0] is snapshot
+    archived = archive_dir / "runs" / session
+    evaluation = json.loads((archived / "evaluation.json").read_bytes())
+    manifest = json.loads((archived / "manifest.json").read_bytes())
+    assert (archived / "trajectory.json").read_bytes() == snapshot.documents[0].json_bytes
+    assert evaluation["cost"]["total_cost_usd"] == 0.5
+    assert evaluation["timing"]["total_wall_clock_seconds"] == expected_wall
+    assert evaluation["timing"]["by_agent"] == [{"agent": "main", "duration_seconds": 1.0}]
+    assert manifest["metrics"]["wall_clock_seconds"] == expected_wall
+
+
 async def test_archive_round_trip_projects_eval_location_metrics(tmp_path: Path, archive_dir: Path,) -> None:
     recorder = _make_round_trip_fixture(tmp_path, DaydreamRunFlow.NORMAL, run_eval=True)
 
@@ -358,65 +381,24 @@ def test_cli_defaults_archive_and_eval(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.archive is True
     assert config.run_eval is True
 
-async def test_archive_callback_uploads_to_hub_when_configured(
+async def test_archive_callback_keeps_configured_hub_work_local(
     tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    recorder, uploaded, _ = _upload_fixture(
-        tmp_path, monkeypatch, trajectory_hub_repo="acme/dd-trajectories", archive=True, dump_artifacts=None,
-    )
+    from tests.harness.dataset_hub import FakeDatasetHub
+
+    hub = FakeDatasetHub()
+    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
+    target = tmp_path / "project"
+    target.mkdir()
+    (target / ".review-output.md").write_text("# Review\nLooks good.\n", encoding="utf-8")
+    config = RunConfig(run_eval=False, trajectory_hub_repo="acme/dd-trajectories", archive=True)
+    recorder = make_recorder(target, on_write=_strict_archive_callback(config, target))
+    _add_user_step(recorder)
     async with recorder:
         pass
 
-    assert len(uploaded) == 1
-    repo_id, session = uploaded[0][1], uploaded[0][2]
-    assert repo_id == "acme/dd-trajectories"
-    assert session == recorder.session_id
-    # Upload reads the private stage before installation under the session ID.
-    assert Path(uploaded[0][0]) != archive_dir / "runs" / recorder.session_id
+    assert hub.commits == []
     assert (archive_dir / "runs" / recorder.session_id / "manifest.json").is_file()
-
-@pytest.mark.parametrize("filename,body,set_hf_token", [
-    (None, None, False), ("pyproject.toml", TARGET_HUB_KEY_CONFIG, True),
-    (".daydream.toml", 'trajectory_hub_repo = "evil/repo"\n', True),
-])
-async def test_archive_callback_does_not_upload_when_unconfigured(
-    tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch, filename: str | None, body: str | None,
-    set_hf_token: bool,
-) -> None:
-    """Target-checkout config cannot select an upload destination, even with HF_TOKEN present."""
-
-    if set_hf_token:
-        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-    monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
-
-    def _setup(target_dir: Path) -> dict[str, Any]:
-        if filename is not None and body is not None:
-            (target_dir / filename).write_text(body, encoding="utf-8")
-        return {"file_config": load_file_config(target_dir) if filename is not None else None}
-
-    recorder, uploaded, _ = _upload_fixture(tmp_path, monkeypatch, archive=True, setup=_setup)
-    async with recorder:
-        pass
-
-    assert uploaded == []
-
-@pytest.mark.parametrize("successful", [False, True])
-async def test_archive_upload_tracks_run_success(
-    tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch, successful: bool,
-) -> None:
-    """Failed/interrupted runs retain local archives without network upload blocking shutdown."""
-    recorder, uploaded, _ = _upload_fixture(
-        tmp_path, monkeypatch, unsuccessful=not successful, trajectory_hub_repo="acme/dd-trajectories", archive=True,
-        dump_artifacts=None,
-    )
-    async with recorder:
-        pass
-
-    assert (archive_dir / "runs" / recorder.session_id / "manifest.json").is_file()
-    if successful:
-        assert [row[1:] for row in uploaded] == [("acme/dd-trajectories", recorder.session_id)]
-    else:
-        assert uploaded == []
 
 async def test_signal_flush_archive_uses_one_immutable_cutoff_for_all_documents(
     tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
@@ -432,7 +414,7 @@ async def test_signal_flush_archive_uses_one_immutable_cutoff_for_all_documents(
     def callback(recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot) -> None:
         snapshots.append(snapshot)
         monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(roots[snapshot.status]))
-        _finalize_strict_archive(recorder, snapshot, config, target, upload=snapshot.status == "complete")
+        _finalize_strict_archive(recorder, snapshot, config, target)
 
     recorder = make_recorder(target, on_write=callback)
     entered = {name: anyio.Event() for name in ("a", "b")}
@@ -479,14 +461,21 @@ async def test_archive_callback_no_archive_dump_artifacts_skips_upload(
 ) -> None:
     dump_dir = tmp_path / "dump"
     dump_dir.mkdir()
-    recorder, uploaded, _ = _upload_fixture(
-        tmp_path, monkeypatch, dump_path=dump_dir, trajectory_hub_repo="acme/dd-trajectories", archive=False,
-        dump_artifacts=str(dump_dir),
-    )
+    from tests.harness.dataset_hub import FakeDatasetHub
+
+    hub = FakeDatasetHub()
+    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
+    target = tmp_path / "project"
+    target.mkdir()
+    (target / ".review-output.md").write_text("# Review\nLooks good.\n", encoding="utf-8")
+    config = RunConfig(run_eval=False, trajectory_hub_repo="acme/dd-trajectories", archive=False,
+                       dump_artifacts=str(dump_dir))
+    recorder = make_recorder(target, on_write=_strict_archive_callback(config, target, dump_path=dump_dir))
+    _add_user_step(recorder)
     async with recorder:
         pass
 
-    assert uploaded == []
+    assert hub.commits == []
     assert (dump_dir / "manifest.json").is_file()
     assert (dump_dir / "review-output.md").is_file()
 

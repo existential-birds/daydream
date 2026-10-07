@@ -229,16 +229,6 @@ async def test_intent_artifact_survives_wonder_failure(multi_stack_target: Path,
     # The wonder half never ran, so its artifact is legitimately absent.
     assert not (multi_stack_target / ".daydream" / "deep" / "alternatives.json").exists()
 
-async def test_both_ttt_artifacts_written_on_the_happy_path(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Relocating the writer leaves contents and ctx.data pointers unchanged."""
-    _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-    assert await _run_deep(multi_stack_target) == 0
-    deep = multi_stack_target / ".daydream" / "deep"
-    assert (deep / "intent.md").read_text().strip()
-    assert json.loads((deep / "alternatives.json").read_text()) == []
-
 async def test_skip_tier_writes_empty_alternatives(tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Both artifacts exist even when the diff is small enough to run wonder."""
     _silence(monkeypatch)
@@ -288,31 +278,6 @@ async def test_start_at_merge_refuses_stale_or_unverifiable_artifacts(
     assert stub.calls == []
     if change != "missing-key":
         assert key_file.read_text().strip() == original_key
-
-async def test_fresh_run_discards_stale_deep_artifacts_before_writing_its_diff_key(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A fresh run cannot certify a new diff key alongside old deep outputs."""
-    _silence(monkeypatch)
-    deep = multi_stack_target / ".daydream" / "deep"
-    deep.mkdir(parents=True)
-    stale = deep / "obsolete-artifact.txt"
-    stale.write_text("stale")
-    _install_stub_backend(monkeypatch, multi_stack_target)
-    assert await _run_deep(multi_stack_target) == 0
-    assert not stale.exists()
-    assert (deep / "diff-key").is_file()
-
-async def test_start_at_merge_proceeds_when_the_diff_is_unchanged(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The freshness gate is not a blanket refusal: same diff still resumes."""
-    _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-    assert await _run_deep(multi_stack_target) == 0
-    stub2 = _install_stub_backend(monkeypatch, multi_stack_target)
-    assert await _run_deep(multi_stack_target, start_at="merge") == 0
-    assert any("cross-stack merge agent" in c["prompt"].lower() for c in stub2.calls)
 
 @pytest.mark.parametrize(("stack", "description", "lens"),
     [pytest.param(

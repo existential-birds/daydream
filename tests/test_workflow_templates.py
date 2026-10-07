@@ -332,6 +332,8 @@ _MATCH_CASES = [pytest.param("@bot review", "bot", "review", id="review"),
     pytest.param("@bot review please", "bot", "review", id="review-trailing-text"),
     pytest.param("please @bot review", "bot", "review", id="review-leading-text"),
     pytest.param("some context\n@bot add flowchart\nthanks", "bot", "flowchart", id="flowchart-mid-body"),
+    pytest.param("some context\n@bot add flowchart\n" + "🌐" * 30_000, "bot", "flowchart",
+                 id="flowchart-large-unicode-body"),
     pytest.param("@bot add flowchart\r\n", "bot", "flowchart", id="flowchart-crlf"),
     # grep is line-oriented, so a mention split across lines falls back to the
     # `add sequence` alias rather than matching nothing.
@@ -357,9 +359,17 @@ _MATCH_CASES = [pytest.param("@bot review", "bot", "review", id="review"),
 
 def _run_match_step(path: Path, job: str, body: str, handle: str, out: Path) -> dict[str, str]:
     """Execute *path*'s own `id: match` step and return the outputs it wrote."""
-    step = next(s for s in job_steps(load_workflow(path), job) if s.get("id") == "match")
+    wf = load_workflow(path)
+    step = next(s for s in job_steps(wf, job) if s.get("id") == "match")
+    workflow_shell = wf.get("defaults", {}).get("run", {}).get("shell")
+    job_shell = wf["jobs"][job].get("defaults", {}).get("run", {}).get("shell", workflow_shell)
+    assert step.get("shell", job_shell) is None, "match-step harness requires the workflow's unspecified shell"
+    # GitHub's unspecified shell is `bash -e {0}`. Explicit `shell: bash` adds
+    # pipefail, which can turn grep's successful early exit into a false match.
+    script = out.with_suffix(".sh")
+    script.write_text(step["run"], encoding="utf-8")
     out.write_text("", encoding="utf-8")
-    subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
+    subprocess.run(["bash", "-e", str(script)],
         env={"PATH": os.environ["PATH"], "BODY": body, "BOT_HANDLE": handle, "GITHUB_OUTPUT": str(out)}, check=True,
         capture_output=True, text=True,
     )

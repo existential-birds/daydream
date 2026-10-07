@@ -3,6 +3,8 @@ import asyncio
 import hashlib as _h
 import inspect
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -13,6 +15,26 @@ from tests.harness.benchmark_judge import MatchClient, judge_env
 
 _VERDICT_JSON = '{"match": true, "confidence": 0.9, "reasoning": "same"}'
 _OK_ENVELOPE = {"is_error": False, "subtype": "success", "type": "result", "result": _VERDICT_JSON}
+
+
+@contextmanager
+def _http_backoff(sr: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[list[float]]:
+    """Record fake HTTP backoff while yielding the real loop without wall-clock delay."""
+    real_asyncio = sr.asyncio
+    real_sleep = real_asyncio.sleep
+    delays: list[float] = []
+
+    class AsyncioProxy:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(real_asyncio, name)
+
+        async def sleep(self, delay: float) -> None:
+            delays.append(delay)
+            await real_sleep(0)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(sr, "asyncio", AsyncioProxy())
+        yield delays
 
 
 def _http_response(status: int, body: Any = None, *, text: str = "ok", **attrs: Any) -> Any:
@@ -145,65 +167,78 @@ async def test_openai_client_routes_base_url_and_posts_chat_completions(sr_modul
     }
 
 @pytest.mark.asyncio
-async def test_retry_policy_retries_transport_and_5xx_then_fails_after_exhaustion(sr_module: Any) -> None:
+async def test_retry_policy_retries_transport_and_5xx_then_fails_after_exhaustion(
+    sr_module: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     sr = sr_module
-    attempts = []
+    with _http_backoff(sr, monkeypatch) as delays:
+        attempts: list[int] = []
 
-    class FlakyClient:
-        async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
-            attempts.append(1)
-            if len(attempts) < 3:
-                raise TimeoutError("timed out")
-            return _http_response(200,
-                {"content": [{"type": "text", "text": '{"match": true, "confidence": 0.8, "reasoning": "x"}'}]},
-            )
+        class FlakyClient:
+            async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
+                assert delays == [1, 2][:len(attempts)]
+                attempts.append(1)
+                if len(attempts) < 3:
+                    raise TimeoutError("timed out")
+                return _http_response(200,
+                    {"content": [{"type": "text", "text": '{"match": true, "confidence": 0.8, "reasoning": "x"}'}]},
+                )
 
-    raw = await sr._complete_json_with_http(
-        FlakyClient(), url="u", payload={}, headers={}, content=lambda b: b["content"][0]["text"],
-        allowlist={"u"}
-    )
-    assert raw == {"match": True, "confidence": 0.8, "reasoning": "x"}
-    assert len(attempts) == 3
-
-    attempts.clear()
-
-    class Always5xx:
-        async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
-            attempts.append(1)
-            return _http_response(503, text="down")
-
-    with pytest.raises(sr.VerifierError):
-        await sr._complete_json_with_http(
-            Always5xx(), url="u", payload={}, headers={}, content=lambda b: b, allowlist={"u"}
+        raw = await sr._complete_json_with_http(
+            FlakyClient(), url="u", payload={}, headers={}, content=lambda b: b["content"][0]["text"],
+            allowlist={"u"}
         )
-    assert len(attempts) == 3  # 3 attempts then fail
+        assert raw == {"match": True, "confidence": 0.8, "reasoning": "x"}
+        assert len(attempts) == 3
+        assert delays == [1, 2]
+
+        attempts.clear()
+        delays.clear()
+
+        class Always5xx:
+            async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
+                assert delays == [1, 2][:len(attempts)]
+                attempts.append(1)
+                return _http_response(503, text="down")
+
+        with pytest.raises(sr.VerifierError):
+            await sr._complete_json_with_http(
+                Always5xx(), url="u", payload={}, headers={}, content=lambda b: b, allowlist={"u"}
+            )
+        assert len(attempts) == 3  # 3 attempts then fail
+        assert delays == [1, 2]
 
 @pytest.mark.asyncio
-async def test_retry_policy_retries_openrouter_error_envelope(sr_module: Any) -> None:
+async def test_retry_policy_retries_openrouter_error_envelope(
+    sr_module: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     sr = sr_module
-    attempts = []
+    with _http_backoff(sr, monkeypatch) as delays:
+        attempts: list[int] = []
 
-    class FlakyOpenRouter:
-        async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
-            attempts.append(1)
-            if len(attempts) < 3:
+        class FlakyOpenRouter:
+            async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
+                assert delays == [1, 2][:len(attempts)]
+                attempts.append(1)
+                if len(attempts) < 3:
+                    return _http_response(200,
+                        {"error": {"code": 502, "message": "Upstream provider temporarily overloaded"}},
+                        text="upstream error",
+                    )
                 return _http_response(200,
-                    {"error": {"code": 502, "message": "Upstream provider temporarily overloaded"}},
-                    text="upstream error",
+                    {"choices": [{"message": {"content": '{"match": true, "confidence": 0.8, "reasoning": "x"}'}}]},
                 )
-            return _http_response(200,
-                {"choices": [{"message": {"content": '{"match": true, "confidence": 0.8, "reasoning": "x"}'}}]},
-            )
 
-    raw = await sr._complete_json_with_http(FlakyOpenRouter(),
-        url="https://openrouter.ai/api/v1/chat/completions",
-        payload={},
-        headers={},
-        content=sr._openai_content,
-        allowlist={"openrouter.ai"},
-    )
-    assert raw["match"] is True
-    assert len(attempts) == 3
+        raw = await sr._complete_json_with_http(FlakyOpenRouter(),
+            url="https://openrouter.ai/api/v1/chat/completions",
+            payload={},
+            headers={},
+            content=sr._openai_content,
+            allowlist={"openrouter.ai"},
+        )
+        assert raw["match"] is True
+        assert len(attempts) == 3
+        assert delays == [1, 2]
 
 @pytest.mark.asyncio
 async def test_terminal_4xx_is_not_retried_and_redirect_to_other_host_is_rejected(sr_module: Any) -> None:
@@ -665,37 +700,46 @@ def _proc_runner(build: Any) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_both_providers_produce_identical_verdicts_and_errors(sr_module: Any) -> None:
+async def test_both_providers_produce_identical_verdicts_and_errors(
+    sr_module: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     sr = sr_module
-    body_anthropic = {"content": [{"type": "text", "text": '{"match": true, "confidence": 0.9, "reasoning": "same"}'}]}
-    body_openai = {"choices": [{"message": {"content": '{"match": true, "confidence": 0.9, "reasoning": "same"}'}}]}
+    with _http_backoff(sr, monkeypatch) as delays:
+        body_anthropic = {"content": [
+            {"type": "text", "text": '{"match": true, "confidence": 0.9, "reasoning": "same"}'},
+        ]}
+        body_openai = {"choices": [{"message": {"content": '{"match": true, "confidence": 0.9, "reasoning": "same"}'}}]}
 
-    def make(body: Any) -> Any:
-        class FakeClient:
-            async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
-                return type("R", (), {"status_code": 200, "text": "ok", "json": lambda self, _b=body: _b})()
+        def make(body: Any) -> Any:
+            class FakeClient:
+                async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
+                    return type("R", (), {"status_code": 200, "text": "ok", "json": lambda self, _b=body: _b})()
 
-        return FakeClient()
+            return FakeClient()
 
-    anthropic = sr.AnthropicJudgeClient(api_key="k", model="m", http=make(body_anthropic))
-    openai = sr.OpenAIJudgeClient(api_key="k", model="m", base_url="https://x/v1", http=make(body_openai))
+        anthropic = sr.AnthropicJudgeClient(api_key="k", model="m", http=make(body_anthropic))
+        openai = sr.OpenAIJudgeClient(api_key="k", model="m", base_url="https://x/v1", http=make(body_openai))
 
-    a = await anthropic.complete_json(user="u", system="s", max_tokens=64)
-    o = await openai.complete_json(user="u", system="s", max_tokens=64)
-    assert a == o == {"match": True, "confidence": 0.9, "reasoning": "same"}
+        a = await anthropic.complete_json(user="u", system="s", max_tokens=64)
+        o = await openai.complete_json(user="u", system="s", max_tokens=64)
+        assert a == o == {"match": True, "confidence": 0.9, "reasoning": "same"}
+        assert delays == []
 
-    for provider in (anthropic, openai):
-        calls = []
+        for provider in (anthropic, openai):
+            calls: list[int] = []
+            delays.clear()
 
-        class RetryClient:
-            async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
-                calls.append(1)
-                return type("R", (), {"status_code": 503, "text": "down"})()
+            class RetryClient:
+                async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
+                    assert delays == [1, 2][:len(calls)]
+                    calls.append(1)
+                    return type("R", (), {"status_code": 503, "text": "down"})()
 
-        provider.http = RetryClient()
-        with pytest.raises(sr.VerifierError):
-            await provider.complete_json(user="u", system="s", max_tokens=64)
-        assert len(calls) == 3
+            provider.http = RetryClient()
+            with pytest.raises(sr.VerifierError):
+                await provider.complete_json(user="u", system="s", max_tokens=64)
+            assert len(calls) == 3
+            assert delays == [1, 2]
 
     cli = sr.ClaudeCliJudgeClient(model="m", runner=_fake_cli_runner(json.dumps(_OK_ENVELOPE)))
     c = await cli.complete_json(user="u", system="s", max_tokens=64)

@@ -1,53 +1,76 @@
 """Adjudication queue build: deterministic ordering over projector adjudication entries."""
+
 from pathlib import Path
 
 import pytest
 
 from daydream.training.adjudication import queue as queue_module
-from daydream.training.adjudication.queue import _NON_DECISIVE_DISPOSITIONS as queue_set, build_queue
-from daydream.training.corpus_projection.identity import record_id
+from daydream.training.adjudication.queue import build_queue
 from daydream.training.corpus_projection.projector import project_findings
-from daydream.training.corpus_projection.tiers import _NON_DECISIVE_DISPOSITIONS as tiers_set
-from daydream.training.dispositions import NON_DECISIVE_DISPOSITIONS, is_decisive
+from daydream.training.record_identity import record_finding_id
 
 
 def _session(sid: str, fingerprint: str, disposition: str, digest: str) -> dict[str, object]:
-    return {"session_id": sid, "trajectory_id": f"{sid}-traj", "segment_id": f"{sid}-seg",
-        "resolutions": [{"fingerprint": fingerprint, "disposition": disposition,
-            "evidence": [{"reply_id": "r1", "body_sha256": "abc"}],
-            "evidence_digest": digest, "profile": "pr_review", "stack": "python",
-        }],
+    return {
+        "session_id": sid,
+        "trajectory_id": f"{sid}-traj",
+        "segment_id": f"{sid}-seg",
+        "resolutions": [
+            {
+                "fingerprint": fingerprint,
+                "item_uid": fingerprint,
+                "disposition": disposition,
+                "evidence": [{"reply_id": "r1", "body_sha256": "abc"}],
+                "evidence_digest": digest,
+                "evidence_digest_scheme": "canonical-json-v1",
+                "profile": "pr_review",
+                "stack": "python",
+            }
+        ],
     }
+
 
 def _sessions_with_accepted_and_unanswered() -> list[dict[str, object]]:  # existing-shape helper
     return [_session("s1", "fp-a", "accepted", "d-gold"), _session("s2", "fp-b", "unanswered", "d2")]
 
 
 def test_build_queue_include_decisive_returns_complete_set(tmp_path: Path) -> None:
-    sessions = _sessions_with_accepted_and_unanswered()
+    sessions = [*_sessions_with_accepted_and_unanswered(),
+                _session("s3", "fp-c", "rejected", "d-rejected"),
+                _session("s4", "fp-d", "ambiguous", "d-ambiguous")]
     open_only = build_queue(sessions)
-    assert [i["disposition"] for i in open_only] == ["unanswered"]
+    assert sorted(str(i["disposition"]) for i in open_only) == ["ambiguous", "unanswered"]
 
     complete = build_queue(sessions, include_decisive=True)
-    assert sorted(str(i["disposition"]) for i in complete) == ["accepted", "unanswered"]
+    assert sorted(str(i["disposition"]) for i in complete) == ["accepted", "ambiguous", "rejected", "unanswered"]
     assert {str(i["status"]) for i in complete} <= {"open", "reopened"}
+
 
 def test_queue_is_deterministic_and_covers_all_non_decisive_states() -> None:
     # NOTE: 'accepted' disposition with evidence would be gold — the queue must EXCLUDE it.
-    sessions = [_session("s2", "fp-b", "unanswered", "d2"), _session("s1", "fp-b", "ambiguous", "d1"),
-        _session("s1", "fp-a", "accepted", "d-gold"), _session("s0", "fp-m", "missing", "d3"),
+    sessions = [
+        _session("s2", "fp-b", "unanswered", "d2"),
+        _session("s1", "fp-b", "ambiguous", "d1"),
+        _session("s1", "fp-a", "accepted", "d-gold"),
+        _session("s0", "fp-m", "missing", "d3"),
     ]
     items_a = build_queue(sessions)
     items_b = build_queue(list(reversed(sessions)))
     assert [i["record_id"] for i in items_a] == [i["record_id"] for i in items_b]
-    assert items_a[0]["record_id"] == record_id("s1", "s1-traj", "s1-seg", "fp-b")  # sorted by record_id
+    assert [i["record_id"] for i in items_a] == sorted(str(i["record_id"]) for i in items_a)
     assert all(i["disposition"] in {"ambiguous", "unanswered", "missing"} for i in items_a)
-    assert all(i["record_id"] != record_id("s1", "s1-traj", "s1-seg", "fp-a") for i in items_a)
+    assert all(i["record_id"] != record_finding_id("s1", "s1-traj", "s1-seg", "fp-a") for i in items_a)
+
 
 def test_digest_drift_reopens_item_and_missing_digest_fails_closed() -> None:
-    record_id_val = record_id("s1", "s1-traj", "s1-seg", "fp-a")
-    prior = {"record_id": record_id_val, "role": "rater", "disposition": "accepted", "evidence_digest": "d" * 64,
-        "labeler": "alice", "observed_at": "2026-08-30T10:00:00+00:00",
+    record_id_val = record_finding_id("s1", "s1-traj", "s1-seg", "fp-a")
+    prior = {
+        "record_id": record_id_val,
+        "role": "rater",
+        "disposition": "accepted",
+        "evidence_digest": "d" * 64,
+        "labeler": "alice",
+        "observed_at": "2026-08-30T10:00:00+00:00",
         "review_required": True,  # e.g. a stored model-suggested label
     }
     fresh = build_queue([_session("s1", "fp-a", "ambiguous", "d" * 64)], prior_observations={record_id_val: prior})
@@ -64,6 +87,7 @@ def test_digest_drift_reopens_item_and_missing_digest_fails_closed() -> None:
     with pytest.raises(ValueError, match="fp-a"):
         build_queue([session])
 
+
 def test_decisive_adjudication_entry_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _session("s1", "fp-a", "ambiguous", "d1")
 
@@ -75,9 +99,3 @@ def test_decisive_adjudication_entry_fails_closed(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(queue_module, "project_findings", _forge_decisive)
     with pytest.raises(ValueError, match="fp-a"):
         build_queue([session])
-
-def test_disposition_sets_are_single_sourced() -> None:
-    assert queue_set is NON_DECISIVE_DISPOSITIONS
-    assert tiers_set is NON_DECISIVE_DISPOSITIONS
-    assert is_decisive("accepted") and is_decisive("rejected")
-    assert not is_decisive("ambiguous")

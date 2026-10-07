@@ -40,29 +40,32 @@ def _all_py_files() -> list[Path]:
             files.append(p)
     return sorted(files)
 
-@pytest.mark.parametrize("py_file", _all_py_files(), ids=lambda p: str(p.relative_to(PROJECT_ROOT)),)
-def test_no_legacy_debug_logging_references(py_file: Path) -> None:
+SOURCE_FILES = tuple(_all_py_files())
+
+
+def test_no_legacy_debug_logging_references() -> None:
     """CUT-08: every .py file is free of forbidden debug-logging symbols and prefixes."""
-    source = py_file.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(py_file))
-    rel = py_file.relative_to(PROJECT_ROOT)
-    for node in ast.walk(tree):
-        # Name: catches direct references (every actual call is a Name node).
-        if isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
-            pytest.fail(f"{rel}:{node.lineno}: forbidden Name reference '{node.id}'")
+    for py_file in SOURCE_FILES:
+        source = py_file.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(py_file))
+        rel = py_file.relative_to(PROJECT_ROOT)
+        for node in ast.walk(tree):
+            # Name: catches direct references (every actual call is a Name node).
+            if isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
+                pytest.fail(f"{rel}:{node.lineno}: forbidden Name reference '{node.id}'")
 
-        # Attribute: catches any .debug_log access regardless of base object.
-        if isinstance(node, ast.Attribute) and (node.attr in FORBIDDEN_NAMES or node.attr in FORBIDDEN_ATTRS):
-            pytest.fail(f"{rel}:{node.lineno}: forbidden Attribute '.{node.attr}'")
+            # Attribute: catches any .debug_log access regardless of base object.
+            if isinstance(node, ast.Attribute) and (node.attr in FORBIDDEN_NAMES or node.attr in FORBIDDEN_ATTRS):
+                pytest.fail(f"{rel}:{node.lineno}: forbidden Attribute '.{node.attr}'")
 
-        # ImportFrom: catches lazy imports inside function bodies (Pitfall 13 case).
-        if isinstance(node, ast.ImportFrom):
-            for alias in node.names:
-                if alias.name in FORBIDDEN_NAMES:
-                    pytest.fail(f"{rel}:{node.lineno}: forbidden ImportFrom alias '{alias.name}'")
+            # ImportFrom: catches lazy imports inside function bodies (Pitfall 13 case).
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if alias.name in FORBIDDEN_NAMES:
+                        pytest.fail(f"{rel}:{node.lineno}: forbidden ImportFrom alias '{alias.name}'")
 
-        # String constants: catch legacy log prefixes re-introduced via raw print()/logger.
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            for prefix in FORBIDDEN_PREFIXES:
-                if prefix in node.value:
-                    pytest.fail(f"{rel}:{node.lineno}: forbidden literal prefix {prefix!r} " f"in string constant")
+            # String constants: catch legacy log prefixes re-introduced via raw print()/logger.
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                for prefix in FORBIDDEN_PREFIXES:
+                    if prefix in node.value:
+                        pytest.fail(f"{rel}:{node.lineno}: forbidden literal prefix {prefix!r} " f"in string constant")

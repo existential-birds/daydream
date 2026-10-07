@@ -19,10 +19,13 @@ from daydream.commands.corpus import _build_harvest_parser
 from daydream.commands.improve import _parse_improve_args
 from daydream.commands.review import _build_main_parser, _parse_args
 from daydream.config_file import DaydreamFileConfig
+from daydream.dataset import LocalRecordStore
 from daydream.run_config import RunConfig, _resolved_backend_name, _resolved_model
 from daydream.ui import NEON_THEME, PHASE_SUBTITLES, print_issues_table
+from tests.harness.dataset import read_records
 from tests.harness.git_helpers import bare_remote, commit, git, init_repo
 from tests.harness.remote_ci import (
+    _accelerate_empty_ci_discovery,
     finish_remote_ci_fake,
     seed_pr_identity,
     start_remote_ci_fake,
@@ -67,6 +70,14 @@ def test_signal_handler_flushes_before_backend_registry_snapshot(monkeypatch: py
             id='stack_short_flag'),
         pytest.param(['/tmp/project'], {'ignore_paths': []},
             id='ignore_paths_default_empty'),
+        pytest.param(['/tmp/project'], {'dataset_capture': False, 'dataset_store_path': None, 'archive': True},
+            id='dataset_capture_is_opt_in'),
+        pytest.param(['--dataset-store', '/tmp/records', '/tmp/project'],
+            {'dataset_capture': True, 'dataset_store_path': Path('/tmp/records')},
+            id='dataset_store_enables_capture'),
+        pytest.param(['--capture-data', '--dataset-store', '/tmp/records', '--no-archive', '/tmp/project'],
+            {'dataset_capture': True, 'dataset_store_path': Path('/tmp/records'), 'archive': False},
+            id='dataset_capture_without_archive'),
         pytest.param(['/tmp/project', '--ignore-path', '.planning'], {'ignore_paths': ['.planning']},
             id='ignore_paths_single'),
         pytest.param(['/tmp/project', '--ignore-path', '.planning', '--ignore-path', 'vendor'],
@@ -336,6 +347,8 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
             discovery_seconds=30, completion_seconds=60, request_seconds=3,
         ),
     )
+    if remote_outcome == "no_ci":
+        _accelerate_empty_ci_discovery(monkeypatch)
     install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
     elsewhere = tmp_path / "different cwd"
     elsewhere.mkdir()
@@ -354,9 +367,13 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
     assert git(project, "config", "--get", "remote.origin.url") == raw_remote
     verdict = json.loads((project / ".daydream" / "deep" / "remote-ci-verdict.json").read_text())
     assert verdict["status"] == remote_outcome
+    assert verdict["target"]["pushed_sha"] == pushed_sha
     assert all(call.cwd == project.resolve() for call in fake_gh.process_calls())
     output = capsys.readouterr().out
     if remote_outcome == "no_ci":
+        assert verdict["evidence_sha"] == pushed_sha
+        assert verdict["polling"]["stable_polls"] >= verdict["polling"]["required_stable_polls"]
+        assert verdict["polling"]["elapsed_seconds"] >= verdict["polling"]["discovery_seconds"]
         assert "Remote CI was observably not configured" in output
         assert "Linux verified" not in output
         assert "coverage verified" not in output.lower()
@@ -650,12 +667,12 @@ def test_cli_preserves_other_errors_beside_grouped_interrupt(monkeypatch: pytest
 
 def test_harvest_parser_accepts_repo_clone_root() -> None:
     parser = _build_harvest_parser()
-    args = parser.parse_args(["--repo-clone-root", "/tmp/clones"])
+    args = parser.parse_args(["--snapshot-id", "a" * 64, "--repo-clone-root", "/tmp/clones"])
     assert args.repo_clone_root == Path("/tmp/clones")
 
 def test_harvest_parser_repo_clone_root_defaults_to_none() -> None:
     parser = _build_harvest_parser()
-    args = parser.parse_args([])
+    args = parser.parse_args(["--snapshot-id", "a" * 64])
     assert args.repo_clone_root is None
 
 def test_pr_repo_falls_back_to_cwd_without_target(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -688,19 +705,29 @@ def test_runconfig_uses_stack_terminology() -> None:
     assert cfg.stack == "go"
     assert not hasattr(cfg, "skill")   # old name removed
 
-def test_real_cli_stack_entry(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,) -> None:
+@pytest.mark.parametrize("capture", [False, True], ids=["capture-off", "store-only"])
+def test_real_cli_stack_entry(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capture: bool,
+) -> None:
     _silence(monkeypatch)
     monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.git_ops.gh_repo_view", lambda _repo, **_kwargs: None)
     monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda _repo, _branch, **_kwargs: None)
     _install_stub_backend(monkeypatch, multi_stack_target)
-    monkeypatch.setattr(sys, "argv",
-        ["daydream", "--review", "--stack", "python", "--no-archive", "--no-eval", str(multi_stack_target)],
-    )
+    store = tmp_path / "records"
+    argv = ["daydream", "--review", "--stack", "python", "--no-archive", "--no-eval", str(multi_stack_target)]
+    if capture:
+        argv.extend(["--dataset-store", str(store)])
+    monkeypatch.setattr(sys, "argv", argv)
     with pytest.raises(SystemExit) as exc_info:
         cli.main()
 
     assert exc_info.value.code == 0
+    assert store.exists() is capture
+    if capture:
+        records = read_records(LocalRecordStore(store))
+        assert len(records.runs) == 1
+        assert records.runs[0]["outcome"] == "success"
 
     monkeypatch.setattr(sys, "argv", ["daydream", "--review", "--skill", "python", str(multi_stack_target)],)
     with pytest.raises(SystemExit) as skill_exc:

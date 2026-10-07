@@ -3,7 +3,7 @@ import json
 import math
 import uuid
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 
@@ -25,21 +25,34 @@ from daydream.eval.analyzer import (
     analyze_tools,
     analyze_training_signals,
     collect_trajectory_paths,
-    load_trajectories,
 )
 from daydream.eval.quality import _quality_python_parser
 from daydream.trajectory import (
     RUN_DOCUMENT_NAME,
     DaydreamPhase,
+    RunWriteSnapshot,
+    TrajectoryDocumentSnapshot,
     run_directory,
     run_document_path,
     sibling_document_path,
+    snapshot_trajectories,
 )
 from tests.harness.trajectory import make_recorder, trajectory_payload
 
 
+def _snapshot(root: dict[str, Any], *forks: dict[str, Any], cutoff_at: str = "2026-01-01T00:00:10Z",
+    status: Literal["complete", "partial"] = "complete",
+) -> RunWriteSnapshot:
+    """Prepare explicitly identified fixture documents without reading trajectory files."""
+    return RunWriteSnapshot(status=status, cutoff_at=cutoff_at, root_trajectory_id=root["trajectory_id"],
+        documents=tuple(TrajectoryDocumentSnapshot(payload["trajectory_id"], Path(payload["_source_file"]),
+                json.dumps({key: value for key, value in payload.items() if key != "_source_file"}).encode(),
+            ) for payload in (root, *forks)),
+    )
+
+
 def test_analyze_timing_prefers_root_lifecycle_over_misleading_steps() -> None:
-    trajectories = {"main": {"session_id": "session", "trajectory_id": "session",
+    trajectories: dict[str, Any] = {"main": {"session_id": "session", "trajectory_id": "session",
             "steps": [{"timestamp": "2026-01-01T00:00:40Z"}, {"timestamp": "2026-01-01T00:00:41Z"}],
             "extra": {"run_started_at": "2026-01-01T00:00:00Z", "run_ended_at": "2026-01-01T00:00:10Z"},
             "_source_file": "trajectory.json",
@@ -50,58 +63,52 @@ def test_analyze_timing_prefers_root_lifecycle_over_misleading_steps() -> None:
         ],
     }
 
-    assert analyze_timing(trajectories)["total_wall_clock_seconds"] == 10.0
+    snapshot = _snapshot(trajectories["main"], *trajectories["forked"], cutoff_at="2026-01-01T00:00:10Z")
+    assert analyze_timing(snapshot_trajectories(snapshot), snapshot)["total_wall_clock_seconds"] == 10.0
 
-def test_analyze_timing_keeps_fork_inclusive_legacy_step_fallback() -> None:
-    trajectories = {"main": {
-            "session_id": "legacy", "trajectory_id": "legacy", "steps": [{"timestamp": "2026-01-01T00:00:02Z"}],
-            "extra": {}, "_source_file": "trajectory.json",
-        },
-        "forked": [{"session_id": "legacy", "trajectory_id": "child", "steps": [{"timestamp": "2026-01-01T00:00:08Z"}],
-                "extra": {}, "_source_file": "child.json",
-            }
-        ],
+def test_analyze_timing_without_lifecycle_is_unavailable() -> None:
+    snapshot = _snapshot({"session_id": "session", "trajectory_id": "session",
+        "_source_file": "trajectory.json", "extra": {},
+        "steps": [{"timestamp": "2026-01-01T00:00:02Z"}, {"timestamp": "2026-01-01T00:00:08Z"}],
+    }, cutoff_at="2026-01-01T00:00:10Z")
+    snapshot.validate("session")
+
+    timing = analyze_timing(snapshot_trajectories(snapshot), snapshot)
+
+    assert timing == {"total_wall_clock_seconds": None,
+        "by_agent": [{"agent": "main", "duration_seconds": 6.0}],
     }
 
-    assert analyze_timing(trajectories)["total_wall_clock_seconds"] == 6.0
 
+@pytest.mark.parametrize(("status", "cutoff_at", "wall"), [
+    ("partial", "2026-01-01T00:00:04Z", 4.0),
+    ("complete", "2026-01-01T00:00:10Z", 10.0),
+    ("partial", "2026-01-01T00:00:10Z", None),
+    ("complete", "2026-01-01T00:00:04Z", None),
+])
+def test_evaluation_uses_frozen_bytes_status_and_cutoff(tmp_path: Path,
+    status: Literal["complete", "partial"], cutoff_at: str, wall: float | None,
+) -> None:
+    root: dict[str, Any] = {"session_id": "frozen", "trajectory_id": "frozen", "_source_file": "trajectory.json",
+        "steps": [{"timestamp": "2026-01-01T00:00:02Z"}, {"timestamp": "2026-01-01T00:00:03Z"}],
+        "final_metrics": {"total_cost_usd": 0.5},
+        "extra": {"partial": False, "run_started_at": "2026-01-01T00:00:00Z",
+            "run_ended_at": "2026-01-01T00:00:10Z", "snapshot_at": "2026-01-01T00:00:04Z"},
+    }
+    snapshot = _snapshot(root, status=status, cutoff_at=cutoff_at)
+    snapshot.validate("frozen")
+    live_path = tmp_path / ".daydream" / "runs" / "frozen" / "trajectory.json"
+    live_path.parent.mkdir(parents=True)
+    live_path.write_bytes(snapshot.documents[0].json_bytes)
+    root["final_metrics"]["total_cost_usd"] = 99.0
+    root["extra"]["run_ended_at"] = "2026-01-01T00:01:00Z"
+    live_path.write_text(json.dumps(root))
 
-def _write_run(daydream_dir: Path, session_id: str, marker: str) -> Path:
-    """Write the minimal valid trajectory object needed for session resolution."""
-    run_dir = daydream_dir / "runs" / session_id
-    run_dir.mkdir(parents=True)
-    traj = run_dir / "trajectory.json"
-    traj.write_text(json.dumps({"session_id": session_id, "marker": marker}))
-    return run_dir
+    result = analyze_session(tmp_path / ".daydream", write_snapshot=snapshot)
 
-def test_ambiguous_prefix_raises(tmp_path: Path) -> None:
-    daydream_dir = tmp_path / ".daydream"
-    _write_run(daydream_dir, "abcd1234-0000-0000-0000-000000000001", "first")
-    _write_run(daydream_dir, "abcd1234-0000-0000-0000-000000000002", "second")
-
-    with pytest.raises(ValueError, match="matches multiple runs"):
-        load_trajectories(daydream_dir, session_id="abcd1234")
-
-def test_unique_prefix_resolves(tmp_path: Path) -> None:
-    daydream_dir = tmp_path / ".daydream"
-    _write_run(daydream_dir, "abcd1234-0000-0000-0000-000000000001", "first")
-    _write_run(daydream_dir, "ffff0000-0000-0000-0000-000000000002", "second")
-
-    result = load_trajectories(daydream_dir, session_id="abcd1234")
-
-    assert result["main"] is not None
-    assert result["main"]["marker"] == "first"
-    assert result["forked"] == []
-
-def test_exact_match_takes_precedence(tmp_path: Path) -> None:
-    daydream_dir = tmp_path / ".daydream"
-    _write_run(daydream_dir, "abcd1234", "exact")
-    _write_run(daydream_dir, "abcd1234-extra", "prefix-only")
-
-    result = load_trajectories(daydream_dir, session_id="abcd1234")
-
-    assert result["main"] is not None
-    assert result["main"]["marker"] == "exact"
+    assert result["cost"]["total_cost_usd"] == 0.5
+    assert result["timing"]["total_wall_clock_seconds"] == wall
+    assert result["timing"]["by_agent"] == [{"agent": "main", "duration_seconds": 1.0}]
 
 
 SESSION = "11111111-2222-3333-4444-555555555555"
@@ -117,9 +124,6 @@ def test_analyzer_resolution_keys_off_the_owned_names(tmp_path: Path) -> None:
 
     assert [p.name for p in collect_trajectory_paths(run_dir)] == [RUN_DOCUMENT_NAME, "deep-python.json"]
     assert [p.name for p in collect_trajectory_paths(daydream_dir)] == [RUN_DOCUMENT_NAME, "deep-python.json"]
-    loaded = load_trajectories(daydream_dir, SESSION)
-    assert loaded["main"]["trajectory_id"] == SESSION
-    assert [d["_source_file"] for d in loaded["forked"]] == ["deep-python.json"]
     assert _latest_main_trajectory(daydream_dir) == run_document_path(run_dir)
 
 def test_analyze_costs_preserves_fractional_aggregate_precision() -> None:
@@ -247,8 +251,11 @@ def test_analyze_costs_aggregates_legacy_fork_metrics() -> None:
 async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Path,) -> None:
     session = "nested-forks"
     daydream_dir = tmp_path / ".daydream"
+    snapshots: list[RunWriteSnapshot] = []
     recorder = make_recorder(
-        tmp_path, path=daydream_dir / "runs" / session / "trajectory.json", agent_model_name="opus", session_id=session,
+        tmp_path, on_write=lambda _rec, snapshot: snapshots.append(snapshot),
+        path=daydream_dir / "runs" / session / "trajectory.json",
+        agent_model_name="opus", session_id=session,
     )
 
     async with recorder:
@@ -267,7 +274,7 @@ async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Pa
                     inv.observe(MetricsEvent("inner", 30, 3, 1, 0.3))
                     inv.observe(ResultEvent(structured_output=None, continuation=None))
 
-    trajectories = load_trajectories(daydream_dir, session)
+    trajectories = snapshot_trajectories(snapshots[-1])
 
     result = analyze_costs(trajectories)
 
@@ -365,12 +372,14 @@ def test_analyze_session_preserves_source_quality_without_read_metrics(tmp_path:
     artifact_ref = str(private_live / ".daydream/deep/stack-python-review.md")
     exploration_ref = str(private_live / ".daydream/exploration/summary.md")
     _write_records(deep, rationale=f"Evidence came from {artifact_ref}")
-    trajectories = {"main": _root_trajectory("session"),
-        "forked": [_read_traj("deep-python.json", str(public_source / "src/api.py"), artifact_ref, exploration_ref,)],
+    trajectories: dict[str, Any] = {"main": _root_trajectory("session"),
+        "forked": [{**_read_traj("deep-python.json", str(public_source / "src/api.py"), artifact_ref, exploration_ref,),
+            "session_id": "session", "trajectory_id": "deep-python"}],
     }
 
     result = analyze_session(
-        daydream_dir, session_id="session", frozen_trajectories=trajectories, artifact_provenance=provenance,
+        daydream_dir, write_snapshot=_snapshot(trajectories["main"], *trajectories["forked"]),
+        artifact_provenance=provenance,
         code_workspace=public_source,
     )
 
@@ -518,9 +527,9 @@ def test_quality_monotone_across_eroding_fix(tmp_path: Path) -> None:
 def test_analyze_session_includes_quality_for_post_fix_workspace(tmp_path: Path,) -> None:
     ws = _quality_workspace(tmp_path, {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},)
     daydream_dir = ws / ".daydream"
-    seed_run_trajectory(daydream_dir, "quality-real", schema_version="ATIF-v1.6", model_name="claude-sonnet-4-5",)
+    snapshot = run_snapshot("quality-real", schema_version="ATIF-v1.6", model_name="claude-sonnet-4-5",)
 
-    result = analyze_session(daydream_dir, session_id="quality-real")
+    result = analyze_session(daydream_dir, write_snapshot=snapshot)
 
     quality = result["quality"]
     assert set(quality) == {"erosion", "verbosity", "per_file", "calibration", "scoped_files"}
@@ -536,7 +545,7 @@ def test_analyze_session_includes_quality_for_post_fix_workspace(tmp_path: Path,
 def test_analyze_session_reads_quality_from_explicit_code_workspace(tmp_path: Path,) -> None:
     """Frozen artifact inputs and post-fix source quality use distinct roots."""
     daydream_dir = tmp_path / "frozen" / ".daydream"
-    seed_run_trajectory(daydream_dir, "quality-split", schema_version="ATIF-v1.6", model_name="test",)
+    snapshot = run_snapshot("quality-split", schema_version="ATIF-v1.6", model_name="test",)
     code_workspace = _quality_workspace(tmp_path,
         {"app.py": "def changed(x):\n    return x + 1\n"},
         name="operational",
@@ -548,7 +557,7 @@ def test_analyze_session_reads_quality_from_explicit_code_workspace(tmp_path: Pa
     )
 
     result = analyze_session(
-        daydream_dir, session_id="quality-split", artifact_provenance=provenance, code_workspace=code_workspace,
+        daydream_dir, write_snapshot=snapshot, artifact_provenance=provenance, code_workspace=code_workspace,
     )
 
     assert result["quality"]["scoped_files"] == 1
@@ -864,27 +873,8 @@ def test_shipped_count_includes_wonder_lens_items(tmp_path: Path) -> None:
     assert out["total"] == 8                     # wonder items are counted (issue #741)
     assert out["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
 
-def test_shipped_count_wrong_shape_merged_items_propagates(tmp_path: Path) -> None:
-    # Present but malformed merged items are integrity failures, never fallback evidence.
-    dd, deep = _deep_dirs(tmp_path)
-    seed_stack_records(deep, "python", n=4)
-    # A non-list items field, missing items key, or top-level list is an invalid writer shape.
-    (deep / "merged-items.json").write_text(json.dumps({"items": {"a": 1}}))
-    with pytest.raises(ValueError):
-        analyze_findings(dd)
 
-def test_shipped_count_missing_items_key_propagates(tmp_path: Path) -> None:
-    dd, deep = _deep_dirs(tmp_path)
-    (deep / "merged-items.json").write_text(json.dumps({}))
-    with pytest.raises(ValueError):
-        analyze_findings(dd)
 
-def test_shipped_count_corrupt_merged_items_propagates_json_decode_error(tmp_path: Path,) -> None:
-    dd, deep = _deep_dirs(tmp_path)
-    seed_stack_records(deep, "python", n=4)
-    (deep / "merged-items.json").write_text("{not json")
-    with pytest.raises(json.JSONDecodeError):
-        analyze_findings(dd)
 
 def test_shipped_count_falls_back_to_regex_when_merged_items_absent(tmp_path: Path,) -> None:
     dd, deep = _deep_dirs(tmp_path)
@@ -923,32 +913,31 @@ def test_per_lens_wonder_only_run_reports_nonzero_wonder(tmp_path: Path) -> None
     assert out["per_lens"]["per-stack"] == 0
 
 
-def seed_run_trajectory(
-    dd: Path, session_id: str, *, total_cost_usd: float | None = None, schema_version: str = "ATIF-v1.7",
+def run_snapshot(
+    session_id: str, *, total_cost_usd: float | None = None, schema_version: str = "ATIF-v1.7",
     model_name: str | None = None, steps: list[dict[str, Any]] | None = None,
-) -> None:
-    """Write dd/\"runs\"/<session_id>/\"trajectory.json\" with the requested fields."""
-    run_dir = dd / "runs" / session_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+) -> RunWriteSnapshot:
+    """Prepare immutable run bytes with the requested fields."""
     agent: dict[str, Any] = {"name": "test"}
     if model_name is not None:
         agent["model_name"] = model_name
-    document: dict[str, Any] = {"schema_version": schema_version, "session_id": session_id, "agent": agent,
+    document: dict[str, Any] = {"schema_version": schema_version, "session_id": session_id, "trajectory_id": session_id,
+        "_source_file": "trajectory.json", "agent": agent,
         "steps": [] if steps is None else steps, "extra": {},
     }
     if total_cost_usd is not None:
         document["final_metrics"] = {"total_cost_usd": total_cost_usd}
-    (run_dir / "trajectory.json").write_text(json.dumps(document))
+    return _snapshot(document)
 
 def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
     sid = "a80b9373-56d6-4062-9ab5-4c75e475ab67"
     dd = tmp_path / ".daydream"
-    seed_run_trajectory(dd, sid, total_cost_usd=18.2056)
+    snapshot = run_snapshot(sid, total_cost_usd=18.2056)
     deep = dd / "deep"
     deep.mkdir(parents=True)
     seed_shipped_items(deep, high=4, med=4)     # 8 shipped items, the a80b9373 shape
     (deep / "alternatives.json").write_text(json.dumps([{"id": i} for i in range(6)]))
-    res = analyze_session(dd, session_id=sid)
+    res = analyze_session(dd, write_snapshot=snapshot)
     assert res["findings"]["total"] == 8
     assert res["findings"]["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
     assert res["findings"]["per_lens"]["wonder"] == 6
@@ -988,9 +977,9 @@ def test_analyze_session_degrades_quality_on_known_bad_tree_sitter(monkeypatch: 
     monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
     ws = _quality_workspace(tmp_path, {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},)
     daydream_dir = ws / ".daydream"
-    seed_run_trajectory(daydream_dir, "quality-bad", schema_version="ATIF-v1.6", model_name="claude-sonnet-4-5",)
+    snapshot = run_snapshot("quality-bad", schema_version="ATIF-v1.6", model_name="claude-sonnet-4-5",)
 
-    result = analyze_session(daydream_dir, session_id="quality-bad")
+    result = analyze_session(daydream_dir, write_snapshot=snapshot)
 
     quality = result["quality"]
     assert quality["unavailable"] is True
@@ -1274,6 +1263,7 @@ def test_shipped_duplication_input_is_capped_to_bound_the_on2_scan(tmp_path: Pat
 @pytest.mark.parametrize(("payload", "expected_error"),
     [pytest.param("{not json", json.JSONDecodeError, id="syntax-invalid"),
         pytest.param('{"items": {"a": 1}}', ValueError, id="wrong-shape"),
+        pytest.param("{}", ValueError, id="missing-items"),
     ],
 )
 def test_location_and_duplication_propagate_corrupt_merged_items(
@@ -1283,8 +1273,11 @@ def test_location_and_duplication_propagate_corrupt_merged_items(
 
     A bogus shipped set is never silently counted -- and never silently scored."""
     dd, deep = _worked_example_dirs(tmp_path)
+    seed_stack_records(deep, "python", n=4)
     (deep / "merged-items.json").write_text(payload)
 
+    with pytest.raises(expected_error):
+        analyze_findings(dd)
     with pytest.raises(expected_error):
         analyze_location(dd)
     with pytest.raises(expected_error):
@@ -1434,9 +1427,9 @@ def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path
     seed_merged_items(
         deep, [_item(1, line=88, description=WORKED_A), _item(2, line=4, description=WORKED_B, lens="structural")],
     )
-    seed_run_trajectory(dd, "loc-session", schema_version="ATIF-v1.7", model_name="claude-sonnet-4-5",)
+    snapshot = run_snapshot("loc-session", schema_version="ATIF-v1.7", model_name="claude-sonnet-4-5",)
 
-    result = analyze_session(dd, session_id="loc-session")
+    result = analyze_session(dd, write_snapshot=snapshot)
 
     assert result["location"]["hunk_source"] == "hunk-index.json"
     assert result["location"]["in_hunk_rate"] == 0.5

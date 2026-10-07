@@ -7,7 +7,6 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from daydream.training.adjudication.precedence import HUMAN_ROLES, reopen_on_digest_change
-from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.projector import project_findings
 from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.dispositions import (
@@ -15,14 +14,13 @@ from daydream.training.dispositions import (
     is_decisive,
 )
 from daydream.training.labeler_versions import ADJUDICATION_LABELER_VERSION
+from daydream.training.record_identity import record_finding_id
 
 __all__ = ["build_queue", "_NON_DECISIVE_DISPOSITIONS"]
 
 
-def _profile_label(
-    resolution: Mapping[str, object], provenance: Mapping[str, Any]
-) -> str | None:
-    """Read canonical profile_name or legacy flat/nested profile through extract_provenance.
+def _profile_label(resolution: Mapping[str, object], provenance: Mapping[str, Any]) -> str | None:
+    """Read canonical profile_name or flat/nested profile through extract_provenance.
 
     Absent labels remain absent; never stringify None or a profile dictionary.
     """
@@ -37,12 +35,16 @@ def _profile_label(
         return None
     return str(flat) if flat is not None else None
 
+
 _ITEM_KEYS = (
     "record_id",
     "fingerprint",
     "disposition",
     "evidence",
     "evidence_digest",
+    "evidence_digest_scheme",
+    "reply_captures",
+    "correction",
     "session_id",
     "trajectory_id",
     "segment_id",
@@ -75,12 +77,21 @@ def build_queue(
     dispositions raise ValueError naming the fingerprint. Identical inputs produce
     identical queues regardless of session order.
     """
-    items: list[dict[str, object]] = []
+    expanded: list[Mapping[str, object]] = []
     for session in sessions:
+        resolutions = session.get("resolutions")
+        if (
+            isinstance(resolutions, list)
+            and resolutions
+            and all(isinstance(r, Mapping) and r.get("item_uid") for r in resolutions)
+        ):
+            expanded.extend({**session, "resolutions": [r]} for r in resolutions)
+        else:
+            expanded.append(session)
+    items: list[dict[str, object]] = []
+    for session in expanded:
         records, adjudication = project_findings(session, return_adjudication=True)
-        entries = adjudication + [
-            r for r in records if is_decisive(str(r.get("disposition")))
-        ]
+        entries = adjudication + [r for r in records if is_decisive(str(r.get("disposition")))]
         for entry in adjudication:
             if entry["disposition"] not in _NON_DECISIVE_DISPOSITIONS:
                 raise ValueError(
@@ -97,13 +108,12 @@ def build_queue(
             if isinstance(raw, Mapping) and raw.get("fingerprint"):
                 by_fingerprint[str(raw["fingerprint"])] = raw
         for entry in entries:
-            fingerprint = str(
-                entry.get("fingerprint") or entry.get("finding_fingerprint")
-            )
+            fingerprint = str(entry.get("fingerprint") or entry.get("finding_fingerprint"))
             disposition = entry["disposition"]
-            finding_id = record_id(session_id, trajectory_id, segment_id, fingerprint)
+            finding_id = record_finding_id(session_id, trajectory_id, segment_id, str(entry["item_uid"]))
             if (
-                not include_decisive and disposition not in _NON_DECISIVE_DISPOSITIONS
+                not include_decisive
+                and disposition not in _NON_DECISIVE_DISPOSITIONS
                 and finding_id not in (prior_observations or {})
             ):
                 continue
@@ -126,6 +136,9 @@ def build_queue(
                 "disposition": disposition,
                 "evidence": entry["evidence"],
                 "evidence_digest": fresh_digest,
+                "evidence_digest_scheme": resolution["evidence_digest_scheme"],
+                "reply_captures": resolution.get("reply_captures", []),
+                "correction": resolution.get("correction"),
                 "session_id": session_id,
                 "trajectory_id": trajectory_id,
                 "segment_id": segment_id,

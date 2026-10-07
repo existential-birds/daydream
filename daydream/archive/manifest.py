@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from daydream.archive.provenance import ExecutableProvenance
     from daydream.trajectory import RunWriteSnapshot
 
-MANIFEST_SCHEMA_VERSION = "1.0"
+MANIFEST_SCHEMA_VERSION = "2.0"
 
 
 def archive_recorder_provenance_from_snapshot(
@@ -88,7 +88,6 @@ class Manifest:
     Missing metrics mean uncomputed or undefined, never an imputed zero.
     ``location_in_hunk_rate`` scores the originally cited line before snapping;
     ``shipped_duplicate_pairs`` counts surviving near-duplicate findings.
-    ``composite_reward`` caches the winning label observation.
 
     Fix failures and surviving untracked paths retain evidence of partial
     work; the latter cannot be attributed to an individual parallel group.
@@ -97,9 +96,6 @@ class Manifest:
     """
 
     schema_version: str = MANIFEST_SCHEMA_VERSION
-    # Missing recommended.patch means no recommendation when supported; only legacy
-    # manifests fall back to diff.patch.
-    recommended_patch_supported: bool = True
     # Capture provenance: post_test is the exact post-heal committed tree; pre_test is
     # the fix-phase fallback. Legacy manifests use None.
     recommended_patch_capture: str | None = None
@@ -172,11 +168,6 @@ class Manifest:
     location_in_hunk_rate: float | None = None
     shipped_duplicate_pairs: int | None = None
 
-    # Outcome labels (populated via `daydream harvest`)
-    outcome_labels: str = field(default="[]")
-    labeled_at: str | None = None
-    composite_reward: float | None = None
-
     # Archive location
     archive_path: str = ""
 
@@ -184,7 +175,6 @@ class Manifest:
         """Return a JSON-serializable dict."""
         return {
             "schema_version": self.schema_version,
-            "recommended_patch_supported": self.recommended_patch_supported,
             **_omit_falsy(recommended_patch_capture=self.recommended_patch_capture),
             "session_id": self.session_id,
             "archived_at": self.archived_at,
@@ -253,11 +243,6 @@ class Manifest:
                 "verbosity": self.verbosity,
                 "location_in_hunk_rate": self.location_in_hunk_rate,
                 "shipped_duplicate_pairs": self.shipped_duplicate_pairs,
-            },
-            "outcome": {
-                "labels": json.loads(self.outcome_labels),
-                "labeled_at": self.labeled_at,
-                "composite_reward": self.composite_reward,
             },
             "archive_path": self.archive_path,
         }

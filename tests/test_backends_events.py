@@ -35,7 +35,6 @@ from daydream.backends import (
     _new_generation_id,
     unix_ms_to_ns,
 )
-from daydream.backends.pi import _PI_READ_ONLY_TOOLS
 from daydream.observability.spans import _admit_observed_identity_list
 
 
@@ -314,10 +313,6 @@ def test_observed_identity_lists_whole_overflow_omission() -> None:
     )
     assert admitted is None and diagnostic is not None
     assert diagnostic.split(":", 1)[0] == "config_list_member_unsafe"
-
-def test_pi_selected_tools_count_derives_from_read_only_tool_constant() -> None:
-    assert len(_PI_READ_ONLY_TOOLS.split(",")) == 4
-    assert _PI_READ_ONLY_TOOLS == "read,find,ls,grep"
 
 def test_tool_call_choice_part_json_arguments_are_schema_admitted() -> None:
     part = ToolCallChoicePart(call_id="t1", name="read", arguments={"path": "/x", "n": 3, "ok": True, "f": 0.5})

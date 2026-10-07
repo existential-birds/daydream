@@ -5,17 +5,19 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from daydream import git_ops, json_utils, runner
 from daydream.backends import MaxTurnsError, ResultEvent, TextEvent, ToolStartEvent
+from daydream.dataset import LocalRecordStore
 from daydream.findings import FindingsValidationError, load_findings_artifact
 from daydream.phases import findings
 from daydream.phases.review import ReviewOutputError
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.console import collapse_panel_text
+from tests.harness.dataset import read_records
 from tests.harness.fake_clock import FakeClock
 from tests.harness.git_helpers import git
 from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipeline, _record
@@ -132,8 +134,19 @@ async def test_schema_output(review: ReviewRun, mode: str, reason: str | None) -
 
 @pytest.mark.parametrize('case', ['live', 'dirty', 'no-diff', 'dirty-no-diff', 'interactive', 'mismatch',
                                   'base-tip', 'shards', 'pipeline-budget'])
-async def test_snapshot_boundaries(review: ReviewRun, shard_many_python_target: Path, case: str) -> None:
+async def test_snapshot_boundaries(review: ReviewRun, request: pytest.FixtureRequest, case: str) -> None:
     overrides: dict[str, Any] = {}
+    store = LocalRecordStore(review.tmp / 'records')
+    if case in {'mismatch', 'no-diff'}:
+        overrides.update(dataset_capture=True, dataset_store_path=store.root)
+    prior = {'.review-output.md': 'prior completed review\n', '.daydream/deep/history.json': '{"prior": true}\n',
+             '.daydream/deep/merged-items.json': '{"items": [{"item_uid": "item:old"}]}\n',
+             '.daydream/recommended.patch': 'prior recommended patch\n'}
+    if case == 'mismatch':
+        for name, text in prior.items():
+            path = review.repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
     live, calls = review.pr, []
     if case in {'no-diff', 'dirty-no-diff', 'base-tip'}:
         git(review.repo, 'checkout', 'main')
@@ -152,7 +165,8 @@ async def test_snapshot_boundaries(review: ReviewRun, shard_many_python_target: 
     if case == 'interactive':
         overrides['findings_out'] = None
     if case == 'shards':
-        review = ReviewRun(shard_many_python_target, review.tmp, review.patch)
+        shard_target = cast(Path, request.getfixturevalue('shard_many_python_target'))
+        review = ReviewRun(shard_target, review.tmp, review.patch)
         overrides.update(deep_shard_enabled=True, deep_shard_max_files=1)
     if case == 'pipeline-budget':
         overrides['review_profile'] = _profile_with_pipeline(review_wall_budget_s=0)
@@ -167,7 +181,20 @@ async def test_snapshot_boundaries(review: ReviewRun, shard_many_python_target: 
         if case == 'live':
             review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False,
                 review_by_stack={'structure': [record()]}, responder=advance)
+    if case == 'no-diff':
+        assert await review.run(dataset_store_path=store.root) == 0 and not store.root.exists()
     assert await review.run(**overrides) == (1 if case in {'dirty', 'dirty-no-diff', 'mismatch'} else 0)
+    if case in {'mismatch', 'no-diff'}:
+        raw = read_records(store).runs[0]
+        assert raw['outcome'] == ('failed' if case == 'mismatch' else 'success')
+        if case == 'mismatch':
+            assert raw['original_task']['status'] == 'unavailable'
+            assert all(raw[name]['status'] == 'unproduced'
+                       for name in ('trajectories', 'findings', 'scoring', 'recommended_patch'))
+            assert all((review.repo / name).read_text() == text for name, text in prior.items())
+        else:
+            assert raw['original_task']['value']['diff'] == '' and raw['findings']['value']['items'] == []
+            assert raw['scoring']['status'] == 'unproduced'
     if case in {'interactive', 'mismatch'}:
         assert not review.output.exists()
         assert bool(review.backend.calls) is (case == 'interactive')
@@ -238,12 +265,14 @@ async def test_partial_checkpoints(review: ReviewRun, budget: str, fault: str | 
         assert scope['reason_codes'] == sorted([reason] + ([damage_reason] if damaged else []))
 
 
-@pytest.mark.parametrize('fault', ['missing', 'corrupt', 'revision', 'scope', 'origin'])
+@pytest.mark.parametrize('fault', ['missing', 'corrupt', 'shape', 'revision', 'scope', 'origin'])
 async def test_loaded_artifact_faults(review: ReviewRun, fault: str) -> None:
     write, read = Path.write_text, Path.read_text
+    malformed = '{invalid' if fault == 'corrupt' else '{"issues": "invalid"}'
     def faulty_write(path: Path, text: str, *args: Any, **kwargs: Any) -> int:
-        count = write(path, '{invalid' if path.name == 'stack-python-records.json' and fault == 'corrupt' else text,
-                      *args, **kwargs)
+        if path.name == 'stack-python-records.json' and fault in {'corrupt', 'shape'}:
+            text = malformed
+        count = write(path, text, *args, **kwargs)
         if path.name == 'stack-python-records.json' and fault == 'missing':
             path.unlink()
         return count
@@ -261,10 +290,21 @@ async def test_loaded_artifact_faults(review: ReviewRun, fault: str) -> None:
         return text
     review.patch.setattr(Path, 'write_text', faulty_write)
     review.patch.setattr(Path, 'read_text', faulty_read)
-    if fault in {'missing', 'corrupt'}:
+    if fault in {'missing', 'corrupt', 'shape'}:
         review.backend.review_by_stack = {'react': [_record(
             description='Surviving sibling defect', file='App.tsx', line=1)]}
-    assert await review.run() == 1
+    assert await review.run(dataset_capture=True, dataset_store_path=review.tmp / 'records') == 1
+    if fault in {'corrupt', 'shape'}:
+        raw = read_records(LocalRecordStore(review.tmp / 'records')).runs[0]
+        assert raw['outcome'] == 'failed' and raw['completeness']['artifact_acquisition'] == 'failed'
+        diagnostic = raw['provenance']['collection_diagnostics']['stack-python-records.json']
+        assert diagnostic['reason'] == ('malformed_json' if fault == 'corrupt' else 'malformed_shape')
+        assert diagnostic.get('raw_text' if fault == 'corrupt' else 'raw_json') == (
+            malformed if fault == 'corrupt' else {'issues': 'invalid'})
+        scoring = raw['scoring']['value']
+        assert scoring['format_valid'] is (fault == 'shape')
+        assert scoring['persisted_breakdown']['correctness_per_finding'] is None
+        assert scoring['persisted_breakdown']['composite'] == (0.0 if fault == 'corrupt' else None)
     data = review.load()
     result, inventory = data['terminal_result'], scopes(data)
     reason = 'missing_artifact' if fault == 'missing' else 'malformed_artifact'
@@ -273,7 +313,7 @@ async def test_loaded_artifact_faults(review: ReviewRun, fault: str) -> None:
     assert set(inventory) == {'python', 'react', 'generic', 'structure'} and reason in result['reason_codes']
     assert {n: s['status'] for n, s in inventory.items()} == dict.fromkeys(inventory, 'complete') | {'python': 'failed'}
     assert inventory['python']['reason_codes'] == [reason]
-    if fault in {'missing', 'corrupt'}:
+    if fault in {'missing', 'corrupt', 'shape'}:
         assert [(f['title'], f['placement']) for f in data['findings']] == [('Surviving sibling defect', 'inline')]
     else:
         assert data['findings'] == []

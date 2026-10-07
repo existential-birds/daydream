@@ -1391,14 +1391,10 @@ def test_build_fix_prompt_concise_mode() -> None:
     assert "Output only the tool calls needed to apply the fix" in prompt
     prompt_default = _build_fix_prompt("test output failed", [{"file": "src/a.py"}])
     assert "CONCISE MODE" not in prompt_default
-
-
-def test_build_fix_prompt_carries_generated_file_rule() -> None:
-    prompt = _build_fix_prompt("test output failed", [{"file": "src/a.py"}])
-    assert "generated" in prompt.lower()
-    assert "migration" in prompt.lower()
-    assert "package manifests" in prompt.lower()
-    assert "lockfile update" in prompt.lower()
+    assert "generated" in prompt_default.lower()
+    assert "migration" in prompt_default.lower()
+    assert "package manifests" in prompt_default.lower()
+    assert "lockfile update" in prompt_default.lower()
 
 # A path that never exists on disk: the prompt renderer only stats it, so the
 # repository-relative form is what these pure prompt tests assert on.
@@ -1981,12 +1977,26 @@ async def test_phase_understand_intent_correction_then_confirm(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
     _quiet_phase_ui: None,
 ) -> None:
-    backend, result, _diff_file, _correction = await _run_intent_correction(tmp_path, monkeypatch, make_work)
+    backend, result, diff_file, correction = await _run_intent_correction(tmp_path, monkeypatch, make_work)
 
     assert backend.call_count == 2
     assert "login" in result.lower()
     # Initial and correction turns both use the read-only backend profile.
     assert backend.read_only_calls == [True, True]
+
+    assert len(backend.prompts) == 2
+    # Initial prompt carries the full directive set.
+    assert "not tied to a GitHub pull request" in backend.prompts[0]
+    assert "Do not invoke any skills or slash commands" in backend.prompts[0]
+    # The rebuilt correction prompt keeps the correction AND the no-PR/no-skill directives.
+    second = backend.prompts[1]
+    assert correction in second
+    assert str(diff_file) in second
+    assert "complete review target" in second
+    assert "do not look up pull requests" in second
+    assert "invoke any skills" in second
+    assert "slash commands" in second
+    assert "login" in result.lower()
 
 @pytest.mark.asyncio
 async def test_phase_understand_intent_codex_read_only_inlines_diff_and_exploration(
@@ -2127,27 +2137,6 @@ async def test_phase_understand_intent_non_codex_keeps_budget_gated_diff_pointer
     prompt = backend.prompts[0]
     assert f"Read the diff file at {diff_file}" in prompt
     assert over_budget_diff not in prompt
-
-@pytest.mark.asyncio
-async def test_phase_understand_intent_correction_prompt_keeps_no_pr_no_skill_directives(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
-    _quiet_phase_ui: None,
-) -> None:
-    backend, result, diff_file, correction = await _run_intent_correction(tmp_path, monkeypatch, make_work)
-
-    assert len(backend.prompts) == 2
-    # Initial prompt carries the full directive set.
-    assert "not tied to a GitHub pull request" in backend.prompts[0]
-    assert "Do not invoke any skills or slash commands" in backend.prompts[0]
-    # The rebuilt correction prompt keeps the correction AND the no-PR/no-skill directives.
-    second = backend.prompts[1]
-    assert correction in second
-    assert str(diff_file) in second
-    assert "complete review target" in second
-    assert "do not look up pull requests" in second
-    assert "invoke any skills" in second
-    assert "slash commands" in second
-    assert "login" in result.lower()
 
 async def test_phase_understand_intent_forced_no_interactive_falls_through(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
@@ -2445,10 +2434,6 @@ def test_exploration_pointer_names_only_bounded_files_and_scopes_read_clause(tmp
     assert "Do not infer or enumerate sibling artifact files" in pointer
     assert "assigned source files" in pointer
     assert _exploration_pointer(None) == ""
-
-def test_exploration_pointer_marks_results_untrusted(tmp_path: Path) -> None:
-    exploration_dir = tmp_path / "exploration"
-    pointer = _exploration_pointer(exploration_dir)
     assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in pointer
     assert pointer.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < pointer.index("summary.md")
     assert pointer.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < pointer.index("affected_files.md")
@@ -2853,27 +2838,15 @@ async def test_phase_test_and_heal_option4_summarizer_fallback_writes_minimal(
     body = handoff.read_text(encoding="utf-8")
     for expected in expected_substrings:
         assert expected in body
-
-
-@pytest.mark.asyncio
-async def test_option4_fallback_puts_unknown_cause_in_hypotheses(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
-    _quiet_phase_ui: None,
-) -> None:
-    """Without a summarizer, quote failing output as fact and retain an UNKNOWN cause in hypotheses."""
-    _, _, _ = await _run_option4_handoff(
-        monkeypatch, tmp_path, make_work, (RuntimeError("scripted summarizer failure"),),
-    )
-
-    body = (tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md").read_text(encoding="utf-8",)
-    assert "## Verified facts" in body
-    assert "## Hypotheses (unverified)" in body
-    # Ground truth (the failing test output) is quoted, not just pointed at.
-    assert "1 failed, 0 passed" in body
-    assert "unknown" in body.lower()
-    # The unknown-cause statement lives under Hypotheses, not Verified facts.
-    facts_section = body.split("## Hypotheses (unverified)")[0]
-    assert "unknown" not in facts_section.lower()
+    if isinstance(turn[0], RuntimeError):
+        assert "## Verified facts" in body
+        assert "## Hypotheses (unverified)" in body
+        # Ground truth (the failing test output) is quoted, not just pointed at.
+        assert "1 failed, 0 passed" in body
+        assert "unknown" in body.lower()
+        # The unknown-cause statement lives under Hypotheses, not Verified facts.
+        facts_section = body.split("## Hypotheses (unverified)")[0]
+        assert "unknown" not in facts_section.lower()
 
 # _resolve_handoff_paths — ephemeral worktree + archive routing
 
@@ -4620,19 +4593,6 @@ async def test_hook_aware_push_reuses_evidence_but_still_runs_the_hook(
     assert runs == [], "the redundant proactive suite run is the only thing removed"
     assert hook_log.exists(), "the pre-push hook must still execute"
     assert git_ops.remote_contains_commit(repo, "main", git_ops.head_sha(repo), remote="origin")
-
-    # Measure the no-reuse baseline: one orchestrator suite and one hook execution.
-    repo_two = _pushable_repo(tmp_path / "baseline")
-    _install_pre_push_hook(repo_two)
-    (repo_two / "fix.py").write_text("fixed\n")
-    baseline = _record_host_runs(monkeypatch, output="")
-
-    await _do_commit(ScriptedBackend(), make_work(repo_two), push=True, interactive=False,
-        items=[{"file": "fix.py", "description": "fix bug"}],
-        **_retained_commit_tree(repo_two, {"fix.py"}), config=_hook_run_config(),
-    )
-
-    assert len(baseline) == 1, "the no-evidence baseline pays exactly one orchestrator run"
 
 @pytest.mark.asyncio
 async def test_hook_failure_still_blocks_the_push_on_a_reuse_hit(

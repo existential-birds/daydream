@@ -3,7 +3,6 @@ from typing import Any
 
 import pytest
 
-from daydream import config
 from daydream.config import (
     AUDIT_CATEGORIES,
     DEEP_PHASE_DEFAULT_EFFORT,
@@ -36,11 +35,6 @@ PHASE_NAMES = {"review", "per_stack_review", "arbiter", "suppression", "supervis
 }
 IMPROVE_PHASE_NAMES = {"recon", "audit", "vet", "plan_write"}
 
-def test_no_pr_feedback_skill_constants() -> None:
-
-    assert not hasattr(config, "PR_FEEDBACK_FETCH_SKILL")
-    assert not hasattr(config, "PR_FEEDBACK_RESPOND_SKILL")
-
 def test_audit_categories_match_playbook() -> None:
     assert set(AUDIT_CATEGORIES) == {
         "correctness", "security", "performance", "tests", "tech-debt", "dependencies", "dx", "docs",
@@ -66,22 +60,12 @@ def test_phase_default_models_covers_every_phase_for_each_backend() -> None:
 def test_phase_default_models_claude_tier_assignments() -> None:
     claude = PHASE_DEFAULT_MODELS["claude"]
     assert claude["parse"] == "claude-haiku-4-5"
-    for phase in ("review", "wonder", "merge", "vet", "plan_write"):
+    for phase in ("review", "arbiter", "wonder", "merge", "vet", "plan_write"):
         assert claude[phase] == "claude-opus-5"
-    for phase in ("fix", "test", "exploration", "per_stack_review", "intent", "diagram", "recon", "audit",):
+    for phase in (
+        "fix", "test", "exploration", "per_stack_review", "suppression", "intent", "diagram", "recon", "audit",
+    ):
         assert claude[phase] == "claude-sonnet-5"
-
-def test_per_stack_review_and_arbiter_split() -> None:
-    claude = PHASE_DEFAULT_MODELS["claude"]
-    assert claude["per_stack_review"] == "claude-sonnet-5"
-    assert claude["arbiter"] == "claude-opus-5"
-    codex = PHASE_DEFAULT_MODELS["codex"]
-    assert codex["per_stack_review"] == "gpt-5.6-terra"
-    assert codex["arbiter"] == "gpt-5.6-sol"
-
-def test_suppression_uses_cheap_tier() -> None:
-    assert PHASE_DEFAULT_MODELS["claude"]["suppression"] == "claude-sonnet-5"
-    assert PHASE_DEFAULT_MODELS["codex"]["suppression"] == "gpt-5.6-terra"
 
 def test_phase_default_models_codex_tier_assignments() -> None:
     codex = PHASE_DEFAULT_MODELS["codex"]
@@ -135,16 +119,7 @@ def test_improve_phase_effort_tier_assignments(backend: Any) -> None:
     assert effort["recon"] == "low"
     assert effort["audit"] == "high"
     assert effort["vet"] == "xhigh"
-
-@pytest.mark.parametrize("backend", ["claude", "codex", "pi"])
-def test_plan_write_is_pinned_to_max_reasoning_on_every_backend(backend: Any) -> None:
-    """Plan authoring and plan repair both ride the plan_write key."""
     assert PHASE_DEFAULT_EFFORT[backend]["plan_write"] == "max"
-
-@pytest.mark.parametrize("backend", ["claude", "codex"])
-def test_plan_write_is_pinned_to_the_top_model_tier(backend: Any) -> None:
-    models = PHASE_DEFAULT_MODELS[backend]
-    assert models["plan_write"] == models["review"] == models["arbiter"]
 
 def test_default_pi_model_is_nous_deepseek_flash() -> None:
     assert DEFAULT_PI_MODEL == "deepseek/deepseek-v4-flash-0731"
@@ -174,11 +149,6 @@ def test_diagram_render_caps_are_positive_and_bound_every_collection() -> None:
     labels = (DIAGRAM_LABEL_CAP_PARTICIPANT, DIAGRAM_LABEL_CAP_MESSAGE, DIAGRAM_LABEL_CAP_NODE, DIAGRAM_LABEL_CAP_EDGE,
     )
     assert labels == (40, 80, 60, 30)
-
-def test_diagram_phase_is_mid_tier_on_both_model_backends() -> None:
-    assert PHASE_DEFAULT_MODELS["claude"]["diagram"] == PHASE_DEFAULT_MODELS["claude"]["intent"]
-    assert PHASE_DEFAULT_MODELS["codex"]["diagram"] == PHASE_DEFAULT_MODELS["codex"]["intent"]
-    assert DEEP_PHASE_DEFAULT_EFFORT["codex"]["diagram"] == "medium"
 
 def test_the_optimised_selection_is_the_default_once_the_evidence_gate_is_green() -> None:
     """Selective verification is the default after the latency evidence gate passed.

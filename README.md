@@ -4,7 +4,7 @@
 
 Daydream is an automated code-review agent. It reviews a code change, applies fixes, and runs the test suite to validate the result. It records every agent action as a structured trajectory.
 
-The goal of daydream is an open-weight code-review model. Daydream trains this model on the trajectory archive that it collects from its own runs. Training is a staged recipe: reward construction, then SFT cold-start, then RFT (rejection fine-tuning), then online RL. Daydream benchmarks the model against commercial code-review bots on a held-out PR replay corpus.
+The goal of daydream is an open-weight code-review model. Daydream trains this model on immutable JSONL run records and their observation history. Training is a staged recipe: reward construction, then SFT cold-start, then RFT (rejection fine-tuning), then online RL. Daydream benchmarks the model against commercial code-review bots on a held-out PR replay corpus.
 
 ## Requirements
 
@@ -239,61 +239,71 @@ This section is for machine learning researchers. Daydream is a data-collection 
 
 Daydream records every agent interaction as an [ATIF v1.7](https://www.harborframework.com/docs/agents/trajectory-format) trajectory. The trajectory records the review pipeline, the model output, the tool calls, the cost, and the result.
 
-During a run, Daydream keeps its working artifacts outside the target checkout. After finalization, it publishes the trajectory at `<project>/.daydream/runs/<session-id>/trajectory.json` and parallel sub-trajectories in the sibling `trajectories/` directory. Daydream archives the complete run bundle at `~/.daydream/archive/runs/<session-id>/`. The bundle contains the trajectory, the manifest, the review output, the diff, and the evaluation analysis. An SQLite index at `~/.daydream/archive/index.db` supports cross-project querying.
+During a run, Daydream keeps its working artifacts outside the target checkout. After finalization, it publishes the trajectory at `<project>/.daydream/runs/<session-id>/trajectory.json` and parallel sub-trajectories in the sibling `trajectories/` directory. Daydream archives the complete run bundle at `~/.daydream/archive/runs/<session-id>/`. The bundle contains the trajectory, the manifest, the review output, the diff, and the evaluation analysis. A local SQLite index at `~/.daydream/archive/index.db` records finalized run metadata for diagnostics. Cross-project training queries read pinned JSONL snapshots through `LocalRecordStore.read_snapshot`; see [Corpus commands](#corpus-commands).
 
 Runtime output publication is all-or-nothing at finalization: invalid run identity, frozen evidence, findings projection, or output publication restores the checkout's prior artifacts. Archive, evaluation, index, and upload failures emit a sanitized data-collection diagnostic and preserve the review result and completed outputs. The archived bundle only exists once archiving has succeeded; handoffs do not promise a manifest from optional persistence.
 
+New runs can also collect raw JSONL evidence with `--capture-data`. Capture is off by default.
+Passing `--dataset-store DIR` also enables capture and chooses private local storage
+(default with `--capture-data`: `~/.daydream/dataset`). An explicit
+`--trajectory-hub-repo` or `DAYDREAM_TRAJECTORY_HUB_REPO` also enables capture.
+`--no-capture-data` disables collection and upload even with a configured Hub destination.
+Capture preserves evidence as produced without additional redaction or secret scanning.
+The user controls this local data and is responsible for reviewing it before sharing.
+Collection works with `--no-archive` and tracing disabled.
+It retains the original analyzed revisions and input diff, trajectories, structured claims and
+verification/fix associations at the existing frozen finalization boundary, including cooperative
+interruption. SIGKILL and power loss before that boundary can lose uncaptured evidence. A
+persistence refusal emits a sanitized collection diagnostic and preserves completed review
+outputs. Existing archives remain available; this workflow accepts newly collected JSONL data
+only. Harvesting, adjudication, and frozen corpus projection consume this same record store.
+
 ### Corpus commands
 
-The data-pipeline verbs live under the `corpus` namespace:
+The canonical evidence path is capture → `LocalRecordStore` → immutable JSONL
+publication → exact-commit download → record-based harvest/adjudication → offline corpus.
 
 ```bash
-daydream corpus harvest                              # annotate all archived runs
-daydream corpus harvest --dry-run
-daydream corpus build --bundle-root BUNDLE_ROOT --annotation-bundle-root ANNOTATION_BUNDLE_ROOT \
-  --license-policy LICENSE_POLICY --out PROJECTION_DIR/corpus.jsonl   # project a curated bundle into a frozen-corpus projection
-daydream corpus build --bundle-root BUNDLE_ROOT --annotation-bundle-root ANNOTATION_BUNDLE_ROOT \
-  --license-policy LICENSE_POLICY --out PROJECTION_DIR/corpus.jsonl --dry-run    # print the projection summary, write nothing
-daydream corpus label <session-id> --outcome accepted  # manual outcome override
-daydream corpus calibrate-reward ...                   # deterministic reward-calibration artifact (see docs/calibration.md)
-daydream corpus hydrate-hub --source-repo org/ds --source-revision <commit-sha> \
-  --destination-repo org/ds --stage-dir /tmp/daydream-hydrate --dry-run
+daydream corpus dataset publish --trajectory-hub-repo OWNER/REPO --store ~/.daydream/dataset
+daydream corpus dataset status --trajectory-hub-repo OWNER/REPO --store ~/.daydream/dataset
+daydream corpus dataset download --trajectory-hub-repo OWNER/REPO --revision <40-character-commit-sha> --output /tmp/daydream-records
+daydream corpus dataset snapshot --store /tmp/daydream-records --observed-before <ISO_TIMESTAMP>
+daydream corpus harvest --store /tmp/daydream-records --snapshot-id <SNAPSHOT_ID>
+daydream corpus label <run-id> --store /tmp/daydream-records --outcome accepted
+daydream corpus dataset snapshot --store /tmp/daydream-records --observed-before <LATER_ISO_TIMESTAMP>
+daydream corpus build --store /tmp/daydream-records --snapshot-id <ENRICHED_SNAPSHOT_ID> \
+  --license-policy LICENSE_POLICY --out PROJECTION_DIR/corpus.jsonl
+daydream corpus calibrate-reward ...  # docs/calibration.md
 ```
 
-`corpus hydrate-hub` discovers the producer's canonical Hub layout,
-`<session-id>/manifest.json` plus `trajectory.json`, and also accepts the
-tested legacy `bundles/<session-id>/...` layout. Accepted sessions are
-normalized into `downloads/<revision>/bundles/<session-id>/`; unrelated
-top-level metadata and derived `curated/**` or `annotations/**` files are
-ignored. The dry-run summary reports discovered, admitted, rejected, and
-accounted candidate counts. A non-dry publication (omit `--dry-run`) also
-requires `--license-policy`: the per-repo license admission gate runs at
-hydration and rejected sessions are excluded before publication (issue
-#1094); a dry-run may omit it. License-evidence enrichment fills legacy
-bundles' missing evidence from the GitHub license API, which requires
-`GITHUB_TOKEN` in the environment (read-only; env-only, never on a URL or
-argv); a non-dry publication fails closed without it. If a pinned revision
-contains run-shaped
-manifests but no complete candidates, hydration fails with layout diagnostics
-instead of reporting a successful zero/zero plan.
+Snapshots freeze observe-time membership. An optional `--valid-before` controls
+valid-time eligibility without removing later-valid observations from pinned
+history. Select a new snapshot after appending enrichment or judgments; previous
+snapshots remain unchanged. Publication uses the same shards, manifest, retry
+queue, and conflict handling for both run records and observations. Downloads
+verify every record at the requested commit. No archive conversion is performed.
 
-The pipeline has three stages:
+Harvest retains intrinsic reward axes, outcome priors, rubric evidence, and
+version pins in `daydream.observation.v2` harvest annotations. Human run labels
+and per-finding judgments append independently; human decisions take precedence
+and model suggestions require human review. Adjudication queues are disposable
+local views of immutable evidence. See the [record dataset workflow](docs/runbooks/record-dataset.md).
 
-1. **Harvest.** Walk the archive. Write one bitemporal annotation per run. Each annotation contains a label, an intrinsic reward, and a valid-at timestamp.
-2. **Label.** Override the automated outcome for a run. The manual label beats the automated label.
-3. **Build.** Project the per-finding annotations into a frozen-corpus projection directory (`corpus build`). Add the lineage manifest.
+Corpus projection runs offline against a selected snapshot and a pinned license
+policy. It preserves license and exclusion admission, gold/silver eligibility,
+trace segmentation, temporal guards, deterministic splits, and stack/repository/
+profile caps. Source lineage uses `record-snapshot-v1`: snapshot membership pins
+run and observation digests, and downloaded evidence also pins its HF commit.
+Run identity, host finding identity, fingerprint, and training record identity
+remain distinct. Derived corpus exports are separate from canonical evidence.
 
-`calibrate-reward` validates a pinned calibration bundle and emits a deterministic, versioned reward-calibration artifact (input wire format: [docs/calibration.md](docs/calibration.md)).
-
-`corpus adjudicate publish-state` creates an immutable recoverable checkpoint after every labeling batch. `publish-final` constructs and publishes the content-addressed per-finding annotation bundle, and `download-final` verifies its exact success commit into a fresh destination. Use `publish-final --dry-run` to validate the complete final identity without contacting the Hub. The empty-VM recovery and verified-publication procedure is in [docs/runbooks/annotation-final-publish.md](docs/runbooks/annotation-final-publish.md); downstream corpus and training operations remain separate.
-
-The harvest stage clones the target repository into a local cache before scoring. Setting `DAYDREAM_GIT_TOKEN` (for example, a GitHub PAT with read access) authenticates clones of private repos. The token is injected out-of-band via git config environment variables (`http.extraHeader`). It is never embedded in the remote URL and never on the command line. Without the token, the harvest stage performs a plain clone via the ambient credential helper. A failed clone emits a warning and never blocks the harvest run. The token is only needed for private repos. See docs/runbooks/credential-remediation.md for operational guidance.
-
-The build stage applies a temporal-leakage guard. It prevents future data from leaking into the past. It applies C5, C8, and C9 filters. It stratifies the corpus by stack and caps the projected stack/repository/profile shares.
+The harvest stage can clone target repositories into a local cache. Setting
+`DAYDREAM_GIT_TOKEN` authenticates private clones through git configuration
+in the child environment; it never appears in URLs or command arguments.
 
 ### Scoring
 
-The harvest stage scores each trajectory using verifier correctness and a length penalty:
+Capture and sealed RL runs read producer artifacts through the same scoring owner. Harvest reads those captured signals from immutable run records and adds separate outcome evidence. Intrinsic scoring uses verifier correctness and a length penalty:
 
 ```text
 correctness = mean(consistent: 1.0, uncertain: 0.5, contradicts: 0.0)
@@ -307,19 +317,54 @@ RFT winner thresholds support `composite`, `correctness_per_finding` (mean score
 
 ### Upload to a private Hugging Face dataset
 
-Upload of trajectories to Hugging Face is opt-in. Only the operator selects the destination. It comes from two sources, highest first:
+Upload of trajectories to Hugging Face is opt-in. Runs and `corpus dataset` commands share one
+operator-selected repository setting. It comes from two sources, highest first:
 
 1. The `--trajectory-hub-repo` CLI flag
 2. The `DAYDREAM_TRAJECTORY_HUB_REPO` environment variable
 
 Daydream ignores a `trajectory_hub_repo` key in the target checkout file config. When unset, nothing leaves your machine.
 
-When set, daydream uploads every run's complete archive bundle to the dataset repo as a per-run folder. The upload requires the `huggingface_hub` package and a valid `HF_TOKEN`. If either is missing, or the upload fails, the run is never aborted. Daydream emits a one-line warning and leaves the bundle un-uploaded. On the first upload daydream creates the dataset repo private. It reuses an existing repo with its current visibility.
+When configured, Daydream captures run records in its private local JSONL store and publishes
+bounded immutable shards with a manifest in one Hub commit. Run records and append-only
+observations are separate datasets in the operator's chosen private repository.
+Credentials alone never enable automatic uploads.
+Create the destination as a private dataset before uploading; existing public repositories are rejected.
+Malformed records, incompatible schemas, unsafe paths, blocking secret findings, scanner
+failures, and incomplete records are refused before publication. Complete oversized records
+produce an explicit error and are never truncated. Advisory scan findings may proceed.
+
+Upload requires the optional `huggingface_hub` package and HF credentials (`HF_TOKEN`
+or a cached Hugging Face login). Unavailable HF,
+interrupted uploads, and uncertain responses leave evidence queued locally. Retrying checks
+record and shard content identity, and commit conflicts reload the latest manifest without
+replacing existing entries. The review result and completed outputs survive upload failures;
+collection diagnostics contain no matched credentials or exception payloads.
 
 ```sh
-export DAYDREAM_TRAJECTORY_HUB_REPO="existentialbirds/daydream-trajectories"
-export HF_TOKEN="hf_..."   # required for upload to proceed
+export DAYDREAM_TRAJECTORY_HUB_REPO="OWNER/REPO"
+export HF_TOKEN="hf_..."
+daydream --review /path/to/project
+
+daydream corpus dataset publish --trajectory-hub-repo OWNER/REPO --store ~/.daydream/dataset
+daydream corpus dataset status --trajectory-hub-repo OWNER/REPO --store ~/.daydream/dataset
+daydream corpus dataset download --trajectory-hub-repo OWNER/REPO --revision <40-character-commit-sha> --output /tmp/daydream-records
 ```
+
+The `corpus dataset publish`, `status`, and `download` commands require an operator-selected
+repository through `--trajectory-hub-repo OWNER/REPO` or `DAYDREAM_TRAJECTORY_HUB_REPO`; the flag takes
+precedence over the environment variable. Without either, the command stops before accessing
+the store or contacting HF. `status` reports JSON counts
+for queued, published, and failed records, plus sanitized errors and the last confirmed commit.
+Publication returns a failure exit code while affected evidence remains queued. Downloads
+require an exact commit, verify manifest/shard checksums and schema contracts, and produce a
+validated local record store directly. They never reconstruct run directories or an archive
+index. A downloaded store can be read through `LocalRecordStore.select_snapshot` and
+`read_snapshot`, preserving temporal eligibility and observation precedence.
+
+Local evidence preserves raw producer content. The credential scanner recognizes limited
+patterns; a passing scan does not establish that content is safe to share. Training admission
+continues to apply its separate license and eligibility policies.
 
 ### Training roadmap
 
@@ -354,7 +399,7 @@ Private PR benchmarks run on Harbor. See [docs/benchmark.md](docs/benchmark.md) 
 
 Daydream runs a deep multi-stack review pipeline. The pipeline runs exploration, intent analysis, alternative review, per-stack reviews, an arbiter pass, cross-stack merge, and recommendation verification. A `--shallow` mode reviews one stack in a single pass for simpler projects.
 
-Daydream records and archives every run as an ATIF v1.7 trajectory. The `--no-archive` flag skips archival. A bitemporal corpus pipeline harvests, scores, and projects these trajectories into JSONL datasets.
+Daydream records and archives every run as an ATIF v1.7 trajectory. The `--no-archive` flag skips archival. Captured run records feed a bitemporal harvest, adjudication, and frozen corpus pipeline; local archives remain available for diagnostics.
 
 The [project page](https://existentialbirds.com/projects/daydream) documents the full architectural details.
 
@@ -837,15 +882,19 @@ These paths contain finalized output in the source checkout. Live artifacts stay
 | `.daydream/exploration/` | Cached pre-scan grounding |
 | `.review-output.md` | Review findings (removed with `--cleanup`) |
 | `~/.daydream/archive/runs/<id>/` | Archived run: manifest, trajectory, review output, evaluation, deep artifacts |
-| `~/.daydream/archive/index.db` | SQLite index for cross-project querying |
+| `~/.daydream/archive/index.db` | Local diagnostic index of finalized run metadata |
 
 Daydream moves existing untracked `.daydream/` and `.review-output.md` artifacts into private storage for the run. It restores or merges them during finalization. Tracked files at these artifact paths cause a preflight refusal; Daydream does not detach tracked source files. If another process changes an output, Daydream retains the competing bytes and reports a conflict instead of overwriting them. Recovery remains tied to the source checkout after temporary worktree cleanup.
 
 An explicit `--trajectory` path outside the source checkout receives live, atomic full and partial trajectory updates. Other explicit outputs remain deferred until finalization; `--dump-artifacts` merges files without replacing the whole destination directory. External trajectory publication requires the destination filesystem to support the checked atomic operations. An unsupported destination fails before model dispatch; there is no non-atomic fallback.
 
-`--dump-artifacts DIR` scans the finalized bundle before export. Clean bundles and bundles with only advisory findings are copied unchanged. Blocking findings trigger redaction of a separate private copy and a second scan. A sanitized copy includes `dump-sanitization.json` and retains the bundle layout and manifest session ID used by Hugging Face uploads; the original local archive and review evidence remain unchanged. Sanitization failures or remaining blocking findings, including scanner errors, withhold the dump and emit a warning without changing the review's exit status or discarding its findings and trajectory. Archive integrity and output publication errors still fail finalization.
+`--dump-artifacts DIR` always copies the finalized bundle's exact assembled bytes, including credential-shaped strings and binary files, without running the archive scanner or sanitizer. It preserves bundle layout, manifest session ID and unrelated destination files, and works with `--no-archive`. Byte preservation does not undo upstream trajectory redaction. Copy/I/O and archive-integrity failures retain the existing fatal finalization behavior and rollback.
 
-The dump scan covers generated bundle files, not unrelated files already in `DIR`. A refused dump leaves the existing destination unchanged. Consumers must handle a missing bundle after refusal; a successful review does not guarantee that `DIR/manifest.json` was exported. Logs and local archives can still contain sensitive information, so upload only the intended outputs.
+Review diagnostic content before sharing; diagnostic dumping preserves the assembled evidence.
+
+The canonical JSONL publisher scans complete run and observation records before private publication, refusing blocking secret findings with value-free diagnostics. Local records, archive evidence, and review output protections remain independent of publication retries.
+
+Logs and local archives can contain sensitive information, so upload only the intended outputs.
 
 Private storage prevents generated artifacts from appearing in ordinary cwd-rooted discovery. It is not an OS sandbox. When a later phase needs a generated file, Daydream passes its exact approved path or, for isolated backend modes, its bounded contents inline. It does not grant access to an entire runtime directory.
 

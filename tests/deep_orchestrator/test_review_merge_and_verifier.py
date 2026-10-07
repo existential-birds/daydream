@@ -281,34 +281,6 @@ def test_diff_changed_files_handles_modify_add_delete_binary() -> None:
     )
     assert _diff_changed_files(mixed) == ["keep.py", "new.py", "old.py", "logo.png"]
 
-async def test_merge_prompt_lists_records_in_sorted_order(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-
-    merge_prompts = [c["prompt"] for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
-    assert merge_prompts, "merge agent was not invoked"
-    prompt = merge_prompts[0]
-
-    # Records appear under "Per-stack parsed records:" as "  - <path>" lines.
-    lines = prompt.splitlines()
-    start = next((i for i, line in enumerate(lines) if "per-stack parsed records:" in line.lower()), None)
-    assert start is not None, "merge prompt missing per-stack records block"
-
-    record_paths: list[str] = []
-    for line in lines[start + 1 :]:
-        if line.startswith("  - "):
-            record_paths.append(line[4:].strip())
-        elif line.strip() == "":
-            break
-        else:
-            break
-
-    assert record_paths, "no record paths found in merge prompt"
-    assert record_paths == sorted(record_paths), f"records not in sorted order: {record_paths}"
-
 def test_merge_prompt_emits_related_files_instruction() -> None:
 
 

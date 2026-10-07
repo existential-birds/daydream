@@ -1432,10 +1432,29 @@ def test_gh_pr_diff_raises_without_remote(repo: Path) -> None:
         git_ops.gh_pr_diff(repo, 1)
 
 @gh_required
-def test_gh_api_raises_without_auth(repo: Path) -> None:
-    """``gh api`` against a relative endpoint with no GitHub remote fails."""
-    with pytest.raises(GitError):
-        git_ops.gh_api(repo, "repos/{owner}/{repo}")
+@pytest.mark.parametrize(
+    ("mode", "guidance"),
+    [
+        ("local", "gh auth login"),
+        ("automation", "GitHub CLI in automation"),
+        ("actions", "GitHub CLI in a GitHub Actions workflow"),
+    ],
+    ids=["local", "automation", "actions"],
+)
+def test_gh_api_raises_without_auth(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, mode: str, guidance: str,
+) -> None:
+    """The installed CLI rejects credentials absent at the actual authentication guard."""
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    if mode != "local":
+        monkeypatch.setenv("CI", "true")
+    if mode == "actions":
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    with pytest.raises(GitError, match=guidance) as error:
+        git_ops.gh_api(repo, "/user")
+    if mode != "local":
+        assert "set the GH_TOKEN environment variable" in str(error.value)
 
 def _make_divergent_history(tmp_path: Path) -> tuple[Path, str, str]:
     """Modify shared.txt on both main and feat so direct and merge-base diffs differ."""

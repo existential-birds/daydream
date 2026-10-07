@@ -70,6 +70,9 @@ async def test_claude_and_codex_produce_identical_steps(
         codex_loader, tmp_path / "codex", read_only=read_only
     )
     _compare_steps(claude_steps, codex_steps)
+    if read_only:
+        pi_steps = await _run_backend_against_canonical(pi_loader, tmp_path / "pi", read_only=True)
+        _compare_steps(claude_steps, pi_steps)
 
 
 @pytest.mark.asyncio
@@ -157,15 +160,3 @@ async def test_pi_produces_expected_steps_from_canonical_fixture(tmp_path: Path)
     trajectory_path = pi_root / "trajectory.json"
     assert trajectory_path.is_file(), "Pi recorder must write trajectory.json"
     assert atif_validate(trajectory_path, validate_images=False)
-
-
-@pytest.mark.asyncio
-async def test_pi_produces_identical_steps_read_only(tmp_path: Path) -> None:
-    """Pi read_only=True must still match Claude's Step shape — the read_only
-    tool restriction changes the CLI args, not the AgentEvent stream."""
-
-    claude_steps = await _run_backend_against_canonical(
-        claude_loader, tmp_path / "claude", read_only=True
-    )
-    pi_steps = await _run_backend_against_canonical(pi_loader, tmp_path / "pi", read_only=True)
-    _compare_steps(claude_steps, pi_steps)

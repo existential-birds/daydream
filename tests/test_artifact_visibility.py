@@ -2967,5 +2967,28 @@ def test_create_private_directory_rejects_symlinked_ancestor(tmp_path: Path) -> 
     assert not (outside / "runs").exists()
 
 
+def test_private_workspace_creation_preserves_symlink_target_permissions_during_leaf_replacement(
+    tmp_path: Path, source: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    outside.chmod(0o755)
+    locations = PrivateRootLocations(tmp_path / "runtime", tmp_path / "operations")
+    original_mkdir = Path.mkdir
+
+    def replace_created_directory(path: Path, *args: Any, **kwargs: Any) -> None:
+        original_mkdir(path, *args, **kwargs)
+        if path == locations.artifact_runtime:
+            path.rmdir()
+            path.symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setattr(Path, "mkdir", replace_created_directory)
+    with pytest.raises(ArtifactVisibilityError, match="private storage root is not an accessible directory"):
+        resolve_private_workspace_owner(source, locations=locations)
+
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o755
+    assert list(outside.iterdir()) == []
+
+
 if __name__ == "__main__":
     _main()

@@ -34,7 +34,6 @@ if TYPE_CHECKING:
     from daydream.run_config import RunConfig
     from daydream.workspace import WorkContext
 
-
 def get_archive_dir() -> Path:
     """Create the archive root and runs directory.
 
@@ -69,7 +68,6 @@ def finalize_archive_run(
     artifact_provenance: ArtifactEvidenceProvenance,
     config: RunConfig,
     work: WorkContext | None,
-    upload: bool = True,
     dump_path: Path | None = None,
 ) -> None:
     """Strictly archive one immutable run or raise a closed typed error."""
@@ -85,6 +83,7 @@ def finalize_archive_run(
     ):
         raise ArchiveIntegrityError("archive identity mismatch")
     _validate_frozen_artifacts(artifacts)
+
     if not config.archive and not config.dump_artifacts:
         return
     run_dir: Path | None = None
@@ -125,8 +124,7 @@ def finalize_archive_run(
 
                 evaluation = analyze_session(
                     target_dir / ".daydream",
-                    session_id=session_id,
-                    frozen_trajectories=frozen,
+                    write_snapshot=write_snapshot,
                     artifact_provenance=artifact_provenance,
                     code_workspace=work.repo if work is not None else artifact_provenance.public_source,
                 )
@@ -159,34 +157,18 @@ def finalize_archive_run(
         if config.dump_artifacts:
             if dump_path is None:
                 raise ArchivePublicationError("dump finalization path is missing")
-            from daydream.archive.dump import publish_dump
-
-            # A scan refusal withholds only the optional dump. Raw frozen
-            # evidence and completed review outputs remain intact. Mark copying
-            # started first so publication I/O failures still clean the stage.
+            # Mark copying started before I/O so publication failures clean the stage.
             dump_started = True
             try:
-                dump_started = publish_dump(assembly_dir, dump_path, session_id)
+                shutil.copytree(assembly_dir, dump_path, dirs_exist_ok=True)
             except Exception as exc:
                 raise ArchivePublicationError("dump publication failed") from exc
-        if config.archive and upload:
-            from daydream.archive import hub
-            from daydream.archive._console import warn
-
-            try:
-                hub_repo_id = hub.resolve_hub_repo(config)
-                _validate_frozen_artifacts(artifacts)
-                if hub_repo_id:
-                    hub.upload_run_bundle(assembly_dir, hub_repo_id, session_id)
-            except Exception as exc:
-                _validate_frozen_artifacts(artifacts)
-                if isinstance(exc, ArchiveIntegrityError):
-                    raise
-                warn(f"Data Collection: run upload failed ({type(exc).__name__})")
         _validate_frozen_artifacts(artifacts)
+
         os.replace(assembly_dir, run_dir)
         assembly_created = False
         archive_installed = True
+
         upsert_run(archive_dir, manifest)
     except BaseException as exc:
         owned_paths: tuple[Path | None, ...] = (

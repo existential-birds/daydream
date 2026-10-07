@@ -1,191 +1,96 @@
-"""Frozen deterministic splits + byte-for-byte reproducibility (Req 12, 13, D5).
-
-Pins byte-for-byte determinism, frozen splits, and the fail-closed as_of boundary.
-"""
-
-import hashlib
+"""Offline pinned membership, deterministic bytes, and chronological evidence eligibility."""
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from daydream.dataset import semantic_evidence_digest
 from daydream.training.corpus_projection.projector import build_frozen_corpus
 from daydream.training.corpus_projection.splits import assign_split
-from tests.harness.adjudication import write_sha256sums
-from tests.test_corpus_projection import (
-    _admit_second_batch,
-    _config_for,
-    _write_annotations_snapshot,
+from tests.harness.dataset import observation
+from tests.harness.record_projection import (
+    add_projection_run,
+    projection_config,
+    seed_projection_store,
 )
+from tests.test_corpus_projection import _read_jsonl
 
 
-def _read_split_memberships(out_dir: Path) -> tuple[list[str], list[str], list[str]]:
-    def ids(name: str) -> list[str]:
-        path = out_dir / name
-        # Fail-closed: a missing split manifest must not read as an empty
-        # membership — vacuous intersection/disjointness checks would mask a
-        # projector regression that skipped a split write.
-        if not path.is_file():
-            raise FileNotFoundError(f"missing split manifest {path}")
-        return [json.loads(line)["record_id"] for line in path.read_text().splitlines() if line]
-
-    return ids("train.jsonl"), ids("validation.jsonl"), ids("holdout.jsonl")
+def _memberships(out_dir: Path) -> dict[str, set[str]]:
+    return {name: {row["record_id"] for row in _read_jsonl(out_dir / f"{name}.jsonl")}
+            for name in ("train", "validation", "holdout")}
 
 
 def test_assign_split_is_deterministic_and_salted() -> None:
     rid = "ab" * 32
     assert assign_split(rid, holdout_rate=0.1, val_rate=0.1, salt="s") == assign_split(
-        rid, holdout_rate=0.1, val_rate=0.1, salt="s"
-    )
-    assert assign_split(rid, holdout_rate=0.0, val_rate=0.0, salt="s") == "train"
-    assert assign_split(rid, holdout_rate=1.0, val_rate=0.0, salt="s") == "holdout"
-    # a different salt is allowed to reorder membership — it must merely be stable per salt
-    assert assign_split(rid, holdout_rate=0.5, val_rate=0.0, salt="s1") == assign_split(
-        rid, holdout_rate=0.5, val_rate=0.0, salt="s1"
-    )
-
-@pytest.mark.parametrize("enriched", [False, True])
-def test_reprojection_is_byte_for_byte_deterministic(tmp_path: Path, enriched: bool, bundle_dir: Path) -> None:
-    """The same bundle projects byte-identically twice, with and without the
-    additive enrichment, so the emitted digests deterministically cover
-    finding_text / task_identity / lineage diff pointers."""
-    if enriched:
-        _enrich_bundle(bundle_dir)
-        _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
-    else:
-        _write_annotations_snapshot(bundle_dir)
-    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "a"))
-    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "b"))
-    assert (tmp_path / "b" / "corpus.jsonl").read_bytes() == (tmp_path / "a" / "corpus.jsonl").read_bytes()
-    assert (tmp_path / "b" / "lineage.json").read_bytes() == (tmp_path / "a" / "lineage.json").read_bytes()
-    for name in ("train.jsonl", "validation.jsonl", "holdout.jsonl"):
-        assert (tmp_path / "b" / name).read_bytes() == (tmp_path / "a" / name).read_bytes()
+        rid, holdout_rate=0.1, val_rate=0.1, salt="s")
+    assert assign_split(rid, holdout_rate=0, val_rate=0, salt="s") == "train"
+    assert assign_split(rid, holdout_rate=1, val_rate=0, salt="s") == "holdout"
 
 
-def _enrich_bundle(bundle_dir: Path) -> None:
-    """Give the admitted batch the review artifacts the projector joins on:
-    findings.json (bodies keyed by fingerprint), diff.patch, and a
-    producer-realistic manifest.json carrying the git shas."""
-    batch_dir = bundle_dir / "batches" / "sess-a"
-    (batch_dir / "manifest.json").write_text(json.dumps({
-        "git": {"head_sha": "2" * 40}, "code_context": {"base_sha": "1" * 40, "head_sha": "2" * 40},
-    }))
-    (batch_dir / "findings.json").write_text(json.dumps({"findings": [
-        {"fingerprint": "a1" * 32, "body": "exact localized finding body"},
-    ]}))
-    (batch_dir / "diff.patch").write_text("diff --git a/x.py b/x.py\n+print(1)\n")
+@pytest.mark.parametrize("capped", [False, True])
+def test_reprojection_is_byte_identical_with_frozen_disjoint_membership(tmp_path: Path, capped: bool) -> None:
+    store = seed_projection_store(tmp_path, dispositions=("accepted", "accepted", "rejected"), siblings=4)
+    add_projection_run(store, run_id="sess-b", dispositions=("accepted", "rejected"), stack="rust",
+                       profile="quick-review", repo_slug="owner/repo-b")
+    caps = {"max_stack_share": 0.5, "max_repo_share": 0.5, "max_profile_share": 0.5} if capped else {}
+    config = projection_config(store, tmp_path, **caps)
+    build_frozen_corpus(config)
+    first = {path.name: path.read_bytes() for path in config.out_dir.iterdir()}
+    # Later records are outside the selected immutable snapshot and must not alter any byte.
+    add_projection_run(store, run_id="later", repo_slug="owner/later")
+    build_frozen_corpus(replace(config, out_dir=tmp_path / "replay"))
+    assert {path.name: path.read_bytes() for path in (tmp_path / "replay").iterdir()} == first
+    build_frozen_corpus(config)
+    assert {path.name: path.read_bytes() for path in config.out_dir.iterdir()} == first
+    memberships = _memberships(config.out_dir)
+    assert memberships["train"].isdisjoint(memberships["validation"])
+    assert memberships["train"].isdisjoint(memberships["holdout"])
+    assert memberships["validation"].isdisjoint(memberships["holdout"])
+    assert set.union(*memberships.values()) == {
+        row["record_id"] for row in _read_jsonl(config.out_dir / "corpus.jsonl")}
+    for row in _read_jsonl(config.out_dir / "corpus.jsonl"):
+        assert row["record_id"] in memberships[row["lineage"]["split"]]
 
 
-def test_enriched_projection_pins_exact_additive_record_shape(tmp_path: Path, bundle_dir: Path) -> None:
-    """The projected gold-accepted record from an enriched bundle is pinned
-    dict-for-dict at the additive v2 shape: finding_text + its sha256, the
-    task_identity block, and the diff pointer mirrored into lineage. The
-    exact equality IS the reproducibility contract — new projector keys must
-    regenerate this dict, never relax it to a subset check."""
-    _enrich_bundle(bundle_dir)
-    _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
-    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "out"))
-    records = [json.loads(line) for line in (tmp_path / "out" / "corpus.jsonl").read_text().splitlines() if line]
-    accepted = next(r for r in records if r["outcome_label"] == "accepted")
-    assert accepted == {"disposition": "accepted",
-        "diff": "diff --git a/x.py b/x.py\n+print(1)\n",
-        "evidence": [{"classifier_label": "accepted", "comment_id": 1,
-             "created_at": "2026-02-01T00:00:00+00:00", "valid_at": "2026-01-01T00:00:00+00:00"},
-        ], "finding_fingerprint": "a1" * 32, "finding_text": "exact localized finding body",
-        "finding_text_sha256": hashlib.sha256(b"exact localized finding body").hexdigest(), "lineage": {"as_of": None,
-            "content_digests": ["1111111111111111111111111111111111111111111111111111111111111111",
-                "e12d0a7e8ecda05271e3faa36158292462221f5cf8c5cc530bc825f463e77b6d",
-            ], "curation_id": "cur-0123456789abcdef",
-            "diff_digest": "4b7fad43c00ef2883fec22db7e9132310846cef11e0ec4cbbf936bc69a2c57a9",
-            "diff_ref": {"batch": "1111111111111111111111111111111111111111111111111111111111111111",
-                "relpath": "batches/sess-a/diff.patch",
-            }, "exclusion_reason": None, "hub_commit": "0123456789abcdef0123456789abcdef01234567",
-            "labeler_policy_version": "1", "license_decision": {
-                "evidence_ref": "manifest", "policy_version": "1", "reason_code": None, "repo_slug": "owner/repo-a",
-                "spdx_id": "MIT", "status": "admitted",
-            }, "reply_classifier_version": "1", "repo_slug": "owner/repo-a",
-            "rubric_schema_version": "per-finding-resolutions-v1", "split": "train",
-            "valid_at": "2026-01-01T00:00:00+00:00",
-        }, "outcome_label": "accepted", "profile": {"profile_digest": "d" * 64, "profile_name": "deep-review",
-            "profile_schema_version": 2, "profile_source_kind": "builtin",
-        }, "record_id": "6bfc34f5a65f3a68bd0409c7893b22a6d884e4c515a74ebe62b8b42e88e0dfda",
-        "record_type": "outcome-finding", "schema_version": "2", "session_id": "sess-a", "stack": "python",
-        "task_identity": {
-            "base_sha": "1" * 40, "diff_digest": "4b7fad43c00ef2883fec22db7e9132310846cef11e0ec4cbbf936bc69a2c57a9",
-            "diff_ref": {"batch": "1111111111111111111111111111111111111111111111111111111111111111",
-                "relpath": "batches/sess-a/diff.patch",
-            }, "head_sha": "2" * 40, "repo_slug": "owner/repo-a",
-        }, "task_segment": "seg-0", "tier": "gold", "trajectory_id": "sess-a:fix-0",
-    }
+def test_observation_temporal_eligibility_and_embedded_posterior_leak_are_distinct(tmp_path: Path) -> None:
+    store = seed_projection_store(tmp_path, dispositions=("accepted",))
+    run = store.read_records()["runs"][0]
+    item = run["findings"]["value"]["items"][0]
+    evidence = [{"valid_at": "2026-10-06T00:00:00Z", "body": "late"}]
+    # An observation whose own valid time is future cannot replace eligible human evidence.
+    store.append_observation(observation("late-valid", run_id=run["run_id"], item_uid=item["item_uid"],
+        role="adjudicator", valid_at="2026-10-06T00:00:00Z", observed_at="2026-10-04T13:00:00Z",
+        semantic_evidence=evidence, evidence_digest=semantic_evidence_digest(evidence),
+        payload={"type": "finding-judgment", "disposition": "rejected", "rationale": "late"}))
+    config = projection_config(store, tmp_path)
+    build_frozen_corpus(config)
+    assert _read_jsonl(config.out_dir / "corpus.jsonl")[0]["disposition"] == "accepted"
+    # Eligible envelopes still must not smuggle posterior reply evidence through the pin.
+    store.append_observation(observation("leaking-valid", run_id=run["run_id"], item_uid=item["item_uid"],
+        role="automatic", observed_at="2026-10-04T14:00:00Z", semantic_evidence=evidence,
+        evidence_digest=semantic_evidence_digest(evidence),
+        payload={"type": "finding-judgment", "disposition": "rejected", "rationale": "invalid pin"}))
+    with pytest.raises(ValueError, match="posterior"):
+        build_frozen_corpus(projection_config(store, tmp_path, out_dir=tmp_path / "leaking"))
+    assert not (tmp_path / "leaking").exists()
 
-def test_splits_are_disjoint_and_frozen(tmp_path: Path, bundle_dir: Path) -> None:
-    _write_annotations_snapshot(bundle_dir)
-    out_a = tmp_path / "o"
-    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out_a))
-    train, val, holdout = _read_split_memberships(out_a)
-    assert not (set(train) & set(val))
-    assert not (set(train) & set(holdout))
-    assert not (set(val) & set(holdout))
-    assert train + val + holdout  # the fixture projected records
-    # frozen: same membership again on re-run into a fresh directory
-    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "b"))
-    train2, _, _ = _read_split_memberships(tmp_path / "b")
-    assert train2 == train
-    # frozen: same membership under re-run in place (overwrite is stable)
-    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out_a))
-    train3, _, _ = _read_split_memberships(out_a)
-    assert train3 == train
 
-def test_split_membership_recorded_in_record_lineage(tmp_path: Path, bundle_dir: Path) -> None:
-    _write_annotations_snapshot(bundle_dir)
-    out = tmp_path / "o"
-    build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out))
-    for line in (out / "corpus.jsonl").read_text().splitlines():
-        record = json.loads(line)
-        assert record["lineage"]["split"] in {"train", "validation", "holdout"}
-
-def test_share_capped_replay_is_byte_identical_and_splits_disjoint(tmp_path: Path, bundle_dir: Path) -> None:
-    snap = _write_annotations_snapshot(
-        bundle_dir, session_id="sess-a", n_siblings=4, dispositions=["accepted", "accepted", "accepted"],
-    )
-    # A second admitted session with a distinct stack/repo so every configured
-    # share cap is satisfiable (a lone value is 100% of the population and can
-    # never satisfy a <1.0 cap); re-profile only the last row to a second
-    # profile value so the profile trim branch executes without ever leaving a
-    # lone survivor, then refresh the annotation bundle's SHA256SUMS (same
-    # mechanics as the build-wiring fixtures).
-    _admit_second_batch(bundle_dir, "owner/repo-b", spdx_id="MIT")
-    snap = _write_annotations_snapshot(
-        bundle_dir, session_id="sess-b", n_siblings=2, dispositions=["accepted", "accepted"], stack="rust",
-    )
-    rows = [json.loads(line) for line in snap.read_text().splitlines() if line]
-    rows[-1]["profile"]["profile_name"] = "quick-review"
-    snap.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
-    ann_dir = snap.parent
-    write_sha256sums(ann_dir, skip=frozenset({"SHA256SUMS"}))
-    for out in (tmp_path / "a", tmp_path / "b"):
-        build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out, max_stack_share=0.5,
-                        max_repo_share=0.6, max_profile_share=0.7)
-        )
-    for name in ("corpus.jsonl", "lineage.json", "train.jsonl", "validation.jsonl", "holdout.jsonl"):
-        assert (tmp_path / "b" / name).read_bytes() == (tmp_path / "a" / name).read_bytes()
-    train, val, hold = _read_split_memberships(tmp_path / "a")
-    assert not (set(train) & set(val))
-    assert not (set(train) & set(hold))
-    assert not (set(val) & set(hold))
-    # share caps present in the lineage of a capped build
-    lineage = json.loads((tmp_path / "a" / "lineage.json").read_text())
-    assert lineage["share_caps"]["version"] == 1
-
-def test_late_outcome_evidence_is_refused(tmp_path: Path, bundle_dir: Path) -> None:
-    _write_annotations_snapshot(bundle_dir, valid_at="2030-01-01T00:00:00+00:00")
-    cfg = _config_for(bundle_dir, tmp_path, out_dir=tmp_path / "late", as_of="2026-06-01T00:00:00+00:00")
-    with pytest.raises(ValueError, match="valid_at"):
-        build_frozen_corpus(cfg)
-    # refusal, not drop: the full fail-closed file set was never written
-    # (every artifact the projector emits, plus the _SUCCESS completeness
-    # marker — a regression that wrote any of them before raising fails)
-    late_dir = tmp_path / "late"
-    for name in ("corpus.jsonl", "train.jsonl", "validation.jsonl",
-                 "holdout.jsonl", "adjudication-report.json", "schema.json", "lineage.json", "_SUCCESS"):
-        assert not (late_dir / name).exists(), name
+def test_snapshot_pins_download_provenance_and_replays_after_source_changes(tmp_path: Path) -> None:
+    store = seed_projection_store(tmp_path)
+    store.record_download_source({"repository": "owner/private", "revision": "a" * 40,
+                                  "manifest_sha256": "c" * 64}, **store.read_records())
+    config = projection_config(store, tmp_path)
+    build_frozen_corpus(config)
+    first = {path.name: path.read_bytes() for path in config.out_dir.iterdir()}
+    lineage = json.loads((config.out_dir / "lineage.json").read_text())
+    assert lineage["hub_commit"] == "a" * 40
+    assert lineage["source_repository"] == "owner/private"
+    assert lineage["snapshot"]["source"]["manifest_sha256"] == "c" * 64
+    assert all(row["lineage"]["hub_commit"] == "a" * 40 for row in _read_jsonl(config.out_dir / "corpus.jsonl"))
+    store.record_download_source({"repository": "owner/other", "revision": "b" * 40,
+                                  "manifest_sha256": "d" * 64}, **store.read_records())
+    build_frozen_corpus(config)
+    assert {path.name: path.read_bytes() for path in config.out_dir.iterdir()} == first

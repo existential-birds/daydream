@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -22,10 +21,10 @@ from daydream.trajectory import (
     RUN_DOCUMENT_NAME,
     RUNS_DIRNAME,
     RunWriteSnapshot,
-    TrajectoryDocumentSnapshot,
     compute_timing_summary,
     run_document_path,
     siblings_directory,
+    snapshot_trajectories,
 )
 
 # Trajectory loading
@@ -63,48 +62,6 @@ def collect_trajectory_paths(run_dir: Path) -> list[Path]:
         if latest:
             paths = _run_dir_trajectory_paths(latest.parent)
     return paths
-
-
-def load_trajectories(daydream_dir: Path, session_id: str | None = None) -> dict[str, Any]:
-    """Load main and sibling trajectories for an exact session or unique prefix.
-
-    Without a session, select the newest run. Ambiguous prefixes raise ValueError.
-    """
-    main = None
-    forked: list[dict[str, Any]] = []
-    runs_dir = daydream_dir / RUNS_DIRNAME
-
-    run_dir: Path | None = None
-    if session_id:
-        # Exact match first, then prefix match on run directory names
-        exact = runs_dir / session_id
-        if exact.is_dir():
-            run_dir = exact
-        elif runs_dir.is_dir():
-            matches = sorted(
-                d for d in runs_dir.iterdir()
-                if d.is_dir() and d.name.startswith(session_id)
-            )
-            if len(matches) == 1:
-                run_dir = matches[0]
-            elif len(matches) > 1:
-                raise ValueError(f"Session prefix '{session_id}' matches multiple runs")
-    else:
-        latest = _latest_main_trajectory(daydream_dir)
-        if latest:
-            # latest is runs/<session_id>/trajectory.json — parent is the run dir
-            run_dir = latest.parent
-
-    if run_dir:
-        for path in _run_dir_trajectory_paths(run_dir):
-            data = json.loads(path.read_text())
-            data["_source_file"] = path.name
-            if path.name == RUN_DOCUMENT_NAME:
-                main = data
-            else:
-                forked.append(data)
-
-    return {"main": main, "forked": forked}
 
 
 def _agent_label(filename: str) -> str:
@@ -629,9 +586,8 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
     }
 
 
-def analyze_timing(trajectories: dict[str, Any]) -> dict[str, Any]:
+def analyze_timing(trajectories: dict[str, Any], write_snapshot: RunWriteSnapshot) -> dict[str, Any]:
     """Project the shared lifecycle-first timing reducer into evaluation JSON."""
-    all_timestamps: list[datetime] = []
     agent_timings: list[dict[str, Any]] = []
 
     for traj in _all_trajectories(trajectories):
@@ -644,57 +600,10 @@ def analyze_timing(trajectories: dict[str, Any]) -> dict[str, Any]:
         if len(ts_list) >= 2:
             duration = (ts_list[-1] - ts_list[0]).total_seconds()
             agent_timings.append({"agent": label, "duration_seconds": round(duration, 1)})
-        all_timestamps.extend(ts_list)
 
-    main = trajectories.get("main")
-    if isinstance(main, dict):
-        payloads = [
-            main,
-            *[item for item in trajectories.get("forked", []) if isinstance(item, dict)],
-        ]
-        documents: list[TrajectoryDocumentSnapshot] = []
-        for index, payload in enumerate(payloads):
-            canonical = {key: value for key, value in payload.items() if key != "_source_file"}
-            trajectory_id = canonical.get("trajectory_id")
-            if not isinstance(trajectory_id, str):
-                trajectory_id = str(canonical.get("session_id", f"legacy-{index}"))
-                canonical["trajectory_id"] = trajectory_id
-            filename = payload.get("_source_file")
-            if not isinstance(filename, str):
-                filename = RUN_DOCUMENT_NAME if index == 0 else f"trajectory-{index}.json"
-            documents.append(
-                TrajectoryDocumentSnapshot(
-                    trajectory_id=trajectory_id,
-                    path=Path(filename),
-                    json_bytes=json.dumps(canonical, sort_keys=True).encode("utf-8"),
-                )
-            )
-        raw_extra = main.get("extra")
-        extra: dict[str, Any] = raw_extra if isinstance(raw_extra, dict) else {}
-        partial = bool(extra.get("partial")) and isinstance(extra.get("snapshot_at"), str)
-        cutoff = extra.get("snapshot_at") if partial else extra.get("run_ended_at")
-        if not isinstance(cutoff, str):
-            cutoff = ""
-        snapshot = RunWriteSnapshot(
-            status="partial" if partial else "complete",
-            cutoff_at=cutoff,
-            root_trajectory_id=documents[0].trajectory_id,
-            documents=tuple(documents),
-        )
-        summary = compute_timing_summary(snapshot)
-        if summary is not None:
-            return {
-                **summary.to_dict(),
-                "by_agent": sorted(
-                    agent_timings,
-                    key=lambda item: item["duration_seconds"],
-                    reverse=True,
-                ),
-            }
-
-    total_duration = (max(all_timestamps) - min(all_timestamps)).total_seconds() if len(all_timestamps) >= 2 else 0.0
+    summary = compute_timing_summary(write_snapshot)
     return {
-        "total_wall_clock_seconds": round(total_duration, 1),
+        **(summary.to_dict() if summary is not None else {"total_wall_clock_seconds": None}),
         "by_agent": sorted(agent_timings, key=lambda item: item["duration_seconds"], reverse=True),
     }
 
@@ -864,15 +773,14 @@ def analyze_routing(daydream_dir: str | Path) -> dict[str, Any]:
 
 def analyze_session(
     daydream_dir: str | Path,
-    session_id: str | None = None,
     *,
-    frozen_trajectories: dict[str, Any] | None = None,
+    write_snapshot: RunWriteSnapshot,
     artifact_provenance: ArtifactEvidenceProvenance | None = None,
     code_workspace: Path | None = None,
 ) -> dict[str, Any]:
     """Combine trajectory, findings, timing, routing, training, and quality analysis.
 
-    Frozen trajectories bypass mutable-file reads. Artifact provenance supplies the
+    The immutable write snapshot supplies trajectory bytes and lifecycle timing. Artifact provenance supplies the
     public display path; only quality reads the live code_workspace. Unsafe tree-sitter
     versions mark quality unavailable while preserving the remaining evaluation.
     """
@@ -880,11 +788,7 @@ def analyze_session(
     display_daydream_dir = (
         daydream_dir if artifact_provenance is None else artifact_provenance.public_daydream_dir
     )
-    trajectories = (
-        frozen_trajectories
-        if frozen_trajectories is not None
-        else load_trajectories(daydream_dir, session_id=session_id)
-    )
+    trajectories = snapshot_trajectories(write_snapshot)
 
     if not trajectories["main"] and not trajectories["forked"]:
         return {"error": f"No trajectory files found in {daydream_dir}"}
@@ -904,7 +808,7 @@ def analyze_session(
     location = analyze_location(daydream_dir)
     routing = analyze_routing(daydream_dir)
     shipped_duplication = analyze_shipped_duplication(daydream_dir)
-    timing = analyze_timing(trajectories)
+    timing = analyze_timing(trajectories, write_snapshot)
     training = analyze_training_signals(trajectories)
     try:
         quality = analyze_quality(daydream_dir, code_workspace=code_workspace)

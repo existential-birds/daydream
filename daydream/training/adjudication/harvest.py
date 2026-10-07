@@ -6,50 +6,42 @@ import json
 from pathlib import Path
 from typing import Any
 
+from daydream.dataset import LocalRecordStore
 from daydream.training.adjudication.canonical import AnnotationDriftError
 from daydream.training.adjudication.export import EXPORT_KEYS
-from daydream.training.adjudication.observations import (
-    group_observations_by_record,
-    load_observations,
-    prior_adjudications,
-)
+from daydream.training.adjudication.observations import group_observations_by_record, prior_adjudications
 from daydream.training.adjudication.precedence import DECISIVE_DISPOSITIONS, effective_adjudication
-from daydream.training.adjudication.preview import _load_sessions
 from daydream.training.adjudication.queue import build_queue
 from daydream.training.corpus_projection.tiers import classify_tier
+from daydream.training.record_evidence import finding_observations, sessions_from_snapshot
 
 __all__ = ["build_export_entries"]
 
 
 def build_export_entries(
-    index_root: Path,
+    store_dir: Path,
+    snapshot_id: str,
     ledger_path: Path,
-    *,
-    observations_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Build corpus adjudicate export rows sorted by record_id. Verify preview digests against a fresh
-    hydrated-index queue before applying effective_adjudication precedence; never re-pin drifted
+    frozen-record queue before applying effective_adjudication precedence; never re-pin drifted
     evidence. Missing ledgers, unknown IDs, and digest drift fail before writing. Rows use the
     projector adjudication shape plus record_id and evidence_digest.
     """
-    observations = load_observations(observations_path) if observations_path is not None else []
+    records = LocalRecordStore(store_dir).read_snapshot(snapshot_id)
+    observations = finding_observations(records)
     items = build_queue(
-        _load_sessions(index_root)[0], prior_observations=prior_adjudications(observations),
+        sessions_from_snapshot(records, overlay_judgments=False),
+        prior_observations=prior_adjudications([o for o in observations if o["role"] != "automatic"]),
     )
     by_record_id = {str(item["record_id"]): item for item in items}
 
     if not ledger_path.is_file():
-        raise FileNotFoundError(
-            f"preview ledger not found (run `corpus adjudicate preview` first): {ledger_path}"
-        )
+        raise FileNotFoundError(f"preview ledger not found (run `corpus adjudicate preview` first): {ledger_path}")
     try:
         ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        from daydream.archive.hydrate import HubUnavailableError
-
-        raise HubUnavailableError(
-            f"unreadable preview ledger at {ledger_path}: {exc}"
-        ) from exc
+        raise ValueError("unreadable preview ledger") from exc
 
     drifted: list[str] = []
     for ledger_item in ledger["items"]:
@@ -58,7 +50,7 @@ def build_export_entries(
         if fresh is None:
             raise ValueError(
                 f"preview ledger record_id {record_id!r} is absent from the "
-                "freshly built adjudication queue over the index"
+                "freshly built adjudication queue over the selected snapshot"
             )
         if str(fresh["evidence_digest"]) != str(ledger_item["evidence_digest"]):
             drifted.append(record_id)
@@ -74,6 +66,13 @@ def build_export_entries(
         observations, {str(item["record_id"]) for item in items}, "adjudicate export"
     )
 
+    from daydream.training.record_identity import record_finding_id
+
+    hosts = {
+        record_finding_id(s["session_id"], s["trajectory_id"], s["segment_id"], r["item_uid"]): r["item_uid"]
+        for s in sessions_from_snapshot(records)
+        for r in s["resolutions"]
+    }
     exported: list[dict[str, Any]] = []
     for item in items:
         record_id = str(item["record_id"])
@@ -95,10 +94,13 @@ def build_export_entries(
         profile = str(item["profile"])
         entry: dict[str, Any] = {
             "record_id": record_id,
+            "item_uid": hosts.get(record_id),
             "evidence_digest": str(item["evidence_digest"]),
             "fingerprint": str(item["fingerprint"]),
             "disposition": disposition,
             "evidence": evidence,
+            "reply_captures": item["reply_captures"],
+            "correction": item["correction"],
             "exclusion_reason": None,
             "profile": profile,
             "stack": item["stack"],

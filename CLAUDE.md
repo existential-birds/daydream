@@ -128,12 +128,21 @@ deep FlowSteps -> phases/ -> agent.py -> Backend.execute()
 | `pr_review.py`, `reviews/` | Posting orchestration over finding/placement models, host-owned comment identity, captured rendering, and immutable diagram validation |
 | `pr_comment_renderer.py` | Pure renderer: trajectory in, markdown out (no I/O) |
 | `training/` vs `eval/` | Corpus pipeline (harvest, reward, projection, JSONL) vs deterministic trajectory analysis; `eval/quality.py` owns source-quality analysis and `eval/latency_report.py` renders the per-profile report |
-| `training/harvest.py`, `training/harvest_types.py` | Explicit per-run evidence services and validated immutable inputs; `collect_annotation` shares acquisition with read-only semantic preview, and `build_annotation(row, evidence)` reduces completed evidence without I/O |
-| `training/calibration.py` | Fail-closed projection validation, deterministic calibration statistics, `calibration-artifact` emission (`corpus calibrate-reward`) |
+| `dataset.py`, `dataset_capture.py`, `dataset_hub.py`, `hub.py` | Frozen run capture, immutable local records and snapshots, canonical JSONL publication/download, and the single lazy HF SDK client |
+| `dataset_scoring.py` | Shared acquisition of live producer scoring artifacts for frozen capture and RL; harvest reads recorded scoring inputs |
+| `training/harvest.py`, `training/harvest_types.py` | Record-based acquisition and immutable observation persistence; pure reward/rubric reduction preserves scoring semantics |
+| `training/corpus_projection/`, `training/calibration.py` | Offline projection from frozen record snapshots with eligible observations, followed by fail-closed calibration of derived corpus exports |
 | `prompts/` | Authorial intent, exploration subagents, CWD grounding |
 
 Self-describing modules are not listed: `findings.py`, `pricing.py`, `github_app.py`,
 `bot_identity.py`, `bot_setup.py`, `summarize.py`, `archive/`, `benchmark/`.
+
+Harvested finding observations retain complete source-bound `reply_captures` separately
+from their semantic reply evidence. Capture-only enrichment preserves semantic digests
+and matching human judgments; source-body edits create a new evidence generation.
+Pinned snapshot readers, materialization, and exports retain the captures even when
+human precedence supplies the disposition. Local capture keeps fetched text intact;
+common private HF publication applies the existing complete-record secret scanner.
 
 **Latency-profile naming.** The concept is `latency_profile` (config key `latency_profile`, CLI
 `--latency-profile`, config-file scalar, `RunConfig.latency_profile`). `forensic` names one profile and
@@ -333,6 +342,9 @@ Full contract: `docs/extensions.md`.
   generated files through the session. Join all writers before freezing immutable evidence;
   archive/evaluate/publish only after that boundary. Never reconstruct public output paths or
   broaden backend read roots.
+- **Archive index**: initialize an empty database or use the complete current schema.
+  The local diagnostic archive uses runs-only schema version 9. Unsupported indexes are preserved and rejected; use a fresh archive directory instead of migrating. Annotation history lives only in LocalRecordStore observations.
+  Evaluation consumes the immutable write snapshot and leaves unavailable lifecycle timing unmeasured.
 - **Conventional Commits** (`feat(backends): ...`). Stage explicitly (`git add <path>`), never `git add -A`.
 - Fix bugs at the root. Never bypass the hook, skip tests, or `git push --no-verify`.
 - Own your own bugs in plain language. Never describe your defect as the tool being buggy.
@@ -347,7 +359,7 @@ Full contract: `docs/extensions.md`.
 | `DAYDREAM_EXT_DIR` | Extensions | Path to `daydream_ext` (overrides `import daydream_ext`) |
 | `DAYDREAM_GH_TIMEOUT_SECONDS` / `_RETRIES` | Git ops | `gh` CLI timeout and retry count |
 | `DAYDREAM_GIT_TOKEN` | Harvest | Optional out-of-band auth for sanitized repo clones during `corpus harvest` of private repos (e.g. a GitHub PAT); injected via git config environment variables (`http.extraHeader`), **never embedded in the remote URL** and **never on the command line**. Without it, plain clone via the ambient credential helper |
-| `DAYDREAM_TRAJECTORY_HUB_REPO` | Archive | Optional HuggingFace dataset repo to upload each run's bundle to; one of the two operator sources (the other is the CLI `--trajectory-hub-repo` flag). The target checkout's file config is ignored for this |
+| `DAYDREAM_TRAJECTORY_HUB_REPO` | Dataset | Explicit private Hugging Face dataset repo for capture and retryable JSONL shard publication; CLI `--trajectory-hub-repo` wins. The target checkout's file config is ignored; `--no-capture-data` disables collection/upload |
 | `DAYDREAM_TRACE_TO` | Observability | Comma-separated trace destinations; empty/unset disables tracing. `--trace-to` overrides this list; `--no-tracing` disables tracing |
 | `DAYDREAM_TRACE_CONTENT` | Observability | Content policy: `full` (default) or `metadata`; overridden by `--trace-content`. Does not enable tracing by itself |
 | `PI_PROVIDER` / `PI_THINKING` | Pi | `--provider` / `--thinking`; `PI_THINKING` loses to a per-phase `reasoning_effort` |

@@ -615,10 +615,6 @@ async def test_osprey_temperature_telemetry_matches_explicit_option(temperature:
         assert config.temperature is None
     else:
         assert config.temperature == 0.7
-
-async def test_osprey_turn_end_model_override_is_native() -> None:
-    backend = OspreyBackend(model="custom-model", osprey_binary="fake")
-    events, _spawner = await _collect(backend, osprey_session(*_p18_osprey_events()))
     turn_ends = [e for e in events if isinstance(e, TurnEndEvent)]
     assert len(turn_ends) == 1
     turn_end = turn_ends[0]
@@ -629,15 +625,12 @@ async def test_osprey_turn_end_model_override_is_native() -> None:
     assert turn_end.provider_source == "native"
     # Session outcome is not a model finish reason — stays unset.
     assert turn_end.finish_reason is None
-
-async def test_osprey_session_end_usage_is_session_sourced() -> None:
-    backend = OspreyBackend(model="custom-model", osprey_binary="fake")
-    events, _spawner = await _collect(backend, osprey_session(*_p18_osprey_events()))
     costs = [e for e in events if isinstance(e, CostEvent)]
     assert len(costs) == 1
     assert costs[0].measurement_source == "session"
     # The base fixture session_end carries no cost -> no provenance claim.
     assert costs[0].cost_source is None
+
 
 async def test_osprey_resume_and_fork_continuation_modes() -> None:
     for mode, flag in (("resume", "--resume"), ("fork", "--fork-from")):

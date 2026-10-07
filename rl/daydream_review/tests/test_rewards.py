@@ -19,7 +19,7 @@ import pytest
 import verifiers.v1 as vf
 from conftest import FakeRuntime, passed_gate_report
 from daydream.atif import validate
-from daydream.training.harvest import assemble_scoring_inputs
+from daydream.dataset_scoring import assemble_scoring_inputs
 from daydream.training.reward import REWARD_VERSION, score_trajectory
 from verifiers.v1.runtimes.subprocess import SubprocessRuntime
 
@@ -29,13 +29,11 @@ from daydream_review.rundir import DAYDREAM_EXCLUDE, RUN_DIR_FILES, candidate_di
 from daydream_review.taskset import (
     ROLLOUT_REWARD_VERSION,
     DaydreamReviewConfig,
-    DaydreamReviewData,
     DaydreamReviewState,
     DaydreamReviewTask,
     DaydreamReviewTaskset,
     _archive_root,
     _claimed_test_verdict,
-    _review_state,
 )
 from daydream_review.verifier import seal_artifacts
 
@@ -103,22 +101,16 @@ def _assert_gate_held(trace: vf.Trace) -> None:
     assert "test_claim_mismatch" not in trace.metrics
 
 
-def test_review_state_guard_rejects_base_state() -> None:
-    data = DaydreamReviewData(idx=0,
-        name="org/repo#1",
-        prompt="Deep-review PR #1 of org/repo @ 111111111111",
-        repo_slug="org/repo", clone_url="https://example.com/repo.git", pr_number=1, base_sha="0" * 40,
-        head_sha="1" * 40, test_command="true", protected_test_paths=["tests/"],
-    )
+async def test_review_state_guard_rejects_base_state(
+    runtime: SubprocessRuntime, fixture_manifest_path: Path,
+) -> None:
+    task = _task(fixture_manifest_path)
     base_trace = vf.Trace(
-        task=vf.TraceTask(type=DaydreamReviewTask.__name__, data=data), agent=vf.AgentInfo(model=MODEL),
+        task=vf.TraceTask(type=DaydreamReviewTask.__name__, data=task.data), agent=vf.AgentInfo(model=MODEL),
     )
-    with pytest.raises(TypeError):
-        _review_state(base_trace)
-    good_trace = vf.Trace(task=vf.TraceTask(type=DaydreamReviewTask.__name__, data=data),
-        agent=vf.AgentInfo(model=MODEL), state=DaydreamReviewState(),
-    )
-    assert _review_state(good_trace).run_dir is None
+    with pytest.raises(TypeError, match="scoring state must be a DaydreamReviewState"):
+        await task.score(base_trace, runtime)
+    assert base_trace.rewards == {} and base_trace.metrics == {}
 
 async def test_score_without_runtime_records_nothing(fixture_manifest_path: Path) -> None:
     """Offline replay with runtime=None leaves rewards/metrics empty, even with base State.
@@ -353,17 +345,6 @@ async def test_missing_run_dir_scores_zero(tmp_path: Path, runtime: SubprocessRu
     assert trace.info["reward_breakdown"] == {"error": "no archived run dir"}
     assert trace.metrics["n_findings"] == 0.0
 
-async def test_green_suite_records_non_regression(
-    tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path
-) -> None:
-    task = _task(fixture_manifest_path)
-    assert task.data.test_command == "python -m unittest discover -q"
-    trace = await _score(tmp_path, fixture_manifest_path, runtime, task=task, edit=_CALC_FIXED, patch=_REAL_PATCH)
-
-    assert trace.metrics["fixes_applied"] == 1.0
-    assert trace.metrics["suite_non_regression"] == 1.0
-    assert trace.metrics["test_oracle_unchanged"] == 1.0
-
 @pytest.mark.parametrize("stage_edit", [False, True], ids=["unstaged", "staged"])
 async def test_verifier_identity_branch_executes_and_fails_closed(
     stage_edit: bool, tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path,
@@ -408,17 +389,6 @@ async def test_verifier_identity_branch_executes_and_fails_closed(
     verify_dir = tmp_path / "repo-verify"
     assert (verify_dir / "calc.py").read_text(encoding="utf-8") == _CALC_FIXED
 
-async def test_verify_checkout_derives_diff_from_shared_helper_with_empty_guard(fixture_manifest_path: Path,) -> None:
-    """Use the shared candidate diff with an empty guard; failed/partial diffs must never reach git apply."""
-
-    rt = FakeRuntime(exit_code=0)
-    repo, head_sha = "/work/repo", "deadbeef"
-    await taskset._prepare_verify_checkout(rt, repo, head_sha)
-
-    script = rt.commands[0][2]  # the single sh -c script
-    assert shlex.join(candidate_diff_cmd(repo, head_sha)) in script
-    assert "[ ! -s " in script and "apply" in script
-
 async def test_red_suite_records_no_non_regression(
     tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path
 ) -> None:
@@ -430,7 +400,9 @@ async def test_red_suite_records_no_non_regression(
 async def test_suite_result_is_telemetry_not_reward(
     tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path,
 ) -> None:
-    trace = await _score(tmp_path, fixture_manifest_path, runtime, edit=_CALC_FIXED, patch=_REAL_PATCH)
+    task = _task(fixture_manifest_path)
+    assert task.data.test_command == "python -m unittest discover -q"
+    trace = await _score(tmp_path, fixture_manifest_path, runtime, task=task, edit=_CALC_FIXED, patch=_REAL_PATCH)
 
     assert set(trace.rewards) == {"intrinsic_composite"}
     assert "fix_tests_pass" not in trace.rewards
@@ -906,7 +878,7 @@ async def test_sealed_run_scoring(
     assert trace.metrics["seal_verified"] == float(tamper == "none")
     expected = score_trajectory(assemble_scoring_inputs(rundir_golden)).composite if tamper == "none" else 0.0
     assert trace.rewards["intrinsic_composite"] == expected
-    if tamper == "artifact":
+    if tamper != "none":
         assert trace.metrics["suite_non_regression"] == 0.0
 
 async def test_vanished_seal_on_a_harness_sealed_run_is_a_tamper(
@@ -974,17 +946,26 @@ async def test_verify_checkout_failed_diff_fails_closed(
 
 async def test_verify_checkout_empty_diff_is_clean_noop(
     tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
 
     task = _task(fixture_manifest_path)
     # --allow-empty commit: HEAD advances, committed tree identical -> genuinely empty diff
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, commit=True)
+    chown_marker = tmp_path / "chown-reached"
+    if os.geteuid() != 0:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        chown = bin_dir / "chown"
+        chown.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(chown_marker))}\nexit 1\n", encoding="utf-8")
+        chown.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     result = await taskset._prepare_verify_checkout(runtime, str(repo), task.data.head_sha)
     if os.geteuid() == 0:
         assert result == str(tmp_path / "repo-verify"), "an empty diff must not fail construction"
     else:
-        # Non-root chown may return None; checkout-tree equality still proves the patch was not
-        # applied.
+        assert result is None
+        assert chown_marker.is_file(), "empty diff must pass the apply guard before chown refuses"
         verify_dir = tmp_path / "repo-verify"
         _assert_checkout_pinned_at(
             verify_dir, task.data.head_sha, exists_msg="the empty diff must not abort the checkout build",

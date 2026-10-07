@@ -13,9 +13,10 @@ def test_default_is_deep() -> None:
     config = _parse_args(["target"])
     assert config.shallow is False
 
+
 def test_help_all_states_trajectory_and_dump_artifacts_semantics(capsys: pytest.CaptureFixture[str],) -> None:
     """--help-all names the public post-finalization trajectory default, live external
-    updates, and --dump-artifacts as a preserving merge with nonfatal refusal.
+    updates, raw diagnostic dumps, and mandatory direct-upload scanning.
 
     Semantics only: stable option names and source/public-path wording, never
     frozen argparse wrapping.
@@ -26,8 +27,9 @@ def test_help_all_states_trajectory_and_dump_artifacts_semantics(capsys: pytest.
     for fragment in ("--trajectory", "<target>/.daydream/runs/<session_id>/trajectory.json", "after finalization",
         "explicit external paths receive live updates", "--dump-artifacts", "Merge the finalized run bundle",
         "Preserves unrelated destination files",
-        "Blocking secret-scan findings trigger sanitization of a separate copy",
-        "A refused dump warns without failing the review", "the local archive stays unchanged",
+        "Always copies exact assembled bytes, including credentials and binary files",
+        "without scanning or sanitizing", "Works on every flow",
+        "Always refuses blocking credentials and scanner failures", "Advisory findings are allowed",
     ):
         assert fragment in out, fragment
 

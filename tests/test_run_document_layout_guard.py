@@ -24,10 +24,8 @@ _EXCLUDED_PARTS = frozenset({"tests", "__pycache__", ".venv", "venv", "site-pack
 #: The in-scope callers. Each must import the layout surface (requirement 10).
 _IN_SCOPE_CONSUMERS = frozenset({
     "daydream/archive/bundle.py", "daydream/archive/finalize.py",
-    "daydream/archive/hydrate.py", "daydream/archive/license_enrich.py",
-    "daydream/archive/sanitize.py", "daydream/eval/analyzer.py", "daydream/artifact_visibility.py",
-    "daydream/phases/handoff.py", "daydream/training/adjudication/materialize.py",
-    "daydream/training/adjudication/import_local.py",
+    "daydream/eval/analyzer.py", "daydream/artifact_visibility.py",
+    "daydream/phases/handoff.py",
     "daydream/run_artifacts.py",
 })
 
@@ -40,16 +38,14 @@ _LAYOUT_SYMBOLS = frozenset({
 #: (file, literal kind) allowances. Every entry names why that file legitimately
 #: carries the name in a *different* layout or cannot import the owner.
 _PERMITTED = {
-    # A download temp file's suffix, unrelated to trajectory documents.
-    "daydream/archive/hydrate.py": frozenset({"partial"}),
     # Harbor container logs: `agent/trajectory.json` inside a benchmark job tree.
     "daydream/benchmark/harbor/agent.py": frozenset({"root-document"}),
     "daydream/benchmark/harbor/clean.py": frozenset({"root-document"}),
     "daydream/benchmark/harbor/entrypoint.py": frozenset({"root-document"}),
     # The harbor clean subcommand help names the same container log path.
     "daydream/benchmark/cli.py": frozenset({"root-document"}),
-    # Training corpus batches: `batches/<sid>/trajectory.json`, its own producer.
-    "daydream/training/corpus_projection/projector.py": frozenset({"root-document"}),
+    # Dataset run-record JSONL shards: `runs/<record-hash>.jsonl`, a separate layout.
+    "daydream/dataset.py": frozenset({"runs-dir"}),
     # A standalone package that cannot import `daydream` (reads via a runtime seam).
     "rl/daydream_review/daydream_review/rundir.py": frozenset({"root-document", "runs-dir"}),
 }

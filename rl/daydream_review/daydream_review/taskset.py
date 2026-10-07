@@ -25,8 +25,8 @@ from pathlib import Path
 from typing import Any
 
 import verifiers.v1 as vf
+from daydream.dataset_scoring import assemble_scoring_inputs
 from daydream.training.exclusion import load_exclusion_list
-from daydream.training.harvest import assemble_scoring_inputs
 from daydream.training.reward import score_trajectory
 from daydream.training.reward_model import OutcomeModel, score_comment as _score_outcome_comment
 from daydream.training.rubric import RubricV2Breakdown, score_review as _score_rubric_review

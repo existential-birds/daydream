@@ -28,6 +28,7 @@ from daydream.backends import (
     ToolStartEvent,
 )
 from daydream.backends.codex import CodexBackend, CodexError
+from daydream.dataset import LocalRecordStore
 from daydream.observability.config import ObservabilityConfig
 from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
@@ -257,8 +258,11 @@ async def test_runner_export_outage_warns_and_preserves_review_result_and_output
     _flow(ext_dir)
     install_backend(ScriptedBackend(events=[TextEvent("review completed during outage"), ResultEvent(None, None)]))
     with otlp_collector(status=503) as collector:
+        config = _config(make_config, feature_branch_repo, collector.base_url, monkeypatch)
+        config.dataset_capture = True
+        config.dataset_store_path = feature_branch_repo.parent / "records"
         with anyio.fail_after(15):
-            rc = await runner.run(_config(make_config, feature_branch_repo, collector.base_url, monkeypatch))
+            rc = await runner.run(config)
     assert rc == 0
     assert json.loads((feature_branch_repo / _RESULT_FILE).read_text()) == {
         "output": "review completed during outage", "aborted": None,
@@ -266,6 +270,12 @@ async def test_runner_export_outage_warns_and_preserves_review_result_and_output
     assert collector.requests
     assert attributes(_kind(collector.spans, "run")[0])["daydream.exit_code"] == 0
     assert "Trace export failed; review execution continues" in caplog.text
+    store = LocalRecordStore(config.dataset_store_path)
+    records = store.read_snapshot(store.select_snapshot(observed_before="2100-01-01T00:00:00Z"))
+    assert len(records.runs) == 1
+    assert records.runs[0]["outcome"] == "success"
+    assert records.runs[0]["trajectories"]["status"] == "available"
+    assert "review completed during outage" in json.dumps(records.runs[0]["trajectories"]["value"])
 
 @pytest.mark.parametrize("interruption", ["supervisor", "tools", "wall"])
 async def test_runner_partial_outcome_preserves_veto_and_budget_reasons(
@@ -748,4 +758,3 @@ return None
         assert identity["traceloop.association.properties.session_id"] == trajectory["session_id"]
     payload = json.dumps([request["body"] for request in collector.requests])
     assert payload.count("native-thread-77") == 1  # only the resumed attempt's conversation
-

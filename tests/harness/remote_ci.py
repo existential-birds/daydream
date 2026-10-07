@@ -12,10 +12,11 @@ from __future__ import annotations
 import re
 import shlex
 import threading
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import NamedTuple
 
+import anyio
 import pytest
 
 from daydream import remote_ci
@@ -263,6 +264,69 @@ def finish_remote_ci_fake(seeder: RemoteCISeeder) -> None:
     assert seeder.errors == []
 
 
+def _accelerate_empty_ci_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Advance only discovery time after real polls prove stable empty CI.
+
+    Request startup and cancellation keep their real clock and budgets. The
+    original waiter, fetcher, evaluator, and snapshot writer still own every
+    result; unrelated integration tests need not spend 45 seconds discovering
+    that their fixture deliberately has no CI producers.
+    """
+    real_wait = remote_ci.wait_for_remote_ci
+
+    async def wait(
+        target: remote_ci.RemoteCITarget,
+        *,
+        fetcher: remote_ci.RemoteCIFetcher,
+        limits: remote_ci.RemoteCILimits = remote_ci.DEFAULT_LIMITS,
+        monotonic: Callable[[], float] = anyio.current_time,
+        monotonic_started_at: float | None = None,
+        sleep: Callable[[float], Awaitable[None]] = anyio.sleep,
+        on_snapshot: Callable[[remote_ci.RemoteCIVerdict], None],
+    ) -> remote_ci.RemoteCIVerdict:
+        advance = 0.0
+        observed: remote_ci.RemoteCIVerdict | None = None
+
+        def clock() -> float:
+            return monotonic() + advance
+
+        def persist(verdict: remote_ci.RemoteCIVerdict) -> None:
+            nonlocal observed
+            on_snapshot(verdict)
+            observed = verdict
+
+        async def discovery_sleep(delay: float) -> None:
+            nonlocal advance
+            if (
+                observed is not None
+                and observed.status == "pending"
+                and observed.binding is not None
+                and observed.binding.head_sha == target.pushed_sha
+                and observed.policy is not None
+                and not observed.policy.contexts
+                and observed.active_workflow_count == 0
+                and not observed.required_observations
+                and not observed.advisory_observations
+                and observed.stable_polls >= limits.stable_polls
+            ):
+                advance += max(0.0, limits.discovery_seconds - observed.elapsed_seconds)
+                await sleep(0)
+            else:
+                await sleep(delay)
+
+        return await real_wait(
+            target,
+            fetcher=fetcher,
+            limits=limits,
+            monotonic=clock,
+            monotonic_started_at=monotonic_started_at,
+            sleep=discovery_sleep,
+            on_snapshot=persist,
+        )
+
+    monkeypatch.setattr(remote_ci, "wait_for_remote_ci", wait)
+
+
 class NoCIRemote:
     """Route a GitHub-shaped remote to a real bare repo and serve no-CI evidence."""
 
@@ -291,6 +355,7 @@ class NoCIRemote:
                 discovery_seconds=45, completion_seconds=90, request_seconds=10,
             ),
         )
+        _accelerate_empty_ci_discovery(monkeypatch)
 
     def connect(self, repo: Path, bare: Path, *, remote: str = "origin") -> None:
         """Connect *remote* through a GitHub URL and seed exact-SHA no-CI state."""

@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import pytest
 
-from daydream.archive.hydrate_rules import (
+from daydream.training.admission import (
     REASON_CODE_C5_EXCLUDED_REPO,
     REASON_CODE_C8_COPYLEFT_UNOPTED,
 )

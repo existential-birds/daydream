@@ -10,10 +10,6 @@ from daydream.archive import provenance
 from daydream.git_ops import GitError
 
 
-def test_version_is_package_version() -> None:
-    p = provenance.capture_executable_provenance()
-    assert p.version == daydream.__version__
-
 def test_container_digest_from_optin_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAYDREAM_IMAGE_DIGEST", "sha256:abc123")
     assert provenance.capture_executable_provenance().container_digest == "sha256:abc123"
@@ -31,10 +27,6 @@ def test_commit_and_dirty_resolve_known_git_state(monkeypatch: pytest.MonkeyPatc
     assert p.commit == expected_sha
     assert p.dirty is True
 
-def test_install_source_is_known_or_unknown() -> None:
-    p = provenance.capture_executable_provenance()
-    assert p.install_source in {"editable", "git", "package", "unknown"}
-
 def test_commit_and_dirty_unknown_on_git_error(monkeypatch: pytest.MonkeyPatch) -> None:
     def _raise(_repo: Any) -> None:
         raise GitError("synthetic git failure")
@@ -49,6 +41,8 @@ def test_commit_and_dirty_unknown_on_git_error(monkeypatch: pytest.MonkeyPatch) 
 
 def test_to_dict_never_omits_unknown() -> None:
     p = provenance.capture_executable_provenance()
+    assert p.version == daydream.__version__
+    assert p.install_source in {"editable", "git", "package", "unknown"}
     d = p.to_dict()
     assert set(d) == {"version", "install_source", "commit", "dirty", "container_digest"}
 
