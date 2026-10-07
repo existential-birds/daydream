@@ -19,6 +19,7 @@ from tests.deep_orchestrator.support import (
 )
 from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.review_result import saved_coverage
+from tests.harness.stub_backend import review_stage_state
 from tests.test_deep_orchestrator import (
     MakeConfig,
     Mute,
@@ -65,10 +66,14 @@ async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge_tiny_host_merge_ph
     assert tiny_reviews < multi_reviews, (
         f"tiny-diff review fan-out did not collapse: tiny={tiny_reviews}, multi={multi_reviews}"
     )
-    # Tiny diff: combined language plus structure first pass and integration.
-    # Multi: three language scopes plus structure first pass and integration.
-    assert tiny_reviews == 3, f"expected 3 review stages for tiny diff, got {tiny_reviews}"
-    assert multi_reviews == 5, f"expected 5 review stages for multi_stack, got {multi_reviews}"
+    # Structure begins with interactions once; it does not repeat the file audit.
+    for calls, expected_languages in ((tiny_calls, {"generic"}),
+                                      (multi_calls, {"python", "react", "generic"})):
+        stages = [review_stage_state(call["prompt"]) for call in calls]
+        assert {stage["scope_id"] for stage in stages if stage is not None
+                and stage["stage"] == "first_pass"} == expected_languages
+        assert [stage["stage"] for stage in stages if stage is not None
+                and stage["scope_id"] == "structure"] == ["integration"]
 
     # The merge agent MUST be skipped on the tiny diff (lever 2).
     assert _count_merge_prompts(tiny_calls) == 0, "merge agent ran on tiny diff"
@@ -172,7 +177,7 @@ async def test_ac5_per_stack_prompt_inlines_diff_hunks(
     # (Fix B does NOT inline the structural / arbiter prompts).
     structural_prompts = [c["prompt"] for c in shared_calls if "you are the structural reviewer" in c["prompt"].lower()]
     assert structural_prompts, "expected a structural review prompt"
-    assert "Read it directly" in structural_prompts[0]
+    assert "Consult the sanctioned diff input for this assignment" in structural_prompts[0]
     structural_diff_lines = [line for line in structural_prompts[0].splitlines() if line.startswith("- diff: ")]
     assert len(structural_diff_lines) == 1
     structural_diff = Path(structural_diff_lines[0].removeprefix("- diff: "))

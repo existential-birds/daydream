@@ -5,26 +5,44 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from daydream.config import (
     DEFAULT_DEEP_SHARD_ENABLED,
+    DEFAULT_DEEP_SHARD_MAX_BYTES,
     DEFAULT_DEEP_SHARD_MAX_FILES,
 )
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.orchestrator import (
+    DIAGRAM_STEPS,
+    STEPS,
+    _config_pipeline,
     _deep_shard_enabled,
     _deep_shard_max_files,
+    _flow_kind_for_mode,
+    _flow_name_for_mode,
+    _resolve_mode,
 )
+from daydream.extensions import Registry
+from daydream.extensions.builtins import register_builtins
+from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 from daydream.run_config import RunConfig
 from daydream.runner import run
-from tests.harness.stub_backend import install_stub_backend
+from daydream.trajectory import DaydreamRunFlow
+from tests.harness.stub_backend import install_stub_backend, review_stage_state
 from tests.test_deep_orchestrator import (
     _install_model_capturing_stubs,
+    _profile_with_pipeline,
     _run_deep,
     _silence,
 )
+
+if TYPE_CHECKING:
+    pass
+
+
 
 
 def test_deep_shard_enabled_default_off(tmp_path: Path) -> None:
@@ -73,6 +91,7 @@ def test_deep_shard_max_files_resolves_and_coerces(tmp_path: Path) -> None:
     fc = DaydreamFileConfig(deep_shard_max_files=7)
     cfg = RunConfig(target=str(tmp_path), file_config=fc)
     assert _deep_shard_max_files(cfg) == 7
+
 
 async def test_deep_large_diff_produces_review_and_record_shards(
     shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, install_backend: Callable[[object], object],
@@ -136,6 +155,10 @@ async def test_no_parse_phase_and_records_from_output_schema(multi_stack_target:
 
 
     # Review requests keep the persisted changed-line authority.
-    prompt = next(c["prompt"] for c in prompts if "Relevant diff hunks" in c["prompt"])
-    assert "hunk-index.json" in prompt or "changed line ranges" in prompt.lower()
-    assert "do NOT re-Read diff.patch" in prompt or "diff.patch" not in prompt
+    language_prompts = [c["prompt"] for c in prompts if (stage := review_stage_state(c["prompt"])) is not None
+                        and stage["stage"] == "first_pass"]
+    assert language_prompts
+    for prompt in language_prompts:
+        assert "hunk-index.json" in prompt or "changed-line authority" in prompt
+        assert "do not re-read the diff artifact" in prompt or "diff.patch" not in prompt
+

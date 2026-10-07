@@ -37,11 +37,11 @@ async def test_shared_phase_backend_drives_shallow_pass(feature_branch_repo: Pat
 
     assert exit_code == 0
     assert "Add type hints" in (feature_branch_repo / ".review-output.md").read_text()
-    # The public scopes each receive one first pass; structure also integrates
-    # their changed behavior before deterministic publication.
+    # Language discovery and structural interactions each run once before
+    # deterministic publication; structure does not repeat the file audit.
     assert backend.parse_calls == 0
     stages = [json.JSONDecoder().raw_decode(prompt.split("Host review stage:\n", 1)[1])[0]
               for prompt in backend.review_prompts]
     assert sorted((stage["scope_id"], stage["stage"]) for stage in stages) == [
-        ("python", "first_pass"), ("structure", "first_pass"), ("structure", "integration"),
+        ("python", "first_pass"), ("structure", "integration"),
     ]

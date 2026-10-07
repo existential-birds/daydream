@@ -196,9 +196,26 @@ async def test_useful_completed_reads_borrow_cumulative_capacity_and_allow_later
         if stage['scope_id'] != scope_id:
             return
         if stage['stage'] == 'triage':
-            output['candidates'] = [dict(item, disposition='rejected') for item in stage['candidates']]
+            for path in stage['assigned_files']:
+                source = (repo / path).read_text()
+                yield ToolStartEvent(id=f'triage-{path}', name='Read',
+                                    input={'file_path': path, 'offset': 1, 'limit': len(source.splitlines())})
+                yield ToolResultEvent(id=f'triage-{path}', output=source, is_error=False)
+                assert "return 'universe'" in source
+            output['candidates'] = [dict(item, disposition='rejected',
+                                        grounds='api.py:12 is the greeting-contract defect already confirmed; '
+                                        'the alleged return at api.py:2 is absent.')
+                                    for item in stage['candidates']]
             return
         if stage['progress']:
+            output['targets'] = []
+            for path in stage['assigned_files']:
+                source = (repo / path).read_text()
+                yield ToolStartEvent(id=f'later-{path}', name='Read',
+                                    input={'file_path': path, 'offset': 1, 'limit': len(source.splitlines())})
+                yield ToolResultEvent(id=f'later-{path}', output=source, is_error=False)
+                assert ('def greeting():' in source if path.endswith('.py') else 'hello() returns world.' in source)
+                output['targets'].append({'target_id': path, 'status': 'reviewed', 'reason': ''})
             return
         # Each assigned first-pass file gets complete source in disjoint bounded
         # segments. Extra reads follow the concrete hello/greeting boundary.
@@ -246,6 +263,12 @@ async def test_useful_completed_reads_borrow_cumulative_capacity_and_allow_later
     assert stage_ends(review, scope_id)[0]['metadata']['remaining_tool_calls'] == 48 - spent
     assert len(stages) > 1
     assert stages[1]['observed_tool_starts'] == spent
+    completed_stages = stage_ends(review, scope_id)
+    assert all(later['metadata']['observed_tool_starts'] > earlier['metadata']['observed_tool_starts']
+               for earlier, later in zip(completed_stages, completed_stages[1:], strict=False))
+    assert completed_stages[-1]['metadata']['observed_tool_starts'] == {
+        'python': 32, 'generic': 23, 'structure': 20,
+    }[scope_id]
 
 
 @pytest.mark.parametrize('sandbox', [False, True], ids=['exact-path-inputs', 'inline-inputs'])
@@ -345,7 +368,16 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         if stage['scope_id'] == 'python':
             if not stage['progress']:
-                output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+                output['targets'] = []
+                for path in stage['assigned_files']:
+                    source = (review.repo / path).read_text()
+                    yield ToolStartEvent(id=f'admitted-{path}', name='Read',
+                                        input={'file_path': path, 'offset': 1, 'limit': len(source.splitlines())})
+                    yield ToolResultEvent(id=f'admitted-{path}', output=source, is_error=False)
+                    output['targets'].append({'target_id': path, 'status': 'reviewed', 'reason': ''})
+                assert "return 'world'" in (review.repo / 'api.py').read_text()
+                output['candidates'] = [dict(candidate(disposition='confirmed', finding=record()),
+                                             grounds="api.py:1-2 defines hello() and returns 'world'.")]
                 return
             yield ResultEvent(structured_output=stage_result(stage, candidates=[
                 candidate(disposition='confirmed', finding=dict(record(), description='Unadmitted defect'))]),
@@ -364,6 +396,10 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
     assert scopes(data)['structure']['status'] == 'complete'
     admitted, stopped = stage_ends(review, 'python')
     assert admitted['status'] == 'succeeded'
+    assert admitted['metadata']['observed_tool_starts'] > 0
+    assert stopped['metadata']['observed_tool_starts'] == (
+        49 if stop == 'tool' else admitted['metadata']['observed_tool_starts'])
+    assert scopes(data)['python']['partial_evidence'] is True
     assert (stopped['status'], stopped.get('reason_code')) == (
         ('timed_out', 'timed_out') if stop == 'deadline' else ('failed', 'domain_failure'))
     assert [stage['stage'] for stage in backend.stages if stage['scope_id'] == 'python'] == (

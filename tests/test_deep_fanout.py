@@ -19,7 +19,7 @@ from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, 
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import commit, write_and_stage
 from tests.harness.review_result import review_scopes, saved_coverage
-from tests.harness.stub_backend import review_stage_result
+from tests.harness.stub_backend import review_stage_result, review_stage_state
 from tests.harness.trajectory import (
     dispatch_descriptors as _dispatch_descriptors,
     dispatch_encloses_children as _dispatch_encloses_children,

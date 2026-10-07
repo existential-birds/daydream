@@ -24,6 +24,7 @@ from tests.deep_orchestrator.support import (
 )
 from tests.harness.git_helpers import git as _git
 from tests.harness.review_profile import independent_alternatives_profile
+from tests.harness.stub_backend import review_stage_state
 from tests.test_deep_orchestrator import (
     MakeConfig,
     Mute,
@@ -32,6 +33,7 @@ from tests.test_deep_orchestrator import (
     _install_stub_backend,
     _pin_findings_pr,
     _run_deep,
+    _sanctioned_inputs,
     _silence,
 )
 
@@ -207,10 +209,17 @@ async def test_over_budget_diff_preserves_full_disk_evidence_and_uses_safe_promp
         assert "Read the diff file at" in intent and "in the diff at " in wonder and "diff.patch" in wonder
         for prompt in (intent, wonder):
             assert "line 500 of filler content" not in prompt and "SMALL_RETAINED_MARKER" not in prompt
-    python_prompt = _matching_prompt(stub.calls, "you are reviewing the python stack")
-    assert "Read it directly" in python_prompt
-    assert "diff --git" not in python_prompt and "line 50 of filler content" not in python_prompt
-    assert "SMALL_RETAINED_MARKER" not in python_prompt
+    python_calls = [(call["prompt"], stage) for call in stub.calls
+                    if (stage := review_stage_state(call["prompt"])) is not None
+                    and stage["scope_id"] == "python" and stage["stage"] == "first_pass"]
+    assert python_calls
+    assert {path for _, stage in python_calls for path in stage["assigned_files"]} == set(files) | {"api.py"}
+    for python_prompt, stage in python_calls:
+        assert "diff" in stage["context_inputs"]
+        assert _sanctioned_inputs(python_prompt)["diff"].read_text() == patch
+        assert "Consult the sanctioned diff input for this assignment" in python_prompt
+        assert "diff --git" not in python_prompt and "line 50 of filler content" not in python_prompt
+        assert "SMALL_RETAINED_MARKER" not in python_prompt
     if not oversize:
         # React's complete retained block remains inline while Python spans dropped evidence.
         assert "diff --git" in _matching_prompt(stub.calls, "you are reviewing the react stack")
@@ -240,6 +249,11 @@ async def test_skip_tier_writes_empty_alternatives(tiny_diff_target: Path, monke
 
 
 
+def test_extension_api_version_and_alternatives_step_removal() -> None:
+    assert EXTENSION_API_VERSION == 7
+    names = [s.name for s in STEPS]
+    assert "alternatives" not in names
+    assert "per-stack-reviews" in names
 
 @pytest.mark.parametrize("change", ["committed", "worktree", "missing-key"])
 async def test_start_at_merge_refuses_stale_or_unverifiable_artifacts(

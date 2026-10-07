@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import inspect
-import re
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import daydream.phases as phases_mod
-from daydream.backends import CostEvent, ResultEvent, TextEvent
+from daydream.backends import CostEvent, ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
 from daydream.config import REVIEW_OUTPUT_FILE, STRUCTURE_STACK_NAME
 from daydream.deep import detection as _detection
 from daydream.deep.detection import StackAssignment
@@ -26,17 +25,18 @@ from daydream.phases import (
     phase_test_and_heal,
     phase_understand_intent,
 )
+from daydream.phases.schemas import REVIEW_STAGE_SCHEMA
 from daydream.prompts.wire_contract import WIRE_CONTRACT_GENERIC_INSTRUCTION, WIRE_CONTRACT_RUST_INSTRUCTION
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.conftest import silence_module_console
 from tests.harness.backend import ScriptedBackend
 from tests.harness.review_result import merge_result
-from tests.harness.stub_backend import review_stage_result
+from tests.harness.stub_backend import review_stage_state, stage_result
 
 
 class _DeepMockBackend(ScriptedBackend):
-    """Dispatch by stage wording; ScriptedBackend records calls and prompts.
+    """Review schema dispatch with completed fixture reads; retain downstream parity.
 
     Stage labels live in stages to avoid colliding with the harness's calls.
     """
@@ -62,6 +62,12 @@ class _DeepMockBackend(ScriptedBackend):
         events: list[Any] = [CostEvent(cost_usd=self.cost_usd, input_tokens=None, output_tokens=None)]
         pl = prompt.lower()
 
+        if _output_schema == REVIEW_STAGE_SCHEMA:
+            stage = review_stage_state(prompt)
+            assert stage is not None, "review request must carry its actual assignment"
+            events.extend(self._review_stage(Path(cwd), stage))
+            return events
+
         # Checked before the alt branch: the alt-review prompt also contains "intent".
         if "understand" in pl and "intent" in pl:
             self.stages.append("intent")
@@ -74,58 +80,14 @@ class _DeepMockBackend(ScriptedBackend):
             events += [TextEvent(text=""), ResultEvent(structured_output={"issues": []}, continuation=None)]
             return events
 
-        # Structural review lacks the per-stack role opener and needs its own dispatch.
-        if "structural reviewer" in pl:
-            self.stages.append("structure")
-            m = re.search(r"stack-(\S+?)-review\.md", prompt)
-            if m:
-                name = m.group(1)
-                out = self._review_output_path(prompt)
-                if out is not None:
-                    out.parent.mkdir(parents=True, exist_ok=True)
-                    out.write_text(
-                        f"# Structural Review ({name})\n\n## Issues\n"
-                        "1. [api.py:1] hello() leaks a god-object boundary\n"
-                    )
-            # The host publishes admitted structured findings with lens="structural".
-            events += [TextEvent(text=""),
-                ResultEvent(structured_output=review_stage_result(prompt, [{
-                                "id": 1, "description": "hello() leaks a god-object boundary", "file": "api.py",
-                                "line": 1, "severity": "medium", "confidence": "MEDIUM", "rationale": "stub",
-                                "evidence": "api.py:1",
-                            }
-                        ]), continuation=None,
-                ),
-            ]
-            return events
-
-        # Per-stack review prompt contains "You are reviewing the ... stack".
-        if "you are reviewing the" in pl and "stack" in pl:
-            self.stages.append("per-stack")
-            # Write the per-stack review file to the path embedded in the prompt
-            # (the session's live artifact tree).
-            m = re.search(r"stack-(\S+?)-review\.md", prompt)
-            if m:
-                name = m.group(1)
-                out = self._review_output_path(prompt)
-                if out is not None:
-                    out.parent.mkdir(parents=True, exist_ok=True)
-                    out.write_text(f"# Review ({name})\n\n## Issues\n1. [a.py:1] stub\n")
-            # Bounded stage acknowledgements admit the fixture finding.
-            issues = [{"id": 1, "description": "Language review finding", "file": "api.py", "line": 1,
-                       "severity": "medium", "confidence": "MEDIUM", "rationale": "stub", "evidence": "api.py:1"}
-                      ] if self.language_finding and m is not None and m.group(1) == "python" else []
-            events += [TextEvent(text=""),
-                       ResultEvent(structured_output=review_stage_result(prompt, issues), continuation=None)]
-            return events
-
         # Backend parity fixtures exercise the model merge with language findings;
         # structural-only fixtures retain the host's deterministic merge path.
         if "cross-stack merge agent" in pl:
             self.stages.append("merge")
             items = [{"id": 1, "lens": "per-stack", "description": "Language review finding", "file": "api.py",
-                      "line": 1, "severity": "medium", "confidence": "MEDIUM", "rationale": "stub",
-                      "evidence": "api.py:1", "source_uids": ["python:1"]}
+                      "line": 2, "severity": "medium", "confidence": "MEDIUM",
+                      "rationale": "The changed hello() return is verified in api.py:2.",
+                      "evidence": "api.py:2 return 'universe'", "source_uids": ["python:1"]}
                      ] if self.language_finding else []
             events += [TextEvent(text=""), ResultEvent(structured_output=merge_result(items), continuation=None),]
             return events
@@ -135,12 +97,48 @@ class _DeepMockBackend(ScriptedBackend):
         events += [TextEvent(text=""), ResultEvent(structured_output=None, continuation=None)]
         return events
 
-    def _review_output_path(self, prompt: str) -> Path | None:
-        """Use the prompt's live session path; reconstructed public paths are detached
-        and would trip the model-CWD artifact gate during the run.
-        """
-        m = re.search(r"Write your full review to (\S+\.md)\.", prompt)
-        return Path(m.group(1)) if m else None
+    def _review_stage(self, cwd: Path, stage: dict[str, Any]) -> list[Any]:
+        """Judge only known fixture changes after reading their complete source."""
+        structural = stage["scope_id"] == STRUCTURE_STACK_NAME
+        assert stage["stage"] == ("integration" if structural else "first_pass")
+        self.stages.append("structure" if structural else "per-stack")
+        expected_sources = {
+            "api.py": "def hello():\n    return 'universe'\n",
+            "App.tsx": "export const App = () => <div>universe</div>;\n",
+            "README.md": "# Project\n\nUpdated.\n",
+            "src/main.rs": 'fn main() {\n    println!("hello from wire");\n}\n',
+        }
+        sources: dict[str, str] = {}
+        events: list[Any] = []
+        for index, path in enumerate(stage["assigned_files"]):
+            assert path in expected_sources, f"unknown fixture work: {path}"
+            source = (cwd / path).read_text()
+            assert source == expected_sources[path], f"unexpected changed behavior in {path}"
+            sources[path] = source
+            call_id = f"source-{index}"
+            events.extend([
+                ToolStartEvent(id=call_id, name="Read", input={"file_path": path}),
+                ToolResultEvent(id=call_id, output=source, is_error=False),
+            ])
+        assert stage["assigned_target_ids"] == (
+            ["integration:structure"] if structural else stage["assigned_files"]
+        )
+        findings = []
+        if "api.py" in sources and (structural or self.language_finding and stage["scope_id"] == "python"):
+            description = "Greeting contract changed across modules" if structural else "Language review finding"
+            findings.append({
+                "candidate_id": "", "file": "api.py", "line": 2,
+                "trigger": "Calling hello() after the changed greeting contract",
+                "consequence": "The returned greeting changes from world to universe.",
+                "grounds": "api.py:2 return 'universe' in the complete hello() symbol",
+                "disposition": "confirmed",
+                "finding": {"id": 1, "description": description, "file": "api.py", "line": 2,
+                            "severity": "medium", "confidence": "MEDIUM",
+                            "rationale": "The changed hello() return is verified in api.py:2.",
+                            "evidence": "api.py:2 return 'universe'"},
+            })
+        events.append(ResultEvent(structured_output=stage_result(stage, candidates=findings), continuation=None))
+        return events
 
 def _silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
     """Silence noisy UI helpers at their current production owners."""
@@ -180,6 +178,9 @@ async def test_claude_shape_backend(multi_stack_target: Path, monkeypatch: pytes
     required = {"intent", "structure", "per-stack", "merge"}
     assert required.issubset(set(backend.stages)), (f"missing stages; saw only: {sorted(set(backend.stages))}")
     assert "alternatives" not in backend.stages
+    report = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
+    assert "Language review finding" in report
+    assert "Greeting contract changed across modules" in report
 
 async def test_codex_shape_backend(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-38: run_deep completes on Codex-shape (cost_usd=None, no agents= ever passed)."""
@@ -188,6 +189,9 @@ async def test_codex_shape_backend(multi_stack_target: Path, monkeypatch: pytest
     assert exit_code == 0, f"run_deep returned {exit_code} (expected 0)"
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).exists(), ("merged report missing after Codex-shape run")
     assert {"intent", "structure", "per-stack", "merge"}.issubset(backend.stages)
+    report = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
+    assert "Language review finding" in report
+    assert "Greeting contract changed across modules" in report
     # Parity guarantee: any stage passing agents= would have raised
     # NotImplementedError above; this asserts it directly too.
     agents_kwargs_seen = [call["agents"] for call in backend.calls]
@@ -302,14 +306,20 @@ async def test_310_prompt_gates_reach_built_prompts_in_real_run(
         assert CONFIG_FLOW_TRACE_INSTRUCTION not in prompt, ("config-trace gate leaked into the structural prompt")
 
     for prompt in per_stack:
-        assert CONFIG_FLOW_TRACE_INSTRUCTION in prompt, ("per-stack prompt missing the config-flow trace gate")
+        assert "Config/env flow trace (apply only to changed fields in this assignment" in prompt
+        assert "config struct -> driver config -> request construction" in prompt
+        assert "Flag silent drops" in prompt and "Flag double-resolves" in prompt
+        assert CONFIG_FLOW_TRACE_INSTRUCTION not in prompt, "whole-scope config audit leaked into a file stage"
         assert TRUST_MODEL_INSTRUCTION in prompt, ("per-stack prompt missing the trust-model gate")
         assert CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION not in prompt, (
             "cross-file gate leaked into the per-stack prompt"
         )
 
     for prompt in generic:
-        assert CONFIG_FLOW_TRACE_INSTRUCTION in prompt, ("generic-fallback prompt missing the config-flow trace gate")
+        assert "Config/env flow trace (apply only to changed fields in this assignment" in prompt
+        assert "config struct -> driver config -> request construction" in prompt
+        assert "Flag silent drops" in prompt and "Flag double-resolves" in prompt
+        assert CONFIG_FLOW_TRACE_INSTRUCTION not in prompt, "whole-scope config audit leaked into a generic stage"
         assert TRUST_MODEL_INSTRUCTION in prompt, ("generic-fallback prompt missing the trust-model gate")
         assert CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION not in prompt, (
             "cross-file gate leaked into the generic-fallback prompt"

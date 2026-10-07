@@ -11,7 +11,7 @@ from daydream.backends.pi import PiBackend
 from daydream.deep.detection import StackAssignment
 from daydream.run_context import InteractionPolicy, RunContext
 from tests.harness.review_result import review_scopes
-from tests.harness.stub_backend import review_stage_result
+from tests.harness.stub_backend import review_stage_result, review_stage_state
 
 
 async def test_small_pi_review_keeps_structural_dispatch(
@@ -46,5 +46,8 @@ async def test_small_pi_review_keeps_structural_dispatch(
     )
     assert failures == {}
     assert set(results) == {"python", "structure"}
-    assert len(calls) == 3
-    assert sum('"stage": "integration"' in prompt for prompt in calls) == 1
+    stages = [review_stage_state(prompt) for prompt in calls]
+    assert sorted((stage["scope_id"], stage["stage"], stage["assigned_files"])
+                  for stage in stages if stage is not None) == [
+        ("python", "first_pass", ["app.py"]), ("structure", "integration", ["app.py"]),
+    ]
