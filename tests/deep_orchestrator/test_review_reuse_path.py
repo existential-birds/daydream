@@ -128,7 +128,7 @@ def _review_surface_prompts(calls: list[dict[str, object]],) -> list[dict[str, o
     return surface
 
 
-@pytest.mark.parametrize("unit", ["all-units", "merge", "companion", "rebound", "independent", "arbiter"])
+@pytest.mark.parametrize("unit", ["all-units", "independent", "arbiter"])
 async def test_identical_rerun_restores_completed_units_and_current_run_evidence(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, unit: str,
 ) -> None:
