@@ -391,7 +391,4 @@ The companion flow report records the subsequent context-specific gh auth repair
 its failing control, explicit local/Actions rows, independent review and the extra
 retained mode case. No production, coverage or skip setting changes.
 
-The final configuration refines dispatch to one case at a time and records
-built-in duration reports. Normal completion queues stay at two; restart refill
-can exceed that. The flow report records independent protocol review, matched
-consumer results and actual hosted target limitations.
+The final configuration caps each dispatch at ten cases and records built-in duration reports. The one-case experiment was reverted after matching local full gates showed no benefit. This caps each send, not total worker queue length. The flow report records independent protocol review, matched consumer results and hosted limitations; [resume consolidations](resume-consolidations.md) records the latest counts and complete CI phase-work bound.

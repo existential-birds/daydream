@@ -3,6 +3,8 @@
 Pinned merged main: `6c48d368d529a89748c93e7bb61ae9ac6566936e`.
 Branch: `test-audit/flow-redundancy`.
 
+Latest collection: **8,197 cases / 5,360 functions**, net **807 cases / 71 functions removed (8.96%)**. Final resume additions, preservation controls and complete hosted duration evidence are in [Resume consolidations](resume-consolidations.md). Earlier counts/results below identify their measured historical heads.
+
 This batch consolidates repeated successful runner executions and matching
 contract assertions. Additional exact evidence is in
 [Shared-run test consolidations](shared-run-consolidations.md). It is a focused
