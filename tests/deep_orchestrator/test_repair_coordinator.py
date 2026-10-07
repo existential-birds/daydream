@@ -125,7 +125,6 @@ _RECOVERY_DRIVER = '''\
 import io
 import json
 import os
-import os
 import sys
 from pathlib import Path
 

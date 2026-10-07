@@ -352,7 +352,6 @@ async def test_group_deadline_still_wins_over_a_larger_allowance(
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     patch_retry_sleep(monkeypatch, fake)
     backend = _retryable_failing_backend(advance=fake.advance, advance_s=20.0)
-    setattr(backend, "retry_policy", RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0))
     _, _, reason = await run_agent(
         backend, tmp_path, "go", phase=DaydreamPhase.FIX, deadline=1_030.0, retry_recovery_allowance_s=300.0,
     )
@@ -381,7 +380,6 @@ async def test_a_deadline_that_ends_a_retry_ladder_still_records_retry_telemetry
     monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
     # 5000 (+300 attempt 1) -> 5300 -> retry -> 5600 (+300 retry) -> deadline spent.
     backend = _retryable_failing_backend(advance=fake.advance, advance_s=300.0)
-    setattr(backend, "retry_policy", RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0))
     recorder = make_recorder(tmp_path)
     with anyio.fail_after(5):
         async with recorder:
