@@ -1418,19 +1418,10 @@ async def test_fix_cycle_clipboard_timeout_keeps_event_loop_responsive_and_shows
     )
     monkeypatch.setattr("daydream.clipboard._detect_clipboard_command", lambda: ["pbcopy"])
     _seed_fix_resume(feature_branch_repo, [_fix_item()])
-    class ClipboardHandoffBackend(StubBackend):
-        async def execute(
-            self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
-        ) -> AsyncIterator[AgentEvent]:
-            if "read-only failure-summarizer" in prompt:
-                self.calls.append({"prompt": prompt})
-                yield ResultEvent(
-                    structured_output={"handoff_prompt": "# Handoff\n\nclipboard timeout"}, continuation=None,
-                )
-                return
-            async for event in super().execute(cwd, prompt, *args, **kwargs):
-                yield event
-    backend = ClipboardHandoffBackend(feature_branch_repo)
+    from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
+
+    backend = EmptyReviewBackend(feature_branch_repo, responder=lambda prompt:
+        _handoff_turn("# Handoff\n\nclipboard timeout") if "read-only failure-summarizer" in prompt else None)
     backend.fail_all_test_runs = True
     backend.fix_edit_line = "\n# daydream fix\n"
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)

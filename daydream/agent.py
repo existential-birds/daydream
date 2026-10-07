@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
     from rich.text import Text
 
-from daydream import clock
+from daydream import clock, review_budget
 from daydream.agent_retry import _plan_retry_delay, _resolve_retry_settings, _retry_hint, _RetryTelemetry
 from daydream.artifact_visibility import ArtifactVisibilityError, artifact_session_active, assert_model_cwd_clean
 from daydream.backends import (
@@ -367,24 +367,14 @@ async def run_agent(
             bounds.append(clock.monotonic() + wall_budget_s)
         deadline = min(bounds)
         hard_deadline = deadline
-        tool_call_budget = min(
-            tool_call_budget if tool_call_budget is not None else investigation_budget.remaining_tool_calls,
-            investigation_budget.remaining_tool_calls,
-        )
+        remaining_calls = investigation_budget.remaining_tool_calls
+        tool_call_budget = min(tool_call_budget, remaining_calls) if tool_call_budget is not None else remaining_calls
         budget_instructions = (
             f"Investigation allowance: at most {max(0.0, deadline - clock.monotonic()):g} seconds and "
             f"{tool_call_budget} tool calls this stage. "
             f"Cumulative observed tool starts: {investigation_budget.observed_tool_starts}; "
             f"remaining reviewer allowance: {investigation_budget.remaining_tool_calls}. " + REVIEW_STOPPING_GUIDANCE
-            + "\n\nStaged review contract: Closed candidate decisions stay closed, even when later evidence "
-            "contradicts them. Report contradictions by their existing candidate IDs; the host marks affected "
-            "work incomplete without reopening or scheduling another round. Return exactly the assigned target "
-            "or triage candidate IDs in the private progress schema. Do not produce a terminal findings serializer; "
-            "the host publishes admitted confirmed records deterministically."
-        )
-        prompt += "\n\n" + budget_instructions
-        review_instructions = "\n\n".join(
-            item for item in (review_system_instructions, budget_instructions) if item
+            + "\n\n" + review_budget.STAGED_REVIEW_GUIDANCE
         )
     if review_limits is not None:
         review_limits = review_limits_for_scope(review_limits)
@@ -409,6 +399,7 @@ async def run_agent(
             f"Investigation allowance: at most {investigation_allowance:g} seconds and "
             f"{tool_call_budget} tool calls. " + REVIEW_STOPPING_GUIDANCE
         )
+    if investigation_budget is not None or review_limits is not None:
         prompt += "\n\n" + budget_instructions
         review_instructions = "\n\n".join(
             item for item in (review_system_instructions, budget_instructions) if item
@@ -575,9 +566,7 @@ async def _run_agent(
             # Set when the invocation already emitted its one stop record, so the
             # post-loop deadline emitter never writes a second, contradicting one.
             stop_recorded = False
-            # Staged calls retain per-call spend across retries as well as the
-            # shared reviewer spend across fresh stage invocations.
-            stage_tool_calls = 0
+            tool_calls = 0
 
             def _emit_ladder_stop(
                 stop_reason: str, limit_expired: str = "retry_ladder"
@@ -626,7 +615,9 @@ async def _run_agent(
                 structured_result = None
                 result_continuation = None
                 evidence_incomplete = False
-                tool_calls = 0
+                if investigation_budget is None:
+                    tool_calls = 0
+                remaining_calls = tool_call_budget - tool_calls if tool_call_budget is not None else None
                 if review_evidence is not None:
                     review_evidence.reset()
                 budget_reason: str | None = None
@@ -645,7 +636,7 @@ async def _run_agent(
                     break
                 if investigation_budget is not None and (
                     investigation_budget.remaining_tool_calls == 0
-                    or (tool_call_budget is not None and stage_tool_calls >= tool_call_budget)
+                    or remaining_calls == 0
                 ):
                     aborted_reason = "tool_call_budget_exceeded"
                     break
@@ -685,18 +676,9 @@ async def _run_agent(
                         # deadline above is derived from the same value, so
                         # the prompt cannot promise time the host withholds.
                         execute_kwargs["wall_budget_s"] = wall_budget_s
-                        execute_kwargs["tool_call_budget"] = (
-                            min(tool_call_budget - stage_tool_calls, investigation_budget.remaining_tool_calls)
-                            if investigation_budget is not None and tool_call_budget is not None
-                            else tool_call_budget
-                        )
+                        execute_kwargs["tool_call_budget"] = remaining_calls
                     attempt_prompt = prompt
                     if investigation_budget is not None and attempt > 0:
-                        remaining_calls = min(
-                            (tool_call_budget - stage_tool_calls) if tool_call_budget is not None
-                            else investigation_budget.remaining_tool_calls,
-                            investigation_budget.remaining_tool_calls,
-                        )
                         retry_budget_update = (
                             "\n\nHost retry budget update: failed-attempt starts remain charged. "
                             f"At most {remaining_calls} tool calls remain this stage; "
@@ -740,8 +722,8 @@ async def _run_agent(
                         with wall_scope:
                             async for event in event_iter:
                                 if investigation_budget is not None and isinstance(event, ToolStartEvent):
-                                    investigation_budget.observe_tool_start()
-                                    stage_tool_calls += 1
+                                    investigation_budget.observed_tool_starts += 1
+                                    tool_calls += 1
                                 # The single effective deadline is enforced per streamed
                                 # event so an injected clock can expire mid-turn even
                                 # though move_on_after only measures real time.
@@ -798,13 +780,9 @@ async def _run_agent(
                                             budget_reason = f"tool_vetoed:{event.name}"
                                             break
 
-                                    tool_calls += 1
-                                    spent_calls = stage_tool_calls if investigation_budget is not None else tool_calls
-                                    if (tool_call_budget is not None and spent_calls > tool_call_budget) or (
-                                        investigation_budget is not None
-                                        and investigation_budget.observed_tool_starts
-                                        > investigation_budget.limits.tool_calls
-                                    ):
+                                    if investigation_budget is None:
+                                        tool_calls += 1
+                                    if tool_call_budget is not None and tool_calls > tool_call_budget:
                                         budget_reason = "tool_call_budget_exceeded"
                                         break
 

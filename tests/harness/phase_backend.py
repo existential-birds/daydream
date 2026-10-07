@@ -4,13 +4,12 @@ Dispatch mode consumes per-iteration issue lists and records protocol calls."""
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import AsyncGenerator
 from typing import Any
 
 from daydream.backends import AgentEvent, ResultEvent, TextEvent
-from tests.harness.stub_backend import review_stage_result
+from tests.harness.stub_backend import review_stage_result, review_stage_state
 
 
 def _shape_issues(issues: list[dict[str, Any]], severity: str | None = None,) -> list[dict[str, Any]]:
@@ -92,11 +91,8 @@ class PhaseDispatchBackend:
             yield TextEvent(text="Review complete.")
             if output_schema is not None:
                 # Native review emits structured records directly.
-                first_discovery = True
-                marker = "Host review stage:\n"
-                if marker in prompt:
-                    state = json.JSONDecoder().raw_decode(prompt.split(marker, 1)[1])[0]
-                    first_discovery = state["stage"] == "first_pass" and not state["progress"]
+                state = review_stage_state(prompt)
+                first_discovery = state is None or (state["stage"] == "first_pass" and not state["progress"])
                 issues = []
                 if first_discovery:
                     issues = (self._parse_results[self._review_call]

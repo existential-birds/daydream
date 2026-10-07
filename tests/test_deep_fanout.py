@@ -9,7 +9,7 @@ from typing import Any
 import anyio
 import pytest
 
-from daydream.backends import AgentEvent, Backend, ResultEvent, ToolStartEvent
+from daydream.backends import AgentEvent, Backend, ResultEvent
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep import prompts as _prompts, sharding
 from daydream.deep.artifacts import deep_dir as _deep_dir, per_stack_records_path
@@ -68,23 +68,6 @@ async def _run_per_stack(
     return results, failures
 
 
-async def test_unsuccessful_stage_checkpoint_is_discarded_with_incomplete_coverage(
-    tmp_path: Path, make_work: Callable[..., WorkContext],
-) -> None:
-    issue = {"id": 1, "file": "api.py", "line": 2, "description": "empty input divides by zero",
-             "severity": "high", "confidence": "HIGH", "rationale": "empty list", "evidence": "sum(xs)/len(xs)"}
-    def checkpoint(cwd: Any, prompt: str, *args: Any) -> list[Any]:
-        return [ResultEvent(structured_output=review_stage_result(prompt, [issue]), continuation=None),
-                *[ToolStartEvent(id=f"extra-{n}", name="Read", input={"file_path": "api.py"})
-                  for n in range(17)]]
-    backend = ScriptedBackend(responder=checkpoint)
-    _, failures = await _run_per_stack(tmp_path, make_work, backend, _mk_stacks()[:1])
-    assert "python" in failures
-    assert "tool_call_budget_exceeded" in failures["python"]
-    saved = json.loads(per_stack_records_path(tmp_path / ".daydream/deep", "python").read_text())
-    assert saved["issues"] == []
-    assert saved["incomplete"] is True
-
 def _deep_dispatch(trajectory: dict[str, Any]) -> dict[str, Any]:
     steps = [step
         for step in trajectory["steps"]
@@ -138,20 +121,19 @@ async def test_fanout_concurrency_limiter(
         peak = 0
 
         async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-            if "Host review stage:\n" not in prompt:
-                async for event in super().execute(cwd, prompt, *args, **kwargs):
-                    yield event
-                return
-            self.active += 1
-            self.peak = max(self.peak, self.active)
+            reviewing = "Host review stage:\n" in prompt
             try:
-                if self.active >= expected:
-                    ready.set()
-                await release.wait()
+                if reviewing:
+                    self.active += 1
+                    self.peak = max(self.peak, self.active)
+                    if self.active >= expected:
+                        ready.set()
+                    await release.wait()
                 async for event in super().execute(cwd, prompt, *args, **kwargs):
                     yield event
             finally:
-                self.active -= 1
+                if reviewing:
+                    self.active -= 1
 
     backend = BlockingReviewBackend(multi_stack_target)
     if fanout_concurrency is None:
@@ -159,10 +141,8 @@ async def test_fanout_concurrency_limiter(
     else:
         backend.fanout_concurrency = fanout_concurrency
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    codes: list[int] = []
-
     async def drive() -> None:
-        codes.append(await run(empty_review_config(multi_stack_target, tmp_path / "trajectory.json")))
+        assert await run(empty_review_config(multi_stack_target, tmp_path / "trajectory.json")) == 0
 
     with anyio.fail_after(10):
         async with anyio.create_task_group() as tasks:
@@ -172,7 +152,7 @@ async def test_fanout_concurrency_limiter(
             assert backend.active == expected
             release.set()
 
-    assert codes == [0] and backend.peak == expected and backend.active == 0
+    assert backend.peak == expected and backend.active == 0
     coverage = saved_coverage(multi_stack_target / ".daydream/deep")
     assert set(coverage.scopes) == {"python", "react", "go", "generic", "structure"}
     assert all(scope["status"] == "complete" for scope in coverage.scopes.values())

@@ -25,17 +25,26 @@ from tests.harness.review_result import merge_result
 PARTIAL_FIX_MARKER = "// PARTIAL BROKEN EDIT -- max turns exhausted mid-fix\n"
 
 
-def review_stage_result(prompt: str, issues: list[dict[str, Any]]) -> dict[str, Any]:
-    """Answer the requested private review stage while preserving legacy callers.
+def review_stage_state(prompt: str) -> dict[str, Any] | None:
+    """Decode the host state before any trailing invocation instructions."""
+    _, marker, payload = prompt.partition("Host review stage:\n")
+    state: dict[str, Any] | None = json.JSONDecoder().raw_decode(payload)[0] if marker else None
+    return state
 
-    Findings belong to the first successful discovery batch. Later file batches
-    and structural integration acknowledge their targets without rediscovering
-    the same fixture finding.
-    """
-    marker = "Host review stage:\n"
-    if marker not in prompt:
+
+def stage_result(stage: dict[str, Any], *, candidates: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    return {
+        "targets": [{"target_id": target, "status": "reviewed", "reason": ""}
+                    for target in stage["assigned_target_ids"]],
+        "notes": "Assigned changed behavior reviewed", "candidates": candidates or [], "contradictions": [],
+    }
+
+
+def review_stage_result(prompt: str, issues: list[dict[str, Any]]) -> dict[str, Any]:
+    """Emit fixture findings once, in the first discovery batch; retain legacy output."""
+    state = review_stage_state(prompt)
+    if state is None:
         return {"issues": issues}
-    state = json.JSONDecoder().raw_decode(prompt.split(marker, 1)[1])[0]
     candidates = []
     if state["stage"] == "first_pass" and not state["progress"]:
         candidates = [{
@@ -46,11 +55,7 @@ def review_stage_result(prompt: str, issues: list[dict[str, Any]]) -> dict[str, 
     elif state["stage"] == "triage":
         candidates = [dict(candidate, disposition="confirmed") for candidate in state["candidates"]
                       if candidate["candidate_id"] in state["assigned_candidate_ids"]]
-    return {
-        "targets": [{"target_id": target, "status": "reviewed", "reason": ""}
-                    for target in state["assigned_target_ids"]],
-        "notes": "Assigned changed behavior reviewed", "candidates": candidates, "contradictions": [],
-    }
+    return stage_result(state, candidates=candidates)
 
 
 class _StubRetryableError(RuntimeError):
@@ -266,9 +271,8 @@ class StubBackend:
     @staticmethod
     def _stack_scope_files(prompt: str) -> list[str]:
         """Split the comma-separated Assigned files marker in a scope instruction."""
-        marker = "Host review stage:\n"
-        if marker in prompt:
-            state = json.JSONDecoder().raw_decode(prompt.split(marker, 1)[1])[0]
+        state = review_stage_state(prompt)
+        if state is not None:
             return [target for target in state["assigned_target_ids"] if not target.startswith("integration:")]
         m = re.search(r"Assigned files:\s*([^\n]+)", prompt)
         if m is None:

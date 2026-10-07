@@ -108,6 +108,7 @@ async def test_outcomes(review: ReviewRun, archive_dir: Path, case: str, state: 
         canonical = json.loads((review.repo / '.daydream/deep/merged-items.json').read_text())
         assert canonical['items'][0]['source_uids'] == ['python:1']
     if case == 'empty':
+        assert sum('Host review stage:\n' in c['prompt'] for c in review.backend.calls) == 5
         assert not any('cross-stack merge agent' in c['prompt'].lower() or
                        'supervisor adjudication' in c['prompt'].lower() for c in review.backend.calls)
     if case == 'archive':
@@ -257,6 +258,8 @@ async def test_unsuccessful_stage_discards_checkpoints(
     reason = 'model_budget_exhaustion' if budget == 'model' else f'host_{budget}_budget_exhaustion'
     assert result['analysis_state'] == 'failed' and result['completed_stacks'] == []
     assert reason in result['reason_codes'] and data['findings'] == []
+    saved = json.loads((review.repo / '.daydream/deep/stack-python-records.json').read_text())
+    assert saved['issues'] == [] and saved['incomplete'] is True
     for scope in scopes(data).values():
         assert (scope['status'], scope['partial_evidence']) == ('incomplete', False)
         assert scope['reason_codes'] == [reason]
