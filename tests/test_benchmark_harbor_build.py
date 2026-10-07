@@ -554,6 +554,7 @@ def test_finding_marker_import_curate_compile_preserves_raw_source(
 def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, head_sha = _seed_ready_workspace(tmp_path, fake_gh)
     key = build.derive_task_key(case_id)
+    case_doc = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     lock = build.compile_workspace(ws)
 
     case = ws / "harbor" / key
@@ -610,17 +611,6 @@ def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path: Path, f
             continue
         assert lock["files"][rel] == hashlib.sha256(data).hexdigest()
 
-def test_compile_lock_records_requested_base_sha(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """The compiled lock row + authoring-input digest carry the corrected base provenance:
-    ``requested_base_sha`` alongside the merge-base ``original_base_sha``, with the
-    digest deterministic across recomputes.
-    """
-
-    ws, case_id, _head = _seed_ready_workspace(tmp_path, fake_gh)
-    key = build.derive_task_key(case_id)
-    case_doc = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-
-    lock = build.compile_workspace(ws)
     row = lock["cases"][key]
     assert row["requested_base_sha"] == case_doc["snapshot"]["requested_base_sha"]
     assert row["original_base_sha"] == case_doc["snapshot"]["original_base_sha"]
@@ -633,6 +623,50 @@ def test_compile_lock_records_requested_base_sha(tmp_path: Path, fake_gh: FakeGh
     moved = dict(case_doc, snapshot=dict(case_doc["snapshot"]))
     moved["snapshot"]["requested_base_sha"] = "0" * 40
     assert build._authoring_input_digest({case_id: moved}, manifest) != lock["authoring_input_digest"]
+
+    rels = {str(p.relative_to(ws / "harbor")) for p in (ws / "harbor").rglob("*") if p.is_file()}
+    forbidden_substrs = ("imports/", "cases/", "benchmark.yaml", "provenance", "exclusions")
+    assert not any(any(f in r for f in forbidden_substrs) for r in rels)
+    # every compiled path lives under a case dir, root control files, or the metric
+    root_files = {"README.md", "benchmark.lock.json", "metric.py", "verifier_core.py",
+        "harbor-job.yaml", "harbor-oracle.yaml"
+    }
+    assert all(r.startswith("case-") or r in root_files for r in rels)
+
+    tm = ws / "harbor" / key / "Task.md"
+    assert tm.exists()                                          # R10 written
+    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    expected = hashlib.sha256(build.render_task_spec(raw, instruction=build.ASSIGNMENT_TEXT)).hexdigest()
+    actual = hashlib.sha256(tm.read_bytes()).hexdigest()
+    assert actual == expected                                   # R10: compiled == approved bytes
+    assert actual == lock["cases"][key]["task_spec_sha256"]     # R10/R11: lock inventory matches
+    assert actual == raw["curation"]["task_spec_sha256"]        # matches the approved curation digest
+    assert lock["cases"][key]["files"]["Task.md"] == actual     # per-case files{} inventory (R11)
+    assert lock["files"][f"{key}/Task.md"] == actual            # root files{} inventory
+    # Task.md is the only hidden-truth surface; it must not be copied into tests/ or environment/
+    rels = {str(p.relative_to(ws / "harbor" / key)) for p in (ws / "harbor" / key).rglob("*") if p.is_file()}
+    assert "Task.md" in rels
+    assert not any(r.startswith("tests/") and r.endswith("Task.md") for r in rels)
+    assert not any(r.startswith("environment/") and r.endswith("Task.md") for r in rels)
+
+    key = build.derive_task_key(case_id)
+    case = ws / "harbor" / key
+    assert (case / "Task.md").is_file()
+    for sub in ("tests", "environment"):
+        rels = {p.name for p in (case / sub).rglob("*") if p.is_file()}
+        assert "Task.md" not in rels, f"Task.md must not reach {sub}/"
+    env_files = {p.name for p in (case / "environment").rglob("*") if p.is_file()}
+    assert env_files == {"repository.bundle", "Dockerfile", "runtime-requirements.lock"
+    }, f"unexpected environment files: {env_files}"
+
+    key = next(iter(lock["cases"]))
+    toml = (ws / "harbor" / key / "task.toml").read_bytes()
+    doc = tomllib.loads(toml.decode())
+    assert doc["agent"]["allowed_hosts"] == ["h1.example.com"]
+    assert doc["verifier"]["environment"]["allowed_hosts"] == ["h2.example.com"]
+    assert "h1.example.com" not in doc["verifier"]["environment"]["allowed_hosts"]
+    assert "h2.example.com" not in doc["agent"]["allowed_hosts"]
+
 
 def test_clean_attested_draft_does_not_compile(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, _, _ = _seed_clean_workspace(tmp_path, fake_gh, ready=False)  # draft-clean
@@ -895,17 +929,6 @@ def test_validate_bundle_inventory_rejects_extra_ref(tmp_path: Path) -> None:
         build.validate_bundle_inventory(bp)
     assert "ref" in str(rejected.value)
 
-def test_compiled_tree_contains_no_raw_authoring_files(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    build.compile_workspace(ws)
-    rels = {str(p.relative_to(ws / "harbor")) for p in (ws / "harbor").rglob("*") if p.is_file()}
-    forbidden_substrs = ("imports/", "cases/", "benchmark.yaml", "provenance", "exclusions")
-    assert not any(any(f in r for f in forbidden_substrs) for r in rels)
-    # every compiled path lives under a case dir, root control files, or the metric
-    root_files = {"README.md", "benchmark.lock.json", "metric.py", "verifier_core.py",
-        "harbor-job.yaml", "harbor-oracle.yaml"
-    }
-    assert all(r.startswith("case-") or r in root_files for r in rels)
 
 def test_compile_workspace_with_relative_root_matches_resolved_root_bytes(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
@@ -1097,12 +1120,10 @@ def test_render_task_spec_is_deterministic_and_sectioned(tmp_path: Path, fake_gh
     raw2["pull_request"]["title"] = "Other"
     assert build.render_task_spec(raw2, instruction=build.ASSIGNMENT_TEXT) != b1
 
-def test_task_md_prose_describes_reported_axes_contract(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     spec = build.render_task_spec(raw, instruction=build.ASSIGNMENT_TEXT).decode()
     assert "reported" in spec  # axes are reported, never gating
     assert "severity, location, and content are graded" not in spec  # the false claim is gone (R10)
+
 
 def test_compile_records_template_version_and_rejects_stale_task_spec(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
@@ -1126,25 +1147,6 @@ def test_compile_records_template_version_and_rejects_stale_task_spec(tmp_path: 
         build.compile_workspace(ws)
     assert _harbor_tree_bytes(ws) == before
 
-def test_compile_writes_task_md_and_inventories_its_digest(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)   # ready with a rendered digest (Task 4)
-    key = build.derive_task_key(case_id)
-    lock = build.compile_workspace(ws)
-    tm = ws / "harbor" / key / "Task.md"
-    assert tm.exists()                                          # R10 written
-    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    expected = hashlib.sha256(build.render_task_spec(raw, instruction=build.ASSIGNMENT_TEXT)).hexdigest()
-    actual = hashlib.sha256(tm.read_bytes()).hexdigest()
-    assert actual == expected                                   # R10: compiled == approved bytes
-    assert actual == lock["cases"][key]["task_spec_sha256"]     # R10/R11: lock inventory matches
-    assert actual == raw["curation"]["task_spec_sha256"]        # matches the approved curation digest
-    assert lock["cases"][key]["files"]["Task.md"] == actual     # per-case files{} inventory (R11)
-    assert lock["files"][f"{key}/Task.md"] == actual            # root files{} inventory
-    # Task.md is the only hidden-truth surface; it must not be copied into tests/ or environment/
-    rels = {str(p.relative_to(ws / "harbor" / key)) for p in (ws / "harbor" / key).rglob("*") if p.is_file()}
-    assert "Task.md" in rels
-    assert not any(r.startswith("tests/") and r.endswith("Task.md") for r in rels)
-    assert not any(r.startswith("environment/") and r.endswith("Task.md") for r in rels)
 
 def test_spec_change_forces_recompile(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
@@ -1183,33 +1185,7 @@ def test_leakage_scan_task_md_permits_spec_prose_and_rejects_identifiers() -> No
         build.leakage_scan({"case-x/Task.md": leaky}, repository_slug="o/r")
     assert "Task.md" in str(rejected.value)
 
-def test_compiled_agent_and_verifier_surfaces_exclude_task_md(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    build.compile_workspace(ws)
-    key = build.derive_task_key(case_id)
-    case = ws / "harbor" / key
-    assert (case / "Task.md").is_file()
-    for sub in ("tests", "environment"):
-        rels = {p.name for p in (case / sub).rglob("*") if p.is_file()}
-        assert "Task.md" not in rels, f"Task.md must not reach {sub}/"
-    env_files = {p.name for p in (case / "environment").rglob("*") if p.is_file()}
-    assert env_files == {"repository.bundle", "Dockerfile", "runtime-requirements.lock"
-    }, f"unexpected environment files: {env_files}"
 
-def test_compiled_policy_comes_from_workspace_allowlists(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """The compiled task TOML's agent/verifier host policies are populated from the
-    workspace's persisted privacy allowlists (reviewer -> [agent].allowed_hosts,
-    judge -> [verifier.environment].allowed_hosts), kept as separate boundaries."""
-
-    ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    lock = build.compile_workspace(ws)                 # h1.example.com / h2.example.com
-    key = next(iter(lock["cases"]))
-    toml = (ws / "harbor" / key / "task.toml").read_bytes()
-    doc = tomllib.loads(toml.decode())
-    assert doc["agent"]["allowed_hosts"] == ["h1.example.com"]
-    assert doc["verifier"]["environment"]["allowed_hosts"] == ["h2.example.com"]
-    assert "h1.example.com" not in doc["verifier"]["environment"]["allowed_hosts"]
-    assert "h2.example.com" not in doc["agent"]["allowed_hosts"]
 
 def test_openrouter_policy_compiles_and_is_not_leak_flagged(tmp_path: Path, fake_gh: FakeGh) -> None:
     """The OpenRouter workspace resolves both persisted allowlists to
