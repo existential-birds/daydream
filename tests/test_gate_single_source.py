@@ -22,7 +22,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 # floor is a number in exactly one of them: pyproject.toml's fail_under.
 # docs/coverage.md is deliberately absent: its baseline table is the recorded
 # measurement history the ratchet procedure maintains, not a policy statement.
-_GATE_FILES = ("Makefile", "pyproject.toml", ".github/workflows/ci.yml", "CONTRIBUTING.md", "CLAUDE.md",
+_GATE_FILES = ("Makefile", "pyproject.toml", ".github/workflows/ci.yml", "CONTRIBUTING.md", "AGENTS.md",
     ".github/PULL_REQUEST_TEMPLATE.md",
 )
 
@@ -54,14 +54,11 @@ def _gate_steps() -> list[str]:
 
 def _documented_gate_steps() -> dict[str, list[str]]:
     """The gate steps each contributor-facing enumeration claims, in order."""
-    claude = (_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
-    claude_line = next(line for line in claude.splitlines() if line.startswith("make check") and "#" in line)
     contributing = (_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
     contributing_block = (
         contributing.split("which runs, in order:", 1)[1].split("```text\n", 1)[1].split("\n```", 1)[0]
     )
     return {
-        "CLAUDE.md": [step.strip() for step in claude_line.split("#", 1)[1].split(" (the gate)")[0].split("+")],
         "CONTRIBUTING.md": contributing_block.split(),
     }
 
