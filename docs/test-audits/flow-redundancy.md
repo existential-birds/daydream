@@ -172,7 +172,7 @@ batch costs of 1,030.45s / 85.33s / 118.20s / 122.93s, with no unmatched cases.
 The first batch alone nearly consumed the full 1,042.56s wall time. The original
 scheduler does not steal already assigned cases.
 
-Root pytest addopts retain strict markers and add `--maxschedchunk=10`, limiting
+The initial root pytest addopts retained strict markers and added `--maxschedchunk=10`, limiting
 each assignment batch while retaining four workers, the entire collection, normal
 fixture/teardown protocols and all coverage settings. This is not a hard total
 queue-length limit: fast completions can accumulate several batches. Independent
@@ -211,10 +211,10 @@ broader results and hosted CI are required before claiming the target.
 
 ## Broader requested count reduction
 
-Final collection after the shared-run batch: **8,197 cases / 5,361 functions**.
-This removes 70 functions (1.29%) and 807 net cases (8.96%). 721 case wrappers
+Final collection after the shared-run batch: **8,198 cases / 5,361 functions**.
+This removes 70 functions (1.29%) and 806 net cases (8.95%). 721 case wrappers
 belonged to one repository logging scan; all722 sources and every AST rule remain
-covered by its same named keeper. The remaining 86 net cases are exact matching
+covered by its same named keeper. The remaining 85 net cases are exact matching
 run/assertion consolidations or private organization/self-identity checks.
 
 The records/runtime/tooling inventories covered 66/33/52 associated files and
@@ -232,8 +232,8 @@ are reported in the PR; do not interpret the initial full gate as the final gate
 after these subsequent edits.
 
 Final size accounting against the same baseline categories: production 0 lines
-changed; tests +327/-883 (net -556); shared support +14; pytest configuration +3/-1
-(net +2). Python totals: production 105,189, tests 116,504, support 7,964. Evidence
+changed; tests +340/-885 (net -545); shared support +14; pytest configuration +3/-1
+(net +2). Python totals: production 105,189, tests 116,515, support 7,964. Evidence
 documentation is separate. The same functions and sources remain in production;
 no test-only production export, injection flag or seam was introduced.
 
@@ -252,3 +252,57 @@ line wrap; Ruff, mypy (723 files), root/RL vulture, root/RL locks and diffcheck 
 The full integrated gate is the ordinary pre-push make check. The PR records its
 actual passed/skipped/coverage/time result and subsequent hosted CI, including
 whether the under-four-minute check-job objective is achieved.
+
+## Hosted auth guidance repair
+
+CI 37553131563 (same 4-vCPU class and actual root Python 3.14.8 as the hosted
+baseline) completed root job 302s/tests 262.91s: 1 failed, 8,191 passed, 5 skipped;
+RL passed 151s. The four-minute target was not met. Sole failure was
+`test_git_ops.py::test_gh_api_raises_without_auth`: installed gh correctly rejects
+/user in Actions with `set the GH_TOKEN environment variable`, while the new
+matcher expected local `gh auth login` wording.
+
+Exact red reproduction on the local installed CLI:
+`GITHUB_ACTIONS=true uv run --no-sync python -m pytest tests/test_git_ops.py::test_gh_api_raises_without_auth -q`.
+It failed with the identical Actions guidance. Before editing, an independent
+review approved preserving the same real auth guard as explicit `[local]` and
+`[actions]` rows: remove/set GITHUB_ACTIONS and require the corresponding exact
+guidance. Both repaired rows passed in 0.61s, and final independent review confirms
+only this declaration changed. No token/config/skip relaxation or dummy auth was
+introduced. This justified additional mode case changes final collection to
+8,198 cases/5,361 functions: 70 functions and 806 net cases removed. The original
+local guard and new CI-context failure mode are both retained.
+
+The ordinary pre-push full gate's 90.54% versus the earlier direct-shell
+candidate's 90.55% differed only at git_ops/snapshot.py:118, the absent-GIT_EXEC_PATH
+return. Hooks export that variable; direct shell does not. Snapshot security tests,
+clean child environment and real pre-push default-helper proof remain unchanged.
+This is 0.0031 percentage points of ambient hook/shell branch difference, not a
+removed contract or changed coverage setting. New auth repair gets its own focused
+Git/auth/shared-consumer and full normal hook validation before landing.
+
+## Refined dispatch and hosted timing evidence
+
+The follow-up configuration uses `--maxschedchunk=1 --durations=40`, retaining
+strict markers, workers, complete collection, dependencies and coverage settings.
+Independent review inspected the locked xdist 3.8.0 scheduler, parser, worker
+lookahead/completion/shutdown and restart protocol before editing. With the full
+collection, initial dispatch still sends two cases. In ordinary completion-driven
+scheduling each finished item is removed and at most one is appended, retaining
+at most two queued cases. Survivor queues can grow on crash/restart refill passes;
+this is not a hard global queue-length guarantee after restart. Running cases
+are never moved; the original dispatch, fixture and teardown protocols remain.
+
+Ten-case dispatch can append further batches after sub-0.1s completions. Whether
+this caused the hosted 262.91s test runtime is an uninstrumented hypothesis. Local
+full 408.62s was already close to its JUnit summed case 1572.08/4=393.02s lower bound;
+no large local improvement is predicted. Additional messages/module setup can
+cost time. The built-in 40-duration summary records existing reports, not queue
+depths, for actual hosted owner timing evidence. No assertion/row/fixture is lost.
+
+Matching Git/auth consumers in Actions mode: 10-case dispatch 447 passed/4 skipped,
+22.46s; 1-case dispatch 447/4,22.26s. Same selection, n4, Python/lock/machine and no
+coverage on either. Difference 0.20s is not a material performance claim. Full
+normal hook gate and actual hosted CI decide preservation and target throughput.
+The final root collector still has 8,198 cases/5,361 functions. The earlier matched
+expanded comparison intentionally used 10-case dispatch on both historical sides.

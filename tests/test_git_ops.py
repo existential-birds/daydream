@@ -1432,9 +1432,20 @@ def test_gh_pr_diff_raises_without_remote(repo: Path) -> None:
         git_ops.gh_pr_diff(repo, 1)
 
 @gh_required
-def test_gh_api_raises_without_auth(repo: Path) -> None:
+@pytest.mark.parametrize(
+    ("actions", "guidance"),
+    [(False, "gh auth login"), (True, "set the GH_TOKEN environment variable")],
+    ids=["local", "actions"],
+)
+def test_gh_api_raises_without_auth(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, actions: bool, guidance: str,
+) -> None:
     """The installed CLI rejects credentials absent at the actual authentication guard."""
-    with pytest.raises(GitError, match="gh auth login"):
+    if actions:
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    else:
+        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    with pytest.raises(GitError, match=guidance):
         git_ops.gh_api(repo, "/user")
 
 def _make_divergent_history(tmp_path: Path) -> tuple[Path, str, str]:
