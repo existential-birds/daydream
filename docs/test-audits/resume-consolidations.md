@@ -1,7 +1,7 @@
 # Final resume consolidation and runtime evidence
 
 Baseline: `6c48d368d529a89748c93e7bb61ae9ac6566936e`.
-Current collection: **8,197 cases / 5,360 functions**, down **807 cases / 71 functions (8.96%)**.
+Collection at `3078954b`: **8,197 cases / 5,360 functions**, down **807 cases / 71 functions (8.96%)**.
 All prior flow/shared keeper mappings remain applicable. These two additions remove two repeated real runner invocations; no production, fixture, transport, coverage, skip, workflow or worker setting changes.
 
 ## Validation and independent preservation review
@@ -19,7 +19,7 @@ Temporary built-in complete duration reporting at `0866523dc6d2eb69bc10e2ce74924
 
 A further constant randomized registry-prefix proposal preserved source contracts and removed false numeric parses in an external mechanism probe, but actual 8,199-row autouse workload showed no improvement (38.55s current / 39.81s constant, same Python/n4/dependencies/machine/no coverage). It was rejected; exact source restored and control checkout removed. This is neither a suite speedup nor a production change.
 
-Additional bounded discovery examined 125 high-cardinality groups / 1,589 cases and the expensive deterministic checks, handoffs, cache damage and fix isolation inputs. No large proven redundancy was established. Independent fault, authorization, path/privacy, transport, cancellation, persistence and shipped-byte contracts remain. Cheap table wrapper reduction is not a performance result. The under-four-minute objective remains unmet; PR remains draft.
+Additional bounded discovery inventoried 125 high-cardinality groups / 1,589 cases; selected groups received complete owner/history audits and the expensive deterministic checks, handoffs, cache damage and fix isolation inputs. No large proven redundancy was established. Independent fault, authorization, path/privacy, transport, cancellation, persistence and shipped-byte contracts remain. Cheap table wrapper reduction is not a performance result. The under-four-minute objective remains unmet; PR remains draft.
 
 ## Exact candidate evidence recorded before editing
 
