@@ -518,15 +518,17 @@ that fits one group is unsharded and keeps the pre-profile arbiter effort
 (Codex `xhigh`, the Claude/Pi ambient default) whatever the profile: the
 route's arbiter effort is a per-group knob. Each run writes
 its decision to `.daydream/deep/latency-routing.json`, and the archived
-`evaluation.json` carries the selected profile. See
-[review runtime](docs/review-runtime.md#latency-profiles-and-the-per-profile-report)
-for the per-profile report command.
+`evaluation.json` carries the selected profile. Compare profiles with:
 
-The same corpus declares `selection_cases` for the recommendation-verifier
-comparison, and the documented command
-`uv run python -m daydream.eval.latency_report --corpus tests/fixtures/latency_profiles/manifest.json`
-then emits a `verify_selection` block contrasting today's conservative verifier
-(`verify_all`) with the selective mode. It reports, per mode: the selected item
+```sh
+uv run python -m daydream.eval.latency_report --corpus tests/fixtures/latency_profiles/manifest.json
+```
+
+The report covers the recorded corpus only; its arbiter latency includes the
+whole deep phase.
+
+The corpus's `selection_cases` produce a `verify_selection` block comparing the
+conservative verifier (`verify_all`) with the selective mode. It reports, per mode: the selected item
 and backend-call counts (a mode with no selected item makes no call), how many
 the mode skips, how many skipped items the archived arm had verdicted
 `contradicts` or `uncertain` (the offline counterfactual), the fraction of each
@@ -639,10 +641,10 @@ and 6× review time and per-role tool-call allowances respectively. The 4× and
 6× tiers also enable deep-review sharding unless explicitly disabled. An explicit review
 profile keeps its configured whole-review deadline. Set
 `pipeline.review_wall_budget_s` in a `--review-profile` TOML file to change it.
-Individual reviewers also have bounded investigation and finalization stages:
-per-stack investigation stops after eight minutes or 48 tool starts, reserving
-up to two minutes to return validated findings. Intent, exploration, and other
-roles have smaller bounds. The existing 60-minute review ceilings remain outer
+Per-stack reviewers share eight minutes and 48 observed tool starts across file
+batches, structural integration, and one triage round. Retries consume the same
+allowances; the host publishes findings from successful stages. Other roles retain
+bounded finalization. The existing 60-minute review ceilings remain outer
 safeguards; fix turns retain their separate 30-minute limit.
 
 When a review agent exhausts its time or tool-call budget, Daydream continues with
@@ -661,8 +663,8 @@ and posting jobs to the same Daydream revision. Leave CI headroom beyond the
 model deadline for setup, host processing, and artifact publication; a 60-minute
 job with the default model budget leaves 15 minutes for those operations. An
 external job cancellation cannot use the graceful budget-exhaustion path.
-See [review runtime and rollout](docs/review-runtime.md) for role limits,
-measurements, quality limitations, and trajectory-upload guidance.
+For diagnosis, capture `--trajectory PATH` and `--dump-artifacts DIRECTORY`.
+Inspect diagnostic bundles for credentials before sharing them.
 
 ### Retry recovery
 

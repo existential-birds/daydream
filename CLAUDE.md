@@ -254,7 +254,8 @@ exploration pre-scan (cached across runs)
 - Per-stack reviewers use bounded first-pass file batches, structural integration where applicable,
   and one finite triage round under a cumulative observed-start budget and absolute deadline.
   Only successful stages admit explicit acknowledgements and candidate decisions; the host publishes
-  confirmed records without a model serializer. See `docs/review-runtime.md` for bounds and incomplete coverage.
+  confirmed records without a model serializer. Cutoffs and malformed stages retain earlier admitted findings
+  with incomplete coverage; cache only complete reviewer scopes.
 - Reviewer records are loaded in **stack-name order** to keep merge input ordering
   and global issue numbering reproducible.
 - **Record identity is host-assigned, not content-derived.** Every per-stack record is stamped with a `uid`
