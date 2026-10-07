@@ -1,6 +1,5 @@
 """Precedence: explicit adjudicator > latest human rater > automatic; conflicts stay non-gold."""
 
-from collections.abc import Mapping
 from typing import Any
 
 from daydream.training.adjudication.precedence import (
@@ -54,6 +53,7 @@ def test_conflicting_raters_without_adjudicator_are_non_gold() -> None:
     assert has_rater_conflict(obs) is True
     assert result["gold_eligible"] is False  # AC 6: stays non-gold until adjudicated
     assert result["conflict"] is True
+    assert result == effective_adjudication(list(reversed(obs)))
 
 
 def test_conflict_resolved_by_adjudicator_is_gold_eligible_again() -> None:
@@ -64,14 +64,6 @@ def test_conflict_resolved_by_adjudicator_is_gold_eligible_again() -> None:
     ]
     result = effective_adjudication(obs)
     assert result["conflict"] is False and result["gold_eligible"] is True
-
-
-def test_conflicting_raters_fixture_order_is_stable() -> None:
-    obs_a: list[Mapping[str, Any]] = [
-        _obs("accepted", "alice", observed="2026-08-30T10:00:00+00:00"),
-        _obs("rejected", "bob", observed="2026-08-30T11:00:00+00:00"),
-    ]
-    assert effective_adjudication(obs_a) == effective_adjudication(list(reversed(obs_a)))
 
 
 def test_digest_change_requeues_prior_judgment() -> None:

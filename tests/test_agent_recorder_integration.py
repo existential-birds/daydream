@@ -76,6 +76,9 @@ async def test_user_prompt_becomes_user_step(tmp_path: Path) -> None:
     assert "model_name" not in user_steps[0] or user_steps[0]["model_name"] is None
     assert "reasoning_content" not in user_steps[0] or user_steps[0]["reasoning_content"] is None
     assert _single_agent_step(traj)["message"] == "hello back"
+    for step in traj["steps"]:
+        assert step["extra"]["daydream_phase"] == "review"
+        assert step["extra"]["daydream_run_flow"] == "normal"
 
 async def test_tool_call_paired_with_observation_in_same_step(tmp_path: Path) -> None:
     backend = _scripted([
@@ -141,14 +144,6 @@ async def test_no_recorder_is_clean_no_op(tmp_path: Path) -> None:
     # No trajectory.json should be written when no recorder is active.
     assert not (tmp_path / ".daydream" / "trajectory.json").exists()
 
-async def test_extra_phase_and_run_flow_labels(tmp_path: Path) -> None:
-    backend = _scripted([ TextEvent(text="ok"), ])
-    traj, _ = await _run_with_recorder(backend, tmp_path, phase=DaydreamPhase.REVIEW, run_flow=DaydreamRunFlow.NORMAL)
-    assert traj is not None
-    assert atif_validate(traj) is True
-    for step in traj["steps"]:
-        assert step["extra"]["daydream_phase"] == "review"
-        assert step["extra"]["daydream_run_flow"] == "normal"
 
 async def test_extra_labels_reflect_per_call_phase_and_run_flow(tmp_path: Path) -> None:
     """MAP-08 + MAP-09 — phase varies per run_agent call; run_flow per recorder."""

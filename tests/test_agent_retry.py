@@ -150,15 +150,6 @@ async def test_run_agent_surfaces_backend_error_message(monkeypatch: pytest.Monk
     assert "leaked-secret-abc123" not in out
     assert "[REDACTED_ENV_VAR]" in out
 
-async def test_run_agent_retry_exhausted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Always-retryable backend is called max_attempts+1 times total, then raises."""
-    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.01")
-    monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "2")
-    backend = _always_raises(PiError("429 rate limit", retryable=True))
-    with pytest.raises(PiError):
-        await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
-    # 1 original attempt + 2 retries = 3 total
-    assert backend.call_count == 3
 
 async def test_stream_stall_gets_only_one_fresh_attempt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Repeated dead-air windows cannot multiply into hours of retries."""

@@ -58,16 +58,14 @@ def test_gate_pass_separates_classes(frozen_split: FrozenSplit, trained_model: O
     assert report.passed
     assert report.separation > 0
     assert report.evidence_digest
+    assert report.accepted_ratio is not None  # measured at gate time
+    assert 0.0 <= report.accepted_ratio <= 1.0
     assert report.to_dict()["separation"] == report.separation  # JSON-serializable
 
 def test_gate_refuses_when_evidence_missing(trained_model: OutcomeModel) -> None:
     with pytest.raises(RuntimeError, match="gate evidence"):
         evaluate_gate(trained_model, None, GateConfig())
 
-def test_label_ratio_reported_not_stale(frozen_split: FrozenSplit, trained_model: OutcomeModel) -> None:
-    report = evaluate_gate(trained_model, frozen_split, GateConfig())
-    assert report.accepted_ratio is not None  # S2: measured at gate time
-    assert 0.0 <= report.accepted_ratio <= 1.0
 
 def test_gate_fails_below_thresholds(frozen_split: FrozenSplit, trained_model: OutcomeModel) -> None:
     report = evaluate_gate(trained_model, frozen_split, GateConfig(min_separation=0.99, min_calibration=0.99))

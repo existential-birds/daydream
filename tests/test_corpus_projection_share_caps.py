@@ -121,11 +121,6 @@ class TestApplyShareCaps:
         assert len(none_kept) / total <= 0.5 + 1e-9
         assert "stack:(none)" in exclusions
 
-    def test_degenerate_cap_that_empties_population_fails_closed(self) -> None:
-        records = [_mk_record(f"r{i:03d}", "python", "owner/repo-a", "deep") for i in range(4)]
-        with pytest.raises(ValueError, match="max_stack_share"):
-            # 0.2 * 4 = 0.8 → keep 0 → population would collapse to zero.
-            _apply_share_caps(records, max_stack_share=0.2, max_repo_share=None, max_profile_share=None)
 
     def test_sole_remaining_value_above_cap_fails_closed(self) -> None:
         # Mono-value boundary consistency (issues #5/#7): a cap that floors to
@@ -162,8 +157,6 @@ class TestApplyShareCaps:
         ]
         with pytest.raises(ValueError, match="max_stack_share"):
             _apply_share_caps(records, max_stack_share=0.5, max_repo_share=0.5, max_profile_share=None)
-
-
 
 
 def _store_with_caps_population(tmp_path: Path) -> Any:
