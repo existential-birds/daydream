@@ -273,10 +273,8 @@ def _select_by_schema(text: str, schema: dict[str, Any], *, require_full_schema:
     keeps a fully valid candidate authoritative; the salvage scan only runs when
     nothing validates, so this never widens what is accepted, only reorders it.
     """
-    if require_full_schema:
-        return extract_json_by_schema(text, schema=schema, accept=validates_schema)
     strict = extract_json_by_schema(text, schema=schema, accept=validates_schema)
-    if strict.value is not None:
+    if require_full_schema or strict.value is not None:
         return strict
     return extract_json_by_schema(text, schema=schema, accept=_salvageable)
 

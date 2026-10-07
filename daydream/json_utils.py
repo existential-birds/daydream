@@ -1,4 +1,4 @@
-"""Shared atomic JSON/byte writers, tolerant JSONL record reading, and tolerant model-output JSON extraction."""
+"""Shared atomic JSON/byte writers and tolerant model-output JSON extraction."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import json
 import os
 import tempfile
 import threading
-from collections.abc import Iterator
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -271,31 +270,6 @@ def _json_candidates(text: str) -> list[tuple[int, Any, int]]:
             # past it never drops the winner and keeps well-formed scans near-linear.
             scan_from = end_idx
     return candidates
-
-
-def iter_jsonl_records(path: Path) -> Iterator[dict[str, Any]]:
-    """Yield each well-formed JSON object written one-per-line to ``path``.
-
-    Append-only logs whose only malformed input is a final line truncated by a
-    crash mid-append: that line is skipped instead of failing the whole file, and
-    so is any line that parses to something other than an object. A path that
-    names nothing usable (absent, or a directory where the artifact belongs)
-    yields nothing; every other read error propagates, because a caller that
-    asked for an existing artifact must learn it could not be read.
-    """
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (FileNotFoundError, IsADirectoryError):
-        return
-    for line in text.splitlines():
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(record, dict):
-            yield record
 
 
 def _largest_span(candidates: list[tuple[int, Any, int]]) -> tuple[int, Any, int]:

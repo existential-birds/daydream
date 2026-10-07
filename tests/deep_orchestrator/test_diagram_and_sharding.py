@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import pytest
 
@@ -39,8 +38,6 @@ from tests.test_deep_orchestrator import (
     _silence,
 )
 
-if TYPE_CHECKING:
-    pass
 
 def test_diagram_step_position_and_phase_key() -> None:
     names = [step.name for step in STEPS]
