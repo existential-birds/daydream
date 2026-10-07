@@ -641,9 +641,20 @@ and 6× review time and per-role tool-call allowances respectively. The 4× and
 6× tiers also enable deep-review sharding unless explicitly disabled. An explicit review
 profile keeps its configured whole-review deadline. Set
 `pipeline.review_wall_budget_s` in a `--review-profile` TOML file to change it.
-Per-stack reviewers share eight minutes and 48 observed tool starts across file
-batches, structural integration, and one triage round. Retries consume the same
-allowances; the host publishes findings from successful stages. Other roles retain
+Per-stack reviewers share eight minutes and 48 observed tool starts across stages.
+Language and generic reviewers receive directory-grouped batches of at most four
+files and 16 KiB of changed hunks (an oversized file remains an explicit assignment); Structure
+starts with whole-change interaction and boundary review, with documentation as
+supporting context. Each invocation receives a fresh prompt for its assigned work,
+followed by a finite triage round for open candidates. Stage call targets are
+advisory: useful work may borrow the reviewer's remaining cumulative allowance.
+The hard allowance and absolute deadline do not reset between stages or retries.
+Retries consume the same allowances; the host publishes findings from successful
+stages, retaining typed incomplete coverage when a later invocation fails.
+Reads alone never establish reviewed coverage. Source reads should stay targeted,
+with complete enclosing symbols read in bounded segments; clipped or omitted
+evidence cannot substantiate a candidate. Successful handoffs remain compact
+within the existing evidence limits. Other roles retain
 bounded finalization. The existing 60-minute review ceilings remain outer
 safeguards; fix turns retain their separate 30-minute limit.
 

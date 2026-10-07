@@ -10,11 +10,12 @@ from typing import Any
 import pytest
 
 from daydream.backends import AgentEvent, MaxTurnsError, ResultEvent, ToolResultEvent, ToolStartEvent
+from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
 from tests.deep_orchestrator.test_review_completion import ReviewRun, record, scopes
 from tests.harness.git_helpers import seed_feature_branch
 from tests.harness.stub_backend import review_stage_state, stage_result
-from tests.test_deep_orchestrator import _profile_with_pipeline
+from tests.test_deep_orchestrator import _profile_with_pipeline, _sanctioned_inputs
 
 
 class StagedBackend(EmptyReviewBackend):
@@ -33,7 +34,8 @@ class StagedBackend(EmptyReviewBackend):
         stage = review_stage_state(prompt)
         if stage is not None:
             self.stages.append(stage)
-            self.calls.append({'prompt': prompt, **kwargs})
+            self.calls.append({'prompt': prompt, 'output_schema': args[0] if args else kwargs.get('output_schema'),
+                               **kwargs})
             if self.stage_delay is not None:
                 await asyncio.sleep(self.stage_delay(stage))
             output = stage_result(stage)
@@ -83,6 +85,8 @@ def candidate(*, disposition: str = 'open', candidate_id: str = '',
     ('omitted', 'malformed_output'), ('read-all', 'malformed_output'),
     ('handoff-bytes', 'evidence_incomplete'), ('handoff-items', 'evidence_incomplete'),
     ('missing-grounds', 'evidence_incomplete'), ('truncated-grounds', 'evidence_incomplete'),
+    ('oversized-output', 'evidence_incomplete'), ('aggregate-output', 'evidence_incomplete'),
+    ('unmatched-output', 'evidence_incomplete'),
 ])
 async def test_invalid_stage_declarations_and_evidence_do_not_establish_coverage(
     investigation: InvestigationRun, fault: str, reason: str,
@@ -107,6 +111,14 @@ async def test_invalid_stage_declarations_and_evidence_do_not_establish_coverage
             yield ToolStartEvent(id='read', name='Read', input={'file_path': 'api.py'})
             yield ToolResultEvent(id='read', output=(investigation.repo / 'api.py').read_text(), is_error=False,
                                   truncated=fault == 'truncated-grounds')
+        elif fault in {'oversized-output', 'aggregate-output', 'unmatched-output'}:
+            for index in range(6 if fault == 'aggregate-output' else 1):
+                if fault != 'unmatched-output':
+                    yield ToolStartEvent(id=f'evidence-{index}', name='Read', input={'file_path': 'api.py'})
+                yield ToolResultEvent(id=f'evidence-{index}', is_error=False,
+                                      output=(investigation.repo / 'api.py').read_text()
+                                      + f'# segment {index}\n'
+                                      + 'x' * (13_000 if fault == 'oversized-output' else 8_000))
 
     investigation.backend.stage_response = response
     data = await investigation.finish('python', reason=reason, statuses=('incomplete', 'failed'))
@@ -127,6 +139,7 @@ def many_file_review(tmp_path: Path, patch: pytest.MonkeyPatch, *, count: int = 
               'a_flags.py': 'def parse_flags(args):\n    return {}\n',
               'z_request.py': "def build_request(options):\n    return {'legacy': False}\n"}
     before.update({f'module_{i:02}.py': 'VALUE = 0\n' for i in range(count - 3)})
+    before.update({f'00_guide_{i}.md': '# Guide\nExisting behavior\n' for i in range(4)})
     after = {name: content + ''.join(f'# changed {i}\n' for i in range(lines)) for name, content in before.items()}
     after['a_flags.py'] = "def parse_flags(args):\n    return {'dry_run': '--dry-run' in args}\n"
     after['z_request.py'] = ('def build_request(options):\n'
@@ -136,12 +149,190 @@ def many_file_review(tmp_path: Path, patch: pytest.MonkeyPatch, *, count: int = 
     return InvestigationRun(repo, tmp_path, patch)
 
 
+@pytest.mark.parametrize('scope_id', ['python', 'generic', 'structure'])
+async def test_useful_completed_reads_borrow_cumulative_capacity_and_allow_later_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope_id: str,
+) -> None:
+    api_body = (
+        "from module_00 import greeting\n\ndef hello():\n"
+        "    expected = greeting()\n"
+        "    boundary = {\n"
+        "        'encoding': 'utf8',\n"
+        "        'source': 'cli',\n"
+        "        'contract': 'world',\n"
+        "    }\n"
+        "    if boundary['encoding'] != 'utf8':\n"
+        "        raise ValueError(boundary['source'])\n"
+    )
+    before = {'api.py': api_body + "    return expected\n"}
+    for index in range(17):
+        next_import = (f"from module_{index + 1:02} import greeting\n" if index < 16 else '')
+        value = 'greeting()' if index < 16 else "'world'"
+        before[f'module_{index:02}.py'] = (
+            next_import + "\ndef greeting():\n    format_options = {\n"
+            "        'template': '{}',\n"
+            "        'encoding': 'utf8',\n"
+            "        'error': 'unsupported encoding',\n"
+            "    }\n"
+            "    if format_options['encoding'] != 'utf8':\n"
+            "        raise ValueError(format_options['error'])\n"
+            f"    value = {value}\n"
+            "    return format_options['template'].format(value)\n"
+        )
+    guide = (
+        '# Greeting contract\nhello() returns world.\n\n'
+        '## Invocation\nCall hello() without arguments.\n\n'
+        '## Encoding\nThe greeting uses utf8.\n\n'
+        '## Failure handling\nAn unsupported encoding raises ValueError.\n'
+    )
+    before.update({f'guide_{i:02}.md': guide for i in range(9)})
+    after = {path: text + '# changed boundary\n' for path, text in before.items()}
+    after['api.py'] = api_body + "    return 'universe'\n"
+    repo = tmp_path / 'useful_work'
+    seed_feature_branch(repo, base=before, feature=after)
+    review = InvestigationRun(repo, tmp_path, monkeypatch)
+
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        if stage['scope_id'] != scope_id:
+            return
+        if stage['stage'] == 'triage':
+            output['candidates'] = [dict(item, disposition='rejected') for item in stage['candidates']]
+            return
+        if stage['progress']:
+            return
+        # Each assigned first-pass file gets complete source in disjoint bounded
+        # segments. Extra reads follow the concrete hello/greeting boundary.
+        assigned = stage['assigned_files']
+        paths = (sorted(path for path in assigned if path.endswith('.py')) if scope_id == 'structure'
+                 else assigned + (['api.py'] if scope_id == 'generic' else ['guide_00.md']))
+        observed = 0
+        captured: dict[str, str] = {}
+        for path in paths:
+            source = (repo / path).read_text()
+            lines = source.splitlines(keepends=True)
+            count = 1 if scope_id == 'structure' else 4 if path in assigned else 2
+            segments = [(1 + index * len(lines) // count,
+                         lines[index * len(lines) // count:(index + 1) * len(lines) // count])
+                        for index in range(count)]
+            for offset, segment in segments:
+                yield ToolStartEvent(id=f'useful-{observed}', name='Read',
+                                    input={'file_path': path, 'offset': offset, 'limit': len(segment)})
+                excerpt = ''.join(segment)
+                yield ToolResultEvent(id=f'useful-{observed}', output=excerpt, is_error=False)
+                captured[path] = captured.get(path, '') + excerpt
+                observed += 1
+            assert captured[path] == source
+        if scope_id == 'structure':
+            yield ToolStartEvent(id='documented-contract', name='Read', input={'file_path': 'guide_00.md'})
+            yield ToolResultEvent(id='documented-contract', output=(repo / 'guide_00.md').read_text(), is_error=False)
+            observed += 1
+        assert observed == (19 if scope_id == 'structure' else 18)
+        assert "return 'universe'" in (repo / 'api.py').read_text()
+        path = 'guide_00.md' if scope_id == 'generic' else 'api.py'
+        line = 2 if scope_id == 'generic' else 12
+        finding = dict(record(), file=path, line=line,
+                       description='Greeting breaks the documented world contract',
+                       evidence=f'{path}:{line}; api.py:12 returns universe; guide_00.md:2 promises world')
+        output['candidates'] = [dict(candidate(disposition='confirmed', finding=finding),
+                                     file=path, line=line, grounds=finding['evidence'])]
+        if scope_id == 'structure':
+            output['candidates'].append(candidate())
+
+    review.backend.stage_response = response
+    await review.finish(scope_id, findings=('Greeting breaks the documented world contract',))
+    stages = [stage for stage in review.backend.stages if stage['scope_id'] == scope_id]
+    spent = 19 if scope_id == 'structure' else 18
+    assert stage_ends(review, scope_id)[0]['metadata']['observed_tool_starts'] == spent
+    assert stage_ends(review, scope_id)[0]['metadata']['remaining_tool_calls'] == 48 - spent
+    assert len(stages) > 1
+    assert stages[1]['observed_tool_starts'] == spent
+
+
+@pytest.mark.parametrize('sandbox', [False, True], ids=['exact-path-inputs', 'inline-inputs'])
+async def test_each_stage_builder_receives_current_assignment_and_bounded_triage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, sandbox: bool,
+) -> None:
+    ext_dir.write_module(
+        "import json\n"
+        "from daydream.deep.prompts import build_per_stack_prompt, build_structural_prompt\n"
+        "def wrap(builder, kw):\n"
+        "    state = kw['review_stage']\n"
+        "    assert kw['files'] == state['assigned_files']\n"
+        "    return builder(**kw) + '\\nBuilder stage arguments:\\n' + json.dumps({\n"
+        "        'files': kw['files'], 'diff': kw.get('inline_diff'), 'stage': state['stage']})\n"
+        "def register(r):\n"
+        "    r.override_prompt('per-stack', lambda **kw: wrap(build_per_stack_prompt, kw))\n"
+        "    r.override_prompt('structural', lambda **kw: wrap(build_structural_prompt, kw))\n"
+    )
+    review = many_file_review(tmp_path, monkeypatch)
+    review.backend.sandbox = sandbox
+
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        if stage['scope_id'] != 'python':
+            return
+        call = review.backend.calls[-1]
+        prose = call['prompt'].split('Host review stage:\n')[0]
+        assert set(call['output_schema']['properties']) == {'targets', 'notes', 'candidates', 'contradictions'}
+        assert 'with issues' not in prose
+        assert 'Advisory' in prose or 'advisory' in prose
+        assert 'Error Handling Semantics (QUAL-04)' in prose
+        assert 'Confidence and Convention Rules' in prose
+        if stage['stage'] == 'first_pass':
+            assert len(stage['assigned_files']) <= 4
+            assert stage['context_transport'] == ('inline' if sandbox else 'exact_paths')
+            if sandbox:
+                assert 'Sanctioned phase inputs (read only these exact files):' not in call['prompt']
+                assert str(review.repo / '.daydream') not in call['prompt']
+                assert 'Sanctioned phase inputs (captured verbatim):' in call['prompt']
+            else:
+                pointers = _sanctioned_inputs(call['prompt'])
+                assert set(pointers) == set(stage['context_inputs'])
+                for index, path in enumerate(pointers.values()):
+                    yield ToolStartEvent(id=f'context-{index}', name='Read', input={'file_path': str(path)})
+                    yield ToolResultEvent(id=f'context-{index}', output=path.read_text(), is_error=False)
+            assigned_line = next(line for line in prose.splitlines() if 'Assigned files:' in line)
+            assert assigned_line.split('Assigned files:', 1)[1].strip() == ', '.join(stage['assigned_files'])
+            assert stage['candidates'] == []
+            for index, path in enumerate(stage['assigned_files']):
+                yield ToolStartEvent(id=f'bounded-{index}', name='Read', input={'file_path': path})
+                yield ToolResultEvent(id=f'bounded-{index}', output=(review.repo / path).read_text(), is_error=False)
+            if 'api.py' in stage['assigned_files']:
+                output['candidates'] = [candidate(disposition='rejected')] + [candidate() for _ in range(9)]
+        else:
+            assert stage['stage'] == 'triage'
+            assert [item['candidate_id'] for item in stage['candidates']] == stage['assigned_candidate_ids']
+            assert all(item['disposition'] == 'open' for item in stage['candidates'])
+            assert 'Assigned files:' not in prose
+            assert 'api.py' in stage['assigned_files']
+            assert stage['context_inputs'] == []
+            assert 'Sanctioned phase inputs (read only these exact files):' not in call['prompt']
+            output['candidates'] = [dict(item, disposition='rejected') for item in stage['candidates']]
+
+    review.backend.stage_response = response
+    data = await review.finish('python')
+    assert all(scope['status'] == 'complete' for scope in scopes(data).values())
+    stages = [stage for stage in review.backend.stages if stage['scope_id'] == 'python']
+    assert len([stage for stage in stages if stage['stage'] == 'first_pass']) > 1
+    assert [stage['stage'] for stage in stages].count('triage') == 2
+    assert [len(stage['assigned_candidate_ids']) for stage in stages if stage['stage'] == 'triage'] == [8, 1]
+
+
 @pytest.mark.parametrize(('stop', 'reason'), [('tool', 'host_tool_budget_exhaustion'),
     ('model', 'model_budget_exhaustion'), ('backend', 'backend_failure'),
+    ('builder', 'backend_failure'),
     ('deadline', 'host_pipeline_budget_exhaustion')])
 async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str, reason: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, stop: str, reason: str,
 ) -> None:
+    if stop == 'builder':
+        ext_dir.write_module(
+            "from daydream.deep.prompts import build_per_stack_prompt\n"
+            "def scoped(**kw):\n"
+            "    if kw['review_stage']['progress']:\n"
+            "        raise RuntimeError('stage builder unavailable')\n"
+            "    return build_per_stack_prompt(**kw)\n"
+            "def register(r): r.override_prompt('per-stack', scoped)\n"
+        )
     review = many_file_review(tmp_path, monkeypatch)
     backend = review.backend
 
@@ -157,7 +348,7 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
                 candidate(disposition='confirmed', finding=dict(record(), description='Unadmitted defect'))]),
                 continuation=None)
             if stop == 'tool':
-                for i in range(17):
+                for i in range(stage['remaining_tool_calls'] + 1):
                     yield ToolStartEvent(id=f'cutoff-{i}', name='Read', input={'file_path': 'api.py'})
             else:
                 raise MaxTurnsError('model exhausted') if stop == 'model' else RuntimeError('backend unavailable')
@@ -172,7 +363,8 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
     assert admitted['status'] == 'succeeded'
     assert (stopped['status'], stopped.get('reason_code')) == (
         ('timed_out', 'timed_out') if stop == 'deadline' else ('failed', 'domain_failure'))
-    assert [stage['stage'] for stage in backend.stages if stage['scope_id'] == 'python'] == ['first_pass'] * 2
+    assert [stage['stage'] for stage in backend.stages if stage['scope_id'] == 'python'] == (
+        ['first_pass'] if stop == 'builder' else ['first_pass'] * 2)
 
 
 @pytest.mark.parametrize(('decision', 'reason'), [
@@ -190,9 +382,10 @@ async def test_one_triage_round_preserves_closed_decisions_and_rejects_invalid_i
             if stage['stage'] == 'first_pass':
                 output['candidates'] = [candidate(disposition='rejected'), candidate()]
             else:
-                closed, pending = stage['candidates']
-                assert stage['progress'] == [{'target_id': 'api.py', 'status': 'reviewed', 'reason': ''}]
-                assert closed['disposition'] == 'rejected'
+                pending, = stage['candidates']
+                closed_id, = stage['closed_candidate_ids']
+                assert stage['progress'] == []
+                assert closed_id != pending['candidate_id']
                 assert pending['candidate_id'] and pending['disposition'] == 'open'
                 assert stage['assigned_candidate_ids'] == [pending['candidate_id']]
                 yield ToolStartEvent(id='targeted-reread', name='Read', input={'file_path': 'api.py'})
@@ -203,13 +396,13 @@ async def test_one_triage_round_preserves_closed_decisions_and_rejects_invalid_i
                 output['candidates'] = [candidate(disposition=disposition, candidate_id=pending['candidate_id'],
                                                    finding=record() if decision == 'confirmed' else None)]
                 if decision == 'unknown':
-                    output['candidates'][0]['candidate_id'] = closed['candidate_id']
+                    output['candidates'][0]['candidate_id'] = closed_id
                 elif decision == 'duplicate':
                     output['candidates'] *= 2
                 elif decision == 'omitted':
                     output['candidates'] = []
                 elif decision == 'contradiction':
-                    output['contradictions'] = [closed['candidate_id']]
+                    output['contradictions'] = [closed_id]
                 elif decision == 'unknown-contradiction':
                     output['contradictions'] = ['foreign-candidate']
 
@@ -221,7 +414,7 @@ async def test_one_triage_round_preserves_closed_decisions_and_rejects_invalid_i
 
 @pytest.mark.parametrize('cutoff', [False, True])
 @pytest.mark.parametrize('wired', [False, True])
-async def test_cross_batch_integration_preserves_cumulative_spend_and_flag_evidence(
+async def test_cross_file_integration_preserves_cumulative_spend_and_flag_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cutoff: bool, wired: bool,
 ) -> None:
     review = many_file_review(tmp_path, monkeypatch, count=41, lines=35, wired=wired)
@@ -230,29 +423,20 @@ async def test_cross_batch_integration_preserves_cumulative_spend_and_flag_evide
 
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         if stage['scope_id'] == 'structure':
-            if stage['stage'] == 'first_pass':
-                starts = 12
-                output['notes'] = ', '.join(stage['assigned_target_ids']) + ': changed behavior checked.'
-                assert stage['tool_call_allowance'] == 12
-                assert stage['remaining_tool_calls'] == 96 - len(observations)
-                if not stage['progress']:
-                    output['candidates'] = [candidate(disposition='rejected'), candidate()]
-            elif stage['stage'] == 'integration':
-                starts = 9
-                assert stage['observed_tool_starts'] == 72
-                assert stage['remaining_tool_calls'] == 24
+            if stage['stage'] == 'integration':
+                starts = 18
+                assert stage['observed_tool_starts'] == 0
+                assert stage['remaining_tool_calls'] == 96
                 assert stage['assigned_target_ids'] == ['integration:structure']
-                assert {target['target_id'] for target in stage['progress']} == {
-                    path.name for path in review.repo.glob('*.py')}
-                assert 'a_flags.py' in ' '.join(stage['notes']) and 'z_request.py' in ' '.join(stage['notes'])
-                assert len(stage['progress']) == 41
-                assert stage['candidates'][0]['disposition'] == 'rejected'
+                assert stage['progress'] == []
+                assert {'a_flags.py', 'z_request.py'} <= set(stage['assigned_files'])
+                output['candidates'] = [candidate(disposition='rejected'), candidate()]
             else:
-                starts = 16 if cutoff else 0
-                assert stage['observed_tool_starts'] == 81
-                assert stage['remaining_tool_calls'] == stage['tool_call_allowance'] == 15
-                closed, pending, *_confirmed = stage['candidates']
-                assert closed['disposition'] == 'rejected'
+                starts = stage['remaining_tool_calls'] + 1 if cutoff else 0
+                assert stage['observed_tool_starts'] == 18
+                assert stage['remaining_tool_calls'] == 78
+                pending, = stage['candidates']
+                assert pending['disposition'] == 'open'
                 assert stage['assigned_candidate_ids'] == [pending['candidate_id']]
                 output['candidates'] = [candidate(disposition='rejected', candidate_id=pending['candidate_id'])]
             for i in range(starts):
@@ -268,24 +452,21 @@ async def test_cross_batch_integration_preserves_cumulative_spend_and_flag_evide
                 finding = dict(record(), file='z_request.py', line=2,
                                description='Parsed dry-run flag is dropped during request construction',
                                evidence='a_flags.py:2 parses dry_run; z_request.py:2 returns an empty request')
-                output['candidates'] = [dict(candidate(disposition='confirmed', finding=finding),
+                output['candidates'].append(dict(candidate(disposition='confirmed', finding=finding),
                     file='z_request.py', trigger='Pass --dry-run through parse_flags and build_request',
-                    consequence='Request omits dry_run and performs a live operation', grounds=finding['evidence'])]
+                    consequence='Request omits dry_run and performs a live operation', grounds=finding['evidence']))
 
     backend.stage_response = response
     data = await review.finish('structure', reason='host_tool_budget_exhaustion' if cutoff else None,
                               findings=() if wired else ('Parsed dry-run flag is dropped during request construction',))
-    assert set(scopes(data)) == {'python', 'structure'}
-    assert len(observations) == (97 if cutoff else 81)
+    assert set(scopes(data)) == {'python', 'generic', 'structure'}
+    assert len(observations) == (97 if cutoff else 18)
     metadata = [event['metadata'] for event in stage_ends(review, 'structure')]
-    assert metadata[-1]['observed_tool_starts'] == (97 if cutoff else 81)
-    assert metadata[-1]['remaining_tool_calls'] == (0 if cutoff else 15)
+    assert metadata[-1]['observed_tool_starts'] == (97 if cutoff else 18)
+    assert metadata[-1]['remaining_tool_calls'] == (0 if cutoff else 78)
     stages = [stage for stage in backend.stages if stage['scope_id'] == 'structure']
-    assert [stage['stage'] for stage in stages] == ['first_pass'] * 6 + ['integration', 'triage']
-    assert 'a_flags.py' in stages[0]['assigned_target_ids']
-    assert 'z_request.py' in stages[5]['assigned_target_ids']
-    assert all(len(stage['assigned_target_ids']) <= 8 for stage in stages[:6])
-    assert all(stage['tool_call_allowance'] <= 16 for stage in stages)
+    assert [stage['stage'] for stage in stages] == ['integration', 'triage']
+    assert all(stage['advisory_tool_call_target'] <= stage['remaining_tool_calls'] for stage in stages)
 
 
 async def test_failed_retry_discards_poisoned_progress_but_charges_every_observed_start(
@@ -325,7 +506,71 @@ async def test_failed_retry_discards_poisoned_progress_but_charges_every_observe
     data = await review.finish('python')
     assert attempts == 2
     assert all(scope['status'] == 'complete' for scope in scopes(data).values())
-    assert [stage['stage'] for stage in backend.stages if stage['scope_id'] == 'python'] == ['first_pass'] * 4
+    python_stages = [stage for stage in backend.stages if stage['scope_id'] == 'python']
+    assert all(stage['stage'] == 'first_pass' for stage in python_stages)
+    assert len(python_stages) > 2
+    assert all(len(stage['assigned_files']) <= 4 for stage in python_stages)
+
+
+async def test_runner_cancellation_closes_stream_and_does_not_admit_an_aborted_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    review = many_file_review(tmp_path, monkeypatch)
+    checkpoint_emitted = asyncio.Event()
+
+    class CancellationBackend(StagedBackend):
+        closed = False
+        cancel_done = False
+
+        async def cancel(self) -> None:
+            await asyncio.sleep(0)
+            self.cancel_done = True
+
+        async def execute(self, cwd: Path, prompt: str, *args: Any,
+                          **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            state = review_stage_state(prompt)
+            if state is not None and state['scope_id'] == 'python' and state['progress']:
+                try:
+                    yield ToolStartEvent(id='cancelled-read', name='Read', input={'file_path': 'api.py'})
+                    yield ToolResultEvent(id='cancelled-read', output=(review.repo / 'api.py').read_text(),
+                                          is_error=False)
+                    yield ResultEvent(structured_output=stage_result(state, candidates=[
+                        candidate(disposition='confirmed', finding=dict(record(), description='Aborted checkpoint'))
+                    ]), continuation=None)
+                    checkpoint_emitted.set()
+                    await asyncio.Event().wait()
+                finally:
+                    self.closed = True
+                return
+            async for event in super().execute(cwd, prompt, *args, **kwargs):
+                yield event
+
+    backend = CancellationBackend(review.repo)
+
+    def admitted(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        if stage['scope_id'] == 'python':
+            yield ToolStartEvent(id='admitted-read', name='Read', input={'file_path': 'api.py'})
+            yield ToolResultEvent(id='admitted-read', output=(review.repo / 'api.py').read_text(), is_error=False)
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+
+    backend.stage_response = admitted
+    review.backend = backend
+    task = asyncio.create_task(review.run())
+    try:
+        await asyncio.wait_for(checkpoint_emitted.wait(), timeout=10)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    assert backend.closed and backend.cancel_done
+    completed, interrupted = stage_ends(review, 'python')
+    assert completed['metadata']['admitted'] is True
+    assert interrupted['metadata']['admitted'] is False
+    assert interrupted['metadata']['observed_tool_starts'] == 2
+    assert not review.output.exists()
 
 
 @pytest.mark.parametrize('oversized', [False, True])
@@ -352,5 +597,5 @@ async def test_batches_use_complete_diff_weights_and_preserve_explicit_oversized
     await review.finish('python', reason='evidence_incomplete' if oversized else None)
     stages = [stage for stage in backend.stages if stage['scope_id'] == 'python']
     assert [stage['assigned_target_ids'] for stage in stages] == [['api.py'], ['module_00.py']]
-    assert all(stage['tool_call_allowance'] <= 16 for stage in stages)
+    assert all(stage['advisory_tool_call_target'] <= stage['remaining_tool_calls'] for stage in stages)
     assert len((repo / '.daydream/diff.patch').read_bytes()) > 48 * 1024

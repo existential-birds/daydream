@@ -354,7 +354,7 @@ async def test_no_review_cache_disables_the_store_and_bypasses_the_exploration_c
 
 
 @pytest.mark.parametrize("damage", ["legacy", "corrupt", "incomplete", "head", "diff", "scope", "origin",
-                                     "partial_payload", "malformed_payload", "unstaged"])
+                                     "partial_payload", "malformed_payload", "unstaged", "prior-staged"])
 async def test_legacy_cache_without_coverage_proof_recomputes_review(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     damage: str,
@@ -367,10 +367,13 @@ async def test_legacy_cache_without_coverage_proof_recomputes_review(
     downgraded = 0
     for manifest_path in entries.glob("*/manifest.json"):
         manifest = json.loads(manifest_path.read_text())
-        if damage == "unstaged":
+        if damage in {"unstaged", "prior-staged"}:
             if not manifest["unit"].startswith("shard:"):
                 continue
-            manifest["components"].pop("staged_review_contract")
+            if damage == "unstaged":
+                manifest["components"].pop("staged_review_contract")
+            else:
+                manifest["components"]["staged_review_contract"] = 1
             legacy_key = hashlib.sha256(json.dumps({
                 "format": manifest["format"], "unit": manifest["unit"], "components": manifest["components"],
             }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -405,13 +408,13 @@ async def test_legacy_cache_without_coverage_proof_recomputes_review(
         else:
             manifest["coverage"]["planned_scopes"][0]["files"] = ["foreign.py"]
         manifest_path.write_text(json.dumps(manifest))
-    assert damage != "unstaged" or downgraded > 0
+    assert damage not in {"unstaged", "prior-staged"} or downgraded > 0
     stub.calls.clear()
     assert await run(config) == 0
     assert _count_review_prompts(stub.calls) > 0
-    if damage not in {"partial_payload", "malformed_payload", "unstaged"}:
+    if damage not in {"partial_payload", "malformed_payload", "unstaged", "prior-staged"}:
         assert _count_merge_prompts(stub.calls) > 0
-    if damage == "unstaged":
+    if damage in {"unstaged", "prior-staged"}:
         assert _reused_stacks(multi_stack_target / ".daydream/deep") == set()
     coverage = json.loads((multi_stack_target / ".daydream" / "deep" / "review-coverage.json").read_text())
     assert all(outcome["status"] == "complete" for outcome in coverage["stack_outcomes"])

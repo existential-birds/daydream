@@ -11,8 +11,12 @@ import pytest
 
 import daydream.deep.orchestrator as orch_mod
 from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.deep import orchestrator as deep_orchestrator
 from daydream.deep.diff import bound_deep_diff
+from daydream.deep.orchestrator import STEPS
+from daydream.extensions.api import EXTENSION_API_VERSION
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
+from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _eroded_main_repo,
@@ -233,6 +237,9 @@ async def test_skip_tier_writes_empty_alternatives(tiny_diff_target: Path, monke
     deep = tiny_diff_target / ".daydream" / "deep"
     assert (deep / "intent.md").read_text().strip()
     assert isinstance(json.loads((deep / "alternatives.json").read_text()), list)
+
+
+
 
 @pytest.mark.parametrize("change", ["committed", "worktree", "missing-key"])
 async def test_start_at_merge_refuses_stale_or_unverifiable_artifacts(

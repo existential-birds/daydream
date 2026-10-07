@@ -46,7 +46,7 @@ def review_stage_result(prompt: str, issues: list[dict[str, Any]]) -> dict[str, 
     if state is None:
         return {"issues": issues}
     candidates = []
-    if state["stage"] == "first_pass" and not state["progress"]:
+    if state["stage"] in {"first_pass", "integration"} and not state["progress"]:
         candidates = [{
             "candidate_id": "", "file": issue["file"], "line": issue["line"],
             "trigger": "The changed path is exercised", "consequence": issue["description"],

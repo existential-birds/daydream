@@ -15,22 +15,40 @@ from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.severity import SEVERITY_RUBRIC
 
 
-def _confidence_and_convention_instructions() -> str:
+def _confidence_and_convention_instructions(*, stage_scoped: bool = False) -> str:
     """Shared confidence, convention, and error-handling rules, appended after Exploration Context."""
-    return (
-        "## Confidence and Convention Rules\n\n"
+    confidence = (
+        "For a confirmed candidate's finding, set `confidence` and `rationale`:\n"
+        "- HIGH: directly verified by completed source evidence in this review or relevant admitted "
+        "evidence. Name the precise source location and applicable convention or dependency.\n"
+        "- MEDIUM: supported by concrete source evidence with remaining uncertainty about impact.\n\n"
+        if stage_scoped else
         "For every issue you report, you MUST set `confidence` and `rationale`:\n"
         "- HIGH: directly verified by a specific entry in the Exploration Context above. "
         "Your rationale MUST name the specific Dependency edge, Convention entry, or "
         "affected file that supports the issue.\n"
         "- MEDIUM: consistent with the Exploration Context but not pinned to a specific entry.\n\n"
+    )
+    grounding = (
+        "Only report candidates grounded in completed source evidence for the assigned work. "
+        "Supporting context can explain intent and conventions, but does not replace source evidence. "
+        if stage_scoped else
+        "You are reviewing AI-generated code. Be strict. Only report an issue you can ground "
+        "in evidence — the diff itself or a specific Exploration Context entry. "
+    )
+    scope = (
+        "Apply the following judgment rules only to this stage's assigned targets or candidates. "
+        "Convention and canonical-helper checks are bounded support for those concrete concerns; "
+        "they do not assign a new audit.\n\n" if stage_scoped else ""
+    )
+    return (
+        scope + "## Confidence and Convention Rules\n\n" + confidence +
         "Convention handling has TWO distinct cases — do not conflate them:\n"
         "1. Before proposing a fix, check it against the Codebase Conventions section. "
         "If your fix would violate a convention, DROP IT — do not include it.\n"
         "2. If the reviewed code itself violates a convention, that IS the issue. "
         "flag it as HIGH confidence and cite the convention by name in `rationale`.\n\n"
-        "You are reviewing AI-generated code. Be strict. Only report an issue you can ground "
-        "in evidence — the diff itself or a specific Exploration Context entry. If you cannot "
+        + grounding + "If you cannot "
         "point to what proves the issue is real, do not emit it. Do not pad the review with "
         "speculative or 'might-be' findings.\n\n"
         "## Error Handling Semantics (QUAL-04)\n\n"
@@ -63,7 +81,7 @@ def _confidence_and_convention_instructions() -> str:
     )
 
 
-def _dependency_impact_instructions() -> str:
+def _dependency_impact_instructions(*, stage_scoped: bool = False) -> str:
     """Prompt language for QUAL-01 cross-file dependency surfacing during review.
 
     This is an investigation method, not an output section: asking the model to
@@ -71,10 +89,16 @@ def _dependency_impact_instructions() -> str:
     object and was directly implicated in the empty-result extraction defect
     (issue #1445). The heading is kept only as a stable capability label.
     """
-    return (
-        "## Dependency Impact\n\n"
+    scope = (
+        "Apply dependency-impact analysis only to changed symbols in the current assigned files/hunks. "
+        "Other paths are supporting context only for concrete candidates in that assigned work:\n"
+        if stage_scoped else
         "Apply dependency-impact analysis to every changed symbol listed in the Exploration "
         "Context dependencies above:\n"
+    )
+    return (
+        "## Dependency Impact\n\n"
+        + scope +
         "  1. Trace the call chain from each changed symbol through its dependents, so a "
         "defect is judged by what it actually breaks downstream rather than by how its own "
         "body reads.\n"

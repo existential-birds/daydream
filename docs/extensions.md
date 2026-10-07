@@ -7,7 +7,7 @@ from a top-level `daydream_ext` package, without editing any file under
 contract: the module shape daydream loads, the exact name inventories a fork
 programs against, and the policy for when those names may change.
 
-Current contract version: **`EXTENSION_API_VERSION = 6`** (supported: `6..6`).
+Current contract version: **`EXTENSION_API_VERSION = 7`** (supported: `7..7`).
 
 ## Extension module contract
 
@@ -21,7 +21,7 @@ daydream_ext/
 `__init__.py` must export exactly two things:
 
 ```python
-DAYDREAM_EXT_API = 6          # must be within daydream's supported range
+DAYDREAM_EXT_API = 7          # must be within daydream's supported range
 
 def register(registry):       # receives a daydream.extensions.Registry
     ...                       # mutate flows / prompts / stacks here
@@ -215,7 +215,7 @@ from opentelemetry.sdk.trace.export import SpanExporter
 
 from daydream.extensions import ObservabilityConfig, Registry
 
-DAYDREAM_EXT_API = 6
+DAYDREAM_EXT_API = 7
 
 def company_exporter(config: ObservabilityConfig) -> SpanExporter:
     return OTLPSpanExporter(
@@ -513,9 +513,9 @@ kwargs are keyword-only except where noted.
 | `intent` | `strategy`, `diff_path`, `branch`, `log`, `exploration_dir`, `pr_description`, `inline_diff`, `inline_exploration_summary` |
 | `alternatives` | `strategy`, `intent_summary`, `diff_path`, `exploration_dir`, `inline_diff` |
 | `fix` | `test_output`, `feedback_items` (both positional), `repo`, `concise_mode` |
-| `per-stack` | `strategy`, `stack_name`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `prior_commits`, `inline_diff`, `intent_authoritative`, `include_alternatives`, `frontier_files` |
-| `structural` | `strategy`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `prior_commits`, `intent_authoritative`, `include_alternatives` |
-| `generic-fallback` | `strategy`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `is_docs_only`, `prior_commits`, `inline_diff`, `intent_authoritative`, `include_alternatives`, `frontier_files` |
+| `per-stack` | `strategy`, `stack_name`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `prior_commits`, `inline_diff`, `intent_authoritative`, `include_alternatives`, `frontier_files`, `review_stage` |
+| `structural` | `strategy`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `prior_commits`, `intent_authoritative`, `include_alternatives`, `review_stage` |
+| `generic-fallback` | `strategy`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `is_docs_only`, `prior_commits`, `inline_diff`, `intent_authoritative`, `include_alternatives`, `frontier_files`, `review_stage` |
 | `arbiter` | `strategy`, `arbiter_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir`, `intent_authoritative` |
 | `supervise` | `strategy`, `supervise_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
 | `suppression` | `strategy`, `suppression_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
@@ -527,6 +527,61 @@ kwargs are keyword-only except where noted.
 | `audit` | `category`, `strategy`, `group`, `scope_note`, `recon_summary`, `cwd`, `tier` |
 | `vet` | `strategy`, `findings`, `cwd` |
 | `plan-writer` | `finding`, `recon_summary`, `verification_commands`, `cwd` |
+
+#### Stage-aware review builders (API 7)
+
+The registered `per-stack`, `structural`, and `generic-fallback` names are
+unchanged. The host invokes the selected builder anew for **every** stage with
+`review_stage`, a mapping of host-owned assignment and admitted state. API 6
+extensions are incompatible and fail at load time with the declared and
+supported versions; migrate the callable to accept this kwarg and declare
+`DAYDREAM_EXT_API = 7`. Overrides are invoked, never silently replaced.
+
+- `stage` is `first_pass`, `integration`, or `triage`; `scope_id` and
+  `analyzed_revision` bind the work to the public reviewer and frozen snapshot.
+- `assigned_files` and the builder's `files` are the current assignment. Language
+  and generic batches group nearby directories within four files and 16 KiB of
+  changed hunks; a single oversized file remains explicit. `inline_diff`
+  contains only these files' hunks. Other paths are
+  supporting context for concrete candidates, not additional audit targets.
+  Structure begins with a whole-change interaction assignment and the synthetic
+  target `integration:structure`, rather than alphabetical file batches.
+- `assigned_target_ids` must be acknowledged exactly. `assigned_candidate_ids`
+  scopes triage; only those candidates and their relevant admitted notes and
+  evidence are supplied. `closed_candidate_ids` are handles for reporting
+  contradictions, not permission to reopen decisions. No new discovery occurs
+  during triage.
+- `advisory_tool_call_target` suggests a compact stage workload;
+  `remaining_tool_calls` is the hard remaining cumulative allowance.
+  `observed_tool_starts` includes retries and the received start exceeding the
+  hard allowance. Native parallel or buffered execution can precede observation.
+  The reviewer deadline and total allowance remain unchanged across stages.
+- `context_inputs` lists only admitted sanctioned labels; `context_transport`
+  describes inline bytes or exact paths. Shared intent and exploration are
+  admitted whole within the transport budget. Missing context is advisory and
+  cannot establish evidence; any necessary pointer reads consume tool calls.
+  Triage receives admitted candidate context rather than whole-review inputs.
+
+Build the stage prompt from its assignment and semantic policy. Do not append a
+narrow stage to a conflicting terminal-review prompt. Scope dependency tracing,
+test-quality review, configuration tracing, and verification to current targets
+or assigned candidates. Operator judgment policy still applies within this
+scope. Custom structural builders and custom alternatives retain their separate
+alternatives behavior.
+
+Stage output must match `daydream.phases.schemas.REVIEW_STAGE_SCHEMA` exactly:
+`targets`, `notes`, `candidates`, and `contradictions`. The host assigns discovery
+candidate IDs and serializes terminal findings; do not request an `issues`
+serializer. Source reads should keep each output below 12,000 bytes and total
+captured evidence below 48,000 bytes, including tool input/status overhead.
+Built-in guidance targets 8,000 bytes per output and 40,000 bytes aggregate to
+leave room for wrappers; these are planning targets, not increased capture limits.
+Read complete enclosing symbols in bounded segments and return compact
+handoffs. Clipping, omitted evidence, schema, identity, snapshot, grounds, and
+contradiction checks remain strict. Failed or cancelled invocations admit no
+output, even if they emitted valid JSON before failing; earlier successful-stage
+findings survive with incomplete coverage. Stage-contract changes invalidate
+old complete review cache entries.
 
 #### `plan-writer` compatibility and output contract
 
@@ -694,7 +749,7 @@ from daydream.flows.engine import FlowContext
 from daydream.prompt_budget import prepare_sanctioned_inputs
 from daydream.trajectory import DaydreamPhase, run_directory
 
-DAYDREAM_EXT_API = 6
+DAYDREAM_EXT_API = 7
 
 async def explain_note(ctx: FlowContext) -> None:
     assert ctx.artifacts is not None
@@ -909,7 +964,7 @@ import json
 
 from daydream.extensions import FlowStep, ToolDecision
 
-DAYDREAM_EXT_API = 6
+DAYDREAM_EXT_API = 7
 
 async def _filter_items(ctx):
     items_file = ctx.data["items_file"]
@@ -1023,7 +1078,7 @@ builders' outputs and are replaced along with them).
 ```python
 from daydream.extensions import FlowStep, get_registry
 
-DAYDREAM_EXT_API = 6
+DAYDREAM_EXT_API = 7
 
 def _ro_prompt(*, policy):
     return f"RO-GATE {policy}"

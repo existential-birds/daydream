@@ -250,8 +250,9 @@ def build_default_profile() -> ReviewProfile:
                 "\n"
                 "For every surviving finding, identify the precise file and line, the "
                 "triggering path or state, the observable impact, and the smallest safe "
-                "remediation. If no candidate survives after the required reads, report "
-                "every read assigned file as clean and every unread assigned file as not "
+                "remediation. Mark an assigned target reviewed only after judging its "
+                "changed behavior with complete enclosing-source evidence; reads alone "
+                "do not establish reviewed coverage. Mark unfinished assigned work not "
                 "reviewed; never invent a finding to fill the review."
             ),
             source="authored: #886 NATIVE_PER_STACK_DISCOVERY_STRATEGY",

@@ -20,7 +20,7 @@ from tests.harness.console import collapse_panel_text
 from tests.harness.dataset import read_records
 from tests.harness.fake_clock import FakeClock
 from tests.harness.git_helpers import git
-from tests.harness.stub_backend import review_stage_result
+from tests.harness.stub_backend import review_stage_result, review_stage_state
 from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipeline, _record
 
 
@@ -108,7 +108,10 @@ async def test_outcomes(review: ReviewRun, archive_dir: Path, case: str, state: 
         canonical = json.loads((review.repo / '.daydream/deep/merged-items.json').read_text())
         assert canonical['items'][0]['source_uids'] == ['python:1']
     if case == 'empty':
-        assert sum('Host review stage:\n' in c['prompt'] for c in review.backend.calls) == 5
+        stages = [stage_state for c in review.backend.calls
+                  if (stage_state := review_stage_state(c['prompt'])) is not None]
+        assert {stage['scope_id'] for stage in stages} == set(inventory)
+        assert [stage['stage'] for stage in stages if stage['scope_id'] == 'structure'] == ['integration']
         assert not any('cross-stack merge agent' in c['prompt'].lower() or
                        'supervisor adjudication' in c['prompt'].lower() for c in review.backend.calls)
     if case == 'archive':
@@ -245,7 +248,9 @@ async def test_unsuccessful_stage_discards_checkpoints(
             if budget == 'model':
                 yield MaxTurnsError('spent turns')
             else:
-                for index in range(17):
+                state = review_stage_state(prompt)
+                assert state is not None
+                for index in range(state['remaining_tool_calls'] + 1):
                     if budget == 'wall':
                         fake.advance(601)
                     yield ToolStartEvent(id=f'budget-{index}', name='Read', input={'file_path': 'api.py'})

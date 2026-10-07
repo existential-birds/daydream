@@ -57,14 +57,13 @@ async def test_pi_review_system_is_scoped_and_preserves_retry_and_stage_spend(tm
     assert REVIEW_STOPPING_GUIDANCE not in fix_system
     assert "Investigation allowance" not in fix_system
     assert budget.observed_tool_starts == 2 and budget.remaining_tool_calls == 2
-    assert "4 tool calls this stage" in initial
-    assert "At most 2 tool calls remain this stage" in retry
+    assert "4 remaining cumulative tool starts" in initial
+    assert "Hard remaining cumulative reviewer allowance: 2 tool calls" in retry
     assert "2 remain for this reviewer after 2 observed starts" in retry
-    assert "2 tool calls this stage" in integration
-    assert "remaining reviewer allowance: 2" in integration
+    assert "2 remaining cumulative tool starts" in integration
     for instructions in (initial, retry, integration):
-        assert instructions.index("Staged review contract:") > instructions.index(REVIEW_STOPPING_GUIDANCE)
-        assert "Closed candidate decisions stay closed" in instructions
-        assert "Report contradictions by their existing candidate IDs" in instructions
-        assert "Return exactly the assigned target or triage candidate IDs" in instructions
-        assert "Do not produce a terminal findings serializer" in instructions
+        assert REVIEW_STOPPING_GUIDANCE not in instructions
+        assert "Closed decisions stay closed" in instructions
+        assert "by closed_candidate_ids" in instructions
+        assert "Return exactly assigned target or triage candidate IDs" in instructions
+        assert "host publishes terminal findings" in instructions

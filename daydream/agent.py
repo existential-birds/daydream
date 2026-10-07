@@ -326,6 +326,7 @@ async def run_agent(
     run_context: RunContext | None = None,
     review_limits: ReviewLimits | None = None,
     investigation_budget: ReviewInvestigationBudget | None = None,
+    advisory_tool_call_target: int | None = None,
     review_evidence: ReviewEvidence | None = None,
     finalization_context: FinalizationContext | None = None,
     tools_disabled: bool = False,
@@ -370,10 +371,12 @@ async def run_agent(
         remaining_calls = investigation_budget.remaining_tool_calls
         tool_call_budget = min(tool_call_budget, remaining_calls) if tool_call_budget is not None else remaining_calls
         budget_instructions = (
-            f"Investigation allowance: at most {max(0.0, deadline - clock.monotonic()):g} seconds and "
-            f"{tool_call_budget} tool calls this stage. "
-            f"Cumulative observed tool starts: {investigation_budget.observed_tool_starts}; "
-            f"remaining reviewer allowance: {investigation_budget.remaining_tool_calls}. " + REVIEW_STOPPING_GUIDANCE
+            f"Hard reviewer allowance: at most {max(0.0, deadline - clock.monotonic()):g} seconds until "
+            f"the absolute deadline and {tool_call_budget} remaining cumulative tool starts. "
+            f"Cumulative observed starts: {investigation_budget.observed_tool_starts}. "
+            + (f"Advisory stage call target: {advisory_tool_call_target}; this is a planning hint, "
+               "not a ceiling. Useful assigned work may borrow available cumulative capacity. "
+               if advisory_tool_call_target is not None else "")
             + "\n\n" + review_budget.STAGED_REVIEW_GUIDANCE
         )
     if review_limits is not None:
@@ -681,7 +684,7 @@ async def _run_agent(
                     if investigation_budget is not None and attempt > 0:
                         retry_budget_update = (
                             "\n\nHost retry budget update: failed-attempt starts remain charged. "
-                            f"At most {remaining_calls} tool calls remain this stage; "
+                            f"Hard remaining cumulative reviewer allowance: {remaining_calls} tool calls; "
                             f"{investigation_budget.remaining_tool_calls} remain for this reviewer "
                             f"after {investigation_budget.observed_tool_starts} observed starts."
                         )
@@ -1016,7 +1019,13 @@ async def _run_agent(
             # above never sees them. Deterministically reap the tracked subprocesses
             # via backend.cancel() before unwinding.
             try:
-                await backend.cancel()
+                # AnyIO task groups keep cancelled scopes cancelled at every
+                # await. Give teardown its existing bounded grace so reaping
+                # can complete without losing the original cancellation.
+                with anyio.move_on_after(BUDGET_CLEANUP_GRACE_S, shield=True) as shutdown_scope:
+                    await backend.cancel()
+                if shutdown_scope.cancel_called:
+                    _logger.warning("backend shutdown exceeded its %ss grace", BUDGET_CLEANUP_GRACE_S)
             except Exception:  # cancel() must not mask the original signal
                 _logger.exception("backend.cancel() failed during shutdown")
             raise

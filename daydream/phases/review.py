@@ -55,7 +55,10 @@ from daydream.phases.inputs import (
 from daydream.phases.schemas import ALTERNATIVE_REVIEW_SCHEMA, PER_STACK_RECORD_SCHEMA
 from daydream.prompt_budget import (
     INLINE_DIFF_BUDGET_BYTES,
+    AdvisoryCandidate,
+    PreparedSanctionedInputs,
     fits_inline_diff_budget,
+    select_advisory_inputs,
     truncate_utf8_to_budget,
     uses_diff_reference,
 )
@@ -471,9 +474,22 @@ async def phase_per_stack_reviews(
                 _diff_blocks_for_files(diff_text, stack.files)
                 if not read_only and diff_text is not None and stack.stack_name != STRUCTURE_STACK_NAME else None
             )
+            # Shared context is advisory and admitted whole. In particular INLINE
+            # transports cannot silently truncate exploration and call it evidence.
+            shared_paths = {"intent": intent_path, **common_inputs}
+            shared_paths.update(_budgeted_exploration_inputs(
+                exploration_dir, backend=backend, cwd=work.repo, read_only=read_only,
+            ))
+            selection = select_advisory_inputs(
+                backend, work.repo,
+                [AdvisoryCandidate(label, path) for label, path in shared_paths.items()
+                 if path is not None],
+                read_only=read_only,
+            )
             stack_sanctioned_inputs = _prepare_existing_phase_inputs(
-                backend, work, common_inputs | ({} if inline_diff is not None else {"diff": diff_path}),
-                capture_without_session=True, exploration_dir=exploration_dir, read_only=read_only,
+                backend, work,
+                selection.selected_paths() | ({} if inline_diff is not None else {"diff": diff_path}),
+                capture_without_session=True, read_only=read_only,
             )
             reuse_unit: ReviewReuseUnit | None = None
             if reuse_cache is not None and phase_identity is not None:
@@ -548,9 +564,37 @@ async def phase_per_stack_reviews(
                     prompt_args["is_docs_only"] = stack.is_docs_only
                 else:
                     prompt_args["stack_name"] = stack.stack_name
-            prompt = active_registry.prompt(prompt_name)(**prompt_args)
+            def build_stage_prompt(stage: dict[str, Any]) -> str:
+                # Invoke the registered builder anew: its kwargs describe this
+                # assignment rather than a terminal whole-stack review.
+                stage_args = dict(prompt_args)
+                stage_args["files"] = stage["assigned_files"]
+                stage_args["review_stage"] = {
+                    **stage,
+                    "context_inputs": ([] if stage["stage"] == "triage" else
+                                       [item.label for item in stack_sanctioned_inputs.inputs]
+                                       if stack_sanctioned_inputs is not None else []),
+                    "context_transport": (stack_sanctioned_inputs.transport.value
+                                          if stack_sanctioned_inputs is not None else "inline"),
+                }
+                if stack.stack_name != STRUCTURE_STACK_NAME:
+                    stage_args["inline_diff"] = (
+                        _diff_blocks_for_files(diff_text, stage["assigned_files"])
+                        if inline_diff is not None and diff_text is not None and stage["stage"] != "triage"
+                        else None
+                    )
+                    # Cross-shard pointers are optional supporting context, never
+                    # an instruction to inspect another assignment independently.
+                    if stage["stage"] == "triage":
+                        stage_args["frontier_files"] = []
+                prompt = active_registry.prompt(prompt_name)(**stage_args)
+                prompt = append_extended_facts(prompt, recipe_for_prompts)
+                return prompt + "\n\nHost review stage:\n" + json.dumps(
+                    stage_args["review_stage"], ensure_ascii=False,
+                )
 
-            prompt = append_extended_facts(prompt, recipe_for_prompts)
+            def stage_inputs(stage: dict[str, Any]) -> PreparedSanctionedInputs | None:
+                return None if stage["stage"] == "triage" else stack_sanctioned_inputs
             stack_name = stack.stack_name
             structured: Any = None
             budget_reason: str | None = None
@@ -562,7 +606,8 @@ async def phase_per_stack_reviews(
                         investigation = ReviewInvestigation(stack, diff_path.read_text(encoding="utf-8"),
                                                             coverage.revision.to_dict())
                         structured, budget_reason = await investigation.run(
-                            backend, work.repo, prompt,
+                            backend, work.repo, build_stage_prompt,
+                            stage_inputs=stage_inputs,
                             wall_budget_s=phase_config.REVIEW_WALL_BUDGET_S,
                             sanctioned_inputs=stack_sanctioned_inputs,
                             read_only=read_only,
