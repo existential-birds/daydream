@@ -211,10 +211,10 @@ broader results and hosted CI are required before claiming the target.
 
 ## Broader requested count reduction
 
-Final collection after the shared-run batch: **8,198 cases / 5,361 functions**.
-This removes 70 functions (1.29%) and 806 net cases (8.95%). 721 case wrappers
+Final collection after the shared-run batch and auth isolation: **8,199 cases / 5,361 functions**.
+This removes 70 functions (1.29%) and 805 net cases (8.94%). 721 case wrappers
 belonged to one repository logging scan; all722 sources and every AST rule remain
-covered by its same named keeper. The remaining 85 net cases are exact matching
+covered by its same named keeper. The remaining 84 net cases are exact matching
 run/assertion consolidations or private organization/self-identity checks.
 
 The records/runtime/tooling inventories covered 66/33/52 associated files and
@@ -232,8 +232,8 @@ are reported in the PR; do not interpret the initial full gate as the final gate
 after these subsequent edits.
 
 Final size accounting against the same baseline categories: production 0 lines
-changed; tests +340/-885 (net -545); shared support +14; pytest configuration +3/-1
-(net +2). Python totals: production 105,189, tests 116,515, support 7,964. Evidence
+changed; tests +467/-960 (net -493); shared support +14; pytest configuration +3/-1
+(net +2). Python totals: production 105,189, tests 116,567, support 7,964. Evidence
 documentation is separate. The same functions and sources remain in production;
 no test-only production export, injection flag or seam was introduced.
 
@@ -283,7 +283,7 @@ Git/auth/shared-consumer and full normal hook validation before landing.
 
 ## Refined dispatch and hosted timing evidence
 
-The follow-up configuration uses `--maxschedchunk=1 --durations=40`, retaining
+The follow-up experiment used `--maxschedchunk=1 --durations=40`, retaining
 strict markers, workers, complete collection, dependencies and coverage settings.
 Independent review inspected the locked xdist 3.8.0 scheduler, parser, worker
 lookahead/completion/shutdown and restart protocol before editing. With the full
@@ -304,5 +304,80 @@ Matching Git/auth consumers in Actions mode: 10-case dispatch 447 passed/4 skipp
 22.46s; 1-case dispatch 447/4,22.26s. Same selection, n4, Python/lock/machine and no
 coverage on either. Difference 0.20s is not a material performance claim. Full
 normal hook gate and actual hosted CI decide preservation and target throughput.
-The final root collector still has 8,198 cases/5,361 functions. The earlier matched
+At that experimental revision the root collector had 8,198 cases/5,361 functions. The earlier matched
 expanded comparison intentionally used 10-case dispatch on both historical sides.
+
+
+## Automation environment repair and scheduling rollback
+
+Before editing, exact CI-context reproduction showed the `[local]` row still
+inherited `CI=true` after removing `GITHUB_ACTIONS`. Real gh correctly rejected
+`/user`, but emitted automation guidance. The existing `[local]` and `[actions]`
+nodes now explicitly clear both flags; a new `[automation]` row sets only `CI`,
+while Actions sets both flags to prove precedence. Each requires its specific
+context guidance, and both CI modes require the full GH_TOKEN instruction.
+The installed CLI, real temporary repo, isolated absent credentials/config and
+production request remain unchanged. Independent pre-edit and final preservation
+reviews approved this repair. With ambient CI and Actions both true, all three
+rows passed (1.93s); Git/auth/shared consumers passed 584 cases with four skips
+(53.15s). No skip or credential relaxation was introduced.
+
+The one-item dispatch experiment was reverted to ten-item batches; the duration
+summary remains. Matching local full hook runs were 408.62s at ten versus 430.85s
+at one, so no speed benefit was established. Hosted CI 37557357315 took 371.07s
+for tests / 410s for the check job and failed only the local auth matcher. Its
+actual interpreter was Python 3.12.14, while the first candidate and baseline
+used 3.14.8. Earlier setup-python supplied 3.12.12 (below the project's 3.12.13
+floor) and uv downloaded 3.14.8; later setup supplied qualifying 3.12.14, which
+uv used directly. These logs explain the interpreter drift; they do not establish
+how much runtime it caused. Hosted times across that change are not a controlled
+scheduler comparison. Runner size, Python workflow declaration, dependencies and
+coverage settings remain unchanged. The under-four-minute objective remains
+unmet; final green CI must be reported independently of that objective.
+
+
+## HTTP judge retry waiting: before-edit preservation evidence
+
+Three existing nodes in `tests/test_benchmark_verifier_judge.py` remain intact:
+`test_retry_policy_retries_transport_and_5xx_then_fails_after_exhaustion`,
+`test_retry_policy_retries_openrouter_error_envelope`, and
+`test_both_providers_produce_identical_verdicts_and_errors`. They exercise actual
+shipped HTTP retry/parser/provider logic over immediate fake network responses:
+two transport failures then success, three 503 failures, HTTP200/OpenRouter502
+recovery, and each provider's native envelope/exhaustion. No run, row or input is
+removed. Full tests, fixture loader, shipped owner/callers and histories
+c03ac839 (#777/#804), df414f47 (#917), 364134be (#965/#978) were inspected, then the
+bounded plan received independent preservation review before editing.
+
+Only a scoped module-binding proxy records HTTP backoff and yields through the
+captured real `asyncio.sleep(0)`. It does not mutate the shared asyncio module.
+Each separate outcome checks literal requested delays `[1, 2]`; successful first
+requests require none. Existing attempts/verdict/error checks remain. The parity
+context exits before its native CLI cases. Named independent timing keepers
+`test_claude_cli_timeout_kills_child_every_attempt`,
+`test_claude_cli_post_eof_wait_timeout_kills_child`,
+`test_claude_cli_post_eof_wait_settles`,
+`test_claude_cli_streaming_oversize_kills_child`, and
+`test_judge_pairs_caps_concurrency_and_enforces_pair_cap` keep real deadlines,
+backoff, child cleanup and overlapping requests unchanged. Packaged source,
+assets/isolation and real image execution contracts remain unchanged.
+
+Before timing: same three nodes, n4/ten-case dispatch/Python3.12.13/locked
+dependencies/machine, no coverage: three passed, 6.64s pytest/7.06s wall;
+calls6.01+6.01+3.00s. Concurrent waits mean 15 seconds of worker time is not a
+15-second suite-wall saving. After timing and shared-consumer/full-gate evidence
+are recorded in the PR. This adjustment alone cannot establish under-four-minute
+CI.
+
+
+Final HTTP timing used exactly the same selection/configuration: three passed,
+0.68s pytest/1.24s wall, versus 6.64s/7.06s before (single pair). Independent final
+AST review confirmed all original stimuli/assertions survive and every other test
+and packaged byte is unchanged. A control changed only shipped HTTP backoff from
+`2**attempt` to `2**attempt + 1` in an isolated checkout: all three keepers failed
+at the new delay/order guards; exact owner restoration passed all three. Test and
+owner bytes were restored and the control checkout diff was empty. Shared
+verifier/judge/calibration/assets/isolation/package consumers passed 154 cases
+with one warning in 7.15s, including actual Docker images. Both retained native
+CLI timeout cases still paid real backoff/deadlines (3.15s and 3.16s). Final
+collection is 8,199 cases/5,361 functions; this waiting change adds/removes none.

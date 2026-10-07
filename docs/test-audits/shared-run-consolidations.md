@@ -8,10 +8,10 @@ The inventories were broad; only candidates whose complete tests, fixtures,
 owners, callers and relevant history were reviewed were edited. Unassessed and
 uncertain cases remain. No percentage quota determined deletion.
 
-Final collection is 8,198 cases / 5,361 functions, versus 9,004 / 5,431:
-70 functions and 806 net cases removed. Of the case reduction, 721 wrappers
+Final collection is 8,199 cases / 5,361 functions, versus 9,004 / 5,431:
+70 functions and 805 net cases removed. Of the case reduction, 721 wrappers
 belong to the repository logging scan; its one retained test still inspects all
-722 original sources with every original rule. The other net 85 cases combine
+722 original sources with every original rule. The other net 84 cases combine
 matching outcomes or retire private organization/self-identity assertions.
 Count reduction alone is not a performance result.
 
