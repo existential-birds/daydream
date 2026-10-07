@@ -251,7 +251,11 @@ exploration pre-scan (cached across runs)
   Single-stack mode and every `--start-at` resume keep the serial order **and** the pointer — single-stack
   has no merge agent, so that pointer is the only path wonder findings take into the report. This boundary
   is why the extension API is v4.
-- Reviewers return structured records, loaded in **stack-name order** to keep merge input ordering
+- Per-stack reviewers use bounded first-pass file batches, structural integration where applicable,
+  and one finite triage round under a cumulative observed-start budget and absolute deadline.
+  Only successful stages admit explicit acknowledgements and candidate decisions; the host publishes
+  confirmed records without a model serializer. See `docs/review-runtime.md` for bounds and incomplete coverage.
+- Reviewer records are loaded in **stack-name order** to keep merge input ordering
   and global issue numbering reproducible.
 - **Record identity is host-assigned, not content-derived.** Every per-stack record is stamped with a `uid`
   (`stack:ordinal`, `deep/records.py`) at birth by the per-stack reviewers and backfilled by the same

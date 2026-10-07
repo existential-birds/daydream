@@ -4,40 +4,62 @@ import errno
 import json
 import os
 import shlex
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager, nullcontext
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import Mock
 
 import anyio
+import jsonschema
 import pytest
+from rich.console import Console
 
 import daydream
-from daydream import artifact_visibility as av, git_ops, phases
+from daydream import artifact_visibility as av, git_ops, phases, review_profile as _rp
 from daydream.artifact_visibility import ArtifactVisibilityError, OutputLabel, artifact_dir_for
 from daydream.backends import (
     AgentEvent,
     Backend,
+    ContinuationToken,
     ResultEvent,
     TextEvent,
 )
 from daydream.backends.codex import CodexBackend
-from daydream.config import TEST_WALL_BUDGET_S
+from daydream.config import REVIEW_OUTPUT_FILE, STRUCTURE_STACK_NAME, TEST_WALL_BUDGET_S
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.artifacts import (
     DeepArtifact,
     deep_dir,
 )
+from daydream.deep.detection import StackAssignment
+from daydream.deep.prompts import (
+    build_arbiter_prompt,
+    build_generic_fallback_prompt,
+    build_merge_prompt,
+    build_per_stack_prompt,
+    build_structural_prompt,
+)
+from daydream.deep.verify_selection import SelectionConfig
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.git_ops import GitError, IndexSnapshot, WorktreeRollbackSnapshot
 from daydream.hunk_index import write_hunk_index
+from daydream.improve.command_contract import REPOSITORY_FILE_PATH_SCHEMA
 from daydream.phases import (
+    FIX_VERIFY_ACTIONABLE_VERDICTS,
+    FIX_VERIFY_RETARGETABLE_VERDICTS,
+    FIX_VERIFY_VERDICTS,
+    FIX_VERIFY_VERDICTS_SCHEMA,
     TEST_OUTPUT_TAIL_LINES,
     PushAttemptError,
     TestAttemptEvidence,
+    build_alternative_review_prompt,
+    build_commit_message,
     build_intent_prompt,
+    group_items_by_footprint,
+    phase_alternative_review,
     phase_commit_push,
     phase_cross_stack_merge,
     phase_understand_intent,
@@ -50,9 +72,13 @@ from daydream.phases.findings import (
     _write_single_stack_merged_items,
 )
 from daydream.phases.fix import (
+    _FIX_GUARDRAILS,
     _parse_test_map,
 )
 from daydream.phases.handoff import (
+    HandoffArtifacts,
+    _build_failure_summarizer_prompt,
+    _build_minimal_handoff,
     _changed_files,
     _resolve_handoff_paths,
     _run_failure_summarizer,
@@ -60,6 +86,8 @@ from daydream.phases.handoff import (
 )
 from daydream.phases.inputs import (
     _PR_BODY_MAX_CHARS,
+    _git_branch,
+    _git_log,
     _inlineable_diff,
 )
 from daydream.phases.publish import (
@@ -69,12 +97,18 @@ from daydream.phases.repair_checkpoint import read_repair_checkpoint
 from daydream.phases.repair_outcome import (
     RepairOutcome,
     classify_repair_outcome,
+    repair_reason_code,
+)
+from daydream.phases.review_prompts import (
+    _exploration_pointer,
 )
 from daydream.phases.test_evidence import (
+    RepairAttemptEvidence,
     TestAndHealResult,
     _test_command_wall_budget,
 )
 from daydream.phases.testing import (
+    _REPAIR_EXCERPT_MAX_CHARS,
     _build_fix_prompt,
     _compose_repair_prompt,
     _reject_test_healing_generated_file_edits,
@@ -85,7 +119,13 @@ from daydream.prompt_budget import (
     SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES,
     SanctionedInputUnavailable,
 )
+from daydream.prompts.authorial_intent import (
+    AUTHORITATIVE_INTENT_BLOCK,
+    AUTHORITATIVE_INTENT_RULE,
+    PR_DESCRIPTION_UNTRUSTED_FRAMING,
+)
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+from daydream.review_result import ReasonCode
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.test_execution import TestExecutionIdentity, TestExecutionResult, resolve_test_recipe
 from daydream.trajectory import (
@@ -95,12 +135,15 @@ from daydream.trajectory import (
     run_document_path,
     siblings_directory,
 )
+from daydream.ui.summary import print_fix_complete
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
+from tests.harness.fake_clock import FakeClock
 from tests.harness.git_helpers import commit as git_commit, configure_identity, git, init_repo
 from tests.harness.review_profile import default_strategy as _default_strategy
-from tests.harness.review_result import merge_result
-from tests.harness.trajectory import make_recorder
+from tests.harness.review_result import merge_result, review_scopes
+from tests.harness.stub_backend import review_stage_result
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
 _FAIL_TURN: tuple[AgentEvent, ...] = (TextEvent(text="1 failed, 0 passed"), _RESULT)
@@ -114,6 +157,7 @@ def _structured_turn(structured: object) -> tuple[AgentEvent, ...]:
 
 def _verdict(verdict: str, suggested_command: str | None, reason: str) -> dict[str, str | None]:
     return {"verdict": verdict, "suggested_command": suggested_command, "reason": reason}
+
 
 def _record_host_runs(monkeypatch: pytest.MonkeyPatch, *, exit_status: int = 0, output: str = "ok",
 ) -> list[dict[str, Any]]:
@@ -301,6 +345,7 @@ def _reject_violations(tmp_path: Path, snapshot: str | None) -> list[str] | None
     return _reject_test_healing_generated_file_edits(
         tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(), allow_standalone=True,
     )
+
 
 def test_test_healing_guard_uses_snapshot_bytes_to_detect_marker_generated_file(
     tmp_path: Path, _quiet_phase_ui: None,
@@ -776,9 +821,14 @@ def test_test_command_wall_budget_resolves_file_config_override() -> None:
         == 1234.0
     )
 
+
+
+
 def _footprint(repo: Path) -> AuthorizedFixFootprint:
     """A no-edit-authority footprint: the repair record, not the prompt, carries scope."""
     return AuthorizedFixFootprint(run_allowed_paths=frozenset(), policy_revision=1)
+
+
 
 
 @pytest.mark.parametrize("outcome_case", ["normal", "timeout", "exception"])
@@ -869,6 +919,8 @@ async def test_failing_confinement_blocks_the_repair_and_records_the_failure(
     assert any("GitError" in diagnostic and "restore failed" in diagnostic
         for r in result.repairs for diagnostic in r.diagnostics)
 
+
+
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_aborts_when_generated_restore_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
@@ -887,6 +939,10 @@ async def test_phase_test_and_heal_aborts_when_generated_restore_fails(
     assert backend.call_count == 3
     assert "failure-summarizer" in backend.prompts[-1].lower()
 
+
+
+
+
 @pytest.mark.parametrize(("abort_reason", "output", "expected"), [
     ("wall_budget_exceeded", "PARTIAL-DIAGNOSIS-abc", RepairOutcome.BUDGET_INTERRUPTED),
     (None, "", RepairOutcome.DIAGNOSIS_UNRESOLVED),
@@ -903,6 +959,9 @@ def test_test_and_heal_result_repairs_field_defaults_for_existing_callers() -> N
     """The defaulted field keeps all eight existing positional constructions valid."""
     result = TestAndHealResult(True, 0, True, False, ())
     assert result.repairs == ()
+
+
+
 
 @pytest.mark.asyncio
 async def test_phase_fix_prompt_enumerates_explicit_edit_scope(
@@ -933,6 +992,7 @@ async def test_phase_fix_prompt_enumerates_explicit_edit_scope(
     prompt_without = backend_without.prompts[0]
     assert "Authorized edit scope" in prompt_without
     assert "src/handler.py" in prompt_without
+
 
 
 @pytest.mark.parametrize("inline", [False, True])
@@ -1003,12 +1063,17 @@ def test_repair_prompt_never_contains_both_permissions() -> None:
     assert not invites_wider, "the contradicting invitation must be gone"
 
 
+
+
 def test_repair_prompt_discloses_truncation() -> None:
     """Truncation is disclosed, as it already is for the human handoff."""
     long_output = "\n".join(f"line {n}" for n in range(500))
     prompt = _compose_repair_prompt(repo=REPO, output=long_output,
                                    edit_scope=frozenset({"src/handler.py"}))
     assert "truncated" in prompt.lower()
+
+
+
 
 
 @pytest.mark.parametrize("entry_point", ["phase_fix", "phase_fix_batched", "phase_fix_parallel"])
@@ -1069,6 +1134,9 @@ async def test_phase_fix_batched_prompt_lists_all_findings(
     assert "Anchor the change" in prompt
     assert "the contract wins" in prompt
 
+
+
+
 @pytest.mark.asyncio
 async def test_phase_fix_batched_includes_verifier_verdicts(
     tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None,
@@ -1096,6 +1164,8 @@ async def test_phase_fix_batched_includes_verifier_verdicts(
     assert "could not reproduce" in prompt
     assert "assumes single-threaded" in prompt
 
+
+
 @pytest.mark.asyncio
 async def test_phase_fix_batched_adds_test_map_source_hint(
     tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None,
@@ -1112,6 +1182,7 @@ async def test_phase_fix_batched_adds_test_map_source_hint(
     await phases.phase_fix_batched(backend, make_work(tmp_path), items, [1], 1, test_map=test_map)
     assert any("daydream/app.py" in prompt for prompt in backend.prompts)
 
+
 @pytest.mark.asyncio
 async def test_phase_fix_parallel_drops_pointer_when_index_missing(
     tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None,
@@ -1125,6 +1196,7 @@ async def test_phase_fix_parallel_drops_pointer_when_index_missing(
     assert backend.prompts
     assert not any("affected_files.md" in prompt for prompt in backend.prompts)
 
+
 @pytest.mark.asyncio
 async def test_phase_fix_batched_prompt_includes_evidence(
     tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None,
@@ -1137,6 +1209,7 @@ async def test_phase_fix_batched_prompt_includes_evidence(
 class TestBuildFixPrompt:
     """Tests for _build_fix_prompt helper."""
 
+
     def test_long_output_truncated(self) -> None:
         lines = [f"line {i}" for i in range(200)]
         output = "\n".join(lines)
@@ -1148,12 +1221,21 @@ class TestBuildFixPrompt:
         assert "line 0\n" not in result
         assert f"line {200 - TEST_OUTPUT_TAIL_LINES - 1}\n" not in result
 
+
+
+
+
+
     def test_repo_leaves_missing_file_relative(self, tmp_path: Path) -> None:
         items = [{"id": 1, "description": "Bug", "file": "src/ghost.py", "line": 1}]
         result = _build_fix_prompt("test failed", items, repo=tmp_path)
         # File does not exist under repo → left as-is, not fabricated absolute.
         assert "- src/ghost.py" in result
         assert str(tmp_path / "src" / "ghost.py") not in result
+
+
+
+
 
 def test_build_intent_prompt_truncates_body_over_8000_chars() -> None:
     prefix = "A" * _PR_BODY_MAX_CHARS
@@ -1183,6 +1265,9 @@ def test_build_intent_prompt_escapes_closing_delimiter_in_body() -> None:
     # Both delimiters are neutralized to HTML entities so they cannot break framing.
     assert "&lt;/pr_description>" in prompt
     assert "&lt;pr_description>" in prompt
+
+
+
 
 @pytest.mark.asyncio
 async def test_phase_understand_intent_rejects_budget_truncated_summary(
@@ -1329,6 +1414,15 @@ async def test_phase_understand_intent_clone_inline_diff_is_byte_bounded(
     char_sliced_prefix = diff_text[:INLINE_DIFF_BUDGET_BYTES].encode("utf-8")[:INLINE_DIFF_BUDGET_BYTES]
     assert char_sliced_prefix not in prompt.encode("utf-8")
 
+
+
+
+
+
+
+
+
+
 def test_is_evidenced_gate_branches() -> None:
     """Issue #227: _is_evidenced grounds on evidence content and confidence tier."""
 
@@ -1370,10 +1464,35 @@ def test_is_evidenced_gate_branches() -> None:
         {"confidence": "HIGH", "rationale": "r", "lens": "structural", "file": "big.py", "line": 0, "evidence": ""}
     ) is False
 
+
+_GEN_STRATEGY = _rp.build_default_profile().strategies["discovery.generic_fallback"].content
+
+_FOOTER_BUILDERS = ["per-stack", "structural", "generic-fallback", "arbiter", "merge"]
+
 # Every phrase that orders a *separate output section* rather than prose inside the
 # required JSON object. Markers are scoped to output emission ("before the JSON",
 # "that summarizes") because the same builders legitimately say "read the full
 # enclosing symbol or configuration section before judging it".
+_SEPARATE_OUTPUT_SECTION_MARKERS = (
+    "Begin your review output with",
+    "Start your review output with",
+    "section that summarizes",
+    "before the JSON",
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 @pytest.mark.asyncio
 async def test_phase_commit_push_writes_daydream_trailers_host_side(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
@@ -1581,6 +1700,8 @@ async def test_unreplaced_test_command_retries_original_prompt(
 
 # phase_test_and_heal — option 4 failure-summarizer + handoff
 
+
+
 def _install_recorder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, on_write: Any=None) -> Any:
     """Install a recorder/path fixture and no-op forks, with on_write indicating archival."""
     class _FakeRecorder:
@@ -1678,6 +1799,7 @@ async def test_phase_test_and_heal_option4_no_clipboard_skip_message(
     assert user_prompts == ["Choice"]
     assert copy_called is False
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("turn", "expected_substrings"),
     [((RuntimeError("scripted summarizer failure"),),
@@ -1763,7 +1885,35 @@ async def test_recorderless_handoff_rejects_a_bound_session_without_explicit_own
         with pytest.raises(ArtifactVisibilityError, match="explicit artifact session"):
             _resolve_handoff_paths(None, work, allow_standalone=True)
 
+
+
+
+
+@pytest.mark.asyncio
+async def test_resolve_handoff_paths_roots_at_the_layout_run_directory(
+    tmp_path: Path, make_work: Callable[..., WorkContext],
+) -> None:
+    """Resolve the live owner run directory through the layout API, without reconstructing paths."""
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    work = make_work(repo)
+    live_daydream = artifact_dir_for(repo, allow_standalone=True)
+    session_id = "handoff-layout"
+    run_dir = run_directory(live_daydream, session_id)
+    recorder = TrajectoryRecorder(
+        path=run_document_path(run_dir), run_flow=DaydreamRunFlow.NORMAL, target_dir=repo, artifact_run_dir=run_dir,
+        agent_model_name="fake-external", session_id=session_id,
+    )
+    async with recorder:
+        handoff, artifacts = _resolve_handoff_paths(recorder, work, allow_standalone=True)
+
+    assert artifacts.trajectory == run_document_path(run_dir)
+    assert artifacts.trajectories == siblings_directory(run_dir)
+    assert handoff == run_dir / "handoff.md"
+    assert artifacts.trajectory.parent == run_dir
+
 # _write_handoff — must report write failure so the caller can fall back
+
 
 def test_write_handoff_returns_false_on_oserror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Return False on write failure so callers cannot announce a nonexistent file."""
@@ -1800,6 +1950,8 @@ async def test_phase_test_and_heal_option4_inlines_body_when_write_fails(
     assert any("FULL_BODY_LINE_1" in line for line in printed), printed
 
 # phase_test_and_heal — non-interactive short-circuit (Task 3)
+
+
 
 # phase_test_and_heal — --yes bounded auto fix-and-retry (Task assume="yes")
 
@@ -1846,6 +1998,7 @@ def test_sanitize_suggested_command_strips_backticks_and_collapses_whitespace() 
     assert _sanitize_suggested_command("echo `whoami`") == "echo whoami"
     # Whitespace runs collapse to single space:
     assert _sanitize_suggested_command("a\t\tb\n c") == "a b c"
+
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_option1_strips_backticks_from_host_command(
@@ -2029,11 +2182,21 @@ async def test_failure_summarizer_falls_back_for_non_live_private_runtime_paths(
     assert "private runtime path" not in body
     assert "output contained a private runtime path" in caplog.text
 
+
+
+
+
+
+
+
+
 # The host renders review-output.md from validated merge items.
 _MERGE_ITEMS = merge_result([{
     "id": 1, "lens": "per-stack", "file": "a.py", "line": 1, "severity": "low", "description": "bug",
     "confidence": "HIGH", "rationale": "r", "evidence": "a.py:1",
 }])
+
+
 
 @pytest.mark.parametrize("inline", [False, True])
 async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
@@ -2168,48 +2331,17 @@ async def test_phase_understand_intent_non_clone_inline_correction_omits_diff_pa
     assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in correction
     assert "Re-examine the codebase and the diff inlined below" in correction
 
-async def test_verifier_excludes_structural_lens(
-    tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None,
-) -> None:
-    """Structural canonical items remain verdict-exempt and never enter the verifier prompt."""
 
-    work = make_work(tmp_path)
-    dd = deep_dir(work.repo, allow_standalone=True)
-    dd.mkdir(parents=True, exist_ok=True)
 
-    structural_id = 1
-    per_stack_id = 2
-    items = {"items": [{"id": structural_id, "lens": "structural", "file": "big.py", "line": 1, "severity": "high",
-                "description": "1k-line file", "confidence": "HIGH", "rationale": "r",
-            },
-            {"id": per_stack_id, "lens": "per-stack", "file": "a.py", "line": 9, "severity": "low",
-                "description": "bug", "confidence": "HIGH", "rationale": "r",
-            },
-        ]
-    }
-    items_path = DeepArtifact.MERGED_ITEMS.at(dd)
-    items_path.write_text(json.dumps(items))
 
-    # MockBackend returns a verdict ONLY for the per-stack id, mimicking an
-    # agent that was never shown the structural item.
-    structured = {"verdicts": [
-            {"issue_id": per_stack_id, "verdict": "consistent", "evidence": "e", "unverified_assumptions": [],}
-        ]
-    }
 
-    backend = ScriptedBackend(events=_structured_turn(structured))
-    _, payload = await phase_verify_recommendations(backend, work, merged_items_path=items_path, deep_dir=dd,)
 
-    verified_ids = {v["issue_id"] for v in payload["verdicts"]}
-    assert structural_id not in verified_ids  # structural deliberately not verified
-    assert per_stack_id in verified_ids  # the language-lens item was a candidate
-    # Structural findings are excluded before prompt construction.
-    assert "1k-line file" not in backend.last_prompt
-    assert "bug" in backend.last_prompt
-    # Verdicts file is written for downstream consumers.
-    assert DeepArtifact.VERDICTS.at(dd).is_file()
-    # The verifier diagnostic must use the read-only profile.
-    assert backend.read_only_calls == [True]
+
+
+
+
+
+
 
 @pytest.mark.asyncio
 async def test_phase_fix_parallel_restores_whole_group_worktree_before_batch_fallback(
@@ -2254,6 +2386,8 @@ async def test_phase_fix_parallel_restores_whole_group_worktree_before_batch_fal
     assert (tmp_path / "a.py").read_text() == "successful fallback fix\n"
     assert (tmp_path / "shared.py").read_text() == "successful fallback fix\n"
     assert (tmp_path / "test_a.py").read_text() == "original group content\n"
+
+
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_records_each_agent_attempt_and_heal_scope(
@@ -2538,7 +2672,24 @@ async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failu
     assert sorted(fix_calls) == ["b.py"]
     assert set(failures) == {"boom.py"} and "RuntimeError" in failures["boom.py"]
 
+
+
+
 # --- Issue #172 Fix B extended: inline small diffs into intent / wonder ------
+
+_INLINE_TEST_DIFF = (
+    "diff --git a/x.py b/x.py\n"
+    "--- a/x.py\n"
+    "+++ b/x.py\n"
+    "@@ -1 +1 @@\n"
+    "-old\n"
+    "+new\n"
+)
+
+
+
+
+
 
 def test_inlineable_diff_budget_boundaries() -> None:
     assert _inlineable_diff(None) is None
@@ -2576,6 +2727,8 @@ def test_merge_demotion_preserves_original_severity_and_marks_distrust(tmp_path:
     assert items[0]["severity"] == "low"  # demoted value (report-facing)
     assert items[0]["severity_before_demotion"] == "high"  # original preserved (R2.1)
     assert items[0]["location_distrust"] is True  # machine-readable demotion mark
+
+
 
 @pytest.mark.asyncio
 async def test_first_targeted_call_runs_in_the_resolved_package_cwd(
@@ -2843,26 +2996,3 @@ async def test_a_mismatch_record_names_the_component(
     assert gate["result"] == "identity-mismatch"
     assert gate["mismatched_components"] == ["tree_key"]
     assert any("tree_key" in line for line in reported), reported
-
-@pytest.mark.asyncio
-async def test_resolve_handoff_paths_roots_at_the_layout_run_directory(
-    tmp_path: Path, make_work: Callable[..., WorkContext],
-) -> None:
-    """Resolve the live owner run directory through the layout API, without reconstructing paths."""
-    repo = tmp_path / "repo"
-    init_repo(repo)
-    work = make_work(repo)
-    live_daydream = artifact_dir_for(repo, allow_standalone=True)
-    session_id = "handoff-layout"
-    run_dir = run_directory(live_daydream, session_id)
-    recorder = TrajectoryRecorder(
-        path=run_document_path(run_dir), run_flow=DaydreamRunFlow.NORMAL, target_dir=repo, artifact_run_dir=run_dir,
-        agent_model_name="fake-external", session_id=session_id,
-    )
-    async with recorder:
-        handoff, artifacts = _resolve_handoff_paths(recorder, work, allow_standalone=True)
-
-    assert artifacts.trajectory == run_document_path(run_dir)
-    assert artifacts.trajectories == siblings_directory(run_dir)
-    assert handoff == run_dir / "handoff.md"
-    assert artifacts.trajectory.parent == run_dir

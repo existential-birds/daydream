@@ -303,6 +303,8 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
     )
     if remote_outcome == "no_ci":
         _accelerate_empty_ci_discovery(monkeypatch)
+    remote_rendered = StringIO()
+    monkeypatch.setattr("daydream.deep.remote_ci_steps.console", Console(file=remote_rendered, width=160))
     install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
     elsewhere = tmp_path / "different cwd"
     elsewhere.mkdir()
@@ -323,7 +325,7 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
     assert verdict["status"] == remote_outcome
     assert verdict["target"]["pushed_sha"] == pushed_sha
     assert all(call.cwd == project.resolve() for call in fake_gh.process_calls())
-    output = capsys.readouterr().out
+    output = capsys.readouterr().out + remote_rendered.getvalue()
     if remote_outcome == "no_ci":
         assert verdict["evidence_sha"] == pushed_sha
         assert verdict["polling"]["stable_polls"] >= verdict["polling"]["required_stable_polls"]

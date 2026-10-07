@@ -67,7 +67,7 @@ from tests.harness.git_helpers import bare_remote, commit as _commit, git as _gi
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.review_profile import independent_exploration_profile
 from tests.harness.review_result import terminal_result
-from tests.harness.stub_backend import StubBackend, silence
+from tests.harness.stub_backend import StubBackend, review_stage_result, silence
 from tests.harness.trajectory import make_recorder
 from tests.test_deep_pr_comment_integration import (
     _answer_prompts,
@@ -1417,24 +1417,43 @@ async def test_fix_cycle_clipboard_timeout_keeps_event_loop_responsive_and_shows
         clipboard, "subprocess", SimpleNamespace(run=_blocking_run, SubprocessError=subprocess.SubprocessError),
     )
     monkeypatch.setattr("daydream.clipboard._detect_clipboard_command", lambda: ["pbcopy"])
+    _seed_fix_resume(feature_branch_repo, [_fix_item()])
+    class ClipboardHandoffBackend(StubBackend):
+        async def execute(
+            self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
+        ) -> AsyncIterator[AgentEvent]:
+            if "read-only failure-summarizer" in prompt:
+                self.calls.append({"prompt": prompt})
+                yield ResultEvent(
+                    structured_output={"handoff_prompt": "# Handoff\n\nclipboard timeout"}, continuation=None,
+                )
+                return
+            async for event in super().execute(cwd, prompt, *args, **kwargs):
+                yield event
+    backend = ClipboardHandoffBackend(feature_branch_repo)
+    backend.fail_all_test_runs = True
+    backend.fix_edit_line = "\n# daydream fix\n"
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+    answers = iter(["y", "4", "y"])
+    monkeypatch.setattr("builtins.input", lambda *_args, **_kwargs: next(answers))
+    monkeypatch.setattr("daydream.runner._stdin_isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+    head_before = _git(feature_branch_repo, "rev-parse", "HEAD")
     async def _ticker() -> None:
         while not stop_tick.is_set():
             state["ticks"] += 1
             await anyio.sleep(0.001)
     ticker_task = asyncio.create_task(_ticker())
-    exit_code, _test_backend, repair_backend, commit_calls = await _drive_fix_cycle_failing(
-        monkeypatch, feature_branch_repo, make_config(feature_branch_repo, start_at="fix", shallow=True,
-            non_interactive=False,
-        ),
-        script=[_FAIL_TURN, _handoff_turn("# Handoff\n\nclipboard timeout")],
-        repair_turn=_FIX_TURN,
-        stdin_answers=["y", "4", "y"], clipboard_is_available=True,
-    )
-    stop_tick.set()
-    await ticker_task
+    try:
+        exit_code = await runner.run(
+            make_config(feature_branch_repo, start_at="fix", shallow=True, non_interactive=False),
+        )
+    finally:
+        stop_tick.set()
+        await ticker_task
     assert exit_code == 1
     assert observed_timeouts == [5], f"expected timeout exactly 5, got {observed_timeouts}"
-    assert state["at_release"] >= state["at_entry"], (
+    assert state["at_release"] > state["at_entry"], (
         "event loop did not tick during the blocked clipboard copy — the copy is running "
         "synchronously on the loop, not offloaded"
     )
@@ -1442,7 +1461,7 @@ async def test_fix_cycle_clipboard_timeout_keeps_event_loop_responsive_and_shows
         f"manual-copy warning missing; got {warnings!r}"
     )
     assert successes == [], f"expected no success message, got {successes!r}"
-    assert commit_calls == [], "a commit ran despite tests failing"
+    assert _git(feature_branch_repo, "rev-parse", "HEAD") == head_before, "a commit ran despite tests failing"
     _assert_single_handoff(feature_branch_repo, "# Handoff\n\nclipboard timeout")
 
 async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
@@ -1572,7 +1591,7 @@ async def test_overlapping_posting_runs_keep_their_own_github_auth(
             entered[name].set()
             if name != "reader":
                 await release.wait()
-            structured: dict[str, Any] = {"issues": []}
+            structured: dict[str, Any] = review_stage_result(prompt, [])
             if "verdicts" in (kwargs.get("output_schema") or {}).get("properties", {}):
                 structured["verdicts"] = []
             yield TextEvent(text="No issues found.")

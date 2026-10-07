@@ -85,6 +85,43 @@ def review_deadline(*, discovery: bool) -> float | None:
     return deadlines[0 if discovery else 1] if deadlines is not None else None
 
 
+@dataclass
+class ReviewInvestigationBudget:
+    """Observed spend and an absolute deadline for one staged reviewer.
+
+    The event stream exposes starts after native execution may have begun. This
+    tracks received observations, including a start that exceeds the allowance;
+    it does not promise prospective tool admission or unseen buffered events.
+    """
+
+    limits: ReviewLimits
+    deadline: float
+    observed_tool_starts: int = 0
+    shared_deadline: float | None = None
+
+    @classmethod
+    def from_limits(
+        cls, limits: ReviewLimits, *, deadline: float | None = None,
+    ) -> ReviewInvestigationBudget:
+        """Resolve scaling once; serialization time is never investigation time."""
+        scaled = review_limits_for_scope(limits)
+        bounds = [clock.monotonic() + scaled.investigation_s]
+        shared = review_deadline(discovery=scaled.discovery)
+        if shared is not None:
+            bounds.append(shared)
+        if deadline is not None:
+            bounds.append(deadline)
+        return cls(scaled, min(bounds), shared_deadline=shared)
+
+    @property
+    def remaining_tool_calls(self) -> int:
+        return max(0, self.limits.tool_calls - self.observed_tool_starts)
+
+    def observe_tool_start(self) -> None:
+        """Charge before deadline and policy handling, without retry refunds."""
+        self.observed_tool_starts += 1
+
+
 class ReviewBudgetExceeded(RuntimeError):
     """A review phase stopped before producing its final result."""
 

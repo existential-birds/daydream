@@ -84,7 +84,7 @@ async def test_review_budget_stop_emits_partial_findings(
 
         async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,) -> AsyncIterator[AgentEvent]:
             if self.exhaust and fragments[phase] in prompt.lower():
-                for n in range(10):
+                for n in range(17):
                     if budget == "wall":
                         fake.advance(601)
                     yield ToolStartEvent(id=f"budget-{n}", name="Read", input={"file_path": "api.py"})
@@ -150,7 +150,7 @@ async def test_single_stack_alternatives_timeout_still_emits_findings(
     artifact = json.loads(out.read_text())
     assert artifact["review_warnings"] == ["alternatives: tool_call_budget_exceeded"]
 
-async def test_partial_checkpoint_survives_publication_and_merge_resume(
+async def test_admitted_first_pass_survives_integration_cutoff_and_merge_resume(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig],
 ) -> None:
 
@@ -158,8 +158,8 @@ async def test_partial_checkpoint_survives_publication_and_merge_resume(
         async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
             async for event in super().execute(cwd, prompt, *args, **kwargs):
                 yield event
-            if "you are reviewing the python stack" in prompt.lower():
-                for n in range(5):
+            if "you are the structural reviewer" in prompt.lower() and '"stage": "integration"' in prompt:
+                for n in range(17):
                     yield ToolStartEvent(id=f"extra-{n}", name="Read", input={"file_path": "api.py"})
 
     silence(monkeypatch)
@@ -173,18 +173,18 @@ async def test_partial_checkpoint_survives_publication_and_merge_resume(
     out = multi_stack_target / "findings.json"
     for start_at in (None, "merge"):
         assert await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out), start_at=start_at,)) == 0
-        saved = json.loads((multi_stack_target / ".daydream/deep/stack-python-records.json").read_text())
-        assert saved["issues"], "validated checkpoint must survive adjudication and resume"
+        saved = json.loads((multi_stack_target / ".daydream/deep/stack-structure-records.json").read_text())
+        assert saved["issues"], "findings admitted before integration cutoff must survive adjudication and resume"
         assert saved["incomplete"] is True
         published = json.loads(out.read_text())
         assert published["findings"]
         terminal = published["terminal_result"]
         assert terminal["analysis_state"] == "incomplete"
-        scope = next(row for row in terminal["stack_outcomes"] if row["scope_id"] == "python")
+        scope = next(row for row in terminal["stack_outcomes"] if row["scope_id"] == "structure")
         assert scope["status"] == "incomplete"
         assert scope["partial_evidence"] is True
         assert scope["reason_codes"] == ["host_tool_budget_exhaustion"]
-        assert any("python" in warning for warning in published["review_warnings"])
+        assert any("structure" in warning for warning in published["review_warnings"])
 
 async def test_spent_pipeline_budget_still_publishes_explicitly_incomplete_artifact(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig],

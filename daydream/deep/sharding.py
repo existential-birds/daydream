@@ -12,7 +12,7 @@ from daydream.deep.detection import StackAssignment
 from daydream.deep.diff import iter_diff_blocks
 
 
-def _file_change_bytes(diff: str) -> dict[str, int]:
+def file_change_bytes(diff: str) -> dict[str, int]:
     """Map changed paths to UTF-8 block sizes; the first block wins.
 
     Files absent from the map still receive a one-byte shard weight.
@@ -23,7 +23,7 @@ def _file_change_bytes(diff: str) -> dict[str, int]:
     return sizes
 
 
-def _pack_shards(
+def pack_file_batches(
     stack: StackAssignment,
     sizes: dict[str, int],
     max_files: int,
@@ -117,7 +117,7 @@ def shard_stacks(
     if those exceed file/byte bounds. If distinct non-structural stacks alone exceed
     fanout_cap, retain them all: the cap cannot discard or merge stacks.
     """
-    sizes = _file_change_bytes(diff)
+    sizes = file_change_bytes(diff)
     structural: list[StackAssignment] = []
     unsharded: list[StackAssignment] = []
     sharded: list[tuple[StackAssignment, list[StackAssignment]]] = []
@@ -135,7 +135,7 @@ def shard_stacks(
             blocks = co_locate_groups(stack.files, edges)
         else:
             blocks = [[f] for f in sorted(stack.files)]
-        shards = _pack_shards(stack, sizes, max_files, max_bytes, blocks)
+        shards = pack_file_batches(stack, sizes, max_files, max_bytes, blocks)
         if len(shards) == 1:
             # Single-shard packs keep their original identity and cannot reduce fan-out.
             unsharded.append(stack)

@@ -202,6 +202,86 @@ async def test_store_directory_survives_a_fresh_run_and_is_readable_by_the_next(
     assert await run(make_config(multi_stack_target)) == 0
     assert (store / "entries" / ("a" * 64)).is_dir(), "a fresh run must not wipe the store"
 
+
+async def test_legacy_unstaged_review_entries_miss_then_completed_stages_are_reused(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+) -> None:
+    """Legacy completion cannot substitute for the staged reviewer contract."""
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    config = make_config(multi_stack_target)
+    assert await run(config) == 0
+    deep = multi_stack_target / ".daydream" / "deep"
+    entries = deep.parent / "review-cache" / "entries"
+    legacy_units: set[str] = set()
+    for manifest_path in entries.glob("*/manifest.json"):
+        manifest = json.loads(manifest_path.read_text())
+        if not manifest["unit"].startswith("shard:"):
+            continue
+        legacy_units.add(manifest["unit"])
+        manifest["components"].pop("staged_review_contract", None)
+        legacy_key = hashlib.sha256(json.dumps({
+            "format": manifest["format"], "unit": manifest["unit"], "components": manifest["components"],
+        }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        manifest["key"] = legacy_key
+        manifest_path.write_text(json.dumps(manifest))
+        if manifest_path.parent.name != legacy_key:
+            manifest_path.parent.rename(entries / legacy_key)
+    assert legacy_units, "the first real review must publish completed reviewer entries"
+
+    stub.calls.clear()
+    assert await run(config) == 0
+    assert _count_review_prompts(stub.calls) > 0
+    assert _reused_stacks(deep) == set()
+    assert saved_coverage(deep).unfinished_scopes == {}
+    current_records = _records_bytes(multi_stack_target)
+
+    stub.calls.clear()
+    assert await run(config) == 0
+    assert _count_review_prompts(stub.calls) == 0
+    assert {f"shard:{name}" for name in _reused_stacks(deep)} == legacy_units
+    assert _records_bytes(multi_stack_target) == current_records
+    assert saved_coverage(deep).unfinished_scopes == {}
+
+
+async def test_unfinished_stage_is_not_cached_until_successful_review(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Incomplete model acknowledgements require fresh investigation on the next run."""
+    from daydream.backends import AgentEvent, ResultEvent
+    from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
+    from tests.harness.stub_backend import review_stage_result
+
+    def unfinished_python(prompt: str) -> list[AgentEvent] | None:
+        if "python stack" not in prompt.lower():
+            return None
+        result = review_stage_result(prompt, [])
+        for target in result["targets"]:
+            target.update(status="not_reviewed", reason="Dependency conclusion is unfinished")
+        return [ResultEvent(structured_output=result, continuation=None)]
+
+    backend = EmptyReviewBackend(multi_stack_target, responder=unfinished_python)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+    config = empty_review_config(multi_stack_target, tmp_path / "trajectory.json", review_cache_enabled=True)
+    assert await run(config) == 0
+    deep = multi_stack_target / ".daydream" / "deep"
+    assert saved_coverage(deep).unfinished_scopes.keys() == {"python"}
+    assert _entry_count_for_unit(deep, "shard:python") == 0
+    assert _entry_count_for_unit(deep, "shard:structure") == 1
+
+    backend.responder = None
+    backend.calls.clear()
+    assert await run(config) == 0
+    assert _reviewed_stacks(backend.calls) == {"python"}
+    assert _entry_count_for_unit(deep, "shard:python") == 1
+    assert saved_coverage(deep).unfinished_scopes == {}
+
+    backend.calls.clear()
+    assert await run(config) == 0
+    assert _count_review_prompts(backend.calls) == 0
+    assert _reused_stacks(deep) == {"python", "react", "generic", "structure"}
+    assert saved_coverage(deep).unfinished_scopes == {}
+
+
 async def test_identical_rerun_reviews_no_stack_and_a_leaf_edit_invalidates_bound_coverage(
     shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:

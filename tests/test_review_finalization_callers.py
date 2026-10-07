@@ -22,11 +22,12 @@ def _stop_then_finalize(result: dict[str, Any]) -> ScriptedBackend:
         [ResultEvent(structured_output=result, continuation=None)],
     ])
 
-async def test_structural_finalizer_captures_prioritized_diff_without_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
+async def test_structural_stage_cutoff_publishes_without_model_finalizer(
+    tmp_path: Path, make_work: Callable[..., WorkContext],
 ) -> None:
-    backend = _stop_then_finalize({"issues": []})
-    monkeypatch.setattr("daydream.phases.review.ReviewLimits", lambda *a, **kw: ReviewLimits(10, 2, 0))
+    backend = ScriptedBackend(events=[
+        ToolStartEvent(id=f"limit-{index}", name="read", input={"path": "api.py"}) for index in range(17)
+    ])
     diff = tmp_path / "diff.patch"
     diff.write_text("diff --git a/api.py b/api.py\n+FOUNDATIONAL_DIFF\n")
     intent = tmp_path / "intent.md"
@@ -38,17 +39,21 @@ async def test_structural_finalizer_captures_prioritized_diff_without_session(
         diff_path=diff, intent_path=intent, alternatives_path=alternatives,
         intent_authoritative=True, allow_standalone=True,
     )
-    assert "FOUNDATIONAL_DIFF" in backend.last_prompt
+    assert str(diff) in backend.last_prompt
     assert "PRESERVE_AUTHOR_INTENT" in backend.last_prompt
     assert "AUTHORITATIVE" in backend.last_prompt
     assert "api.py" in backend.last_prompt
-    assert "Investigation allowance" not in backend.last_prompt
-    assert "budget exhausted" in failures[STRUCTURE_STACK_NAME]
+    assert "Investigation allowance" in backend.last_prompt
+    assert "Host review stage:" in backend.last_prompt
+    assert backend.call_count == 1
+    assert "tool_call_budget_exceeded" in failures[STRUCTURE_STACK_NAME]
     assert STRUCTURE_STACK_NAME in results
     records = next(tmp_path.rglob("stack-structure-records.json"))
     saved = json.loads(records.read_text())
     assert saved["incomplete"] is True
     assert saved["issues"] == []
+
+
 
 async def test_intent_requires_nonempty_provider_evidence(
     tmp_path: Path, make_work: Callable[..., WorkContext],

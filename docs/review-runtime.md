@@ -601,3 +601,89 @@ The corpus is small and fixed, so the report makes no statistical claim beyond
 those exact runs: it states the observed subset and its coverage rather than
 extrapolating. `analyze_findings.per_lens` remains raw pre-merge attribution and
 is unaffected by this shipped-lens report.
+
+## Bounded per-stack investigation
+
+Per-stack reviewers use fresh bounded invocations under their original public
+scope and analyzed revision. The host schedules one first pass in deterministic
+batches of at most eight files and 48 KiB of complete persisted diff-block
+weights. A file larger than the byte bound stays alone: its bounded targeted
+expansion must explicitly acknowledge unfinished work when it cannot finish.
+Pi retains the live exact diff pointer and ordinary read-only tools. Whole-change
+intent and existing dependency/frontier context remain available.
+
+Structure follows its file batches with one bounded integration stage. Compact
+batch notes and candidates support targeted cross-file checks; file acknowledgements
+alone cannot complete structural coverage. Integration does not schedule another
+whole-diff pass. Then one finite triage round resolves the admitted open candidates,
+split into bounded calls when needed. The host assigns candidate IDs; closed
+candidates are carried forward but never scheduled again. Contradictory later
+evidence makes coverage incomplete rather than reopening a closed decision.
+
+Each reviewer owns one in-memory cumulative budget and absolute investigation
+deadline. Workload scaling happens once. A quarter of the existing tool allowance
+is reserved for integration and triage; first-pass calls share the rest and receive
+at most sixteen starts each. Unused starts flow forward. Retries retain their
+charged spend, and fresh invocation overhead consumes the same deadline. The old
+finalization reserve is not extra investigation time. Staged progress calls never
+receive automatic cutoff recovery or a model serialization invocation. Other
+review callers retain their existing recovery behavior and downstream reserves.
+
+The controller counts received tool-start events, including failed-attempt,
+parallel-member and cutoff-triggering observations, before deadline or veto
+handling. After 81 of 96 observed starts, at most 15 remain. This is observation
+and scheduling enforcement: it does not prospectively interdict native execution
+or count buffered events the backend never delivers.
+
+Only successful invocation completion admits stage decisions. Strict output must
+acknowledge exactly the assigned target IDs and, in triage, exactly the assigned
+candidate IDs. Reads, valid JSON and empty candidates do not establish completion.
+Reviewed declarations are validated model assertions, not host proof that every
+hunk was semantically understood. Concrete candidates carry their location,
+trigger, observable consequence, grounds and disposition; confirmed candidates
+contain a valid existing finding record. Evidence uses the existing completed-tool
+association and truncation handling. The host does not independently authenticate
+every citation against a tool result. One aggregate handoff bound covers all target
+acknowledgements, notes, candidates (including dispositions and grounds), and
+associated excerpts: 64 KiB and 128 items. Overflow leaves that stage unadmitted
+and coverage incomplete. Candidate conclusions with missing grounds or clipped
+completed evidence also remain incomplete.
+
+The host publishes admitted confirmed finding records deterministically with the
+existing UID assignment, snapshot binding and artifact session. Invalid output,
+cutoffs and unresolved work retain earlier admitted findings and the original stop
+reason with incomplete coverage; unsuccessful-stage findings are discarded.
+Cancellation cannot establish completion. Progress is in memory only. Complete
+per-stack cache entries include the staged contract version; legacy entries miss,
+incomplete results are not cached, and no intermediate progress resumes.
+
+Stage transitions and observed/remaining allowances use existing trajectory
+metadata. Deterministic runner replays establish controller behavior and bounds;
+they do not establish better model quality, live recall, or universal adequacy of
+these initial limits.
+
+### Deterministic staged replay
+
+The [replay script](../scripts/measure_review_investigation.py) runs the same
+17-file Git change through `runner.run()` against the pinned baseline and staged
+source. Its external backend deliberately starts each invocation without memory;
+only the host-supplied progress and allowance survive. See the
+[recorded measurements](measurements/review-investigation.json) for source, replay
+and fixture digests, reproduction commands, individual stage requests, and counts.
+
+| Measurement | Baseline `db98cf1` | Staged |
+|---|---:|---:|
+| Reviewer requests | 2 unrestricted first passes | 6 file batches + 1 integration + 1 triage |
+| Observed tool starts | 170 | 37 |
+| Repeated evidence requests | 136 | 3 targeted integration/triage reads |
+| Findings | 0 | 0 |
+| Coverage | Complete | Complete with explicit acknowledgements |
+
+The staged replay schedules each file once per public scope on the first pass and
+carries a closed rejected candidate alongside the finite open candidate into
+triage. Each later request receives the cumulative remaining allowance. Separate
+runner regressions check 81/96 observed starts, failed retries, cutoff-triggering
+starts, real absolute deadlines, and the cross-batch parsed-but-dropped flag.
+These deterministic results show controller enforcement, not improved model
+quality or a universally sufficient budget. No live PR #1497 quality replay is
+claimed.

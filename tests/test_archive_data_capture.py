@@ -33,7 +33,6 @@ from daydream.config_file import DaydreamFileConfig
 from daydream.dataset import LocalRecordStore
 from daydream.phases import TestAndHealResult, TestAttemptEvidence
 from daydream.phases.review import ReviewOutputError
-from daydream.review_budget import ReviewLimits
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from daydream.training.labeler_signals import fix_applied_signal, local_commit_applied_signal
@@ -48,6 +47,7 @@ from tests.harness.stub_backend import (
     StubBackend,
     force_interactive,
     install_stub_backend,
+    review_stage_result,
     silence,
 )
 from tests.harness.trajectory import diff_adding
@@ -512,13 +512,12 @@ def _fix_editing_backend(repo: Path) -> ScriptedBackend:
             or "repository-wide interactions" in pl
         ):
             return [TextEvent(text="Review complete."),
-                ResultEvent(structured_output={"issues": [{
+                ResultEvent(structured_output=review_stage_result(prompt, [{
                                 "id": 1, "description": "Add a guard", "file": "main.py", "line": 1,
                                 "severity": "medium", "confidence": "HIGH", "rationale": "guard missing",
                                 "evidence": "main.py:1",
                             }
-                        ],
-                    }, continuation=None,
+                        ]), continuation=None,
                 ),
             ]
         if "fix this issue" in pl or pl.startswith("fix these"):
@@ -674,7 +673,7 @@ class _CodexEvidenceBackend(StubBackend):
     async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         if "you are reviewing the python stack" in prompt.lower():
             if self.evidence:
-                for index in range(311):
+                for index in range(15):
                     call_id = f"shell-{index}"
                     yield ToolStartEvent(id=call_id, name="shell",
                         input={"command": f"printf 'shell {index}\\n'"},
@@ -682,7 +681,7 @@ class _CodexEvidenceBackend(StubBackend):
                     if index == 1:
                         continue
                     yield ToolResultEvent(id=call_id, output="failed" if index == 0 else "ok", is_error=index == 0,)
-                for index in range(15):
+                for index in range(1):
                     call_id = f"patch-{index}"
                     yield ToolStartEvent(id=call_id, name="patch", input={"patch": f"*** patch {index} ***"},)
                     yield ToolResultEvent(id=call_id, output="applied", is_error=False)
@@ -713,13 +712,8 @@ def _install_codex_evidence_backend(target: Path, monkeypatch: pytest.MonkeyPatc
 async def test_codex_evidence_integrity_archives_semantic_counts_and_review_flags(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
 ) -> None:
-    # This telemetry fixture deliberately needs 326 events to keep its write
-    # ratio below 5%. Give that fixture sufficient investigation allowance;
-    # the production default's truncation is covered by review-runtime tests.
-    def telemetry_limits(*args: Any, **kwargs: Any) -> ReviewLimits:
-        return replace(ReviewLimits(*args, **kwargs), tool_calls=400)
-
-    monkeypatch.setattr("daydream.phases.review.ReviewLimits", telemetry_limits)
+    # Keep telemetry within one bounded stage while retaining failures, missing
+    # results, unmatched results, writes and parser/transport diagnostics.
     _install_codex_evidence_backend(multi_stack_target, monkeypatch, evidence=True,)
 
     assert await run(_deep_run_config(multi_stack_target)) == 0
@@ -728,12 +722,12 @@ async def test_codex_evidence_integrity_archives_semantic_counts_and_review_flag
     child = json.loads(_deep_python_trajectory(run_dir).read_text(encoding="utf-8"))
     evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
     child_calls = [call for step in child["steps"] for call in step.get("tool_calls") or []]
-    assert len(child_calls) == 326
+    assert len(child_calls) == 16
     assert child_calls[0]["arguments"]["command"] == "printf 'shell 0\\n'"
-    assert sum(evaluation["tools"]["by_agent"]["deep-python"].values()) == 326
-    assert evaluation["tools"]["total_calls"] == 326
-    assert evaluation["tools"]["by_type"] == {"shell": 311, "patch": 15}
-    assert evaluation["tools"]["write_ratio"] == 0.046
+    assert sum(evaluation["tools"]["by_agent"]["deep-python"].values()) == 16
+    assert evaluation["tools"]["total_calls"] == 16
+    assert evaluation["tools"]["by_type"] == {"shell": 15, "patch": 1}
+    assert evaluation["tools"]["write_ratio"] == 0.0625
 
     agent_steps = [step for step in child["steps"] if step["source"] == "agent"]
     result_extras = [result.get("extra", {})
@@ -861,12 +855,13 @@ class _JoinedArtifactEvidenceBackend(StubBackend):
 
                 payload = event.structured_output
                 assert isinstance(payload, dict)
-                issues = payload.get("issues")
-                assert isinstance(issues, list)
-                assert len(issues) == 1
-                assert isinstance(issues[0], dict)
-                issue = {**issues[0], "rationale": f"Evidence: {artifact_reference}",}
-                yield replace(event, structured_output={**payload, "issues": [issue]},)
+                candidates = payload.get("candidates")
+                assert isinstance(candidates, list)
+                assert len(candidates) == 1
+                finding = candidates[0]["finding"]
+                assert isinstance(finding, dict)
+                candidate = {**candidates[0], "finding": {**finding, "rationale": f"Evidence: {artifact_reference}"}}
+                yield replace(event, structured_output={**payload, "candidates": [candidate]},)
                 continue
             yield event
 

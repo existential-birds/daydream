@@ -45,7 +45,7 @@ from tests.harness.remote_ci import (
     seed_pr_identity,
     start_remote_ci_fake,
 )
-from tests.harness.stub_backend import force_interactive, install_stub_backend, silence
+from tests.harness.stub_backend import force_interactive, install_stub_backend, review_stage_result, silence
 from tests.test_deep_orchestrator import _install_stub_backend, _silence
 from tests.test_runner import _fix_item, _seed_fix_resume
 
@@ -95,7 +95,8 @@ async def render_agent(
     output = StringIO()
     extra: dict[str, Any] = {} if color_system is None else {"color_system": color_system}
     monkeypatch.setattr(
-        "daydream.agent.console", Console(file=output, force_terminal=True, width=120, theme=NEON_THEME, **extra),
+        "daydream.agent.console",
+        Console(file=output, force_terminal=True, no_color=False, width=120, theme=NEON_THEME, **extra),
     )
     await run_agent(
         ScriptedBackend(events=events, model="mock-model"), Path("/tmp"), prompt, phase=DaydreamPhase.REVIEW,
@@ -761,7 +762,9 @@ async def test_quiet_mode_error_shows_header_with_red_border(monkeypatch: pytest
     assert "Bash" in output_text
     assert "Command failed" not in output_text  # quiet mode: header only, no error body
     assert "╭" in output_text or "│" in output_text
-    assert "\x1b[" in output_text  # ANSI styling present (red border)
+    assert re.search(r"\x1b\[[0-9;]*38;2;255;85;85(?:;[0-9;]+)?m[╭│╰─]", output_text), (
+        "the failed tool's border must render red, not merely carry ANSI styling"
+    )
 
 async def test_skill_tool_panel_collapses_output(monkeypatch: pytest.MonkeyPatch) -> None:
     """Suppress the redundant Skill launch output already named in its header."""
@@ -908,8 +911,9 @@ async def test_run_comment_does_not_prompt_for_skill(
     """--comment mode should never prompt for skill selection."""
     _two_commit_repo(tmp_path, "f.txt", "a", "b", "feat")
     install_backend(ScriptedBackend(
-        events=[
-            TextEvent(text="Intent: changes f.txt."), ResultEvent(structured_output={"issues": []}, continuation=None),
+        responder=lambda _cwd, prompt, *_args: [
+            TextEvent(text="Intent: changes f.txt."),
+            ResultEvent(structured_output=review_stage_result(prompt, []), continuation=None),
         ], model="mock-model",
     ))
     silence_console("daydream.ui")

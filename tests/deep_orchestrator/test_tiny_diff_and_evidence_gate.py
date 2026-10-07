@@ -65,9 +65,10 @@ async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge_tiny_host_merge_ph
     assert tiny_reviews < multi_reviews, (
         f"tiny-diff review fan-out did not collapse: tiny={tiny_reviews}, multi={multi_reviews}"
     )
-    # Tiny diff: 2 review agents (combined lang + structure). Multi: 4.
-    assert tiny_reviews == 2, f"expected 2 review agents for tiny diff, got {tiny_reviews}"
-    assert multi_reviews == 4, f"expected 4 review agents for multi_stack, got {multi_reviews}"
+    # Tiny diff: combined language plus structure first pass and integration.
+    # Multi: three language scopes plus structure first pass and integration.
+    assert tiny_reviews == 3, f"expected 3 review stages for tiny diff, got {tiny_reviews}"
+    assert multi_reviews == 5, f"expected 5 review stages for multi_stack, got {multi_reviews}"
 
     # The merge agent MUST be skipped on the tiny diff (lever 2).
     assert _count_merge_prompts(tiny_calls) == 0, "merge agent ran on tiny diff"
@@ -354,7 +355,7 @@ async def test_ac_merge_resume_on_tiny_diff(
     structural = [item for item in items if item.get("lens") == "structural"]
     assert structural[0]["source_uids"] == ["structure:1"]
 
-@pytest.mark.parametrize("confidence", ["HIGH", "LOW"])
+@pytest.mark.parametrize("confidence", ["HIGH", "MEDIUM"])
 async def test_evidence_gate_drops_speculative_finding(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
     confidence: str,
 ) -> None:
@@ -374,11 +375,7 @@ async def test_evidence_gate_drops_speculative_finding(multi_stack_target: Path,
     ]
 
     exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == (1 if confidence == "LOW" else 0)
-    if confidence == "LOW":
-        coverage = saved_coverage(multi_stack_target / ".daydream/deep")
-        assert coverage.phases["merge"]["status"] == "failed"
-        return
+    assert exit_code == 0
 
     deep = multi_stack_target / ".daydream" / "deep"
     items = json.loads((deep / "merged-items.json").read_text())["items"]

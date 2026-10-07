@@ -20,6 +20,7 @@ from tests.harness.console import collapse_panel_text
 from tests.harness.dataset import read_records
 from tests.harness.fake_clock import FakeClock
 from tests.harness.git_helpers import git
+from tests.harness.stub_backend import review_stage_result
 from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipeline, _record
 
 
@@ -93,7 +94,8 @@ async def test_outcomes(review: ReviewRun, archive_dir: Path, case: str, state: 
     assert set(inventory) == {'python', 'react', 'generic', 'structure'}
     assert bool(data['findings']) is nonempty
     assert {name: s['status'] for name, s in inventory.items()} == {
-        name: 'failed' if case == 'total' or (name == 'python' and reason) else 'complete' for name in inventory}
+        name: 'incomplete' if name == 'python' and case == 'model' else
+        'failed' if case == 'total' or (name == 'python' and reason) else 'complete' for name in inventory}
     if reason:
         assert inventory['python']['reason_codes'] == [reason]
     else:
@@ -124,7 +126,8 @@ async def test_outcomes(review: ReviewRun, archive_dir: Path, case: str, state: 
                                              ('invalid', 'malformed_output'), ('fallback', None)])
 async def test_schema_output(review: ReviewRun, mode: str, reason: str | None) -> None:
     payload = {'missing': None, 'invalid': {'issues': [{'id': 1}, 'invalid']}}.get(mode, {'unexpected': []})
-    review.backend.responder = lambda p: [TextEvent(text='{"issues": []}' if mode == 'fallback' else ''),
+    review.backend.responder = lambda p: [TextEvent(text=json.dumps(review_stage_result(p, []))
+        if mode == 'fallback' else ''),
         ResultEvent(structured_output=payload, continuation=None)] if 'python stack' in p.lower() else None
     assert await review.run() == 0
     data = review.load()
@@ -228,41 +231,35 @@ async def test_snapshot_boundaries(review: ReviewRun, request: pytest.FixtureReq
             'mod0.py', 'mod1.py', 'mod2.py', 'README.md'}
 
 
-@pytest.mark.parametrize(('budget', 'fault'), [('tool', None), ('wall', None), ('model', None),
-                                              ('model', 'missing'), ('model', 'corrupt')])
+@pytest.mark.parametrize('budget', ['tool', 'wall', 'model'])
 @pytest.mark.parametrize('nonempty', [False, True])
-async def test_partial_checkpoints(review: ReviewRun, budget: str, fault: str | None, nonempty: bool) -> None:
+async def test_unsuccessful_stage_discards_checkpoints(
+    review: ReviewRun, budget: str, nonempty: bool,
+) -> None:
     fake = FakeClock().install(review.patch)
     def response(prompt: str) -> Any:
         if reviewer(prompt):
-            yield ResultEvent(structured_output={'issues': [record()] if nonempty else []}, continuation=None)
+            yield ResultEvent(structured_output=review_stage_result(prompt, [record()] if nonempty else []),
+                              continuation=None)
             if budget == 'model':
                 yield MaxTurnsError('spent turns')
             else:
-                for index in range(3):
+                for index in range(17):
                     if budget == 'wall':
                         fake.advance(601)
                     yield ToolStartEvent(id=f'budget-{index}', name='Read', input={'file_path': 'api.py'})
     review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
                                        responder=lambda p: response(p) if reviewer(p) else None)
     review.backend.merge_echo_records = True
-    review.patch.setattr('daydream.config.DEFAULT_TOOL_CALL_BUDGET', 1 if budget == 'tool' else None)
-    if fault:
-        method = 'is_file' if fault == 'missing' else 'read_text'
-        original = getattr(Path, method)
-        review.patch.setattr(Path, method, lambda p, *a, **k: (False if fault == 'missing' else '{')
-            if p.name == 'stack-python-records.json' else original(p, *a, **k))
-    assert await review.run(review_profile=_profile_with_pipeline(review_wall_budget_s=99999)) == (1 if fault else 0)
+    assert await review.run(review_profile=_profile_with_pipeline(review_wall_budget_s=99999)) == 0
     data = review.load()
     result = data['terminal_result']
     reason = 'model_budget_exhaustion' if budget == 'model' else f'host_{budget}_budget_exhaustion'
-    assert result['analysis_state'] == 'incomplete' and result['completed_stacks'] == []
-    assert reason in result['reason_codes'] and bool(data['findings']) is nonempty
-    for name, scope in scopes(data).items():
-        damaged = name == 'python' and fault is not None
-        assert (scope['status'], scope['partial_evidence']) == ('failed' if damaged else 'incomplete', not damaged)
-        damage_reason = 'missing_artifact' if fault == 'missing' else 'malformed_artifact'
-        assert scope['reason_codes'] == sorted([reason] + ([damage_reason] if damaged else []))
+    assert result['analysis_state'] == 'failed' and result['completed_stacks'] == []
+    assert reason in result['reason_codes'] and data['findings'] == []
+    for scope in scopes(data).values():
+        assert (scope['status'], scope['partial_evidence']) == ('incomplete', False)
+        assert scope['reason_codes'] == [reason]
 
 
 @pytest.mark.parametrize('fault', ['missing', 'corrupt', 'shape', 'revision', 'scope', 'origin'])
@@ -321,10 +318,12 @@ async def test_loaded_artifact_faults(review: ReviewRun, fault: str) -> None:
 
 
 @pytest.mark.parametrize(('phase', 'reason'), [('intent', 'backend_failure'), ('alternatives', 'backend_failure'),
-    ('merge', 'synthesis_failure'), ('missing', 'missing_output'), ('malformed', 'malformed_output'),
+    ('merge', 'synthesis_failure'), ('merge-low', 'synthesis_failure'),
+    ('missing', 'missing_output'), ('malformed', 'malformed_output'),
     ('omitted', 'evidence_incomplete')])
 async def test_required_phase_faults(review: ReviewRun, phase: str, reason: str) -> None:
     from tests.harness.review_profile import independent_alternatives_profile
+    from tests.harness.review_result import merge_result
     def response(prompt: str) -> Any:
         lower = prompt.lower()
         if (phase == 'intent' and 'present your understanding concisely' in lower) or (
@@ -333,14 +332,18 @@ async def test_required_phase_faults(review: ReviewRun, phase: str, reason: str)
         if phase in {'missing', 'malformed', 'omitted'} and 'supervisor adjudication' in lower:
             payload = None if phase == 'missing' else {'verdicts': [None] if phase == 'malformed' else []}
             return [ResultEvent(structured_output=payload, continuation=None)]
+        if phase == 'merge-low' and 'cross-stack merge agent' in lower:
+            return [ResultEvent(structured_output=merge_result([
+                dict(record(), confidence='LOW', lens='per-stack'),
+            ]), continuation=None)]
     review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
-        review_by_stack={'python' if phase == 'merge' else 'structure': [record()]}, responder=response)
+        review_by_stack={'python' if phase in {'merge', 'merge-low'} else 'structure': [record()]}, responder=response)
     review.backend.merge_echo_records = True
     review.backend.merge_emit_str = 'invalid merge output' if phase == 'merge' else None
-    if phase in {'intent', 'alternatives', 'merge'}:
+    if phase in {'intent', 'alternatives', 'merge', 'merge-low'}:
         review.config = replace(review.config, review_profile=independent_alternatives_profile())
-    if phase in {'merge', 'omitted'}:
-        assert await review.run() == (1 if phase == 'merge' else 0)
+    if phase in {'merge', 'merge-low', 'omitted'}:
+        assert await review.run() == (1 if phase in {'merge', 'merge-low'} else 0)
     else:
         error_type = ReviewOutputError if phase in {'missing', 'malformed'} else RuntimeError
         with pytest.raises(error_type, match=None if error_type is ReviewOutputError else f'{phase} unavailable'):
@@ -351,6 +354,10 @@ async def test_required_phase_faults(review: ReviewRun, phase: str, reason: str)
         'completed' if phase == 'omitted' else 'failed',
         'failed' if phase in {'intent', 'alternatives'} else 'incomplete')
     assert reason in result['reason_codes']
+    if phase in {'merge', 'merge-low'}:
+        outcome = next(p for p in result['phase_outcomes'] if p['phase'] == 'merge')
+        assert outcome['status'] == 'failed'
+        assert 'synthesis_failure' in outcome['reason_codes']
     expected_titles = [] if phase in {'intent', 'alternatives'} else ['Grounded defect']
     assert [f['title'] for f in data['findings']] == expected_titles
     if phase in {'missing', 'malformed', 'omitted'}:

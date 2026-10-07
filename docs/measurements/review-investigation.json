@@ -1,0 +1,180 @@
+{
+  "baseline_revision": "db98cf184b73cf7fc018b17e045be863906aef0d",
+  "comparison": "Same real temporary Git fixture and runner.run path; only the external backend is replaced.",
+  "limits": {
+    "scaled_tool_calls_per_scope": 96,
+    "first_pass_max_files": 8,
+    "first_pass_max_diff_bytes": 49152,
+    "first_pass_max_tool_starts": 16
+  },
+  "reproduce": [
+    "mkdir -p /tmp/review-investigation-before-source",
+    "git archive db98cf184b73cf7fc018b17e045be863906aef0d | tar -x -C /tmp/review-investigation-before-source",
+    "uv run python scripts/measure_review_investigation.py --source /tmp/review-investigation-before-source --output /tmp/before.json",
+    "uv run python scripts/measure_review_investigation.py --source . --output /tmp/after.json"
+  ],
+  "before": {
+    "exit_code": 0,
+    "fixture": "17-file-lossy-context",
+    "source_sha256": "05b095ba91c8a6ce055317e9c770e6c7b9df93d8d503e9766f04568bca9f5403",
+    "replay_sha256": "e95bb373191f3c6cc1d27d2bfbaf7dc9f7a9502cee5fa35e0df8c6eb58d2343e",
+    "fixture_sha256": "1b9f59f9e4f00a05a02fcc042d1e745f8759d2506392c4785f5345aa5deabcd4",
+    "stage_requests": [
+      {
+        "scope_id": "python",
+        "stage": "unbounded_discovery",
+        "remaining_tool_calls": null,
+        "tool_call_allowance": null,
+        "progress_count": 0,
+        "candidate_dispositions": [],
+        "observed_tool_starts": 85,
+        "no_tools": false
+      },
+      {
+        "scope_id": "structure",
+        "stage": "unbounded_discovery",
+        "remaining_tool_calls": null,
+        "tool_call_allowance": null,
+        "progress_count": 0,
+        "candidate_dispositions": [],
+        "observed_tool_starts": 85,
+        "no_tools": false
+      }
+    ],
+    "observed_tool_starts": {
+      "python": 85,
+      "structure": 85
+    },
+    "repeated_evidence_requests": {
+      "python": 68,
+      "structure": 68
+    },
+    "findings": 0,
+    "coverage": {
+      "python": "complete",
+      "structure": "complete"
+    },
+    "interpretation": "Deterministic controller enforcement only; no model-quality claim."
+  },
+  "after": {
+    "exit_code": 0,
+    "fixture": "17-file-lossy-context",
+    "source_sha256": "05226fd36d94ab203fe34e6e2cf208570cf9b6e0de34242baae26dc9a2c04c57",
+    "replay_sha256": "e95bb373191f3c6cc1d27d2bfbaf7dc9f7a9502cee5fa35e0df8c6eb58d2343e",
+    "fixture_sha256": "1b9f59f9e4f00a05a02fcc042d1e745f8759d2506392c4785f5345aa5deabcd4",
+    "stage_requests": [
+      {
+        "scope_id": "python",
+        "stage": "first_pass",
+        "remaining_tool_calls": 96,
+        "tool_call_allowance": 16,
+        "progress_count": 0,
+        "candidate_dispositions": [],
+        "observed_tool_starts": 8,
+        "no_tools": false
+      },
+      {
+        "scope_id": "python",
+        "stage": "first_pass",
+        "remaining_tool_calls": 88,
+        "tool_call_allowance": 16,
+        "progress_count": 8,
+        "candidate_dispositions": [],
+        "observed_tool_starts": 8,
+        "no_tools": false
+      },
+      {
+        "scope_id": "python",
+        "stage": "first_pass",
+        "remaining_tool_calls": 80,
+        "tool_call_allowance": 16,
+        "progress_count": 16,
+        "candidate_dispositions": [],
+        "observed_tool_starts": 1,
+        "no_tools": false
+      },
+      {
+        "scope_id": "structure",
+        "stage": "first_pass",
+        "remaining_tool_calls": 96,
+        "tool_call_allowance": 16,
+        "progress_count": 0,
+        "candidate_dispositions": [],
+        "observed_tool_starts": 8,
+        "no_tools": false
+      },
+      {
+        "scope_id": "structure",
+        "stage": "first_pass",
+        "remaining_tool_calls": 88,
+        "tool_call_allowance": 16,
+        "progress_count": 8,
+        "candidate_dispositions": [
+          "rejected",
+          "open"
+        ],
+        "observed_tool_starts": 8,
+        "no_tools": false
+      },
+      {
+        "scope_id": "structure",
+        "stage": "first_pass",
+        "remaining_tool_calls": 80,
+        "tool_call_allowance": 16,
+        "progress_count": 16,
+        "candidate_dispositions": [
+          "rejected",
+          "open"
+        ],
+        "observed_tool_starts": 1,
+        "no_tools": false
+      },
+      {
+        "scope_id": "structure",
+        "stage": "integration",
+        "remaining_tool_calls": 79,
+        "tool_call_allowance": 16,
+        "progress_count": 17,
+        "candidate_dispositions": [
+          "rejected",
+          "open"
+        ],
+        "observed_tool_starts": 2,
+        "no_tools": false
+      },
+      {
+        "scope_id": "structure",
+        "stage": "triage",
+        "remaining_tool_calls": 77,
+        "tool_call_allowance": 77,
+        "progress_count": 18,
+        "candidate_dispositions": [
+          "rejected",
+          "open"
+        ],
+        "observed_tool_starts": 1,
+        "no_tools": false
+      }
+    ],
+    "observed_tool_starts": {
+      "python": 17,
+      "structure": 20
+    },
+    "repeated_evidence_requests": {
+      "python": 0,
+      "structure": 3
+    },
+    "findings": 0,
+    "coverage": {
+      "python": "complete",
+      "structure": "complete"
+    },
+    "interpretation": "Deterministic controller enforcement only; no model-quality claim."
+  },
+  "interpretation": [
+    "First-pass assignments cover every file once; subsequent integration and triage reads are targeted.",
+    "Every fresh staged request carries admitted progress, closed candidate dispositions and a decreasing host allowance.",
+    "The deterministic backend deliberately rescans the full assignment without stage instructions and starts with no conversational memory.",
+    "This demonstrates controller scheduling and allowance enforcement, not improved model quality, universal budget sufficiency or prospective native tool blocking."
+  ]
+}

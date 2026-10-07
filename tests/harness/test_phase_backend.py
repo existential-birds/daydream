@@ -4,6 +4,7 @@ Drives the production shallow mode through ``runner.run`` with the shared
 phase-dispatch fake injected at the ``daydream.runner.create_backend`` seam.
 Asserts the observable outcome and that the removed parse phase is not invoked.
 """
+import json
 from pathlib import Path
 from typing import Any
 
@@ -35,9 +36,12 @@ async def test_shared_phase_backend_drives_shallow_pass(feature_branch_repo: Pat
     )
 
     assert exit_code == 0
-    # Issue #745: the per-stack reviewers emit PER_STACK_RECORD_SCHEMA records
-    # directly -- the spine no longer has a parse phase. The single shallow
-    # pass still fires the per-stack reviews for the combined python stack +
-    # the structural meta-stack.
+    assert "Add type hints" in (feature_branch_repo / ".review-output.md").read_text()
+    # The public scopes each receive one first pass; structure also integrates
+    # their changed behavior before deterministic publication.
     assert backend.parse_calls == 0
-    assert len(backend.review_prompts) == 2
+    stages = [json.JSONDecoder().raw_decode(prompt.split("Host review stage:\n", 1)[1])[0]
+              for prompt in backend.review_prompts]
+    assert sorted((stage["scope_id"], stage["stage"]) for stage in stages) == [
+        ("python", "first_pass"), ("structure", "first_pass"), ("structure", "integration"),
+    ]

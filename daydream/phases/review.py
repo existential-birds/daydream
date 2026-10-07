@@ -59,15 +59,13 @@ from daydream.prompt_budget import (
     truncate_utf8_to_budget,
     uses_diff_reference,
 )
-from daydream.prompts.authorial_intent import (
-    AUTHORITATIVE_INTENT_BLOCK,
-)
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.review_budget import (
     ReviewBudgetExceeded,
     ReviewLimits,
 )
 from daydream.review_evidence import FinalizationContext
+from daydream.review_investigation import ReviewInvestigation
 from daydream.review_result import ReasonCode, ReviewCoverage, reason_for_budget, reason_for_exception
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.test_execution import (
@@ -553,17 +551,6 @@ async def phase_per_stack_reviews(
             prompt = active_registry.prompt(prompt_name)(**prompt_args)
 
             prompt = append_extended_facts(prompt, recipe_for_prompts)
-            task_context = FinalizationContext(
-                task=f"Finalize {stack.stack_name} review",
-                input_priority=("diff", "intent"),
-                assigned_files=tuple(stack.files),
-                output_semantics="Return issues in the required schema. "
-                "An empty issues array is valid when no defect is established; "
-                "unfinished review work must not be described as clean.",
-                supplied_context=(("diff", inline_diff or ""),
-                                  ("intent authority", AUTHORITATIVE_INTENT_BLOCK
-                                   if intent_authoritative else "Intent is advisory context.")),
-            )
             stack_name = stack.stack_name
             structured: Any = None
             budget_reason: str | None = None
@@ -572,17 +559,10 @@ async def phase_per_stack_reviews(
                     async with maybe_fork(
                         recorder, f"deep-{stack_name}", dispatch=dispatch,
                     ):
-                        # The reviewer returns structured records directly.
-                        structured, _, budget_reason = await agent.run_agent(
-                            backend,
-                            work.repo,
-                            prompt,
-                            phase=DaydreamPhase.DEEP,
-                            output_schema=PER_STACK_RECORD_SCHEMA,
-                            require_full_schema=True,
-                            review_limits=ReviewLimits(),
-                            finalization_context=task_context,
-                            tool_call_budget=phase_config.DEFAULT_TOOL_CALL_BUDGET,
+                        investigation = ReviewInvestigation(stack, diff_path.read_text(encoding="utf-8"),
+                                                            coverage.revision.to_dict())
+                        structured, budget_reason = await investigation.run(
+                            backend, work.repo, prompt,
                             wall_budget_s=phase_config.REVIEW_WALL_BUDGET_S,
                             sanctioned_inputs=stack_sanctioned_inputs,
                             read_only=read_only,
@@ -594,12 +574,22 @@ async def phase_per_stack_reviews(
                         diagnostic=f"{type(e).__name__}: {exception_text(e) or '(unavailable)'}")
                     return
                 if budget_reason:
-                    partial_valid = validates_schema(structured, PER_STACK_RECORD_SCHEMA)
-                    status = ("uncovered" if budget_reason == "pipeline_budget_exceeded" and not partial_valid
-                              else "incomplete")
-                    coverage.record_scope(stack_name, status, reasons=(reason_for_budget(budget_reason),),
-                                          partial_evidence=partial_valid,
-                                          diagnostic=f"budget exhausted: {budget_reason}")
+                    try:
+                        reason = ReasonCode(budget_reason)
+                    except ValueError:
+                        reason = reason_for_budget(budget_reason)
+                    status = "incomplete"
+                    if investigation.admitted_stages == 0:
+                        if budget_reason == "pipeline_budget_exceeded":
+                            status = "uncovered"
+                        elif investigation.failed_invocation and reason is not ReasonCode.MODEL_BUDGET_EXHAUSTION:
+                            status = "failed"
+                    coverage.record_scope(stack_name, status, reasons=(reason,),
+                                          partial_evidence=investigation.admitted_stages > 0,
+                                          diagnostic=(investigation.failure_diagnostic
+                                                      or f"budget exhausted: {budget_reason}"))
+                    if status == "failed":
+                        return
                 if not validates_schema(structured, PER_STACK_RECORD_SCHEMA):
                     if not budget_reason:
                         error = ReviewOutputError(structured)

@@ -49,7 +49,7 @@ from daydream.retry_policy import (
     RetryRecoveryBudget,
     classify_failure,
 )
-from daydream.review_budget import ReviewLimits, review_deadline, review_limits_for_scope
+from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits, review_deadline, review_limits_for_scope
 from daydream.review_evidence import FinalizationContext, ReviewEvidence
 from daydream.run_context import (
     RunContext,
@@ -325,6 +325,8 @@ async def run_agent(
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext | None = None,
     review_limits: ReviewLimits | None = None,
+    investigation_budget: ReviewInvestigationBudget | None = None,
+    review_evidence: ReviewEvidence | None = None,
     finalization_context: FinalizationContext | None = None,
     tools_disabled: bool = False,
     review_system_instructions: str | None = None,
@@ -333,6 +335,8 @@ async def run_agent(
 
     Backend retry, supervision, budget and ATIF semantics live in the invocation
     executor. The outer scope owns exactly the result the phase receives.
+    Staged reviewers pass investigation_budget and optionally their own bounded
+    review_evidence; failed/cutoff stages never receive automatic serialization.
     """
     if tools_disabled and not getattr(backend, "supports_tools_disabled", False):
         raise NotImplementedError(f"{type(backend).__name__} does not support tools_disabled")
@@ -348,10 +352,40 @@ async def run_agent(
         if rendered_suffix and prompt.endswith(rendered_suffix):
             prompt = prompt.removesuffix(rendered_suffix)
     context = resolve_run_context(run_context)
-    evidence = ReviewEvidence(output_schema) if review_limits is not None else None
+    if investigation_budget is not None and review_limits is not None:
+        raise ValueError("staged investigation uses investigation_budget instead of review_limits")
+    evidence = review_evidence or (ReviewEvidence(output_schema) if review_limits is not None else None)
     review_instructions = review_system_instructions
     hard_deadline = deadline
     shared: float | None = None
+    if investigation_budget is not None:
+        shared = investigation_budget.shared_deadline
+        bounds = [investigation_budget.deadline]
+        if deadline is not None:
+            bounds.append(deadline)
+        if wall_budget_s is not None:
+            bounds.append(clock.monotonic() + wall_budget_s)
+        deadline = min(bounds)
+        hard_deadline = deadline
+        tool_call_budget = min(
+            tool_call_budget if tool_call_budget is not None else investigation_budget.remaining_tool_calls,
+            investigation_budget.remaining_tool_calls,
+        )
+        budget_instructions = (
+            f"Investigation allowance: at most {max(0.0, deadline - clock.monotonic()):g} seconds and "
+            f"{tool_call_budget} tool calls this stage. "
+            f"Cumulative observed tool starts: {investigation_budget.observed_tool_starts}; "
+            f"remaining reviewer allowance: {investigation_budget.remaining_tool_calls}. " + REVIEW_STOPPING_GUIDANCE
+            + "\n\nStaged review contract: Closed candidate decisions stay closed, even when later evidence "
+            "contradicts them. Report contradictions by their existing candidate IDs; the host marks affected "
+            "work incomplete without reopening or scheduling another round. Return exactly the assigned target "
+            "or triage candidate IDs in the private progress schema. Do not produce a terminal findings serializer; "
+            "the host publishes admitted confirmed records deterministically."
+        )
+        prompt += "\n\n" + budget_instructions
+        review_instructions = "\n\n".join(
+            item for item in (review_system_instructions, budget_instructions) if item
+        )
     if review_limits is not None:
         review_limits = review_limits_for_scope(review_limits)
         started = clock.monotonic()
@@ -398,12 +432,13 @@ async def run_agent(
                 sanctioned_inputs=sanctioned_inputs,
                 run_context=context,
                 review_evidence=evidence,
+                investigation_budget=investigation_budget,
                 review_instructions=review_instructions,
                 tools_disabled=tools_disabled,
             )
         except Exception as exc:
             from daydream.review_result import ReasonCode, reason_for_exception
-            if (evidence is None or not evidence.valid(evidence.checkpoint)
+            if (investigation_budget is not None or evidence is None or not evidence.valid(evidence.checkpoint)
                     or reason_for_exception(exc) != ReasonCode.MODEL_BUDGET_EXHAUSTION):
                 raise
             # Provider turn exhaustion retains this invocation's strictly validated
@@ -480,6 +515,7 @@ async def _run_agent(
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext,
     review_evidence: ReviewEvidence | None = None,
+    investigation_budget: ReviewInvestigationBudget | None = None,
     review_instructions: str | None = None,
     finalization: bool = False,
     tools_disabled: bool = False,
@@ -539,6 +575,9 @@ async def _run_agent(
             # Set when the invocation already emitted its one stop record, so the
             # post-loop deadline emitter never writes a second, contradicting one.
             stop_recorded = False
+            # Staged calls retain per-call spend across retries as well as the
+            # shared reviewer spend across fresh stage invocations.
+            stage_tool_calls = 0
 
             def _emit_ladder_stop(
                 stop_reason: str, limit_expired: str = "retry_ladder"
@@ -604,6 +643,12 @@ async def _run_agent(
                         )
                         stop_recorded = True
                     break
+                if investigation_budget is not None and (
+                    investigation_budget.remaining_tool_calls == 0
+                    or (tool_call_budget is not None and stage_tool_calls >= tool_call_budget)
+                ):
+                    aborted_reason = "tool_call_budget_exceeded"
+                    break
                 # Dispatch bookkeeping: the opening attempt is useful work, every
                 # later one is retry overhead. Retry attempts' backend time is
                 # charged to the recovery budget; the attempt that produces the
@@ -640,9 +685,29 @@ async def _run_agent(
                         # deadline above is derived from the same value, so
                         # the prompt cannot promise time the host withholds.
                         execute_kwargs["wall_budget_s"] = wall_budget_s
-                        execute_kwargs["tool_call_budget"] = tool_call_budget
+                        execute_kwargs["tool_call_budget"] = (
+                            min(tool_call_budget - stage_tool_calls, investigation_budget.remaining_tool_calls)
+                            if investigation_budget is not None and tool_call_budget is not None
+                            else tool_call_budget
+                        )
+                    attempt_prompt = prompt
+                    if investigation_budget is not None and attempt > 0:
+                        remaining_calls = min(
+                            (tool_call_budget - stage_tool_calls) if tool_call_budget is not None
+                            else investigation_budget.remaining_tool_calls,
+                            investigation_budget.remaining_tool_calls,
+                        )
+                        retry_budget_update = (
+                            "\n\nHost retry budget update: failed-attempt starts remain charged. "
+                            f"At most {remaining_calls} tool calls remain this stage; "
+                            f"{investigation_budget.remaining_tool_calls} remain for this reviewer "
+                            f"after {investigation_budget.observed_tool_starts} observed starts."
+                        )
+                        attempt_prompt += retry_budget_update
+                        if "review_instructions" in execute_kwargs:
+                            execute_kwargs["review_instructions"] += retry_budget_update
                     event_iter = backend.execute(
-                        cwd, prompt, output_schema, continuation,
+                        cwd, attempt_prompt, output_schema, continuation,
                         **execute_kwargs,
                     )
                     invocation_cm: Any = (
@@ -656,7 +721,7 @@ async def _run_agent(
                         event_stream_scope,
                     ):
                         if inv is not None:
-                            inv.observe_user_step(prompt=prompt)
+                            inv.observe_user_step(prompt=attempt_prompt)
 
                         # Per-invocation abort controls live here so both backends
                         # are covered without a backend-signature change: the tool-call
@@ -674,6 +739,9 @@ async def _run_agent(
 
                         with wall_scope:
                             async for event in event_iter:
+                                if investigation_budget is not None and isinstance(event, ToolStartEvent):
+                                    investigation_budget.observe_tool_start()
+                                    stage_tool_calls += 1
                                 # The single effective deadline is enforced per streamed
                                 # event so an injected clock can expire mid-turn even
                                 # though move_on_after only measures real time.
@@ -731,7 +799,12 @@ async def _run_agent(
                                             break
 
                                     tool_calls += 1
-                                    if tool_call_budget is not None and tool_calls > tool_call_budget:
+                                    spent_calls = stage_tool_calls if investigation_budget is not None else tool_calls
+                                    if (tool_call_budget is not None and spent_calls > tool_call_budget) or (
+                                        investigation_budget is not None
+                                        and investigation_budget.observed_tool_starts
+                                        > investigation_budget.limits.tool_calls
+                                    ):
                                         budget_reason = "tool_call_budget_exceeded"
                                         break
 

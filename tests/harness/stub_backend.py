@@ -25,6 +25,34 @@ from tests.harness.review_result import merge_result
 PARTIAL_FIX_MARKER = "// PARTIAL BROKEN EDIT -- max turns exhausted mid-fix\n"
 
 
+def review_stage_result(prompt: str, issues: list[dict[str, Any]]) -> dict[str, Any]:
+    """Answer the requested private review stage while preserving legacy callers.
+
+    Findings belong to the first successful discovery batch. Later file batches
+    and structural integration acknowledge their targets without rediscovering
+    the same fixture finding.
+    """
+    marker = "Host review stage:\n"
+    if marker not in prompt:
+        return {"issues": issues}
+    state = json.JSONDecoder().raw_decode(prompt.split(marker, 1)[1])[0]
+    candidates = []
+    if state["stage"] == "first_pass" and not state["progress"]:
+        candidates = [{
+            "candidate_id": "", "file": issue["file"], "line": issue["line"],
+            "trigger": "The changed path is exercised", "consequence": issue["description"],
+            "grounds": issue["evidence"], "disposition": "confirmed", "finding": issue,
+        } for issue in issues]
+    elif state["stage"] == "triage":
+        candidates = [dict(candidate, disposition="confirmed") for candidate in state["candidates"]
+                      if candidate["candidate_id"] in state["assigned_candidate_ids"]]
+    return {
+        "targets": [{"target_id": target, "status": "reviewed", "reason": ""}
+                    for target in state["assigned_target_ids"]],
+        "notes": "Assigned changed behavior reviewed", "candidates": candidates, "contradictions": [],
+    }
+
+
 class _StubRetryableError(RuntimeError):
     """Default transport-shaped failure for ``fix_retryable_failures``."""
 
@@ -238,6 +266,10 @@ class StubBackend:
     @staticmethod
     def _stack_scope_files(prompt: str) -> list[str]:
         """Split the comma-separated Assigned files marker in a scope instruction."""
+        marker = "Host review stage:\n"
+        if marker in prompt:
+            state = json.JSONDecoder().raw_decode(prompt.split(marker, 1)[1])[0]
+            return [target for target in state["assigned_target_ids"] if not target.startswith("integration:")]
         m = re.search(r"Assigned files:\s*([^\n]+)", prompt)
         if m is None:
             return []
@@ -455,7 +487,7 @@ class StubBackend:
             }
             issues: list[dict[str, Any]] = self._apply_parse_by_stack_override(prompt, issue)
             yield TextEvent(text="")
-            yield ResultEvent(structured_output={"issues": issues}, continuation=None,)
+            yield ResultEvent(structured_output=review_stage_result(prompt, issues), continuation=None,)
             return
 
         # Echo arbiter IDs with keep=True; stamp descriptions so revisions remain

@@ -1,19 +1,25 @@
 """phase_per_stack_reviews concurrency + correctness tests (D-17, D-18, D-38)."""
 from __future__ import annotations
 
-from collections.abc import Callable
+import json
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
 import anyio
 import pytest
 
-from daydream.backends import Backend, ResultEvent, TextEvent
-from daydream.deep import sharding
+from daydream.backends import AgentEvent, Backend, ResultEvent, ToolStartEvent
+from daydream.config import STRUCTURE_STACK_NAME
+from daydream.deep import prompts as _prompts, sharding
+from daydream.deep.artifacts import deep_dir as _deep_dir, per_stack_records_path
 from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.workspace import WorkContext
-from tests.harness.backend import ScriptedBackend, Turn
-from tests.harness.review_result import review_scopes
+from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
+from tests.harness.backend import ScriptedBackend
+from tests.harness.git_helpers import commit, write_and_stage
+from tests.harness.review_result import review_scopes, saved_coverage
+from tests.harness.stub_backend import review_stage_result
 from tests.harness.trajectory import (
     dispatch_descriptors as _dispatch_descriptors,
     dispatch_encloses_children as _dispatch_encloses_children,
@@ -21,13 +27,11 @@ from tests.harness.trajectory import (
     read_trajectory,
 )
 
-# The minimal turn a per-stack review agent has to emit to satisfy run_agent.
-# Issue #745 (AC4): the reviewer emits PER_STACK_RECORD_SCHEMA structured
-# output directly (issues) -- there is no separate parse stage.
-_REVIEW_TURN: Turn = [TextEvent(text="done"), ResultEvent(structured_output={"issues": []}, continuation=None),]
 
 def _review_backend(**attrs: Any) -> ScriptedBackend:
-    return ScriptedBackend(events=_REVIEW_TURN, model="mock-model", **attrs)
+    def respond(cwd: Any, prompt: str, *args: Any) -> list[Any]:
+        return [ResultEvent(structured_output=review_stage_result(prompt, []), continuation=None)]
+    return ScriptedBackend(responder=respond, model="mock-model", **attrs)
 
 def _mk_stacks() -> list[StackAssignment]:
     return [StackAssignment(stack_name="python", files=["api.py"], is_docs_only=False,),
@@ -64,6 +68,23 @@ async def _run_per_stack(
     return results, failures
 
 
+async def test_unsuccessful_stage_checkpoint_is_discarded_with_incomplete_coverage(
+    tmp_path: Path, make_work: Callable[..., WorkContext],
+) -> None:
+    issue = {"id": 1, "file": "api.py", "line": 2, "description": "empty input divides by zero",
+             "severity": "high", "confidence": "HIGH", "rationale": "empty list", "evidence": "sum(xs)/len(xs)"}
+    def checkpoint(cwd: Any, prompt: str, *args: Any) -> list[Any]:
+        return [ResultEvent(structured_output=review_stage_result(prompt, [issue]), continuation=None),
+                *[ToolStartEvent(id=f"extra-{n}", name="Read", input={"file_path": "api.py"})
+                  for n in range(17)]]
+    backend = ScriptedBackend(responder=checkpoint)
+    _, failures = await _run_per_stack(tmp_path, make_work, backend, _mk_stacks()[:1])
+    assert "python" in failures
+    assert "tool_call_budget_exceeded" in failures["python"]
+    saved = json.loads(per_stack_records_path(tmp_path / ".daydream/deep", "python").read_text())
+    assert saved["issues"] == []
+    assert saved["incomplete"] is True
+
 def _deep_dispatch(trajectory: dict[str, Any]) -> dict[str, Any]:
     steps = [step
         for step in trajectory["steps"]
@@ -94,34 +115,67 @@ async def test_phase_per_stack_reviews_dispatch_interval_success(tmp_path: Path,
     assert step["extra"]["attempted_count"] == 3
     assert step["extra"]["completed_count"] == 3
 
+
+
+
+
 @pytest.mark.parametrize(
-    ("fanout_concurrency", "expected"), [(None, [4]), (2, [2])], ids=["default_concurrency", "low_concurrency"],
+    ("fanout_concurrency", "expected"), [(None, 4), (2, 2)], ids=["default_concurrency", "low_concurrency"],
 )
 async def test_fanout_concurrency_limiter(
-    tmp_path: Path, make_work: Callable[..., WorkContext], monkeypatch: pytest.MonkeyPatch,
-    fanout_concurrency: int | None, expected: list[int],
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    fanout_concurrency: int | None, expected: int,
 ) -> None:
-    """Backend fanout_concurrency selects the limiter width (absent → 4)."""
-    captured: list[int] = []
-    real_limiter = anyio.CapacityLimiter
+    """The real runner enforces the backend's ceiling while completing every scope."""
+    from daydream.runner import run
 
-    def patched_limiter(n: int) -> anyio.CapacityLimiter:
-        captured.append(n)
-        return real_limiter(n)
+    write_and_stage(multi_stack_target, "main.go", "package main\n\nfunc main() {}\n")
+    commit(multi_stack_target, "add Go review scope")
+    ready, release = anyio.Event(), anyio.Event()
 
-    monkeypatch.setattr(anyio, "CapacityLimiter", patched_limiter)
+    class BlockingReviewBackend(EmptyReviewBackend):
+        active = 0
+        peak = 0
 
+        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            if "Host review stage:\n" not in prompt:
+                async for event in super().execute(cwd, prompt, *args, **kwargs):
+                    yield event
+                return
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            try:
+                if self.active >= expected:
+                    ready.set()
+                await release.wait()
+                async for event in super().execute(cwd, prompt, *args, **kwargs):
+                    yield event
+            finally:
+                self.active -= 1
+
+    backend = BlockingReviewBackend(multi_stack_target)
     if fanout_concurrency is None:
-        # The default-limiter path is only reached when the attribute is
-        # ABSENT, so drop the one ScriptedBackend always sets → 4.
-        backend = _review_backend()
         del backend.fanout_concurrency
-        assert not hasattr(backend, "fanout_concurrency")
     else:
-        backend = _review_backend(fanout_concurrency=fanout_concurrency)
-    await _run_per_stack(tmp_path, make_work, backend, _mk_stacks())
+        backend.fanout_concurrency = fanout_concurrency
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+    codes: list[int] = []
 
-    assert captured == expected
+    async def drive() -> None:
+        codes.append(await run(empty_review_config(multi_stack_target, tmp_path / "trajectory.json")))
+
+    with anyio.fail_after(10):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(drive)
+            await ready.wait()
+            await anyio.wait_all_tasks_blocked()
+            assert backend.active == expected
+            release.set()
+
+    assert codes == [0] and backend.peak == expected and backend.active == 0
+    coverage = saved_coverage(multi_stack_target / ".daydream/deep")
+    assert set(coverage.scopes) == {"python", "react", "go", "generic", "structure"}
+    assert all(scope["status"] == "complete" for scope in coverage.scopes.values())
 
 def test_shards_carry_scope_not_skill() -> None:
     """M2: shards inherit stack name / files / frontier, never a skill field."""

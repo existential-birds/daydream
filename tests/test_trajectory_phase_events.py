@@ -594,7 +594,7 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
             qualified_counts[key] = qualified_counts.get(key, 0) + 1
     assert qualified_counts == {("root", "intent"): 1, ("root", "merge"): 1, ("root", "test"): 1, ("root", "verify"): 2,
         ("deep-generic", "deep"): 1, ("deep-python", "deep"): 1, ("deep-react", "deep"): 1,
-        ("deep-structure", "deep"): 1, ("explore-dependency-tracer", "exploration"): 1, ("fix-api-py", "fix"): 4,
+        ("deep-structure", "deep"): 2, ("explore-dependency-tracer", "exploration"): 1, ("fix-api-py", "fix"): 4,
         ("fix-app-tsx", "fix"): 1,
     }
 

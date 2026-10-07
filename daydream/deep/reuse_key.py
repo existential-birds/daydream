@@ -318,6 +318,8 @@ def shard_key_payload(
     pre-scan at all); the pre-scan's **content** is the ``exploration``
     *grounding* row.
     """
+    from daydream.review_investigation import STAGED_REVIEW_CONTRACT
+
     ordered_files = sorted(set(files))
     ordered_frontier = sorted(set(frontier_files))
     exploration_present = exploration_dir is not None and Path(exploration_dir).is_dir()
@@ -333,6 +335,7 @@ def shard_key_payload(
         "exploration_present": exploration_present,
         "docs_only": docs_only,
         "schema": _phases_schema_digest("PER_STACK_RECORD_SCHEMA"),
+        "staged_review_contract": STAGED_REVIEW_CONTRACT,
     }
     grounding = {
         "exploration": {"digest": exploration_digest(exploration_dir)},

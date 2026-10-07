@@ -32,6 +32,7 @@ from daydream.runner import run
 from tests.conftest import silence_module_console
 from tests.harness.backend import ScriptedBackend
 from tests.harness.review_result import merge_result
+from tests.harness.stub_backend import review_stage_result
 
 
 class _DeepMockBackend(ScriptedBackend):
@@ -86,16 +87,14 @@ class _DeepMockBackend(ScriptedBackend):
                         f"# Structural Review ({name})\n\n## Issues\n"
                         "1. [api.py:1] hello() leaks a god-object boundary\n"
                     )
-            # Issue #745: the structural reviewer emits PER_STACK_RECORD_SCHEMA
-            # structured output directly (its finding lands lens="structural").
+            # The host publishes admitted structured findings with lens="structural".
             events += [TextEvent(text=""),
-                ResultEvent(structured_output={"issues": [{
+                ResultEvent(structured_output=review_stage_result(prompt, [{
                                 "id": 1, "description": "hello() leaks a god-object boundary", "file": "api.py",
                                 "line": 1, "severity": "medium", "confidence": "MEDIUM", "rationale": "stub",
                                 "evidence": "api.py:1",
                             }
-                        ],
-                    }, continuation=None,
+                        ]), continuation=None,
                 ),
             ]
             return events
@@ -112,11 +111,12 @@ class _DeepMockBackend(ScriptedBackend):
                 if out is not None:
                     out.parent.mkdir(parents=True, exist_ok=True)
                     out.write_text(f"# Review ({name})\n\n## Issues\n1. [a.py:1] stub\n")
-            # Issue #745: per-stack reviewer emits structured output directly.
+            # Bounded stage acknowledgements admit the fixture finding.
             issues = [{"id": 1, "description": "Language review finding", "file": "api.py", "line": 1,
                        "severity": "medium", "confidence": "MEDIUM", "rationale": "stub", "evidence": "api.py:1"}
                       ] if self.language_finding and m is not None and m.group(1) == "python" else []
-            events += [TextEvent(text=""), ResultEvent(structured_output={"issues": issues}, continuation=None),]
+            events += [TextEvent(text=""),
+                       ResultEvent(structured_output=review_stage_result(prompt, issues), continuation=None)]
             return events
 
         # Backend parity fixtures exercise the model merge with language findings;

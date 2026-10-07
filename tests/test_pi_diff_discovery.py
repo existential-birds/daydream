@@ -1,14 +1,17 @@
 """Pi discovery uses admitted diff references even for small changes."""
 
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from daydream.backends import AgentEvent, ResultEvent
 from daydream.backends.pi import PiBackend
 from daydream.deep.detection import StackAssignment
 from daydream.run_context import InteractionPolicy, RunContext
 from tests.harness.review_result import review_scopes
+from tests.harness.stub_backend import review_stage_result
 
 
 async def test_small_pi_review_keeps_structural_dispatch(
@@ -22,20 +25,19 @@ async def test_small_pi_review_keeps_structural_dispatch(
     intent.write_text("Change the value")
     calls: list[str] = []
 
-    async def review(*args: Any, **kwargs: Any) -> Any:
-        prompt = args[2]
+    async def review(
+        self: PiBackend, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
+    ) -> AsyncIterator[AgentEvent]:
         assert str(diff) in prompt
         assert "DIFF_SENTINEL" not in prompt
         assert kwargs["read_only"] is True
         assert not kwargs.get("tools_disabled")
-        inputs = kwargs["sanctioned_inputs"]
-        inputs.revalidate(args[0], args[1], True)
-        assert "DIFF_SENTINEL" not in inputs.finalization_text(args[0], args[1], True)
-        assert "DIFF_SENTINEL" not in repr(kwargs["finalization_context"])
+        assert "Host review stage:" in prompt
+        assert "INVESTIGATION HAS ENDED" not in prompt
         calls.append(prompt)
-        return {"issues": []}, None, None
+        yield ResultEvent(structured_output=review_stage_result(prompt, []), continuation=None)
 
-    monkeypatch.setattr("daydream.agent.run_agent", review)
+    monkeypatch.setattr(PiBackend, "execute", review)
     results, failures = await review_scopes(PiBackend(model="fixture"), make_work(tmp_path),
         [StackAssignment("python", ["app.py"]), StackAssignment("structure", ["app.py"])],
         diff_path=diff, diff_text=diff.read_text(), intent_path=intent,
@@ -44,4 +46,5 @@ async def test_small_pi_review_keeps_structural_dispatch(
     )
     assert failures == {}
     assert set(results) == {"python", "structure"}
-    assert len(calls) == 2
+    assert len(calls) == 3
+    assert sum('"stage": "integration"' in prompt for prompt in calls) == 1
