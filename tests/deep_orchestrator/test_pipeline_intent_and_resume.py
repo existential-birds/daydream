@@ -49,9 +49,15 @@ from tests.test_deep_orchestrator import (
 async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Default deep flow preserves stage order, isolation, artifacts, prompts, and report."""
     _silence(monkeypatch)
+    deep = multi_stack_target / ".daydream" / "deep"
+    deep.mkdir(parents=True)
+    stale = deep / "obsolete-artifact.txt"
+    stale.write_text("stale")
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
+    assert not stale.exists()
+    assert (deep / "diff-key").is_file()
 
     # Alt checked before intent: the alt prompt embeds the intent summary text.
     order: list[str] = []
@@ -79,8 +85,8 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     assert len(set(prompts)) == len(prompts)
 
     deep = multi_stack_target / ".daydream" / "deep"
-    assert (deep / "intent.md").exists()
-    assert (deep / "alternatives.json").exists()
+    assert (deep / "intent.md").read_text().strip()
+    assert json.loads((deep / "alternatives.json").read_text()) == []
     review_files = list(deep.glob("stack-*-review.md"))
     records_files = list(deep.glob("stack-*-records.json"))
     assert review_files, "expected at least one stack-*-review.md"
@@ -132,12 +138,8 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     cross_section = text.split("## Cross-Stack Issues", 1)[1]
     assert "[cross-stack]" in cross_section
 
-async def test_deep_run_writes_hunk_index_after_diff(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
+
+    # Persist the changed-line authority after the exact patch it describes.
     idx_path = multi_stack_target / ".daydream" / "hunk-index.json"
     diff_path = multi_stack_target / ".daydream" / "diff.patch"
     assert idx_path.is_file() and diff_path.is_file()
@@ -146,6 +148,35 @@ async def test_deep_run_writes_hunk_index_after_diff(multi_stack_target: Path, m
     idx = load_hunk_index(multi_stack_target / ".daydream")
     assert idx, "hunk index must reflect the run's changed files"
     assert "api.py" in idx or "README.md" in idx
+
+
+    # Merge inputs retain deterministic record ordering.
+    merge_prompts = [c["prompt"] for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
+    assert merge_prompts, "merge agent was not invoked"
+    prompt = merge_prompts[0]
+
+    # Records appear under "Per-stack parsed records:" as "  - <path>" lines.
+    lines = prompt.splitlines()
+    start = next((i for i, line in enumerate(lines) if "per-stack parsed records:" in line.lower()), None)
+    assert start is not None, "merge prompt missing per-stack records block"
+
+    record_paths: list[str] = []
+    for line in lines[start + 1 :]:
+        if line.startswith("  - "):
+            record_paths.append(line[4:].strip())
+        elif line.strip() == "":
+            break
+        else:
+            break
+
+    assert record_paths, "no record paths found in merge prompt"
+    assert record_paths == sorted(record_paths), f"records not in sorted order: {record_paths}"
+
+
+    # Generated evidence remains resumable while the source diff is unchanged.
+    resumed_stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target, start_at="merge") == 0
+    assert any("cross-stack merge agent" in c["prompt"].lower() for c in resumed_stub.calls)
 
 async def test_pr_body_reaches_intent_prompt(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -403,6 +434,10 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
         registry.override_prompt("structural", lambda **_: "CUSTOM STRUCTURAL BUILDER")
         monkeypatch.setattr("daydream.deep.orchestrator.get_registry", lambda: registry)
     captured: list[dict[str, Any]] = []
+    progress_calls: list[tuple[int, int, str]] = []
+
+    def _capture_progress(console: Any, current: Any, total: Any, name: Any) -> None:
+        progress_calls.append((current, total, name))
 
     def _capture(console: Any, *, stages: Any, stack_lines: Any, agent_count: Any, exploration_available: Any,
     ) -> None:
@@ -411,7 +446,8 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
             }
         )
 
-    monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", _capture_progress)
+    monkeypatch.setattr("daydream.deep.merge_steps.print_stage_progress", _capture_progress)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", _capture)
     monkeypatch.setattr("daydream.run_context._prompt_user", _accept_intent_decline_other)
     _install_stub_backend(monkeypatch, multi_stack_target)
@@ -428,28 +464,23 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
     # Folding default alternatives removes one invocation from the legacy estimate.
     assert notice["agent_count"] == (12 if custom_builder else 11)
     assert notice["stack_lines"] == ["python: 1 file(s)", "react: 1 file(s)", "generic: 1 file(s)"]
+    stage_numbers = {c[0] for c in progress_calls}
+    assert stage_numbers == {1, 2, 3, 4, 5}
+    assert all(c[1] == 5 for c in progress_calls)
 
 async def test_resume_per_stack_reruns_all(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-34: --start-at per-stack re-runs ALL per-stack reviews (after priming TTT artifacts)."""
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    _prime_merge_resume(multi_stack_target)
+    deep = _prime_merge_resume(multi_stack_target)
+    old = deep / "stack-python-review.md"
+    old.write_text("STALE CONTENT")
     exit_code = await _run_deep(multi_stack_target, start_at="per-stack")
     assert exit_code == 0
     per_stack_calls = [c for c in stub.calls if "you are reviewing the" in c["prompt"].lower()]
     # Fixture yields >= 2 non-generic buckets + 1 generic.
     assert len(per_stack_calls) >= 2
 
-async def test_resume_overwrites(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """D-35: resume overwrites stage artifacts (new stack-*-review.md replaces old)."""
-    _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-    # Prime TTT artifacts and an OLD per-stack review that must be overwritten.
-    deep = _prime_merge_resume(multi_stack_target)
-    old = deep / "stack-python-review.md"
-    old.write_text("STALE CONTENT")
-    exit_code = await _run_deep(multi_stack_target, start_at="per-stack")
-    assert exit_code == 0
     assert "STALE CONTENT" not in old.read_text()
 
 async def test_resume_merge_consumes_saved_records(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -477,22 +508,6 @@ async def test_resume_merge_consumes_saved_records(multi_stack_target: Path, mon
     merge_calls = [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
     assert len(merge_calls) == 1
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).exists()
-
-async def test_stage_ui_surfacing(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """D-44: UI prints [stage N/5: ...] at each stage boundary."""
-    progress_calls: list[tuple[int, int, str]] = []
-    def _capture(console: Any, current: Any, total: Any, name: Any) -> None:
-        progress_calls.append((current, total, name))
-    monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", _capture)
-    monkeypatch.setattr("daydream.deep.merge_steps.print_stage_progress", _capture)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.run_context._prompt_user", _accept_intent_decline_other)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-    stage_numbers = {c[0] for c in progress_calls}
-    assert stage_numbers == {1, 2, 3, 4, 5}
-    assert all(c[1] == 5 for c in progress_calls)
 
 @pytest.mark.parametrize("empty", [False, True])
 async def test_review_and_resume_ignore_obsolete_sweep_outputs(

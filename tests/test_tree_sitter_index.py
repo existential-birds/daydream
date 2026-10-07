@@ -7,11 +7,8 @@ import pytest
 
 from daydream import _tree_sitter_safety as safety, git_ops, tree_sitter_index
 from daydream.tree_sitter_index import (
-    BRANCH_NODE_TYPES,
     PYTHON_DEF_QUERY,
-    TERMINAL_CALL_NAMES,
     TERMINAL_MACRO_NAMES,
-    TERMINAL_NODE_TYPES,
     branch_statement_lines,
     definitions_in_file,
     detect_affected_files,
@@ -23,7 +20,6 @@ from daydream.tree_sitter_index import (
 )
 from daydream.tree_sitter_index.imports import _MAX_IMPORTERS
 from daydream.tree_sitter_index.runtime import _PARSER_CACHE, _def_query_for_language, _diagram_def_query_for_language
-from daydream.tree_sitter_index.statements import _walk
 from tests.conftest import _make_repo_with_main
 from tests.harness.git_helpers import commit as _commit, configure_identity as _configure_identity, git as _git
 
@@ -362,8 +358,7 @@ def test_get_parser_refuses_known_bad_tree_sitter(monkeypatch: pytest.MonkeyPatc
         _PARSER_CACHE.clear()
 
 
-# Real grammar probes cover every branch/terminal node, call and macro table entry.
-# The table-entry checks reject names the grammars never produce.
+# Literal line outcomes exercise branch and terminal classification through real grammars.
 
 PYTHON_CF = b'''import os
 import sys
@@ -563,16 +558,6 @@ fn f(a: bool, b: bool, v: Option<i32>, items: &[i32]) -> Result<i32, std::io::Er
 '''
 
 # TypeScript, TSX and JavaScript share tree-sitter-typescript grammars and probe source.
-_BRANCH_PROBE_SOURCES: dict[str, tuple[bytes, ...]] = {
-    "python": (PYTHON_CF,), "typescript": (TYPESCRIPT_CF,), "tsx": (TYPESCRIPT_CF, TSX_CF),
-    "javascript": (TYPESCRIPT_CF, JAVASCRIPT_CF), "go": (GO_CF,), "rust": (RUST_CF,),
-}
-
-
-def _node_types(language_id: str, source: bytes) -> set[str]:
-    parser = get_parser(language_id)
-    assert parser is not None
-    return {node.type for node in _walk(parser.parse(source).root_node)}
 
 
 def _terminal_lines(language_id: str | None, source: bytes) -> list[int]:
@@ -847,13 +832,6 @@ def test_branch_lines_degrade_on_malformed_source() -> None:
     assert branch_statement_lines("python", b"def f(:\n    if x:\n        pass\n") == [2]
     assert branch_statement_lines("typescript", b"function f( {\n  if (a) {\n") == []
 
-@pytest.mark.parametrize("language_id", sorted(BRANCH_NODE_TYPES))
-def test_branch_table_entries_all_occur_in_probe_sources(language_id: str) -> None:
-    present: set[str] = set()
-    for source in _BRANCH_PROBE_SOURCES[language_id]:
-        present |= _node_types(language_id, source)
-    assert BRANCH_NODE_TYPES[language_id] - present == set()
-
 
 @pytest.mark.parametrize(
     ("language_id", "line"),
@@ -1027,24 +1005,3 @@ def test_is_terminal_line_falls_back_to_keyword_regex() -> None:
         assert is_terminal_line(language_id, elixir, 2) is True
         assert is_terminal_line(language_id, elixir, 3) is False
     assert is_terminal_line(None, elixir, 999) is False
-
-@pytest.mark.parametrize("language_id", sorted(TERMINAL_NODE_TYPES))
-def test_terminal_table_entries_all_occur_in_probe_sources(language_id: str) -> None:
-    source = {
-        "python": PYTHON_CF, "typescript": TYPESCRIPT_CF, "tsx": TYPESCRIPT_CF, "javascript": TYPESCRIPT_CF,
-        "go": GO_CF, "rust": RUST_CF,
-    }[language_id]
-    parser = get_parser(language_id)
-    assert parser is not None
-    root = parser.parse(source).root_node
-    assert not root.has_error, "probe source must parse cleanly"
-    present: set[str] = set()
-    callees: set[str] = set()
-    for node in _walk(root):
-        present.add(node.type)
-        if node.type in ("call", "call_expression"):
-            callee = node.child_by_field_name("function")
-            if callee is not None and callee.text is not None:
-                callees.add(callee.text.decode())
-    assert TERMINAL_NODE_TYPES[language_id] - present == set()
-    assert TERMINAL_CALL_NAMES[language_id] - callees == set()

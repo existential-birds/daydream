@@ -52,14 +52,11 @@ async def _drive_codex_through_recorder(
 
 
 @pytest.mark.asyncio
-async def test_codex_emits_one_turn_granular_metrics_event_per_turn(
-    tmp_path: Path,
-) -> None:
-    """Codex item IDs identify messages but turn.completed carries only usage, so metrics correlation
-    remains turn-granular with empty message_id.
+async def test_codex_trajectory_golden_round_trip(tmp_path: Path) -> None:
+    """The fixture covers reasoning_content, command_execution tool/result pairs, and
+    cached_input_tokens mapped into Step.metrics.
     """
-    events, _ = await _drive_codex_through_recorder(tmp_path)
-
+    events, recorder = await _drive_codex_through_recorder(tmp_path)
     metrics_events = [e for e in events if isinstance(e, MetricsEvent)]
     assert len(metrics_events) == 2, (
         f"expected one MetricsEvent per turn (2 turns), got {len(metrics_events)}"
@@ -79,13 +76,6 @@ async def test_codex_emits_one_turn_granular_metrics_event_per_turn(
     assert metrics_events[0].prompt_tokens != metrics_events[1].prompt_tokens
 
 
-@pytest.mark.asyncio
-async def test_codex_trajectory_golden_round_trip(tmp_path: Path) -> None:
-    """The fixture covers reasoning_content, command_execution tool/result pairs, and
-    cached_input_tokens mapped into Step.metrics.
-    """
-    _, recorder = await _drive_codex_through_recorder(tmp_path)
-
     traj_path = tmp_path / "trajectory.json"
     assert traj_path.exists(), "recorder.__aexit__ must write trajectory.json"
 
@@ -95,6 +85,12 @@ async def test_codex_trajectory_golden_round_trip(tmp_path: Path) -> None:
 
     # Revalidate the loaded dict without image checks because it has no filesystem anchor.
     raw = json.loads(traj_path.read_text())
+    step_prompt = sum(
+        s["metrics"]["prompt_tokens"] for s in raw["steps"]
+        if s.get("metrics") and s["metrics"].get("prompt_tokens")
+    )
+    assert step_prompt == 34594 + 36000
+    assert raw["final_metrics"]["total_prompt_tokens"] == step_prompt
     rt_validator = TrajectoryValidator()  # type: ignore[no-untyped-call]  # vendored atif (untyped)
     rt_ok = rt_validator.validate(raw, validate_images=False)
     assert rt_ok, rt_validator.get_errors() or "round-trip validation failed"
@@ -305,20 +301,6 @@ async def test_codex_final_metrics_equal_step_sum(tmp_path: Path) -> None:
     final = traj["final_metrics"]
     assert final["total_prompt_tokens"] == step_prompt  # not 400
     assert final["total_completion_tokens"] == step_completion  # not 200
-
-
-@pytest.mark.asyncio
-async def test_codex_multi_turn_final_metrics_equal_step_sum(tmp_path: Path) -> None:
-    await _drive_codex_through_recorder(tmp_path)
-
-    traj = json.loads((tmp_path / "trajectory.json").read_text())
-    step_prompt = sum(
-        s["metrics"]["prompt_tokens"]
-        for s in traj["steps"]
-        if s.get("metrics") and s["metrics"].get("prompt_tokens")
-    )
-    assert step_prompt == 34594 + 36000
-    assert traj["final_metrics"]["total_prompt_tokens"] == step_prompt
 
 
 @pytest.mark.asyncio

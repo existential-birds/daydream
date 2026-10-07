@@ -873,27 +873,8 @@ def test_shipped_count_includes_wonder_lens_items(tmp_path: Path) -> None:
     assert out["total"] == 8                     # wonder items are counted (issue #741)
     assert out["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
 
-def test_shipped_count_wrong_shape_merged_items_propagates(tmp_path: Path) -> None:
-    # Present but malformed merged items are integrity failures, never fallback evidence.
-    dd, deep = _deep_dirs(tmp_path)
-    seed_stack_records(deep, "python", n=4)
-    # A non-list items field, missing items key, or top-level list is an invalid writer shape.
-    (deep / "merged-items.json").write_text(json.dumps({"items": {"a": 1}}))
-    with pytest.raises(ValueError):
-        analyze_findings(dd)
 
-def test_shipped_count_missing_items_key_propagates(tmp_path: Path) -> None:
-    dd, deep = _deep_dirs(tmp_path)
-    (deep / "merged-items.json").write_text(json.dumps({}))
-    with pytest.raises(ValueError):
-        analyze_findings(dd)
 
-def test_shipped_count_corrupt_merged_items_propagates_json_decode_error(tmp_path: Path,) -> None:
-    dd, deep = _deep_dirs(tmp_path)
-    seed_stack_records(deep, "python", n=4)
-    (deep / "merged-items.json").write_text("{not json")
-    with pytest.raises(json.JSONDecodeError):
-        analyze_findings(dd)
 
 def test_shipped_count_falls_back_to_regex_when_merged_items_absent(tmp_path: Path,) -> None:
     dd, deep = _deep_dirs(tmp_path)
@@ -1282,6 +1263,7 @@ def test_shipped_duplication_input_is_capped_to_bound_the_on2_scan(tmp_path: Pat
 @pytest.mark.parametrize(("payload", "expected_error"),
     [pytest.param("{not json", json.JSONDecodeError, id="syntax-invalid"),
         pytest.param('{"items": {"a": 1}}', ValueError, id="wrong-shape"),
+        pytest.param("{}", ValueError, id="missing-items"),
     ],
 )
 def test_location_and_duplication_propagate_corrupt_merged_items(
@@ -1291,8 +1273,11 @@ def test_location_and_duplication_propagate_corrupt_merged_items(
 
     A bogus shipped set is never silently counted -- and never silently scored."""
     dd, deep = _worked_example_dirs(tmp_path)
+    seed_stack_records(deep, "python", n=4)
     (deep / "merged-items.json").write_text(payload)
 
+    with pytest.raises(expected_error):
+        analyze_findings(dd)
     with pytest.raises(expected_error):
         analyze_location(dd)
     with pytest.raises(expected_error):

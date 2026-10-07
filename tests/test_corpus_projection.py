@@ -161,6 +161,8 @@ def test_mixed_session_yields_two_distinct_gold_records() -> None:
     assert {r["finding_fingerprint"] for r in gold} == {"a1" * 32, "b2" * 32}
     assert {r["record_id"] for r in gold} and len({r["record_id"] for r in gold}) == 2
     assert {r["disposition"] for r in gold} == {"accepted", "rejected"}
+    assert all(r["outcome_label"] != "contested" for r in records)
+    assert sorted(str(r["disposition"]) for r in records) == ["accepted", "rejected"]
 
 def test_cli_reply_existence_never_constitutes_acceptance(tmp_path: Path) -> None:
     store = LocalRecordStore(tmp_path / "records")
@@ -191,15 +193,6 @@ def test_non_decisive_findings_route_to_adjudication() -> None:
     assert {r["finding_fingerprint"] for r in records if r["tier"] == "gold"} == set()
     assert {a["fingerprint"] for a in adjudication} == {"d4" * 32, "e5" * 32}
     assert all(a["evidence"] == [] for a in adjudication)  # evidence carried for the human pass
-
-def test_run_level_contested_aggregate_never_erases_split() -> None:
-    # v1 collapse: outcome_label="contested". v2 must never produce that shape.
-    records = list(project_findings({"session_id": "s1", "trajectory_id": "s1:root",
-                                     "segment_id": "seg-0",
-                                     "resolutions": [_res("a1" * 32, "accepted"), _res("b2" * 32, "rejected")]}))
-    assert all(r["outcome_label"] != "contested" for r in records)
-    assert sorted(str(r["disposition"]) for r in records) == ["accepted", "rejected"]
-
 
 
 def _cli_args(config: BuildFrozenCorpusConfig) -> list[str]:

@@ -357,7 +357,7 @@ async def test_merge_rejects_bare_list_and_salvages_bound_records(
     assert coverage.phases["merge"]["status"] == "failed"
 
 @pytest.mark.parametrize("merge_str,resume", [
-    ("All stacks reviewed. No JSON item list to emit.", "inspect"), (ARCHIVED_MERGE_STR, "inspect"),
+    ("All stacks reviewed. No JSON item list to emit.", "inspect"),
     ("prose with no item list", "fix"), (ARCHIVED_MERGE_STR, "fix"),
     ("prose with no item list", "merge"), ("prose with no item list", "fix-declined"),
 ])

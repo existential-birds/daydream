@@ -22,23 +22,6 @@ def config(multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyP
         shallow_fanout_threshold=0, cleanup=False)
 
 
-async def test_explicit_hub_destination_captures_evidence_without_archive_or_credentials(
-    config: RunConfig, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from daydream import dataset_hub
-    from tests.harness.dataset_hub import FakeDatasetHub
-
-    hub = FakeDatasetHub()
-    hub.fail_before = True
-    monkeypatch.setattr(dataset_hub, "HfDatasetHub", lambda: hub)
-    assert await run(config) == 0
-    assert config.dataset_store_path is not None
-    captured = read_records(LocalRecordStore(config.dataset_store_path))
-    assert len(captured.runs) == 1
-    assert captured.runs[0]["outcome"] == "success"
-    assert captured.runs[0]["original_task"]["status"] == "available"
-    assert captured.runs[0]["trajectories"]["status"] == "available"
-
 
 async def test_review_publishes_raw_records_and_other_machine_reads_pinned_commit(
     config: RunConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -79,6 +62,9 @@ async def test_review_stays_successful_with_durable_failed_uploads(
     store = LocalRecordStore(config.dataset_store_path)
     captured = read_records(store)
     assert len(captured.runs) == 1 and captured.runs[0]["outcome"] == "success"
+    if failure == "offline":
+        assert captured.runs[0]["original_task"]["status"] == "available"
+        assert captured.runs[0]["trajectories"]["status"] == "available"
     uploader = dataset_hub.DatasetUploader(store, config.trajectory_hub_repo, backend=hub)
     status = uploader.status()
     assert status.queued == 1 and status.published == 0 and status.failed == 1

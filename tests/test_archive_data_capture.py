@@ -103,7 +103,7 @@ async def _run_real_phases_deep(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, no_ci_remote: NoCIRemote, *,
     remote_name: str = "origin.git", pr_repo: str | None = None,
     fix_edit_line: str = "# daydream recommended change\n",
-    untracked_fix: str | None = None, dataset_store: Path | None = None,
+    untracked_fix: str | None = None, dataset_store: Path | None = None, dump_path: Path | None = None,
 ) -> tuple[Path, int]:
     """Run real internal phases against a bare remote; return ``(remote, exit_code)``.
 
@@ -124,6 +124,7 @@ async def _run_real_phases_deep(
     exit_code = await run(_deep_run_config(
             multi_stack_target, pr_number=no_ci_remote.pr_number, pr_repo=pr_repo or no_ci_remote.base_repository,
             dataset_capture=dataset_store is not None, dataset_store_path=dataset_store,
+            dump_artifacts=None if dump_path is None else str(dump_path),
         )
     )
     return remote, exit_code
@@ -140,14 +141,16 @@ async def _ok_with_heal_edit(target: Path, **kwargs: Any) -> Any:
 
 async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_phase_state(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, no_ci_remote: NoCIRemote,
+    tmp_path: Path,
 ) -> None:
     """Editing tracked api.py gives real test/heal and commit phases a nonempty recommended diff."""
     head_before = git_ops.head_sha(multi_stack_target)
     base_before = git_ops.resolve_diff_merge_base(multi_stack_target, "main", head_before)
     original_diff = git_ops.diff(multi_stack_target, "main")
     store = LocalRecordStore(archive_dir.parent / "records")
+    dump_dir = tmp_path / "uploaded-artifacts"
     remote, exit_code = await _run_real_phases_deep(
-        multi_stack_target, monkeypatch, archive_dir, no_ci_remote, dataset_store=store.root)
+        multi_stack_target, monkeypatch, archive_dir, no_ci_remote, dataset_store=store.root, dump_path=dump_dir)
     assert exit_code == 0
     head_after = git_ops.head_sha(multi_stack_target)
     assert head_after != head_before
@@ -184,6 +187,9 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert recommended_text != diff_text
     assert "# daydream recommended change" in recommended_text
     assert "# daydream recommended change" not in diff_text
+    for filename in ("manifest.json", "trajectory.json", "diff.patch", "evaluation.json"):
+        assert (dump_dir / filename).is_file()
+        assert (dump_dir / filename).read_bytes() == (run_dir / filename).read_bytes()
     captured = read_records(store).runs[0]
     task = captured["original_task"]["value"]
     assert (task["analyzed_revision"]["head_sha"], task["analyzed_revision"]["merge_base_sha"]) == (
@@ -314,21 +320,6 @@ async def test_deep_rejects_unauthorized_heal_file_before_archiving_recommendati
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert manifest["recommended_patch_capture"] == "post_test"
 
-async def test_dump_artifacts_copies_full_bundle_to_target_dir(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path,
-) -> None:
-    stub = _install_deep_capture_backend(multi_stack_target, monkeypatch)
-    stub.fix_edit_line = "# daydream recommended change\n"
-    dump_dir = tmp_path / "uploaded-artifacts"
-    exit_code = await run(_deep_run_config(multi_stack_target, dump_artifacts=str(dump_dir),))
-    assert exit_code == 0
-
-    run_dir = _only_archived_run(archive_dir)
-    assert (dump_dir / "manifest.json").is_file()
-    assert (dump_dir / "trajectory.json").is_file()
-    assert (dump_dir / "diff.patch").is_file()
-    assert (dump_dir / "evaluation.json").is_file()
-    assert (dump_dir / "manifest.json").read_text() == (run_dir / "manifest.json").read_text()
 
 async def test_failed_findings_export_retains_requested_diagnostics(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path, fake_gh: FakeGh,

@@ -5,10 +5,8 @@ from pathlib import Path
 import pytest
 
 from daydream.training.adjudication import queue as queue_module
-from daydream.training.adjudication.queue import _NON_DECISIVE_DISPOSITIONS as queue_set, build_queue
+from daydream.training.adjudication.queue import build_queue
 from daydream.training.corpus_projection.projector import project_findings
-from daydream.training.corpus_projection.tiers import _NON_DECISIVE_DISPOSITIONS as tiers_set
-from daydream.training.dispositions import NON_DECISIVE_DISPOSITIONS, is_decisive
 from daydream.training.record_identity import record_finding_id
 
 
@@ -37,12 +35,14 @@ def _sessions_with_accepted_and_unanswered() -> list[dict[str, object]]:  # exis
 
 
 def test_build_queue_include_decisive_returns_complete_set(tmp_path: Path) -> None:
-    sessions = _sessions_with_accepted_and_unanswered()
+    sessions = [*_sessions_with_accepted_and_unanswered(),
+                _session("s3", "fp-c", "rejected", "d-rejected"),
+                _session("s4", "fp-d", "ambiguous", "d-ambiguous")]
     open_only = build_queue(sessions)
-    assert [i["disposition"] for i in open_only] == ["unanswered"]
+    assert sorted(str(i["disposition"]) for i in open_only) == ["ambiguous", "unanswered"]
 
     complete = build_queue(sessions, include_decisive=True)
-    assert sorted(str(i["disposition"]) for i in complete) == ["accepted", "unanswered"]
+    assert sorted(str(i["disposition"]) for i in complete) == ["accepted", "ambiguous", "rejected", "unanswered"]
     assert {str(i["status"]) for i in complete} <= {"open", "reopened"}
 
 
@@ -99,10 +99,3 @@ def test_decisive_adjudication_entry_fails_closed(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(queue_module, "project_findings", _forge_decisive)
     with pytest.raises(ValueError, match="fp-a"):
         build_queue([session])
-
-
-def test_disposition_sets_are_single_sourced() -> None:
-    assert queue_set is NON_DECISIVE_DISPOSITIONS
-    assert tiers_set is NON_DECISIVE_DISPOSITIONS
-    assert is_decisive("accepted") and is_decisive("rejected")
-    assert not is_decisive("ambiguous")

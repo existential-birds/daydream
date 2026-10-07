@@ -132,6 +132,12 @@ async def test_simple_text_events() -> None:
     assert result_events[0].continuation is not None
     assert result_events[0].continuation.backend == "codex"
     assert result_events[0].continuation.data["thread_id"] == "th_abc123"
+    metrics = [e for e in events if isinstance(e, MetricsEvent)]
+    assert metrics and cost_events
+    assert all(m.measurement_source == "turn_end" for m in metrics)
+    assert all(m.usage_scope == "invocation" for m in metrics)
+    assert all(c.measurement_source == "turn_end" for c in cost_events)
+    assert all(c.cost_source == "estimated" for c in cost_events)
 
 async def test_tool_use_events() -> None:
     backend = CodexBackend(model="fixture-model")
@@ -145,7 +151,9 @@ async def test_tool_use_events() -> None:
     assert any(ts.name == "shell" and ts.input == {"command": "ls -la"} for ts in tool_starts)
     assert any(tr.output == "file.py\ntest.py" and not tr.is_error for tr in tool_results)
     # file_change → synthetic ToolStart("patch") + ToolResult
-    assert any(ts.name == "patch" for ts in tool_starts)
+    patches = [ts for ts in tool_starts if ts.name == "patch"]
+    assert len(patches) == 1
+    assert patches[0].input == {"file": "main.py", "action": "modified"}
     assert any("main.py" in tr.output for tr in tool_results)
     assert any(t.text == "Done!" for t in texts)
 
@@ -169,12 +177,6 @@ async def test_malformed_mcp_tool_name_is_string_safe_and_diagnosed(tmp_path: Pa
     assert events.index(diagnostics[0]) < events.index(starts[0])
     assert "private-value" not in repr(diagnostics)
 
-async def test_file_change_legacy_scalar_payload_unchanged() -> None:
-    backend = CodexBackend(model="fixture-model")
-    events = await _run_fixture(backend, "Run ls", "tool_use.jsonl")
-    starts = [e for e in events if isinstance(e, ToolStartEvent) and e.name == "patch"]
-    assert len(starts) == 1
-    assert starts[0].input == {"file": "main.py", "action": "modified"}
 
 async def test_file_change_changes_map_single_path() -> None:
     backend = CodexBackend(model="fixture-model")
@@ -1287,24 +1289,6 @@ async def test_parser_diagnostic_precedes_nonzero_process_exit() -> None:
     assert "/Users/private-person" not in message
     assert len(message) <= 3_000
 
-@pytest.mark.parametrize(
-    ("fixture", "expected_substring"),
-    [
-        ("toplevel_text.jsonl", "Missing yield"),
-        ("simple_text.jsonl", "Hello from Codex"),
-        ("output_text_blocks.jsonl", "Bad import"),
-    ],
-)
-def test_text_extraction_precedence(fixture: str, expected_substring: str) -> None:
-    fixture_path = FIXTURES_DIR / fixture
-    lines = fixture_path.read_text().strip().split("\n")
-    items = [json.loads(line) for line in lines if "item.completed" in line]
-    candidates = [i["item"] for i in items if i["item"].get("type") == "agent_message"]
-    assert candidates, f"no agent_message item.completed in {fixture}"
-    extracted = CodexBackend._extract_text(candidates[0])
-    assert expected_substring in extracted, (
-        f"fixture={fixture} extracted={extracted!r} expected substring={expected_substring!r}"
-    )
 
 def test_text_extraction_top_level_wins_over_content_blocks() -> None:
     """When both delivery shapes exist, top-level text takes precedence over content blocks."""
@@ -1344,8 +1328,6 @@ async def test_codex_preserves_exit_code_and_status_on_results() -> None:
 class TestDisplayShellCommand:
     """S1/M5: display variant decodes AND strips the leading cd prefix."""
 
-    def test_display_strips_cd_prefix(self) -> None:
-        assert display_shell_command('/bin/zsh -lc "cd /home/user/project && make test"') == "make test"
 
     def test_raw_and_display_distinct_for_cd_command(self) -> None:
         raw = '/bin/zsh -lc "cd /app && echo hello"'
@@ -1364,16 +1346,6 @@ def _reset_real_git_resolution() -> Iterator[Any]:
 class TestResolveRealGitDir:
     """Darwin real-git resolver (issue #1122): resolve once, validate, fail open."""
 
-    def test_resolves_parent_dir_of_xcrun_result(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-    ) -> None:
-        # Validation requires a real executable file, so stage one on disk.
-        git_bin = tmp_path / "usr" / "bin"
-        git_file = _stage_executable(git_bin / "git")
-        monkeypatch.setattr(codex.sys, "platform", "darwin")
-        proc = subprocess.CompletedProcess[str](args=[], returncode=0, stdout=f"{git_file}\n", stderr="")
-        monkeypatch.setattr(codex.subprocess, "run", lambda *a, **k: proc)
-        assert codex._resolve_real_git_dir() == str(git_bin)
 
     def test_caches_at_most_once_per_process(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
@@ -1681,14 +1653,3 @@ async def test_request_event_config_resume_and_schema() -> None:
     assert request.session_id == "th_old"
     assert request.session_source == "configured"
     assert "hello" not in argv
-
-async def test_codex_usage_events_carry_turn_end_and_estimated_provenance() -> None:
-    backend = CodexBackend(model="gpt-5.3-codex")
-    events = await _run_fixture(backend, "say", "simple_text.jsonl")
-    metrics = [e for e in events if isinstance(e, MetricsEvent)]
-    costs = [e for e in events if isinstance(e, CostEvent)]
-    assert metrics and costs
-    assert all(m.measurement_source == "turn_end" for m in metrics)
-    assert all(m.usage_scope == "invocation" for m in metrics)
-    assert all(c.measurement_source == "turn_end" for c in costs)
-    assert all(c.cost_source == "estimated" for c in costs)

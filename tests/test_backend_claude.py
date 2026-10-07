@@ -35,7 +35,6 @@ from daydream.backends.claude import (
     _is_background_bash,
     _is_dangerous_command,
     _is_read_only_command,
-    _read_only_guard,
     _RunLocalClaudeSDKClient,
     _RunLocalSubprocessCLITransport,
 )
@@ -425,6 +424,16 @@ async def test_read_only_execute_registers_pretooluse_guard(patch_sdk: Any) -> N
     assert matcher.hooks  # callbacks registered
     deny_write = await _decide(matcher, {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}})
     assert deny_write["hookSpecificOutput"]["permissionDecision"] == "deny"
+    write_reason = deny_write["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "read-only guard" in write_reason
+    assert "read-only summarizer" not in write_reason
+    deny_missing = await _decide(matcher, {"tool_name": "Bash"})
+    assert deny_missing["hookSpecificOutput"]["permissionDecision"] == "deny"
+    deny_delete = await _decide(matcher, {"tool_name": "Bash", "tool_input": {"command": "rm -rf x"}})
+    assert deny_delete["hookSpecificOutput"]["permissionDecision"] == "deny"
+    delete_reason = deny_delete["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "read-only guard" in delete_reason
+    assert "read-only summarizer" not in delete_reason
     deny_bash = await _decide(matcher, {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}})
     assert deny_bash["hookSpecificOutput"]["permissionDecision"] == "deny"
     deny_git_output = await _decide(matcher,
@@ -460,28 +469,6 @@ async def test_non_read_only_execute_registers_dangerous_command_hook(patch_sdk:
     )
     assert "hookSpecificOutput" not in allow_find_scoped
 
-@pytest.mark.parametrize("payload,denied", [
-    ({"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}, True),
-    ({"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}}, True),
-    ({"tool_name": "Bash", "tool_input": {"command": "git log -n 5"}}, False),
-    ({"tool_name": "Bash"}, True),
-])
-async def test_read_only_guard_denies_mutation_allows_inspection(payload: Any, denied: bool) -> None:
-    result = cast(dict[str, Any], await _read_only_guard(payload, None, {}))
-    if denied:
-        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-    else:
-        assert "hookSpecificOutput" not in result
-
-@pytest.mark.parametrize("payload", [
-    {"tool_name": "Bash", "tool_input": {"command": "rm -rf x"}},
-    {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}},
-])
-async def test_read_only_guard_deny_reason_uses_shared_guard_wording(payload: Any) -> None:
-    result = cast(dict[str, Any], await _read_only_guard(payload, None, {}))
-    reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "read-only guard" in reason
-    assert "read-only summarizer" not in reason
 
 @pytest.mark.parametrize("with_agents", [False, True])
 async def test_execute_preserves_agents_in_sdk_options(patch_sdk: Any, with_agents: bool) -> None:
@@ -918,17 +905,6 @@ async def test_result_continuation_requires_persisted_native_session(
         assert results[0].continuation is None
 
 
-
-async def test_execute_disables_cli_background_tasks_and_lifts_bash_ceiling(patch_sdk: Any) -> None:
-    backend, captured = _capturing_backend(patch_sdk)
-    async for _ in backend.execute(Path("/tmp"), "Go"):
-        pass
-    env = captured["options"].env
-    assert env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
-    expected_ms = str(int(TEST_WALL_BUDGET_S * 1000))
-    assert env["BASH_DEFAULT_TIMEOUT_MS"] == expected_ms
-    assert env["BASH_MAX_TIMEOUT_MS"] == expected_ms
-
 @pytest.mark.parametrize("read_only", [False, True])
 async def test_execute_registers_background_bash_guard(patch_sdk: Any, read_only: bool) -> None:
     """Registered guards block background Bash in both profiles with foreground guidance.
@@ -938,6 +914,11 @@ async def test_execute_registers_background_bash_guard(patch_sdk: Any, read_only
     backend, captured = _capturing_backend(patch_sdk)
     async for _ in backend.execute(Path("/tmp"), "Go", read_only=read_only):
         pass
+    env = captured["options"].env
+    assert env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
+    expected_ms = str(int(TEST_WALL_BUDGET_S * 1000))
+    assert env["BASH_DEFAULT_TIMEOUT_MS"] == expected_ms
+    assert env["BASH_MAX_TIMEOUT_MS"] == expected_ms
     matcher = captured["options"].hooks["PreToolUse"][0]
     deny_bg = await _decide(
         matcher, {"tool_name": "Bash", "tool_input": {"command": "git status", "run_in_background": True}},

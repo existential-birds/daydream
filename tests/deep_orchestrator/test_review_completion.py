@@ -5,7 +5,7 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -134,7 +134,7 @@ async def test_schema_output(review: ReviewRun, mode: str, reason: str | None) -
 
 @pytest.mark.parametrize('case', ['live', 'dirty', 'no-diff', 'dirty-no-diff', 'interactive', 'mismatch',
                                   'base-tip', 'shards', 'pipeline-budget'])
-async def test_snapshot_boundaries(review: ReviewRun, shard_many_python_target: Path, case: str) -> None:
+async def test_snapshot_boundaries(review: ReviewRun, request: pytest.FixtureRequest, case: str) -> None:
     overrides: dict[str, Any] = {}
     store = LocalRecordStore(review.tmp / 'records')
     if case in {'mismatch', 'no-diff'}:
@@ -165,7 +165,8 @@ async def test_snapshot_boundaries(review: ReviewRun, shard_many_python_target: 
     if case == 'interactive':
         overrides['findings_out'] = None
     if case == 'shards':
-        review = ReviewRun(shard_many_python_target, review.tmp, review.patch)
+        shard_target = cast(Path, request.getfixturevalue('shard_many_python_target'))
+        review = ReviewRun(shard_target, review.tmp, review.patch)
         overrides.update(deep_shard_enabled=True, deep_shard_max_files=1)
     if case == 'pipeline-budget':
         overrides['review_profile'] = _profile_with_pipeline(review_wall_budget_s=0)

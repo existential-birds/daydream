@@ -52,6 +52,9 @@ async def test_backend_conformance(loader: Loader) -> None:
     results = {e.id for e in events if isinstance(e, ToolResultEvent)}
     assert results <= starts
     assert any(isinstance(e, (MetricsEvent, CostEvent)) for e in events)
+    read_only_events = [e async for e in loader(CANONICAL_SCRIPT, read_only=True)]
+    assert _vocabulary(read_only_events) == types
+    assert {"TextEvent", "ToolStartEvent", "ToolResultEvent"} <= _vocabulary(read_only_events)
     driver = _driver(loader)
     deltas = KNOWN_DELTAS[driver]
     metrics = [e for e in events if isinstance(e, MetricsEvent)]
@@ -65,10 +68,3 @@ async def test_backend_conformance(loader: Loader) -> None:
         assert costs
         assert all(m.message_id == deltas["metrics_message_id"] for m in metrics)
         assert all(c.cost_usd == deltas["cost_usd"] for c in costs)
-
-@pytest.mark.parametrize("loader", [claude_loader, codex_loader, pi_loader])
-async def test_read_only_preserves_vocabulary(loader: Loader) -> None:
-    default_events = [e async for e in loader(CANONICAL_SCRIPT)]
-    read_only_events = [e async for e in loader(CANONICAL_SCRIPT, read_only=True)]
-    assert _vocabulary(read_only_events) == _vocabulary(default_events)
-    assert {"TextEvent", "ToolStartEvent", "ToolResultEvent"} <= _vocabulary(read_only_events)

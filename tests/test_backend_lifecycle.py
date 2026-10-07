@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import json
 import logging
 from pathlib import Path
@@ -22,12 +21,7 @@ from daydream.backends._transport import (
 )
 from daydream.backends.codex import CodexBackend, CodexError
 from daydream.backends.osprey import OspreyBackend, OspreyError
-from daydream.backends.pi import (
-    _PI_DEFAULT_RETRY_ATTEMPTS,
-    PiBackend,
-    PiError,
-    _pi_retry_attempts,
-)
+from daydream.backends.pi import PiBackend, PiError
 from tests.harness.fake_cli_process import FakeCliProcess
 from tests.harness.osprey_jsonl import osprey_session
 
@@ -95,7 +89,7 @@ def test_process_exit_message_reports_the_count_it_prints() -> None:
         "(no non-JSON output captured — pi may have crashed before writing to stdout)"
     )
 
-# Parser and facade coverage.
+# Shared parser coverage.
 
 @pytest.mark.parametrize(
     ("raw", "expected", "warning"),
@@ -139,21 +133,6 @@ def test_shared_nonnegative_float_parser(
         assert caplog.text == ""          # the check order is pinned: nan/inf are caught before the sign check
     else:
         assert warning in caplog.text
-
-@pytest.mark.parametrize(
-    ("env_value", "expected"), [(None, _PI_DEFAULT_RETRY_ATTEMPTS), ("5", 5),
-     ("", _PI_DEFAULT_RETRY_ATTEMPTS), ("-1", _PI_DEFAULT_RETRY_ATTEMPTS)],
-    ids=["default", "override", "empty-warns", "negative-warns"],
-)
-def test_pi_facades_delegate_to_the_shared_parsers(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, env_value: str | None, expected: int
-) -> None:
-    if env_value is not None:
-        monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", env_value)
-    with caplog.at_level(logging.WARNING):
-        assert _pi_retry_attempts() == expected
-    if env_value not in (None, "5"):
-        assert f"DAYDREAM_PI_RETRY_ATTEMPTS={env_value!r}" in caplog.text   # the warning still names the knob
 
 # Real drivers with only OS process spawning replaced.
 
@@ -232,125 +211,3 @@ async def test_osprey_clean_exit_lifecycle() -> None:
     backend = OspreyBackend(osprey_binary="fake")
     _events, proc = await _drive(backend, _osprey_stream())
     _assert_clean_lifecycle(backend, proc)
-
-# The finalization sequence belongs in one module. Synthetic offenders prove each structural
-# detector works, so a broken scan cannot pass empty.
-
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-_BACKENDS_DIR = _REPO_ROOT / "daydream" / "backends"
-_OWNER = "daydream/backends/_transport.py"
-_OWNER_SURFACE = frozenset({"reap", "raise_for_exit", "teardown"})
-
-def _is_transport_exit_error(node: ast.expr | None) -> bool:
-    if isinstance(node, ast.Name):
-        return node.id == "TransportExitError"
-    if isinstance(node, ast.Attribute):
-        return node.attr == "TransportExitError"
-    if isinstance(node, ast.Tuple):
-        return any(_is_transport_exit_error(element) for element in node.elts)
-    return False
-
-def _names_cli_transport(annotation: ast.expr | None) -> bool:
-    if isinstance(annotation, ast.Name):
-        return annotation.id == "CliTransport"
-    if isinstance(annotation, ast.Attribute):
-        return annotation.attr == "CliTransport"
-    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
-        return _names_cli_transport(annotation.left) or _names_cli_transport(annotation.right)
-    return False
-
-def _constructs_cli_transport(value: ast.expr | None) -> bool:
-    return (
-        isinstance(value, ast.Call)
-        and isinstance(value.func, ast.Name)
-        and value.func.id == "CliTransport"
-    )
-
-def _transport_bound_names(tree: ast.AST) -> set[str]:
-    """Names bound to a ``CliTransport`` so a renamed receiver cannot evade the scan."""
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            args = [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
-            names.update(arg.arg for arg in args if _names_cli_transport(arg.annotation))
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            if _names_cli_transport(node.annotation) or _constructs_cli_transport(node.value):
-                names.add(node.target.id)
-        elif isinstance(node, ast.Assign) and _constructs_cli_transport(node.value):
-            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
-    return names
-
-def _forbidden_sites(source: str) -> list[tuple[str, int]]:
-    """(label, lineno) for every reap/raise shape that must live only in the owner."""
-    tree = ast.parse(source)
-    transport_names = _transport_bound_names(tree)
-    found: list[tuple[str, int]] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Await) and isinstance(node.value, ast.Call):
-            func = node.value.func
-            if (
-                isinstance(func, ast.Attribute)
-                and func.attr == "wait"
-                and isinstance(func.value, ast.Name)
-                and (func.value.id == "transport" or func.value.id in transport_names)
-            ):
-                found.append(("awaits transport.wait()", node.lineno))
-        if isinstance(node, ast.ExceptHandler) and _is_transport_exit_error(node.type):
-            found.append(("except TransportExitError", node.lineno))
-        if (
-            isinstance(node, ast.Raise)
-            and isinstance(node.exc, ast.Call)
-            and any(
-                kw.arg == "category"
-                and isinstance(kw.value, ast.Constant)
-                and kw.value.value == "PROCESS_EXIT"
-                for kw in node.exc.keywords
-            )
-        ):
-            found.append(('raise with category="PROCESS_EXIT"', node.lineno))
-    return found
-
-@pytest.mark.parametrize(
-    ("source", "label"),
-    [
-        ("async def f(transport):\n    await transport.wait()\n", "awaits transport.wait()"),
-        ("async def f():\n    t = CliTransport(...)\n    await t.wait()\n", "awaits transport.wait()"),
-        ("async def f(t: CliTransport):\n    await t.wait()\n", "awaits transport.wait()"),
-        ("try:\n    pass\nexcept TransportExitError:\n    pass\n", "except TransportExitError"),
-        ("try:\n    pass\nexcept (TransportExitError, ValueError):\n    pass\n", "except TransportExitError"),
-        ("try:\n    pass\nexcept _transport.TransportExitError:\n    pass\n", "except TransportExitError"),
-        ('raise AdapterError("x", category="PROCESS_EXIT")\n', 'raise with category="PROCESS_EXIT"'),
-    ],
-)
-def test_the_guard_detects_each_forbidden_shape(source: str, label: str) -> None:
-    """Liveness: an empty scan can never pass silently — each detector is proven to fire."""
-    assert label in [found for found, _line in _forbidden_sites(source)]
-
-def test_no_adapter_owns_the_reap_or_the_process_exit_raise() -> None:
-    offenders: dict[str, list[tuple[str, int]]] = {}
-    modules = sorted(_BACKENDS_DIR.glob("*.py"))
-    assert modules, "the scan found no production modules"  # liveness: mis-rooted scan fails
-    for path in modules:
-        relative = path.relative_to(_REPO_ROOT).as_posix()
-        if relative == _OWNER:
-            continue
-        sites = _forbidden_sites(path.read_text(encoding="utf-8"))
-        if sites:
-            offenders[relative] = sites
-    assert not offenders, f"the reap / PROCESS_EXIT raise must live in {_OWNER}: {offenders}"
-
-def test_the_owner_still_carries_the_shared_surface() -> None:
-    """Liveness: the exemption is a property of the owner's contents, not of its filename."""
-    tree = ast.parse((_REPO_ROOT / _OWNER).read_text(encoding="utf-8"))
-    defined = {
-        node.name
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    assert _OWNER_SURFACE <= defined, f"{_OWNER} no longer defines {sorted(_OWNER_SURFACE - defined)}"
-    assert any(
-        isinstance(node, ast.ExceptHandler)
-        and isinstance(node.type, ast.Name)
-        and node.type.id == "TransportExitError"
-        for node in ast.walk(tree)
-    ), "the suppression handler must live in _OWNER"

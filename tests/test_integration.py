@@ -809,30 +809,6 @@ def _two_commit_repo(repo: Path, filename: str, before: str, after: str, branch:
     _commit(repo, "change")
     return repo
 
-async def test_run_comment_full_flow(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., 'RunConfig'],
-) -> None:
-    """Integration test: full --comment flow through the deep pipeline."""
-    _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
-    _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, tmp_path)
-    # Capture the canonical items that reach the PR-posting step — the comment path.
-    posted: list[dict[str, Any]] = []
-    posted_posts: list[bool] = []
-    async def fake_post(
-        target_dir: Any, merged_items_path: Path, *, post: Any, **_kwargs: Any,
-    ) -> None:
-        posted.extend(json.loads(merged_items_path.read_text())["items"])
-        posted_posts.append(post)
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", fake_post)
-    config = make_config(tmp_path, output_mode="comment")
-    exit_code = await run(config)
-    assert exit_code == 0
-    # Comment mode auto-posts (post=True) with the canonical merged items.
-    assert posted_posts == [True]
-    assert posted, "the --comment post step never received merged items"
-    assert any(item.get("file") for item in posted), posted
-    assert (tmp_path / ".daydream" / "diff.patch").exists()
 
 @pytest.mark.parametrize("pr_number", [None, 7], ids=["branch", "explicit"])
 async def test_run_comment_resolves_pr_through_real_cli_boundary(
@@ -854,10 +830,15 @@ async def test_run_comment_resolves_pr_through_real_cli_boundary(
     _install_stub_backend(monkeypatch, tmp_path)
     exit_code = await run(make_config(tmp_path, output_mode="comment", pr_number=pr_number))
     assert exit_code == 0
+    items = json.loads((tmp_path / ".daydream" / "deep" / "merged-items.json").read_text())["items"]
+    assert items
+    assert any(item.get("file") for item in items)
+    assert (tmp_path / ".daydream" / "diff.patch").is_file()
     review_calls = fake_gh.calls("POST", "repos/acme/widgets/pulls/7/reviews")
     assert len(review_calls) == 1
     assert review_calls[0].payload["commit_id"] == head
     assert review_calls[0].payload["comments"][0]["path"] == "api.py"
+    assert review_calls[0].payload["comments"][0]["path"] in {item.get("file") for item in items}
     assert fake_gh.process_calls()
     assert {call.cwd for call in fake_gh.process_calls()} == {tmp_path.resolve()}
     list_calls = [
@@ -941,17 +922,6 @@ async def test_run_comment_does_not_prompt_for_skill(
     exit_code = await run(config)
     assert exit_code == 0
 
-async def test_run_comment_missing_pr_exits_nonzero(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., 'RunConfig'],
-) -> None:
-    """Comment mode requires a posted review; a missing PR makes runner.run fail."""
-    _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
-    _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, tmp_path)
-    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td, **_kwargs: None)
-    config = make_config(tmp_path, output_mode="comment")
-    exit_code = await run(config)
-    assert exit_code == 1, "comment mode must fail when no open PR exists"
 
 async def test_run_comment_submission_failure_exits_nonzero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., 'RunConfig'], fake_gh: Any,

@@ -48,13 +48,6 @@ def test_init_creates_private_layout_and_modes(tmp_path: Path) -> None:
     assert not (root / "harbor").exists()   # compiled dataset only after a build
     assert stat.S_IMODE((root / "benchmark.yaml").stat().st_mode) == 0o600
 
-def test_init_gitignore_ignores_everything_except_itself(tmp_path: Path) -> None:
-    root = tmp_path / "ws"
-    init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
-    gi = (root / ".gitignore").read_text()
-    assert "*" in gi and ".gitignore" in gi
-    assert stat.S_IMODE((root / ".gitignore").stat().st_mode) == 0o600
-
 def test_init_manifest_is_valid_and_immutable_fields(tmp_path: Path) -> None:
     root = tmp_path / "ws"
     m = init_workspace(root, "OWNER/REPO", ["API.Anthropic.COM"], ["api.anthropic.com"])
@@ -81,24 +74,18 @@ def test_init_refuses_empty_reviewer_hosts(tmp_path: Path) -> None:
 def test_status_fresh_workspace_is_empty_and_unresolved(tmp_path: Path) -> None:
     root = tmp_path / "ws"
     init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
+    gitignore_text = (root / ".gitignore").read_text()
+    assert "*" in gitignore_text and ".gitignore" in gitignore_text
+    assert stat.S_IMODE((root / ".gitignore").stat().st_mode) == 0o600
+    code, label = validate_workspace(root)
+    assert code == 2  # structurally valid but incomplete (unresolved repo identity)
+    assert "incomplete" in label
     st = workspace_status(root)
     assert st.workspace_state == "empty"
     assert st.repository_identity_resolved is False
     assert st.ledger is not None and st.ledger.pull_requests == []
-
-def test_status_surfaces_unresolved_identity(tmp_path: Path) -> None:
-    root = tmp_path / "ws"
-    init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
-    st = workspace_status(root)
     assert st.source.hostname == "github.com"
     assert st.source.repository_id is None and st.source.visibility == "unresolved"
-
-def test_validate_fresh_workspace_returns_2(tmp_path: Path) -> None:
-    root = tmp_path / "ws"
-    init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
-    code, label = validate_workspace(root)
-    assert code == 2  # structurally valid but incomplete (unresolved repo identity)
-    assert "incomplete" in label
 
 def test_validate_corrupt_manifest_returns_1(tmp_path: Path) -> None:
     root = tmp_path / "ws"

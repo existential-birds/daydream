@@ -38,16 +38,6 @@ REQUIRED_CATEGORIES = {"wording_location", "related_distinct", "negation", "same
 _CRED = re.compile(r"sk-ant-|sk-or-|Bearer |x-api-key")
 
 
-def test_fixture_is_24_pairs_12_12() -> None:
-    pairs = _load_fixture()
-    assert len(pairs) == 24
-    labels = [p["label"] for p in pairs]
-    assert labels.count("match") == 12 and labels.count("nonmatch") == 12
-
-def test_fixture_covers_all_eight_categories() -> None:
-    pairs = _load_fixture()
-    assert {p["category"] for p in pairs} >= REQUIRED_CATEGORIES
-
 def test_fixture_is_source_free() -> None:
     pairs = calibrate._load_fixture()
     text = json.dumps(pairs, ensure_ascii=False)
@@ -80,6 +70,9 @@ def test_fixture_provenance_declares_unverified_llm_origin() -> None:
     assert prov["class_balance"] == {"match": 12, "nonmatch": 12}
     assert prov["categories"] == 8
     assert len(pairs) == 24          # the 24 pairs survive the shape change
+    labels = [p["label"] for p in pairs]
+    assert labels.count("match") == 12 and labels.count("nonmatch") == 12
+    assert {p["category"] for p in pairs} >= REQUIRED_CATEGORIES
 
 def test_every_pair_renders_within_24kib() -> None:
     sr = _load_judge_template()
@@ -304,6 +297,10 @@ class TestCalibrateAcceptance:
         assert code == 0
         assert (tmp_path / "ws" / "runtime" / "calibration-receipt.json").exists()
         assert counter[0] == 72
+        receipt = (tmp_path / "ws" / "runtime" / "calibration-receipt.json").read_text()
+        assert not re.search(r"sk-ant-|sk-or-|Bearer |x-api-key", receipt)
+        assert "Cache key not tenant-scoped" not in receipt
+        assert "DAYDREAM_JUDGE_API_KEY" not in receipt
 
     def test_accuracy_failure_no_receipt(self, tmp_path: Path, ws_factory: Any) -> None:
         responses = _scripted_responses(_load_fixture(), mislabel_count=3)
@@ -339,16 +336,6 @@ class TestCalibrateAcceptance:
         err = capsys.readouterr().err
         assert "instability" in err and "0" in err
         assert not (tmp_path / "ws" / "runtime" / "calibration-receipt.json").exists()
-
-    def test_acceptance_zero_source_leakage(self, tmp_path: Path, ws_factory: Any) -> None:
-        responses = _scripted_responses(_load_fixture())
-        fake, _ = _scripted_http(responses)
-        assert run_calibration(ws_factory(tmp_path), yes=True, env=_env(), http=fake) == 0
-        receipt = (tmp_path / "ws" / "runtime" / "calibration-receipt.json").read_text()
-        assert not re.search(r"sk-ant-|sk-or-|Bearer |x-api-key", receipt)
-        assert "Cache key not tenant-scoped" not in receipt
-        assert "DAYDREAM_JUDGE_API_KEY" not in receipt
-
 
 def test_calibrate_judge_subparser_and_flags() -> None:
     args = _build_benchmark_parser().parse_args(["calibrate-judge", "/ws", "--yes"])
