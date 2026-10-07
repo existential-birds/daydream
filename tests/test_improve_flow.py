@@ -1331,8 +1331,7 @@ async def test_non_array_commands_preserve_diagnostics_and_continue_audit(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(("effort", "focus", "expected_categories"),
-    [pytest.param("standard", None, sorted(AUDIT_CATEGORIES), id="standard-effort"),
-        pytest.param("quick", None, ["correctness", "security", "tech-debt", "tests"], id="quick-effort",),
+    [pytest.param("quick", None, ["correctness", "security", "tech-debt", "tests"], id="quick-effort",),
         pytest.param("standard", "security", ["security"], id="focus-security"),
     ],
 )
@@ -2412,6 +2411,10 @@ async def test_improve_timing_completeness_preserves_p09_audit_isolation(
     code = await _run_improve(make_config, repo)
 
     assert code == 0
+    audited = _load_improve_json(repo, "audit-findings.json")
+    assert sorted(audited["categories_run"]) == sorted(AUDIT_CATEGORIES)
+    audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
+    assert audit_calls and all(call["read_only"] for call in audit_calls)
     trajectory = _root_run_trajectory(repo)
     trajectories = list((improve_monorepo_target / ".daydream" / "runs").glob("*/trajectory.json"))
     assert len(trajectories) == 1
@@ -2634,17 +2637,6 @@ def test_scope_narrowing_does_not_widen_for_a_repo_root_service(tmp_path: Path) 
     assert [(stack.stack_name, list(stack.files)) for stack in scoped] == [("python", ["services/api/inner/main.py"])]
 
 @pytest.mark.anyio
-async def test_improve_model_calls_are_one_shot(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=1,)
-    code = await _run_improve(make_config, improve_monorepo_target)
-    assert code == 0
-    improve_calls = [call for call in stub.calls if call["marker"] in {"recon", "audit", "vet", "plan-writer"}]
-    assert {call["marker"] for call in improve_calls} == {"recon", "audit", "vet", "plan-writer",}
-    assert all(call["persist_session"] is False for call in improve_calls)
-
-@pytest.mark.anyio
 @pytest.mark.parametrize(("file_config", "expected_tiers"),
     [
         # Plan authoring runs on the top model tier at max reasoning; recon does not.
@@ -2759,6 +2751,9 @@ async def test_rendered_plan_gives_a_literal_executor_no_room_to_guess(
     code = await _run_improve(make_config, improve_monorepo_target)
 
     assert code == 0
+    improve_calls = [call for call in stub.calls if call["marker"] in {"recon", "audit", "vet", "plan-writer"}]
+    assert {call["marker"] for call in improve_calls} == {"recon", "audit", "vet", "plan-writer"}
+    assert all(call["persist_session"] is False for call in improve_calls)
     plan_path = next((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     text = plan_path.read_text(encoding="utf-8")
     head_sha = git(improve_monorepo_target, "rev-parse", "HEAD")
