@@ -2742,78 +2742,6 @@ async def test_empty_secret_named_assignments_do_not_eat_the_next_line(
     assert "[REDACTED_ENV_VAR]" not in plan_text
 
 @pytest.mark.anyio
-async def test_rendered_plan_gives_a_literal_executor_no_room_to_guess(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    """Walk the rendered artifact for the points a zero-context agent stalls on."""
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=1)
-
-    code = await _run_improve(make_config, improve_monorepo_target)
-
-    assert code == 0
-    improve_calls = [call for call in stub.calls if call["marker"] in {"recon", "audit", "vet", "plan-writer"}]
-    assert {call["marker"] for call in improve_calls} == {"recon", "audit", "vet", "plan-writer"}
-    assert all(call["persist_session"] is False for call in improve_calls)
-    plan_path = next((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
-    text = plan_path.read_text(encoding="utf-8")
-    head_sha = git(improve_monorepo_target, "rev-parse", "HEAD")
-
-    assert "## Before you start" in text
-    assert f"`git cat-file -e {head_sha}^{{commit}}`" in text
-    assert "`git status --porcelain` — expected: no output at all." in text
-    assert head_sha in text  # full sha, not only the 7-char Status stamp
-    assert "You are expected to be running it later, from a HEAD" in text
-    assert "that has moved on — that is normal and is not by itself a reason to" in text
-    assert f"`git diff --name-only {head_sha} HEAD --" in text
-    assert "Files outside this list do not matter." in text
-    assert "`git switch --create improve/" in text
-    assert f"`git switch --create improve/batch-billing-contract {head_sha}`" not in text
-    assert "branches from your current HEAD, which is what you want." in text
-
-    # Why-this-matters is labelled, so the intended outcome cannot be misread
-    # as a statement about the code as it stands.
-    assert "- **Problem**:" in text
-    assert "- **Cost of leaving it**:" in text
-    assert "- **Intended outcome (does not describe the code today)**:" in text
-
-    assert "unless a reviewer maintains the index" not in text
-    assert "Do not skip a\n> step, reorder steps, or substitute your own judgement" in text
-
-    assert "| Purpose | Run from | Command | Expected on success |" in text
-    assert "**Run from**: the repository root" in text
-    assert "Run this now, before starting the next step." in text
-
-    assert "Do these in the order they are numbered." in text
-    assert "write it once, not twice." in text
-
-    assert "## Finishing" in text
-    assert "never `git add -A`" in text
-    assert "git add apps/billing/api.py apps/billing/test_api.py" in text
-    assert "4. Do not push and do not open a pull request." in text
-    # Issue publication copies the plan without committing the local index, so
-    # an executor must not be told to edit daydream_plans/README.md.
-    assert "`TODO` to `DONE`" not in text
-
-    assert "Before editing a file, read the exact line range quoted for it in the Current state section" in text
-    assert "two failures total for the same verification" in text
-
-    call = next(c for c in stub.calls if c["marker"] == "plan-writer")
-    prompt = call["prompt"]
-    assert "cannot infer and will not look" in prompt
-    assert "has never seen this repository" in prompt
-    for banned in ("the relevant handler", "as appropriate", "update accordingly"):
-        assert banned in prompt, banned
-    assert "Length is never a reason to compress." in prompt
-
-    changes = call["output_schema"]["properties"]["steps"]["items"]["properties"]["changes"]["items"]["properties"]
-    assert "Banned:" in changes["instruction"]["description"]
-    assert changes["instruction"]["maxLength"] == 4000
-    assert "re-read the file" in changes["target_state"]["description"]
-    assert "verbatim from the file" in changes["symbol"]["description"]
-    done = call["output_schema"]["properties"]["done_criteria"]["items"]["properties"]["description"]["description"]
-    assert "without judgement" in done
-
-@pytest.mark.anyio
 async def test_ungated_step_and_scope_criterion_still_get_a_real_check(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
@@ -2929,6 +2857,69 @@ async def test_reused_plan_publishes_its_stored_package_and_member_identities(
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=1,)
     first_code = await _run_improve(make_config, improve_monorepo_target)
+    assert first_code == 0
+    improve_calls = [call for call in stub.calls if call["marker"] in {"recon", "audit", "vet", "plan-writer"}]
+    assert {call["marker"] for call in improve_calls} == {"recon", "audit", "vet", "plan-writer"}
+    assert all(call["persist_session"] is False for call in improve_calls)
+    plan_path = next((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
+    text = plan_path.read_text(encoding="utf-8")
+    head_sha = git(improve_monorepo_target, "rev-parse", "HEAD")
+
+    assert "## Before you start" in text
+    assert f"`git cat-file -e {head_sha}^{{commit}}`" in text
+    assert "`git status --porcelain` — expected: no output at all." in text
+    assert head_sha in text  # full sha, not only the 7-char Status stamp
+    assert "You are expected to be running it later, from a HEAD" in text
+    assert "that has moved on — that is normal and is not by itself a reason to" in text
+    assert f"`git diff --name-only {head_sha} HEAD --" in text
+    assert "Files outside this list do not matter." in text
+    assert "`git switch --create improve/" in text
+    assert f"`git switch --create improve/batch-billing-contract {head_sha}`" not in text
+    assert "branches from your current HEAD, which is what you want." in text
+
+    # Why-this-matters is labelled, so the intended outcome cannot be misread
+    # as a statement about the code as it stands.
+    assert "- **Problem**:" in text
+    assert "- **Cost of leaving it**:" in text
+    assert "- **Intended outcome (does not describe the code today)**:" in text
+
+    assert "unless a reviewer maintains the index" not in text
+    assert "Do not skip a\n> step, reorder steps, or substitute your own judgement" in text
+
+    assert "| Purpose | Run from | Command | Expected on success |" in text
+    assert "**Run from**: the repository root" in text
+    assert "Run this now, before starting the next step." in text
+
+    assert "Do these in the order they are numbered." in text
+    assert "write it once, not twice." in text
+
+    assert "## Finishing" in text
+    assert "never `git add -A`" in text
+    assert "git add apps/billing/api.py apps/billing/test_api.py" in text
+    assert "4. Do not push and do not open a pull request." in text
+    # Issue publication copies the plan without committing the local index, so
+    # an executor must not be told to edit daydream_plans/README.md.
+    assert "`TODO` to `DONE`" not in text
+
+    assert "Before editing a file, read the exact line range quoted for it in the Current state section" in text
+    assert "two failures total for the same verification" in text
+
+    call = next(c for c in stub.calls if c["marker"] == "plan-writer")
+    prompt = call["prompt"]
+    assert "cannot infer and will not look" in prompt
+    assert "has never seen this repository" in prompt
+    for banned in ("the relevant handler", "as appropriate", "update accordingly"):
+        assert banned in prompt, banned
+    assert "Length is never a reason to compress." in prompt
+
+    changes = call["output_schema"]["properties"]["steps"]["items"]["properties"]["changes"]["items"]["properties"]
+    assert "Banned:" in changes["instruction"]["description"]
+    assert changes["instruction"]["maxLength"] == 4000
+    assert "re-read the file" in changes["target_state"]["description"]
+    assert "verbatim from the file" in changes["symbol"]["description"]
+    done = call["output_schema"]["properties"]["done_criteria"]["items"]["properties"]["description"]["description"]
+    assert "without judgement" in done
+
     sidecar_path = (improve_monorepo_target / "daydream_plans" / PLAN_INDEX_FILENAME)
     sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
     stored = sidecar["plans"][0]

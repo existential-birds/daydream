@@ -55,7 +55,7 @@ companion report covers the subsequent broader matching-input consolidations.
 | `test_clean_full_coverage_reports_nothing_skipped` | `test_run_with_no_findings_writes_report_and_empty_plan_diagnostics` | All four partitions audited, no omissions, standard-tier explanation, no writers and empty diagnostics. |
 | `test_vet_rejects_unconfirmed_finding_with_reason_and_persists` | `test_previously_rejected_finding_is_not_revetted_or_rereported` | Vetted exclusion and durable title/reason immediately after the first run, followed by actual second-run replay suppression. |
 | `test_report_orders_by_leverage_without_non_actionable_direction_section` | `test_non_interactive_run_selects_top_findings_and_writes_plans` | Leverage order, cleanup pressure, omission reporting and absent obsolete direction section. |
-| `test_plan_writer_is_told_to_leave_the_executor_no_decisions` | `test_rendered_plan_gives_a_literal_executor_no_room_to_guess` | Complete actual planner prompt/schema constraints alongside complete rendered executor artifact checks. |
+| `test_plan_writer_is_told_to_leave_the_executor_no_decisions` | `test_reused_plan_publishes_its_stored_package_and_member_identities` | Complete actual planner prompt/schema constraints alongside complete rendered executor artifact checks. |
 
 Matching inputs were verified through the full tests, shared fixtures,
 ImproveStubBackend and production callers. Three-plan runs all use the same

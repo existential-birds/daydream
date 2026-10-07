@@ -7,7 +7,7 @@ Collection: **8,198 cases / 5,359 functions**, down **806 cases (8.95%) / 72 fun
 
 | Exact retired node in tests/test_improve_flow.py | Named keeper | Transferred observations |
 | --- | --- | --- |
-| `test_improve_model_calls_are_one_shot[asyncio]` | `test_rendered_plan_gives_a_literal_executor_no_room_to_guess[asyncio]` | Actual recon/audit/vet/plan-writer marker set is complete; every such call has persist_session=False. |
+| `test_improve_model_calls_are_one_shot[asyncio]` | `test_reused_plan_publishes_its_stored_package_and_member_identities[asyncio]` | Actual recon/audit/vet/plan-writer marker set is complete; every such call has persist_session=False. |
 | `test_effort_and_focus_select_the_audited_categories_read_only[asyncio-standard-effort]` only | `test_improve_timing_completeness_preserves_p09_audit_isolation[asyncio]` | Persisted category inventory equals AUDIT_CATEGORIES; actual audit calls are nonempty and read-only. Quick-effort/security-focus rows remain unchanged. |
 
 Both complete tests, keepers, fixture chain, backend constructor/recorder, production owners/callers and history were read, then independently reviewed before edits. S1 uses identical fresh committed monorepo, exact install_improve_stub(...,n_findings=1), unmodified backend and default real runner config. The prior n_findings=1 versus timing n_findings=None objection is resolved by the existing literal-executor keeper's exact one-finding input. Preserve all its shipped prompt/schema, Git revision, tool-path and rendered-plan assertions. Repo-scan remains excluded from the four-phase persistence assertion, exactly as before.
