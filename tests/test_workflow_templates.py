@@ -90,9 +90,9 @@ def _action_references(wf: dict[str, Any]) -> list[str]:
 
 _EVENT_INTERP = re.compile(r"\$\{\{[^}]*github\.event\.(comment|issue|pull_request|workflow_run|review)[^}]*\}\}")
 
-def test_command_workflows_dispatch_approved_head() -> None:
-    path = REPO_WORKFLOWS_DIR / "daydream-command.yml"
-    wf = load_workflow(path)
+@pytest.mark.parametrize("wf_path", _COMMAND_WORKFLOW_PATHS, ids=_TEMPLATE_AND_LIVE_IDS)
+def test_command_workflow_dispatches_approved_head(wf_path: Path) -> None:
+    wf = load_workflow(wf_path)
     dispatch = _dispatch_step(wf)
 
     assert "gh api" in dispatch["run"] and ".head.sha" in dispatch["run"]
@@ -101,17 +101,7 @@ def test_command_workflows_dispatch_approved_head() -> None:
     assert "PR_NUMBER" in dispatch["env"]
     assert "COMMENT_CREATED_AT" in dispatch["env"]
     assert not any(_EVENT_INTERP.search(step.get("run", "")) for step in job_steps(wf, "dispatch"))
-
-def test_template_command_workflow_dispatches_approved_head() -> None:
-    path = TEMPLATES_DIR / "daydream-command.yml"
-    wf = load_workflow(path)
-    dispatch = _dispatch_step(wf)
-    assert "approved_head_sha" in dispatch["run"]
-    assert "approved_at" in dispatch["run"]
-    assert "gh api" in dispatch["run"] and ".head.sha" in dispatch["run"]
-    assert "PR_NUMBER" in dispatch["env"]
-    assert "COMMENT_CREATED_AT" in dispatch["env"]
-    assert "actions/checkout" not in path.read_text(encoding="utf-8")
+    assert "actions/checkout" not in wf_path.read_text(encoding="utf-8")
 
 @pytest.mark.parametrize("wf_path", _COMMAND_WORKFLOW_PATHS, ids=_TEMPLATE_AND_LIVE_IDS)
 def test_command_workflow_acknowledges_only_after_successful_dispatch(wf_path: Path) -> None:

@@ -38,6 +38,7 @@ def _profile_label(resolution: Mapping[str, object], provenance: Mapping[str, An
 
 _ITEM_KEYS = (
     "record_id",
+    "item_uid",
     "fingerprint",
     "disposition",
     "evidence",
@@ -132,6 +133,7 @@ def build_queue(
                 )
             item: dict[str, object] = {
                 "record_id": finding_id,
+                "item_uid": str(entry["item_uid"]),
                 "fingerprint": fingerprint,
                 "disposition": disposition,
                 "evidence": entry["evidence"],

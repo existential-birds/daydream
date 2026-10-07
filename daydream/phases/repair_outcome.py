@@ -76,17 +76,16 @@ def classify_repair_outcome(abort_reason: str | None, output: str) -> RepairOutc
 
     A host abort always wins over whatever the turn said: prose claiming a fix
     inside an interrupted turn is partial diagnosis, not completion. Absent an
-    abort, a blank turn is an unresolved diagnosis — the host cannot read success
-    out of silence.
+    abort, no turn can read success out of its own text — the host validates
+    completion separately — so every non-aborted turn is an unresolved diagnosis.
     """
     if abort_reason is not None:
         code = repair_reason_code(abort_reason)
         if code in _BUDGET_REASON_CODES:
             return RepairOutcome.BUDGET_INTERRUPTED
         return RepairOutcome.EXECUTION_ERROR
-    if not output.strip():
-        # Silence is not a success claim: the turn is recorded and the job re-runs.
-        return RepairOutcome.DIAGNOSIS_UNRESOLVED
+    # The host never reads success out of a turn's prose: a blank turn and a
+    # descriptive one are both unresolved until host validation runs.
     return RepairOutcome.DIAGNOSIS_UNRESOLVED
 
 

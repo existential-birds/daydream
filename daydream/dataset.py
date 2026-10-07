@@ -203,30 +203,33 @@ def _parse(raw: Mapping[str, Any] | str | bytes, version: str) -> Record:
         raise ValueError(f"invalid {name}: {field}") from None
 
 
+def _parse_typed(raw: Mapping[str, Any] | str | bytes, *, versions: tuple[str, ...], name: str) -> Record:
+    """Decode and version-gate ``raw`` before the full ``_parse`` validation.
+
+    A non-mapping payload and an undecodable one both surface as ``invalid
+    <name>: record``; a decoded object whose ``schema_version`` is outside
+    ``versions`` surfaces as ``invalid <name>: schema_version``.
+    """
+    try:
+        value = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
+        version = value.get("schema_version") if isinstance(value, dict) else None
+    except (ValueError, TypeError, UnicodeError):
+        raise ValueError(f"invalid {name}: record") from None
+    if version not in versions:
+        raise ValueError(f"invalid {name}: schema_version")
+    return _parse(value, version)
+
+
 def parse_run(raw: Mapping[str, Any] | str | bytes) -> Record:
     return _parse(raw, "daydream.run.v1")
 
 
 def parse_observation(raw: Mapping[str, Any] | str | bytes) -> Record:
-    try:
-        value = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
-        version = value.get("schema_version") if isinstance(value, dict) else None
-    except (ValueError, TypeError, UnicodeError):
-        raise ValueError("invalid ObservationRecord: record") from None
-    if version not in ("daydream.observation.v1", "daydream.observation.v2"):
-        raise ValueError("invalid ObservationRecord: schema_version")
-    return _parse(value, version)
+    return _parse_typed(raw, versions=("daydream.observation.v1", "daydream.observation.v2"), name="ObservationRecord")
 
 
 def parse_snapshot(raw: Mapping[str, Any] | str | bytes) -> Record:
-    try:
-        value = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
-        version = value.get("schema_version") if isinstance(value, dict) else None
-    except (ValueError, TypeError, UnicodeError):
-        raise ValueError("invalid Snapshot: record") from None
-    if version not in ("daydream.snapshot.v1", "daydream.snapshot.v2"):
-        raise ValueError("invalid Snapshot: schema_version")
-    return _parse(value, version)
+    return _parse_typed(raw, versions=("daydream.snapshot.v1", "daydream.snapshot.v2"), name="Snapshot")
 
 
 def validate_record_targets(runs: Sequence[Record], observations: Sequence[Record]) -> None:

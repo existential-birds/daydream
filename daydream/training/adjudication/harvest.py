@@ -66,13 +66,6 @@ def build_export_entries(
         observations, {str(item["record_id"]) for item in items}, "adjudicate export"
     )
 
-    from daydream.training.record_identity import record_finding_id
-
-    hosts = {
-        record_finding_id(s["session_id"], s["trajectory_id"], s["segment_id"], r["item_uid"]): r["item_uid"]
-        for s in sessions_from_snapshot(records)
-        for r in s["resolutions"]
-    }
     exported: list[dict[str, Any]] = []
     for item in items:
         record_id = str(item["record_id"])
@@ -94,7 +87,7 @@ def build_export_entries(
         profile = str(item["profile"])
         entry: dict[str, Any] = {
             "record_id": record_id,
-            "item_uid": hosts.get(record_id),
+            "item_uid": item["item_uid"],
             "evidence_digest": str(item["evidence_digest"]),
             "fingerprint": str(item["fingerprint"]),
             "disposition": disposition,

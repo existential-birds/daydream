@@ -20,7 +20,6 @@ from daydream.training.adjudication.preview import run_preview
 from daydream.training.adjudication.queue import build_queue
 from daydream.training.adjudication.report import build_report, enrich_report_items
 from daydream.training.record_evidence import finding_observations, sessions_from_snapshot, validate_output_path
-from daydream.training.record_identity import record_finding_id
 from daydream.ui import create_console, print_error, print_success
 
 
@@ -73,18 +72,10 @@ def _write(path: Path, value: Any) -> None:
 
 
 def _queue(records: SnapshotRecords) -> list[dict[str, object]]:
-    items = build_queue(
+    return build_queue(
         sessions_from_snapshot(records, overlay_judgments=False),
         prior_observations=prior_adjudications([o for o in finding_observations(records) if o["role"] != "automatic"]),
     )
-    hosts = {
-        record_finding_id(session["session_id"], session["trajectory_id"], session["segment_id"], r["item_uid"]): r[
-            "item_uid"
-        ]
-        for session in sessions_from_snapshot(records)
-        for r in session["resolutions"]
-    }
-    return [{**item, "item_uid": hosts[str(item["record_id"])]} for item in items]
 
 
 def _state(path: Path) -> tuple[LocalRecordStore, SnapshotRecords, list[dict[str, Any]]]:
