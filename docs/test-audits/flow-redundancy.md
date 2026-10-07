@@ -232,8 +232,8 @@ are reported in the PR; do not interpret the initial full gate as the final gate
 after these subsequent edits.
 
 Final size accounting against the same baseline categories: production 0 lines
-changed; tests +467/-960 (net -493); shared support +14; pytest configuration +3/-1
-(net +2). Python totals: production 105,189, tests 116,567, support 7,964. Evidence
+changed; tests +467/-960 (net -493); shared support +19/-6 (net +13); pytest configuration +3/-1
+(net +2). Python totals: production 105,189, tests 116,567, support 7,963. Evidence
 documentation is separate. The same functions and sources remain in production;
 no test-only production export, injection flag or seam was introduced.
 
@@ -362,7 +362,7 @@ context exits before its native CLI cases. Named independent timing keepers
 backoff, child cleanup and overlapping requests unchanged. Packaged source,
 assets/isolation and real image execution contracts remain unchanged.
 
-Before timing: same three nodes, n4/ten-case dispatch/Python3.12.13/locked
+Before timing: same three nodes, n4/ten-case dispatch/Python 3.12.13/locked
 dependencies/machine, no coverage: three passed, 6.64s pytest/7.06s wall;
 calls6.01+6.01+3.00s. Concurrent waits mean 15 seconds of worker time is not a
 15-second suite-wall saving. After timing and shared-consumer/full-gate evidence
@@ -381,3 +381,53 @@ verifier/judge/calibration/assets/isolation/package consumers passed 154 cases
 with one warning in 7.15s, including actual Docker images. Both retained native
 CLI timeout cases still paid real backoff/deadlines (3.15s and 3.16s). Final
 collection is 8,199 cases/5,361 functions; this waiting change adds/removes none.
+
+
+## Fresh Claude config allocation
+
+Before editing, a complete consumer/history review identified avoidable repeated
+numbered temp allocation in `tests/conftest.py::_hermetic_skill_availability`.
+All root test nodes still receive a fresh real empty registry, a private 0700
+root outside their source directory, and function-scoped environment restoration.
+Only allocation changes to stdlib `tempfile.mkdtemp` beneath the existing worker
+basetemp. This avoids a second whole-basetemp scan and current-symlink update for
+each test. No shared directory, missing registry, cache, cleanup relaxation,
+production export, dependency, test deletion or new maintained test is involved.
+History 9bacaa42 (#291) introduced the isolation; 3014107c (#902) removed the old
+first-party registry routing reader. Native SDK environment/config/transcript
+writes still justify fresh per-test storage. Complete present read/write and
+absent/populated override consumers were reviewed before the edit.
+
+A direct deterministic sibling was rejected by independent review: supported
+`tmp_path_retention_policy=failed` removes passed tmp_path roots, permitting
+same-basename reuse while the prior config sibling remains. An isolated actual
+autouse control reproduced one pass/three mkdir collisions. Random unique
+allocation passed same-long-basename controls with both `failed` and `none`.
+An inside-source mutation failed four confinement checks; exact candidate
+restoration passed four. Actual 0700 mode, exact empty JSON, absence of prior
+canary, changed-registry nonreuse and post-teardown environment restoration were
+checked without adding helper-only rows to the maintained suite.
+
+Matched instrumented fixture workload: 8,199 ephemeral cases, four workers,
+ten-case dispatch, Python 3.12.13, same lock/machine and no coverage. Each exercised
+all actual root autouses, checked the above contracts, then wrote a canary and
+changed the registry. Before 13.13s pytest/13.80s wall; after 8.87s/9.32s wall.
+Registry fixture body totals 21.9431→2.0525 worker-seconds; removed numbered
+allocation 20.5954s, 8,199→zero calls. These are fixture
+workload measurements, not covered full-suite or hosted CI savings. The modest
+4.48s wall difference does not establish under-four-minute CI.
+
+Named unchanged consumers/keepers include all twelve `_pin_stack_availability`
+Improve callers, the full real runner `test_run_deep_routes_detected_react_to_react_stack_without_plugin`,
+`test_injected_claude_uses_run_local_transport_for_version_and_main_spawn` (both
+admission-delay rows), `test_audit_options_reach_real_sdk_subprocess_transport`,
+and the native schema-finalization contract where its prerequisite is available.
+Independent prototype review verified only allocation/import/signature changed
+and accepted isolated behavioral controls instead of adding maintained tests.
+Counts remain 8,199 cases/5,361 functions. Focused and ordinary full-hook results
+on the final allocation are recorded in the PR.
+
+Focused final registry consumers passed 319 cases in 68.74s, including Improve,
+integration, deep routing, Claude SDK transport and native finalization. The
+fixture docstring now states native config isolation; obsolete first-party
+routing/import-by-value claims were removed. Only prose changed after the run.

@@ -3,6 +3,7 @@
 import importlib.util
 import os
 import sys
+import tempfile
 import tomllib
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -423,13 +424,11 @@ def _isolate_trace_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _hermetic_skill_availability(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Use an empty plugin registry so stack routing is independent of the host.
+def _hermetic_skill_availability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give native Claude clients a fresh private configuration with an empty registry.
 
-    Tests may override CLAUDE_CONFIG_DIR after this autouse fixture. The data
-    seam covers every flow, including functions imported by value; a missing
-    registry intentionally has different, optimistic routing semantics."""
-    cfg = tmp_path_factory.mktemp("claude-config")
+    Tests may override CLAUDE_CONFIG_DIR after this autouse fixture."""
+    cfg = Path(tempfile.mkdtemp(prefix=f"{tmp_path.name}-claude-config-", dir=tmp_path.parent))
     (cfg / "plugins").mkdir()
     (cfg / "plugins" / "installed_plugins.json").write_text('{"plugins": {}}')
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
