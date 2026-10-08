@@ -569,8 +569,17 @@ supported versions; migrate the callable to accept this kwarg and declare
   explicit capability its `diff_path` remains a real diff file and adjacent
   `hunk-index.json` remains a real index, with their original semantics. They are
   never aliases for a bundle. Bundle reading supplies supporting context only.
-  `supporting_parts` exposes targeted bounded Structure diff projections where
-  exact transport permits them. Inline omissions remain honestly unavailable.
+  `supporting_catalog` exposes targeted bounded Structure diff projections where
+  exact transport permits them. Its exact pointer leads to bounded 12,000-byte
+  JSON catalogs containing `parts` (`file`, existing `target_id`, exact `path`)
+  or `catalogs` (exact child `path`, `part_count`). The full part inventory remains
+  available without repeating every pointer in the initial prompt. Every catalog
+  and part is captured supporting input through `ArtifactSession`; no directory
+  access is granted. Inline omissions remain honestly unavailable.
+  Recipe-capable Structure omits duplicate source projection paths, retaining
+  concrete before/after ranges and native selectors for file and canonical part
+  IDs. `context_availability` summarizes complete source/part/catalog counts;
+  explicit partial and unavailable statuses remain in `context_statuses`.
 - `response_contract` carries the strict invocation schema and explicit
   four-key skeleton. Triage targets are exactly `[]`; discovery candidates may
   be nonempty with `candidate_id: ""`. Independent identity, snapshot, grounds

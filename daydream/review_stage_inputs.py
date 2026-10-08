@@ -275,10 +275,49 @@ class StageInputFactory:
         atomic_write_bytes(path, text.encode(), fsync=True, dir_fsync=True, mode=0o600)
         return path
 
+    def _supporting_catalog(
+        self, directory: Path, entries: list[dict[str, Any]],
+    ) -> tuple[Path, dict[str, Path]]:
+        """Publish a bounded exact-pointer catalog without exposing a directory grant."""
+        captured: dict[str, Path] = {}
+        ordinal = 0
+
+        def write_groups(key: str, values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            nonlocal ordinal
+            groups: list[list[dict[str, Any]]] = []
+            current: list[dict[str, Any]] = []
+            for value in values:
+                if len(_json({key: [value]}).encode()) > 12_000:
+                    raise SanctionedInputUnavailable('supporting catalog entry exceeds its bounded allowance')
+                if current and len(_json({key: [*current, value]}).encode()) > 12_000:
+                    groups.append(current)
+                    current = []
+                current.append(value)
+            if current or not groups:
+                groups.append(current)
+            result: list[dict[str, Any]] = []
+            for group in groups:
+                label = f'supporting-catalog-{ordinal:06d}'
+                ordinal += 1
+                path = self._write(directory / f'{label}.json', _json({key: group}))
+                captured[label] = path
+                result.append({'path': str(path), 'part_count': (
+                    len(group) if key == 'parts' else sum(child['part_count'] for child in group))})
+            return result
+
+        level = write_groups('parts', entries)
+        while len(level) > 1:
+            following = write_groups('catalogs', level)
+            if len(following) >= len(level):
+                raise SanctionedInputUnavailable('supporting catalog cannot fit its bounded index')
+            level = following
+        return Path(level[0]['path']), captured
+
     def _source_windows(self, parts: list[_Part], directory: Path,
-                        statuses: list[dict[str, Any]]) -> SourceRecipe:
+                        statuses: list[dict[str, Any]], *, required_windows: bool | None = None) -> SourceRecipe:
         """Freeze side-specific source, with bounded enclosing context for large parts."""
         windows: list[SourceWindow] = []
+        frozen: dict[tuple[str, str], tuple[str, bytes]] = {}
         for part in parts:
             assignment = part.assignment
             path = assignment['file']
@@ -322,7 +361,10 @@ class StageInputFactory:
                     continue
                 revision = self.binding['analyzed_revision']['merge_base_sha' if side == 'before' else 'head_sha']
                 try:
-                    oid, raw = frozen_source(self.work.repo, revision, source_path)
+                    key = (revision, source_path)
+                    if key not in frozen:
+                        frozen[key] = frozen_source(self.work.repo, revision, source_path)
+                    oid, raw = frozen[key]
                 except GitError:
                     if side == required_side:
                         raise SourceAccessUnavailable('required frozen source is unavailable') from None
@@ -344,13 +386,14 @@ class StageInputFactory:
                     side='before' if side == 'before' else 'after', revision=revision,
                     content_sha256=hashlib.sha256(raw).hexdigest(), blob_oid=oid,
                     start_line=start_line, end_line=end_line, start_byte=start, end_byte=end, body=body,
-                    read_required=side == required_side,
+                    read_required=side == required_side if required_windows is None else required_windows,
                 )
                 # Reuse one full source projection across multiple units in this invocation.
                 same = next((i for i, prior in enumerate(windows)
                              if replace(prior, target_ids=window.target_ids, projection=None) == window), None)
                 if same is not None:
-                    windows[same] = replace(windows[same], target_ids=(*windows[same].target_ids, *window.target_ids))
+                    windows[same] = replace(windows[same], target_ids=tuple(dict.fromkeys(
+                        (*windows[same].target_ids, *window.target_ids))))
                     continue
                 if self.transport is SanctionedInputTransport.EXACT_PATHS:
                     projection = self._write(directory / f'source-{len(windows):06d}.txt', body)
@@ -465,8 +508,19 @@ class StageInputFactory:
                 else {'label': 'review-assignment', 'transport': 'inline'})
         deferred_paths = {label: self._write(directory / f'{label}.patch', text)
                           for label, text in deferred_contents.items()}
+        catalog_paths: dict[str, Path] = {}
+        if deferred_paths:
+            catalog_entries = [{'file': part.assignment['file'], 'target_id': part.assignment['target_id'],
+                                'path': str(deferred_paths[f'diff-part-{index:06d}'])}
+                               for index, part in enumerate(self.parts)]
+            catalog, catalog_paths = self._supporting_catalog(directory, catalog_entries)
+            state['supporting_catalog'] = {'path': str(catalog), 'part_count': len(catalog_entries),
+                                           'status': 'complete', 'read_required': False}
         assigned_source_files = {part.assignment['file'] for part in parts}
-        recipe = self._source_windows(parts, directory, statuses)
+        compact_structure = state['stage'] == 'integration' and self.bundle_capable
+        source_parts = [*parts, *self.parts] if compact_structure else parts
+        recipe = self._source_windows(source_parts, directory, statuses,
+                                      required_windows=False if compact_structure else None)
         # The shared selector preserves required priority and uses the actual
         # transport allowance. Reuse existing identity-bound artifacts instead
         # of copying advisory bytes or following an unchecked symlink.
@@ -494,12 +548,14 @@ class StageInputFactory:
             aggregate += captured.size
             paths[label] = path
         paths.update(deferred_paths)
+        paths.update(catalog_paths)
         paths.update({f'source-{index:06d}': window.projection for index, window in enumerate(recipe.windows)
                       if window.projection is not None})
         prepared = prepare_sanctioned_inputs(self.backend, self.work.repo, paths, read_only=self.read_only,
                                              source_recipe=recipe)
         prepared = replace(prepared, inputs=tuple(replace(item, prompt_visible=False)
-                                                  if item.label in deferred_paths else item
+                                                  if item.label in deferred_paths or item.label in catalog_paths
+                                                  else item
                                                   for item in prepared.inputs))
         if self.bundle_capable and self.transport is SanctionedInputTransport.EXACT_PATHS:
             # Whole small shared artifacts travel in the prompt within the same
@@ -524,15 +580,19 @@ class StageInputFactory:
         self.current_paths = {**legacy_paths, **paths}
         declared_status = {item['label'] for item in statuses}
         statuses.extend({"label": label, "status": "complete"} for label in paths if label not in declared_status)
+        if compact_structure:
+            state['context_availability'] = {
+                'source_windows': len(recipe.windows), 'supporting_parts': len(deferred_paths),
+                'supporting_catalogs': len(catalog_paths),
+            }
+            statuses = [status for status in statuses if status['status'] != 'complete' or
+                        not (status['label'].startswith('source-') or status['label'] in deferred_paths
+                             or status['label'] in catalog_paths)]
         state.update(context_inputs=list(paths), context_transport=prepared.transport.value, context_statuses=statuses,
                      canonical_input_identities=self.binding['canonical_inputs'])
         if deferred_paths:
-            state['supporting_parts'] = [{'file': part.assignment['file'],
-                                          'target_id': part.assignment['target_id'],
-                                          'path': str(deferred_paths[f'diff-part-{index:06d}'])}
-                                         for index, part in enumerate(self.parts)]
             state['context_inputs'] = [label for label in paths if label not in deferred_paths
-                                        and not label.startswith('source-')]
+                                      and label not in catalog_paths and not label.startswith('source-')]
         state['source_access'] = [self._source_access(window) for window in recipe.windows
                                   if window.file in assigned_source_files]
         state['available_source_files'] = {
@@ -545,6 +605,9 @@ class StageInputFactory:
                                        if key in {'target_ids', 'file', 'source_path', 'side', 'start_line', 'end_line',
                                                   'start_byte', 'end_byte', 'access'}} | {'read_required': False}
                                       for entry in state['source_access']]
+            if getattr(self.backend, 'supports_source_recipe', False) is True:
+                for entry in state['source_access']:
+                    entry['access'].pop('path', None)
         units = sum(len(batch) for batch in self.assignment_batches)
         decided = set(state.get('completed_target_ids', []))
         remaining = [part for part in self.parts if part.assignment['target_id'] not in decided]

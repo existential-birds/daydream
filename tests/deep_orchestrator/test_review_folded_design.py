@@ -55,7 +55,11 @@ async def test_structure_fulfils_folded_design_duty_after_early_docs_or_propagat
         assert 'store.py' in inventory and 'service.py' in inventory
         yield ToolStartEvent(id='interaction-inventory', name='Read', input={'file_path': str(bundle)})
         yield ToolResultEvent(id='interaction-inventory', output=inventory, is_error=False)
-        deferred, = [part for part in stage['supporting_parts'] if part['file'] == 'service.py']
+        catalog_path = stage['supporting_catalog']['path']
+        catalog_body = Path(catalog_path).read_text()
+        yield ToolStartEvent(id='supporting-catalog', name='Read', input={'file_path': catalog_path})
+        yield ToolResultEvent(id='supporting-catalog', output=catalog_body, is_error=False)
+        deferred, = [part for part in json.loads(catalog_body)['parts'] if part['file'] == 'service.py']
         diff = Path(deferred['path']).read_text()
         assert 'class Service:' in diff
         yield ToolStartEvent(id='service-supporting-diff', name='Read', input={'file_path': deferred['path']})
@@ -114,9 +118,98 @@ async def test_structure_fulfils_folded_design_duty_after_early_docs_or_propagat
     phases = {phase['phase']: phase for phase in data['terminal_result']['phase_outcomes']}
     assert phases['alternatives']['status'] == ('failed' if syntax_failure else 'complete')
     event, = stage_ends(review, 'structure')
-    assert event['metadata']['attempt'] == 1 and event['metadata']['observed_tool_starts'] == 4
+    assert event['metadata']['attempt'] == 1 and event['metadata']['observed_tool_starts'] == 5
     if syntax_failure:
         assert phases['alternatives']['reason_codes'] == ['malformed_output']
         assert event['metadata']['failure_class'] == 'syntax_failure'
         coverage = json.loads((repo / '.daydream/deep/review-coverage.json').read_text())
         assert coverage['diagnostics']['scopes']['structure'] in coverage['diagnostics']['phases']['alternatives']
+
+
+@pytest.mark.parametrize('wired', [False, True], ids=['whole-change-defect', 'whole-change-clean'])
+async def test_structure_initial_prompt_is_compact_with_complete_bounded_supporting_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wired: bool,
+) -> None:
+    import ast
+
+    from tests.deep_orchestrator.test_review_native_capacity import _workload
+    from tests.deep_orchestrator.test_review_native_sources import NativeSourceBackend
+
+    before, after = _workload(wired)
+    for index in range(5):
+        path = f'00_context_{index}.md'
+        before[path] = '# Request boundary\n'
+        after[path] = before[path] + 'Preserve the dry-run request boundary.\n'
+    repo = tmp_path / 'large_interaction'
+    seed_feature_branch(repo, base=before, feature=after)
+    review = InvestigationRun(repo, tmp_path, monkeypatch)
+    review.backend = NativeSourceBackend(repo)
+    title = 'Whole-change request construction drops the parsed dry-run flag'
+    judged: list[bool] = []
+    prompt_sizes: list[int] = []
+
+    def catalog(path: Path, found: list[dict[str, Any]]) -> Iterable[AgentEvent]:
+        raw = path.read_text()
+        assert len(raw.encode()) <= 12_000
+        yield ToolStartEvent(id=f'catalog-{path.name}', name='Read', input={'file_path': str(path)})
+        yield ToolResultEvent(id=f'catalog-{path.name}', output=raw, is_error=False)
+        data = json.loads(raw)
+        if 'parts' in data:
+            found.extend(data['parts'])
+        else:
+            for child in data['catalogs']:
+                yield from catalog(Path(child['path']), found)
+
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        if stage['scope_id'] != 'structure':
+            return
+        prompt_sizes.append(len(review.backend.calls[-1]['prompt'].encode()))
+        assert prompt_sizes[-1] < 70_683
+        assert len(stage['assigned_files']) == 47 and stage['assigned_target_ids'] == ['integration:structure']
+        assert stage['folded_alternatives'] is True
+        assert 'supporting_parts' not in stage
+        assert all('path' not in window['access'] for window in stage['source_access'])
+        found: list[dict[str, Any]] = []
+        yield from catalog(Path(stage['supporting_catalog']['path']), found)
+        assert len(found) == stage['supporting_catalog']['part_count'] > 90
+        assert {part['file'] for part in found} == set(stage['assigned_files'])
+        producer, consumer = 'package_0/module_00.py', 'package_8/module_40.py'
+        deferred, = [part for part in found if part['file'] == consumer]
+        raw = Path(deferred['path']).read_text()
+        assert 'def build_request(options)' in raw
+        yield ToolStartEvent(id='late-supporting-diff', name='Read', input={'file_path': deferred['path']})
+        yield ToolResultEvent(id='late-supporting-diff', output=raw, is_error=False)
+        bodies: dict[str, str] = {}
+        recipe = review.backend.calls[-1]['source_recipe']
+        for path in (producer, consumer):
+            source = recipe.selector(path, 'after')
+            assert source is not None
+            bodies[path] = source.body
+            yield ToolStartEvent(id=f'whole-source-{path}', name='read_source',
+                                 input={'target_id': path, 'side': 'after'})
+            yield ToolResultEvent(id=f'whole-source-{path}', is_error=False,
+                                  output=json.dumps({'source': source.metadata(), 'body': source.body}))
+        producer_tree = ast.parse(bodies[producer])
+        assert any(isinstance(node, ast.FunctionDef) and node.name == 'parse_flags' for node in producer_tree.body)
+        consumer_tree = ast.parse(bodies[consumer])
+        fn = next(node for node in consumer_tree.body if isinstance(node, ast.FunctionDef)
+                  and node.name == 'build_request')
+        returned = fn.body[0]
+        assert isinstance(returned, ast.Return) and isinstance(returned.value, ast.Dict)
+        carries = any(isinstance(key, ast.Constant) and key.value == 'dry_run' for key in returned.value.keys)
+        judged.append(carries)
+        output['notes'] = 'The parsed option was traced into the returned request across the complete inventory.'
+        if not carries:
+            finding = {'id': 1, 'file': consumer, 'line': 4, 'severity': 'medium', 'confidence': 'MEDIUM',
+                       'description': title, 'rationale': 'The parser creates a dry-run field absent from the request.',
+                       'evidence': f'{producer}: defines dry_run; {consumer}:4 returns an empty request.'}
+            output['candidates'] = [{'candidate_id': '', 'file': consumer, 'line': 4,
+                                     'trigger': 'Parse --dry-run and build the request',
+                                     'consequence': 'The request loses the dry-run flag',
+                                     'grounds': finding['evidence'],
+                                     'disposition': 'confirmed', 'finding': finding}]
+
+    review.backend.stage_response = response
+    await review.finish('structure', findings=(title,) if not wired else ())
+    assert judged == [wired] and len(prompt_sizes) == 1
+    assert all(event['metadata']['admitted'] for event in stage_ends(review, 'structure'))

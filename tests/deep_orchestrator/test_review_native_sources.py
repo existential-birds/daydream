@@ -697,3 +697,55 @@ async def test_added_nonregular_source_has_typed_access_failure_before_provider(
         assert len(phases) == 1
         metadata = phases[0]['metadata']
         assert judged == ['world'] and metadata['admitted'] and metadata['fresh_source_reads'] > 0
+
+
+@pytest.mark.parametrize('defective', [False, True], ids=['unchanged-dependency-clean', 'open-dependency-confirmed'])
+async def test_open_unchanged_dependency_reaches_source_grounded_empty_target_triage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defective: bool,
+) -> None:
+    repo = tmp_path / 'dependency_triage'
+    dependency = 'def greeting():\n    return ' + ('"universe"\n' if defective else '"world"\n')
+    api = 'from dependency import greeting\nEXPECTED = "world"\nassert greeting() == EXPECTED\n'
+    seed_feature_branch(repo, base={'api.py': api, 'dependency.py': dependency},
+                        feature={'api.py': api + '# Preserve the greeting contract.\n'})
+    review = InvestigationRun(repo, tmp_path, monkeypatch)
+    review.backend = NativeSourceBackend(repo)
+    title = 'Unchanged greeting dependency violates the retained caller contract'
+    decisions: list[tuple[str, str]] = []
+
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        if stage['scope_id'] != 'python':
+            return
+        for path in ('api.py', 'dependency.py'):
+            body = (repo / path).read_text()
+            yield ToolStartEvent(id=f'{stage["stage"]}-{path}', name='Read', input={'file_path': path})
+            yield ToolResultEvent(id=f'{stage["stage"]}-{path}', output=body, is_error=False)
+        tree = ast.parse(dependency)
+        fn = tree.body[0]
+        assert isinstance(fn, ast.FunctionDef) and isinstance(fn.body[0], ast.Return)
+        assert isinstance(fn.body[0].value, ast.Constant) and isinstance(fn.body[0].value.value, str)
+        actual = fn.body[0].value.value
+        decisions.append((stage['stage'], actual))
+        assert 'EXPECTED = "world"' in (repo / 'api.py').read_text()
+        if actual == 'world':
+            output['notes'] = 'The unchanged dependency preserves the retained world contract.'
+            return
+        finding = {'id': 1, 'file': 'dependency.py', 'line': 2, 'severity': 'medium', 'confidence': 'MEDIUM',
+                   'description': title, 'rationale': 'The retained API requires world from greeting.',
+                   'evidence': 'dependency.py:2 returns universe; api.py:2-3 requires world.'}
+        candidate_id = '' if stage['stage'] == 'first_pass' else stage['assigned_candidate_ids'][0]
+        if stage['stage'] == 'triage':
+            assert stage['assigned_target_ids'] == output['targets'] == []
+            assert stage['assigned_files'] == ['dependency.py']
+        output['candidates'] = [{'candidate_id': candidate_id, 'file': 'dependency.py', 'line': 2,
+                                 'trigger': 'Run the retained caller assertion', 'consequence': 'AssertionError',
+                                 'grounds': finding['evidence'],
+                                 'disposition': 'open' if stage['stage'] == 'first_pass' else 'confirmed',
+                                 'finding': None if stage['stage'] == 'first_pass' else finding}]
+        output['notes'] = 'The actual dependency return contradicts the retained caller expectation.'
+
+    review.backend.stage_response = response
+    await review.finish('python', findings=(title,) if defective else ())
+    assert decisions == ([('first_pass', 'universe'), ('triage', 'universe')] if defective
+                         else [('first_pass', 'world')])
+    assert all(event['metadata']['admitted'] for event in stage_ends(review, 'python'))

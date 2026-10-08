@@ -307,6 +307,15 @@ def _review_stage_context(review_stage: dict[str, Any], *, intent_authoritative:
             "and binding, then reuse that supporting content; separate legacy diff/index reads are "
             "unnecessary for this bundle-capable builder."
         )
+    if review_stage.get('supporting_catalog'):
+        bundle += (
+            ' The optional supporting_catalog provides the complete exact file/target/pointer inventory '
+            'for deferred bounded diff parts. Read its supplied exact pointer and bounded child catalogs '
+            'only when relevant supporting parts are needed. Use their explicitly listed pointers; '
+            'do not infer siblings or enumerate host storage. Catalogs and diff parts remain supporting, '
+            'never source receipts. Source selectors in source_access also expose existing canonical '
+            'part IDs for bounded before/after context beyond a large file prefix.'
+        )
     authority = (
         "\n" + AUTHORITATIVE_INTENT_BLOCK
         if intent_authoritative and "intent" in labels else ""

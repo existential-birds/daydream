@@ -438,7 +438,7 @@ class ReviewInvestigation:
             return 'evidence_incomplete'
         reviewed_ids = {target['target_id'] for target in declared_targets
                         if target.get('status') == 'reviewed' and isinstance(target.get('target_id'), str)}
-        reviewed_files = (files if stage == 'integration' and reviewed_ids else
+        reviewed_files = ([] if not reviewed_ids else files if stage == 'integration' else
                           [path for path in files if any(target in reviewed_ids
                                                         for target in self.required_targets[path])])
         candidate_files = _candidate_source_files(decisions)

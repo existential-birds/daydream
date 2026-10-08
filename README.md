@@ -690,6 +690,12 @@ assignment input. API-7 custom builders retain real legacy diff/index files unle
 they explicitly opt in. Structure receives a compact whole-change inventory and
 targeted bounded supporting parts; its interaction and default design duties
 remain whole-change reviews. Supporting reads remain distinct from source reads.
+An optional catalog exposes those exact part pointers on demand through bounded
+12,000-byte files, with complete file/target inventory and no directory grant.
+Recipe-capable Structure uses native source selectors instead of duplicating
+projection paths in its initial prompt, including canonical part selectors for
+late before-side context. Complete availability is summarized; partial and
+unavailable inputs remain explicit.
 Complete verified windows from successful clean stages are retained and can cover
 later work in the same reviewer/snapshot, including an exact union of read ranges.
 Failed attempts and opaque or uncovered ranges cannot supply reuse. Every new
