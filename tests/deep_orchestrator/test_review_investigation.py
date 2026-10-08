@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator, Callable, Iterable
 from pathlib import Path
 from typing import Any
@@ -363,9 +364,22 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
         )
     review = many_file_review(tmp_path, monkeypatch, count=5 if stop == 'deadline' else 17)
     backend = review.backend
+    dispatch_deadlines: list[float] = []
+    deadline_test_wall_s = 60
 
     if stop == 'deadline':
-        backend.stage_delay = lambda stage: (20.0 if stage['progress'] else 0.1) if stage['scope_id'] == 'python' else 0
+        def delay_later_provider(stage: dict[str, Any]) -> float:
+            if stage['scope_id'] != 'python':
+                return 0
+            allowance = re.search(r'Hard reviewer allowance: at most ([\d.e+-]+) seconds',
+                                  backend.calls[-1]['prompt'])
+            assert allowance is not None
+            dispatch_deadlines.append(asyncio.get_running_loop().time() + float(allowance[1]))
+            # Leave real Git preparation and the first admission unstalled. The
+            # later provider alone outlives the existing absolute deadline.
+            return deadline_test_wall_s * 2 if stage['progress'] else 0
+
+        backend.stage_delay = delay_later_provider
 
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         if stage['scope_id'] == 'python':
@@ -392,7 +406,8 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
 
     backend.stage_response = response
     overrides: dict[str, Any] = (
-        {'review_profile': _profile_with_pipeline(review_wall_budget_s=10)} if stop == 'deadline' else {}
+        {'review_profile': _profile_with_pipeline(review_wall_budget_s=deadline_test_wall_s)}
+        if stop == 'deadline' else {}
     )
     data = await review.finish('python', reason=reason, findings=('Grounded defect',), **overrides)
     assert scopes(data)['structure']['status'] == 'complete'
@@ -406,6 +421,10 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
         ('timed_out', 'timed_out') if stop == 'deadline' else ('failed', 'domain_failure'))
     assert [stage['stage'] for stage in backend.stages if stage['scope_id'] == 'python'] == (
         ['first_pass'] if stop == 'builder' else ['first_pass'] * 2)
+    if stop == 'deadline':
+        assert len(dispatch_deadlines) == 2
+        assert dispatch_deadlines[1] == pytest.approx(dispatch_deadlines[0], abs=0.5)
+        assert asyncio.get_running_loop().time() >= dispatch_deadlines[0] - 0.5
 
 
 @pytest.mark.parametrize(('decision', 'reason'), [
