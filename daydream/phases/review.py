@@ -476,8 +476,8 @@ async def phase_per_stack_reviews(
                 build_structural_prompt,
             )
             builder = active_registry.prompt(prompt_name)
-            bundle_capable = (builder in {build_generic_fallback_prompt, build_per_stack_prompt,
-                                          build_structural_prompt}
+            builtin_builders = (build_generic_fallback_prompt, build_per_stack_prompt, build_structural_prompt)
+            bundle_capable = (any(builder is builtin for builtin in builtin_builders)
                               or getattr(builder, 'review_input_bundle', False) is True)
             shared_paths = {"intent": intent_path, "alternatives": alternatives_path if include_alternatives else None}
             if exploration_dir is not None:

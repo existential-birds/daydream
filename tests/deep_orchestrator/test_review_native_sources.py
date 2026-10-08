@@ -654,3 +654,46 @@ async def test_pi_bounded_read_representation_preserves_real_source_range_union_
         assert metadata['fresh_source_reads'] == 2 and metadata['source_body_bytes'] == len(body.encode())
     else:
         assert metadata['failure_class'] in {'source_access_failure', 'capture_loss'}
+
+
+@pytest.mark.parametrize('symlink', [False, True], ids=['regular-source', 'unavailable-nonregular-source'])
+async def test_added_nonregular_source_has_typed_access_failure_before_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, symlink: bool,
+) -> None:
+    repo = tmp_path / 'source_mode'
+    body = 'def greeting():\n    return "world"\n'
+    seed_feature_branch(repo, base={'target.py': body}, feature={'target.py': body + '# feature context\n'})
+    if symlink:
+        (repo / 'api.py').symlink_to('target.py')
+    else:
+        (repo / 'api.py').write_text(body)
+    git(repo, 'add', 'api.py')
+    git(repo, 'commit', '-m', 'add public source')
+    review = InvestigationRun(repo, tmp_path, monkeypatch)
+    review.backend = NativeSourceBackend(repo)
+    judged: list[str] = []
+
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        if stage['scope_id'] != 'python':
+            return
+        tree = ast.parse((repo / 'api.py').read_text())
+        fn, = tree.body
+        assert isinstance(fn, ast.FunctionDef) and isinstance(fn.body[0], ast.Return)
+        assert isinstance(fn.body[0].value, ast.Constant)
+        assert isinstance(fn.body[0].value.value, str)
+        judged.append(fn.body[0].value.value)
+        output['notes'] = 'The added greeting preserves its world return contract.'
+
+    review.backend.stage_response = response
+    data = await review.finish('python', reason='evidence_incomplete' if symlink else None)
+    phases = stage_ends(review, 'python')
+    if symlink:
+        assert judged == [] and not any(s['scope_id'] == 'python' for s in review.backend.stages)
+        assert not phases
+        coverage = json.loads((repo / '.daydream/deep/review-coverage.json').read_text())
+        assert coverage['diagnostics']['scopes']['python'].startswith('Frozen source access unavailable or rejected:')
+        assert scopes(data)['structure']['reason_codes'] == ['evidence_incomplete']
+    else:
+        assert len(phases) == 1
+        metadata = phases[0]['metadata']
+        assert judged == ['world'] and metadata['admitted'] and metadata['fresh_source_reads'] > 0

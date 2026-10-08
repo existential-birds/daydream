@@ -1164,3 +1164,46 @@ async def test_retargeted_finding_requires_its_actual_file_source_as_well_as_can
     assert event['metadata']['admitted'] is read_finding
     assert event['metadata']['observed_tool_starts'] == (2 if read_finding else 1)
     assert event['metadata']['schema_rejection'] is None
+
+
+@pytest.mark.parametrize('bundle_capable', [False, True], ids=['legacy-files', 'explicit-bundle'])
+async def test_api_seven_unhashable_callable_override_runs_each_real_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, bundle_capable: bool,
+) -> None:
+    ext_dir.write_module(
+        'from dataclasses import dataclass\n'
+        'from daydream.deep.prompts import build_per_stack_prompt\n'
+        '@dataclass\n'
+        'class Builder:\n'
+        f'    review_input_bundle: bool = {bundle_capable!r}\n'
+        '    def __call__(self, *, strategy, stack_name, files, diff_path, intent_path, alternatives_path, '
+        'output_path, cwd, exploration_dir=None, prior_commits=None, inline_diff=None, '
+        'intent_authoritative=False, include_alternatives=True, frontier_files=None, review_stage=None):\n'
+        '        args = dict(locals()); del args["self"]\n'
+        '        return build_per_stack_prompt(**args) + "\\nUNHASHABLE_API7_OVERRIDE"\n'
+        'def register(r): r.override_prompt("per-stack", Builder())\n', api_version=7,
+    )
+    review = source_review(tmp_path, monkeypatch, source_bytes=400, files=5)
+    invocations: list[list[str]] = []
+
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        if stage['scope_id'] != 'python':
+            return
+        prompt = review.backend.calls[-1]['prompt']
+        assert 'UNHASHABLE_API7_OVERRIDE' in prompt
+        supporting = supporting_contents(prompt)
+        assert supporting['diff'].startswith('diff --git ')
+        assert isinstance(json.loads(supporting['hunk-index']), dict)
+        assert ('review-assignment' in stage['context_inputs']) is bundle_capable
+        invocations.append(stage['assigned_files'])
+        for path in stage['assigned_files']:
+            body = (review.repo / path).read_text()
+            assert ("return 'universe'" in body) if path == 'api.py' else 'VALUE = 1' in body
+            yield from read_source(review, path, f'callable-source-{path}')
+        output['notes'] = 'The changed source declarations preserve their assigned value contract.'
+
+    review.backend.stage_response = response
+    await review.finish('python')
+    assert len(invocations) == 2
+    assert {path for files in invocations for path in files} == {'api.py', *(f'module_{i:02}.py' for i in range(4))}
+    assert all(event['metadata']['admitted'] for event in stage_ends(review, 'python'))

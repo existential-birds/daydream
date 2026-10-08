@@ -13,7 +13,7 @@ from daydream.artifact_visibility import ArtifactSession, artifact_dir_for
 from daydream.backends import Backend
 from daydream.deep.detection import StackAssignment
 from daydream.deep.diff import _DIFF_MINUS_HEADER, _DIFF_PLUS_HEADER, iter_diff_blocks
-from daydream.git_ops.models import PathAbsentError
+from daydream.git_ops.models import GitError
 from daydream.git_ops.queries import ls_tree_files
 from daydream.git_ops.source import frozen_source
 from daydream.hunk_index import _HUNK_HEADER, _unquote_git_path
@@ -275,7 +275,8 @@ class StageInputFactory:
         atomic_write_bytes(path, text.encode(), fsync=True, dir_fsync=True, mode=0o600)
         return path
 
-    def _source_windows(self, parts: list[_Part], directory: Path) -> SourceRecipe:
+    def _source_windows(self, parts: list[_Part], directory: Path,
+                        statuses: list[dict[str, Any]]) -> SourceRecipe:
         """Freeze side-specific source, with bounded enclosing context for large parts."""
         windows: list[SourceWindow] = []
         for part in parts:
@@ -322,9 +323,11 @@ class StageInputFactory:
                 revision = self.binding['analyzed_revision']['merge_base_sha' if side == 'before' else 'head_sha']
                 try:
                     oid, raw = frozen_source(self.work.repo, revision, source_path)
-                except PathAbsentError:
+                except GitError:
                     if side == required_side:
                         raise SourceAccessUnavailable('required frozen source is unavailable') from None
+                    statuses.append({'label': f'source-{side}', 'file': path, 'side': side,
+                                     'status': 'unavailable', 'read_required': False})
                     continue
                 try:
                     raw.decode('utf-8')
@@ -463,7 +466,7 @@ class StageInputFactory:
         deferred_paths = {label: self._write(directory / f'{label}.patch', text)
                           for label, text in deferred_contents.items()}
         assigned_source_files = {part.assignment['file'] for part in parts}
-        recipe = self._source_windows(parts, directory)
+        recipe = self._source_windows(parts, directory, statuses)
         # The shared selector preserves required priority and uses the actual
         # transport allowance. Reuse existing identity-bound artifacts instead
         # of copying advisory bytes or following an unchecked symlink.
