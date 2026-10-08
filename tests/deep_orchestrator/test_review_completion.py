@@ -10,7 +10,7 @@ from typing import Any, cast
 import pytest
 
 from daydream import git_ops, json_utils, runner
-from daydream.backends import MaxTurnsError, ResultEvent, TextEvent, ToolStartEvent
+from daydream.backends import AgentEvent, MaxTurnsError, ResultEvent, TextEvent, ToolStartEvent
 from daydream.dataset import LocalRecordStore
 from daydream.findings import FindingsValidationError, load_findings_artifact
 from daydream.phases import findings
@@ -20,7 +20,7 @@ from tests.harness.console import collapse_panel_text
 from tests.harness.dataset import read_records
 from tests.harness.fake_clock import FakeClock
 from tests.harness.git_helpers import git
-from tests.harness.stub_backend import review_stage_result, review_stage_state
+from tests.harness.stub_backend import completed_stage_reads, review_stage_result, review_stage_state
 from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipeline, _record
 
 
@@ -127,12 +127,22 @@ async def test_outcomes(review: ReviewRun, archive_dir: Path, case: str, state: 
 
 
 @pytest.mark.parametrize(('mode', 'reason'), [('missing', 'missing_output'), ('malformed', 'malformed_output'),
-                                             ('invalid', 'malformed_output'), ('fallback', None)])
+                                             ('invalid', 'malformed_output'),
+                                             ('rejected-native', 'malformed_output'), ('text-only', None)])
 async def test_schema_output(review: ReviewRun, mode: str, reason: str | None) -> None:
-    payload = {'missing': None, 'invalid': {'issues': [{'id': 1}, 'invalid']}}.get(mode, {'unexpected': []})
-    review.backend.responder = lambda p: [TextEvent(text=json.dumps(review_stage_result(p, []))
-        if mode == 'fallback' else ''),
-        ResultEvent(structured_output=payload, continuation=None)] if 'python stack' in p.lower() else None
+    payload = {'missing': None, 'text-only': None, 'invalid': {'issues': [{'id': 1}, 'invalid']}}.get(
+        mode, {'unexpected': []})
+
+    def response(prompt: str) -> list[AgentEvent] | None:
+        state = review_stage_state(prompt)
+        if state is None or state['scope_id'] != 'python':
+            return None
+        return [*completed_stage_reads(review.repo, state),
+                TextEvent(text=json.dumps(review_stage_result(prompt, []))
+                          if mode in {'text-only', 'rejected-native'} else ''),
+                ResultEvent(structured_output=payload, continuation=None)]
+
+    review.backend.responder = response
     assert await review.run() == 0
     data = review.load()
     assert data['terminal_result']['analysis_state'] == ('complete' if reason is None else 'incomplete')

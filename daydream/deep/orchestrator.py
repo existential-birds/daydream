@@ -31,7 +31,7 @@ from daydream.deep.artifacts import (
     per_stack_records_path,
 )
 from daydream.deep.dependency import build_import_graph
-from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
+from daydream.deep.detection import GENERIC_STACK, StackAssignment, base_stack_name, detect_stacks
 from daydream.deep.diagram_steps import _diagram_mode_for, _resolved_diagram_mode, _step_diagram, _step_post_diagram
 from daydream.deep.diff import _diff_changed_files, bound_deep_diff
 from daydream.deep.fix_steps import (
@@ -679,7 +679,7 @@ async def run_deep(
             recorder.session_id,
             AnalyzedRevision(captured_head, captured_base, current_diff_sha,
                              pr_base_sha),
-            [PlannedScope(stack.stack_name, stack.stack_name.split("#", 1)[0],
+            [PlannedScope(stack.stack_name, base_stack_name(stack.stack_name),
                           files=tuple(sorted(stack.files)),
                           shard=int(stack.stack_name.split("#", 1)[1]) if "#" in stack.stack_name else None)
              for stack in stacks] if not no_diff else [],

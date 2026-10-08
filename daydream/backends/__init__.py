@@ -854,6 +854,9 @@ class ResultEvent:
     finish_reason: str | None = None
     duration_ms: float | None = None
     duration_api_ms: float | None = None
+    # Emulated schemas may select a fragment from assistant text. Staged callers
+    # validate that original final turn rather than trusting fragment selection.
+    structured_output_origin: Literal["native", "text"] = "native"
 
 
 AgentEvent = (

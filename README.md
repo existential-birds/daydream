@@ -426,7 +426,7 @@ There is no environment-variable tier. `DAYDREAM_MODEL` and `DAYDREAM_BACKEND` a
 
 ### Extensions
 
-A fork can extend daydream. A top-level `daydream_ext` package exposes a `register(registry)` function. The function can add phases, reorder flow steps, override prompts, and register stack rules. The extension API is version 6. Verify an extension with `daydream ext validate`. See [docs/extensions.md](docs/extensions.md).
+A fork can extend daydream. A top-level `daydream_ext` package exposes a `register(registry)` function. The function can add phases, reorder flow steps, override prompts, and register stack rules. The extension API is version 7. Verify an extension with `daydream ext validate`. See [docs/extensions.md](docs/extensions.md).
 
 ## Configuration
 
@@ -643,18 +643,36 @@ profile keeps its configured whole-review deadline. Set
 `pipeline.review_wall_budget_s` in a `--review-profile` TOML file to change it.
 Per-stack reviewers share eight minutes and 48 observed tool starts across stages.
 Language and generic reviewers receive directory-grouped batches of at most four
-files and 16 KiB of changed hunks (an oversized file remains an explicit assignment); Structure
+files, sized to the 12,288-byte inline input allowance including wrappers, scoped
+diff/index and snapshot bindings. Exact-path transport uses the same assignments.
+Oversized files split into hunks; oversized hunks split into ordered continuations
+with old/new ranges and exact fragment offsets. Every required part must succeed
+before its file is complete. Structure
 starts with whole-change interaction and boundary review, with documentation as
 supporting context. Each invocation receives a fresh prompt for its assigned work,
 followed by a finite triage round for open candidates. Stage call targets are
 advisory: useful work may borrow the reviewer's remaining cumulative allowance.
 The hard allowance and absolute deadline do not reset between stages or retries.
-Retries consume the same allowances; the host publishes findings from successful
-stages, retaining typed incomplete coverage when a later invocation fails.
-Reads alone never establish reviewed coverage. Source reads should stay targeted,
-with complete enclosing symbols read in bounded segments; clipped or omitted
-evidence cannot substantiate a candidate. Successful handoffs remain compact
-within the existing evidence limits. Other roles retain
+One fresh full-stage attempt is permitted after a normally completed invocation
+fails typed strict schema validation. Its prompt contains only safe validator
+metadata; rejected output is never repaired, stripped or continued. Required
+capture loss, aborts, unknown IDs and other admission failures are terminal.
+Retries consume the same allowances and obtain source evidence anew; the host
+publishes findings from successful stages, retaining typed incomplete coverage
+when a later invocation fails.
+Reads alone never establish reviewed coverage, including empty-candidate claims.
+Completed associated source receipts are retained separately from compact views:
+2 MiB per result and 8 MiB across a reviewer's live and admitted captures,
+including bounded receipt metadata. These bounds cover the investigated captured
+workload's largest result (159,126 bytes) and 3,561,955 bytes of observed outputs
+across the entire run with substantial room; they are host
+resource limits, not new model allowances. Compact output/handoff views keep their
+12,000/48,000-byte limits and explicitly mark partial excerpts. Native truncation,
+missing association, failed required reads and full-retention overflow remain
+incomplete evidence. Supporting diff, index, intent and exploration inputs never
+establish source coverage; their compact clipping does not invalidate complete
+source receipts. Triage receives only relevant admitted compact evidence and may
+make targeted rereads within the existing allowance. Other roles retain
 bounded finalization. The existing 60-minute review ceilings remain outer
 safeguards; fix turns retain their separate 30-minute limit.
 

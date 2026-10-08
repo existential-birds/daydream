@@ -413,6 +413,27 @@ def _render_tool_result(result: Any) -> str:
     return json.dumps(result, ensure_ascii=False) if result else ""
 
 
+def _tool_completion_metadata(event: dict[str, Any]) -> dict[str, Any]:
+    """Retain explicit native completion fields; rendered notices are not authority."""
+    result = event.get('result')
+    result = result if isinstance(result, dict) else {}
+    details = result.get('details')
+    details = details if isinstance(details, dict) else {}
+    truncation = details.get('truncation')
+    truncation = truncation if isinstance(truncation, dict) else {}
+    structured = result.get('structuredContent')
+    structured = structured if isinstance(structured, dict) else {}
+    exit_code = structured.get('exit_code', result.get('exit_code', event.get('exit_code')))
+    status = event.get('status', result.get('status'))
+    return {
+        'exit_code': exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) else None,
+        'status': status if isinstance(status, str) else None,
+        'cancelled': event.get('cancelled') is True or result.get('cancelled') is True,
+        'truncated': (truncation.get('truncated') is True or truncation.get('firstLineExceedsLimit') is True
+                      or structured.get('truncated') is True or result.get('truncated') is True),
+    }
+
+
 def _extract_usage(message: dict[str, Any]) -> dict[str, Any]:
     """Pull token + cost fields out of a Pi ``AssistantMessage``.
 
@@ -728,6 +749,7 @@ class PiBackend:
                     provider_name=last_provider,
                     session_id=native_session,
                     finish_reason=finish_reason,
+                    structured_output_origin="text",
                 ),
             )
 
@@ -949,6 +971,7 @@ class PiBackend:
                         id=event.get("toolCallId") or str(uuid.uuid4()),
                         output=_render_tool_result(event.get("result")),
                         is_error=bool(event.get("isError", False)),
+                        **_tool_completion_metadata(event),
                     )
 
                 elif event_type == "turn_end":

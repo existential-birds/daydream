@@ -10,7 +10,7 @@ from typing import Any
 from daydream.backends import AgentEvent, ResultEvent, ToolStartEvent
 from daydream.config_file import DaydreamFileConfig
 from daydream.run_config import RunConfig
-from tests.harness.stub_backend import StubBackend, review_stage_result
+from tests.harness.stub_backend import StubBackend, completed_stage_reads, review_stage_result, review_stage_state
 
 
 class EmptyReviewBackend(StubBackend):
@@ -62,8 +62,13 @@ class EmptyReviewBackend(StubBackend):
                 return
             if stack == self.fail_stack:
                 raise self.stack_error
-            yield ResultEvent(structured_output=review_stage_result(prompt, self.review_by_stack.get(stack, [])),
-                              continuation=None)
+            state = review_stage_state(prompt)
+            output = review_stage_result(prompt, self.review_by_stack.get(stack, []))
+            if state is not None:
+                files = sorted(set(state['assigned_files']) | {item['file'] for item in output['candidates']})
+                for event in completed_stage_reads(cwd, {**state, 'assigned_files': files}):
+                    yield event
+            yield ResultEvent(structured_output=output, continuation=None)
             return
         if "would you have done this differently" in lower or "evaluate the implementation" in lower:
             self.calls.append({"prompt": prompt, "model": self.model})

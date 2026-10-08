@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 import anyio
 import pytest
 
+from daydream import git_ops
 from daydream.backends import (
     AgentEvent,
     ContinuationToken,
@@ -30,6 +32,22 @@ def review_stage_state(prompt: str) -> dict[str, Any] | None:
     _, marker, payload = prompt.partition("Host review stage:\n")
     state: dict[str, Any] | None = json.JSONDecoder().raw_decode(payload)[0] if marker else None
     return state
+
+
+def completed_stage_reads(cwd: Path, stage: dict[str, Any]) -> list[AgentEvent]:
+    """Perform the assigned snapshot source reads at the external provider seam."""
+    events: list[AgentEvent] = []
+    for path in stage['assigned_files']:
+        if (cwd / path).is_file():
+            call = ToolStartEvent(id=f'source-{path}', name='Read', input={'file_path': path})
+            source = (cwd / path).read_text()
+        else:
+            revision = stage['analyzed_revision']['merge_base_sha']
+            call = ToolStartEvent(id=f'source-{path}', name='Bash',
+                                  input={'command': 'git show ' + shlex.quote(f'{revision}:{path}')})
+            source = git_ops.show(cwd, revision, path).decode("utf-8")
+        events.extend((call, ToolResultEvent(id=call.id, output=source, is_error=False)))
+    return events
 
 
 def stage_result(stage: dict[str, Any], *, candidates: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -273,7 +291,7 @@ class StubBackend:
         """Split the comma-separated Assigned files marker in a scope instruction."""
         state = review_stage_state(prompt)
         if state is not None:
-            return [target for target in state["assigned_target_ids"] if not target.startswith("integration:")]
+            return [str(path) for path in state["assigned_files"]]
         m = re.search(r"Assigned files:\s*([^\n]+)", prompt)
         if m is None:
             return []
@@ -465,12 +483,7 @@ class StubBackend:
         if stack_label is None and "you are the structural reviewer" in pl:
             stack_label = "structure"
         if stack_label is not None:
-            if self.per_stack_emit_reads:
-                scope_files = self._stack_scope_files(prompt)
-                for scope_file in scope_files:
-                    yield ToolStartEvent(id=f"read-{scope_file}", name="Read", input={"file_path": scope_file})
-                    # Budget recovery retains only completed source reads.
-                    yield ToolResultEvent(id=f"read-{scope_file}", output="file content", is_error=False)
+            state = review_stage_state(prompt)
             out_match = re.search(r"write your full review to (\S+)", prompt, flags=re.IGNORECASE)
             if out_match is not None:
                 raw = out_match.group(1).rstrip(".")
@@ -489,9 +502,21 @@ class StubBackend:
                 ), "file": "api.py", "line": 1, "severity": self.parse_severity or "medium", "confidence": "MEDIUM",
                 "rationale": "stub", "evidence": "api.py:1",
             }
+            if state is not None and not (cwd / 'api.py').is_file():
+                issue.update(file=state['assigned_files'][0], evidence=f"{state['assigned_files'][0]}:1")
             issues: list[dict[str, Any]] = self._apply_parse_by_stack_override(prompt, issue)
+            payload = review_stage_result(prompt, issues)
+            if state is not None:
+                files = sorted(set(state['assigned_files']) | {item['file'] for item in payload['candidates']})
+                for event in completed_stage_reads(cwd, {**state, 'assigned_files': files}):
+                    yield event
+            elif self.per_stack_emit_reads:
+                for scope_file in self._stack_scope_files(prompt):
+                    yield ToolStartEvent(id=f"read-{scope_file}", name="Read", input={"file_path": scope_file})
+                    yield ToolResultEvent(id=f"read-{scope_file}", output=(cwd / scope_file).read_text(),
+                                          is_error=False)
             yield TextEvent(text="")
-            yield ResultEvent(structured_output=review_stage_result(prompt, issues), continuation=None,)
+            yield ResultEvent(structured_output=payload, continuation=None,)
             return
 
         # Echo arbiter IDs with keep=True; stamp descriptions so revisions remain

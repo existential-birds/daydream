@@ -14,7 +14,7 @@ from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
 from tests.deep_orchestrator.test_review_completion import ReviewRun, record, scopes
 from tests.harness.git_helpers import seed_feature_branch
-from tests.harness.stub_backend import review_stage_state, stage_result
+from tests.harness.stub_backend import completed_stage_reads, review_stage_state, stage_result
 from tests.test_deep_orchestrator import _profile_with_pipeline, _sanctioned_inputs
 
 
@@ -29,6 +29,7 @@ class StagedBackend(EmptyReviewBackend):
             Callable[[dict[str, Any], dict[str, Any]], Iterable[AgentEvent] | None] | None
         ) = None
         self.stage_delay: Callable[[dict[str, Any]], float] | None = None
+        self.default_source_reads = True
 
     async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         stage = review_stage_state(prompt)
@@ -39,8 +40,13 @@ class StagedBackend(EmptyReviewBackend):
             if self.stage_delay is not None:
                 await asyncio.sleep(self.stage_delay(stage))
             output = stage_result(stage)
+            emitted = False
             if self.stage_response is not None:
                 for event in self.stage_response(stage, output) or ():
+                    emitted = True
+                    yield event
+            if not emitted and self.default_source_reads:
+                for event in completed_stage_reads(cwd, stage):
                     yield event
             yield ResultEvent(structured_output=output, continuation=None)
             return
@@ -85,7 +91,6 @@ def candidate(*, disposition: str = 'open', candidate_id: str = '',
     ('omitted', 'malformed_output'), ('read-all', 'malformed_output'),
     ('handoff-bytes', 'evidence_incomplete'), ('handoff-items', 'evidence_incomplete'),
     ('missing-grounds', 'evidence_incomplete'), ('truncated-grounds', 'evidence_incomplete'),
-    ('oversized-output', 'evidence_incomplete'), ('aggregate-output', 'evidence_incomplete'),
     ('unmatched-output', 'evidence_incomplete'),
 ])
 async def test_invalid_stage_declarations_and_evidence_do_not_establish_coverage(
@@ -111,14 +116,9 @@ async def test_invalid_stage_declarations_and_evidence_do_not_establish_coverage
             yield ToolStartEvent(id='read', name='Read', input={'file_path': 'api.py'})
             yield ToolResultEvent(id='read', output=(investigation.repo / 'api.py').read_text(), is_error=False,
                                   truncated=fault == 'truncated-grounds')
-        elif fault in {'oversized-output', 'aggregate-output', 'unmatched-output'}:
-            for index in range(6 if fault == 'aggregate-output' else 1):
-                if fault != 'unmatched-output':
-                    yield ToolStartEvent(id=f'evidence-{index}', name='Read', input={'file_path': 'api.py'})
-                yield ToolResultEvent(id=f'evidence-{index}', is_error=False,
-                                      output=(investigation.repo / 'api.py').read_text()
-                                      + f'# segment {index}\n'
-                                      + 'x' * (13_000 if fault == 'oversized-output' else 8_000))
+        elif fault == 'unmatched-output':
+            yield ToolResultEvent(id='unmatched-source', is_error=False,
+                                  output=(investigation.repo / 'api.py').read_text())
 
     investigation.backend.stage_response = response
     data = await investigation.finish('python', reason=reason, statuses=('incomplete', 'failed'))
@@ -312,9 +312,10 @@ async def test_each_stage_builder_receives_current_assignment_and_bounded_triage
             else:
                 pointers = _sanctioned_inputs(call['prompt'])
                 assert set(pointers) == set(stage['context_inputs'])
-                for index, path in enumerate(pointers.values()):
-                    yield ToolStartEvent(id=f'context-{index}', name='Read', input={'file_path': str(path)})
-                    yield ToolResultEvent(id=f'context-{index}', output=path.read_text(), is_error=False)
+                for label in ('diff', 'hunk-index'):
+                    path = pointers[label]
+                    yield ToolStartEvent(id=f'context-{label}', name='Read', input={'file_path': str(path)})
+                    yield ToolResultEvent(id=f'context-{label}', output=path.read_text(), is_error=False)
             assigned_line = next(line for line in prose.splitlines() if 'Assigned files:' in line)
             assert assigned_line.split('Assigned files:', 1)[1].strip() == ', '.join(stage['assigned_files'])
             assert stage['candidates'] == []
@@ -484,7 +485,7 @@ async def test_cross_file_integration_preserves_cumulative_spend_and_flag_eviden
                                        input={'file_path': name, 'parallel_member': i})
                 observations.append(event)
                 yield event
-                if stage['stage'] == 'integration' and i < 2:
+                if stage['stage'] == 'integration':
                     yield ToolResultEvent(id=event.id, output=(review.repo / name).read_text(), is_error=False)
             if (stage['stage'] == 'integration'
                     and "options['dry_run']" not in (review.repo / 'z_request.py').read_text()):
@@ -501,8 +502,8 @@ async def test_cross_file_integration_preserves_cumulative_spend_and_flag_eviden
     assert set(scopes(data)) == {'python', 'generic', 'structure'}
     assert len(observations) == (97 if cutoff else 18)
     metadata = [event['metadata'] for event in stage_ends(review, 'structure')]
-    assert metadata[-1]['observed_tool_starts'] == (97 if cutoff else 18)
-    assert metadata[-1]['remaining_tool_calls'] == (0 if cutoff else 78)
+    assert metadata[-1]['observed_tool_starts'] == (97 if cutoff else 19)
+    assert metadata[-1]['remaining_tool_calls'] == (0 if cutoff else 77)
     stages = [stage for stage in backend.stages if stage['scope_id'] == 'structure']
     assert [stage['stage'] for stage in stages] == ['integration', 'triage']
     assert all(stage['advisory_tool_call_target'] <= stage['remaining_tool_calls'] for stage in stages)
@@ -527,14 +528,25 @@ async def test_failed_retry_discards_poisoned_progress_but_charges_every_observe
             attempts += 1
             # Starts arrive together before any completion, as parallel members may.
             for index in range(2 if attempts == 1 else 3):
-                yield ToolStartEvent(id=f'attempt-{attempts}-{index}', name='Read', input={'file_path': 'api.py'})
+                if attempts == 2 and index == 0:
+                    yield ToolStartEvent(id=f'attempt-{attempts}-{index}', name='Bash',
+                                        input={'command': 'cat ' + ' '.join(stage['assigned_files'])})
+                else:
+                    yield ToolStartEvent(id=f'attempt-{attempts}-{index}', name='Read',
+                                        input={'file_path': 'api.py'})
             if attempts == 1:
                 yield ToolResultEvent(id='attempt-1-0', output='poisoned incomplete evidence', is_error=False)
                 yield ResultEvent(structured_output=stage_result(stage, candidates=[
                     candidate(disposition='confirmed', finding=record())]), continuation=None)
                 raise TransportFailure('retryable provider transport failure')
+            for index in range(3):
+                source = (''.join((review.repo / path).read_text() for path in stage['assigned_files'])
+                          if index == 0 else (review.repo / 'api.py').read_text())
+                yield ToolResultEvent(id=f'attempt-{attempts}-{index}', output=source, is_error=False)
         elif stage['scope_id'] == 'python':
-            assert stage['observed_tool_starts'] == 5 and stage['remaining_tool_calls'] == 91
+            assert stage['observed_tool_starts'] >= 5
+            if len(stage['progress']) == 4:
+                assert stage['observed_tool_starts'] == 5 and stage['remaining_tool_calls'] == 91
             assert stage['candidates'] == []
             assert all('poisoned' not in note for note in stage['notes'])
         elif stage['scope_id'] == 'structure':
@@ -544,6 +556,9 @@ async def test_failed_retry_discards_poisoned_progress_but_charges_every_observe
     backend.stage_response = response
     data = await review.finish('python')
     assert attempts == 2
+    assert stage_ends(review, 'python')[0]['metadata']['observed_tool_starts'] == 5
+    assert stage_ends(review, 'python')[-1]['metadata']['observed_tool_starts'] == 18
+    assert stage_ends(review, 'python')[-1]['metadata']['remaining_tool_calls'] == 78
     assert all(scope['status'] == 'complete' for scope in scopes(data).values())
     python_stages = [stage for stage in backend.stages if stage['scope_id'] == 'python']
     assert all(stage['stage'] == 'first_pass' for stage in python_stages)
@@ -588,8 +603,9 @@ async def test_runner_cancellation_closes_stream_and_does_not_admit_an_aborted_c
 
     def admitted(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         if stage['scope_id'] == 'python':
-            yield ToolStartEvent(id='admitted-read', name='Read', input={'file_path': 'api.py'})
-            yield ToolResultEvent(id='admitted-read', output=(review.repo / 'api.py').read_text(), is_error=False)
+            for path in stage['assigned_files']:
+                yield ToolStartEvent(id=f'admitted-{path}', name='Read', input={'file_path': path})
+                yield ToolResultEvent(id=f'admitted-{path}', output=(review.repo / path).read_text(), is_error=False)
             output['candidates'] = [candidate(disposition='confirmed', finding=record())]
 
     backend.stage_response = admitted
@@ -608,33 +624,5 @@ async def test_runner_cancellation_closes_stream_and_does_not_admit_an_aborted_c
     completed, interrupted = stage_ends(review, 'python')
     assert completed['metadata']['admitted'] is True
     assert interrupted['metadata']['admitted'] is False
-    assert interrupted['metadata']['observed_tool_starts'] == 2
+    assert interrupted['metadata']['observed_tool_starts'] == 5
     assert not review.output.exists()
-
-
-@pytest.mark.parametrize('oversized', [False, True])
-async def test_batches_use_complete_diff_weights_and_preserve_explicit_oversized_work(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, oversized: bool,
-) -> None:
-    before = {'api.py': 'VALUE = 0\n', 'module_00.py': 'VALUE = 0\n'}
-    after = {'api.py': "VALUE = '" + 'x' * (60_000 if oversized else 28_000) + "'\n",
-             'module_00.py': "VALUE = '" + 'y' * (3 if oversized else 28_000) + "'\n"}
-    repo = tmp_path / 'weighted_diff'
-    seed_feature_branch(repo, base=before, feature=after)
-    review = InvestigationRun(repo, tmp_path, monkeypatch)
-    backend = review.backend
-
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
-        if oversized and stage['scope_id'] == 'python':
-            if stage['assigned_target_ids'] == ['api.py']:
-                output['targets'][0].update(status='not_reviewed', reason='Oversized diff needs more targeted reads.')
-            else:
-                assert stage['progress'] == [{'target_id': 'api.py', 'status': 'not_reviewed',
-                                             'reason': 'Oversized diff needs more targeted reads.'}]
-
-    backend.stage_response = response
-    await review.finish('python', reason='evidence_incomplete' if oversized else None)
-    stages = [stage for stage in backend.stages if stage['scope_id'] == 'python']
-    assert [stage['assigned_target_ids'] for stage in stages] == [['api.py'], ['module_00.py']]
-    assert all(stage['advisory_tool_call_target'] <= stage['remaining_tool_calls'] for stage in stages)
-    assert len((repo / '.daydream/diff.patch').read_bytes()) > 48 * 1024

@@ -30,8 +30,11 @@ def _confidence_and_convention_instructions(*, stage_scoped: bool = False) -> st
         "- MEDIUM: consistent with the Exploration Context but not pinned to a specific entry.\n\n"
     )
     grounding = (
-        "Only report candidates grounded in completed source evidence for the assigned work. "
-        "Supporting context can explain intent and conventions, but does not replace source evidence. "
+        "Ground every reviewed assertion, including clean targets with no candidates, in complete "
+        "associated source evidence for the assigned file/hunk parts. Supporting context can explain "
+        "intent and conventions, but does not replace source evidence. Compact excerpts marked "
+        "partial may omit complete retained receipt content; use targeted rereads when needed for "
+        "judgment. Free-form source citations do not authenticate their association to a receipt. "
         if stage_scoped else
         "You are reviewing AI-generated code. Be strict. Only report an issue you can ground "
         "in evidence — the diff itself or a specific Exploration Context entry. "
@@ -90,7 +93,8 @@ def _dependency_impact_instructions(*, stage_scoped: bool = False) -> str:
     (issue #1445). The heading is kept only as a stable capability label.
     """
     scope = (
-        "Apply dependency-impact analysis only to changed symbols in the current assigned files/hunks. "
+        "Apply dependency-impact analysis only to changed symbols in the current assigned file/hunk "
+        "parts, including ordered continuation segments where present. "
         "Other paths are supporting context only for concrete candidates in that assigned work:\n"
         if stage_scoped else
         "Apply dependency-impact analysis to every changed symbol listed in the Exploration "

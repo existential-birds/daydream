@@ -13,6 +13,7 @@ from daydream.agent import (
 )
 from daydream.artifact_visibility import (
     ArtifactSession,
+    ArtifactVisibilityError,
     artifact_session_active,
 )
 from daydream.backends import (
@@ -28,7 +29,7 @@ from daydream.deep.artifacts import (
     per_stack_review_path,
     write_review_markdown,
 )
-from daydream.deep.detection import GENERIC_STACK, StackAssignment
+from daydream.deep.detection import GENERIC_STACK, StackAssignment, base_stack_name
 from daydream.deep.records import (
     stamp_record_uids,
 )
@@ -40,7 +41,6 @@ from daydream.deep.reuse_key import (
 )
 from daydream.deep.reuse_store import ReuseCache
 from daydream.deep.review_reuse import ReviewReuseUnit
-from daydream.diagnostics import exception_text
 from daydream.extensions import Registry, get_registry
 from daydream.hunk_index import load_hunk_index
 from daydream.json_utils import validates_schema
@@ -55,10 +55,9 @@ from daydream.phases.inputs import (
 from daydream.phases.schemas import ALTERNATIVE_REVIEW_SCHEMA, PER_STACK_RECORD_SCHEMA
 from daydream.prompt_budget import (
     INLINE_DIFF_BUDGET_BYTES,
-    AdvisoryCandidate,
-    PreparedSanctionedInputs,
+    SanctionedInputTransport,
     fits_inline_diff_budget,
-    select_advisory_inputs,
+    sanctioned_transport_for,
     truncate_utf8_to_budget,
     uses_diff_reference,
 )
@@ -70,6 +69,7 @@ from daydream.review_budget import (
 from daydream.review_evidence import FinalizationContext
 from daydream.review_investigation import ReviewInvestigation
 from daydream.review_result import ReasonCode, ReviewCoverage, reason_for_budget, reason_for_exception
+from daydream.review_stage_inputs import StageInputFactory
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.test_execution import (
     load_test_recipe,
@@ -107,7 +107,8 @@ async def phase_understand_intent(
     # Codex clones retain bounded inline summary/diff fallback.
     read_only_disposable_clone = getattr(backend, "read_only_disposable_clone", False)
     inline_diff: str | None
-    if read_only_disposable_clone and diff_text and not fits_inline_diff_budget(diff_text):
+    inline_transport = sanctioned_transport_for(backend, work.repo, read_only=True) is SanctionedInputTransport.INLINE
+    if inline_transport and diff_text and not fits_inline_diff_budget(diff_text):
         # Clone runs cannot read gitignored artifact pointers. Keep the inline diff
         # self-contained within the shared budget, including its truncation marker.
         inline_diff = truncate_utf8_to_budget(
@@ -431,9 +432,6 @@ async def phase_per_stack_reviews(
     """
     active_registry = registry if registry is not None else get_registry()
     run_context = resolve_run_context(run_context)
-    # Prompt builders import phases, so keep this import local.
-    from daydream.deep.diff import _diff_blocks_for_files
-
     deep_dir_path = deep_dir(work.repo, session=artifact_session, allow_standalone=allow_standalone)
     recipe_for_prompts = load_test_recipe(deep_dir_path)
     recorder = get_current_recorder()
@@ -447,11 +445,6 @@ async def phase_per_stack_reviews(
         effective_fanout_concurrency(10, backend)
     )
     prior_commits = git_ops.daydream_commits(work.repo, work.base_branch)
-    common_inputs: dict[str, Path | None] = {
-        "hunk-index": diff_path.parent / "hunk-index.json",
-        "intent": intent_path,
-        "alternatives": alternatives_path if include_alternatives else None,
-    }
     read_only = uses_diff_reference(backend, work.repo, read_only=True)
 
     hunk_index = load_hunk_index(deep_dir_path.parent)
@@ -470,26 +463,15 @@ async def phase_per_stack_reviews(
     ) as dispatch:
         async def _review_stack_impl(stack: "StackAssignment") -> None:
             output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
-            inline_diff = (
-                _diff_blocks_for_files(diff_text, stack.files)
-                if not read_only and diff_text is not None and stack.stack_name != STRUCTURE_STACK_NAME else None
-            )
-            # Shared context is advisory and admitted whole. In particular INLINE
-            # transports cannot silently truncate exploration and call it evidence.
-            shared_paths = {"intent": intent_path, **common_inputs}
-            shared_paths.update(_budgeted_exploration_inputs(
-                exploration_dir, backend=backend, cwd=work.repo, read_only=read_only,
-            ))
-            selection = select_advisory_inputs(
-                backend, work.repo,
-                [AdvisoryCandidate(label, path) for label, path in shared_paths.items()
-                 if path is not None],
-                read_only=read_only,
-            )
-            stack_sanctioned_inputs = _prepare_existing_phase_inputs(
-                backend, work,
-                selection.selected_paths() | ({} if inline_diff is not None else {"diff": diff_path}),
-                capture_without_session=True, read_only=read_only,
+            shared_paths = {"intent": intent_path, "alternatives": alternatives_path if include_alternatives else None}
+            if exploration_dir is not None:
+                shared_paths.update({"exploration-summary": exploration_dir / "summary.md",
+                                     "exploration-affected-files": exploration_dir / "affected_files.md"})
+            input_factory = StageInputFactory(
+                backend, work, stack, diff_path=diff_path,
+                hunk_index_path=diff_path.parent / "hunk-index.json", shared_paths=shared_paths,
+                revision=coverage.revision.to_dict(), artifact_session=artifact_session,
+                allow_standalone=allow_standalone, read_only=read_only,
             )
             reuse_unit: ReviewReuseUnit | None = None
             if reuse_cache is not None and phase_identity is not None:
@@ -498,7 +480,7 @@ async def phase_per_stack_reviews(
                     files=stack.files,
                     frontier_files=_frontier_files_for_stack(stack),
                     docs_only=stack.is_docs_only,
-                    diff_path_or_hunks=diff_text,
+                    diff_path_or_hunks=input_factory.full_diff,
                     hunk_index=hunk_index,
                     exploration_dir=exploration_dir,
                     worktree_root=work.repo,
@@ -538,11 +520,11 @@ async def phase_per_stack_reviews(
                     ui.print_warning(agent.console,
                                      f"Cached records for {stack.stack_name} are invalid; rerunning review")
             per_stack_records_path(deep_dir_path, stack.stack_name).unlink(missing_ok=True)
-            pointer_dir = _pointer_dir(stack_sanctioned_inputs, exploration_dir)
+            base_stack = base_stack_name(stack.stack_name)
             prompt_name, strategy_name = {
                 STRUCTURE_STACK_NAME: ("structural", "discovery.structural"),
                 GENERIC_STACK: ("generic-fallback", "discovery.generic_fallback"),
-            }.get(stack.stack_name, ("per-stack", "discovery.per_stack"))
+            }.get(base_stack, ("per-stack", "discovery.per_stack"))
             prompt_args: dict[str, Any] = {
                 "strategy": strategies[strategy_name],
                 "files": stack.files,
@@ -551,7 +533,7 @@ async def phase_per_stack_reviews(
                 "alternatives_path": alternatives_path,
                 "output_path": output_path,
                 "cwd": work.repo,
-                "exploration_dir": pointer_dir,
+                "exploration_dir": None,
                 "prior_commits": prior_commits,
                 "intent_authoritative": intent_authoritative,
                 "include_alternatives": include_alternatives,
@@ -559,8 +541,8 @@ async def phase_per_stack_reviews(
             # Structural review ranges over the whole repository and therefore
             # keeps the diff pointer. Language and generic scopes can inline hunks.
             if stack.stack_name != STRUCTURE_STACK_NAME:
-                prompt_args.update(inline_diff=inline_diff, frontier_files=_frontier_files_for_stack(stack))
-                if stack.stack_name == GENERIC_STACK:
+                prompt_args.update(inline_diff=None, frontier_files=_frontier_files_for_stack(stack))
+                if base_stack == GENERIC_STACK:
                     prompt_args["is_docs_only"] = stack.is_docs_only
                 else:
                     prompt_args["stack_name"] = stack.stack_name
@@ -569,32 +551,22 @@ async def phase_per_stack_reviews(
                 # assignment rather than a terminal whole-stack review.
                 stage_args = dict(prompt_args)
                 stage_args["files"] = stage["assigned_files"]
-                stage_args["review_stage"] = {
-                    **stage,
-                    "context_inputs": ([] if stage["stage"] == "triage" else
-                                       [item.label for item in stack_sanctioned_inputs.inputs]
-                                       if stack_sanctioned_inputs is not None else []),
-                    "context_transport": (stack_sanctioned_inputs.transport.value
-                                          if stack_sanctioned_inputs is not None else "inline"),
-                }
-                if stack.stack_name != STRUCTURE_STACK_NAME:
-                    stage_args["inline_diff"] = (
-                        _diff_blocks_for_files(diff_text, stage["assigned_files"])
-                        if inline_diff is not None and diff_text is not None and stage["stage"] != "triage"
-                        else None
-                    )
-                    # Cross-shard pointers are optional supporting context, never
-                    # an instruction to inspect another assignment independently.
-                    if stage["stage"] == "triage":
-                        stage_args["frontier_files"] = []
+                stage_args["review_stage"] = stage
+                paths = input_factory.current_paths
+                stage_args.update(
+                    diff_path=paths.get("diff", Path("unavailable-stage-diff")),
+                    intent_path=paths.get("intent", Path("unavailable-intent")),
+                    alternatives_path=paths.get("alternatives", Path("unavailable-alternatives")),
+                    output_path=Path("host-owned-review-output"),
+                )
+                if stack.stack_name != STRUCTURE_STACK_NAME and stage["stage"] == "triage":
+                    stage_args["frontier_files"] = []
                 prompt = active_registry.prompt(prompt_name)(**stage_args)
                 prompt = append_extended_facts(prompt, recipe_for_prompts)
                 return prompt + "\n\nHost review stage:\n" + json.dumps(
                     stage_args["review_stage"], ensure_ascii=False,
                 )
 
-            def stage_inputs(stage: dict[str, Any]) -> PreparedSanctionedInputs | None:
-                return None if stage["stage"] == "triage" else stack_sanctioned_inputs
             stack_name = stack.stack_name
             structured: Any = None
             budget_reason: str | None = None
@@ -603,20 +575,21 @@ async def phase_per_stack_reviews(
                     async with maybe_fork(
                         recorder, f"deep-{stack_name}", dispatch=dispatch,
                     ):
-                        investigation = ReviewInvestigation(stack, diff_path.read_text(encoding="utf-8"),
-                                                            coverage.revision.to_dict())
+                        investigation = ReviewInvestigation(
+                            stack, input_factory.full_diff, coverage.revision.to_dict(),
+                            assignment_batches=input_factory.assignment_batches,
+                        )
                         structured, budget_reason = await investigation.run(
                             backend, work.repo, build_stage_prompt,
-                            stage_inputs=stage_inputs,
+                            stage_inputs=input_factory.prepare,
                             wall_budget_s=phase_config.REVIEW_WALL_BUDGET_S,
-                            sanctioned_inputs=stack_sanctioned_inputs,
                             read_only=read_only,
                             run_context=run_context,
                         )
                 except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
                     coverage.record_scope(stack_name, "failed",
                         reasons=(reason_for_exception(e),),
-                        diagnostic=f"{type(e).__name__}: {exception_text(e) or '(unavailable)'}")
+                        diagnostic=f"{type(e).__name__}: reviewer invocation failed ({reason_for_exception(e).value})")
                     return
                 if budget_reason:
                     try:
@@ -632,7 +605,7 @@ async def phase_per_stack_reviews(
                     coverage.record_scope(stack_name, status, reasons=(reason,),
                                           partial_evidence=investigation.admitted_stages > 0,
                                           diagnostic=(investigation.failure_diagnostic
-                                                      or f"budget exhausted: {budget_reason}"))
+                                                      or f"review stopped: {reason.value}"))
                     if status == "failed":
                         return
                 if not validates_schema(structured, PER_STACK_RECORD_SCHEMA):
@@ -656,7 +629,7 @@ async def phase_per_stack_reviews(
                 except (OSError, ValueError, TypeError) as exc:
                     coverage.record_scope(stack_name, "failed",
                         reasons=(*coverage.scopes[stack_name]["reason_codes"], ReasonCode.MALFORMED_ARTIFACT),
-                        diagnostic=f"{type(exc).__name__}: {exception_text(exc) or '(unavailable)'}")
+                        diagnostic=f"{type(exc).__name__}: reviewer artifact publication failed")
                     return
                 results[stack_name] = output_path
                 if budget_reason is None:
@@ -670,10 +643,11 @@ async def phase_per_stack_reviews(
             try:
                 await _review_stack_impl(stack)
             except Exception as exc:  # noqa: BLE001 -- isolate ordinary sibling failures; cancellation propagates
-                reason = (ReasonCode.MALFORMED_ARTIFACT if isinstance(exc, (OSError, ValueError, TypeError))
+                reason = (ReasonCode.MALFORMED_ARTIFACT
+                          if isinstance(exc, (OSError, ValueError, TypeError, ArtifactVisibilityError))
                           else ReasonCode.UNEXPECTED_ANALYSIS_FAILURE)
                 coverage.record_scope(stack.stack_name, "failed", reasons=(reason,),
-                                      diagnostic=f"{type(exc).__name__}: {exception_text(exc) or '(unavailable)'}")
+                                      diagnostic=f"{type(exc).__name__}: review scope failed ({reason.value})")
 
         async with anyio.create_task_group() as tg:
             for stack in stacks:

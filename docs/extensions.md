@@ -540,12 +540,28 @@ supported versions; migrate the callable to accept this kwarg and declare
 - `stage` is `first_pass`, `integration`, or `triage`; `scope_id` and
   `analyzed_revision` bind the work to the public reviewer and frozen snapshot.
 - `assigned_files` and the builder's `files` are the current assignment. Language
-  and generic batches group nearby directories within four files and 16 KiB of
-  changed hunks; a single oversized file remains explicit. `inline_diff`
-  contains only these files' hunks. Other paths are
+  and generic batches group nearby directories within four files and the actual
+  12,288-byte rendered inline input allowance, including wrappers, scoped index
+  and snapshot bindings. Required assignment bytes take priority over shared
+  context. Exact paths carry the same logical assignments. The stage factory
+  reads complete frozen canonical diff/index artifacts and writes bounded inputs
+  atomically through the owning `ArtifactSession`; it never uses a truncated
+  in-memory diff. `diff_path` points at the current stage projection, with its
+  scoped `hunk-index.json`. Sanctioned inline bytes carry that same content;
+  `inline_diff` remains optional. Other paths are
   supporting context for concrete candidates, not additional audit targets.
   Structure begins with a whole-change interaction assignment and the synthetic
-  target `integration:structure`, rather than alphabetical file batches.
+  target `integration:structure`. Its honest compact inventory and bounded
+  supporting diff parts orient boundary traces, rather than alphabetical file
+  batches. Omitted supporting parts are explicitly unavailable.
+- `assignment_parts` describes each required target: `target_id`, `file`,
+  one-based `part_index`, `part_count`, and `kind` (`file`, `hunk`, or
+  `continuation`). Split hunks include zero-based `hunk_index`, `old_start`,
+  `old_count`, `new_start`, and `new_count`. Continuations also carry ordered
+  `segment_index`/`segment_count`, UTF-8 `fragment_offset`/`fragment_bytes`,
+  and `old_line`/`new_line`/`fragment_line_offset` mapping. The ranges identify
+  the parent hunk; a continuation never claims to contain it whole. Every
+  required target must succeed before host file coverage is complete.
 - `assigned_target_ids` must be acknowledged exactly. `assigned_candidate_ids`
   scopes triage; only those candidates and their relevant admitted notes and
   evidence are supplied. `closed_candidate_ids` are handles for reporting
@@ -557,10 +573,37 @@ supported versions; migrate the callable to accept this kwarg and declare
   hard allowance. Native parallel or buffered execution can precede observation.
   The reviewer deadline and total allowance remain unchanged across stages.
 - `context_inputs` lists only admitted sanctioned labels; `context_transport`
-  describes inline bytes or exact paths. Shared intent and exploration are
+  describes inline bytes or exact paths. `context_statuses` records complete,
+  partial or unavailable supporting context. `canonical_input_identities`
+  binds generated inputs to the original artifact hashes and analyzed revision.
+  Shared intent and exploration are
   admitted whole within the transport budget. Missing context is advisory and
   cannot establish evidence; any necessary pointer reads consume tool calls.
   Triage receives admitted candidate context rather than whole-review inputs.
+- `attempt` is 1 or 2, with `max_attempts=2`. Only a normally completed,
+  complete object rejected at the strict schema selection boundary may receive
+  one fresh stage attempt. `schema_rejection` contains bounded validator
+  `category`, host `schema_path`, `error_count`, and `candidate_count`, never
+  rejected values or arbitrary unknown property names. The selected registered
+  builder runs anew for every stage and attempt. Rejected evidence, notes and
+  candidates are discarded; necessary source grounding must be obtained anew.
+  There is no serializer recovery, conversation continuation, reserve, extra
+  calls, deadline reset or `max_turns`. Backend transport retries remain separate.
+
+These fields are additive within API 7; exact callable signatures need no new
+kwargs. Builder/strategy selection uses the canonical base stack (`generic#0`
+routes to `generic-fallback`, `rust#0` retains Rust policy), while public shard
+identity remains intact in coverage, artifacts and UIDs.
+
+`ResultEvent.structured_output_origin` is an additive optional backend field:
+`native` (the default) means an authoritative structured payload; `text` means
+the backend inferred a candidate from assistant text. Staged callers validate
+the complete final assistant turn for text-derived candidates, excluding earlier
+planning/tool-turn prose. Native structured results remain authoritative despite
+prose. The final-turn text buffer is bounded to 128 KiB; overflow is terminal,
+never a truncated candidate or a schema-retry witness. Other consumers retain
+their existing extraction behavior. Pi forwards typed native tool truncation,
+exit, status and cancellation metadata; printed notices are not capture authority.
 
 Build the stage prompt from its assignment and semantic policy. Do not append a
 narrow stage to a conflicting terminal-review prompt. Scope dependency tracing,
@@ -572,16 +615,34 @@ alternatives behavior.
 Stage output must match `daydream.phases.schemas.REVIEW_STAGE_SCHEMA` exactly:
 `targets`, `notes`, `candidates`, and `contradictions`. The host assigns discovery
 candidate IDs and serializes terminal findings; do not request an `issues`
-serializer. Source reads should keep each output below 12,000 bytes and total
-captured evidence below 48,000 bytes, including tool input/status overhead.
-Built-in guidance targets 8,000 bytes per output and 40,000 bytes aggregate to
-leave room for wrappers; these are planning targets, not increased capture limits.
-Read complete enclosing symbols in bounded segments and return compact
-handoffs. Clipping, omitted evidence, schema, identity, snapshot, grounds, and
-contradiction checks remain strict. Failed or cancelled invocations admit no
+serializer. Read complete enclosing symbols in targeted segments. Invocation-local
+complete associated native receipts govern admission independently of compact
+presentation. Full retention is bounded to 2 MiB per result and 8 MiB across live
+and admitted reviewer captures, including bounded metadata; overflow stays typed
+incomplete evidence. Native metadata is bounded to 2 KiB, with a completion
+metadata reservation charged at each start. Full receipt/pending counts are
+bounded to 4,096 (8 MiB / 2 KiB), independently of the compact view's 64 pending
+calls and 128 blocks. These are host memory bounds, not model call allowances.
+Compact views retain the 12,000-byte per-output and
+48,000-byte aggregate caps, with explicit partial/omitted markers. Supporting
+inputs are classified only from revalidated prepared identities, never basenames;
+mixed/opaque calls are treated conservatively. Supporting reads cannot establish
+source coverage. Irrelevant failed searches alone do not invalidate complete source.
+Every reviewed assertion, including an empty-candidate claim, needs complete
+source evidence and explicit valid host-assigned coverage. Free-form citations
+are not authenticated by receipts. Triage sees only relevant admitted partial
+views and may obtain targeted rereads under the same cumulative budget.
+Native capture loss, schema, identity, snapshot, grounds, and contradiction checks
+remain strict. Failed or cancelled invocations admit no
 output, even if they emitted valid JSON before failing; earlier successful-stage
-findings survive with incomplete coverage. Stage-contract changes invalidate
-old complete review cache entries.
+findings survive with incomplete coverage. Every actual attempt records logical
+stage, attempt, observed starts, remaining hard allowance, advisory target,
+admission, safe schema rejection, retained bytes and compact clipping separately
+from native truncation and host retention overflow. Diagnostics distinguish
+quantitative exhaustion, schema rejection, capture loss and admission failure.
+Stage contract **3** invalidates complete contract-2 cache entries. ATIF is
+optional recording, never the admission authority; other evidence finalization
+consumers preserve their existing behavior.
 
 #### `plan-writer` compatibility and output contract
 

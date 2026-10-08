@@ -195,6 +195,17 @@ class ArtifactSession:
         if self._state is not _SessionState.ACTIVE:
             raise ArtifactVisibilityError("artifact session is frozen and no longer writable")
 
+    def write_review_input(self, repo: Path, relative: Path, text: str) -> Path:
+        """Atomically generate a host-named review input inside the owning session."""
+        self._route_repo(repo)
+        if relative.is_absolute() or not relative.parts or any(part in {".", ".."} for part in relative.parts):
+            raise ArtifactVisibilityError("review input name is unsafe")
+        path = self.daydream_dir / "deep" / "stage-inputs" / relative
+        filesystem._validate_projection_ancestry(path, expected_kind="either")
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        filesystem._atomic_bytes(path, text.encode("utf-8"))
+        return path
+
     def _route_repo(self, repo: Path) -> None:
         self._require_active()
         declared = filesystem._absolute_lexical(repo)

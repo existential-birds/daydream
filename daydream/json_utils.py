@@ -8,6 +8,7 @@ import tempfile
 import threading
 from contextlib import suppress
 from dataclasses import asdict, dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Any, Callable
 
@@ -200,6 +201,33 @@ def validates_schema(value: Any, schema: dict[str, Any]) -> bool:
 
 
 @dataclass(frozen=True)
+class SchemaRejection:
+    """Bounded validator metadata whose path belongs to the host schema, never output."""
+
+    category: str
+    schema_path: str
+    error_count: int
+    candidate_count: int = 1
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def schema_rejection(value: Any, schema: dict[str, Any], *, candidate_count: int = 1) -> SchemaRejection | None:
+    """Only a complete object candidate can qualify for a fresh strict-schema attempt."""
+    if not isinstance(value, dict):
+        return None
+    errors = list(islice(Draft202012Validator(schema).iter_errors(value), 128))
+    if not errors:
+        return None
+    first = errors[0]
+    # absolute_schema_path contains only host-authored schema keys and indices;
+    # unlike json_path, it cannot carry arbitrary unknown output property names.
+    path = '/'.join(str(part) for part in first.absolute_schema_path)
+    return SchemaRejection(str(first.validator), path[:512], min(len(errors), 128), min(candidate_count, 128))
+
+
+@dataclass(frozen=True)
 class SchemaAwareSelection:
     """One schema-aware extraction decision plus a content-free rejection trace.
 
@@ -214,6 +242,7 @@ class SchemaAwareSelection:
     candidate_count: int
     rejected_type: str | None
     rejected_reason: str | None
+    rejection: SchemaRejection | None = None
 
 
 def _strip_json_fences(text: str) -> str:
@@ -287,6 +316,7 @@ def extract_json_by_schema(
     *,
     schema: dict[str, Any],
     accept: Callable[[Any, dict[str, Any]], bool],
+    require_complete_root: bool = False,
 ) -> SchemaAwareSelection:
     """Return the *last* candidate in document order that ``accept`` admits.
 
@@ -295,6 +325,16 @@ def extract_json_by_schema(
     a trailing empty result outranks a larger incidental object. A whole text
     that parses but is rejected falls through to the scan.
     """
+    if require_complete_root:
+        try:
+            root = json.loads(_strip_json_fences(text))
+        except (ValueError, TypeError):
+            return SchemaAwareSelection(None, 0, None, None)
+        if accept(root, schema):
+            return SchemaAwareSelection(root, 1, None, None)
+        rejection = schema_rejection(root, schema)
+        reason = f'{rejection.category} at {rejection.schema_path}' if rejection else None
+        return SchemaAwareSelection(None, 1, type(root).__name__, reason, rejection)
     candidates = _json_candidates(text)
     if not candidates:
         return SchemaAwareSelection(None, 0, None, None)
@@ -310,4 +350,14 @@ def extract_json_by_schema(
     for error in Draft202012Validator(schema).iter_errors(largest[1]):
         reason = f"{error.validator} at {error.json_path}"
         break
-    return SchemaAwareSelection(None, len(candidates), type(largest[1]).__name__, reason)
+    rejection = schema_rejection(largest[1], schema, candidate_count=len(candidates))
+    # A nested object decoded from an incomplete outer deliverable is not a
+    # complete structured candidate. Only a whole decoded object qualifies.
+    try:
+        whole = json.loads(_strip_json_fences(text))
+    except (ValueError, TypeError):
+        rejection = None
+    else:
+        if not isinstance(whole, dict):
+            rejection = None
+    return SchemaAwareSelection(None, len(candidates), type(largest[1]).__name__, reason, rejection)

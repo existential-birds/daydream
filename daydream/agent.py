@@ -36,8 +36,10 @@ from daydream.diagnostics import exception_text, sanitize_verbose_message
 from daydream.extensions import get_registry
 from daydream.json_utils import (
     SchemaAwareSelection,
+    SchemaRejection,
     extract_json,
     extract_json_by_schema,
+    schema_rejection,
     validates_schema,
 )
 from daydream.observability.spans import agent_scope, attempt_scope
@@ -255,11 +257,14 @@ class StructuredOutputFailure(str):
 
     reason: str
     detail: str | None
+    rejection: SchemaRejection | None
 
-    def __new__(cls, text: str, reason: str, detail: str | None = None) -> "StructuredOutputFailure":
+    def __new__(cls, text: str, reason: str, detail: str | None = None, *,
+                rejection: SchemaRejection | None = None) -> "StructuredOutputFailure":
         value = super().__new__(cls, text)
         value.reason = reason
         value.detail = detail
+        value.rejection = rejection
         return value
 
 
@@ -526,6 +531,11 @@ async def _run_agent(
     the public run_agent wrapper.
     """
     output_parts: list[str] = []
+    assistant_turn_parts: list[str] = []
+    assistant_turn_bytes = 0
+    assistant_turn_overflow = False
+    completed_assistant_text: str | None = None
+    completed_assistant_overflow = False
     structured_result: Any = None
     result_continuation: ContinuationToken | None = None
     aborted_reason: str | None = None
@@ -615,6 +625,11 @@ async def _run_agent(
                 # pre-backoff break) ends the ladder, so the caller sees only
                 # output from the attempt that actually completed the turn.
                 output_parts = []
+                assistant_turn_parts = []
+                assistant_turn_bytes = 0
+                assistant_turn_overflow = False
+                completed_assistant_text = None
+                completed_assistant_overflow = False
                 structured_result = None
                 result_continuation = None
                 evidence_incomplete = False
@@ -752,14 +767,32 @@ async def _run_agent(
                                         and event.metadata.get("coverage") == "incomplete"):
                                     evidence_incomplete = True
                                 if isinstance(event, TextEvent):
-                                    output_parts.append(event.text)
+                                    if investigation_budget is None:
+                                        output_parts.append(event.text)
+                                    elif event.text:
+                                        size = len(event.text.encode())
+                                        if assistant_turn_bytes + size > 128 * 1024:
+                                            assistant_turn_overflow = True
+                                        else:
+                                            assistant_turn_parts.append(event.text)
+                                            assistant_turn_bytes += size
+                                elif isinstance(event, TurnEndEvent) and investigation_budget is not None:
+                                    completed_assistant_text = ''.join(assistant_turn_parts)
+                                    completed_assistant_overflow = assistant_turn_overflow
+                                    assistant_turn_parts = []
+                                    assistant_turn_bytes = 0
+                                    assistant_turn_overflow = False
                                 elif isinstance(event, ResultEvent):
-                                    structured_result = event.structured_output
+                                    structured_result = (None if investigation_budget is not None
+                                                         and event.structured_output_origin == 'text'
+                                                         else event.structured_output)
                                     result_continuation = event.continuation
                                 if not (
                                     require_full_schema and output_schema is not None
                                     and isinstance(event, ResultEvent)
-                                    and not validates_schema(event.structured_output, output_schema)
+                                    and (not validates_schema(event.structured_output, output_schema)
+                                         or (investigation_budget is not None
+                                             and event.structured_output_origin == 'text'))
                                 ):
                                     await display.observe(event)
                                 if isinstance(event, ToolStartEvent):
@@ -858,6 +891,11 @@ async def _run_agent(
                         # and record any retry overhead already spent.
                         if effective_deadline is not None and clock.monotonic() >= effective_deadline:
                             output_parts = []
+                            assistant_turn_parts = []
+                            assistant_turn_bytes = 0
+                            assistant_turn_overflow = False
+                            completed_assistant_text = None
+                            completed_assistant_overflow = False
                             structured_result = None
                             result_continuation = None
                             aborted_reason = "wall_budget_exceeded"
@@ -1033,6 +1071,14 @@ async def _run_agent(
     if evidence_incomplete and aborted_reason is None and require_full_schema:
         aborted_reason = "evidence_incomplete"
 
+    if investigation_budget is not None:
+        raw = (''.join(assistant_turn_parts) if assistant_turn_parts or assistant_turn_overflow
+               else completed_assistant_text or '')
+        text_overflow = (assistant_turn_overflow if assistant_turn_parts or assistant_turn_overflow
+                         else completed_assistant_overflow)
+    else:
+        raw, text_overflow = ''.join(output_parts), False
+
     def _usable(value: Any) -> bool:
         """Accept explicit validation opt-out or a downstream-salvageable value."""
         return not validate_structured_output or (
@@ -1046,7 +1092,6 @@ async def _run_agent(
         return structured_result, result_continuation, aborted_reason
     selection: SchemaAwareSelection | None = None
     if output_schema is not None:
-        raw = "".join(output_parts)
         # Fallback: robust extraction (prose-wrapped JSON, markdown fences) when
         # structured output failed. Selection is schema-driven rather than
         # size-driven — the last candidate this same gate admits wins — so
@@ -1064,18 +1109,25 @@ async def _run_agent(
         # callers keep largest-span extraction. Everything else narrows to the
         # last candidate its own gate admits, which never widens what is
         # accepted.
-        if raw.strip():
+        # A staged native candidate is authoritative. Rejecting it cannot be
+        # followed by salvaging another text fragment from the same invocation.
+        if raw.strip() and not text_overflow and not (
+            investigation_budget is not None and structured_result is not None
+        ):
             selected: Any = None
             if validate_structured_output:
-                selection = _select_by_schema(raw, output_schema, require_full_schema=require_full_schema)
+                selection = (extract_json_by_schema(raw, schema=output_schema, accept=validates_schema,
+                                                    require_complete_root=True)
+                             if investigation_budget is not None else
+                             _select_by_schema(raw, output_schema, require_full_schema=require_full_schema))
                 selected = selection.value
             else:
                 selected = extract_json(raw)
             if selected is not None and _usable(selected):
                 return selected, result_continuation, aborted_reason
-    raw = "".join(output_parts)
     if output_schema is not None and require_full_schema:
-        reason = "malformed_output" if structured_result is not None or raw.strip() else "missing_output"
+        reason = ("malformed_output" if structured_result is not None or raw.strip() or text_overflow
+                  else "missing_output")
         # Content-free rejection trace: the selected candidate's Python type name,
         # its first schema error as "<validator> at <json_path>" (never the
         # jsonschema message, which embeds candidate content), and how many spans
@@ -1084,5 +1136,11 @@ async def _run_agent(
         if reason == "malformed_output" and selection is not None and selection.rejected_type is not None:
             reject_detail = (f"candidate type {selection.rejected_type} failed {selection.rejected_reason}"
                              f"; {selection.candidate_count} candidate(s)")
-        return StructuredOutputFailure(raw, reason, reject_detail), result_continuation, aborted_reason
+        rejection = (schema_rejection(structured_result, output_schema) if structured_result is not None else
+                     selection.rejection if selection is not None else None)
+        if rejection is not None:
+            reject_detail = (f"schema {rejection.category} at {rejection.schema_path}; "
+                             f"{rejection.error_count} error(s); {rejection.candidate_count} candidate(s)")
+        failure = StructuredOutputFailure(raw, reason, reject_detail, rejection=rejection)
+        return failure, result_continuation, aborted_reason
     return raw, result_continuation, aborted_reason

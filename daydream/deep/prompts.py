@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream import review_profile
+from daydream.deep.detection import base_stack_name
 from daydream.deep.diff import _full_diff_pointer, _hunk_index_authority
 from daydream.phases.review_prompts import (
     _confidence_and_convention_instructions,
@@ -278,10 +279,16 @@ def _frontier_read_instruction(frontier_files: list[str]) -> str:
 def _review_stage_context(review_stage: dict[str, Any], *, intent_authoritative: bool) -> str:
     """Use only host-selected, bounded inputs; their transport owns path confinement."""
     labels = review_stage.get("context_inputs", [])
+    statuses = review_stage.get("context_statuses", [])
+    status_text = (
+        "\nHost context availability: " + json.dumps(statuses, ensure_ascii=False)
+        if statuses else ""
+    )
     if not labels:
         return (
             "No shared artifact context is assigned to this stage. Use its admitted evidence and "
             "targeted repository reads. Missing advisory context never establishes coverage."
+            + status_text
         )
     transport = (
         "Use the captured sanctioned bytes; do not read their private storage paths."
@@ -294,7 +301,8 @@ def _review_stage_context(review_stage: dict[str, Any], *, intent_authoritative:
         if intent_authoritative and "intent" in labels else ""
     )
     return (
-        "Shared context inputs available for this assignment: " + ", ".join(labels) + ". " + transport
+        "Sanctioned inputs available for this assignment: " + ", ".join(labels) + ". " + transport
+        + status_text
         + "\nThese bounded inputs explain intent and repository conventions; they are supporting context, "
         "not additional assigned targets or completed source evidence. Omitted inputs are unavailable; "
         "never assume a partial context contains the complete repository map."
@@ -310,7 +318,10 @@ def _stage_output_instruction() -> str:
         "The host owns terminal findings serialization.\n"
         "Echo every assigned target_id exactly once; mark it reviewed only after judging its assigned "
         "changed behavior using complete enclosing-source evidence. Reads alone do not establish "
-        "reviewed coverage. Explain unfinished work with not_reviewed and a nonempty reason. "
+        "reviewed coverage. A target can name a file, hunk, or ordered continuation segment: judge "
+        "only its assigned part, never claim a prefix completes a hunk. The host folds a file's "
+        "coverage only after every required part succeeds. Explain unfinished work with "
+        "not_reviewed and a nonempty reason. "
         "Keep notes short and specific to this assignment. Each candidate needs a concrete trigger, "
         "observable consequence, and grounds citing completed source evidence. In discovery, leave "
         "candidate_id empty: the host assigns its identity. In triage, echo exactly the assigned "
@@ -337,11 +348,36 @@ def _build_review_stage_prompt(
     if settled:
         parts.append(settled)
     parts.append(_confidence_and_convention_instructions(stage_scoped=True))
+    attempt = review_stage.get("attempt", 1)
+    parts.append(
+        f"Stage attempt: {attempt} of {review_stage.get('max_attempts', 2)}. "
+        "This is a fresh invocation for the same logical assignment and frozen snapshot. "
+        "Obtain necessary source grounding in this invocation; unsuccessful attempts contribute "
+        "no source evidence, notes, candidates, or excerpts. Previously admitted stages remain "
+        "available only within their stated scope."
+    )
+    rejection = review_stage.get("schema_rejection")
+    if rejection is not None:
+        parts.append(
+            "The previous completed attempt was rejected by strict schema validation. "
+            "Safe validator feedback: " + json.dumps(rejection, ensure_ascii=False)
+            + "\nReturn a new object matching REVIEW_STAGE_SCHEMA exactly, including its "
+            "additionalProperties:false rules. Do not repair, recover, or continue previous output."
+        )
+    if review_stage.get("assignment_parts"):
+        parts.append(
+            "The host stage state's assignment_parts inventory contains the ordered required work "
+            "with old/new range mapping. Continuations are incomplete "
+            "pieces of the same hunk; no individual segment represents the complete hunk or file. "
+            "Supporting reads can resolve the assigned behavior but do not expand the assignment."
+        )
     if triage:
         parts.append(
             f"You are triaging the {stack_name} review's assigned candidate IDs only: "
             + ", ".join(review_stage["assigned_candidate_ids"])
-            + ". Use only their relevant admitted notes and completed evidence in the host stage state. "
+            + ". Use only their relevant admitted notes and compact evidence in the host stage state. "
+            "Evidence excerpts marked partial omit retained receipt content; obtain targeted source "
+            "rereads when the excerpt is insufficient to decide a candidate. "
             "Read additional source only to decide those candidates. Do not start a fresh audit, "
             "discover new candidates, revisit unrelated findings, or reopen closed decisions. "
             "Decide each assigned candidate once: confirmed, rejected, or unresolved."
@@ -364,9 +400,12 @@ def _build_review_stage_prompt(
             parts.append(
                 "You are the structural reviewer. Begin with whole-change interactions and boundaries, "
                 "not an alphabetical file audit. The changed-file inventory is: " + ", ".join(files) + ". "
+                "The compact whole-change inventory and bounded supporting diff parts orient this "
+                "interaction assignment; do not begin by dumping the complete diff or hunk index. "
                 "Inspect implementation interactions first: trace changed values, calls, contracts and "
                 "lifetimes across components. Documentation and tests are supporting evidence for "
-                "these interactions; do not repeat the language or generic reviewers' file audits. "
+                "these interactions; early documentation does not finish the interaction assignment. "
+                "Do not repeat the language or generic reviewers' file audits. "
                 "Stop a boundary trace when the contract agrees and no concrete candidate remains."
             )
         else:
@@ -374,7 +413,7 @@ def _build_review_stage_prompt(
                 parts.append(DOC_REVIEW_NOTICE)
             parts.append(_stack_scope_instruction(stack_name, files))
             parts.append(
-                "First pass assignment: only the current target IDs and their changed hunks. "
+                "First pass assignment: only the current target IDs and their assigned file/hunk parts. "
                 "Supporting paths, shared exploration, and other batches are not assigned work. "
                 "End dependency, configuration, and test traces as soon as the concrete candidate "
                 "in this assignment is resolved. No speculative extra pass is required."
@@ -389,9 +428,9 @@ def _build_review_stage_prompt(
             )
         elif "diff" in review_stage.get("context_inputs", []):
             parts.append(
-                "Consult the sanctioned diff input for this assignment. For a file stage, select only "
-                "hunks in the assigned files; the remaining diff is supporting context for concrete "
-                "candidates. For structural integration, use the whole-change boundaries."
+                "Consult only the sanctioned stage diff input for the current required assignment "
+                "parts. It does not assign the rest of the stack. For structural integration, bounded "
+                "supporting diff parts orient whole-change boundary traces."
             )
         if "hunk-index" in review_stage.get("context_inputs", []):
             parts.append(
@@ -417,7 +456,7 @@ def _build_review_stage_prompt(
                 "Config/env flow trace (apply only to changed fields in this assignment or fields "
                 "needed to decide its concrete candidates):\n" + _CONFIG_FLOW_TRACE_RULES
             )
-            if stack_name == "rust":
+            if base_stack_name(stack_name) == "rust":
                 parts.append(WIRE_CONTRACT_RUST_INSTRUCTION)
             elif stack_name == "generic-fallback":
                 parts.append(WIRE_CONTRACT_GENERIC_INSTRUCTION)
@@ -426,13 +465,19 @@ def _build_review_stage_prompt(
         if structural:
             parts.append(CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION)
     parts.append(
-        "Evidence capture is bounded: request targeted line ranges and compact searches, keeping each "
-        "tool output below 8,000 bytes and aggregate completed tool evidence below 40,000 bytes "
-        "including call metadata. Read the complete enclosing symbol or configuration section in "
-        "bounded contiguous segments when necessary; never treat a clipped segment as complete. "
-        "Avoid full-file dumps and repeated reads of already admitted evidence. Keep the successful "
-        "handoff compact, citing precise source locations instead of copying large outputs into notes. "
-        "Unavailable, omitted, errored, cancelled, or truncated output cannot ground a candidate."
+        "Complete associated tool receipts are retained separately from compact prompt and handoff "
+        "views. Compact views are bounded to 12,000 bytes per output and 48,000 bytes in aggregate, "
+        "and clipped views are explicitly partial; this presentation clipping does not mean complete "
+        "source receipts were lost. Request targeted line ranges and compact searches, reading complete "
+        "enclosing symbols or configuration sections in contiguous segments when needed. "
+        "Full retention has separate host resource limits: 2 MiB per result and 8 MiB across live and "
+        "admitted captures. Native truncation, missing association, failed or unavailable required reads, "
+        "and retention overflow cannot ground reviewed assertions, even with no candidates. "
+        "Supporting intent, exploration, diff and index reads alone never establish source coverage. "
+        "Reads alone never establish reviewed coverage, and free-form citations are not authenticated "
+        "by receipts. Keep notes and handoffs compact, citing precise locations instead of duplicating "
+        "large outputs. Relevant admitted partial excerpts may require targeted rereads within the "
+        "same cumulative tool allowance."
     )
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(SEVERITY_RUBRIC)
@@ -491,7 +536,7 @@ def build_per_stack_prompt(
     parts.append(CONFIG_FLOW_TRACE_INSTRUCTION)
     parts.append(SEVERITY_RUBRIC)
     parts.append(TRUST_MODEL_INSTRUCTION)
-    if stack_name == "rust":
+    if base_stack_name(stack_name) == "rust":
         parts.append(WIRE_CONTRACT_RUST_INSTRUCTION)
     parts.append(_artifact_footer(output_path))
     return "\n\n".join(parts)

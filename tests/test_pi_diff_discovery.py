@@ -6,12 +6,14 @@ from typing import Any
 
 import pytest
 
-from daydream.backends import AgentEvent, ResultEvent
+from daydream.backends import AgentEvent, ResultEvent, ToolResultEvent, ToolStartEvent
 from daydream.backends.pi import PiBackend
 from daydream.deep.detection import StackAssignment
+from daydream.hunk_index import write_hunk_index
 from daydream.run_context import InteractionPolicy, RunContext
 from tests.harness.review_result import review_scopes
 from tests.harness.stub_backend import review_stage_result, review_stage_state
+from tests.test_deep_orchestrator import _sanctioned_inputs
 
 
 async def test_small_pi_review_keeps_structural_dispatch(
@@ -21,6 +23,7 @@ async def test_small_pi_review_keeps_structural_dispatch(
     diff = tmp_path / "diff.patch"
     diff.write_text("diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
                     "@@ -1 +1 @@\n-value = 0\n+value = 'DIFF_SENTINEL'\n")
+    write_hunk_index(tmp_path, diff.read_text())
     intent = tmp_path / "intent.md"
     intent.write_text("Change the value")
     calls: list[str] = []
@@ -28,13 +31,21 @@ async def test_small_pi_review_keeps_structural_dispatch(
     async def review(
         self: PiBackend, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
     ) -> AsyncIterator[AgentEvent]:
-        assert str(diff) in prompt
+        assert str(diff) not in prompt
+        pointers = _sanctioned_inputs(prompt)
+        state = review_stage_state(prompt)
+        assert state is not None and set(pointers) == set(state["context_inputs"])
+        captured_diff = pointers["diff"].read_text() if state["scope_id"] == "python" else "".join(
+            path.read_text() for label, path in pointers.items() if label.startswith("diff-part-"))
+        assert "DIFF_SENTINEL" in captured_diff
         assert "DIFF_SENTINEL" not in prompt
         assert kwargs["read_only"] is True
         assert not kwargs.get("tools_disabled")
         assert "Host review stage:" in prompt
         assert "INVESTIGATION HAS ENDED" not in prompt
         calls.append(prompt)
+        yield ToolStartEvent(id="source-app", name="Read", input={"file_path": "app.py"})
+        yield ToolResultEvent(id="source-app", output=(cwd / "app.py").read_text(), is_error=False)
         yield ResultEvent(structured_output=review_stage_result(prompt, []), continuation=None)
 
     monkeypatch.setattr(PiBackend, "execute", review)

@@ -21,8 +21,12 @@ Discovery candidates use empty candidate_id for host assignment. Triage resolves
 as confirmed, rejected or unresolved; discover no new candidates. Closed decisions stay closed. Report contradictions
 by closed_candidate_ids; the host marks affected work incomplete without reopening or scheduling another round.
 Confirmed candidates require a valid finding; other dispositions use finding=null. Keep notes and candidate grounds
-compact with concrete location, trigger and consequence. Complete enclosing symbols using bounded line segments;
-keep each output below 8,000 bytes and all completed tool evidence below 40,000 bytes including tool wrappers.
+compact with concrete location, trigger and consequence. Complete enclosing symbols using bounded line segments.
+The host retains complete associated receipts separately from compact views (12,000 bytes per output and 48,000
+aggregate compact bytes). Clipped views are explicitly partial; they do not erase complete source receipts.
+Complete receipt retention is bounded separately at 2 MiB per result and 8 MiB per reviewer across live and admitted
+captures. Native truncated, failed, unavailable or unmatched required reads and full-retention overflow cannot
+ground reviewed claims, including empty-candidate claims. Supporting host inputs alone never establish source coverage.
 Search narrowly before reading. Avoid full-file/diff dumps, duplicate reads and verbose command/test output.
 An advisory stage call target is a planning hint, not a stop: useful assigned work can borrow remaining reviewer
 capacity. The remaining cumulative tool allowance and absolute reviewer deadline are hard limits across stages

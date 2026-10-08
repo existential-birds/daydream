@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from daydream._tree_sitter_safety import TreeSitterBadVersionError
 from daydream.config import STRUCTURE_STACK_NAME
-from daydream.deep.detection import GENERIC_STACK
+from daydream.deep.detection import GENERIC_STACK, base_stack_name
 from daydream.deep.diagram_types import CandidateRoot, DiagramThresholds
 from daydream.repository_paths import is_test_path
 from daydream.services import RepoRootPolicy, ServiceMatch, owning_services
@@ -103,7 +103,7 @@ def _code_files(stacks: list[StackAssignment], changed_files: list[str]) -> list
     changed = set(changed_files)
     selected: set[str] = set()
     for assignment in stacks:
-        base_stack = assignment.stack_name.split("#", 1)[0]
+        base_stack = base_stack_name(assignment.stack_name)
         if base_stack in (GENERIC_STACK, STRUCTURE_STACK_NAME):
             continue
         for path in assignment.files:

@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from daydream.agent import run_agent
 from daydream.backends.pi import PiBackend
 from daydream.prompts.grounding import REVIEW_STOPPING_GUIDANCE
@@ -67,3 +69,74 @@ async def test_pi_review_system_is_scoped_and_preserves_retry_and_stage_spend(tm
         assert "by closed_candidate_ids" in instructions
         assert "Return exactly assigned target or triage candidate IDs" in instructions
         assert "host publishes terminal findings" in instructions
+
+
+@pytest.mark.parametrize('native_fault', [None, 'read-truncated', 'first-line-truncated',
+                                        'structured-truncated', 'native-exit-code'])
+async def test_actual_pi_process_preserves_strict_root_and_native_capture_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_fault: str | None,
+) -> None:
+    import os
+    import sys
+
+    from daydream.agent import StructuredOutputFailure
+    from daydream.phases.schemas import REVIEW_STAGE_SCHEMA
+    from daydream.review_evidence import ReviewEvidence
+
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    executable = bin_dir / 'pi'
+    executable.write_text(
+        f'#!{sys.executable}\n'
+        'import json\nfrom pathlib import Path\n'
+        f'NATIVE_FAULT = {native_fault!r}\n'
+        'def emit(value): print(json.dumps(value), flush=True)\n'
+        'def assistant(text):\n'
+        '    message = {"role": "assistant", "content": [{"type": "text", "text": text}], '
+        '"model": "fixture-model", "provider": "fixture", "stopReason": "stop"}\n'
+        '    emit({"type": "message_end", "message": message})\n'
+        '    emit({"type": "turn_end", "message": message})\n'
+        'emit({"type": "session", "sessionId": "strict-root-fixture"})\n'
+        'assistant("I will inspect the assigned source before judging.")\n'
+        'emit({"type": "tool_execution_start", "toolCallId": "actual-source", '
+        '"toolName": "read", "args": {"path": "api.py"}})\n'
+        'source = Path(\"api.py\").read_text()\n'
+        'result = {\"content\": [{\"type\": \"text\", \"text\": source}]}\n'
+        'if NATIVE_FAULT == \"read-truncated\": result[\"details\"] = '
+        '{\"truncation\": {\"truncated\": True}}\n'
+        'if NATIVE_FAULT == \"first-line-truncated\": result[\"details\"] = '
+        '{\"truncation\": {\"truncated\": False, \"firstLineExceedsLimit\": True}}\n'
+        'if NATIVE_FAULT == \"structured-truncated\": result[\"structuredContent\"] = {\"truncated\": True}\n'
+        'if NATIVE_FAULT == \"native-exit-code\": result[\"structuredContent\"] = {\"exit_code\": 7}\n'
+        'emit({\"type\": \"tool_execution_end\", \"toolCallId\": \"actual-source\", '
+        '\"isError\": False, \"result\": result})\n'
+        'valid = {"targets": [{"target_id": "api.py", "status": "reviewed", "reason": ""}], '
+        '"notes": "Reviewed assigned source", "candidates": [], "contradictions": []}\n'
+        'assistant(json.dumps({\"invalid_outer\": valid} if NATIVE_FAULT is None else valid))\n'
+        'emit({"type": "agent_end", "messages": []})\n',
+    )
+    executable.chmod(0o700)
+    monkeypatch.setenv('PATH', str(bin_dir) + os.pathsep + os.environ['PATH'])
+    (tmp_path / 'api.py').write_text('VALUE = 1\n')
+    budget = ReviewInvestigationBudget.from_limits(ReviewLimits(investigation_s=30, finalization_s=0, tool_calls=8))
+    evidence = ReviewEvidence(REVIEW_STAGE_SCHEMA)
+    evidence.configure_capture(tmp_path)
+    output, _, reason = await run_agent(
+        PiBackend(model='fixture-model'), tmp_path, 'Review the changed value in api.py.',
+        phase=DaydreamPhase.DEEP, output_schema=REVIEW_STAGE_SCHEMA, require_full_schema=True,
+        investigation_budget=budget, review_evidence=evidence, progress_callback=lambda _: None,
+    )
+    assert reason is None
+    if native_fault is None:
+        assert isinstance(output, StructuredOutputFailure)
+        assert output.reason == 'malformed_output' and output.rejection is not None
+        assert evidence.capture_failure(['api.py']) is False
+    else:
+        assert isinstance(output, dict) and output['targets'][0]['status'] == 'reviewed'
+        assert evidence.capture_failure(['api.py']) is True
+        receipt, = evidence.receipts
+        if native_fault == 'native-exit-code':
+            assert receipt.result.exit_code == 7
+        else:
+            assert receipt.result.truncated is True and evidence.native_truncated_results == 1
+    assert budget.observed_tool_starts == 1 and budget.remaining_tool_calls == 7

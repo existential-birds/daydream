@@ -155,7 +155,7 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
         assert _count_arbiter_prompts(stub.calls) >= 1
     stub.calls.clear()
     assert await run(config) == 0
-    assert _review_surface_prompts(stub.calls) == [], f"paid work on a warm run: {stub.calls}"
+    assert _review_surface_prompts(stub.calls) == [], "the warm run dispatched fresh reviewer work"
     assert {name: (deep / name).read_bytes() for name in canonical} == canonical
     assert saved_coverage(deep).unfinished_scopes == failures
     second = json.loads((deep / "review-coverage.json").read_text())
@@ -373,7 +373,7 @@ async def test_legacy_cache_without_coverage_proof_recomputes_review(
             if damage == "unstaged":
                 manifest["components"].pop("staged_review_contract")
             else:
-                manifest["components"]["staged_review_contract"] = 1
+                manifest["components"]["staged_review_contract"] = 2
             legacy_key = hashlib.sha256(json.dumps({
                 "format": manifest["format"], "unit": manifest["unit"], "components": manifest["components"],
             }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
