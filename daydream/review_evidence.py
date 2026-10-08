@@ -5,13 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent, TurnEndEvent
 from daydream.json_utils import extract_json_by_schema, validates_schema
 from daydream.prompt_budget import PreparedSanctionedInputs, truncate_utf8_to_budget
+from daydream.review_source import SourceRecipe, SourceWindow
 
 FULL_RESULT_MAX_BYTES = 2 * 1024 * 1024
 FULL_REVIEW_MAX_BYTES = 8 * 1024 * 1024
@@ -44,6 +45,7 @@ class EvidenceReceipt:
     opaque: bool
     retained_bytes: int
     overflow: bool = False
+    source: SourceWindow | None = None
 
     @property
     def complete(self) -> bool:
@@ -52,6 +54,32 @@ class EvidenceReceipt:
                     or result.exit_code not in (None, 0)
                     or (result.status is not None and result.status.lower() not in
                         {'success', 'succeeded', 'completed', 'complete', 'ok', 'finished', 'done', 'passed'}))
+
+
+def source_window_covered(window: SourceWindow, receipts: list[EvidenceReceipt]) -> bool:
+    """Cover a frozen window with independently admitted byte ranges, never opaque reads."""
+    ranges: list[tuple[int, int]] = []
+    identity = ('file', 'source_path', 'side', 'revision', 'content_sha256', 'blob_oid')
+    expected = window.body.encode()
+    for receipt in receipts:
+        source = receipt.source
+        if (not receipt.complete or source is None
+                or any(getattr(source, key) != getattr(window, key) for key in identity)):
+            continue
+        start, end = max(source.start_byte, window.start_byte), min(source.end_byte, window.end_byte)
+        if end < start:
+            continue
+        actual = source.body.encode()[start - source.start_byte:end - source.start_byte]
+        if actual == expected[start - window.start_byte:end - window.start_byte]:
+            ranges.append((start, end))
+    covered = window.start_byte
+    for start, end in sorted(ranges):
+        if start > covered:
+            return False
+        covered = max(covered, end)
+        if covered >= window.end_byte:
+            return True
+    return False
 
 
 def _read_paths(call: ToolStartEvent) -> tuple[list[str], bool, bool]:
@@ -136,19 +164,24 @@ class ReviewEvidence:
         self.cwd: Path | None = None
         self.supporting_paths: set[Path] = set()
         self.snapshot_revisions: tuple[str, ...] = ()
+        self.source_recipe: SourceRecipe | None = None
+        self.reused_receipts: list[EvidenceReceipt] = []
         self.reset()
 
     def configure_capture(
         self, cwd: Path, *, allowance: int = FULL_REVIEW_MAX_BYTES,
         sanctioned_inputs: PreparedSanctionedInputs | None = None,
         snapshot_revisions: tuple[str, ...] = (),
+        reused_receipts: list[EvidenceReceipt] | None = None,
     ) -> None:
         """Enable staged admission after the caller revalidated its prepared inputs."""
         self.full_capture = True
         self.full_allowance = allowance
         self.cwd = cwd.resolve()
         self.snapshot_revisions = snapshot_revisions
-        self.supporting_paths = ({item.path.resolve() for item in sanctioned_inputs.inputs}
+        self.source_recipe = sanctioned_inputs.source_recipe if sanctioned_inputs else None
+        self.reused_receipts = list(reused_receipts or ())
+        self.supporting_paths = ({item.path.resolve() for item in sanctioned_inputs.inputs if item.source is None}
                                  if sanctioned_inputs else set())
 
     def reset(self) -> None:
@@ -166,11 +199,17 @@ class ReviewEvidence:
         self.full_retained_bytes = 0
         self.unmatched_results = 0
         self.native_truncated_results = 0
+        self.source_access_failures = 0
         self.retention_overflow_results = 0
         self.retention_failed_files: set[str] = set()
         self.opaque_retention_loss = False
 
     def _classification(self, call: ToolStartEvent) -> tuple[tuple[str, ...], bool, bool]:
+        if call.name == "read_source" and self.source_recipe is not None:
+            target_id, side = call.input.get("target_id"), call.input.get("side")
+            window = self.source_recipe.selector(target_id, side) if (
+                isinstance(target_id, str) and isinstance(side, str)) else None
+            return ((window.file,), False, False) if window is not None else ((), False, True)
         operands, opaque, search = _read_paths(call)
         command = call.input.get('command', call.input.get('cmd'))
         if call.name.lower() in {'shell', 'bash', 'exec', 'exec_command'} and isinstance(command, str):
@@ -192,7 +231,12 @@ class ReviewEvidence:
                 unknown = True
                 continue
             resolved = (self.cwd / operand).resolve() if self.cwd else Path(operand).resolve()
-            if resolved in self.supporting_paths:
+            projection = next((window for window in self.source_recipe.windows
+                               if window.projection is not None and window.projection.resolve() == resolved), None) \
+                if self.source_recipe is not None else None
+            if projection is not None:
+                paths.append(projection.file)
+            elif resolved in self.supporting_paths:
                 supporting += 1
             elif self.cwd and resolved.is_relative_to(self.cwd):
                 paths.append(resolved.relative_to(self.cwd).as_posix())
@@ -203,10 +247,47 @@ class ReviewEvidence:
         return (tuple(paths), bool(supporting and not paths and not unknown),
                 unknown or opaque or bool(supporting and paths))
 
+    def _declared_source_read(self, call: ToolStartEvent) -> bool:
+        """Distinguish a wrong known source body from unsupported, non-authoritative reads."""
+        recipe = self.source_recipe
+        if recipe is None or self.cwd is None:
+            return False
+        data = call.input
+        command = data.get('command', data.get('cmd'))
+        if call.name.lower() in {'shell', 'bash', 'exec', 'exec_command'} and isinstance(command, str):
+            try:
+                words = shlex.split(command)
+            except ValueError:
+                return False
+            if len(words) != 3 or words[:2] != ['git', 'show'] or ':' not in words[2]:
+                return False
+            revision, source_path = words[2].split(':', 1)
+            return (any(window.revision == revision and window.source_path == source_path
+                        for window in recipe.windows)
+                    or revision == recipe.head_revision and recipe.permits_repository_read(source_path))
+        if call.name.lower() not in {'read', 'read_file', 'file_read'} or set(data) - {
+            'path', 'file_path', 'file', 'offset', 'limit',
+        }:
+            return False
+        offset, limit = data.get('offset', 1), data.get('limit')
+        if type(offset) is not int or offset < 1 or limit is not None and (type(limit) is not int or limit < 1):
+            return False
+        path = data.get('file_path', data.get('path', data.get('file')))
+        if not isinstance(path, str):
+            return False
+        resolved = (self.cwd / path).resolve()
+        return (any(window.projection is not None and resolved == window.projection.resolve()
+                    or window.side == 'after' and resolved == (self.cwd / window.source_path).resolve()
+                    for window in recipe.windows)
+                or (resolved.is_relative_to(self.cwd)
+                    and recipe.permits_repository_read(resolved.relative_to(self.cwd).as_posix())))
+
     def capture_failure(self, files: list[str], *, require_source: bool = True,
                         interaction: bool = False) -> bool:
         """Compact clipping is presentation loss; complete receipts govern admission."""
         assigned = set(files)
+        if self.source_access_failures:
+            return True
         if self.unmatched_results or self.opaque_retention_loss or assigned.intersection(self.retention_failed_files):
             return True
         for receipt in self.receipts:
@@ -220,24 +301,47 @@ class ReviewEvidence:
                 return True
         if not require_source:
             return False
-        grounded = {path for receipt in self.receipts if receipt.complete and not receipt.supporting
+        receipts = [*self.reused_receipts, *self.receipts]
+        grounded = {path for receipt in receipts if receipt.complete and not receipt.supporting
                     for path in receipt.paths}
+        if self.source_recipe is not None and not interaction:
+            for window in self.source_recipe.windows:
+                if window.file in assigned and window.read_required and not (
+                    self.source_recipe.verify_window(window) and source_window_covered(window, receipts)
+                ):
+                    return True
         return not bool(assigned.intersection(grounded)) if interaction else not assigned <= grounded
 
-    def compact_for_files(self, files: set[str]) -> list[dict[str, Any]]:
+    def compact_for_files(
+        self, files: set[str], *, receipts: list[EvidenceReceipt] | None = None,
+    ) -> list[dict[str, Any]]:
         """Bound relevant admitted views without authenticating model citations."""
         blocks: list[dict[str, Any]] = []
-        for receipt in self.receipts:
+        retained = self.receipts if receipts is None else receipts
+        size = 0
+        marker = {"files": sorted(files), "partial": True, "omitted_receipts": len(retained),
+                  "excerpt": "[partial evidence view]"}
+        marker_size = len(json.dumps(marker, ensure_ascii=False).encode())
+        if marker_size > 48000:
+            marker["files"] = []
+            marker_size = len(json.dumps(marker, ensure_ascii=False).encode())
+        for index, receipt in enumerate(retained):
             relevant = files.intersection(receipt.paths)
             if not receipt.complete or not relevant:
                 continue
             mixed = receipt.opaque or not set(receipt.paths) <= files
-            blocks.append({
+            block = {
                 'files': sorted(relevant), 'partial': mixed or len(receipt.result.output.encode()) > 12000,
                 'excerpt': ('[mixed receipt omitted from this assignment; targeted reread remains available]'
                             if mixed else truncate_utf8_to_budget(receipt.result.output, 12000,
                                                                  '[partial tool excerpt]')),
-            })
+            }
+            block_size = len(json.dumps(block, ensure_ascii=False).encode())
+            if size + block_size + marker_size > 48000 or len(blocks) >= 63:
+                blocks.append({**marker, "omitted_receipts": len(retained) - index})
+                break
+            blocks.append(block)
+            size += block_size
         return blocks
 
     def _observe_receipt(self, event: ToolStartEvent | ToolResultEvent) -> None:
@@ -296,8 +400,43 @@ class ReviewEvidence:
                 self.retention_failed_files.update(paths)
                 self.opaque_retention_loss |= opaque
             return
+        source = None
+        source_size = 0
+        if self.source_recipe is not None and not overflow:
+            if call.name == "read_source":
+                source = self.source_recipe.native_result(call.input, result.output)
+                if source is None:
+                    self.source_access_failures += 1
+                    paths, supporting, opaque = classification[0], False, True
+            elif self.cwd is not None and paths and not supporting:
+                source = self.source_recipe.match_read(call.input, result.output, self.cwd)
+            if source is not None:
+                paths, supporting, opaque = (source.file,), False, False
+                if source.body == result.output:
+                    # Share the native string instead of retaining a second raw-read body.
+                    source = replace(source, body=result.output)
+                else:
+                    # Packet JSON and selected subranges retain an additional typed body.
+                    source_size = len(source.body.encode())
+                if self.full_retained_bytes + source_size > self.full_allowance:
+                    overflow = True
+                    self.retention_overflow_results += 1
+                    self.full_retained_bytes -= output_size
+                    output_size = source_size = 0
+                    source = None
+                    result = ToolResultEvent(result.id, "", result.is_error, result.timestamp, result.exit_code,
+                                             result.status, result.duration_ms, result.cancelled, result.truncated)
+                else:
+                    self.full_retained_bytes += source_size
+            elif paths:
+                if self._declared_source_read(call):
+                    self.source_access_failures += 1
+                # Unknown ranges and commands may support understanding, but only
+                # a targeted verified read can supply source authority. Failed
+                # opaque calls remain capture failures through their native status.
+                paths, opaque = (), True
         self.receipts.append(EvidenceReceipt(call, result, paths, supporting, opaque,
-                                             input_size + output_size, overflow))
+                                             input_size + output_size + source_size, overflow, source))
 
     def valid(self, value: Any) -> bool:
         return self.schema is not None and validates_schema(value, self.schema)

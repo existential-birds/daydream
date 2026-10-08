@@ -19,6 +19,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from contextlib import ExitStack
 from functools import partial
+from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,7 @@ from daydream.backends._transport import (
 from daydream.config import DEFAULT_PI_MODEL, DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
 from daydream.json_utils import extract_json, extract_json_by_schema, validates_schema
 from daydream.retry_policy import classify_failure, parse_message_retry_hint
+from daydream.review_source import SourceRecipe
 
 # Mirror Codex's generous stdout cap so large JSONL events (big file reads,
 # patch payloads) do not trip asyncio's "chunk is longer than limit" guard.
@@ -158,7 +160,9 @@ WORK STRATEGY:
 - Read the diff first. If a diff file or git output is in your context, start
   there; only explore files referenced by the diff or their direct imports.
 - Don't re-read what you've already read. If a file's content is already in
-  your context (prior tool result, the diff, the prompt), reuse it.
+  your context, reuse it for understanding. For staged reviews, diff or prompt
+  contents do not satisfy required source reads. Only explicitly host-admitted
+  complete source windows can be reused as receipts; obtain required fresh reads.
 - Answer directly when you can. If the existing context (commit log, diff,
   prior tool results) already answers the question, respond without additional
   tool calls.
@@ -167,9 +171,10 @@ WORK STRATEGY:
   answer immediately.
 
 GIT CONTEXT:
-You are operating in a git repository. Use `git diff`, `git log`, and
-`git show` to understand changes efficiently — they are usually cheaper than
-reading whole files.
+You are operating in a git repository. When a Git execution tool is enabled,
+use `git diff`, `git log`, and `git show` to understand changes efficiently.
+Read-only Pi has no Git execution tool: use the supplied frozen-source access
+instead for before/after revisions. Never infer missing old-source contents.
 
 Be concise in your responses. Do not narrate exploration step by step; report
 findings and conclusions."""
@@ -460,6 +465,20 @@ def _schema_instruction(schema: dict[str, Any]) -> str:
     )
 
 
+def _stage_supplies_schema(prompt: str, schema: dict[str, Any]) -> bool:
+    """A matching host stage contract is already the authoritative schema text."""
+    marker = 'Host review stage:\n'
+    start = prompt.find(marker)
+    if start < 0:
+        return False
+    try:
+        stage, _ = json.JSONDecoder().raw_decode(prompt[start + len(marker):].lstrip())
+    except (ValueError, TypeError):
+        return False
+    contract = stage.get('response_contract') if isinstance(stage, dict) else None
+    return isinstance(contract, dict) and contract.get('schema') == schema
+
+
 def _write_prompt_attachment(text: str, attachments: ExitStack) -> Path:
     """Create a closed private UTF-8 file owned by the invocation's cleanup scope."""
     with tempfile.NamedTemporaryFile(
@@ -474,6 +493,8 @@ def _write_prompt_attachment(text: str, attachments: ExitStack) -> Path:
 class PiBackend:
     """Translate the Pi JSONL event stream into normalized AgentEvent records."""
 
+    supports_source_recipe = True
+    supports_complete_output = True
     supports_finalization = True
     supports_tools_disabled = True
     supports_review_instructions = True
@@ -543,6 +564,8 @@ class PiBackend:
         validate_structured_output: bool = True,
         wall_budget_s: float | None = None,
         tool_call_budget: int | None = None,
+        source_recipe: SourceRecipe | None = None,
+        require_complete_root: bool = False,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Yield Pi events; a turn error raises PiError and nonempty agents are unsupported.
 
@@ -679,7 +702,7 @@ class PiBackend:
         if finalization or tools_disabled:
             args.append("--no-tools")
         elif read_only:
-            args.extend(["--tools", _PI_READ_ONLY_TOOLS])
+            args.extend(["--tools", _PI_READ_ONLY_TOOLS + (",read_source" if source_recipe is not None else "")])
 
         resume_id: str | None = None
         if persist_session and continuation and continuation.backend == "pi":
@@ -694,7 +717,7 @@ class PiBackend:
         args.append("--no-skills")
 
         full_prompt = prompt
-        if output_schema:
+        if output_schema and not (require_complete_root and _stage_supplies_schema(prompt, output_schema)):
             full_prompt = prompt + _schema_instruction(output_schema)
 
         # P18 Task 1: generation lifecycle correlation state (Pi only —
@@ -772,7 +795,8 @@ class PiBackend:
                 continuation_mode="resume" if resume_id is not None else "fresh",
                 model_mode="single",
                 selected_tools_count=(
-                    0 if finalization or tools_disabled else len(_PI_READ_ONLY_TOOLS.split(",")) if read_only else None
+                    0 if finalization or tools_disabled else
+                    len(_PI_READ_ONLY_TOOLS.split(",")) + int(source_recipe is not None) if read_only else None
                 ),
                 selected_tools_present=read_only and not (finalization or tools_disabled),
                 no_tools=finalization or tools_disabled,
@@ -786,6 +810,15 @@ class PiBackend:
 
         attachments = ExitStack()
         try:
+            if source_recipe is not None and not finalization and not tools_disabled:
+                source_recipe.revalidate()
+                packet_path = _write_prompt_attachment(json.dumps(source_recipe.to_packet(), ensure_ascii=False),
+                                                       attachments)
+                child_env["DAYDREAM_PI_SOURCE_PACKET"] = str(packet_path)
+                extension = attachments.enter_context(as_file(files("daydream.backends").joinpath("pi_read_source.ts")))
+                args.extend(["--no-extensions", "--extension", str(extension)])
+            else:
+                child_env.pop("DAYDREAM_PI_SOURCE_PACKET", None)
             if not tools_disabled:
                 args.append(f"@{_write_prompt_attachment(full_prompt, attachments)}")
             if review_instructions and not finalization:
@@ -1055,7 +1088,8 @@ class PiBackend:
                     # admits wins, so an incidental larger span cannot displace a valid
                     # (possibly empty) result.
                     structured_result = extract_json_by_schema(
-                        last_assistant_text, schema=output_schema, accept=validates_schema
+                        last_assistant_text, schema=output_schema, accept=validates_schema,
+                        require_complete_root=require_complete_root,
                     ).value
                 else:
                     # A caller that opts out of validation owns fail-closed checking

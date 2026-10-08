@@ -554,6 +554,45 @@ supported versions; migrate the callable to accept this kwarg and declare
   target `integration:structure`. Its honest compact inventory and bounded
   supporting diff parts orient boundary traces, rather than alphabetical file
   batches. Omitted supporting parts are explicitly unavailable.
+- Contract **4** adds fields under `review_stage` without changing any API-7
+  callable signature. `source_access` describes frozen before/after source
+  windows, original and rename-side paths, revisions, ranges and permitted read
+  methods. `read_required` indicates mandatory fresh work; false alone does not
+  prove reuse (the before side may be optional). `admitted_source_windows` binds
+  verified complete receipts from successful stages in this reviewer/snapshot.
+  Clean stages retain useful source and notes. Exact interval unions may cover
+  later windows; unknown/opaque ranges and failed attempts never authorize reuse.
+  Every assigned unit still requires a fresh review decision. Schema retries
+  obtain new evidence under the same absolute allowance/deadline.
+- `supporting_bundle` is available to built-in builders. A custom builder can
+  opt in by declaring `review_input_bundle = True` on its callable. Without this
+  explicit capability its `diff_path` remains a real diff file and adjacent
+  `hunk-index.json` remains a real index, with their original semantics. They are
+  never aliases for a bundle. Bundle reading supplies supporting context only.
+  `supporting_parts` exposes targeted bounded Structure diff projections where
+  exact transport permits them. Inline omissions remain honestly unavailable.
+- `response_contract` carries the strict invocation schema and explicit
+  four-key skeleton. Triage targets are exactly `[]`; discovery candidates may
+  be nonempty with `candidate_id: ""`. Independent identity, snapshot, grounds
+  and contradiction admission remains authoritative. Syntax/identity failures
+  are terminal, with no repair or semantic retry. `remaining_work` estimates
+  residual assignments/files/stages and separately labels current-stage fresh
+  source/read costs. These estimates prove transport feasibility only; native
+  quality/capacity needs matched cold measurements under unchanged numeric limits.
+- Pi's optional per-invocation source recipe uses a confined packet grant and
+  packaged native `read_source(target_id, side)` tool. It serves frozen bytes,
+  not arbitrary paths or Git commands, and enables no Bash/private root access.
+  Source projections are atomically owned/revalidated by `ArtifactSession` and
+  typed in `PreparedSanctionedInputs`; legacy prepared inputs default to
+  supporting. Source bytes/ranges are independently verified, including rename
+  sides and bounded enclosing context. Inline prompt bytes alone are not native
+  receipts. Codex's independent snapshot/full-SHA Git-show path is preserved.
+  Normal repository reads may obtain independently verified tracked dependency
+  evidence at captured HEAD without widening recipe selectors. Pi's native
+  bounded-read LF representation, including its exact continuation footer, is
+  verified against frozen bytes; native results and completion flags remain
+  unchanged. Unknown wrappers, forged footers and truncation supply no coverage.
+  Complete contract-3 cache entries miss the new source/input/schema contract.
 - `assignment_parts` describes each required target: `target_id`, `file`,
   one-based `part_index`, `part_count`, and `kind` (`file`, `hunk`, or
   `continuation`). Split hunks include zero-based `hunk_index`, `old_start`,

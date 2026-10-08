@@ -311,7 +311,8 @@ async def test_each_stage_builder_receives_current_assignment_and_bounded_triage
                 assert 'Sanctioned phase inputs (captured verbatim):' in call['prompt']
             else:
                 pointers = _sanctioned_inputs(call['prompt'])
-                assert set(pointers) == set(stage['context_inputs'])
+                assert set(pointers) == {label for label in stage['context_inputs']
+                                         if not label.startswith('source-')}
                 for label in ('diff', 'hunk-index'):
                     path = pointers[label]
                     yield ToolStartEvent(id=f'context-{label}', name='Read', input={'file_path': str(path)})
@@ -331,8 +332,8 @@ async def test_each_stage_builder_receives_current_assignment_and_bounded_triage
             assert all(item['disposition'] == 'open' for item in stage['candidates'])
             assert 'Assigned files:' not in prose
             assert 'api.py' in stage['assigned_files']
-            assert stage['context_inputs'] == []
-            assert 'Sanctioned phase inputs (read only these exact files):' not in call['prompt']
+            assert all(label.startswith('source-') for label in stage['context_inputs'])
+            assert ('Sanctioned phase inputs (read only these exact files):' not in call['prompt']) is sandbox
             output['candidates'] = [dict(item, disposition='rejected') for item in stage['candidates']]
 
     review.backend.stage_response = response
@@ -360,11 +361,11 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
             "    return build_per_stack_prompt(**kw)\n"
             "def register(r): r.override_prompt('per-stack', scoped)\n"
         )
-    review = many_file_review(tmp_path, monkeypatch)
+    review = many_file_review(tmp_path, monkeypatch, count=5 if stop == 'deadline' else 17)
     backend = review.backend
 
     if stop == 'deadline':
-        backend.stage_delay = lambda stage: (5.0 if stage['progress'] else 0.1) if stage['scope_id'] == 'python' else 0
+        backend.stage_delay = lambda stage: (20.0 if stage['progress'] else 0.1) if stage['scope_id'] == 'python' else 0
 
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         if stage['scope_id'] == 'python':
@@ -391,7 +392,7 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
 
     backend.stage_response = response
     overrides: dict[str, Any] = (
-        {'review_profile': _profile_with_pipeline(review_wall_budget_s=3)} if stop == 'deadline' else {}
+        {'review_profile': _profile_with_pipeline(review_wall_budget_s=10)} if stop == 'deadline' else {}
     )
     data = await review.finish('python', reason=reason, findings=('Grounded defect',), **overrides)
     assert scopes(data)['structure']['status'] == 'complete'
@@ -482,7 +483,7 @@ async def test_cross_file_integration_preserves_cumulative_spend_and_flag_eviden
             for i in range(starts):
                 name = ('a_flags.py', 'z_request.py')[i] if stage['stage'] == 'integration' and i < 2 else 'api.py'
                 event = ToolStartEvent(id=f'observed-{len(observations)}', name='Read',
-                                       input={'file_path': name, 'parallel_member': i})
+                                       input={'file_path': name})
                 observations.append(event)
                 yield event
                 if stage['stage'] == 'integration':
@@ -527,26 +528,21 @@ async def test_failed_retry_discards_poisoned_progress_but_charges_every_observe
         if stage['scope_id'] == 'python' and not stage['progress']:
             attempts += 1
             # Starts arrive together before any completion, as parallel members may.
-            for index in range(2 if attempts == 1 else 3):
-                if attempts == 2 and index == 0:
-                    yield ToolStartEvent(id=f'attempt-{attempts}-{index}', name='Bash',
-                                        input={'command': 'cat ' + ' '.join(stage['assigned_files'])})
-                else:
-                    yield ToolStartEvent(id=f'attempt-{attempts}-{index}', name='Read',
-                                        input={'file_path': 'api.py'})
+            paths = ['api.py'] * 2 if attempts == 1 else stage['assigned_files']
+            for index, path in enumerate(paths):
+                yield ToolStartEvent(id=f'attempt-{attempts}-{index}', name='Read', input={'file_path': path})
             if attempts == 1:
                 yield ToolResultEvent(id='attempt-1-0', output='poisoned incomplete evidence', is_error=False)
                 yield ResultEvent(structured_output=stage_result(stage, candidates=[
                     candidate(disposition='confirmed', finding=record())]), continuation=None)
                 raise TransportFailure('retryable provider transport failure')
-            for index in range(3):
-                source = (''.join((review.repo / path).read_text() for path in stage['assigned_files'])
-                          if index == 0 else (review.repo / 'api.py').read_text())
+            for index, path in enumerate(paths):
+                source = (review.repo / path).read_text()
                 yield ToolResultEvent(id=f'attempt-{attempts}-{index}', output=source, is_error=False)
         elif stage['scope_id'] == 'python':
-            assert stage['observed_tool_starts'] >= 5
+            assert stage['observed_tool_starts'] >= 6
             if len(stage['progress']) == 4:
-                assert stage['observed_tool_starts'] == 5 and stage['remaining_tool_calls'] == 91
+                assert stage['observed_tool_starts'] == 6 and stage['remaining_tool_calls'] == 90
             assert stage['candidates'] == []
             assert all('poisoned' not in note for note in stage['notes'])
         elif stage['scope_id'] == 'structure':
@@ -556,9 +552,9 @@ async def test_failed_retry_discards_poisoned_progress_but_charges_every_observe
     backend.stage_response = response
     data = await review.finish('python')
     assert attempts == 2
-    assert stage_ends(review, 'python')[0]['metadata']['observed_tool_starts'] == 5
-    assert stage_ends(review, 'python')[-1]['metadata']['observed_tool_starts'] == 18
-    assert stage_ends(review, 'python')[-1]['metadata']['remaining_tool_calls'] == 78
+    assert stage_ends(review, 'python')[0]['metadata']['observed_tool_starts'] == 6
+    assert stage_ends(review, 'python')[-1]['metadata']['observed_tool_starts'] == 19
+    assert stage_ends(review, 'python')[-1]['metadata']['remaining_tool_calls'] == 77
     assert all(scope['status'] == 'complete' for scope in scopes(data).values())
     python_stages = [stage for stage in backend.stages if stage['scope_id'] == 'python']
     assert all(stage['stage'] == 'first_pass' for stage in python_stages)

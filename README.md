@@ -642,7 +642,7 @@ and 6× review time and per-role tool-call allowances respectively. The 4× and
 profile keeps its configured whole-review deadline. Set
 `pipeline.review_wall_budget_s` in a `--review-profile` TOML file to change it.
 Per-stack reviewers share eight minutes and 48 observed tool starts across stages.
-Language and generic reviewers receive directory-grouped batches of at most four
+Language and generic reviewers receive locality-preferred batches of at most four
 files, sized to the 12,288-byte inline input allowance including wrappers, scoped
 diff/index and snapshot bindings. Exact-path transport uses the same assignments.
 Oversized files split into hunks; oversized hunks split into ordered continuations
@@ -671,10 +671,44 @@ resource limits, not new model allowances. Compact output/handoff views keep the
 missing association, failed required reads and full-retention overflow remain
 incomplete evidence. Supporting diff, index, intent and exploration inputs never
 establish source coverage; their compact clipping does not invalidate complete
-source receipts. Triage receives only relevant admitted compact evidence and may
+source receipts. Frozen source windows carry the original repository path, rename
+side, full revision/blob identity and exact line/byte range. Exact projections are
+written and revalidated through the owning artifact session. Pi also offers an
+invocation-local `read_source(target_id, side)` tool backed only by the frozen
+window packet; it grants no private directory or Bash access. Inline source text
+is prompt context, not a native source receipt. Codex retains its independent
+snapshot and full-SHA `git show` access. Returned bytes and ranges are checked
+against frozen source independently of tool-provided provenance.
+Normal reads of tracked current-side dependencies are also verified against the
+captured HEAD; they do not expand the native recipe's permitted selectors.
+Pi's exact bounded-read representation is decoded against independently frozen
+LF ranges, including its continuation footer. Original native results remain
+intact; forged footers and actual truncation do not establish source evidence.
+
+Built-in staged builders combine diff/index/binding into one bounded supporting
+assignment input. API-7 custom builders retain real legacy diff/index files unless
+they explicitly opt in. Structure receives a compact whole-change inventory and
+targeted bounded supporting parts; its interaction and default design duties
+remain whole-change reviews. Supporting reads remain distinct from source reads.
+Complete verified windows from successful clean stages are retained and can cover
+later work in the same reviewer/snapshot, including an exact union of read ranges.
+Failed attempts and opaque or uncovered ranges cannot supply reuse. Every new
+assignment still requires its own review decision. Triage receives only relevant admitted compact evidence and may
 make targeted rereads within the existing allowance. Other roles retain
 bounded finalization. The existing 60-minute review ceilings remain outer
 safeguards; fix turns retain their separate 30-minute limit.
+
+Staged contract 4 invalidates contract-3 cached reviews. Each invocation has a
+strict assignment-specific schema and explicit four-key skeleton: triage targets
+are exactly empty; discovery may introduce candidates with an empty candidate ID.
+JSON syntax errors and identity/source failures are terminal; only the existing
+schema-only fresh attempt remains. Diagnostics distinguish syntax, schema,
+assignment identity, source access/receipts, capture loss and quantitative
+exhaustion without exposing rejected values. Folded alternatives inherit
+Structure's actual failure reason and diagnostic, with no independent model call.
+Remaining-work/read estimates are transport floors, not proof of meaningful
+native review capacity. Numeric call, deadline and token policies are unchanged;
+their adequacy requires repeated matched cold production measurements.
 
 When a review agent exhausts its time or tool-call budget, Daydream continues with
 completed reviewers' findings and validated partial checkpoints, and marks the

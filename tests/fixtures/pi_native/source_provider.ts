@@ -1,0 +1,48 @@
+/** Synthetic external provider. The actual installed Pi CLI and tools still run. */
+import { createAssistantMessageEventStream, getCurrentTools } from "@earendil-works/pi-ai";
+
+export default function (pi: any) {
+  pi.registerProvider("source-fixture", {
+    api: "openai-completions", baseUrl: "https://fixture.invalid", apiKey: "synthetic-provider-key",
+    models: [{ id: "source-model", name: "Source fixture", reasoning: false, input: ["text"],
+               contextWindow: 32768, maxTokens: 8192,
+               cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+    streamSimple(model: any, context: any) {
+      const stream = createAssistantMessageEventStream();
+      queueMicrotask(() => {
+        const result = context.messages.findLast((entry: any) => entry.role === "toolResult");
+        const message: any = {
+          role: "assistant", api: model.api, provider: model.provider, model: model.id,
+          content: [], timestamp: Date.now(), stopReason: result ? "stop" : "toolUse",
+          usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
+                   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        };
+        stream.push({ type: "start", partial: message });
+        if (!result) {
+          const toolCall = { type: "toolCall", id: "native-frozen-source-001",
+                             name: process.env.DAYDREAM_TEST_SOURCE_TOOL || "read_source",
+                             arguments: JSON.parse(process.env.DAYDREAM_TEST_SOURCE_SELECTOR!) };
+          message.content = [toolCall];
+          stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
+          stream.push({ type: "toolcall_delta", contentIndex: 0,
+                        delta: JSON.stringify(toolCall.arguments), partial: message });
+          stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
+        } else {
+          const text = JSON.stringify({
+            observed_body: result.isError ? "" : result.toolName === "read_source"
+              ? JSON.parse(result.content[0].text).body : result.content[0].text,
+            source_error: result.isError,
+            active_tools: getCurrentTools(context.messages).map((tool: any) => tool.name).sort(),
+          });
+          message.content = [{ type: "text", text }];
+          stream.push({ type: "text_start", contentIndex: 0, partial: message });
+          stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message });
+          stream.push({ type: "text_end", contentIndex: 0, content: text, partial: message });
+        }
+        stream.push({ type: "done", reason: message.stopReason, message });
+        stream.end(message);
+      });
+      return stream;
+    },
+  });
+}

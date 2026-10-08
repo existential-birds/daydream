@@ -25,8 +25,8 @@ def test_single_variant_references_the_canonical_secret_and_var_names() -> None:
         assert secret in single
     assert config.BOT_HANDLE_VAR in single
 
-def test_yaml_templates_present_in_built_wheel() -> None:
-    """Build a real wheel and confirm the YAML templates are included as package data.
+def test_templates_and_native_tools_present_in_built_wheel() -> None:
+    """Build a real wheel and confirm shipped templates and the native tool are included.
 
     The editable-install tests above exercise importlib.resources against the source tree; they would pass even if
     the [tool.hatch.build.targets.wheel] include glob were missing or mis-typed. This test catches that gap: it
@@ -38,10 +38,11 @@ def test_yaml_templates_present_in_built_wheel() -> None:
         assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
         expected_paths = {f"daydream/templates/workflows/{name}" for name in _EXPECTED_TEMPLATES}
         expected_paths.add(_SINGLE_TEMPLATE_PATH)  # optional variant ships too
+        expected_paths.add('daydream/backends/pi_read_source.ts')
         with zipfile.ZipFile(wheels[0]) as zf:
             names_in_wheel = set(zf.namelist())
-        assert expected_paths <= names_in_wheel, (f"Built wheel is missing YAML templates. "
-            f"Found YAML entries: {sorted(n for n in names_in_wheel if n.endswith('.yml'))!r}. "
+        assert expected_paths <= names_in_wheel, (f"Built wheel is missing packaged runtime resources. "
+            f"Found resources: {sorted(names_in_wheel.intersection(expected_paths))!r}. "
             f"Expected paths: {sorted(expected_paths)!r}. "
             f"Check [tool.hatch.build.targets.wheel] include in pyproject.toml."
         )

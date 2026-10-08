@@ -42,6 +42,21 @@ REVIEW_STAGE_SCHEMA = strict_object({
     "contradictions": {"type": "array", "items": {"type": "string"}},
 })
 
+
+def review_stage_schema(target_ids: list[str], candidate_ids: list[str], *, triage: bool) -> dict[str, Any]:
+    """Specialize output transport to the assignment; semantic admission stays independent."""
+    schema = copy.deepcopy(REVIEW_STAGE_SCHEMA)
+    targets = schema['properties']['targets']
+    targets.update(minItems=len(target_ids), maxItems=len(target_ids))
+    if target_ids:
+        targets['items']['properties']['target_id']['enum'] = target_ids
+    candidates = schema['properties']['candidates']
+    candidates['items']['properties']['candidate_id']['enum'] = candidate_ids if triage else ['']
+    if triage:
+        candidates.update(minItems=len(candidate_ids), maxItems=len(candidate_ids))
+        candidates['items']['properties']['disposition']['enum'] = ['confirmed', 'rejected', 'unresolved']
+    return schema
+
 ALTERNATIVE_REVIEW_SCHEMA = result_array_schema("issues", {
     "id": {"type": "integer"},
     "title": {"type": "string"},

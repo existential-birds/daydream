@@ -244,6 +244,7 @@ class SchemaAwareSelection:
     rejected_reason: str | None
     rejection: SchemaRejection | None = None
     schema_retry_eligible: bool = False
+    syntax_error: dict[str, int] | None = None
 
 
 def _strip_json_fences(text: str) -> str:
@@ -330,6 +331,9 @@ def extract_json_by_schema(
     if require_complete_root:
         try:
             root = json.loads(_strip_json_fences(text))
+        except json.JSONDecodeError as exc:
+            return SchemaAwareSelection(None, 0, None, None,
+                                        syntax_error={'position': exc.pos, 'line': exc.lineno, 'column': exc.colno})
         except (ValueError, TypeError):
             return SchemaAwareSelection(None, 0, None, None)
         if accept(root, schema):

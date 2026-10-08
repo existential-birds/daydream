@@ -906,6 +906,10 @@ class Backend(Protocol):
     - supports_budget_preamble: accepts wall_budget_s/tool_call_budget so the
       backend's own system prompt can state this turn's real allowances rather
       than its module defaults. The host enforces the bound either way.
+    - supports_source_recipe: accepts optional invocation-local source_recipe;
+      the immutable recipe grants only frozen source windows, never a private root.
+    - supports_complete_output: accepts optional require_complete_root for strict
+      staged JSON syntax; malformed roots remain terminal.
     - reasoning_effort: native level fixed at construction; None defers to the driver.
       Backend instances are cached by kind, model, effort, and audit root.
     """

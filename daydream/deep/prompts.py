@@ -291,45 +291,103 @@ def _review_stage_context(review_stage: dict[str, Any], *, intent_authoritative:
             + status_text
         )
     transport = (
-        "Use the captured sanctioned bytes; do not read their private storage paths."
+        "For host artifacts, use the captured sanctioned bytes; do not read their private storage paths."
         if review_stage.get("context_transport") == "inline" else
-        "Use only the exact sanctioned pointers supplied by the host. Necessary pointer reads "
+        "For host artifacts, use only the exact sanctioned pointers supplied by the host; do not "
+        "infer sibling paths or enumerate host storage. Necessary pointer reads "
         "consume the same remaining hard tool allowance as source reads."
     )
+    bundle = ""
+    if review_stage.get('supporting_bundle'):
+        bundle = (
+            " The supporting_bundle contains the complete bounded assignment diff, hunk index "
+            "and binding. Reuse its captured inline content; no supporting artifact read is needed."
+            if review_stage.get('context_transport') == 'inline' else
+            " Read the supporting_bundle once for its complete bounded assignment diff, hunk index "
+            "and binding, then reuse that supporting content; separate legacy diff/index reads are "
+            "unnecessary for this bundle-capable builder."
+        )
     authority = (
         "\n" + AUTHORITATIVE_INTENT_BLOCK
         if intent_authoritative and "intent" in labels else ""
     )
     return (
-        "Sanctioned inputs available for this assignment: " + ", ".join(labels) + ". " + transport
+        "Sanctioned inputs available for this assignment: " + ", ".join(labels) + ". " + transport + bundle
         + status_text
-        + "\nThese bounded inputs explain intent and repository conventions; they are supporting context, "
-        "not additional assigned targets or completed source evidence. Omitted inputs are unavailable; "
+        + "\nDiff, hunk-index, input-binding, intent and exploration inputs are supporting context, "
+        "not additional assigned targets or completed source evidence. Source projections identified "
+        "by source_access are separately typed genuine source; use their bound access methods. "
+        "Repository source reads for "
+        "concrete assigned concerns remain permitted. Omitted inputs are unavailable; "
         "never assume a partial context contains the complete repository map."
         + authority
     )
 
 
-def _stage_output_instruction() -> str:
-    """The progress handoff has exactly the host's schema, never terminal findings."""
+def _stage_source_instruction() -> str:
+    """Explain typed access and reuse without repeating the host's window inventory."""
     return (
-        "Return only one JSON object conforming exactly to REVIEW_STAGE_SCHEMA below, with "
+        "Frozen source windows: the host state's source_access inventory identifies the original "
+        "file, side-specific source_path, before/after side and revision, content identity, line/byte "
+        "range, associated target_ids, exact access method and read_required obligation. "
+        "A before window can belong to a deleted file absent at HEAD or a renamed old path. "
+        "Read it through the supplied projection or read_source arguments; do not try the missing "
+        "HEAD path or infer host artifact paths. Source projections contain actual source, not diff "
+        "text. Use only the current invocation's supplied selectors with read_source. "
+        "Every read_required:true window needs a completed source read in this invocation, even "
+        "when its contents already appear in the supporting diff or prompt. General reuse-diff "
+        "advice does not waive this obligation. A read_required:false window may be optional "
+        "before-side context or covered by an admitted complete receipt; that flag alone does not "
+        "establish evidence. Reuse requires a verified covered window explicitly bound in "
+        "admitted_source_windows from a successful stage in this reviewer and snapshot. Optional "
+        "source needed for a decision still needs a read when no admitted receipt covers it. "
+        "Relevant admitted_source_windows and notes are available for current "
+        "first-pass work as well as triage; their compact excerpts may be partial. Reuse the "
+        "verified covered window without repeating its read if it suffices for judgment. Unknown "
+        "or opaque ranges, uncovered enclosing context and insufficient excerpts need a fresh "
+        "targeted read. Failed attempts contribute no reusable evidence. A receipt or reused "
+        "window never supplies the new assignment's review decision by itself. If needed source "
+        "is unavailable, do not claim a reviewed target or confirmed candidate; explain unfinished "
+        "work in its assigned output fields."
+    )
+
+
+def _stage_output_instruction(review_stage: dict[str, Any]) -> str:
+    """The progress handoff has exactly the host's schema, never terminal findings."""
+    contract = review_stage.get('response_contract')
+    output_contract = (
+        "The authoritative invocation REVIEW_STAGE_SCHEMA is response_contract.schema in the "
+        "Host review stage below; it specializes identities and counts for this assignment. "
+        "Start with this explicit four-key output skeleton, filling required judgments rather "
+        "than copying placeholder decisions:\n"
+        + json.dumps(contract['skeleton'], ensure_ascii=False)
+        if contract else
+        "REVIEW_STAGE_SCHEMA:\n" + json.dumps(REVIEW_STAGE_SCHEMA, ensure_ascii=False)
+    )
+    identity = (
+        "This is triage: targets must be exactly []. Echo every assigned candidate ID exactly "
+        "once, with no new candidates, target entries, IDs or open dispositions. "
+        if review_stage['stage'] == 'triage' else
+        "Echo every assigned target_id exactly once. Discovery may produce newly discovered "
+        "nonempty candidates; leave each candidate_id empty so the host assigns its identity. "
+    )
+    return (
+        "Return only one JSON object conforming exactly to the invocation REVIEW_STAGE_SCHEMA, with "
         "targets, notes, candidates, and contradictions. Do not write artifacts or a markdown report. "
-        "The host owns terminal findings serialization.\n"
-        "Echo every assigned target_id exactly once; mark it reviewed only after judging its assigned "
+        "The host owns terminal findings serialization. Keep all four members inside the root "
+        "object and close it once after contradictions; append no member suffix or prose.\n"
+        + identity + "Mark a target reviewed only after judging its assigned "
         "changed behavior using complete enclosing-source evidence. Reads alone do not establish "
         "reviewed coverage. A target can name a file, hunk, or ordered continuation segment: judge "
         "only its assigned part, never claim a prefix completes a hunk. The host folds a file's "
         "coverage only after every required part succeeds. Explain unfinished work with "
         "not_reviewed and a nonempty reason. "
         "Keep notes short and specific to this assignment. Each candidate needs a concrete trigger, "
-        "observable consequence, and grounds citing completed source evidence. In discovery, leave "
-        "candidate_id empty: the host assigns its identity. In triage, echo exactly the assigned "
-        "candidate IDs, with no new IDs or open dispositions. A confirmed candidate must carry its "
+        "observable consequence, and grounds citing completed source evidence. A confirmed candidate must carry its "
         "grounded finding; other dispositions carry finding: null. Never reopen a closed decision. "
         "contradictions may name only the supplied closed_candidate_ids when evidence directly "
         "contradicts one; do not revise that decision.\n"
-        + json.dumps(REVIEW_STAGE_SCHEMA, ensure_ascii=False)
+        + output_contract
     )
 
 
@@ -352,10 +410,11 @@ def _build_review_stage_prompt(
     parts.append(
         f"Stage attempt: {attempt} of {review_stage.get('max_attempts', 2)}. "
         "This is a fresh invocation for the same logical assignment and frozen snapshot. "
-        "Obtain necessary source grounding in this invocation; unsuccessful attempts contribute "
+        "Obtain necessary fresh source grounding in this invocation; unsuccessful attempts contribute "
         "no source evidence, notes, candidates, or excerpts. Previously admitted stages remain "
-        "available only within their stated scope."
+        "available only within their verified source windows and stated scope."
     )
+    parts.append(_stage_source_instruction())
     rejection = review_stage.get("schema_rejection")
     if rejection is not None:
         parts.append(
@@ -399,7 +458,8 @@ def _build_review_stage_prompt(
         if structural:
             parts.append(
                 "You are the structural reviewer. Begin with whole-change interactions and boundaries, "
-                "not an alphabetical file audit. The changed-file inventory is: " + ", ".join(files) + ". "
+                "not an alphabetical file audit. The complete host assigned_files inventory names "
+                "the changed paths. "
                 "The compact whole-change inventory and bounded supporting diff parts orient this "
                 "interaction assignment; do not begin by dumping the complete diff or hunk index. "
                 "Inspect implementation interactions first: trace changed values, calls, contracts and "
@@ -408,6 +468,16 @@ def _build_review_stage_prompt(
                 "Do not repeat the language or generic reviewers' file audits. "
                 "Stop a boundary trace when the contract agrees and no concrete candidate remains."
             )
+            if review_stage.get('folded_alternatives'):
+                parts.append(
+                    "This Structure invocation also owns the folded default design-alternatives "
+                    "duty. Within the same whole-change boundary review, judge whether design "
+                    "choices conflict with confirmed intent, an existing canonical implementation "
+                    "or an applicable repository convention. Retain a concrete design downside "
+                    "only with a real trigger, consequence and completed source grounds; a clean "
+                    "design can finish without a candidate. Do not launch a separate alternatives "
+                    "audit or invent hypothetical replacements."
+                )
         else:
             if is_docs_only:
                 parts.append(DOC_REVIEW_NOTICE)
@@ -485,11 +555,24 @@ def _build_review_stage_prompt(
         f"Advisory stage tool-call target: {review_stage['advisory_tool_call_target']}. "
         f"Remaining hard cumulative tool allowance: {review_stage['remaining_tool_calls']}. "
         "The advisory target guides pace and is not a stopping limit: useful assigned investigation "
-        "may borrow available cumulative capacity. Every stage, pointer read and retry consumes the "
+        "may borrow available cumulative capacity. Plan reads around the required source windows, "
+        "reuse admitted covered windows and the supporting bundle, and combine related targeted "
+        "searches. Trace dependencies only to answer concrete changed-behavior questions; stop a "
+        "trace once its contract agrees or the candidate is decided. Broad source reads may be "
+        "legitimate when they resolve a specific dependency question. Every stage, pointer read and retry consumes the "
         "same hard allowance and absolute reviewer deadline. Finish this finite assignment without "
-        "reopening decisions or repeating speculative passes."
+        "reopening decisions or repeating speculative passes; never skip assigned work to satisfy "
+        "the advisory target."
     )
-    parts.append(_stage_output_instruction())
+    if review_stage.get('remaining_work'):
+        parts.append(
+            "Remaining planned work estimate: " + json.dumps(review_stage['remaining_work'], ensure_ascii=False)
+            + ". The mandatory-read estimate covers known required transport and source starts; "
+            "it does not prove that the allowance suffices for meaningful review, dependency "
+            "investigation, extra source windows or candidate triage. Unfinished work remains "
+            "explicitly incomplete."
+        )
+    parts.append(_stage_output_instruction(review_stage))
     return "\n\n".join(parts)
 
 

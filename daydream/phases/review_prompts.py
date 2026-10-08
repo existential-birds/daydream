@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
 from daydream import review_profile as _rp
 from daydream.phases.inputs import _PR_BODY_MAX_CHARS
@@ -13,6 +14,49 @@ from daydream.prompts.authorial_intent import (
 )
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.severity import SEVERITY_RUBRIC
+
+
+def build_review_stage_system_instruction(review_stage: dict[str, Any]) -> str:
+    """Persist the stage's source and output duties through native compaction."""
+    triage = review_stage['stage'] == 'triage'
+    identity = (
+        'Triage targets must be exactly []; decide each assigned candidate ID once with '
+        'confirmed, rejected, or unresolved, without discovering candidates.'
+        if triage else
+        'Echo each assigned target_id exactly once. Discovery may add concrete candidates with '
+        'candidate_id empty; the host assigns candidate IDs.'
+    )
+    return (
+        'STAGED REVIEW CONTRACT: The host assignment and invocation output schema govern this turn. '
+        'Return one complete JSON object with exactly targets, notes, candidates, contradictions; '
+        'close the root only after all four members. No prose or separate issues object. '
+        + identity + ' '
+        'A reviewed decision requires complete associated source evidence, even for a clean target. '
+        'Supporting diff, index, binding, intent, exploration and prompt-inlined source do not '
+        'replace a required native source read. This requirement overrides generic advice to reuse '
+        'content already present in a diff or prompt. Use source_access for frozen before/after '
+        'windows and their permitted read method; read every read_required window. Only a '
+        'host-verified complete window from an admitted successful stage in this reviewer and '
+        'snapshot may be reused through its admitted_source_windows binding. read_required:false '
+        'alone can also describe optional source and does not establish a receipt. Unknown or partial '
+        'coverage needs a fresh targeted read. Failed attempts contribute no evidence. Each current '
+        'assignment still requires a new review decision. Exact-pointer restrictions apply to '
+        'host artifacts: never infer private sibling paths or enumerate host storage. Repository '
+        'source reads for concrete assigned concerns remain permitted. Do not claim a reviewed '
+        'target or confirmed candidate when needed source is unavailable; explain unfinished work '
+        'in its assigned output fields. Every tool start and allowed fresh attempt spends '
+        'the same cumulative hard allowance and absolute deadline. '
+        'Persistent assignment identities: ' + json.dumps({
+            'targets': review_stage['assigned_target_ids'],
+            'candidate_ids': review_stage.get('assigned_candidate_ids', []),
+        }, ensure_ascii=False) + '. '
+        'Optional available_source_files permit normal current-side repository reads for '
+        'concrete candidates; these are independently verified against the captured HEAD. '
+        'Other tracked current-side dependencies may also be read through normal repository '
+        'tools for concrete concerns, with the same independent frozen-HEAD verification. '
+        'Frozen before reads use only their supplied source_access method. '
+        'No source receipt removes the need for a new decision on the current assignment.'
+    )
 
 
 def _confidence_and_convention_instructions(*, stage_scoped: bool = False) -> str:
@@ -32,7 +76,10 @@ def _confidence_and_convention_instructions(*, stage_scoped: bool = False) -> st
     grounding = (
         "Ground every reviewed assertion, including clean targets with no candidates, in complete "
         "associated source evidence for the assigned file/hunk parts. Supporting context can explain "
-        "intent and conventions, but does not replace source evidence. Compact excerpts marked "
+        "intent and conventions, but does not replace source evidence, even when the complete added "
+        "file appears in the diff. Read every source_access window marked read_required using its "
+        "supplied frozen before/after access method. Explicitly admitted complete same-reviewer, "
+        "same-snapshot source windows may be reused only for verified covered ranges. Compact excerpts marked "
         "partial may omit complete retained receipt content; use targeted rereads when needed for "
         "judgment. Free-form source citations do not authenticate their association to a receipt. "
         if stage_scoped else
@@ -140,7 +187,7 @@ def _exploration_pointer(exploration_dir: Path | None, *, fixer: bool = False) -
         f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
         f"Read the pre-scan summary at {exploration_dir / 'summary.md'} and the "
         f"deterministic structural/import map at {exploration_dir / 'affected_files.md'} "
-        "as bounded context for this review. Do not infer or enumerate sibling "
+        "as bounded context for this review. For host artifacts: Do not infer or enumerate sibling "
         "artifact files.\n"
         "Assigned source files are different: read the changed hunks in all assigned source files "
         "with the full enclosing symbol or configuration section; expand only as needed "

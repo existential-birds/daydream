@@ -14,14 +14,20 @@ from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import StackAssignment
 from daydream.deep.sharding import file_change_bytes, pack_file_batches
 from daydream.json_utils import SchemaRejection, validates_schema
-from daydream.phases.schemas import REVIEW_STAGE_SCHEMA
-from daydream.prompt_budget import PreparedSanctionedInputs, SanctionedInputUnavailable
+from daydream.phases.review_prompts import build_review_stage_system_instruction
+from daydream.phases.schemas import review_stage_schema
+from daydream.prompt_budget import PreparedSanctionedInputs, SanctionedInputUnavailable, SourceAccessUnavailable
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
-from daydream.review_evidence import FULL_REVIEW_MAX_BYTES, EvidenceReceipt, ReviewEvidence
+from daydream.review_evidence import (
+    FULL_REVIEW_MAX_BYTES,
+    EvidenceReceipt,
+    ReviewEvidence,
+    source_window_covered,
+)
 from daydream.review_result import reason_for_exception
 from daydream.trajectory import DaydreamPhase, LifecycleReasonCode, LifecycleStatus, phase_scope
 
-STAGED_REVIEW_CONTRACT = 3
+STAGED_REVIEW_CONTRACT = 4
 HANDOFF_MAX_BYTES = 64 * 1024
 HANDOFF_MAX_ITEMS = 128
 
@@ -120,18 +126,23 @@ class ReviewInvestigation:
         candidates = [candidate for candidate in self.handoff['candidates']
                       if candidate['candidate_id'] in candidate_ids]
         candidate_files = _candidate_source_files(candidates)
+        relevant_files = candidate_files | set(files)
         # Only admitted context relevant to this triage assignment travels into
         # its fresh request. Closed decisions expose handles, never fresh work.
         notes = [note['text'] for note in self.handoff['notes']
-                 if candidate_files.intersection(note['files'])]
-        evidence = [block for block in self.handoff['evidence']
-                    if candidate_files.intersection(block['files'])]
+                 if relevant_files.intersection(note['files'])]
+        evidence = ReviewEvidence(None).compact_for_files(relevant_files, receipts=self.admitted_receipts)
         target = (max(4, 3 * len(candidate_ids)) if stage == 'triage' else
                   max(8, len(files)) if stage == 'integration' else max(4, 2 * len(files)))
         return {
             'contract_version': STAGED_REVIEW_CONTRACT, 'scope_id': self.scope_id,
             'analyzed_revision': self.revision, 'stage': stage, 'assigned_target_ids': targets,
             'assignment_parts': assignment_parts,
+            'completed_target_ids': [target for target, progress in self.target_progress.items()
+                                     if progress['status'] == 'reviewed'],
+            'admitted_source_windows': [receipt.source.metadata() for receipt in self.admitted_receipts
+                                        if receipt.complete and receipt.source is not None
+                                        and receipt.source.file in relevant_files],
             'assigned_files': sorted(candidate_files) if stage == 'triage' else files,
             'progress': self.handoff['progress'] if stage != 'triage' else [],
             'notes': notes, 'candidates': candidates, 'evidence': evidence,
@@ -180,15 +191,28 @@ class ReviewInvestigation:
         self.failure_diagnostic = None
         self.failed_invocation = False
         self.failure_class = None
+        if attempt > 1:
+            state["admitted_source_windows"] = []
         state.update(attempt=attempt, max_attempts=2,
                      schema_rejection=rejection.to_dict() if rejection else None)
-        evidence = ReviewEvidence(REVIEW_STAGE_SCHEMA)
+        schema = review_stage_schema(targets, candidate_ids, triage=stage == "triage")
+        state["response_contract"] = {"schema": schema, "skeleton": {
+            "targets": [{"target_id": target, "status": "reviewed", "reason": ""} for target in targets],
+            "notes": "", "candidates": [{
+                "candidate_id": candidate["candidate_id"], "file": candidate["file"], "line": candidate["line"],
+                "trigger": "", "consequence": "", "grounds": "", "disposition": "unresolved", "finding": None,
+            } for candidate in state["candidates"]] if stage == "triage" else [], "contradictions": [],
+        }}
+        evidence = ReviewEvidence(schema)
+        self.assertion_failure_class: str | None = None
+        syntax_error: dict[str, int] | None = None
         retry_rejection: SchemaRejection | None = None
         actual_rejection: SchemaRejection | None = None
         accepted = False
         starts_before = self.budget.observed_tool_starts
         candidate_count = 0
         identity_failure = False
+        source_access_failure = False
         async with phase_scope(DaydreamPhase.DEEP, stage=f'review-{stage.replace('_', '-')}') as transition:
             prior_admitted = self.admitted_stages
             try:
@@ -198,13 +222,55 @@ class ReviewInvestigation:
                 prepared = kwargs.get('sanctioned_inputs')
                 if prepared is not None:
                     prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
+                reused: list[EvidenceReceipt] = []
+                if prepared is not None:
+                    kwargs["source_recipe"] = prepared.source_recipe
+                    recipe = prepared.source_recipe
+                    if recipe is not None and attempt == 1:
+                        reused = [receipt for receipt in self.admitted_receipts
+                                  if receipt.complete and receipt.source is not None
+                                  and receipt.source.file in state["assigned_files"] and any(
+                                      receipt.source.file == window.file and receipt.source.side == window.side
+                                      and receipt.source.revision == window.revision
+                                      and receipt.source.content_sha256 == window.content_sha256
+                                      and receipt.source.blob_oid == window.blob_oid
+                                      and receipt.source.source_path == window.source_path
+                                      for window in recipe.windows)]
+                        for access in state.get("source_access", []):
+                            window = next((window for window in recipe.windows
+                                           if window.file == access["file"] and window.side == access["side"]
+                                           and window.start_byte == access["start_byte"]
+                                           and window.end_byte == access["end_byte"]
+                                           and set(access["target_ids"]) <= set(window.target_ids)), None)
+                            if (window is not None and recipe.verify_window(window)
+                                    and source_window_covered(window, reused)):
+                                access["read_required"] = False
+                                access["reuse"] = "admitted complete frozen source coverage"
+                        state["admitted_source_windows"] = [receipt.source.metadata() for receipt in reused
+                                                            if receipt.source is not None]
+                    if recipe is not None:
+                        remaining = state.setdefault("remaining_work", {})
+                        required = [window for window in recipe.windows
+                                    if window.read_required and window.file in state["assigned_files"]]
+                        remaining["current_stage_source_windows"] = 1 if stage == "integration" else len(required)
+                        remaining["current_stage_fresh_source_windows"] = (
+                            int(not any(source_window_covered(window, reused) for window in recipe.windows))
+                            if stage == "integration" else
+                            sum(not source_window_covered(window, reused) for window in required))
+                        supporting_reads = (0 if stage == "triage" or prepared.transport.value == "inline" else
+                                            1 if state.get("supporting_bundle") else 3)
+                        remaining["current_stage_mandatory_read_estimate"] = (
+                            supporting_reads + remaining["current_stage_fresh_source_windows"])
+                        remaining["read_estimate_scope"] = (
+                            "Transport lower bound only; candidate and dependency investigation are additional.")
                 evidence.configure_capture(cwd, allowance=FULL_REVIEW_MAX_BYTES - self.admitted_retained_bytes,
-                                           sanctioned_inputs=prepared,
+                                           sanctioned_inputs=prepared, reused_receipts=reused,
                                            snapshot_revisions=tuple(self.revision[key] for key in
                                                                     ('head_sha', 'merge_base_sha')))
                 stage_prompt = prompt_builder(state)
                 output, _, self.reason = await agent.run_agent(
-                    backend, cwd, stage_prompt, phase=DaydreamPhase.DEEP, output_schema=REVIEW_STAGE_SCHEMA,
+                    backend, cwd, stage_prompt, phase=DaydreamPhase.DEEP, output_schema=schema,
+                    review_system_instructions=build_review_stage_system_instruction(state),
                     require_full_schema=True, investigation_budget=self.budget, review_evidence=evidence,
                     schema_rejection_guard=lambda value: self._schema_retry_eligible(
                         value, stage, targets, candidate_ids, evidence, files=files or state['assigned_files']),
@@ -212,6 +278,10 @@ class ReviewInvestigation:
                 )
                 if prepared is not None:
                     prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
+            except SourceAccessUnavailable:
+                self.reason = "evidence_incomplete"
+                source_access_failure = True
+                accepted = False
             except SanctionedInputUnavailable:
                 self.reason = 'evidence_incomplete'
                 identity_failure = True
@@ -227,6 +297,7 @@ class ReviewInvestigation:
                 accepted = False
             else:
                 actual_rejection = output.rejection if isinstance(output, agent.StructuredOutputFailure) else None
+                syntax_error = output.syntax_error if isinstance(output, agent.StructuredOutputFailure) else None
                 candidate_count = len(output.get('candidates', [])) if isinstance(output, dict) else 0
                 if self.reason is None:
                     if (actual_rejection is not None and isinstance(output, agent.StructuredOutputFailure)
@@ -241,18 +312,28 @@ class ReviewInvestigation:
                 if self.reason in {'tool_call_budget_exceeded', 'wall_budget_exceeded', 'pipeline_budget_exceeded',
                                    'model_budget_exhaustion'}:
                     self.failure_class = 'quantitative_exhaustion'
+                elif source_access_failure or evidence.source_access_failures:
+                    self.failure_class = "source_access_failure"
+                elif self.assertion_failure_class is not None:
+                    self.failure_class = self.assertion_failure_class
+                elif syntax_error is not None:
+                    self.failure_class = "syntax_failure"
                 elif actual_rejection is not None:
                     self.failure_class = 'schema_rejection'
                 elif self.reason == 'evidence_incomplete':
                     self.failure_class = ('capture_loss' if identity_failure or evidence.capture_failure(
                         files or state['assigned_files'], require_source=False,
-                        interaction=stage == 'integration') else 'admission_failure')
+                        interaction=stage == 'integration') else 'missing_source_receipt')
                 elif self.reason == 'interruption':
                     self.failure_class = 'cancellation'
                 else:
                     self.failure_class = self.reason
                 if self.reason is not None and not self.failed_invocation:
                     labels = {'schema_rejection': 'Strict stage schema rejected',
+                              'syntax_failure': 'Invalid JSON syntax',
+                              'assignment_mismatch': 'Stage assignment identities rejected',
+                              'missing_source_receipt': 'Required source receipt missing',
+                              'source_access_failure': 'Frozen source access unavailable or rejected',
                               'capture_loss': 'Required source evidence capture incomplete',
                               'admission_failure': 'Stage evidence admission failed',
                               'quantitative_exhaustion': 'Review limit exhausted'}
@@ -272,9 +353,26 @@ class ReviewInvestigation:
                     full_retained_bytes=evidence.full_retained_bytes,
                     compact_view_clipped=evidence.clipped,
                     native_truncated_results=evidence.native_truncated_results,
+                    source_access_failures=evidence.source_access_failures + int(source_access_failure),
+                    reused_source_windows=sum(not access.get("read_required", True) and "reuse" in access
+                                              for access in state.get("source_access", [])),
+                    fresh_source_reads=sum(receipt.complete and receipt.source is not None
+                                           for receipt in evidence.receipts),
+                    before_source_reads=sum(receipt.complete and receipt.source is not None
+                                            and receipt.source.side == "before" for receipt in evidence.receipts),
+                    base_only_source_reads=sum(
+                        receipt.complete and receipt.source is not None and receipt.source.side == "before"
+                        and evidence.source_recipe is not None
+                        and not any(window.side == "after" and window.source_path == receipt.source.source_path
+                                    for window in evidence.source_recipe.windows) for receipt in evidence.receipts),
+                    source_body_bytes=sum(len(receipt.source.body.encode()) for receipt in evidence.receipts
+                                          if receipt.complete and receipt.source is not None),
+                    after_source_reads=sum(receipt.complete and receipt.source is not None
+                                           and receipt.source.side == "after" for receipt in evidence.receipts),
                     retention_overflow_results=evidence.retention_overflow_results,
                     unmatched_results=evidence.unmatched_results,
                     failure_class=self.failure_class,
+                    syntax_error=syntax_error,
                     stage_candidate_count=candidate_count,
                     admitted_candidate_count=len(self.handoff['candidates']),
                     retained_findings=sum(item['disposition'] == 'confirmed' for item in self.handoff['candidates']),
@@ -330,11 +428,13 @@ class ReviewInvestigation:
                    and candidate['finding'] is None
                    for candidate in decisions)
         ):
+            self.assertion_failure_class = 'assignment_mismatch'
             return 'malformed_output'
         if decisions and any(
             not isinstance(candidate.get(field), str) or not candidate[field].strip()
             for candidate in decisions for field in ('grounds', 'trigger', 'consequence')
         ):
+            self.assertion_failure_class = 'admission_failure'
             return 'evidence_incomplete'
         reviewed_ids = {target['target_id'] for target in declared_targets
                         if target.get('status') == 'reviewed' and isinstance(target.get('target_id'), str)}
@@ -354,7 +454,7 @@ class ReviewInvestigation:
         # Whole-change interaction evidence is deliberately broader than a
         # language/file audit. Each defect claim still needs its own associated
         # source, rather than borrowing an unrelated receipt from that union.
-        receipts = [*self.admitted_receipts, *evidence.receipts] if stage == 'triage' else evidence.receipts
+        receipts = [*evidence.reused_receipts, *evidence.receipts]
         grounded = {path for receipt in receipts if receipt.complete and not receipt.supporting
                     for path in receipt.paths}
         if not candidate_files <= grounded:
@@ -367,6 +467,10 @@ class ReviewInvestigation:
         if not isinstance(output, dict) or self._assertion_failure(
             output, stage, targets, candidate_ids, evidence, files=files
         ) is not None:
+            return False
+        if evidence.capture_failure(files, interaction=stage == 'integration'):
+            self.assertion_failure_class = ('capture_loss' if evidence.capture_failure(
+                files, require_source=False, interaction=stage == 'integration') else 'missing_source_receipt')
             return False
         contradictions = output.get('contradictions')
         if isinstance(contradictions, list) and any(isinstance(item, str) for item in contradictions):
@@ -427,7 +531,7 @@ class ReviewInvestigation:
         compact = list(self.handoff['evidence'])
         compact_bytes = len(json.dumps(compact, ensure_ascii=False).encode())
         compact_clipped = False
-        relevant_files = _candidate_source_files(decisions)
+        relevant_files = _candidate_source_files(decisions) | set(files)
         relevant_blocks = evidence.compact_for_files(relevant_files)
         for index, block in enumerate(relevant_blocks):
             entry = {'stage': stage, 'assigned_target_ids': targets, **block}
@@ -447,21 +551,26 @@ class ReviewInvestigation:
         handoff = {
             'progress': progress,
             'notes': self.handoff['notes'] + [{
-                'files': sorted(set(files) | relevant_files), 'text': output['notes'],
+                'files': sorted(set(files) | relevant_files | {
+                    receipt.source.file for receipt in evidence.receipts
+                    if receipt.complete and receipt.source is not None
+                }), 'text': output['notes'],
             }],
             'candidates': candidates, 'evidence': compact,
         }
         if (sum(map(len, handoff.values())) > HANDOFF_MAX_ITEMS
                 or len(json.dumps(handoff, ensure_ascii=False).encode('utf-8')) > HANDOFF_MAX_BYTES):
+            self.assertion_failure_class = 'admission_failure'
             return None, 'evidence_incomplete'
         receipts = [receipt for receipt in evidence.receipts
-                    if receipt.complete and relevant_files.intersection(receipt.paths)]
+                    if receipt.complete and (receipt.source is not None
+                                             or relevant_files.intersection(receipt.paths))]
         return _AdmissionPlan(handoff, target_progress, receipts, compact_clipped), None
 
     def _admit(self, output: Any, stage: str, targets: list[str], candidate_ids: list[str],
                evidence: ReviewEvidence, *, files: list[str]) -> str | None:
         """Commit a bounded plan only after the full strict schema and domain gates."""
-        if not isinstance(output, dict) or not validates_schema(output, REVIEW_STAGE_SCHEMA):
+        if not isinstance(output, dict) or not validates_schema(output, evidence.schema or {}):
             return (output.reason if isinstance(output, agent.StructuredOutputFailure)
                     else 'malformed_output' if output else 'missing_output')
         reason = self._assertion_failure(output, stage, targets, candidate_ids, evidence, files=files)
@@ -470,10 +579,13 @@ class ReviewInvestigation:
         plan, reason = self._prepare_handoff(output, stage, targets, evidence, files=files)
         if plan is None:
             return reason
+        if output['contradictions']:
+            self.assertion_failure_class = 'admission_failure'
+            return 'evidence_incomplete'
         self.admitted_stages += 1
         self.handoff = plan.handoff
         self.target_progress = plan.target_progress
         evidence.clipped |= plan.compact_clipped
         self.admitted_receipts.extend(plan.receipts)
         self.admitted_retained_bytes += sum(receipt.retained_bytes for receipt in plan.receipts)
-        return 'evidence_incomplete' if output['contradictions'] else None
+        return None

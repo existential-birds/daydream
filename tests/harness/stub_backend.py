@@ -37,7 +37,23 @@ def review_stage_state(prompt: str) -> dict[str, Any] | None:
 def completed_stage_reads(cwd: Path, stage: dict[str, Any]) -> list[AgentEvent]:
     """Perform the assigned snapshot source reads at the external provider seam."""
     events: list[AgentEvent] = []
+    projected: set[str] = set()
+    accesses = stage.get('source_access', [])
+    for index, window in enumerate(accesses):
+        access = window.get('access', {})
+        source_path = access.get('path')
+        preferred = (window['side'] == 'after' or not any(
+            other['file'] == window['file'] and other['side'] == 'after' for other in accesses))
+        if (source_path is None or window['file'] not in stage['assigned_files']
+                or not (window['read_required'] or 'reuse' in window
+                        or stage['stage'] == 'integration' and preferred)):
+            continue
+        call = ToolStartEvent(id=f'source-window-{index}', name='Read', input={'file_path': source_path})
+        events.extend((call, ToolResultEvent(id=call.id, output=Path(source_path).read_text(), is_error=False)))
+        projected.add(window['file'])
     for path in stage['assigned_files']:
+        if path in projected:
+            continue
         if (cwd / path).is_file():
             call = ToolStartEvent(id=f'source-{path}', name='Read', input={'file_path': path})
             source = (cwd / path).read_text()

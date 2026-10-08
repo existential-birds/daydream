@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from tests.conftest import ExtDir
 from tests.deep_orchestrator.test_review_completion import record, scopes
 from tests.deep_orchestrator.test_review_investigation import InvestigationRun, StagedBackend, candidate, stage_ends
 from tests.harness.git_helpers import seed_feature_branch
+from tests.test_deep_orchestrator import _sanctioned_inputs
 
 
 def source_review(tmp: Path, patch: pytest.MonkeyPatch, *, source_bytes: int,
@@ -32,10 +34,48 @@ def source_review(tmp: Path, patch: pytest.MonkeyPatch, *, source_bytes: int,
     return InvestigationRun(repo, tmp, patch)
 
 
-def read_source(review: InvestigationRun, path: str, call_id: str) -> Iterable[AgentEvent]:
+def read_source(review: InvestigationRun, path: str, call_id: str, *,
+                stage: dict[str, Any] | None = None) -> Iterable[AgentEvent]:
+    if stage is not None:
+        from daydream import git_ops
+
+        windows = [window for window in stage['source_access'] if window['file'] == path and window['read_required']]
+        if windows:
+            for index, window in enumerate(windows):
+                projection = window['access'].get('path')
+                if projection is not None:
+                    source = Path(projection).read_text()
+                    call = ToolStartEvent(id=f'{call_id}-{index}', name='Read', input={'file_path': projection})
+                elif window['side'] == 'before':
+                    source = git_ops.show(review.repo, window['revision'], window['source_path']).decode('utf-8')
+                    call = ToolStartEvent(id=f'{call_id}-{index}', name='Bash',
+                                         input={'command': f'git show {window["revision"]}:{window["source_path"]}'})
+                else:
+                    source = (review.repo / path).read_text()
+                    call = ToolStartEvent(id=f'{call_id}-{index}', name='Read', input={'file_path': path})
+                yield call
+                yield ToolResultEvent(id=call.id, output=source, is_error=False)
+            return
     source = (review.repo / path).read_text()
     yield ToolStartEvent(id=call_id, name='Read', input={'file_path': path})
     yield ToolResultEvent(id=call_id, output=source, is_error=False)
+
+
+def supporting_contents(prompt: str) -> dict[str, str]:
+    """The scripted provider consumes whole bounded supporting sections on either transport."""
+    from tests.test_deep_orchestrator import _sanctioned_inputs
+
+    captured = dict(re.findall(r'<sanctioned-input label="([^"]+)">\n(.*?)\n</sanctioned-input>', prompt, re.S))
+    if 'Sanctioned phase inputs (read only these exact files):' in prompt:
+        captured.update({label: path.read_text() for label, path in _sanctioned_inputs(prompt).items()})
+    bundle = captured.get('review-assignment')
+    if bundle is not None:
+        sections = list(re.finditer(r'^### ([^\n]+) \(supporting\)\n', bundle, re.M))
+        for index, section in enumerate(sections):
+            body = (bundle[section.end():sections[index + 1].start()] if index + 1 < len(sections)
+                    else bundle[section.end():])
+            captured[section[1]] = body.removesuffix('\n\n') if index + 1 < len(sections) else body
+    return captured
 
 
 @pytest.mark.parametrize('workload_bytes', [53_000, 89_000])
@@ -220,11 +260,13 @@ async def test_oversized_hunk_continuations_cover_every_byte_before_file_is_comp
                                        rendered, flags=re.S))
         else:
             pointers = _sanctioned_inputs(prompt)
-            assert set(pointers) == set(stage['context_inputs'])
+            visible = {label for label in stage['context_inputs'] if not label.startswith('source-')}
+            assert set(pointers) == visible - set(stage.get('context_inline_labels', []))
             captured = {label: path.read_text() for label, path in pointers.items()}
             for index, (label, path) in enumerate(pointers.items()):
                 yield ToolStartEvent(id=f'input-{index}', name='Read', input={'file_path': str(path)})
                 yield ToolResultEvent(id=f'input-{index}', output=captured[label], is_error=False)
+        captured = supporting_contents(prompt)
         diff = captured['diff']
         assert len(diff.encode()) < 12_000
         index = json.loads(captured['hunk-index'])
@@ -315,7 +357,7 @@ async def test_triage_carries_only_relevant_partial_views_and_rereads_candidate_
         assert stage['assigned_candidate_ids'] == [pending['candidate_id']]
         assert stage['evidence'] and all(block['files'] == ['api.py'] for block in stage['evidence'])
         assert all(block['partial'] for block in stage['evidence'])
-        assert stage['context_inputs'] == []
+        assert all(label.startswith('source-') for label in stage['context_inputs'])
         yield from read_source(review, 'api.py', 'triage-reread')
         output['candidates'] = [dict(pending, disposition='confirmed', finding=record())]
 
@@ -329,7 +371,6 @@ async def test_triage_carries_only_relevant_partial_views_and_rereads_candidate_
 async def test_realistic_diff_and_index_are_scoped_and_cannot_poison_source_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tests.test_deep_orchestrator import _sanctioned_inputs
 
     before: dict[str, str] = {}
     after: dict[str, str] = {}
@@ -351,13 +392,14 @@ async def test_realistic_diff_and_index_are_scoped_and_cannot_poison_source_evid
         if stage['scope_id'] != 'python':
             return
         pointers = _sanctioned_inputs(review.backend.calls[-1]['prompt'])
-        diff, index = pointers['diff'].read_text(), json.loads(pointers['hunk-index'].read_text())
+        captured = supporting_contents(review.backend.calls[-1]['prompt'])
+        diff, index = captured['diff'], json.loads(captured['hunk-index'])
         assert set(index) == set(stage['assigned_files'])
         assert set(path for path in after if f'diff --git a/{path} b/{path}' in diff) == set(stage['assigned_files'])
         assert len(diff.encode()) < 12_288
         exposed.append(diff)
         if len(exposed) == 1:
-            for label in ('diff', 'hunk-index'):
+            for label in ('review-assignment',) if 'review-assignment' in pointers else ('diff', 'hunk-index'):
                 yield ToolStartEvent(id=f'support-{label}', name='Read', input={'file_path': str(pointers[label])})
                 yield ToolResultEvent(id=f'support-{label}', output=pointers[label].read_text(), is_error=False)
         for path in stage['assigned_files']:
@@ -422,10 +464,8 @@ async def test_strict_stage_selection_never_salvages_rejected_or_incomplete_outp
 async def test_long_unicode_line_continuations_reassemble_complete_diff_with_byte_offsets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool,
 ) -> None:
-    import re
 
     from daydream import git_ops
-    from tests.test_deep_orchestrator import _sanctioned_inputs
 
     repo = tmp_path / 'unicode_line'
     seed_feature_branch(repo, base={'api.py': 'VALUE = 0\n'},
@@ -443,17 +483,13 @@ async def test_long_unicode_line_continuations_reassemble_complete_diff_with_byt
         part, = stage['assignment_parts']
         mappings.append(part)
         prompt = review.backend.calls[-1]['prompt']
-        if sandbox:
-            diff = dict(re.findall(r'<sanctioned-input label="([^"]+)">\n(.*?)\n</sanctioned-input>',
-                                   prompt, flags=re.S))['diff']
-        else:
-            diff = _sanctioned_inputs(prompt)['diff'].read_text()
+        diff = supporting_contents(prompt)['diff']
         body = diff.split('\n@@', 1)[1].split('\n', 1)[1].encode()
         assert part['kind'] == 'continuation' and part['fragment_offset'] == sum(map(len, chunks))
         assert part['fragment_bytes'] == len(body)
         assert (part['old_start'], part['old_count'], part['new_start'], part['new_count']) == (1, 1, 1, 1)
         chunks.append(body)
-        yield from read_source(review, 'api.py', f'unicode-{part["part_index"]}')
+        yield from read_source(review, 'api.py', f'unicode-{part["part_index"]}', stage=stage)
 
     review.backend.stage_response = response
     await review.finish('python')
@@ -489,7 +525,6 @@ async def test_reviewer_total_retention_overflow_rejects_otherwise_complete_sour
 async def test_quoted_git_paths_keep_complete_required_stage_inputs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str,
 ) -> None:
-    from tests.test_deep_orchestrator import _sanctioned_inputs
 
     repo = tmp_path / 'quoted_paths'
     seed_feature_branch(repo, base={path: 'VALUE = 0\n'},
@@ -501,10 +536,10 @@ async def test_quoted_git_paths_keep_complete_required_stage_inputs(
         if stage['scope_id'] != 'python':
             return
         assert stage['assigned_files'] == [path]
-        pointers = _sanctioned_inputs(review.backend.calls[-1]['prompt'])
-        diff = pointers['diff'].read_text()
+        captured = supporting_contents(review.backend.calls[-1]['prompt'])
+        diff = captured['diff']
         assert 'QUOTED_REQUIRED_CHANGE' in diff
-        assert path in json.loads(pointers['hunk-index'].read_text())
+        assert path in json.loads(captured['hunk-index'])
         required.append(diff)
         yield from read_source(review, path, 'quoted-source')
 
@@ -633,7 +668,8 @@ async def test_changed_prepared_input_identity_blocks_admission_and_schema_retry
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         if stage['scope_id'] != 'python':
             return
-        diff = _sanctioned_inputs(review.backend.calls[-1]['prompt'])['diff']
+        pointers = _sanctioned_inputs(review.backend.calls[-1]['prompt'])
+        diff = pointers['review-assignment'] if 'review-assignment' in pointers else pointers['diff']
         yield ToolStartEvent(id='captured-support', name='Read', input={'file_path': str(diff)})
         yield ToolResultEvent(id='captured-support', output=diff.read_text(), is_error=False)
         yield from read_source(review, 'api.py', 'complete-source')
@@ -667,6 +703,8 @@ async def test_mixed_source_receipt_does_not_expose_other_file_in_candidate_tria
             yield ToolStartEvent(id='mixed-source', name='Bash', input={'command': 'cat api.py module.py'})
             yield ToolResultEvent(id='mixed-source', output=''.join((repo / path).read_text()
                                                                   for path in stage['assigned_files']), is_error=False)
+            for path in stage['assigned_files']:
+                yield from read_source(review, path, f'verified-{path}')
             output['candidates'] = [candidate()]
             return
         pending, = stage['candidates']
@@ -680,7 +718,7 @@ async def test_mixed_source_receipt_does_not_expose_other_file_in_candidate_tria
 
     review.backend.stage_response = response
     await review.finish('python', findings=('Grounded defect',))
-    assert stage_ends(review, 'python')[-1]['metadata']['observed_tool_starts'] == 2
+    assert stage_ends(review, 'python')[-1]['metadata']['observed_tool_starts'] == 4
 
 
 @pytest.mark.parametrize('sandbox', [False, True], ids=['exact-whole-context', 'inline-context-unavailable'])
@@ -831,7 +869,6 @@ async def test_final_turn_selection_distinguishes_inferred_text_from_native_stru
 async def test_opaque_assignment_handles_cannot_alias_real_changed_filenames(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tests.test_deep_orchestrator import _sanctioned_inputs
 
     repo = tmp_path / 'assignment_identity'
     payload = ''.join(f'# REQUIRED_LARGE_CHANGE_{index:04} ' + 'x' * 90 + '\n' for index in range(600))
@@ -848,9 +885,9 @@ async def test_opaque_assignment_handles_cannot_alias_real_changed_filenames(
         target_ids = stage['assigned_target_ids']
         assert len(target_ids) == len(set(target_ids)) and not set(targets).intersection(target_ids)
         targets.extend(target_ids)
-        pointers = _sanctioned_inputs(review.backend.calls[-1]['prompt'])
-        scoped_diff = pointers['diff'].read_text()
-        scoped_index = json.loads(pointers['hunk-index'].read_text())
+        captured = supporting_contents(review.backend.calls[-1]['prompt'])
+        scoped_diff = captured['diff']
+        scoped_index = json.loads(captured['hunk-index'])
         assert set(scoped_index) == set(stage['assigned_files'])
         if '00_oversize.md' in stage['assigned_files']:
             assert 'REQUIRED_LARGE_CHANGE_' in scoped_diff
@@ -983,11 +1020,9 @@ async def test_mixed_schema_and_admission_rejection_never_retries_or_loses_prior
 async def test_old_only_hunk_and_later_continuations_keep_their_own_canonical_ranges(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool,
 ) -> None:
-    import re
 
     from daydream import git_ops
     from tests.harness.git_helpers import git
-    from tests.test_deep_orchestrator import _sanctioned_inputs
 
     prefix = ''.join(f'# stable boundary {index:03}\n' for index in range(98))
     before = 'DELETED_FIRST_LINE = True\n' + prefix + 'VALUE = 0\n'
@@ -1004,9 +1039,7 @@ async def test_old_only_hunk_and_later_continuations_keep_their_own_canonical_ra
         if stage['scope_id'] != 'python':
             return
         prompt = review.backend.calls[-1]['prompt']
-        captured = (dict(re.findall(r'<sanctioned-input label="([^"]+)">\n(.*?)\n</sanctioned-input>',
-                                    prompt, flags=re.S)) if sandbox else
-                    {label: path.read_text() for label, path in _sanctioned_inputs(prompt).items()})
+        captured = supporting_contents(prompt)
         scoped = json.loads(captured['hunk-index'])['api.py']
         fragments.append(captured['diff'])
         for part in stage['assignment_parts']:

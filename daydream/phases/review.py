@@ -445,7 +445,9 @@ async def phase_per_stack_reviews(
         effective_fanout_concurrency(10, backend)
     )
     prior_commits = git_ops.daydream_commits(work.repo, work.base_branch)
-    read_only = uses_diff_reference(backend, work.repo, read_only=True)
+    read_only = (getattr(backend, 'supports_source_recipe', False) is True
+                 or getattr(backend, 'read_only_disposable_clone', False) is True
+                 or uses_diff_reference(backend, work.repo, read_only=True))
 
     hunk_index = load_hunk_index(deep_dir_path.parent)
 
@@ -463,6 +465,20 @@ async def phase_per_stack_reviews(
     ) as dispatch:
         async def _review_stack_impl(stack: "StackAssignment") -> None:
             output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
+            base_stack = base_stack_name(stack.stack_name)
+            prompt_name, strategy_name = {
+                STRUCTURE_STACK_NAME: ("structural", "discovery.structural"),
+                GENERIC_STACK: ("generic-fallback", "discovery.generic_fallback"),
+            }.get(base_stack, ("per-stack", "discovery.per_stack"))
+            from daydream.deep.prompts import (
+                build_generic_fallback_prompt,
+                build_per_stack_prompt,
+                build_structural_prompt,
+            )
+            builder = active_registry.prompt(prompt_name)
+            bundle_capable = (builder in {build_generic_fallback_prompt, build_per_stack_prompt,
+                                          build_structural_prompt}
+                              or getattr(builder, 'review_input_bundle', False) is True)
             shared_paths = {"intent": intent_path, "alternatives": alternatives_path if include_alternatives else None}
             if exploration_dir is not None:
                 shared_paths.update({"exploration-summary": exploration_dir / "summary.md",
@@ -472,6 +488,7 @@ async def phase_per_stack_reviews(
                 hunk_index_path=diff_path.parent / "hunk-index.json", shared_paths=shared_paths,
                 revision=coverage.revision.to_dict(), artifact_session=artifact_session,
                 allow_standalone=allow_standalone, read_only=read_only,
+                bundle_capable=bundle_capable,
             )
             reuse_unit: ReviewReuseUnit | None = None
             if reuse_cache is not None and phase_identity is not None:
@@ -550,6 +567,10 @@ async def phase_per_stack_reviews(
                 # Invoke the registered builder anew: its kwargs describe this
                 # assignment rather than a terminal whole-stack review.
                 stage_args = dict(prompt_args)
+                from daydream.review_profile import FOLDED_ALTERNATIVES_INSTRUCTION
+                stage['folded_alternatives'] = (stack.stack_name == STRUCTURE_STACK_NAME
+                                                and builder is build_structural_prompt
+                                                and FOLDED_ALTERNATIVES_INSTRUCTION in strategies[strategy_name])
                 stage_args["files"] = stage["assigned_files"]
                 stage_args["review_stage"] = stage
                 paths = input_factory.current_paths

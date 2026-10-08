@@ -53,6 +53,7 @@ from daydream.retry_policy import (
 )
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits, review_deadline, review_limits_for_scope
 from daydream.review_evidence import FinalizationContext, ReviewEvidence
+from daydream.review_source import SourceRecipe
 from daydream.run_context import (
     RunContext,
     bind_run_context,
@@ -259,16 +260,19 @@ class StructuredOutputFailure(str):
     detail: str | None
     rejection: SchemaRejection | None
     schema_retry_eligible: bool
+    syntax_error: dict[str, int] | None
 
     def __new__(
         cls, text: str, reason: str, detail: str | None = None, *,
         rejection: SchemaRejection | None = None, schema_retry_eligible: bool = False,
+        syntax_error: dict[str, int] | None = None,
     ) -> "StructuredOutputFailure":
         value = super().__new__(cls, text)
         value.reason = reason
         value.detail = detail
         value.rejection = rejection
         value.schema_retry_eligible = schema_retry_eligible
+        value.syntax_error = syntax_error
         return value
 
 
@@ -332,6 +336,7 @@ async def run_agent(
     validate_structured_output: bool = True,
     require_full_schema: bool = False,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
+    source_recipe: SourceRecipe | None = None,
     run_context: RunContext | None = None,
     review_limits: ReviewLimits | None = None,
     investigation_budget: ReviewInvestigationBudget | None = None,
@@ -352,9 +357,9 @@ async def run_agent(
     if tools_disabled and not getattr(backend, "supports_tools_disabled", False):
         raise NotImplementedError(f"{type(backend).__name__} does not support tools_disabled")
     if review_system_instructions is not None:
-        if not tools_disabled:
-            raise ValueError("review_system_instructions requires tools_disabled=True")
-        if not getattr(backend, "supports_review_instructions", False):
+        if not tools_disabled and investigation_budget is None:
+            raise ValueError("review_system_instructions requires tools_disabled=True or a staged investigation")
+        if investigation_budget is None and not getattr(backend, "supports_review_instructions", False):
             raise NotImplementedError(f"{type(backend).__name__} does not support review_instructions")
     if sanctioned_inputs is not None:
         # Callers may already have rendered this suffix. Move it after the
@@ -434,6 +439,7 @@ async def run_agent(
                 validate_structured_output=validate_structured_output,
                 require_full_schema=require_full_schema,
                 sanctioned_inputs=sanctioned_inputs,
+                source_recipe=source_recipe,
                 run_context=context,
                 review_evidence=evidence,
                 schema_rejection_guard=schema_rejection_guard,
@@ -518,6 +524,7 @@ async def _run_agent(
     validate_structured_output: bool = True,
     require_full_schema: bool = False,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
+    source_recipe: SourceRecipe | None = None,
     run_context: RunContext,
     review_evidence: ReviewEvidence | None = None,
     schema_rejection_guard: Callable[[Any], bool] | None = None,
@@ -684,6 +691,11 @@ async def _run_agent(
                         "max_turns": max_turns,
                         "read_only": read_only,
                     }
+                    if source_recipe is not None and getattr(backend, "supports_source_recipe", False):
+                        source_recipe.revalidate()
+                        execute_kwargs["source_recipe"] = source_recipe
+                    if investigation_budget is not None and getattr(backend, "supports_complete_output", False):
+                        execute_kwargs["require_complete_root"] = True
                     if finalization and getattr(backend, "supports_finalization", False):
                         execute_kwargs["finalization"] = True
                     if tools_disabled and getattr(backend, "supports_tools_disabled", False):
@@ -1154,6 +1166,7 @@ async def _run_agent(
                     if structured_result is not None else
                     selection.schema_retry_eligible if selection is not None else False)
         failure = StructuredOutputFailure(raw, reason, reject_detail, rejection=rejection,
-                                          schema_retry_eligible=eligible)
+                                          schema_retry_eligible=eligible,
+                                          syntax_error=selection.syntax_error if selection is not None else None)
         return failure, result_continuation, aborted_reason
     return raw, result_continuation, aborted_reason
