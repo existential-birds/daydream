@@ -164,8 +164,8 @@ async def test_per_stack_sanctioned_input_contains_complete_assigned_diff_hunks(
     # The complete api.py hunk reaches the real per-stack prompt, including
     # its enclosing function context and the exact removed/added return lines.
     expected_api_hunk = "@@ -1,2 +1,2 @@\n def hello():\n-    return 'world'\n+    return 'universe'\n"
-    from tests.test_deep_orchestrator import _sanctioned_inputs
-    scoped = _sanctioned_inputs(prompt)['diff'].read_text()
+    from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
+    scoped = supporting_contents(prompt)['diff']
     assert expected_api_hunk in scoped, "expected complete api.py hunk in the sanctioned assignment input"
     # The Read instruction is absent (the agent is never told to Read diff.patch).
     assert "Read it directly" not in prompt
@@ -178,12 +178,14 @@ async def test_per_stack_sanctioned_input_contains_complete_assigned_diff_hunks(
     # (Fix B does NOT inline the structural / arbiter prompts).
     structural_prompts = [c["prompt"] for c in shared_calls if "you are the structural reviewer" in c["prompt"].lower()]
     assert structural_prompts, "expected a structural review prompt"
-    assert "Consult only the sanctioned stage diff input" in structural_prompts[0]
-    structural_diff_lines = [line for line in structural_prompts[0].splitlines() if line.startswith("- diff: ")]
-    assert len(structural_diff_lines) == 1
-    structural_diff = Path(structural_diff_lines[0].removeprefix("- diff: "))
-    assert structural_diff.is_file()
-    assert structural_diff.name == "diff.patch"
+    assert "Read the supporting_bundle once" in structural_prompts[0]
+    from tests.harness.stub_backend import review_stage_state
+    structure = review_stage_state(structural_prompts[0])
+    assert structure is not None
+    inventory = supporting_contents(structural_prompts[0])["review-assignment"]
+    assert "api.py" in inventory
+    assert any(expected_api_hunk in Path(part["path"]).read_text()
+               for part in structure["supporting_parts"] if part["file"] == "api.py")
     assert diff_path_str not in structural_prompts[0]
 
 async def test_ac6_single_stack_merged_items_carry_structural_lens(

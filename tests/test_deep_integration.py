@@ -25,7 +25,6 @@ from daydream.phases import (
     phase_test_and_heal,
     phase_understand_intent,
 )
-from daydream.phases.schemas import REVIEW_STAGE_SCHEMA
 from daydream.prompts.wire_contract import WIRE_CONTRACT_GENERIC_INSTRUCTION, WIRE_CONTRACT_RUST_INSTRUCTION
 from daydream.run_config import RunConfig
 from daydream.runner import run
@@ -62,9 +61,8 @@ class _DeepMockBackend(ScriptedBackend):
         events: list[Any] = [CostEvent(cost_usd=self.cost_usd, input_tokens=None, output_tokens=None)]
         pl = prompt.lower()
 
-        if _output_schema == REVIEW_STAGE_SCHEMA:
-            stage = review_stage_state(prompt)
-            assert stage is not None, "review request must carry its actual assignment"
+        stage = review_stage_state(prompt)
+        if stage is not None:
             events.extend(self._review_stage(Path(cwd), stage))
             return events
 

@@ -159,10 +159,10 @@ async def test_no_parse_phase_and_records_from_output_schema(multi_stack_target:
                         and stage["stage"] == "first_pass"]
     assert language_prompts
     for prompt in language_prompts:
-        assert "hunk-index.json" in prompt or "changed-line authority" in prompt
-        from tests.test_deep_orchestrator import _sanctioned_inputs
-        pointers = _sanctioned_inputs(prompt)
+        from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
         state = review_stage_state(prompt)
-        assert state is not None and set(pointers) == set(state['context_inputs'])
-        assert pointers['diff'].name == 'diff.patch'
+        assert state is not None
+        supporting = supporting_contents(prompt)
+        assert set(json.loads(supporting['hunk-index'])) == set(state['assigned_files'])
+        assert all(f'diff --git a/{path} b/{path}' in supporting['diff'] for path in state['assigned_files'])
 

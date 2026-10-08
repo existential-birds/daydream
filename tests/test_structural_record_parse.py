@@ -53,7 +53,12 @@ async def test_per_stack_rerun_clears_stale_structural_outputs_before_review(
     artifacts = [dd / name for name in ("stack-structure-records.json", "stack-structure-review.md",)]
     for path in artifacts:
         path.write_text("STALE")
-    (tmp_path / "api.py").write_text("value = 1\n")
+    import hashlib
+
+    from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
+    from tests.harness.git_helpers import git, seed_feature_branch
+
+    seed_feature_branch(tmp_path, base={"api.py": "value = 0\n"}, feature={"api.py": "value = 1\n"})
     diff = dd / "diff.patch"
     diff.write_text("diff --git a/api.py b/api.py\n--- a/api.py\n+++ b/api.py\n"
                     "@@ -1 +1 @@\n-value = 0\n+value = 1\n")
@@ -82,7 +87,10 @@ async def test_per_stack_rerun_clears_stale_structural_outputs_before_review(
         config=make_config(tmp_path, start_at=start_at), work=make_work(tmp_path), registry=get_registry(),
         allow_standalone_artifacts=True, run_context=RunContext(InteractionPolicy(interactive=False)),
         _backend_factory=lambda *_: backend,
-        data={"dd": dd, "review_coverage": review_coverage(files=("api.py",), phases=()),
+        data={"dd": dd, "review_coverage": ReviewCoverage("source-test", AnalyzedRevision(
+                  git(tmp_path, "rev-parse", "HEAD"), git(tmp_path, "rev-parse", "main"),
+                  hashlib.sha256(diff.read_bytes()).hexdigest()),
+                  [PlannedScope(scope, scope, ("api.py",)) for scope in ("python", "structure")], ()) ,
               "diff_path": diff, "diff": diff.read_text(), "intent_path": intent,
               "alts_path": alternatives, "exploration_dir": None, "failed_stacks": {},
               "stacks": [StackAssignment("python", ["api.py"]), StackAssignment("structure", ["api.py"])]},

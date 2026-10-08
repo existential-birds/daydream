@@ -118,7 +118,8 @@ async def test_second_run_reuses_exploration(multi_stack_target: Path, monkeypat
     # the completed per-stack shards (issue #733), so the pointer grounding is
     # inspected on the run that produced the reviews.
     review_prompt = next(c["prompt"] for c in stub1.calls if "you are reviewing the" in c["prompt"].lower())
-    assert ".daydream/exploration" in review_prompt
+    from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
+    assert supporting_contents(review_prompt)["exploration-summary"] == (exploration / "summary.md").read_text()
     assert not any("you are reviewing the" in c["prompt"].lower() for c in stub2.calls
     ), "an identical rerun must reuse the per-stack reviews"
 

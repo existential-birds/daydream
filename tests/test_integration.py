@@ -995,7 +995,9 @@ async def test_run_populates_exploration_context(
     review_prompts = [call["prompt"] for call in backend.calls if call.get("output_schema")
                       and "you are reviewing the" in call["prompt"].lower()]
     assert review_prompts
-    assert all("exploration/summary.md" in prompt for prompt in review_prompts)
+    from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
+    expected_summary = (multi_stack_target / ".daydream/exploration/summary.md").read_text()
+    assert all(supporting_contents(prompt)["exploration-summary"] == expected_summary for prompt in review_prompts)
 
 async def test_codex_backend_raises_on_agents(tmp_path: Path) -> None:
     """CodexBackend.execute() refuses agents= with NotImplementedError."""

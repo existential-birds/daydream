@@ -699,7 +699,7 @@ class _CodexEvidenceBackend(StubBackend):
                 )
             else:
                 yield ToolStartEvent(id="clean-read", name="read", input={"path": "api.py"},)
-                yield ToolResultEvent(id="clean-read", output="file content", is_error=False,)
+                yield ToolResultEvent(id="clean-read", output=(cwd / "api.py").read_text(), is_error=False,)
         async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
@@ -817,6 +817,12 @@ class _JoinedArtifactEvidenceBackend(StubBackend):
 
     async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         lowered = prompt.lower()
+        if "understand the intent of these changes" in lowered:
+            # Exercise exact private-pointer transport with a complete artifact
+            # that exceeds the advisory inline allowance.
+            yield TextEvent(text="Preserve the greeting API and existing caller behavior.\n" * 300)
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
         python_request = "you are reviewing the python stack" in lowered
         generic_request = "you are reviewing the generic-fallback stack" in lowered
         artifact_reference: str | None = None
@@ -828,7 +834,8 @@ class _JoinedArtifactEvidenceBackend(StubBackend):
             start = prompt_lines.index(header) + 1
             rendered_entries: list[tuple[str, Path]] = []
             for line in prompt_lines[start:]:
-                assert line.startswith("- ")
+                if not line.startswith("- "):
+                    break
                 label, raw_path = line.removeprefix("- ").split(": ", 1)
                 rendered_entries.append((label, Path(raw_path)))
 
@@ -937,7 +944,13 @@ async def test_real_deep_archive_preserves_sanctioned_artifacts_and_findings(
         if call["tool_call_id"] in python_completed_ids
         and call["function_name"].casefold() == "read"
     }
-    assert "api.py" in python_reads
+    from tests.harness.stub_backend import review_stage_state
+    python_stage = review_stage_state(backend.python_prompts[0])
+    assert python_stage is not None
+    python_source = next(window for window in python_stage['source_access']
+                         if window['file'] == 'api.py' and window['side'] == 'after')
+    assert python_source['access']['path'] in python_reads
+    assert Path(python_source['access']['path']).read_bytes() == (multi_stack_target / 'api.py').read_bytes()
     assert str(private_intent) in python_reads
 
     generic_candidates = sorted((run_dir / "trajectories").glob("deep-generic*.json"))
@@ -958,7 +971,14 @@ async def test_real_deep_archive_preserves_sanctioned_artifacts_and_findings(
         if call["tool_call_id"] in generic_completed_ids
         and call["function_name"].casefold() == "read"
     }
-    assert "README.md" in generic_reads
+    generic_prompt = next(call['prompt'] for call in backend.calls
+                          if 'you are reviewing the generic-fallback stack' in call['prompt'].lower())
+    generic_stage = review_stage_state(generic_prompt)
+    assert generic_stage is not None
+    generic_source = next(window for window in generic_stage['source_access']
+                          if window['file'] == 'README.md' and window['side'] == 'after')
+    assert generic_source['access']['path'] in generic_reads
+    assert Path(generic_source['access']['path']).read_bytes() == (multi_stack_target / 'README.md').read_bytes()
     assert ".daydream/deep/intent.md" in generic_reads
 
     controlled_records: list[dict[str, Any]] = []

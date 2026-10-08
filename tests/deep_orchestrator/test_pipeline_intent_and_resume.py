@@ -112,7 +112,8 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     assert all(c["agents"] is None for c in stub.calls)
 
     for p in per_stack_prompts:
-        assert "intent.md" in p
+        from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
+        assert supporting_contents(p)["intent"] == (deep / "intent.md").read_text()
         # Folded design review has no independent alternatives to consume.
         assert "alternatives.json" not in p
 
