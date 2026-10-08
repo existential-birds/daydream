@@ -11,6 +11,7 @@ from daydream import phases
 from daydream.backends import ResultEvent, ToolResultEvent, ToolStartEvent
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import StackAssignment
+from daydream.hunk_index import write_hunk_index
 from daydream.review_budget import ReviewLimits
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
@@ -42,7 +43,10 @@ async def test_structural_stage_cutoff_publishes_without_model_finalizer(
 
     backend = ScriptedBackend(responder=exhaust)
     diff = tmp_path / "diff.patch"
-    diff.write_text("diff --git a/api.py b/api.py\n+FOUNDATIONAL_DIFF\n")
+    diff.write_text("diff --git a/api.py b/api.py\n--- a/api.py\n+++ b/api.py\n"
+                    "@@ -1 +1 @@\n-VALUE = 0\n+FOUNDATIONAL_DIFF\n")
+    (tmp_path / "api.py").write_text("FOUNDATIONAL_DIFF\n")
+    write_hunk_index(tmp_path, diff.read_text())
     intent = tmp_path / "intent.md"
     intent.write_text("PRESERVE_AUTHOR_INTENT")
     alternatives = tmp_path / "alternatives.json"
@@ -52,7 +56,8 @@ async def test_structural_stage_cutoff_publishes_without_model_finalizer(
         diff_path=diff, intent_path=intent, alternatives_path=alternatives,
         intent_authoritative=True, allow_standalone=True,
     )
-    assert str(diff) in backend.last_prompt
+    assert str(diff) not in backend.last_prompt
+    assert "diff" in _sanctioned_inputs(backend.last_prompt)
     assert intent_reads == ["PRESERVE_AUTHOR_INTENT"]
     assert str(intent) in backend.last_prompt
     assert "AUTHORITATIVE" in backend.last_prompt
@@ -75,7 +80,10 @@ async def test_intent_requires_nonempty_provider_evidence(
     from daydream.phases.review import ReviewOutputError
     backend = ScriptedBackend(events=[ResultEvent(structured_output=None, continuation=None)])
     diff = tmp_path / "diff.patch"
-    diff.write_text("diff --git a/api.py b/api.py\n+change\n")
+    diff.write_text("diff --git a/api.py b/api.py\n--- a/api.py\n+++ b/api.py\n"
+                    "@@ -1 +1 @@\n-VALUE = 0\n+VALUE = 1\n")
+    (tmp_path / "api.py").write_text("VALUE = 1\n")
+    write_hunk_index(tmp_path, diff.read_text())
     with pytest.raises(ReviewOutputError) as raised:
         await phases.phase_understand_intent(backend, make_work(tmp_path), diff, "log", "branch")
     assert raised.value.reason_code == "missing_output"

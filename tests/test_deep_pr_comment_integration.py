@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from daydream import pr_review
+from daydream.backends import ToolResultEvent, ToolStartEvent
 from daydream.exploration import ExplorationContext
 from daydream.run_config import RunConfig
 from daydream.runner import run
@@ -33,7 +34,7 @@ from tests.harness.claude_sdk import (
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.review_result import merge_result
-from tests.harness.stub_backend import review_stage_result
+from tests.harness.stub_backend import completed_stage_reads, review_stage_result, review_stage_state
 
 FIXTURE_MODEL_ID = "fixture-model-id"
 _PARTIAL_MODEL = "partial-only-model-must-not-be-posted"
@@ -133,7 +134,7 @@ class _FakeSDKClient:
             out.write_text(_PER_STACK_REPORT)
 
     async def receive_response(self) -> Any:
-        for msg in self._build_messages(self._prompt):
+        for msg in self._build_messages(self._prompt, Path(self.options.cwd)):
             yield msg
 
     @staticmethod
@@ -150,7 +151,7 @@ class _FakeSDKClient:
         ]
 
     @staticmethod
-    def _build_messages(prompt: str) -> list[Any]:
+    def _build_messages(prompt: str, cwd: Path) -> list[Any]:
         """Choose canned SDK responses carrying a real model ID and nonzero cost/usage."""
         pl = prompt.lower()
 
@@ -180,7 +181,7 @@ class _FakeSDKClient:
             ]
 
         # phase_understand_intent: free-form text.
-        if "understand" in pl and "intent" in pl:
+        if "understand" in pl and "intent" in pl and review_stage_state(prompt) is None:
             return [MockAssistantMessage(
                     content=[MockTextBlock(text="The PR refactors foo() for clarity.")], model=FIXTURE_MODEL_ID,
                 ),
@@ -203,7 +204,20 @@ class _FakeSDKClient:
             review_issues: list[Any] = []
         else:
             review_issues = [dict(_REVIEW_FINDING)]
-        return [MockAssistantMessage(content=[MockTextBlock(text="ok, wrote the review")], model=FIXTURE_MODEL_ID,),
+        source_messages: list[Any] = []
+        state = review_stage_state(prompt)
+        if state is not None:
+            payload = review_stage_result(prompt, review_issues)
+            files = sorted(set(state['assigned_files']) | {item['file'] for item in payload['candidates']})
+            for event in completed_stage_reads(cwd, {**state, 'assigned_files': files}):
+                if isinstance(event, ToolStartEvent):
+                    source_messages.append(MockAssistantMessage(content=[MockToolUseBlock(
+                        id=event.id, name=event.name, input=event.input)], model=FIXTURE_MODEL_ID))
+                elif isinstance(event, ToolResultEvent):
+                    source_messages.append(MockUserMessage(content=[MockToolResultBlock(
+                        tool_use_id=event.id, content=event.output, is_error=event.is_error)]))
+        return [*source_messages,
+            MockAssistantMessage(content=[MockTextBlock(text="ok, wrote the review")], model=FIXTURE_MODEL_ID,),
             MockResultMessage(structured_output=review_stage_result(prompt, review_issues), total_cost_usd=0.20,
                 usage={"input_tokens": 4000, "output_tokens": 600, "cache_read_input_tokens": 1500,},
             ),

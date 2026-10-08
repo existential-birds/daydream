@@ -562,6 +562,9 @@ supported versions; migrate the callable to accept this kwarg and declare
   and `old_line`/`new_line`/`fragment_line_offset` mapping. The ranges identify
   the parent hunk; a continuation never claims to contain it whole. Every
   required target must succeed before host file coverage is complete.
+  Stage indexes match canonical hunks by old/new ranges, including explicit
+  `old_only` entries for pure deletions omitted from the posting index; a
+  deletion never shifts the authority of subsequent hunk assignments.
 - `assigned_target_ids` must be acknowledged exactly. `assigned_candidate_ids`
   scopes triage; only those candidates and their relevant admitted notes and
   evidence are supplied. `closed_candidate_ids` are handles for reporting
@@ -589,6 +592,9 @@ supported versions; migrate the callable to accept this kwarg and declare
   candidates are discarded; necessary source grounding must be obtained anew.
   There is no serializer recovery, conversation continuation, reserve, extra
   calls, deadline reset or `max_turns`. Backend transport retries remain separate.
+  Retry eligibility also checks the untouched rejected candidate for independent
+  terminal identity, contradiction, grounding and handoff failures. A schema
+  error combined with one of these failures does not permit a fresh attempt.
 
 These fields are additive within API 7; exact callable signatures need no new
 kwargs. Builder/strategy selection uses the canonical base stack (`generic#0`
@@ -632,6 +638,11 @@ Every reviewed assertion, including an empty-candidate claim, needs complete
 source evidence and explicit valid host-assigned coverage. Free-form citations
 are not authenticated by receipts. Triage sees only relevant admitted partial
 views and may obtain targeted rereads under the same cumulative budget.
+Structure's whole-change interaction assignment may use relevant source evidence
+without a file-by-file audit, but every candidate still needs complete evidence
+for its own file and any terminal finding file. Retargeting requires meaningful
+source reads for the published location. Missing or non-string candidate grounds are insufficient
+evidence and cannot qualify for a schema-only retry.
 Native capture loss, schema, identity, snapshot, grounds, and contradiction checks
 remain strict. Failed or cancelled invocations admit no
 output, even if they emitted valid JSON before failing; earlier successful-stage

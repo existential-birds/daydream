@@ -25,6 +25,7 @@ from tests.deep_orchestrator.support import (
     _make_record_issue,
     _silence_gate_noise,
 )
+from tests.harness.git_helpers import seed_base_support_files
 from tests.test_deep_orchestrator import (
     PR_SENTINEL,
     MakeConfig,
@@ -401,6 +402,10 @@ async def test_fix_gate_runs_when_all_canonical_findings_are_outside_reviewed_di
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    seed_base_support_files(multi_stack_target, {
+        'docs/elsewhere.md': '# Greeting contract\nhello() returns world.\n',
+        'notes.txt': 'Calling hello() must preserve the documented world greeting.\n',
+    })
     stub.merge_items = [_merge_item(1, "notes.txt", "high", desc="out-of-scope finding")]
     # Route the appended structural finding to another off-diff file; the
     # stub's default structural parse emits ``file=api.py``.

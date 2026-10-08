@@ -140,11 +140,10 @@ async def test_merge_failure_phase_state_domain_failure_closes_failed_scope(
     assert manifest["phase_states"]["merge"] == {"ran": True, "status": "failed"}
     assert manifest["pipeline_status"] == "failed"
 
-async def test_ac5_per_stack_prompt_inlines_diff_hunks(
+async def test_per_stack_sanctioned_input_contains_complete_assigned_diff_hunks(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """AC5 (real-path): per-stack review prompts contain inlined diff hunks and NO ``Read it directly`` / diff_path
-    instruction."""
+    """The assigned complete hunk reaches the reviewer without a whole-stack pointer."""
 
     _silence(monkeypatch)
     shared_calls = _install_model_capturing_stubs(monkeypatch, tiny_diff_target)
@@ -165,7 +164,9 @@ async def test_ac5_per_stack_prompt_inlines_diff_hunks(
     # The complete api.py hunk reaches the real per-stack prompt, including
     # its enclosing function context and the exact removed/added return lines.
     expected_api_hunk = "@@ -1,2 +1,2 @@\n def hello():\n-    return 'world'\n+    return 'universe'\n"
-    assert expected_api_hunk in prompt, "expected complete api.py diff hunk in per-stack prompt"
+    from tests.test_deep_orchestrator import _sanctioned_inputs
+    scoped = _sanctioned_inputs(prompt)['diff'].read_text()
+    assert expected_api_hunk in scoped, "expected complete api.py hunk in the sanctioned assignment input"
     # The Read instruction is absent (the agent is never told to Read diff.patch).
     assert "Read it directly" not in prompt
     # And diff_path is not embedded as an instruction (it remains a required
@@ -177,7 +178,7 @@ async def test_ac5_per_stack_prompt_inlines_diff_hunks(
     # (Fix B does NOT inline the structural / arbiter prompts).
     structural_prompts = [c["prompt"] for c in shared_calls if "you are the structural reviewer" in c["prompt"].lower()]
     assert structural_prompts, "expected a structural review prompt"
-    assert "Consult the sanctioned diff input for this assignment" in structural_prompts[0]
+    assert "Consult only the sanctioned stage diff input" in structural_prompts[0]
     structural_diff_lines = [line for line in structural_prompts[0].splitlines() if line.startswith("- diff: ")]
     assert len(structural_diff_lines) == 1
     structural_diff = Path(structural_diff_lines[0].removeprefix("- diff: "))

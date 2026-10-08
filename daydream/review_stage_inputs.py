@@ -99,9 +99,30 @@ class StageInputFactory:
             assignments = [part.assignment for part in parts if part.assignment["file"] == path]
             canonical = self.index.get(path, {})
             hunks = canonical.get('hunks', [])
-            selected = (hunks if any(part['kind'] == 'file' for part in assignments) else
-                        [hunk for ordinal, hunk in enumerate(hunks)
-                         if ordinal in {part['hunk_index'] for part in assignments}])
+            if any(part['kind'] == 'file' for part in assignments):
+                selected = hunks
+            else:
+                selected = []
+                seen_ranges: set[tuple[int, int, int, int]] = set()
+                for part in assignments:
+                    bounds = (part['old_start'], part['old_start'] + part['old_count'] - 1,
+                              part['new_start'], part['new_start'] + part['new_count'] - 1)
+                    if bounds in seen_ranges:
+                        continue
+                    seen_ranges.add(bounds)
+                    keys = ('old_start', 'old_end', 'new_start', 'new_end')
+                    matching = next((hunk for hunk in hunks
+                                     if tuple(hunk[key] for key in keys) == bounds), None)
+                    if matching is not None:
+                        selected.append(matching)
+                    elif part['new_count'] == 0:
+                        # The canonical posting index intentionally omits empty
+                        # new-side ranges. Review assignments still retain the
+                        # exact frozen diff's old-side deletion authority.
+                        selected.append({**dict(zip(keys, bounds, strict=True)),
+                                         'added': 0, 'removed': part['old_count'], 'old_only': True})
+                    else:
+                        raise SanctionedInputUnavailable("canonical hunk ranges do not match assigned work")
             index[path] = {"hunks": selected, "assignments": assignments,
                            "status": "partial" if any(part['part_count'] > 1 for part in assignments) else "complete"}
         return {"diff": "".join(part.diff for part in parts), "hunk-index": _json(index),

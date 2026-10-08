@@ -224,3 +224,14 @@ def tracked_source_state(repo: Path) -> dict[str, Any]:
         "index": git(repo, "ls-files", "--stage"), "diff": git(repo, "diff", "--binary", "HEAD"),
         "bytes": {name: (repo / name).read_bytes() for name in tracked},
     }
+
+
+def seed_base_support_files(repo: Path, files: dict[str, str]) -> None:
+    """Add existing dependency sources to main and merge them into a fixture branch."""
+    branch = git(repo, 'branch', '--show-current')
+    git(repo, 'checkout', 'main')
+    for path, content in files.items():
+        write_and_stage(repo, path, content)
+    commit(repo, 'fixture: existing dependency sources')
+    git(repo, 'checkout', branch)
+    git(repo, 'merge', 'main', '-m', 'fixture: merge existing dependency sources')

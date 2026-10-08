@@ -25,6 +25,7 @@ from tests.deep_orchestrator.support import (
     _scan_trajectory_extra,
     _silence_gate_noise,
 )
+from tests.harness.git_helpers import seed_base_support_files
 from tests.test_deep_orchestrator import (
     _SUPPRESSION_COLLISION_STACKS,
     MakeConfig,
@@ -600,6 +601,10 @@ async def test_precision_suppresses_low_sibling_sharing_high_finding_location(
     same stack must STILL be suppression-reviewed and dropped. A (file, line)-keyed exclusion excluded both
     siblings, letting the LOW one survive unreviewed; the per-record-identity key fixes it."""
     _silence(monkeypatch)
+    seed_base_support_files(multi_stack_target, {'py_module.py':
+        "def greeting_boundary():\n    from api import hello\n    expected = 'world'\n"
+        "    actual = hello()\n    # Compare the changed greeting with its caller contract.\n"
+        "    # Both findings intentionally share this source location.\n    return actual == expected\n"})
     calls = _install_model_capturing_stubs(
         monkeypatch, multi_stack_target, merge_echo_records=True, parse_by_stack=_SUPPRESSION_COLLISION_STACKS,
         suppression_keep=False,

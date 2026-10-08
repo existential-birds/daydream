@@ -1,18 +1,22 @@
 """Structural findings remain partitioned through review and resume."""
 
 import json
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from daydream.backends import AgentEvent, ResultEvent
 from daydream.backends.pi import PiBackend
 from daydream.deep.detection import StackAssignment
 from daydream.deep.review_steps import _per_stack_body, _step_per_stack_parse
 from daydream.extensions import Registry, get_registry
 from daydream.flows.engine import FlowContext
+from daydream.hunk_index import write_hunk_index
 from daydream.run_context import InteractionPolicy, RunContext
 from tests.harness.review_result import records_artifact, review_coverage
+from tests.harness.stub_backend import completed_stage_reads, review_stage_result
 
 
 @pytest.mark.parametrize("start_at", [None, "merge", "fix"])
@@ -53,19 +57,26 @@ async def test_per_stack_rerun_clears_stale_structural_outputs_before_review(
     diff = dd / "diff.patch"
     diff.write_text("diff --git a/api.py b/api.py\n--- a/api.py\n+++ b/api.py\n"
                     "@@ -1 +1 @@\n-value = 0\n+value = 1\n")
+    write_hunk_index(dd, diff.read_text())
     intent = dd / "intent.md"
     intent.write_text("Preserve behavior")
     alternatives = dd / "alternatives.json"
     alternatives.write_text("[]")
     attempted: list[str] = []
 
-    async def review(*args: Any, **kwargs: Any) -> Any:
+    async def review(self: PiBackend, cwd: Path, prompt: str, *args: Any,
+                     **kwargs: Any) -> AsyncIterator[AgentEvent]:
         assert not artifacts[0].exists()
-        assert "STALE" not in args[2]
-        attempted.append("structure" if "repository-wide interactions" in args[2] else "primary")
-        return {"issues": []}, None, None
+        assert "STALE" not in prompt
+        attempted.append("structure" if "repository-wide interactions" in prompt else "primary")
+        from tests.harness.stub_backend import review_stage_state
+        state = review_stage_state(prompt)
+        assert state is not None
+        for event in completed_stage_reads(cwd, state):
+            yield event
+        yield ResultEvent(structured_output=review_stage_result(prompt, []), continuation=None)
 
-    monkeypatch.setattr("daydream.agent.run_agent", review)
+    monkeypatch.setattr(PiBackend, "execute", review)
     backend = PiBackend(model="test", reasoning_effort="high")
     ctx = FlowContext(
         config=make_config(tmp_path, start_at=start_at), work=make_work(tmp_path), registry=get_registry(),

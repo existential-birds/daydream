@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,27 @@ from daydream.trajectory import DaydreamPhase, LifecycleReasonCode, LifecycleSta
 STAGED_REVIEW_CONTRACT = 3
 HANDOFF_MAX_BYTES = 64 * 1024
 HANDOFF_MAX_ITEMS = 128
+
+
+def _candidate_source_files(candidates: list[dict[str, Any]]) -> set[str]:
+    """Source anchors include each candidate and its actual terminal location."""
+    files = {candidate['file'] for candidate in candidates if isinstance(candidate.get('file'), str)}
+    for candidate in candidates:
+        finding = candidate.get('finding')
+        if (candidate.get('disposition') == 'confirmed' and isinstance(finding, dict)
+                and isinstance(finding.get('file'), str)):
+            files.add(finding['file'])
+    return files
+
+
+@dataclass(frozen=True)
+class _AdmissionPlan:
+    """Prospective host state; constructing this never admits model output."""
+
+    handoff: dict[str, list[Any]]
+    target_progress: dict[str, dict[str, Any]]
+    receipts: list[EvidenceReceipt]
+    compact_clipped: bool
 
 
 class ReviewInvestigation:
@@ -97,7 +119,7 @@ class ReviewInvestigation:
                      candidate_ids: list[str], assignment_parts: list[dict[str, Any]]) -> dict[str, Any]:
         candidates = [candidate for candidate in self.handoff['candidates']
                       if candidate['candidate_id'] in candidate_ids]
-        candidate_files = {candidate['file'] for candidate in candidates}
+        candidate_files = _candidate_source_files(candidates)
         # Only admitted context relevant to this triage assignment travels into
         # its fresh request. Closed decisions expose handles, never fresh work.
         notes = [note['text'] for note in self.handoff['notes']
@@ -184,6 +206,8 @@ class ReviewInvestigation:
                 output, _, self.reason = await agent.run_agent(
                     backend, cwd, stage_prompt, phase=DaydreamPhase.DEEP, output_schema=REVIEW_STAGE_SCHEMA,
                     require_full_schema=True, investigation_budget=self.budget, review_evidence=evidence,
+                    schema_rejection_guard=lambda value: self._schema_retry_eligible(
+                        value, stage, targets, candidate_ids, evidence, files=files or state['assigned_files']),
                     advisory_tool_call_target=state['advisory_tool_call_target'], **kwargs,
                 )
                 if prepared is not None:
@@ -205,7 +229,8 @@ class ReviewInvestigation:
                 actual_rejection = output.rejection if isinstance(output, agent.StructuredOutputFailure) else None
                 candidate_count = len(output.get('candidates', [])) if isinstance(output, dict) else 0
                 if self.reason is None:
-                    if (actual_rejection is not None
+                    if (actual_rejection is not None and isinstance(output, agent.StructuredOutputFailure)
+                            and output.schema_retry_eligible
                             and not evidence.capture_failure(files or state['assigned_files'], require_source=False,
                                                              interaction=stage == 'integration')):
                         retry_rejection = actual_rejection
@@ -242,6 +267,7 @@ class ReviewInvestigation:
                     logical_stage=stage, attempt=attempt,
                     attempt_tool_starts=self.budget.observed_tool_starts - starts_before,
                     schema_rejection=actual_rejection.to_dict() if actual_rejection else None,
+                    schema_retry_eligible=retry_rejection is not None,
                     retry_feedback=rejection.to_dict() if rejection else None,
                     full_retained_bytes=evidence.full_retained_bytes,
                     compact_view_clipped=evidence.clipped,
@@ -261,49 +287,118 @@ class ReviewInvestigation:
                 transition.finish(LifecycleStatus.SUCCEEDED)
             return accepted, retry_rejection
 
-    def _admit(self, output: Any, stage: str, targets: list[str], candidate_ids: list[str],
-               evidence: ReviewEvidence, *, files: list[str]) -> str | None:
-        """Atomically validate and admit successful invocation assertions within the handoff bounds."""
-        if not isinstance(output, dict) or not validates_schema(output, REVIEW_STAGE_SCHEMA):
-            return (output.reason if isinstance(output, agent.StructuredOutputFailure)
-                    else 'malformed_output' if output else 'missing_output')
-        decisions = output['candidates']
+    def _assertion_failure(self, output: dict[str, Any], stage: str, targets: list[str], candidate_ids: list[str],
+                           evidence: ReviewEvidence, *, files: list[str]) -> str | None:
+        """Check proven domain failures without widening the independent strict schema gate.
+
+        Schema-rejected objects may lack a known field or carry the wrong type.
+        Unassessable fields alone are schema errors; available assertions still
+        cannot override assignment identity, grounded evidence, or closed decisions.
+        """
+        raw_targets = output.get('targets')
+        declared_targets = [item for item in raw_targets if isinstance(item, dict)] if (
+            isinstance(raw_targets, list)) else []
+        target_ids = [item.get('target_id') for item in declared_targets]
+        known_target_ids = [item for item in target_ids if isinstance(item, str)]
+        raw_decisions = output.get('candidates')
+        decisions = [item for item in raw_decisions if isinstance(item, dict)] if (
+            isinstance(raw_decisions, list)) else []
         prior_candidates = self.handoff['candidates']
-        contradictions = output['contradictions']
+        raw_contradictions = output.get('contradictions')
+        contradictions = [item for item in raw_contradictions if isinstance(item, str)] if (
+            isinstance(raw_contradictions, list)) else []
         closed_ids = {candidate['candidate_id'] for candidate in prior_candidates
                       if candidate['disposition'] in {'confirmed', 'rejected'}}
-        decision_ids = [candidate['candidate_id'] for candidate in decisions]
+        decision_ids = [candidate.get('candidate_id') for candidate in decisions]
+        known_decision_ids = [item for item in decision_ids if isinstance(item, str)]
         if (
-            sorted(target['target_id'] for target in output['targets']) != sorted(targets)
-            or any(target['status'] == 'not_reviewed' and not target['reason'].strip()
-                   for target in output['targets'])
+            any(identifier not in targets for identifier in known_target_ids)
+            or len(set(known_target_ids)) != len(known_target_ids)
+            or (isinstance(raw_targets, list) and len(known_target_ids) == len(raw_targets)
+                and sorted(known_target_ids) != sorted(targets))
+            or any(target.get('status') == 'not_reviewed' and isinstance(target.get('reason'), str)
+                   and not target['reason'].strip() for target in declared_targets)
             or len(set(contradictions)) != len(contradictions)
             or not set(contradictions) <= closed_ids
-            or (stage == 'triage' and (sorted(decision_ids) != sorted(candidate_ids)
-                                      or any(candidate['disposition'] == 'open' for candidate in decisions)))
-            or (stage != 'triage' and any(decision_ids))
-            or any(candidate['disposition'] == 'confirmed' and candidate['finding'] is None
+            or (stage == 'triage' and (any(identifier not in candidate_ids for identifier in known_decision_ids)
+                                      or (isinstance(raw_decisions, list)
+                                          and len(known_decision_ids) == len(raw_decisions)
+                                          and sorted(known_decision_ids) != sorted(candidate_ids))
+                                      or any(candidate.get('disposition') == 'open' for candidate in decisions)))
+            or (stage != 'triage' and any(known_decision_ids))
+            or any(candidate.get('disposition') == 'confirmed' and 'finding' in candidate
+                   and candidate['finding'] is None
                    for candidate in decisions)
         ):
             return 'malformed_output'
         if decisions and any(
-            not candidate[field].strip() for candidate in decisions for field in ('grounds', 'trigger', 'consequence')
+            not isinstance(candidate.get(field), str) or not candidate[field].strip()
+            for candidate in decisions for field in ('grounds', 'trigger', 'consequence')
         ):
             return 'evidence_incomplete'
-        reviewed_ids = {target['target_id'] for target in output['targets'] if target['status'] == 'reviewed'}
+        reviewed_ids = {target['target_id'] for target in declared_targets
+                        if target.get('status') == 'reviewed' and isinstance(target.get('target_id'), str)}
         reviewed_files = (files if stage == 'integration' and reviewed_ids else
                           [path for path in files if any(target in reviewed_ids
                                                         for target in self.required_targets[path])])
-        grounding_files = sorted(set(reviewed_files) | {candidate['file'] for candidate in decisions})
+        candidate_files = _candidate_source_files(decisions)
+        grounding_files = sorted(set(reviewed_files) | candidate_files)
         if grounding_files:
-            if evidence.capture_failure(grounding_files, require_source=stage != 'triage',
-                                        interaction=stage == 'integration'):
+            if evidence.capture_failure(grounding_files, require_source=False):
                 return 'evidence_incomplete'
-            if stage == 'triage':
-                grounded = {path for receipt in [*self.admitted_receipts, *evidence.receipts]
-                            if receipt.complete and not receipt.supporting for path in receipt.paths}
-                if not set(grounding_files) <= grounded:
-                    return 'evidence_incomplete'
+        if reviewed_files and evidence.capture_failure(
+            grounding_files if stage == 'integration' else reviewed_files,
+            interaction=stage == 'integration',
+        ):
+            return 'evidence_incomplete'
+        # Whole-change interaction evidence is deliberately broader than a
+        # language/file audit. Each defect claim still needs its own associated
+        # source, rather than borrowing an unrelated receipt from that union.
+        receipts = [*self.admitted_receipts, *evidence.receipts] if stage == 'triage' else evidence.receipts
+        grounded = {path for receipt in receipts if receipt.complete and not receipt.supporting
+                    for path in receipt.paths}
+        if not candidate_files <= grounded:
+            return 'evidence_incomplete'
+        return None
+
+    def _schema_retry_eligible(self, output: Any, stage: str, targets: list[str], candidate_ids: list[str],
+                               evidence: ReviewEvidence, *, files: list[str]) -> bool:
+        """Inspect the original rejected object; never repair, publish, or retain it."""
+        if not isinstance(output, dict) or self._assertion_failure(
+            output, stage, targets, candidate_ids, evidence, files=files
+        ) is not None:
+            return False
+        contradictions = output.get('contradictions')
+        if isinstance(contradictions, list) and any(isinstance(item, str) for item in contradictions):
+            return False
+        raw_targets = output.get('targets')
+        raw_candidates = output.get('candidates')
+        can_prepare = (
+            'notes' in output and isinstance(raw_targets, list) and isinstance(raw_candidates, list)
+            and all(isinstance(item, dict) and isinstance(item.get('target_id'), str)
+                    and isinstance(item.get('status'), str) for item in raw_targets)
+            and all(isinstance(item, dict) and isinstance(item.get('file'), str)
+                    and (stage != 'triage' or isinstance(item.get('candidate_id'), str)) for item in raw_candidates)
+        )
+        if can_prepare:
+            _, reason = self._prepare_handoff(output, stage, targets, evidence, files=files)
+            return reason is None
+        # When schema-only shape errors prevent a prospective plan, block only
+        # independently proven bounds failures, rather than inventing another
+        # shape validator or repairing the rejected payload into a usable result.
+        if 'notes' in output and len(json.dumps(output['notes'], ensure_ascii=False).encode()) > HANDOFF_MAX_BYTES:
+            return False
+        if isinstance(raw_candidates, list):
+            prior = len(self.handoff['candidates']) if stage != 'triage' else 0
+            if len(raw_candidates) + prior > HANDOFF_MAX_ITEMS:
+                return False
+        return True
+
+    def _prepare_handoff(self, output: dict[str, Any], stage: str, targets: list[str],
+                         evidence: ReviewEvidence, *, files: list[str]) -> tuple[_AdmissionPlan | None, str | None]:
+        """Construct prospective state for bounds checks without changing admitted state."""
+        decisions = output['candidates']
+        prior_candidates = self.handoff['candidates']
         if stage == 'triage':
             by_id = {candidate['candidate_id']: candidate for candidate in decisions}
             candidates = [by_id.get(candidate['candidate_id'], candidate) for candidate in prior_candidates]
@@ -331,13 +426,14 @@ class ReviewInvestigation:
         # may omit late blocks without turning otherwise complete reads into loss.
         compact = list(self.handoff['evidence'])
         compact_bytes = len(json.dumps(compact, ensure_ascii=False).encode())
-        relevant_files = {candidate['file'] for candidate in decisions}
+        compact_clipped = False
+        relevant_files = _candidate_source_files(decisions)
         relevant_blocks = evidence.compact_for_files(relevant_files)
         for index, block in enumerate(relevant_blocks):
             entry = {'stage': stage, 'assigned_target_ids': targets, **block}
             size = len(json.dumps(entry, ensure_ascii=False).encode())
             if compact_bytes + size > 48000 or len(compact) >= 64:
-                evidence.clipped = True
+                compact_clipped = True
                 if compact:
                     compact[-1] = {**compact[-1], 'partial': True,
                                    'omitted_receipts': len(relevant_blocks) - index}
@@ -351,18 +447,33 @@ class ReviewInvestigation:
         handoff = {
             'progress': progress,
             'notes': self.handoff['notes'] + [{
-                'files': sorted(set(files) | {candidate['file'] for candidate in decisions}), 'text': output['notes'],
+                'files': sorted(set(files) | relevant_files), 'text': output['notes'],
             }],
             'candidates': candidates, 'evidence': compact,
         }
         if (sum(map(len, handoff.values())) > HANDOFF_MAX_ITEMS
                 or len(json.dumps(handoff, ensure_ascii=False).encode('utf-8')) > HANDOFF_MAX_BYTES):
-            return 'evidence_incomplete'
-        self.admitted_stages += 1
-        self.handoff = handoff
-        self.target_progress = target_progress
+            return None, 'evidence_incomplete'
         receipts = [receipt for receipt in evidence.receipts
                     if receipt.complete and relevant_files.intersection(receipt.paths)]
-        self.admitted_receipts.extend(receipts)
-        self.admitted_retained_bytes += sum(receipt.retained_bytes for receipt in receipts)
+        return _AdmissionPlan(handoff, target_progress, receipts, compact_clipped), None
+
+    def _admit(self, output: Any, stage: str, targets: list[str], candidate_ids: list[str],
+               evidence: ReviewEvidence, *, files: list[str]) -> str | None:
+        """Commit a bounded plan only after the full strict schema and domain gates."""
+        if not isinstance(output, dict) or not validates_schema(output, REVIEW_STAGE_SCHEMA):
+            return (output.reason if isinstance(output, agent.StructuredOutputFailure)
+                    else 'malformed_output' if output else 'missing_output')
+        reason = self._assertion_failure(output, stage, targets, candidate_ids, evidence, files=files)
+        if reason is not None:
+            return reason
+        plan, reason = self._prepare_handoff(output, stage, targets, evidence, files=files)
+        if plan is None:
+            return reason
+        self.admitted_stages += 1
+        self.handoff = plan.handoff
+        self.target_progress = plan.target_progress
+        evidence.clipped |= plan.compact_clipped
+        self.admitted_receipts.extend(plan.receipts)
+        self.admitted_retained_bytes += sum(receipt.retained_bytes for receipt in plan.receipts)
         return 'evidence_incomplete' if output['contradictions'] else None

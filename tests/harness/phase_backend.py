@@ -6,10 +6,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import Any
 
 from daydream.backends import AgentEvent, ResultEvent, TextEvent
-from tests.harness.stub_backend import review_stage_result, review_stage_state
+from tests.harness.stub_backend import completed_stage_reads, review_stage_result, review_stage_state
 
 
 def _shape_issues(issues: list[dict[str, Any]], severity: str | None = None,) -> list[dict[str, Any]]:
@@ -128,6 +129,11 @@ class PhaseDispatchBackend:
             yield TextEvent(text="Committed.")
         else:
             yield TextEvent(text="OK")
+        state = review_stage_state(prompt)
+        if state is not None and structured is not None:
+            files = sorted(set(state['assigned_files']) | {item['file'] for item in structured['candidates']})
+            for event in completed_stage_reads(Path(cwd), {**state, 'assigned_files': files}):
+                yield event
         yield ResultEvent(structured_output=structured, continuation=None)
 
     async def cancel(self) -> None:

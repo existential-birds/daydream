@@ -258,13 +258,17 @@ class StructuredOutputFailure(str):
     reason: str
     detail: str | None
     rejection: SchemaRejection | None
+    schema_retry_eligible: bool
 
-    def __new__(cls, text: str, reason: str, detail: str | None = None, *,
-                rejection: SchemaRejection | None = None) -> "StructuredOutputFailure":
+    def __new__(
+        cls, text: str, reason: str, detail: str | None = None, *,
+        rejection: SchemaRejection | None = None, schema_retry_eligible: bool = False,
+    ) -> "StructuredOutputFailure":
         value = super().__new__(cls, text)
         value.reason = reason
         value.detail = detail
         value.rejection = rejection
+        value.schema_retry_eligible = schema_retry_eligible
         return value
 
 
@@ -333,6 +337,7 @@ async def run_agent(
     investigation_budget: ReviewInvestigationBudget | None = None,
     advisory_tool_call_target: int | None = None,
     review_evidence: ReviewEvidence | None = None,
+    schema_rejection_guard: Callable[[Any], bool] | None = None,
     finalization_context: FinalizationContext | None = None,
     tools_disabled: bool = False,
     review_system_instructions: str | None = None,
@@ -431,6 +436,7 @@ async def run_agent(
                 sanctioned_inputs=sanctioned_inputs,
                 run_context=context,
                 review_evidence=evidence,
+                schema_rejection_guard=schema_rejection_guard,
                 investigation_budget=investigation_budget,
                 review_instructions=review_instructions,
                 tools_disabled=tools_disabled,
@@ -514,6 +520,7 @@ async def _run_agent(
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext,
     review_evidence: ReviewEvidence | None = None,
+    schema_rejection_guard: Callable[[Any], bool] | None = None,
     investigation_budget: ReviewInvestigationBudget | None = None,
     review_instructions: str | None = None,
     finalization: bool = False,
@@ -1117,7 +1124,8 @@ async def _run_agent(
             selected: Any = None
             if validate_structured_output:
                 selection = (extract_json_by_schema(raw, schema=output_schema, accept=validates_schema,
-                                                    require_complete_root=True)
+                                                    require_complete_root=True,
+                                                    rejection_guard=schema_rejection_guard)
                              if investigation_budget is not None else
                              _select_by_schema(raw, output_schema, require_full_schema=require_full_schema))
                 selected = selection.value
@@ -1141,6 +1149,11 @@ async def _run_agent(
         if rejection is not None:
             reject_detail = (f"schema {rejection.category} at {rejection.schema_path}; "
                              f"{rejection.error_count} error(s); {rejection.candidate_count} candidate(s)")
-        failure = StructuredOutputFailure(raw, reason, reject_detail, rejection=rejection)
+        eligible = (rejection is not None and (schema_rejection_guard is None
+                                              or schema_rejection_guard(structured_result))
+                    if structured_result is not None else
+                    selection.schema_retry_eligible if selection is not None else False)
+        failure = StructuredOutputFailure(raw, reason, reject_detail, rejection=rejection,
+                                          schema_retry_eligible=eligible)
         return failure, result_continuation, aborted_reason
     return raw, result_continuation, aborted_reason

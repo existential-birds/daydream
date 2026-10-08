@@ -160,5 +160,9 @@ async def test_no_parse_phase_and_records_from_output_schema(multi_stack_target:
     assert language_prompts
     for prompt in language_prompts:
         assert "hunk-index.json" in prompt or "changed-line authority" in prompt
-        assert "do not re-read the diff artifact" in prompt or "diff.patch" not in prompt
+        from tests.test_deep_orchestrator import _sanctioned_inputs
+        pointers = _sanctioned_inputs(prompt)
+        state = review_stage_state(prompt)
+        assert state is not None and set(pointers) == set(state['context_inputs'])
+        assert pointers['diff'].name == 'diff.patch'
 

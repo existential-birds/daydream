@@ -45,9 +45,11 @@ from tests.harness.git_helpers import bare_remote, git
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.stub_backend import (
     StubBackend,
+    completed_stage_reads,
     force_interactive,
     install_stub_backend,
     review_stage_result,
+    review_stage_state,
     silence,
 )
 from tests.harness.trajectory import diff_adding
@@ -511,7 +513,9 @@ def _fix_editing_backend(repo: Path) -> ScriptedBackend:
             or "assigned to this stack" in pl
             or "repository-wide interactions" in pl
         ):
-            return [TextEvent(text="Review complete."),
+            state = review_stage_state(prompt)
+            assert state is not None
+            return [*completed_stage_reads(Path(cwd), state), TextEvent(text="Review complete."),
                 ResultEvent(structured_output=review_stage_result(prompt, [{
                                 "id": 1, "description": "Add a guard", "file": "main.py", "line": 1,
                                 "severity": "medium", "confidence": "HIGH", "rationale": "guard missing",
@@ -722,12 +726,12 @@ async def test_codex_evidence_integrity_archives_semantic_counts_and_review_flag
     child = json.loads(_deep_python_trajectory(run_dir).read_text(encoding="utf-8"))
     evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
     child_calls = [call for step in child["steps"] for call in step.get("tool_calls") or []]
-    assert len(child_calls) == 16
+    assert len(child_calls) == 17
     assert child_calls[0]["arguments"]["command"] == "printf 'shell 0\\n'"
-    assert sum(evaluation["tools"]["by_agent"]["deep-python"].values()) == 16
-    assert evaluation["tools"]["total_calls"] == 16
-    assert evaluation["tools"]["by_type"] == {"shell": 15, "patch": 1}
-    assert evaluation["tools"]["write_ratio"] == 0.0625
+    assert sum(evaluation["tools"]["by_agent"]["deep-python"].values()) == 17
+    assert evaluation["tools"]["total_calls"] == 24
+    assert evaluation["tools"]["by_type"] == {"shell": 15, "patch": 1, "Read": 8}
+    assert evaluation["tools"]["write_ratio"] == 0.0417
 
     agent_steps = [step for step in child["steps"] if step["source"] == "agent"]
     result_extras = [result.get("extra", {})
@@ -759,8 +763,8 @@ async def test_codex_evidence_integrity_clean_archive_stays_clean(
     assert all(not step.get("extra", {}).get("backend_diagnostics") for step in child["steps"])
     evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
     training = next(row for row in evaluation["training_signals"]["trajectories"] if row["trajectory"] == "deep-python")
-    assert evaluation["tools"]["total_calls"] == 1
-    assert evaluation["tools"]["by_type"] == {"read": 1}
+    assert evaluation["tools"]["total_calls"] == 9
+    assert evaluation["tools"]["by_type"] == {"read": 1, "Read": 8}
     assert training["noise_flags"] == []
     assert training["training_quality"] == "clean"
 
@@ -793,7 +797,8 @@ async def test_malformed_codex_tool_name_survives_real_log_mode_runner_archive(
 
     child = json.loads(_deep_python_trajectory(_only_archived_run(archive_dir)).read_text())
     calls = [call for step in child["steps"] for call in (step.get("tool_calls") or [])]
-    assert [(call["tool_call_id"], call["function_name"]) for call in calls] == [("malformed-mcp", "unknown")]
+    assert [(call["tool_call_id"], call["function_name"]) for call in calls
+            if call["tool_call_id"] == "malformed-mcp"] == [("malformed-mcp", "unknown")]
     diagnostics = [diagnostic for step in child["steps"]
         for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])
     ]

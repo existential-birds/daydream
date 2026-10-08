@@ -38,7 +38,8 @@ _FORENSIC_BASELINE_DEEP_ARTIFACTS = frozenset({
 #: #1408 persists in the preamble. The gate subtracts all three before comparing
 #: against the baseline.
 _FORENSIC_ADDITIVE_DEEP_ARTIFACTS = frozenset(
-    {"review-coverage.json","latency-routing.json", "adjudication-provenance.json", "test-recipe.json"}
+    {"review-coverage.json", "latency-routing.json", "adjudication-provenance.json", "test-recipe.json",
+     "stage-inputs"}
 )
 
 #: The pre-#732 ``arbiter-input.json`` for the exact stub records below: the

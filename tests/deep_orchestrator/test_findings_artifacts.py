@@ -216,13 +216,17 @@ async def test_over_budget_diff_preserves_full_disk_evidence_and_uses_safe_promp
     assert {path for _, stage in python_calls for path in stage["assigned_files"]} == set(files) | {"api.py"}
     for python_prompt, stage in python_calls:
         assert "diff" in stage["context_inputs"]
-        assert _sanctioned_inputs(python_prompt)["diff"].read_text() == patch
-        assert "Consult the sanctioned diff input for this assignment" in python_prompt
+        scoped_diff = _sanctioned_inputs(python_prompt)["diff"].read_text()
+        scoped_index = json.loads(_sanctioned_inputs(python_prompt)["hunk-index"].read_text())
+        assert set(scoped_index) == set(stage['assigned_files'])
+        assert len(scoped_diff.encode()) < INLINE_DIFF_BUDGET_BYTES
+        assert all(f'diff --git a/{path} b/{path}' in scoped_diff for path in stage['assigned_files'])
+        assert 'Consult only the sanctioned stage diff input' in python_prompt
         assert "diff --git" not in python_prompt and "line 50 of filler content" not in python_prompt
         assert "SMALL_RETAINED_MARKER" not in python_prompt
     if not oversize:
-        # React's complete retained block remains inline while Python spans dropped evidence.
-        assert "diff --git" in _matching_prompt(stub.calls, "you are reviewing the react stack")
+        react = _matching_prompt(stub.calls, "you are reviewing the react stack")
+        assert 'diff --git a/App.tsx b/App.tsx' in _sanctioned_inputs(react)['diff'].read_text()
 
 
 

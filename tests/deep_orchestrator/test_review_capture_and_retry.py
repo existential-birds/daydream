@@ -922,3 +922,212 @@ async def test_production_sized_receipt_counts_preserve_complete_structure_evide
     assert metadata['full_retained_bytes'] < 8 * 1024 * 1024
     assert metadata['compact_view_clipped'] is True and metadata['admitted'] is True
     assert metadata['retention_overflow_results'] == metadata['unmatched_results'] == 0
+
+
+@pytest.mark.parametrize('fault', ['unknown-target', 'unknown-candidate', 'contradiction', 'grounds',
+                                  'grounds-missing', 'grounds-null', 'grounds-number', 'handoff'])
+async def test_mixed_schema_and_admission_rejection_never_retries_or_loses_prior_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
+    review = source_review(tmp_path, monkeypatch, source_bytes=400)
+    rejected_assignments: list[tuple[str, ...]] = []
+
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        if stage['scope_id'] != 'python':
+            return
+        for path in stage['assigned_files']:
+            yield from read_source(review, path, f'read-{path}')
+        if not stage['progress']:
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+            return
+        assignment = tuple(stage['assigned_target_ids'])
+        rejected_assignments.append(assignment)
+        if stage['attempt'] > 1:
+            # A second valid answer demonstrates the erroneous recovery path;
+            # production must never invoke it for a mixed semantic rejection.
+            return
+        output['unknown_extra'] = None
+        output['notes'] = 'FAILED_MIXED_ATTEMPT_MARKER'
+        if fault == 'unknown-target':
+            output['targets'][0]['target_id'] = 'foreign-assignment'
+        elif fault == 'contradiction':
+            output['contradictions'] = [stage['closed_candidate_ids'][0]]
+        elif fault == 'handoff':
+            output['notes'] += 'x' * 70_000
+        else:
+            path = stage['assigned_files'][0]
+            finding = dict(record(line=1), file=path, evidence=f'{path}:1 changes VALUE from 0 to 1')
+            item = dict(candidate(disposition='confirmed', finding=finding), file=path, line=1,
+                        grounds=finding['evidence'])
+            if fault == 'unknown-candidate':
+                item['candidate_id'] = 'foreign-candidate'
+            elif fault == 'grounds-missing':
+                item.pop('grounds')
+            else:
+                item['grounds'] = {'grounds-null': None, 'grounds-number': 7}.get(fault, '')
+            output['candidates'] = [item]
+
+    review.backend.stage_response = response
+    await review.finish('python', reason='malformed_output', findings=('Grounded defect',))
+    assert len(rejected_assignments) == 1
+    events = stage_ends(review, 'python')
+    assert [event['metadata']['admitted'] for event in events] == [True, False]
+    assert [event['metadata']['attempt'] for event in events] == [1, 1]
+    assert events[-1]['metadata']['observed_tool_starts'] == 8
+    assert events[-1]['metadata']['remaining_tool_calls'] == 40
+    assert events[-1]['metadata']['schema_rejection']['error_count'] > 0
+    assert all('FAILED_MIXED_ATTEMPT_MARKER' not in call['prompt'] for call in review.backend.calls)
+
+
+@pytest.mark.parametrize('sandbox', [False, True], ids=['exact-paths', 'inline'])
+async def test_old_only_hunk_and_later_continuations_keep_their_own_canonical_ranges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool,
+) -> None:
+    import re
+
+    from daydream import git_ops
+    from tests.harness.git_helpers import git
+    from tests.test_deep_orchestrator import _sanctioned_inputs
+
+    prefix = ''.join(f'# stable boundary {index:03}\n' for index in range(98))
+    before = 'DELETED_FIRST_LINE = True\n' + prefix + 'VALUE = 0\n'
+    added = ''.join(f'# LATER_REQUIRED_CHANGE_{index:04} ' + 'x' * 96 + '\n' for index in range(500))
+    repo = tmp_path / 'mixed_hunk_ranges'
+    seed_feature_branch(repo, base={'api.py': before}, feature={'api.py': prefix + 'VALUE = 1\n' + added})
+    git(repo, 'config', 'diff.context', '0')
+    review = InvestigationRun(repo, tmp_path, monkeypatch)
+    review.backend.sandbox = sandbox
+    assignments: list[dict[str, Any]] = []
+    fragments: list[str] = []
+
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        if stage['scope_id'] != 'python':
+            return
+        prompt = review.backend.calls[-1]['prompt']
+        captured = (dict(re.findall(r'<sanctioned-input label="([^"]+)">\n(.*?)\n</sanctioned-input>',
+                                    prompt, flags=re.S)) if sandbox else
+                    {label: path.read_text() for label, path in _sanctioned_inputs(prompt).items()})
+        scoped = json.loads(captured['hunk-index'])['api.py']
+        fragments.append(captured['diff'])
+        for part in stage['assignment_parts']:
+            assignments.append(part)
+            expected = (part['old_start'], part['old_start'] + part['old_count'] - 1,
+                        part['new_start'], part['new_start'] + part['new_count'] - 1)
+            assert any((hunk['old_start'], hunk['old_end'], hunk['new_start'], hunk['new_end']) == expected
+                       for hunk in scoped['hunks'])
+            if part['new_count'] == 0:
+                revision = stage['analyzed_revision']['merge_base_sha']
+                old_source = git_ops.show(repo, revision, 'api.py').decode('utf-8')
+                assert old_source.splitlines()[0] == 'DELETED_FIRST_LINE = True'
+                yield ToolStartEvent(id=f'old-{part["target_id"]}', name='Bash',
+                                    input={'command': f'git show {revision}:api.py'})
+                yield ToolResultEvent(id=f'old-{part["target_id"]}', output=old_source, is_error=False)
+            else:
+                assert (part['old_start'], part['old_count'], part['new_start'], part['new_count']) == (100, 1, 99, 501)
+                yield from read_source(review, 'api.py', f'new-{part["target_id"]}')
+
+    review.backend.stage_response = response
+    assert await review.run(findings_out=None) == 0
+    coverage = json.loads((repo / '.daydream/deep/review-coverage.json').read_text())
+    assert all(scope['status'] == 'complete' for scope in coverage['stack_outcomes'])
+    assert assignments[0]['old_start'] == 1 and assignments[0]['new_count'] == 0
+    combined = '\n'.join(fragments)
+    assert combined.count('-DELETED_FIRST_LINE = True') == 1
+    for index in range(500):
+        assert combined.count(f'LATER_REQUIRED_CHANGE_{index:04}') == 1
+
+
+@pytest.mark.parametrize('fault', ['missing-notes', 'wrong-type-notes'])
+async def test_schema_only_field_shape_rejection_still_allows_one_fresh_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
+    review = source_review(tmp_path, monkeypatch, source_bytes=400, files=2)
+    attempts = 0
+
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        nonlocal attempts
+        if stage['scope_id'] != 'python':
+            return
+        attempts += 1
+        for path in stage['assigned_files']:
+            yield from read_source(review, path, f'fresh-{attempts}-{path}')
+        if attempts == 1:
+            output['candidates'] = [candidate(disposition='confirmed', finding=dict(
+                record(), description='FAILED_SCHEMA_ONLY_ATTEMPT'))]
+            if fault == 'missing-notes':
+                output.pop('notes')
+            else:
+                output['notes'] = 3
+        else:
+            assert stage['attempt'] == 2 and stage['observed_tool_starts'] == 2
+            assert stage['remaining_tool_calls'] == 46
+            assert stage['evidence'] == stage['notes'] == stage['candidates'] == []
+            assert 'FAILED_SCHEMA_ONLY_ATTEMPT' not in review.backend.calls[-1]['prompt']
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+
+    review.backend.stage_response = response
+    await review.finish('python', findings=('Grounded defect',))
+    assert attempts == 2
+    events = stage_ends(review, 'python')
+    assert [event['metadata']['admitted'] for event in events] == [False, True]
+    assert events[-1]['metadata']['observed_tool_starts'] == 4
+
+
+@pytest.mark.parametrize('nonempty', [False, True], ids=['clean-interaction', 'unread-candidate'])
+async def test_structure_candidate_requires_its_own_source_receipt_not_only_interaction_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nonempty: bool,
+) -> None:
+    review = source_review(tmp_path, monkeypatch, source_bytes=400, files=2)
+
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        if stage['scope_id'] == 'python':
+            for path in stage['assigned_files']:
+                yield from read_source(review, path, f'python-{path}')
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+        elif stage['scope_id'] == 'structure':
+            assert stage['stage'] == 'integration' and stage['assigned_target_ids'] == ['integration:structure']
+            yield from read_source(review, 'module_00.py', 'unrelated-module')
+            if nonempty:
+                output['candidates'] = [candidate(disposition='confirmed', finding=dict(
+                    record(), description='Unread structure candidate'))]
+
+    review.backend.stage_response = response
+    data = await review.finish('structure', reason='evidence_incomplete' if nonempty else None,
+                               findings=('Grounded defect',))
+    assert scopes(data)['python']['status'] == 'complete'
+    event, = stage_ends(review, 'structure')
+    assert event['metadata']['admitted'] is (not nonempty)
+    assert event['metadata']['observed_tool_starts'] == 1
+    assert event['metadata']['schema_rejection'] is None
+
+
+@pytest.mark.parametrize('read_finding', [False, True], ids=['unread-finding', 'grounded-retargeting'])
+async def test_retargeted_finding_requires_its_actual_file_source_as_well_as_candidate_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_finding: bool,
+) -> None:
+    review = source_review(tmp_path, monkeypatch, source_bytes=400, files=2)
+    description = 'Retargeted greeting defect'
+
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        if stage['scope_id'] == 'python':
+            for path in stage['assigned_files']:
+                yield from read_source(review, path, f'python-{path}')
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+        elif stage['scope_id'] == 'structure':
+            yield from read_source(review, 'module_00.py', 'candidate-source')
+            if read_finding:
+                yield from read_source(review, 'api.py', 'actual-finding-source')
+            finding = dict(record(), description=description)
+            output['candidates'] = [dict(candidate(disposition='confirmed', finding=finding),
+                                         file='module_00.py', line=1,
+                                         grounds='module_00.py:1 changes VALUE; api.py:2 changes the greeting')]
+
+    review.backend.stage_response = response
+    findings = ('Grounded defect', description) if read_finding else ('Grounded defect',)
+    data = await review.finish('structure', reason=None if read_finding else 'evidence_incomplete',
+                               findings=findings)
+    assert scopes(data)['python']['status'] == 'complete'
+    event, = stage_ends(review, 'structure')
+    assert event['metadata']['admitted'] is read_finding
+    assert event['metadata']['observed_tool_starts'] == (2 if read_finding else 1)
+    assert event['metadata']['schema_rejection'] is None

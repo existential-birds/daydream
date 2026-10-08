@@ -144,7 +144,7 @@ from tests.harness.fake_clock import FakeClock
 from tests.harness.git_helpers import commit as git_commit, configure_identity, git, init_repo
 from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.review_result import merge_result, review_scopes
-from tests.harness.stub_backend import review_stage_result
+from tests.harness.stub_backend import completed_stage_reads, review_stage_result, review_stage_state
 from tests.harness.trajectory import make_recorder, read_trajectory
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)

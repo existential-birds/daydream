@@ -243,6 +243,7 @@ class SchemaAwareSelection:
     rejected_type: str | None
     rejected_reason: str | None
     rejection: SchemaRejection | None = None
+    schema_retry_eligible: bool = False
 
 
 def _strip_json_fences(text: str) -> str:
@@ -317,6 +318,7 @@ def extract_json_by_schema(
     schema: dict[str, Any],
     accept: Callable[[Any, dict[str, Any]], bool],
     require_complete_root: bool = False,
+    rejection_guard: Callable[[Any], bool] | None = None,
 ) -> SchemaAwareSelection:
     """Return the *last* candidate in document order that ``accept`` admits.
 
@@ -334,7 +336,8 @@ def extract_json_by_schema(
             return SchemaAwareSelection(root, 1, None, None)
         rejection = schema_rejection(root, schema)
         reason = f'{rejection.category} at {rejection.schema_path}' if rejection else None
-        return SchemaAwareSelection(None, 1, type(root).__name__, reason, rejection)
+        eligible = rejection is not None and (rejection_guard is None or rejection_guard(root))
+        return SchemaAwareSelection(None, 1, type(root).__name__, reason, rejection, eligible)
     candidates = _json_candidates(text)
     if not candidates:
         return SchemaAwareSelection(None, 0, None, None)
