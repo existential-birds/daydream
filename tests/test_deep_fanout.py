@@ -18,7 +18,7 @@ from daydream.hunk_index import write_hunk_index
 from daydream.workspace import WorkContext
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.backend import ScriptedBackend
-from tests.harness.git_helpers import commit, write_and_stage
+from tests.harness.git_helpers import commit, git, seed_feature_branch, write_and_stage
 from tests.harness.review_result import review_scopes, saved_coverage
 from tests.harness.stub_backend import completed_stage_reads, review_stage_result, review_stage_state
 from tests.harness.trajectory import (
@@ -47,8 +47,7 @@ def _mk_context_files(tmp_path: Path) -> tuple[Path, Path, Path]:
     diff = tmp_path / "diff.patch"
     sources = {name: 'VALUE = 1\n' for name in
                ('api.py', 'a.py', 'App.tsx', 'README.md', 'main.go', 'lib.rs', 'app.ex', 'notes.txt')}
-    for name, source in sources.items():
-        (tmp_path / name).write_text(source)
+    seed_feature_branch(tmp_path, base={name: 'VALUE = 0\n' for name in sources}, feature=sources)
     diff.write_text(''.join(f'diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n'
                             '@@ -1 +1 @@\n-VALUE = 0\n+VALUE = 1\n' for name in sources))
     write_hunk_index(tmp_path, diff.read_text())
@@ -68,7 +67,8 @@ async def _run_per_stack(
     diff, intent, alts = _mk_context_files(tmp_path)
     results, failures = await review_scopes(
         backend,
-        make_work(tmp_path),
+        make_work(tmp_path, base_sha=git(tmp_path, "rev-parse", "main"),
+                  head_sha=git(tmp_path, "rev-parse", "HEAD"), head_branch="feature"),
         stacks,
         diff_path=diff,
         intent_path=intent,

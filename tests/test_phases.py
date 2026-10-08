@@ -26,8 +26,6 @@ from daydream.backends import (
     ContinuationToken,
     ResultEvent,
     TextEvent,
-    ToolResultEvent,
-    ToolStartEvent,
 )
 from daydream.backends.codex import CodexBackend
 from daydream.config import REVIEW_OUTPUT_FILE, STRUCTURE_STACK_NAME, TEST_WALL_BUDGET_S
@@ -141,7 +139,7 @@ from daydream.ui.summary import print_fix_complete
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock
-from tests.harness.git_helpers import commit as git_commit, configure_identity, git, init_repo
+from tests.harness.git_helpers import commit as git_commit, configure_identity, git, init_repo, seed_feature_branch
 from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.review_result import merge_result, review_scopes
 from tests.harness.stub_backend import completed_stage_reads, review_stage_result, review_stage_state
