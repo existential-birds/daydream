@@ -154,7 +154,9 @@ async def test_fanout_concurrency_limiter(
     async def drive() -> None:
         assert await run(empty_review_config(multi_stack_target, tmp_path / "trajectory.json")) == 0
 
-    with anyio.fail_after(10):
+    # This is a concurrency assertion, not a pipeline latency benchmark.
+    # Real source preparation/publication must fit under full-suite contention.
+    with anyio.fail_after(60):
         async with anyio.create_task_group() as tasks:
             tasks.start_soon(drive)
             await ready.wait()
