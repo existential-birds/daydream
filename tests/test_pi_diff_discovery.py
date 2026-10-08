@@ -1,5 +1,6 @@
 """Pi discovery uses admitted diff references even for small changes."""
 
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -39,8 +40,15 @@ async def test_small_pi_review_keeps_structural_dispatch(
         assert "review-assignment" in _sanctioned_inputs(prompt)
         state = review_stage_state(prompt)
         assert state is not None
-        captured_diff = supporting_contents(prompt)['diff'] if state['scope_id'] == 'python' else ''.join(
-            Path(part['path']).read_text() for part in state['supporting_parts'])
+        if state['scope_id'] == 'python':
+            captured_diff = supporting_contents(prompt)['diff']
+        else:
+            catalog_path = state['supporting_catalog']['path']
+            catalog_body = Path(catalog_path).read_text()
+            yield ToolStartEvent(id='supporting-catalog', name='Read', input={'file_path': catalog_path})
+            yield ToolResultEvent(id='supporting-catalog', output=catalog_body, is_error=False)
+            parts = json.loads(catalog_body)['parts']
+            captured_diff = ''.join(Path(part['path']).read_text() for part in parts)
         assert "DIFF_SENTINEL" in captured_diff
         assert "DIFF_SENTINEL" not in prompt
         assert kwargs["read_only"] is True

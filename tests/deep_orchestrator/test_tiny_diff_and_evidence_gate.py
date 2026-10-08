@@ -184,8 +184,9 @@ async def test_per_stack_sanctioned_input_contains_complete_assigned_diff_hunks(
     assert structure is not None
     inventory = supporting_contents(structural_prompts[0])["review-assignment"]
     assert "api.py" in inventory
+    catalog = json.loads(Path(structure['supporting_catalog']['path']).read_text())
     assert any(expected_api_hunk in Path(part["path"]).read_text()
-               for part in structure["supporting_parts"] if part["file"] == "api.py")
+               for part in catalog['parts'] if part["file"] == "api.py")
     assert diff_path_str not in structural_prompts[0]
 
 async def test_ac6_single_stack_merged_items_carry_structural_lens(

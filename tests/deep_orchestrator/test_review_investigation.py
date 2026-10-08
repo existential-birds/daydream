@@ -423,7 +423,10 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
         ['first_pass'] if stop == 'builder' else ['first_pass'] * 2)
     if stop == 'deadline':
         assert len(dispatch_deadlines) == 2
-        assert dispatch_deadlines[1] == pytest.approx(dispatch_deadlines[0], abs=0.5)
+        # The prompt allowance precedes provider entry and is therefore an
+        # upper bound on the deadline. Variable dispatch overhead may lower
+        # the second estimate, but must not extend the first absolute bound.
+        assert dispatch_deadlines[1] <= dispatch_deadlines[0] + 0.5
         assert asyncio.get_running_loop().time() >= dispatch_deadlines[0] - 0.5
 
 
