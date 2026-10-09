@@ -233,7 +233,7 @@ async def test_clean_admitted_source_is_reused_for_later_units_and_new_review_de
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = tmp_path / 'clean_source_reuse'
-    old = ''.join(f'# Previous contract section {index:03}: ' + 'x' * 110 + '\n' for index in range(220))
+    old = ''.join(f'# Previous contract section {index:03}: ' + 'x' * 110 + '\n' for index in range(600))
     current = ('def encode_payload(value):\n    return {"payload": value}\n'
                + ''.join(f'# New contract section {index:03}: ' + 'y' * 40 + '\n' for index in range(70))
                + 'def send_payload(value):\n    return encode_payload(value)["payload"]\n')
@@ -272,8 +272,17 @@ async def test_clean_admitted_source_is_reused_for_later_units_and_new_review_de
         else:
             assert source_windows and all(not window['read_required'] for window in source_windows)
             assert stage['admitted_source_windows']
+            instruction = review.backend.calls[-1]['review_instructions']
+            identities = json.JSONDecoder().raw_decode(instruction.split('Persistent assignment identities: ', 1)[1])[0]
+            assert identities['admitted_source_windows'] == stage['admitted_source_windows']
+            current_receipt, = [window for window in identities['admitted_source_windows']
+                               if window['side'] == 'after']
+            assert (current_receipt['revision'], current_receipt['start_byte'], current_receipt['end_byte']) == (
+                review.pr.head_sha, 0, len(current.encode()))
             assert any('ENCODER_RETURNS_PAYLOAD' in note for note in stage['notes'])
-            assert any('encode_payload(value)["payload"]' in block['excerpt'] for block in stage['evidence'])
+            # Host receipts retain authority without carrying source bodies into
+            # each fresh continuation. The admitted note preserves the decision.
+            assert stage['evidence'] == []
             output['notes'] = 'The newly assigned continuation preserves the same payload producer/consumer contract.'
 
     review.backend.stage_response = response

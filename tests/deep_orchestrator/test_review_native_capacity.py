@@ -75,8 +75,7 @@ async def test_all_41_files_and_late_contract_are_reviewed_within_192_native_sta
                            output_schema=stage['response_contract']['schema'],
                            config=PiRequestConfig(schema_emulated=False, no_tools=False))
         assert stage['remaining_tool_calls'] <= 192
-        bodies = {block['files'][0]: block['excerpt'] for block in stage['evidence']
-                  if len(block['files']) == 1 and not block['partial']}
+        bodies: dict[str, str] = {}
         pointers = _sanctioned_inputs(review.backend.calls[-1]['prompt'])
         for label, path in pointers.items():
             if label.startswith('source-'):
@@ -101,8 +100,8 @@ async def test_all_41_files_and_late_contract_are_reviewed_within_192_native_sta
         for part in stage['assignment_parts']:
             path = part['file']
             if path not in bodies:
-                # A complete admitted receipt can have a clipped prompt view.
-                # Fresh source is needed when the actual code is unavailable here.
+                # Retained receipts preserve host authority; this fresh request
+                # still needs source to understand the actual changed code.
                 window = next(window for window in stage['source_access']
                               if window['file'] == path and window['side'] == 'after')
                 projection = Path(window['access']['path'])
@@ -152,7 +151,7 @@ async def test_all_41_files_and_late_contract_are_reviewed_within_192_native_sta
                         deep_shard_enabled=False)
     data = review.load()
     assert len(scopes(data)['python']['files']) == 41 and late in scopes(data)['python']['files']
-    assert len(reviewed_units) == len(set(reviewed_units)) == 87
+    assert len(reviewed_units) == len(set(reviewed_units)) == 48
     assert judged_late == [wired]
     metadata = [phase['metadata'] for phase in stage_ends(review, 'python')]
     assert metadata[0]['hard_tool_call_allowance'] == 192

@@ -316,13 +316,57 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
         assert metadata[-1]['observed_tool_starts'] == 12 and metadata[-1]['remaining_tool_calls'] == 36
 
 
+@pytest.mark.parametrize(('sandbox', 'expected_stages'), [(False, 1), (True, 2)], ids=['exact-paths', 'inline'])
+async def test_transport_cap_keeps_a_medium_changed_file_whole_without_enlarging_inline_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool, expected_stages: int,
+) -> None:
+    from daydream import git_ops
+    from daydream.prompt_budget import SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
+
+    repo = tmp_path / 'medium_assignment'
+    payload = ''.join(f'# changed payload {index:04}: ' + 'x' * 90 + '\n' for index in range(140))
+    seed_feature_branch(repo, base={'api.py': "def hello():\n    return 'world'\n"},
+                        feature={'api.py': "def hello():\n    return 'universe'\n" + payload})
+    canonical = git_ops.diff(repo, 'main')
+    assert 12 * 1024 < len(canonical.encode()) < 24 * 1024
+    review = InvestigationRun(repo, tmp_path, monkeypatch)
+    review.backend.sandbox = sandbox
+    diffs: list[str] = []
+
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        if stage['scope_id'] != 'python':
+            return
+        prompt = review.backend.calls[-1]['prompt']
+        captured = supporting_contents(prompt)
+        diffs.append(captured['diff'])
+        if sandbox:
+            rendered = prompt[prompt.index('Sanctioned phase inputs (captured verbatim):'):]
+            assert len(rendered.encode()) <= SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
+            assert stage['assignment_parts'][0]['kind'] == 'continuation'
+        else:
+            bundle = Path(stage['supporting_bundle']['path']).read_bytes()
+            assert len(bundle) <= 24 * 1024
+            assert stage['assignment_parts'][0]['kind'] == 'file'
+            assert captured['diff'] == canonical
+            assert '<sanctioned-input label="intent">' in prompt
+            assert 'The PR updates greetings across stacks.' in prompt
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+        yield from read_source(review, 'api.py', f'medium-{len(diffs)}', stage=stage)
+
+    review.backend.stage_response = response
+    await review.finish('python', findings=() if sandbox else ('Grounded defect',))
+    assert len(diffs) == expected_stages
+    joined = ''.join(diffs)
+    assert all(joined.count(f'# changed payload {index:04}:') == 1 for index in range(140))
+    assert all(event['metadata']['admitted'] for event in stage_ends(review, 'python'))
+
+
 @pytest.mark.parametrize('sandbox', [False, True], ids=['exact-paths', 'inline'])
 @pytest.mark.parametrize('omit_final', [False, True], ids=['all-parts', 'missing-final-part'])
 async def test_oversized_hunk_continuations_cover_every_byte_before_file_is_complete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool, omit_final: bool,
 ) -> None:
-    import re
-
+    from daydream import git_ops
     from daydream.prompt_budget import SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
     from tests.test_deep_orchestrator import _sanctioned_inputs
 
@@ -332,7 +376,9 @@ async def test_oversized_hunk_continuations_cover_every_byte_before_file_is_comp
                         feature={'api.py': 'VALUE = 1\n' + required})
     review = InvestigationRun(repo, tmp_path, monkeypatch)
     review.backend.sandbox = sandbox
-    fragments: list[str] = []
+    canonical = git_ops.diff(repo, 'main')
+    expected_body = canonical.split('\n@@', 1)[1].split('\n', 1)[1].encode()
+    fragments: list[bytes] = []
     assignments: list[dict[str, Any]] = []
 
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
@@ -341,7 +387,7 @@ async def test_oversized_hunk_continuations_cover_every_byte_before_file_is_comp
         assert stage['stage'] == 'first_pass' and stage['assigned_files'] == ['api.py']
         part, = stage['assignment_parts']
         assert part['kind'] == 'continuation' and part['part_count'] > 1
-        assert part['old_start'] >= 1 and part['new_start'] >= 1
+        assert (part['old_start'], part['old_count'], part['new_start'], part['new_count']) == (1, 1, 1, 541)
         assignments.append(part)
         prompt = review.backend.calls[-1]['prompt']
         if sandbox:
@@ -357,16 +403,19 @@ async def test_oversized_hunk_continuations_cover_every_byte_before_file_is_comp
             visible = {label for label in stage['context_inputs'] if not label.startswith('source-')}
             assert set(pointers) == visible - set(stage.get('context_inline_labels', []))
             captured = {label: path.read_text() for label, path in pointers.items()}
+            assert len(Path(stage['supporting_bundle']['path']).read_bytes()) <= 24 * 1024
             for index, (label, path) in enumerate(pointers.items()):
                 yield ToolStartEvent(id=f'input-{index}', name='Read', input={'file_path': str(path)})
                 yield ToolResultEvent(id=f'input-{index}', output=captured[label], is_error=False)
         captured = supporting_contents(prompt)
         diff = captured['diff']
-        assert len(diff.encode()) < 12_000
         index = json.loads(captured['hunk-index'])
         assert list(index) == ['api.py']
         assert index['api.py']['assignments'][0]['target_id'] == part['target_id']
-        fragments.append(diff)
+        body = diff.split('\n@@', 1)[1].split('\n', 1)[1].encode()
+        assert part['fragment_offset'] == sum(map(len, fragments))
+        assert part['fragment_bytes'] == len(body)
+        fragments.append(body)
         if omit_final and part['part_index'] == part['part_count']:
             output['targets'][0].update(status='not_reviewed', reason='Final continuation remains unexamined.')
         yield from read_source(review, 'api.py', 'grounded-continuation')
@@ -376,10 +425,7 @@ async def test_oversized_hunk_continuations_cover_every_byte_before_file_is_comp
     assert scopes(data)['python']['files'] == ['api.py']
     assert len(assignments) > 1
     assert [part['part_index'] for part in assignments] == list(range(1, len(assignments) + 1))
-    joined = '\n'.join(fragments)
-    for index in range(540):
-        marker = f'# continuation payload {index:04}:'
-        assert joined.count(marker) == 1
+    assert b''.join(fragments) == expected_body
     assert all(event['metadata']['admitted'] for event in stage_ends(review, 'python'))
 
 
@@ -490,7 +536,7 @@ async def test_realistic_diff_and_index_are_scoped_and_cannot_poison_source_evid
         diff, index = captured['diff'], json.loads(captured['hunk-index'])
         assert set(index) == set(stage['assigned_files'])
         assert set(path for path in after if f'diff --git a/{path} b/{path}' in diff) == set(stage['assigned_files'])
-        assert len(diff.encode()) < 12_288
+        assert len(Path(stage['supporting_bundle']['path']).read_bytes()) <= 24 * 1024
         exposed.append(diff)
         if len(exposed) == 1:
             for label in ('review-assignment',) if 'review-assignment' in pointers else ('diff', 'hunk-index'):

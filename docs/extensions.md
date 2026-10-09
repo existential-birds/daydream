@@ -541,10 +541,13 @@ supported versions; migrate the callable to accept this kwarg and declare
   `analyzed_revision` bind the work to the public reviewer and frozen snapshot.
 - `assigned_files` and the builder's `files` are the current assignment. Language
   and generic batches group nearby directories within four files and the actual
-  12,288-byte rendered inline input allowance, including wrappers, scoped index
-  and snapshot bindings. Required assignment bytes take priority over shared
-  context. Exact paths carry the same logical assignments. The stage factory
-  reads complete frozen canonical diff/index artifacts and writes bounded inputs
+  24,576-byte rendered assignment cap for exact paths or the 12,288-byte inline
+  input allowance, including wrappers, scoped index and snapshot bindings.
+  Complete files are preferred when they fit; required assignment bytes take
+  priority over shared context. The stage factory
+  keeps exact assignment references outside the separate inline shared-context
+  allowance; only the shared bytes actually inlined and their wrappers consume it.
+  It reads complete frozen canonical diff/index artifacts and writes bounded inputs
   atomically through the owning `ArtifactSession`; it never uses a truncated
   in-memory diff. `diff_path` points at the current stage projection, with its
   scoped `hunk-index.json`. Sanctioned inline bytes carry that same content;
@@ -560,7 +563,12 @@ supported versions; migrate the callable to accept this kwarg and declare
   methods. `read_required` indicates mandatory fresh work; false alone does not
   prove reuse (the before side may be optional). `admitted_source_windows` binds
   verified complete receipts from successful stages in this reviewer/snapshot.
-  Clean stages retain useful source and notes. Exact interval unions may cover
+  Clean stages retain useful source and notes. First-pass handoffs carry receipt
+  metadata without repeating source bodies; triage retains relevant compact
+  excerpts. Host receipt authority is distinct from current agent knowledge:
+  omitted bodies and compaction do not erase retained receipts. Targeted rereads
+  remain appropriate for understanding a concrete concern or uncovered source.
+  Exact interval unions may cover
   later windows; unknown/opaque ranges and failed attempts never authorize reuse.
   Every assigned unit still requires a fresh review decision. Schema retries
   obtain new evidence under the same absolute allowance/deadline.
@@ -568,14 +576,20 @@ supported versions; migrate the callable to accept this kwarg and declare
   opt in by declaring `review_input_bundle = True` on its callable. Without this
   explicit capability its `diff_path` remains a real diff file and adjacent
   `hunk-index.json` remains a real index, with their original semantics. They are
-  never aliases for a bundle. Bundle reading supplies supporting context only.
+  never aliases for a bundle. First-pass bundles contain the bounded assignment
+  diff, index and binding; integration bundles contain the compact whole-change
+  inventory and binding with navigation instructions for deferred diff parts.
+  Bundle reading supplies supporting context only.
   `supporting_catalog` exposes targeted bounded Structure diff projections where
   exact transport permits them. Its exact pointer leads to bounded 12,000-byte
   JSON catalogs containing `parts` (`file`, existing `target_id`, exact `path`)
   or `catalogs` (exact child `path`, `part_count`). The full part inventory remains
   available without repeating every pointer in the initial prompt. Every catalog
   and part is captured supporting input through `ArtifactSession`; no directory
-  access is granted. Inline omissions remain honestly unavailable.
+  access is granted. Catalogs guide navigation, never an exhaustive reading
+  checklist. Structure resolves concrete changed-boundary concerns at their
+  relevant owners and submits; settled contract checks stay settled unless new
+  contradictory evidence appears. Inline omissions remain honestly unavailable.
   Recipe-capable Structure omits duplicate source projection paths, retaining
   concrete before/after ranges and native selectors for file and canonical part
   IDs. `context_availability` summarizes complete source/part/catalog counts;
@@ -592,6 +606,9 @@ supported versions; migrate the callable to accept this kwarg and declare
   It persists in stage system guidance through Pi compaction, retaining exact
   catalog/assignment/shared-context pointers and required source arguments.
   Complete inline context is labeled honestly; optional omissions are explicit.
+  Persistent stage identities also retain `admitted_source_windows`; their
+  verified covered ranges govern fresh-read obligations when an access guide
+  was prepared before receipt reuse. The guide preserves navigation arguments.
   Custom integration builders keep their full initial `source_access` and do not
   acquire a new guide-size admission gate; unsupported persistent access remains
   explicitly unrepresented. Recipe-capable exact integration also receives its
@@ -634,15 +651,24 @@ supported versions; migrate the callable to accept this kwarg and declare
 - `assigned_target_ids` must be acknowledged exactly. `assigned_candidate_ids`
   scopes triage; only those candidates and their relevant admitted notes and
   evidence are supplied. `closed_candidate_ids` are handles for reporting
-  contradictions, not permission to reopen decisions. No new discovery occurs
-  during triage.
+  contradictions, not permission to reopen decisions. Additive `closed_decisions`
+  carries each admitted closed candidate's host ID, file/line, disposition,
+  bounded conclusion and relevant frozen evidence references. These summaries
+  also persist in stage system guidance through Pi compaction. They reuse settled
+  decisions without substituting for receipt admission or granting source access.
+  No new discovery occurs during triage.
 - `remaining_work` keeps source/read estimates separate from native submission
   and total start floors. These are optimistic transport hints, not quality proof.
 - `advisory_tool_call_target` suggests a compact stage workload;
   `remaining_tool_calls` is the hard remaining cumulative allowance.
   `observed_tool_starts` includes retries and the received start exceeding the
   hard allowance. Native parallel or buffered execution can precede observation.
+  Each supplied bound source read uses its own tool call/result and preserves
+  the host's quoted arguments. Parallel reads remain separate calls; compound
+  shell commands and concatenated multi-file output supply no bound receipts.
   The reviewer deadline and total allowance remain unchanged across stages.
+  Reviewers use the existing remaining-work estimates and allowance to preserve
+  capacity for submission, remaining assignments and open-candidate triage.
 - `context_inputs` lists only admitted sanctioned labels; `context_transport`
   describes inline bytes or exact paths. `context_statuses` records complete,
   partial or unavailable supporting context. `canonical_input_identities`

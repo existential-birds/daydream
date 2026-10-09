@@ -17,7 +17,12 @@ from daydream.deep.sharding import file_change_bytes, pack_file_batches
 from daydream.json_utils import SchemaRejection, validates_schema
 from daydream.phases.review_prompts import build_review_stage_system_instruction
 from daydream.phases.schemas import review_stage_schema
-from daydream.prompt_budget import PreparedSanctionedInputs, SanctionedInputUnavailable, SourceAccessUnavailable
+from daydream.prompt_budget import (
+    PreparedSanctionedInputs,
+    SanctionedInputUnavailable,
+    SourceAccessUnavailable,
+    truncate_utf8_to_budget,
+)
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.review_evidence import (
     FULL_REVIEW_MAX_BYTES,
@@ -51,7 +56,6 @@ class _AdmissionPlan:
     handoff: dict[str, list[Any]]
     target_progress: dict[str, dict[str, Any]]
     receipts: list[EvidenceReceipt]
-    compact_clipped: bool
 
 
 class ReviewInvestigation:
@@ -82,7 +86,7 @@ class ReviewInvestigation:
         self.target_progress: dict[str, dict[str, Any]] = {}
         self.admitted_receipts: list[EvidenceReceipt] = []
         self.admitted_retained_bytes = 0
-        self.handoff: dict[str, list[Any]] = {name: [] for name in ('progress', 'notes', 'candidates', 'evidence')}
+        self.handoff: dict[str, list[Any]] = {name: [] for name in ('progress', 'notes', 'candidates')}
         self.budget = ReviewInvestigationBudget.from_limits(ReviewLimits())
         self.reason: str | None = None
         self.admitted_stages = 0
@@ -128,11 +132,43 @@ class ReviewInvestigation:
                       if candidate['candidate_id'] in candidate_ids]
         candidate_files = _candidate_source_files(candidates)
         relevant_files = candidate_files | set(files)
-        # Only admitted context relevant to this triage assignment travels into
-        # its fresh request. Closed decisions expose handles, never fresh work.
+        # Triage needs source context for pending decisions. Fresh assignments
+        # reuse receipt metadata and compact notes instead of source bodies.
         notes = [note['text'] for note in self.handoff['notes']
                  if relevant_files.intersection(note['files'])]
-        evidence = ReviewEvidence(None).compact_for_files(relevant_files, receipts=self.admitted_receipts)
+        evidence = (ReviewEvidence(None).compact_for_files(relevant_files, receipts=self.admitted_receipts)
+                    if stage == 'triage' else [])
+        closed_decisions = []
+        for candidate in self.handoff['candidates']:
+            if candidate['disposition'] not in {'confirmed', 'rejected'}:
+                continue
+            locations = [(candidate['file'], candidate['line'])]
+            conclusion = candidate['grounds']
+            if candidate['finding'] is not None:
+                locations.append((candidate['finding']['file'], candidate['finding']['line']))
+                conclusion = f"{candidate['finding']['description']}: {conclusion}"
+            references = []
+            for path, line in locations:
+                for side in ('before', 'after'):
+                    sources = [receipt.source for receipt in self.admitted_receipts
+                               if receipt.complete and receipt.source is not None
+                               and receipt.source.file == path and receipt.source.side == side
+                               and receipt.source.start_line <= line <= receipt.source.end_line]
+                    if not sources:
+                        continue
+                    source = min(sources, key=lambda window: window.end_byte - window.start_byte)
+                    reference = source.metadata()
+                    # Assignment aliases describe the read grant, not additional
+                    # evidence when the same frozen range was read again.
+                    reference.pop('target_ids')
+                    if reference not in references:
+                        references.append(reference)
+            closed_decisions.append({
+                'candidate_id': candidate['candidate_id'], 'file': candidate['file'], 'line': candidate['line'],
+                'disposition': candidate['disposition'],
+                'conclusion': truncate_utf8_to_budget(conclusion, 512, '[conclusion clipped]'),
+                'evidence_references': references,
+            })
         target = (max(4, 3 * len(candidate_ids)) if stage == 'triage' else
                   max(8, len(files)) if stage == 'integration' else max(4, 2 * len(files)))
         return {
@@ -147,6 +183,7 @@ class ReviewInvestigation:
             'assigned_files': sorted(candidate_files) if stage == 'triage' else files,
             'progress': self.handoff['progress'] if stage != 'triage' else [],
             'notes': notes, 'candidates': candidates, 'evidence': evidence,
+            'closed_decisions': closed_decisions,
             'closed_candidate_ids': [candidate['candidate_id'] for candidate in self.handoff['candidates']
                                      if candidate['disposition'] in {'confirmed', 'rejected'}],
             'assigned_candidate_ids': candidate_ids,
@@ -553,28 +590,10 @@ class ReviewInvestigation:
                                for target in required)
                 progress.append({'target_id': path, 'status': 'reviewed' if complete else 'not_reviewed',
                                  'reason': '' if complete else 'Required assignment parts remain incomplete.'})
-        # Full associated receipts remain the admission authority. Compact views
-        # may omit late blocks without turning otherwise complete reads into loss.
-        compact = list(self.handoff['evidence'])
-        compact_bytes = len(json.dumps(compact, ensure_ascii=False).encode())
-        compact_clipped = False
+        # Keep one complete receipt store. Compact excerpts are derived for
+        # triage, rather than duplicated in an accumulating handoff history.
         relevant_files = _candidate_source_files(decisions) | set(files)
-        relevant_blocks = evidence.compact_for_files(relevant_files)
-        for index, block in enumerate(relevant_blocks):
-            entry = {'stage': stage, 'assigned_target_ids': targets, **block}
-            size = len(json.dumps(entry, ensure_ascii=False).encode())
-            if compact_bytes + size > 48000 or len(compact) >= 64:
-                compact_clipped = True
-                if compact:
-                    compact[-1] = {**compact[-1], 'partial': True,
-                                   'omitted_receipts': len(relevant_blocks) - index}
-                else:
-                    compact.append({'stage': stage, 'assigned_target_ids': targets,
-                                    'files': sorted(relevant_files), 'partial': True,
-                                    'omitted_receipts': len(relevant_blocks), 'excerpt': '[partial evidence view] '})
-                break
-            compact.append(entry)
-            compact_bytes += size
+        evidence.compact_for_files(relevant_files)
         handoff = {
             'progress': progress,
             'notes': self.handoff['notes'] + [{
@@ -583,7 +602,7 @@ class ReviewInvestigation:
                     if receipt.complete and receipt.source is not None
                 }), 'text': output['notes'],
             }],
-            'candidates': candidates, 'evidence': compact,
+            'candidates': candidates,
         }
         if (sum(map(len, handoff.values())) > HANDOFF_MAX_ITEMS
                 or len(json.dumps(handoff, ensure_ascii=False).encode('utf-8')) > HANDOFF_MAX_BYTES):
@@ -592,7 +611,7 @@ class ReviewInvestigation:
         receipts = [receipt for receipt in evidence.receipts
                     if receipt.complete and (receipt.source is not None
                                              or relevant_files.intersection(receipt.paths))]
-        return _AdmissionPlan(handoff, target_progress, receipts, compact_clipped), None
+        return _AdmissionPlan(handoff, target_progress, receipts), None
 
     def _admit(self, output: Any, stage: str, targets: list[str], candidate_ids: list[str],
                evidence: ReviewEvidence, *, files: list[str]) -> str | None:
@@ -612,7 +631,6 @@ class ReviewInvestigation:
         self.admitted_stages += 1
         self.handoff = plan.handoff
         self.target_progress = plan.target_progress
-        evidence.clipped |= plan.compact_clipped
         self.admitted_receipts.extend(plan.receipts)
         self.admitted_retained_bytes += sum(receipt.retained_bytes for receipt in plan.receipts)
         return None

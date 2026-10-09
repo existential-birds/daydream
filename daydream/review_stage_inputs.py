@@ -35,6 +35,8 @@ from daydream.prompt_budget import (
 from daydream.review_source import SourceRecipe, SourceWindow, source_line_bytes
 from daydream.workspace import WorkContext
 
+_EXACT_PATH_ASSIGNMENT_MAX_BYTES = 24 * 1024
+
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -49,9 +51,9 @@ class _Part:
 class StageInputFactory:
     """Required work takes priority over advisory context on either transport.
 
-    The logical batches fit the actual inline allowance, including wrappers and
-    binding metadata. Exact-path backends receive those same assignments, never
-    the canonical whole-change artifacts as their first-pass inputs.
+    Batches fit the transport's bounded assignment allowance, including wrappers
+    and binding metadata. Exact-path transport permits larger assignments than
+    inline transport, never whole-change artifacts as first-pass inputs.
     """
 
     def __init__(
@@ -149,9 +151,9 @@ class StageInputFactory:
 
     def _fits(self, contents: dict[str, str]) -> bool:
         contents = self._bundled(contents)
-        return inline_section_emitted_bytes([(label, len(text.encode())) for label, text in contents.items()]) <= (
-            SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
-        )
+        cap = (_EXACT_PATH_ASSIGNMENT_MAX_BYTES if self.transport is SanctionedInputTransport.EXACT_PATHS
+               else SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES)
+        return inline_section_emitted_bytes([(label, len(text.encode())) for label, text in contents.items()]) <= cap
 
     def _parts(self) -> list[_Part]:
         result: list[_Part] = []
@@ -227,7 +229,7 @@ class StageInputFactory:
                 else:
                     high = mid - 1
             if low == 0:
-                raise SanctionedInputUnavailable("required change header exceeds the inline allowance")
+                raise SanctionedInputUnavailable("required change header exceeds the assignment allowance")
             boundary = rest.rfind("\n", 0, low)
             take = boundary + 1 if boundary >= 0 else low
             chunk = rest[:take]
@@ -260,7 +262,7 @@ class StageInputFactory:
                 batches.append(current)
                 current = []
             if not self._fits(self._render([part])):
-                raise SanctionedInputUnavailable("required assignment exceeds the inline allowance")
+                raise SanctionedInputUnavailable("required assignment exceeds the assignment allowance")
             current.append(part)
         if current:
             batches.append(current)
@@ -618,9 +620,9 @@ class StageInputFactory:
                                                   else item
                                                   for item in prepared.inputs))
         if self.bundle_capable and self.transport is SanctionedInputTransport.EXACT_PATHS:
-            # Whole small shared artifacts travel in the prompt within the same
-            # logical supporting allowance. They need no repeated native read.
-            entries = [(label, len(text.encode())) for label, text in contents.items()]
+            # Required assignments travel as exact pointers. Only shared bytes
+            # actually inlined consume the inline allowance, including wrappers.
+            entries: list[tuple[str, int]] = []
             inline_shared: dict[str, str] = {}
             for item in prepared.inputs:
                 if item.label not in shared_paths:

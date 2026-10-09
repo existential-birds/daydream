@@ -32,6 +32,8 @@ from tests.test_deep_orchestrator import _profile_with_pipeline, _sanctioned_inp
 class StagedBackend(EmptyReviewBackend):
     """A provider that remembers nothing beyond the current request."""
 
+    supports_review_instructions = True
+
     def __init__(self, repo: Path) -> None:
         super().__init__(repo, forbid_merge=False, forbid_supervise=False)
         self.merge_echo_records = True
@@ -62,6 +64,7 @@ class StagedBackend(EmptyReviewBackend):
                     yield event
             yield ResultEvent(structured_output=output, continuation=None)
             return
+        kwargs.pop('review_instructions', None)
         async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
@@ -520,6 +523,58 @@ async def test_one_triage_round_preserves_closed_decisions_and_rejects_invalid_i
     await investigation.finish('python', reason=reason,
                                findings=('Grounded defect',) if decision == 'confirmed' else ())
     assert [s['stage'] for s in backend.stages if s['scope_id'] == 'python'] == ['first_pass', 'triage']
+
+
+@pytest.mark.parametrize('long_grounds', [False, True])
+async def test_later_assignments_carry_closed_decisions_without_reopening_retained_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, long_grounds: bool,
+) -> None:
+    review = many_file_review(tmp_path, monkeypatch, count=9)
+    later_assignments: list[dict[str, Any]] = []
+
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        if stage['scope_id'] != 'python':
+            return
+        if not stage['progress']:
+            assert 'api.py' in stage['assigned_files']
+            output['candidates'] = [candidate(disposition='confirmed', finding=record()),
+                                    candidate(disposition='rejected')]
+            if long_grounds:
+                output['candidates'][0]['grounds'] += ' Additional explanation: ' + 'é' * 400
+            output['candidates'][1]['grounds'] = 'The greeting is allowed by the updated consumer contract.'
+            yield from completed_stage_reads(review.repo, stage)
+            for index, line in enumerate((1, 2, 2)):
+                call = ToolStartEvent(id=f'precise-source-{index}', name='Read',
+                                      input={'file_path': 'api.py', 'offset': line, 'limit': 1})
+                yield call
+                yield ToolResultEvent(id=call.id, output=(review.repo / 'api.py').read_text().splitlines(
+                    keepends=True)[line - 1], is_error=False)
+            return
+        later_assignments.append(stage)
+        decisions = stage['closed_decisions']
+        assert [(decision['candidate_id'], decision['file'], decision['line'], decision['disposition'])
+                for decision in decisions] == [('python:candidate:1', 'api.py', 2, 'confirmed'),
+                                              ('python:candidate:2', 'api.py', 2, 'rejected')]
+        assert decisions[0]['conclusion'].startswith('Grounded defect: ' + candidate()['grounds'])
+        assert len(decisions[0]['conclusion'].encode()) <= 512
+        assert decisions[0]['conclusion'].endswith('[conclusion clipped]') is long_grounds
+        assert decisions[1]['conclusion'] == 'The greeting is allowed by the updated consumer contract.'
+        for decision in decisions:
+            reference, = decision['evidence_references']
+            assert reference['file'] == 'api.py' and reference['side'] == 'after'
+            assert reference['revision'] == review.pr.head_sha
+            assert reference['start_line'] == reference['end_line'] == decision['line']
+            assert reference['content_sha256'] and reference['blob_oid']
+        assert stage['candidates'] == [] and stage['evidence'] == []
+        instruction = review.backend.calls[-1]['review_instructions']
+        assert 'The greeting is allowed by the updated consumer contract.' in instruction
+        assert 'Host-retained receipt authority' in instruction
+
+    review.backend.stage_response = response
+    data = await review.finish('python', findings=('Grounded defect',))
+    assert len(later_assignments) == 2
+    assert all(scope['status'] == 'complete' for scope in scopes(data).values())
+    assert all(event['metadata']['admitted'] for event in stage_ends(review, 'python'))
 
 
 @pytest.mark.parametrize('cutoff', [False, True])

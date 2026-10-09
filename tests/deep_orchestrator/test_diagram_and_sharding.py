@@ -205,7 +205,10 @@ async def test_default_cap_coarsens_only_enough_and_preserves_scope_qualified_wo
             key = (stage['scope_id'], target)
             assert key not in required
             required.add(key)
-    assert len(required) > len(before)
+    # These medium files now fit whole in the exact-path assignment cap; scope
+    # coarsening still owns every file exactly once without resetting on hunks.
+    assert required == {(name, path) for name, scope in outcomes.items() if name != 'structure'
+                        for path in scope['files']}
     for call in review.backend.calls:
         call_stage = review_stage_state(call['prompt'])
         if call_stage is None or call_stage['stage'] != 'first_pass':
@@ -214,6 +217,6 @@ async def test_default_cap_coarsens_only_enough_and_preserves_scope_qualified_wo
         from daydream.prompt_budget import inline_section_emitted_bytes
         logical = [('review-assignment', contents['review-assignment'])] if 'review-assignment' in contents else [
             (label, contents[label]) for label in ('diff', 'hunk-index', 'input-binding')]
-        assert inline_section_emitted_bytes([(label, len(text.encode())) for label, text in logical]) <= 12288
+        assert inline_section_emitted_bytes([(label, len(text.encode())) for label, text in logical]) <= 24 * 1024
     coverage = json.loads((repo / '.daydream/deep/review-coverage.json').read_text())
     assert coverage['stack_outcomes'] == data['terminal_result']['stack_outcomes']

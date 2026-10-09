@@ -299,12 +299,18 @@ def _review_stage_context(review_stage: dict[str, Any], *, intent_authoritative:
     )
     bundle = ""
     if review_stage.get('supporting_bundle'):
+        contents = (
+            "a compact whole-change inventory and binding with navigation instructions for deferred "
+            "bounded diff parts"
+            if review_stage['stage'] == 'integration' else
+            "the complete bounded assignment diff, hunk index and binding"
+        )
         bundle = (
-            " The supporting_bundle contains the complete bounded assignment diff, hunk index "
-            "and binding. Reuse its captured inline content; no supporting artifact read is needed."
+            f" The supporting_bundle contains {contents}. "
+            "Reuse its captured inline content; no supporting artifact read is needed."
             if review_stage.get('context_transport') == 'inline' else
-            " Read the supporting_bundle once for its complete bounded assignment diff, hunk index "
-            "and binding, then reuse that supporting content; separate legacy diff/index reads are "
+            f" Read the supporting_bundle once for {contents}, then reuse that supporting content; "
+            "separate legacy diff/index reads are "
             "unnecessary for this bundle-capable builder."
         )
     if review_stage.get('supporting_catalog'):
@@ -343,8 +349,13 @@ def _stage_source_instruction() -> str:
         "Read it through the supplied projection or read_source arguments; do not try the missing "
         "HEAD path or infer host artifact paths. Source projections contain actual source, not diff "
         "text. Use only the current invocation's supplied selectors with read_source. "
-        "Use admitted_source_windows and notes for verified reusable ranges; partial excerpts may "
-        "need targeted rereads. The persistent staged contract governs required reads and reuse."
+        "Issue one bound source read per tool result; do not combine source commands with &&, "
+        "semicolons or pipes, and preserve supplied shell quoting exactly. "
+        "admitted_source_windows records complete host-retained receipt authority, distinct from "
+        "your current source knowledge. Omitted bodies, partial excerpts and compaction do not erase "
+        "those receipts. Reuse verified ranges and closed_decisions; reread only when needed to "
+        "understand a concrete concern or cover source outside those ranges. "
+        "The persistent staged contract governs required reads and reuse."
     )
 
 
@@ -436,11 +447,16 @@ def _build_review_stage_prompt(
                 "the changed paths. "
                 "The compact whole-change inventory and bounded supporting diff parts orient this "
                 "interaction assignment; do not begin by dumping the complete diff or hunk index. "
-                "Inspect implementation interactions first: trace changed values, calls, contracts and "
-                "lifetimes across components. Documentation and tests are supporting evidence for "
+                "Investigate concrete changed-boundary concerns: trace changed values, calls, contracts "
+                "and lifetimes to their relevant owners. Narrow searches to those owners. "
+                "Catalogs are navigation aids, not an exhaustive reading checklist. "
+                "Documentation and tests are supporting evidence for "
                 "these interactions; early documentation does not finish the interaction assignment. "
                 "Do not repeat the language or generic reviewers' file audits. "
-                "Stop a boundary trace when the contract agrees and no concrete candidate remains."
+                "Stop a boundary trace when the contract agrees and no concrete candidate remains. "
+                "Settled contract checks stay settled unless new contradictory evidence appears. "
+                "Once concrete concerns are resolved, submit the integration decision; a clean "
+                "interaction review can finish without candidates."
             )
             if review_stage.get('folded_alternatives'):
                 parts.append(
@@ -514,7 +530,9 @@ def _build_review_stage_prompt(
         f"Advisory stage tool-call target: {review_stage['advisory_tool_call_target']}. "
         f"Remaining hard cumulative tool allowance: {review_stage['remaining_tool_calls']}. "
         "Plan around required source windows, verified reuse, the supporting bundle and combined "
-        "targeted searches. The advisory target guides pace; the cumulative allowance is the hard limit."
+        "targeted searches. Preserve capacity for structured submission and any remaining assignments "
+        "or open-candidate triage; finish resolved work promptly. The advisory target guides pace; "
+        "the cumulative allowance is the hard limit."
     )
     if review_stage.get('remaining_work'):
         parts.append(

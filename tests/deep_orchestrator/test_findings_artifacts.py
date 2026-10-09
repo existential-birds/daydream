@@ -220,16 +220,13 @@ async def test_over_budget_diff_preserves_full_disk_evidence_and_uses_safe_promp
         scoped_diff = supporting["diff"]
         scoped_index = json.loads(supporting["hunk-index"])
         assert set(scoped_index) == set(stage['assigned_files'])
-        assert len(scoped_diff.encode()) < INLINE_DIFF_BUDGET_BYTES
+        assert len(Path(stage['supporting_bundle']['path']).read_bytes()) <= 24 * 1024
         assert all(f'diff --git a/{path} b/{path}' in scoped_diff for path in stage['assigned_files'])
         assert 'Read the supporting_bundle once' in python_prompt
         assert "diff --git" not in python_prompt
-        # Later assignments may reuse complete, admitted source windows. Such
-        # source context is independent of the bounded supporting diff.
-        for marker in ("line 50 of filler content", "SMALL_RETAINED_MARKER"):
-            if marker in python_prompt:
-                assert any(marker in receipt['excerpt'] for receipt in stage['evidence'])
-                assert stage['admitted_source_windows']
+        # Source-body history stays with host receipts rather than being repeated
+        # alongside each bounded supporting assignment.
+        assert stage['evidence'] == []
     if not oversize:
         react = _matching_prompt(stub.calls, "you are reviewing the react stack")
         assert 'diff --git a/App.tsx b/App.tsx' in supporting_contents(react)['diff']

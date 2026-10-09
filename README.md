@@ -654,8 +654,11 @@ The shared pipeline clock, queue time and concurrency still bound execution;
 this is neither a billing estimate nor a guarantee of cold review completion.
 Per-stack reviewers share eight minutes and 48 observed tool starts across stages.
 Language and generic reviewers receive locality-preferred batches of at most four
-files, sized to the 12,288-byte inline input allowance including wrappers, scoped
-diff/index and snapshot bindings. Exact-path transport uses the same assignments.
+files, sized to a 24,576-byte assignment cap for exact-path transport or the
+12,288-byte inline input allowance, including wrappers, scoped diff/index and
+snapshot bindings. Complete files are preferred when they fit the transport cap.
+Exact assignment pointers do not consume the separate inline allowance for small
+shared context; only inlined shared bytes and their wrappers do.
 Oversized files split into hunks; oversized hunks split into ordered continuations
 with old/new ranges and exact fragment offsets. Every required part must succeed
 before its file is complete. Structure
@@ -706,6 +709,10 @@ window packet; it grants no private directory or Bash access. Inline source text
 is prompt context, not a native source receipt. Codex retains its independent
 snapshot and full-SHA `git show` access. Returned bytes and ranges are checked
 against frozen source independently of tool-provided provenance.
+Execute each supplied bound source read as a separate tool call, preserving its
+quoted arguments (including literal shell metacharacters in paths). Compound
+commands and concatenated source bodies do not establish bound receipts. Parallel
+reads use separate calls; failed required reads remain incomplete.
 Normal reads of tracked current-side dependencies are also verified against the
 captured HEAD; they do not expand the native recipe's permitted selectors.
 Pi's exact bounded-read representation is decoded against independently frozen
@@ -732,14 +739,29 @@ by the same artifact owner under the existing byte/count bounds. A persistent
 exact access guide (at most 8 KiB) survives Pi compaction with captured catalog,
 assignment and shared-context pointers. Output IDs such as `integration:structure`
 identify decisions; they are source selectors only when listed in the catalog.
-Structure starts with implementation interactions; diff/docs support concrete
-concerns. Catalogs and inline context provide no reviewed-source coverage or
+Structure starts with concrete changed-boundary concerns and searches their
+relevant owners; diff/docs support those concerns. Its integration bundle contains
+the compact whole-change inventory and binding with deferred-part navigation,
+while first-pass bundles contain the bounded assignment diff/index/binding.
+Catalogs are navigation aids, not an exhaustive reading checklist. Settled
+contract checks stay settled unless new contradictory evidence appears. Once
+concrete concerns are resolved, reviewers submit, preserving capacity for
+submission, remaining assignments and open-candidate triage under the existing
+allowance. Catalogs and inline context provide no reviewed-source coverage or
 additional directory access. Full host source state remains available, and
 partial/unavailable context remains explicit.
 Complete verified windows from successful clean stages are retained and can cover
 later work in the same reviewer/snapshot, including an exact union of read ranges.
 Failed attempts and opaque or uncovered ranges cannot supply reuse. Every new
-assignment still requires its own review decision. Triage receives only relevant admitted compact evidence and may
+assignment still requires its own review decision. First-pass handoffs carry
+receipt metadata rather than repeated source bodies. Compact `closed_decisions`
+identify admitted candidate IDs, locations, dispositions, brief conclusions and
+relevant frozen evidence references; the same summaries persist through Pi
+compaction. They support decision reuse, never new coverage or reopening.
+Complete host-retained receipt authority is distinct from the agent's current
+source knowledge: omitted bodies and compaction do not erase receipts. Targeted
+rereads remain appropriate for understanding concrete concerns or uncovered
+source. Triage receives only relevant admitted compact evidence and may
 make targeted rereads within the existing allowance. Other roles retain
 bounded finalization. The existing 60-minute review ceilings remain outer
 safeguards; fix turns retain their separate 30-minute limit.

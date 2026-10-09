@@ -29,6 +29,8 @@ def build_review_stage_system_instruction(review_stage: dict[str, Any]) -> str:
             'targets': review_stage['assigned_target_ids'],
             'candidate_ids': review_stage.get('assigned_candidate_ids', []),
             'closed_candidate_ids': review_stage.get('closed_candidate_ids', []),
+            'closed_decisions': review_stage.get('closed_decisions', []),
+            'admitted_source_windows': review_stage.get('admitted_source_windows', []),
         }, ensure_ascii=False) + '.\nPersistent exact access guide (supporting metadata): '
         + access_guide
     )

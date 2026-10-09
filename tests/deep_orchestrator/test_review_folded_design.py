@@ -54,6 +54,12 @@ async def test_structure_fulfils_folded_design_duty_after_early_docs_or_propagat
         bundle = Path(stage['supporting_bundle']['path'])
         inventory = bundle.read_text()
         assert 'store.py' in inventory and 'service.py' in inventory
+        prompt = review.backend.calls[-1]['prompt']
+        # The provider gets navigation metadata here, not the promised complete
+        # diff. Its selective boundary trace below must still finish Structure.
+        assert 'complete bounded assignment diff' not in prompt
+        assert 'inventory' in prompt and 'deferred' in prompt
+        assert 'submission' in prompt and 'settled' in prompt
         yield ToolStartEvent(id='interaction-inventory', name='Read', input={'file_path': str(bundle)})
         yield ToolResultEvent(id='interaction-inventory', output=inventory, is_error=False)
         catalog_path = stage['supporting_catalog']['path']
