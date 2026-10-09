@@ -106,6 +106,11 @@ async def test_large_complete_source_receipts_retain_findings_and_allow_later_st
             total += len(source.encode())
             yield from read_source(review, path, f'source-{path}')
         source_totals.append(total)
+        if len(source_totals) > 1:
+            yield RequestEvent(prompt=review.backend.calls[-1]['prompt'],
+                               config=PiRequestConfig(no_extensions=True, no_tools=False))
+            yield ToolStartEvent(id='later-optional', name='read', input={'path': 'fixtures/unavailable.json'})
+            yield ToolResultEvent(id='later-optional', output='missing optional fixture', is_error=True)
         if 'api.py' in stage['assigned_files']:
             assert "return 'universe'" in (review.repo / 'api.py').read_text()
             output['candidates'] = [candidate(disposition='confirmed', finding=record())]
@@ -118,8 +123,9 @@ async def test_large_complete_source_receipts_retain_findings_and_allow_later_st
     assert all(item['admitted'] for item in metadata)
     assert metadata[0]['full_retained_bytes'] > workload_bytes
     assert metadata[0]['compact_view_clipped'] is True
-    assert metadata[-1]['observed_tool_starts'] == 8
-    assert metadata[-1]['remaining_tool_calls'] == 40
+    assert metadata[-1]['observed_tool_starts'] == 9
+    assert metadata[-1]['remaining_tool_calls'] == 39
+    assert metadata[-1]['nonblocking_unavailable_reads'] == 1
 
 
 @pytest.mark.parametrize('nonempty', [False, True], ids=['empty-reviewed', 'grounded-candidate'])
@@ -155,7 +161,10 @@ async def test_incomplete_required_source_cannot_establish_reviewed_coverage(
 
 
 @pytest.mark.parametrize('fault', [
-    'search', 'optional', 'offset', 'custom', 'ambient', 'ambiguous', 'unsupported', 'source',
+    'search', 'optional', 'offset', 'checkout-relative', 'checkout-absolute', 'broken-symlink', 'existing',
+    'custom', 'ambient', 'support-pointer', 'support-status', 'support-pending', 'support-overflow',
+    'file-url-current', 'file-url-projection', 'file-url-support',
+    'ambiguous', 'unsupported', 'source',
     'truncated', 'cancelled', 'pending', 'overflow', 'normalized-source', 'prefixed-source', 'parent-source',
 ])
 async def test_failed_unrelated_search_does_not_poison_complete_source_review(
@@ -167,7 +176,7 @@ async def test_failed_unrelated_search_does_not_poison_complete_source_review(
         private_base = tmp_path.parent / f'{tmp_path.name}-source alias'
         monkeypatch.setattr('daydream.artifacts.ownership._default_private_base', lambda: private_base)
     review = source_review(tmp_path, monkeypatch, source_bytes=400, files=2)
-    nonblocking = fault in {'search', 'optional', 'offset'}
+    nonblocking = fault in {'search', 'optional', 'offset', 'checkout-relative', 'checkout-absolute'}
 
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         if stage['scope_id'] != 'python':
@@ -180,12 +189,29 @@ async def test_failed_unrelated_search_does_not_poison_complete_source_review(
         for path in stage['assigned_files']:
             yield from read_source(review, path, f'complete-{path}', stage=stage)
         operands: dict[str, Any] = {'path': str(tmp_path / 'unavailable-optional.txt')}
+        if fault in {'checkout-relative', 'checkout-absolute', 'broken-symlink', 'existing'}:
+            operand = review.backend.calls[-1]['cwd'] / 'unavailable-fixture.json'
+            if fault == 'broken-symlink':
+                operand.symlink_to('missing-target.json')
+            elif fault == 'existing':
+                operand.write_text('{}')
+            operands['path'] = operand.name if fault == 'checkout-relative' else str(operand)
         if fault == 'offset':
             operands.update(offset=2, limit=3)
         elif fault == 'ambiguous':
             operands['file_path'] = 'api.py'
         elif fault == 'unsupported':
             operands['encoding'] = 'utf8'
+        elif fault == 'file-url-current':
+            operands['path'] = (review.backend.calls[-1]['cwd'] / 'api.py').as_uri()
+        elif fault == 'file-url-projection':
+            projection = next(window['access']['path'] for window in stage['source_access']
+                              if window['access'].get('path') is not None)
+            operands['path'] = Path(projection).as_uri()
+        elif fault == 'file-url-support':
+            operands['path'] = Path(stage['supporting_bundle']['path']).as_uri()
+        elif fault in {'support-pointer', 'support-status', 'support-pending', 'support-overflow'}:
+            operands['path'] = stage['supporting_bundle']['path']
         elif fault == 'source':
             operands['path'] = 'api.py'
         elif fault in {'normalized-source', 'prefixed-source', 'parent-source'}:
@@ -210,9 +236,13 @@ async def test_failed_unrelated_search_does_not_poison_complete_source_review(
         if fault == 'search':
             call = ToolStartEvent(id='optional-read', name='Bash', input={'command': 'rg absent_optional_hook .'})
         yield call
-        if fault != 'pending':
-            yield ToolResultEvent(id=call.id, output='x' * (2 * 1024 * 1024 + 1) if fault == 'overflow' else '',
-                                  is_error=True, exit_code=1, truncated=fault == 'truncated',
+        if fault not in {'pending', 'support-pending'}:
+            yield ToolResultEvent(id=call.id, output='x' * (2 * 1024 * 1024 + 1)
+                                  if fault in {'overflow', 'support-overflow'} else '',
+                                  is_error=fault not in {'support-status', 'support-overflow'},
+                                  exit_code=None if fault in {'support-status', 'support-overflow'} else 1,
+                                  status='failed' if fault == 'support-status' else None,
+                                  truncated=fault == 'truncated',
                                   cancelled=fault == 'cancelled')
         output['candidates'] = [candidate(disposition='confirmed', finding=record())]
 
@@ -222,8 +252,9 @@ async def test_failed_unrelated_search_does_not_poison_complete_source_review(
     metadata = stage_ends(review, 'python')[0]['metadata']
     assert metadata['observed_tool_starts'] == 3
     assert metadata['admitted'] is nonblocking
-    assert metadata['nonblocking_unavailable_reads'] == int(fault in {'optional', 'offset'})
-    assert metadata['blocking_pending_receipts'] == int(fault == 'pending')
+    assert metadata['nonblocking_unavailable_reads'] == int(fault in {
+        'optional', 'offset', 'checkout-relative', 'checkout-absolute'})
+    assert metadata['blocking_pending_receipts'] == int(fault in {'pending', 'support-pending'})
 
 
 @pytest.mark.parametrize('outcome', ['success', 'second-rejection', 'capture-loss'])
@@ -613,8 +644,9 @@ async def test_quoted_git_paths_keep_complete_required_stage_inputs(
 
 
 @pytest.mark.parametrize('frozen', [False, True], ids=['symbolic-unbound-ref', 'frozen-merge-base'])
+@pytest.mark.parametrize('probe', [False, True], ids=['before-only', 'absent-current-probe'])
 async def test_deleted_assignments_require_source_receipts_from_frozen_revision(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frozen: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frozen: bool, probe: bool,
 ) -> None:
     from daydream import git_ops
     from tests.harness.git_helpers import git
@@ -629,6 +661,9 @@ async def test_deleted_assignments_require_source_receipts_from_frozen_revision(
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         if stage['scope_id'] != 'python':
             return
+        if probe:
+            yield RequestEvent(prompt=review.backend.calls[-1]['prompt'],
+                               config=PiRequestConfig(no_extensions=True, no_tools=False))
         for path in stage['assigned_files']:
             if path != 'api.py':
                 yield from read_source(review, path, f'current-{path}')
@@ -638,6 +673,9 @@ async def test_deleted_assignments_require_source_receipts_from_frozen_revision(
             assert "return 'world'" in source and not (repo / path).exists()
             yield ToolStartEvent(id='before-deletion', name='Bash', input={'command': f'git show {revision}:{path}'})
             yield ToolResultEvent(id='before-deletion', output=source, is_error=False)
+            if probe:
+                yield ToolStartEvent(id='deleted-current', name='read', input={'path': path})
+                yield ToolResultEvent(id='deleted-current', output='absent', is_error=True)
 
     review.backend.stage_response = response
     data = await review.finish('python', reason=None if frozen else 'evidence_incomplete')

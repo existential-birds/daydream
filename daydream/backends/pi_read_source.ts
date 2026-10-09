@@ -1,5 +1,6 @@
 /** Invocation-local frozen-source access and exact-schema final submission. */
 import { constants, closeSync, fstatSync, openSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -9,21 +10,35 @@ export default function (pi: ExtensionAPI) {
   if (!packetPath) throw new Error("Frozen source packet unavailable");
   const fd = openSync(packetPath, constants.O_RDONLY | constants.O_NOFOLLOW);
   let packet: any;
+  let packetDigest: string;
   try {
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.size > 8 * 1024 * 1024) throw new Error("Frozen source packet unavailable");
-    packet = JSON.parse(readFileSync(fd, "utf8"));
+    const raw = readFileSync(fd);
+    packetDigest = createHash("sha256").update(raw).digest("hex");
+    packet = JSON.parse(raw.toString("utf8"));
   } finally {
     closeSync(fd);
   }
   if (!packet || typeof packet !== "object" || Array.isArray(packet)) throw new Error("Invocation packet unavailable");
   if ("windows" in packet) {
     const windows = packet.windows;
-    if (!Array.isArray(windows)) throw new Error("Frozen source packet unavailable");
+    if (!Array.isArray(windows) || windows.some((entry: any) => {
+      const source = entry?.source;
+      return !source || typeof entry.body !== "string" ||
+        !["before", "after"].includes(source.side) ||
+        !Array.isArray(source.target_ids) || source.target_ids.length === 0 ||
+        source.target_ids.some((id: any) => typeof id !== "string" || !id) ||
+        ["file", "source_path", "revision", "content_sha256", "blob_oid"].some(
+          key => typeof source[key] !== "string" || !source[key]) ||
+        ["start_line", "end_line", "start_byte", "end_byte"].some(
+          key => !Number.isSafeInteger(source[key]) || source[key] < 0) ||
+        source.start_line < 1 || source.end_line < source.start_line || source.end_byte < source.start_byte;
+    })) throw new Error("Frozen source packet unavailable");
     pi.registerTool({
       name: "read_source",
       label: "Read frozen source",
-      description: "Read one supplied before/after source window by assigned target ID and captured side.",
+      description: "Read one frozen window using a listed source selector and side. Output assignment IDs are not source selectors unless explicitly listed in the source catalog.",
       promptSnippet: "Read frozen before/after source windows using supplied target_id and side.",
       defaultActive: false,
       parameters: Type.Object({ target_id: Type.String(), side: Type.Union([Type.Literal("before"), Type.Literal("after")]) },
@@ -32,6 +47,11 @@ export default function (pi: ExtensionAPI) {
         if (signal?.aborted) throw new Error("Frozen source read cancelled");
         const matches = windows.filter((entry: any) => entry.source.side === params.side &&
                                       entry.source.target_ids.includes(params.target_id));
+        if (matches.length === 0) {
+          if (signal?.aborted) throw new Error("Frozen source read cancelled");
+          return { content: [{ type: "text", text: "Frozen source selector unavailable" }], isError: true,
+                   details: { source_free_disposition: "zero_match", packet_sha256: packetDigest } };
+        }
         if (matches.length !== 1) throw new Error("Frozen source selector unavailable");
         const text = JSON.stringify(matches[0]);
         if (Buffer.byteLength(text, "utf8") > 2 * 1024 * 1024) throw new Error("Frozen source window exceeds bound");

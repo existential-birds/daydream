@@ -276,7 +276,8 @@ class StageInputFactory:
         return path
 
     def _supporting_catalog(
-        self, directory: Path, entries: list[dict[str, Any]],
+        self, directory: Path, entries: list[dict[str, Any]], *, namespace: str = 'supporting',
+        entry_key: str = 'parts', count_key: str = 'part_count',
     ) -> tuple[Path, dict[str, Path]]:
         """Publish a bounded exact-pointer catalog without exposing a directory grant."""
         captured: dict[str, Path] = {}
@@ -297,21 +298,67 @@ class StageInputFactory:
                 groups.append(current)
             result: list[dict[str, Any]] = []
             for group in groups:
-                label = f'supporting-catalog-{ordinal:06d}'
+                label = f'{namespace}-catalog-{ordinal:06d}'
                 ordinal += 1
                 path = self._write(directory / f'{label}.json', _json({key: group}))
                 captured[label] = path
-                result.append({'path': str(path), 'part_count': (
-                    len(group) if key == 'parts' else sum(child['part_count'] for child in group))})
+                result.append({'path': str(path), count_key: (
+                    len(group) if key == entry_key else sum(child[count_key] for child in group))})
             return result
 
-        level = write_groups('parts', entries)
+        level = write_groups(entry_key, entries)
         while len(level) > 1:
             following = write_groups('catalogs', level)
             if len(following) >= len(level):
                 raise SanctionedInputUnavailable('supporting catalog cannot fit its bounded index')
             level = following
         return Path(level[0]['path']), captured
+
+    def _access_guide(self, state: dict[str, Any], prepared: PreparedSanctionedInputs) -> str:
+        """Persist only captured exact authority, without clipping required access."""
+        guide: dict[str, Any] = {'stage': state['stage'], 'contexts': []}
+        for key in ('source_catalog', 'supporting_catalog', 'supporting_bundle'):
+            if key in state:
+                guide[key] = state[key]
+        guide['required_source'] = [
+            {key: entry[key] for key in ('file', 'side', 'start_line', 'end_line', 'start_byte', 'end_byte', 'access')}
+            for entry in state['source_access'] if entry['read_required'] and state['stage'] != 'integration'
+        ]
+        if state['stage'] == 'integration' and 'source_catalog' in guide:
+            guide['required_source'] = 'Use catalog windows marked read_required; relevant source still needs receipts.'
+        if len(_json(guide).encode()) > 8192:
+            raise SanctionedInputUnavailable('required persistent source access exceeds its bounded allowance')
+        omitted: list[str] = []
+        for item in prepared.inputs:
+            if item.source is not None or not item.prompt_visible:
+                continue
+            context: dict[str, Any] = {'label': item.label, 'status': 'complete'}
+            if prepared.transport is SanctionedInputTransport.EXACT_PATHS:
+                context['path'] = str(item.path)
+                if item.inline_advisory:
+                    context['initial_context'] = 'complete inline'
+            else:
+                context['transport'] = 'complete inline'
+            candidate = {**guide, 'contexts': [*guide['contexts'], context]}
+            # Reserve room to report optional omissions explicitly.
+            if len(_json(candidate).encode()) <= 7168:
+                guide = candidate
+            else:
+                omitted.append(item.label)
+        if omitted:
+            guide['unrepresented_optional_context'] = omitted
+        if state['stage'] == 'integration' and 'source_catalog' not in guide:
+            # Custom builders keep their full initial inventory and transport.
+            # Do not turn an additive guide into a new whole-change input gate,
+            # or invent a catalog grant on an unsupported/inline transport.
+            guide['source_inventory'] = {'transport': 'initial supplied source_access',
+                                          'windows': len(state['source_access']),
+                                          'read_required_windows': sum(entry['read_required']
+                                                                       for entry in state['source_access']),
+                                          'persistent_arguments': 'unrepresented; use supplied source_access'}
+        if len(_json(guide).encode()) > 8192:
+            raise SanctionedInputUnavailable('persistent access guide exceeds its bounded allowance')
+        return _json(guide)
 
     def _source_windows(self, parts: list[_Part], directory: Path,
                         statuses: list[dict[str, Any]], *, required_windows: bool | None = None) -> SourceRecipe:
@@ -403,7 +450,8 @@ class StageInputFactory:
             raise SanctionedInputUnavailable('invocation source recipe exceeds retained source bound')
         recipe = SourceRecipe(tuple(windows), self.work.repo,
                               tuple(sorted(set(self.stack.files + self.stack.frontier_files))),
-                              self.binding['analyzed_revision']['head_sha'], self.repository_files)
+                              self.binding['analyzed_revision']['head_sha'], self.repository_files,
+                              repository_inventory_revision=self.binding['analyzed_revision']['head_sha'])
         recipe.revalidate()
         return recipe
 
@@ -521,6 +569,16 @@ class StageInputFactory:
         source_parts = [*parts, *self.parts] if compact_structure else parts
         recipe = self._source_windows(source_parts, directory, statuses,
                                       required_windows=False if compact_structure else None)
+        source_catalog_paths: dict[str, Path] = {}
+        if (state['stage'] == 'integration' and getattr(self.backend, 'supports_source_recipe', False) is True
+                and self.transport is SanctionedInputTransport.EXACT_PATHS):
+            source_entries = [self._source_access(window) for window in recipe.windows]
+            for entry in source_entries:
+                entry['access'].pop('path', None)
+            source_catalog, source_catalog_paths = self._supporting_catalog(
+                directory, source_entries, namespace='source', entry_key='windows', count_key='window_count')
+            state['source_catalog'] = {'path': str(source_catalog), 'window_count': len(source_entries),
+                                       'status': 'complete', 'read_required': False}
         # The shared selector preserves required priority and uses the actual
         # transport allowance. Reuse existing identity-bound artifacts instead
         # of copying advisory bytes or following an unchecked symlink.
@@ -549,12 +607,14 @@ class StageInputFactory:
             paths[label] = path
         paths.update(deferred_paths)
         paths.update(catalog_paths)
+        paths.update(source_catalog_paths)
         paths.update({f'source-{index:06d}': window.projection for index, window in enumerate(recipe.windows)
                       if window.projection is not None})
         prepared = prepare_sanctioned_inputs(self.backend, self.work.repo, paths, read_only=self.read_only,
                                              source_recipe=recipe)
         prepared = replace(prepared, inputs=tuple(replace(item, prompt_visible=False)
-                                                  if item.label in deferred_paths or item.label in catalog_paths
+                                                  if (item.label in deferred_paths or item.label in catalog_paths
+                                                      or item.label in source_catalog_paths)
                                                   else item
                                                   for item in prepared.inputs))
         if self.bundle_capable and self.transport is SanctionedInputTransport.EXACT_PATHS:
@@ -584,6 +644,7 @@ class StageInputFactory:
             state['context_availability'] = {
                 'source_windows': len(recipe.windows), 'supporting_parts': len(deferred_paths),
                 'supporting_catalogs': len(catalog_paths),
+                'source_catalogs': len(source_catalog_paths),
             }
             statuses = [status for status in statuses if status['status'] != 'complete' or
                         not (status['label'].startswith('source-') or status['label'] in deferred_paths
@@ -592,7 +653,8 @@ class StageInputFactory:
                      canonical_input_identities=self.binding['canonical_inputs'])
         if deferred_paths:
             state['context_inputs'] = [label for label in paths if label not in deferred_paths
-                                      and label not in catalog_paths and not label.startswith('source-')]
+                                      and label not in catalog_paths and label not in source_catalog_paths
+                                      and not label.startswith('source-')]
         state['source_access'] = [self._source_access(window) for window in recipe.windows
                                   if window.file in assigned_source_files]
         state['available_source_files'] = {
@@ -622,4 +684,5 @@ class StageInputFactory:
                                              window.read_required for window in recipe.windows),
             'transport_floor_only': True,
         }
+        state['access_guide'] = self._access_guide(state, prepared)
         return prepared

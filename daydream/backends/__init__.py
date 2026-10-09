@@ -504,6 +504,7 @@ class PiRequestConfig(EffectiveRequestConfig):
     no_skills: bool | None = None
     schema_emulated: bool | None = None
     no_extensions: bool | None = field(default=None, kw_only=True)
+    source_tool_enabled: bool | None = field(default=None, kw_only=True)
 
 
 
@@ -626,6 +627,7 @@ class ToolStartEvent:
     name: str
     input: dict[str, Any]
     timestamp: str = field(default_factory=now_iso)
+    input_incomplete: bool = False
 
 
 @dataclass
@@ -646,6 +648,7 @@ class ToolResultEvent:
     duration_ms: float | None = None
     cancelled: bool = False
     truncated: bool = False
+    source_free_disposition: Literal['zero_match'] | None = None
 
 
 @dataclass

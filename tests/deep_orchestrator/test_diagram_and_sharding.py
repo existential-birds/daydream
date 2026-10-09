@@ -166,3 +166,54 @@ async def test_no_parse_phase_and_records_from_output_schema(multi_stack_target:
         assert set(json.loads(supporting['hunk-index'])) == set(state['assigned_files'])
         assert all(f'diff --git a/{path} b/{path}' in supporting['diff'] for path in state['assigned_files'])
 
+
+
+async def test_default_cap_coarsens_only_enough_and_preserves_scope_qualified_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from collections import Counter
+
+    from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
+    from tests.deep_orchestrator.test_review_completion import scopes
+    from tests.deep_orchestrator.test_review_investigation import InvestigationRun
+    from tests.harness.git_helpers import seed_feature_branch
+
+    before = {f'module_{index:02}.py': 'VALUE = 0\n' for index in range(41)}
+    before.update({f'guide_{index}.md': '# Guide\n' for index in range(7)})
+    before.update({'App.tsx': 'export const App = () => <div/>;\n',
+                   'Other.tsx': 'export const Other = () => <div/>;\n'})
+    after = {path: text + ''.join(f'# changed {index}: ' + 'x' * 75 + '\n' for index in range(155))
+             for path, text in before.items() if not path.endswith('.tsx')}
+    after.update({path: text + '// Retain component contract.\n'
+                  for path, text in before.items() if path.endswith('.tsx')})
+    repo = tmp_path / 'cap_workload'
+    seed_feature_branch(repo, base=before, feature=after)
+    review = InvestigationRun(repo, tmp_path, monkeypatch)
+    assert await review.run() == 0
+    data = review.load()
+    outcomes = scopes(data)
+    python = [scope for name, scope in outcomes.items() if name.startswith('python#')]
+    assert len(python) == 8
+    assert len(outcomes) == 17 and all(scope['status'] == 'complete' for scope in outcomes.values())
+    assigned = [path for name, scope in outcomes.items() if name != 'structure' for path in scope['files']]
+    assert Counter(assigned) == Counter(before.keys())
+    required: set[tuple[str, str]] = set()
+    for stage in review.backend.stages:
+        if stage['stage'] != 'first_pass':
+            continue
+        for target in stage['assigned_target_ids']:
+            key = (stage['scope_id'], target)
+            assert key not in required
+            required.add(key)
+    assert len(required) > len(before)
+    for call in review.backend.calls:
+        call_stage = review_stage_state(call['prompt'])
+        if call_stage is None or call_stage['stage'] != 'first_pass':
+            continue
+        contents = supporting_contents(call['prompt'])
+        from daydream.prompt_budget import inline_section_emitted_bytes
+        logical = [('review-assignment', contents['review-assignment'])] if 'review-assignment' in contents else [
+            (label, contents[label]) for label in ('diff', 'hunk-index', 'input-binding')]
+        assert inline_section_emitted_bytes([(label, len(text.encode())) for label, text in logical]) <= 12288
+    coverage = json.loads((repo / '.daydream/deep/review-coverage.json').read_text())
+    assert coverage['stack_outcomes'] == data['terminal_result']['stack_outcomes']

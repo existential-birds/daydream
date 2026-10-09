@@ -182,13 +182,39 @@ async def test_structure_initial_prompt_is_compact_with_complete_bounded_support
         assert stage['folded_alternatives'] is True
         assert 'supporting_parts' not in stage
         assert all('path' not in window['access'] for window in stage['source_access'])
+        guide = json.loads(stage['access_guide'])
+        assert len(stage['access_guide'].encode()) <= 8192
+        assert guide['source_catalog'] == stage['source_catalog']
+        assert stage['source_catalog']['status'] == 'complete'
+        source_paths: set[Path] = set()
+        source_entries: list[dict[str, Any]] = []
+        def source_catalog(path: Path) -> None:
+            source_paths.add(path)
+            raw = path.read_text()
+            assert len(raw.encode()) <= 12000
+            data = json.loads(raw)
+            if 'windows' in data:
+                source_entries.extend(data['windows'])
+            else:
+                for child in data['catalogs']:
+                    source_catalog(Path(child['path']))
+        source_catalog(Path(guide['source_catalog']['path']))
+        recipe = review.backend.calls[-1]['source_recipe']
+        assert len(source_entries) == len(recipe.windows)
+        for entry in source_entries:
+            assert entry['access']['tool'] == 'read_source' and 'path' not in entry['access']
+            for target in entry['target_ids']:
+                window = recipe.selector(target, entry['side'])
+                assert window is not None
+                assert window.metadata() == {key: entry[key] for key in window.metadata()}
         found: list[dict[str, Any]] = []
         yield from catalog(Path(stage['supporting_catalog']['path']), found)
+        assert not source_paths.intersection(catalog_paths)
         assert len(found) == stage['supporting_catalog']['part_count'] > 90
         assert {part['file'] for part in found} == set(stage['assigned_files'])
         recipe = review.backend.calls[-1]['source_recipe']
         assert {window.file for window in recipe.windows} == set(stage['assigned_files'])
-        inputs = catalog_paths | {Path(part['path']) for part in found}
+        inputs = catalog_paths | source_paths | {Path(part['path']) for part in found}
         for window in recipe.windows:
             assert window.projection is not None
             assert window.projection.read_text() == window.body

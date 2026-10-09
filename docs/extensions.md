@@ -580,6 +580,24 @@ supported versions; migrate the callable to accept this kwarg and declare
   concrete before/after ranges and native selectors for file and canonical part
   IDs. `context_availability` summarizes complete source/part/catalog counts;
   explicit partial and unavailable statuses remain in `context_statuses`.
+- Additive API-7 `source_catalog` names the exact captured Structure source
+  catalog root (`path`, `window_count`, `status`, `read_required:false`). Leaves
+  contain `windows` preserving frozen metadata, all target aliases and exact
+  source-tool arguments; index nodes contain exact child paths/window counts.
+  The separate `source-catalog-*` namespace cannot overwrite diff catalogs.
+  Each file remains <=12,000 bytes and participates in the existing owning
+  session, count/aggregate capture, confinement and post-invocation revalidation.
+  Catalog metadata grants no source evidence or directory access.
+- Additive `access_guide` is a JSON string <=8 KiB assembled after input capture.
+  It persists in stage system guidance through Pi compaction, retaining exact
+  catalog/assignment/shared-context pointers and required source arguments.
+  Complete inline context is labeled honestly; optional omissions are explicit.
+  Custom integration builders keep their full initial `source_access` and do not
+  acquire a new guide-size admission gate; unsupported persistent access remains
+  explicitly unrepresented. Recipe-capable exact integration also receives its
+  source catalog with the original required-window flags.
+  Output target IDs and readable source selectors remain distinct. Full host
+  `source_access` and legacy custom-builder transport contracts are preserved.
 - `response_contract` carries the strict invocation schema and explicit
   four-key skeleton. Triage targets are exactly `[]`; discovery candidates may
   be nonempty with `candidate_id: ""`. Independent identity, snapshot, grounds
@@ -601,7 +619,7 @@ supported versions; migrate the callable to accept this kwarg and declare
   bounded-read LF representation, including its exact continuation footer, is
   verified against frozen bytes; native results and completion flags remain
   unchanged. Unknown wrappers, forged footers and truncation supply no coverage.
-  Complete older cache entries miss staged contract 6.
+  Complete older cache entries miss staged contract 7.
 - `assignment_parts` describes each required target: `target_id`, `file`,
   one-based `part_index`, `part_count`, and `kind` (`file`, `hunk`, or
   `continuation`). Split hunks include zero-based `hunk_index`, `old_start`,
@@ -698,14 +716,26 @@ Compact views retain the 12,000-byte per-output and
 inputs are classified only from revalidated prepared identities, never basenames;
 mixed/opaque calls are treated conservatively. Supporting reads cannot establish
 source coverage. Irrelevant failed searches alone do not invalidate complete source.
-A completed unavailable Pi built-in `read` is also nonblocking only with a frozen
-recipe and typed `no_extensions=True`, one absent, unambiguous absolute `path` operand with supported
-positive integer offset/limit, and no repository, source-projection or supporting
-identity. Normalization-sensitive filename spellings, prefix aliases, existing operands and
-parent components remain opaque and blocking.
-Its opaque failed receipt and start charge remain; it provides no
-coverage or reusable evidence. Custom tools, pending/unmatched results, actual
-source failures, cancellation, truncation and retention overflow stay blocking.
+A completed unavailable Pi built-in `read` requires the supplied frozen recipe,
+typed `no_extensions=True`, one unambiguous supported operand with positive integer
+offset/limit, no furnished source/supporting identity, and no-follow absence.
+Checkout-local operands additionally require a host-only complete strict HEAD
+inventory bound to the recipe's full revision; default empty inventories and Git
+errors never establish absence. Frozen-before identity does not imply current
+source availability. Case/Unicode/prefix/file-URL aliases and broken symlinks stay blocking.
+For `read_source`, the owned executed zero-match branch returns `isError:true`
+with bounded disposition and packet digest details. The Pi adapter checks the
+exact invocation bytes and owned-tool association; evidence independently counts
+zero recipe matches and checks original arguments and native completion flags.
+`source_tool_enabled` records the invocation-local packaged-tool request fact.
+Unknown, initialization, markerless/wrong-digest, ambiguous and valid-source errors
+cannot recover. Native assistant length termination binds bounded actual call IDs
+to typed `ToolStartEvent.input_incomplete` before synthetic tool events; later
+finish reasons cannot erase this fact. Incomplete calls supply no coverage/reuse.
+Recovery is stored at matched completion before fatal source counters increment.
+Failed receipts/starts remain charged; required source, furnished-pointer failures,
+cancellation, truncation, capture overflow and unmatched/pending calls remain
+blocking. A later good read never clears an actual source failure.
 Every reviewed assertion, including an empty-candidate claim, needs complete
 source evidence and explicit valid host-assigned coverage. Free-form citations
 are not authenticated by receipts. Triage sees only relevant admitted partial
@@ -728,7 +758,7 @@ public settlement boundary after completed prose, preserving existing boundary
 entries. Reminder state spans native continuations; successful finalized serializer
 calls suppress it. Repeated prose remains missing output. Native validation
 correction stays Pi-owned, with no host attempt or allowance reset.
-Stage contract **6** invalidates older complete cache entries. ATIF is
+Stage contract **7** invalidates older complete cache entries. ATIF is
 optional recording, never the admission authority; other evidence finalization
 consumers preserve their existing behavior.
 

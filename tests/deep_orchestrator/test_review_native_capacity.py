@@ -146,7 +146,10 @@ async def test_all_41_files_and_late_contract_are_reviewed_within_192_native_sta
         yield ToolResultEvent(id=f'submit-{len(supporting_reads)}', output='Submitted.', is_error=False)
 
     review.backend.stage_response = response
-    await review.finish('python', findings=() if wired else ('Late request builder drops the parsed dry-run flag',))
+    # This owner proves one reviewer's cumulative native transport/reuse capacity.
+    # Routing has its own runner proof; its cap must not choose this test's scope.
+    await review.finish('python', findings=() if wired else ('Late request builder drops the parsed dry-run flag',),
+                        deep_shard_enabled=False)
     data = review.load()
     assert len(scopes(data)['python']['files']) == 41 and late in scopes(data)['python']['files']
     assert len(reviewed_units) == len(set(reviewed_units)) == 87

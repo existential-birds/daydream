@@ -38,7 +38,17 @@ def isolated_pi(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     bin_dir.mkdir()
     shim = bin_dir / 'pi'
     pids = config / 'pids'
-    shim.write_text(f'#!{sys.executable}\nimport os, sys\n'
+    shim.write_text(f'#!{sys.executable}\nimport os, sys, json\nfrom pathlib import Path\n'
+                   'packet = os.environ.get("DAYDREAM_PI_SOURCE_PACKET")\n'
+                   'fault = os.environ.get("DAYDREAM_TEST_PACKET_FAULT")\n'
+                   'if packet and fault:\n'
+                   '    path = Path(packet)\n'
+                   '    if fault == "digest": path.write_bytes(path.read_bytes() + b" ")\n'
+                   '    else:\n'
+                   '        value = json.loads(path.read_text())\n'
+                   '        value.pop("windows", None)\n'
+                   '        if fault == "initialization": value["windows"] = [{}]\n'
+                   '        path.write_text(json.dumps(value))\n'
                    f'with open({str(pids)!r}, "a") as file: file.write(str(os.getpid()) + "\\n")\n'
                    f'os.execv({native_pi!r}, [{native_pi!r}, *sys.argv[1:]])\n')
     shim.chmod(0o755)
@@ -175,7 +185,10 @@ async def test_installed_pi_bounded_read_footer_is_verified_against_actual_sourc
     ('multiple', True), ('later-failed', True),
     ('host-rejected', True), ('exhausted', True), ('boundary-corrected', True),
     ('over-limit-corrected', True), ('ordinary', True), ('ordinary-reminder', True), ('optional-unavailable', True),
-    ('cancelled', True), ('deadline', True),
+    ('cancelled', True), ('deadline', True), ('checkout-unavailable', True),
+    ('zero-selector', True), ('length-read', True), ('length-source', True),
+    ('unknown-tool', True), ('invalid-source-arguments', True),
+    ('wrong-packet-digest', True), ('unloaded-source-tool', True), ('packet-initialization', True),
 ])
 async def test_installed_pi_native_output_through_review_runner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_pi: Path, mode: str, defective: bool,
@@ -195,6 +208,10 @@ async def test_installed_pi_native_output_through_review_runner(
     from tests.harness.fake_clock import FakeClock
     from tests.harness.stub_backend import review_stage_state, stage_result
 
+    if mode in {'wrong-packet-digest', 'unloaded-source-tool', 'packet-initialization'}:
+        monkeypatch.setenv('DAYDREAM_TEST_PACKET_FAULT', {
+            'wrong-packet-digest': 'digest', 'unloaded-source-tool': 'unloaded',
+            'packet-initialization': 'initialization'}[mode])
     repo = tmp_path / 'native_review'
     api = 'def greeting():\n    return "world"\nEXPECTED = "world"\nassert greeting() == EXPECTED\n'
     seed_feature_branch(repo, base={'api.py': api},
@@ -243,8 +260,11 @@ async def test_installed_pi_native_output_through_review_runner(
             elif not results:
                 window = next(window for window in stage['source_access'] if window['side'] == 'after')
                 calls = [('source', 'read_source', {'target_id': window['target_ids'][0], 'side': 'after'})]
+                if mode in {'unloaded-source-tool', 'packet-initialization'}:
+                    calls = [('source', 'read', {'path': 'api.py'})]
             else:
-                source = json.loads(results[0]['content'])['body']
+                source = (results[0]['content'] if mode in {'unloaded-source-tool', 'packet-initialization'} else
+                          json.loads(results[0]['content'])['body'])
                 assert 'EXPECTED = "world"' in source and 'assert greeting() == EXPECTED' in source
                 is_defect = 'return "universe"' in source
                 assert is_defect is defective
@@ -268,8 +288,22 @@ async def test_installed_pi_native_output_through_review_runner(
                         if mode in {'cancelled', 'deadline'}:
                             prose_pending.set()
                             assert release_prose.wait(10), 'The runner must stop within its original allowance'
-                    elif mode == 'optional-unavailable':
-                        calls = [('optional-read', 'read', {'path': str(tmp_path / 'unrequested-missing.txt')})]
+                    elif mode in {'optional-unavailable', 'checkout-unavailable', 'length-read',
+                                  'zero-selector', 'length-source', 'unknown-tool', 'invalid-source-arguments',
+                                  'wrong-packet-digest', 'unloaded-source-tool', 'packet-initialization'}:
+                        source_lookup = mode in {'zero-selector', 'length-source', 'invalid-source-arguments',
+                                                'wrong-packet-digest', 'unloaded-source-tool', 'packet-initialization'}
+                        calls = [('optional-read', 'read_source' if source_lookup else 'read',
+                                  {'target_id': 'integration:structure', 'side': 'after'} if source_lookup else
+                                  {'path': 'unrequested-missing.txt' if mode != 'optional-unavailable' else
+                                   str(tmp_path / 'unrequested-missing.txt')})]
+                        if mode == 'unknown-tool':
+                            calls = [('optional-read', 'unloaded_read_source',
+                                      {'target_id': 'absent', 'side': 'after'})]
+                        elif mode == 'invalid-source-arguments':
+                            calls[0][2]['unsupported'] = True
+                        if mode in {'length-read', 'length-source'}:
+                            finish = 'length'
                     elif mode == 'multiple':
                         calls = [('first', 'structured_output', stage_result(stage)),
                                  ('last', 'structured_output', output)]
@@ -291,8 +325,16 @@ async def test_installed_pi_native_output_through_review_runner(
                     rejected = (mode == 'exhausted' or mode == 'boundary-corrected' and len(results) < 47
                                 or mode == 'over-limit-corrected' and len(results) < 48)
                     calls = [(f'correction-{len(results)}', 'structured_output', {} if rejected else output)]
-                elif mode == 'optional-unavailable':
-                    assert len(results) == 2 and 'ENOENT' in results[-1]['content']
+                elif mode in {'optional-unavailable', 'checkout-unavailable', 'length-read',
+                                  'zero-selector', 'length-source', 'unknown-tool', 'invalid-source-arguments',
+                                  'wrong-packet-digest', 'unloaded-source-tool', 'packet-initialization'}:
+                    assert len(results) == 2
+                    assert ('output token limit' if mode.startswith('length-') else
+                            'selector unavailable' if mode in {'zero-selector', 'wrong-packet-digest'} else
+                            'not found' if mode in {'unknown-tool', 'unloaded-source-tool',
+                                                   'packet-initialization'} else
+                            'Validation failed' if mode == 'invalid-source-arguments' else 'ENOENT'
+                            ) in results[-1]['content']
                     calls = [('after-optional', 'structured_output', output)]
                 elif mode == 'invalid-prose':
                     assert len(results) == 2 and 'Validation failed' in results[-1]['content']
@@ -394,10 +436,20 @@ async def test_installed_pi_native_output_through_review_runner(
         assert interrupted[0]['metadata']['observed_tool_starts'] == 1
         assert len(requests) == 2
         return
-    admitted = mode not in {'prose', 'host-rejected', 'exhausted', 'over-limit-corrected', 'deadline'}
+    admitted = mode not in {'prose', 'host-rejected', 'exhausted', 'over-limit-corrected', 'deadline',
+                            'length-read', 'length-source', 'unknown-tool', 'invalid-source-arguments',
+                            'wrong-packet-digest', 'unloaded-source-tool', 'packet-initialization'}
     data = review.load()
     expected_title = ordinary_title if mode in {'ordinary', 'ordinary-reminder'} else title
     assert [finding['title'] for finding in data['findings']] == ([expected_title] if admitted and defective else [])
+    if mode == 'packet-initialization':
+        assert scopes(data)['python']['status'] == 'failed'
+        assert scopes(data)['python']['reason_codes'] == ['backend_failure']
+        terminal, = stage_ends(review, 'python')
+        assert terminal['metadata']['observed_tool_starts'] == 0
+        assert terminal['metadata']['admitted'] is False
+        assert not requests
+        return
     assert scopes(data)['python']['status'] == ('complete' if admitted else 'incomplete')
     ends = stage_ends(review, 'python')
     assert len(ends) == 1, 'Pi owns native correction; the host must not start a schema-only replacement stage'
@@ -407,12 +459,25 @@ async def test_installed_pi_native_output_through_review_runner(
     expected_starts = (49 if mode in {'exhausted', 'over-limit-corrected'} else
                        48 if mode == 'boundary-corrected' else 1 if mode in {'prose', 'deadline'} else 3 if mode in {
                            'corrected', 'length', 'mixed', 'mixed-read-first', 'multiple', 'later-failed',
-                           'optional-unavailable', 'invalid-prose'} else 2)
+                           'optional-unavailable', 'invalid-prose', 'checkout-unavailable', 'zero-selector',
+                           'length-read', 'length-source', 'unknown-tool', 'invalid-source-arguments',
+                           'wrong-packet-digest', 'unloaded-source-tool', 'packet-initialization'} else 2)
     assert metadata['observed_tool_starts'] == expected_starts
     assert metadata['remaining_tool_calls'] == max(0, metadata['hard_tool_call_allowance'] - expected_starts)
     native_request = next(event for event in native_events if isinstance(event, RequestEvent))
     assert isinstance(native_request.config, PiRequestConfig) and native_request.config.no_extensions is True
-    if mode == 'optional-unavailable':
+    if mode in {'wrong-packet-digest', 'unloaded-source-tool', 'packet-initialization'}:
+        failed = next(event for event in native_events if isinstance(event, ToolResultEvent)
+                      and event.id == 'optional-read')
+        assert failed.is_error and failed.source_free_disposition is None
+        assert metadata['source_access_failures'] == 1
+        assert metadata['nonblocking_unavailable_reads'] == 0
+    if mode in {'length-read', 'length-source'}:
+        incomplete = next(event for event in native_events if isinstance(event, ToolStartEvent)
+                          and event.id == 'optional-read')
+        assert getattr(incomplete, 'input_incomplete', False) is True
+        assert metadata['blocking_opaque_receipts'] == 1
+    if mode in {'optional-unavailable', 'checkout-unavailable', 'zero-selector'}:
         failed = next(event for event in native_events if isinstance(event, ToolResultEvent)
                       and event.id == 'optional-read')
         assert failed.is_error and not failed.cancelled and not failed.truncated
@@ -445,7 +510,9 @@ async def test_installed_pi_native_output_through_review_runner(
         assert metadata['failed_submissions'] == metadata['successful_submissions'] == 1
     else:
         continued = mode in {'corrected', 'length', 'mixed', 'mixed-read-first', 'later-failed', 'reminder', 'prose',
-                            'optional-unavailable'}
+                            'optional-unavailable', 'checkout-unavailable', 'zero-selector',
+                            'length-read', 'length-source', 'unknown-tool', 'invalid-source-arguments',
+                            'wrong-packet-digest', 'unloaded-source-tool', 'packet-initialization'}
         assert len(requests) == (3 if continued else 2)
     reminders = [message for request in requests for message in request['messages']
                  if message['role'] == 'user' and 'Assistant prose is not a submission.' in str(message['content'])]
@@ -459,3 +526,224 @@ async def test_installed_pi_native_output_through_review_runner(
         assert scopes(data)['python']['reason_codes'] == ['evidence_incomplete']
     if admitted and defective:
         assert data['findings'][0]['line'] == 2
+
+
+@pytest.mark.parametrize('fault', ['none', 'metadata-only', 'mutated-catalog', 'missing-catalog', 'symlink-catalog'])
+async def test_installed_pi_compaction_restores_exact_structure_access_and_settles_lookup_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_pi: Path, fault: str,
+) -> None:
+    import threading
+    from collections.abc import AsyncIterator
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from typing import Any
+
+    from daydream.backends import AgentEvent
+    from tests.deep_orchestrator.test_review_completion import scopes
+    from tests.deep_orchestrator.test_review_investigation import InvestigationRun, stage_ends
+    from tests.deep_orchestrator.test_review_native_sources import NativeSourceBackend
+    from tests.harness.stub_backend import review_stage_state, stage_result
+
+    repo = tmp_path / 'compacted_structure'
+    before = {'api.py': 'VALUE = 0\n', 'retired.py': 'RETIRED = True\n',
+              'legacy.py': '# Rename context\n' * 30 + 'VALUE = 0\n',
+              'late.py': '# Stable context\n' * 9000 + 'VALUE = 0\n'}
+    after = {**before, 'api.py': 'VALUE = 1\n',
+             'late.py': before['late.py'] + '# New bounded context\n' * 2000}
+    seed_feature_branch(repo, base=before, feature=after)
+    git(repo, 'rm', 'retired.py')
+    git(repo, 'mv', 'legacy.py', 'modern.py')
+    (repo / 'modern.py').write_text(before['legacy.py'].replace('VALUE = 0', 'VALUE = 1'))
+    git(repo, 'add', 'modern.py')
+    git(repo, 'commit', '-m', 'retire and rename source')
+    requests: list[dict[str, Any]] = []
+    native_events: list[AgentEvent] = []
+    saved_stage: dict[str, Any] = {}
+    guide: dict[str, Any] = {}
+    summary_calls = 0
+    action_index = 0
+    actions: list[tuple[str, str, dict[str, Any]]] = []
+    catalog_paths: list[str] = []
+    entries: list[dict[str, Any]] = []
+    selected: list[dict[str, Any]] = []
+
+    class Provider(BaseHTTPRequestHandler):
+        def log_message(self, *_args: Any) -> None:
+            pass
+
+        def do_POST(self) -> None:
+            nonlocal saved_stage, guide, summary_calls, action_index, actions
+            request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            requests.append(request)
+            tools = {tool['function']['name'] for tool in request.get('tools', [])}
+            calls: list[tuple[str, str, Any]] = []
+            text, finish, tokens = '', 'tool_calls', 10
+            if 'structured_output' not in tools:
+                # The installed SDK asks the same loopback provider to summarize.
+                summary_calls += 1
+                text, finish = 'Earlier investigation is complete. Use persistent host guidance to continue.', 'stop'
+            elif not saved_stage:
+                user = next(message['content'] for message in request['messages'] if message['role'] == 'user')
+                if isinstance(user, list):
+                    user = ''.join(part.get('text', '') for part in user)
+                saved_stage = review_stage_state(user) or {}
+                assert saved_stage['scope_id'] == 'structure'
+                window = next(window for window in saved_stage['source_access']
+                              if window['file'] == 'api.py' and window['side'] == 'after')
+                calls = [('initial-source', 'read_source', window['access']['arguments'])]
+                if fault == 'metadata-only':
+                    calls = [('initial-context', 'read', {'path': saved_stage['supporting_bundle']['path']})]
+            elif summary_calls == 0:
+                # A completed prose turn triggers threshold compaction, followed by
+                # the owned missing-submission continuation under the same attempt.
+                text, finish, tokens = 'Investigation complete.', 'stop', 30000
+            else:
+                system = next(message['content'] for message in request['messages'] if message['role'] == 'system')
+                marker = 'Persistent exact access guide (supporting metadata): '
+                guide = json.JSONDecoder().raw_decode(system.split(marker, 1)[1])[0] if marker in system else {}
+                if not guide:
+                    calls = [('unguided-submit', 'structured_output', stage_result(saved_stage))]
+                else:
+                    assert 'Read the diff first' not in system
+                    assert len(json.dumps(guide, separators=(',', ':'), ensure_ascii=False).encode()) <= 8192
+                    assert not any('Host review stage:' in str(message['content'])
+                                   for message in request['messages'] if message['role'] == 'user')
+                    if not catalog_paths:
+                        root = guide['source_catalog']['path']
+                        catalog_paths.append(root)
+                        actions.append(('catalog-0', 'read', {'path': root}))
+                    results = [message for message in request['messages'] if message['role'] == 'tool']
+                    for result in results:
+                        if not result.get('tool_call_id', '').startswith('catalog-'):
+                            continue
+                        catalog = json.loads(result['content'])
+                        if 'windows' in catalog:
+                            for entry in catalog['windows']:
+                                if entry not in entries:
+                                    entries.append(entry)
+                        else:
+                            for child in catalog['catalogs']:
+                                if child['path'] not in catalog_paths:
+                                    catalog_paths.append(child['path'])
+                                    actions.append((f'catalog-{len(catalog_paths)-1}', 'read', {'path': child['path']}))
+                    if action_index == len(actions) and not selected:
+                        selected.extend([
+                            next(entry for entry in entries if entry['file'] == 'retired.py'),
+                            next(entry for entry in entries if entry['file'] == 'modern.py'
+                                 and entry['side'] == 'before'),
+                            next(entry for entry in entries if entry['file'] == 'modern.py'
+                                 and entry['side'] == 'after'),
+                            max((entry for entry in entries if entry['file'] == 'late.py'
+                                 and entry['side'] == 'before'),
+                                key=lambda entry: entry['start_byte']),
+                        ])
+                        assert selected[-1]['start_byte'] > 128000
+                        assert selected[0]['side'] == 'before'
+                        assert selected[1]['source_path'] == 'legacy.py' and selected[2]['source_path'] == 'modern.py'
+                        assert 'integration:structure' not in {
+                            target for entry in entries for target in entry['target_ids']}
+                        if fault != 'metadata-only':
+                            actions.extend((f'frozen-{i}', 'read_source', entry['access']['arguments'])
+                                           for i, entry in enumerate(selected))
+                        exact = next(context['path'] for context in guide['contexts'] if 'path' in context)
+                        actions.extend([('exact-context', 'read', {'path': exact}),
+                                        ('absent-context', 'read', {'path': '.daydream/exploration/absent.md'}),
+                                        ('zero-selector', 'read_source',
+                                         {'target_id': 'integration:structure', 'side': 'after'})])
+                    if action_index < len(actions):
+                        calls = [actions[action_index]]
+                        action_index += 1
+                    else:
+                        root = Path(catalog_paths[-1])
+                        if fault == 'mutated-catalog':
+                            root.write_text('{}')
+                        elif fault == 'missing-catalog':
+                            root.unlink()
+                        elif fault == 'symlink-catalog':
+                            copy = tmp_path / 'catalog-copy.json'
+                            copy.write_bytes(root.read_bytes())
+                            root.unlink()
+                            root.symlink_to(copy)
+                        calls = [('submit', 'structured_output', stage_result(saved_stage))]
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.end_headers()
+            delta: dict[str, Any] = {'role': 'assistant'}
+            if calls:
+                delta['tool_calls'] = [{'index': i, 'id': call_id, 'type': 'function',
+                                       'function': {'name': name, 'arguments': json.dumps(arguments)}}
+                                      for i, (call_id, name, arguments) in enumerate(calls)]
+            else:
+                delta['content'] = text
+            for payload in ({'choices': [{'index': 0, 'delta': delta, 'finish_reason': None}]},
+                            {'choices': [{'index': 0, 'delta': {}, 'finish_reason': finish}],
+                             'usage': {'prompt_tokens': tokens, 'completion_tokens': 5, 'total_tokens': tokens + 5}}):
+                self.wfile.write(('data: ' + json.dumps({'id': 'synthetic-compaction',
+                    'object': 'chat.completion.chunk',
+                    'created': 1, 'model': 'native-guide', **payload}) + '\n\n').encode())
+            self.wfile.write(b'data: [DONE]\n\n')
+            self.wfile.flush()
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Provider)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    (isolated_pi / 'models.json').write_text(json.dumps({'providers': {'native-guide': {
+        'baseUrl': f'http://127.0.0.1:{server.server_port}/v1', 'api': 'openai-completions',
+        'apiKey': 'synthetic-loopback-only', 'models': [{'id': 'native-guide', 'reasoning': False,
+            'input': ['text'], 'contextWindow': 32768, 'maxTokens': 8192}],
+    }}}))
+    (isolated_pi / 'settings.json').write_text(json.dumps({'compaction': {
+        'enabled': True, 'reserveTokens': 8192, 'keepRecentTokens': 1}}))
+    monkeypatch.setenv('PI_PROVIDER', 'native-guide')
+    review = InvestigationRun(repo, tmp_path, monkeypatch)
+
+    class NativeGuide(NativeSourceBackend):
+        supports_review_instructions = True
+
+        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            stage = review_stage_state(prompt)
+            if stage is not None and stage['scope_id'] == 'structure':
+                self.stages.append(stage)
+                self.calls.append({'prompt': prompt, **kwargs})
+                async for event in PiBackend(model='native-guide').execute(cwd, prompt, *args, **kwargs):
+                    native_events.append(event)
+                    yield event
+                return
+            kwargs.pop('review_instructions', None)
+            async for event in super().execute(cwd, prompt, *args, **kwargs):
+                yield event
+
+    review.backend = NativeGuide(repo)
+    try:
+        assert await review.run() == (1 if fault == 'symlink-catalog' else 0)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    assert summary_calls == 1 and guide
+    for pid in (isolated_pi / 'pids').read_text().splitlines():
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(pid), 0)
+    if fault == 'symlink-catalog':
+        assert not review.output.exists(), 'Unsafe artifact publication must remain atomic'
+        coverage_path = next(parent / 'review-coverage.json' for parent in Path(catalog_paths[0]).parents
+                             if (parent / 'review-coverage.json').is_file())
+        coverage = json.loads(coverage_path.read_text())
+        structural = next(scope for scope in coverage['stack_outcomes'] if scope['scope_id'] == 'structure')
+        assert structural['status'] == 'incomplete'
+        assert structural['reason_codes'] == ['evidence_incomplete']
+        return
+    terminal, = stage_ends(review, 'structure')
+    data = review.load()
+    assert scopes(data)['structure']['status'] == ('complete' if fault == 'none' else 'incomplete')
+    phases = {phase['phase']: phase for phase in data['terminal_result']['phase_outcomes']}
+    assert phases['alternatives']['status'] == ('complete' if fault == 'none' else 'failed')
+    terminal, = stage_ends(review, 'structure')
+    if fault in {'none', 'metadata-only'}:
+        metadata = terminal['metadata']
+        assert metadata['nonblocking_unavailable_reads'] == 2
+        assert metadata['source_access_failures'] == 0
+        assert metadata['fresh_source_reads'] == (5 if fault == 'none' else 0)
+        assert metadata['admitted'] is (fault == 'none')
+    failures = [event for event in native_events if isinstance(event, ToolResultEvent) and event.is_error]
+    assert len(failures) == 2 and {event.id for event in failures} == {'absent-context', 'zero-selector'}
+    assert next(event for event in failures if event.id == 'zero-selector').source_free_disposition == 'zero_match'

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -67,6 +68,68 @@ class SourceRecipe:
     allowed_files: tuple[str, ...] = ()
     head_revision: str | None = None
     repository_files: tuple[str, ...] = ()
+    # Host-only authority: strict complete enumeration of this exact HEAD.
+    # Legacy/default empty inventories cannot establish absence.
+    repository_inventory_revision: str | None = None
+
+    def unavailable_lookup(self, name: str, data: dict[str, Any], cwd: Path,
+                           supporting_paths: set[Path]) -> bool:
+        """Prove source-free lookup intent from frozen authority and no-follow absence.
+
+        Native completion/provenance is checked by the receipt owner. Before-side
+        logical paths do not imply that a normal current-side operand exists.
+        """
+        if name == 'read_source':
+            target, side = data.get('target_id'), data.get('side')
+            return (set(data) == {'target_id', 'side'} and isinstance(target, str)
+                    and bool(target) and len(target.encode()) <= 2048 and isinstance(side, str)
+                    and side in {'before', 'after'}
+                    and not any(target in window.target_ids and side == window.side for window in self.windows))
+        if name != 'read' or set(data) - {'path', 'offset', 'limit'}:
+            return False
+        path = data.get('path')
+        offset, limit = data.get('offset', 1), data.get('limit')
+        if (not isinstance(path, str) or not path or '\x00' in path or len(path.encode()) > 2048
+                or type(offset) is not int or offset < 1
+                or limit is not None and (type(limit) is not int or limit < 1)
+                or '..' in Path(path).parts or not path.isascii() or "'" in path
+                or path.startswith(('~', '@', '//')) or any(ord(char) < 32 for char in path)
+                or path.casefold().startswith('file:')
+                or any(marker in path.lower() for marker in (' am.', ' pm.'))):
+            return False
+        try:
+            lexical = Path(os.path.abspath(cwd / path))
+            if any(parent.is_symlink() for parent in (lexical, *lexical.parents)):
+                return False
+            # lstat distinguishes absent operands from broken symlinks and I/O errors.
+            try:
+                lexical.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                return False
+            def normalize(value: str) -> str:
+                return unicodedata.normalize('NFD', value).casefold()
+
+            if any(normalize(str(lexical)) == normalize(str(path)) for path in supporting_paths) or any(
+                window.projection is not None and normalize(str(lexical)) == normalize(str(window.projection.resolve()))
+                for window in self.windows
+            ):
+                return False
+            if not lexical.is_relative_to(cwd):
+                return (Path(path).is_absolute()
+                        and not normalize(str(lexical)).startswith(normalize(str(cwd)) + '/'))
+            relative = lexical.relative_to(cwd).as_posix()
+            if (self.head_revision is None or not re.fullmatch(r'[0-9a-f]{40}', self.head_revision)
+                    or self.repository_inventory_revision != self.head_revision):
+                return False
+            # Case/Unicode aliases of a frozen identity never establish absence.
+            return not any(normalize(relative) == normalize(known) for known in self.repository_files) and not any(
+                window.side == 'after' and normalize(relative) == normalize(window.source_path)
+                for window in self.windows
+            )
+        except (OSError, ValueError, RuntimeError):
+            return False
 
     def permits_repository_read(self, path: str) -> bool:
         """Normal repository reads may investigate frozen tracked dependencies.

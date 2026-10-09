@@ -641,6 +641,17 @@ and 6× review time and per-role tool-call allowances respectively. The 4× and
 6× tiers also enable deep-review sharding unless explicitly disabled. An explicit review
 profile keeps its configured whole-review deadline. Set
 `pipeline.review_wall_budget_s` in a `--review-profile` TOML file to change it.
+The nonstructural role cap coarsens the largest packed stack groups only enough
+to fit: repeatedly merge adjacent groups with the smallest combined diff-byte
+weight, breaking ties at the left index. Final shard names are contiguous and
+frontiers are recomputed. File/byte targets are soft when the cap conflicts;
+files stay indivisible and distinct stacks retain their one-role minimum.
+Structure remains whole-change and outside the cap. More resulting roles increase
+aggregate model opportunity despite unchanged per-role limits. For the captured
+81-file Python workload, eight groups replace one, increasing maximum Python
+starts from 288 to 2,304 and nominal role-time opportunity from 48 to 384 minutes.
+The shared pipeline clock, queue time and concurrency still bound execution;
+this is neither a billing estimate nor a guarantee of cold review completion.
 Per-stack reviewers share eight minutes and 48 observed tool starts across stages.
 Language and generic reviewers receive locality-preferred batches of at most four
 files, sized to the 12,288-byte inline input allowance including wrappers, scoped
@@ -671,13 +682,23 @@ resource limits, not new model allowances. Compact output/handoff views keep the
 missing association, failed required reads and full-retention overflow remain
 incomplete evidence. Supporting diff, index, intent and exploration inputs never
 establish source coverage; their compact clipping does not invalidate complete
-source receipts. A completed failed Pi built-in `read` of one absent, unambiguous absolute operand outside
-repository source, granted projections and supporting pointers is nonblocking only
-when a frozen recipe is supplied and ambient extensions are disabled. Ambiguous
-filename normalization remains blocking. It remains
-an opaque failed receipt and a charged start, supplies no coverage or reuse, and
-cannot excuse pending, unmatched, truncated, cancelled, overflowing or required
-source failures. Frozen source windows carry the original repository path, rename
+source receipts. A completed failed Pi built-in `read` of one absent, unambiguous operand is nonblocking only
+with a frozen recipe, disabled ambient extensions, and no granted projection or
+supporting identity. Checkout-local/current-side absence also requires a complete
+strict inventory bound to the full captured HEAD. This includes an ordinary probe
+of a deleted current path after mandatory frozen-before source was read. Default
+empty inventories, Git failures, case/Unicode/prefix/file-URL aliases and broken symlinks
+cannot prove absence. A native zero-match `read_source` lookup is nonblocking only
+when the executed owned tool returns a failed disposition bound to the exact
+invocation packet digest, and the host independently verifies zero authorized
+matches. Markerless, unknown-tool and initialization errors remain blocking.
+Failed lookup receipts and starts remain charged, failed and nonreusable; they
+supply no coverage. Call-input incompleteness from native length termination is
+retained across subsequent turns separately from output truncation. Pending,
+unmatched, truncated, cancelled, overflowing, ambiguous and actual-source errors
+remain incomplete, even after a good reread. Failures of exact furnished supporting
+pointers remain blocking; supporting clipping alone does not invalidate source.
+Frozen source windows carry the original repository path, rename
 side, full revision/blob identity and exact line/byte range. Exact projections are
 written and revalidated through the owning artifact session. Pi also offers an
 invocation-local `read_source(target_id, side)` tool backed only by the frozen
@@ -704,8 +725,17 @@ An optional catalog exposes those exact part pointers on demand through bounded
 12,000-byte files, with complete file/target inventory and no directory grant.
 Recipe-capable Structure uses native source selectors instead of duplicating
 projection paths in its initial prompt, including canonical part selectors for
-late before-side context. Complete availability is summarized; partial and
-unavailable inputs remain explicit.
+late before-side context. A separate source catalog preserves every permitted
+alias, side, exact argument and frozen line/byte range in bounded 12,000-byte
+metadata files. Source and diff catalogs have disjoint names and remain captured
+by the same artifact owner under the existing byte/count bounds. A persistent
+exact access guide (at most 8 KiB) survives Pi compaction with captured catalog,
+assignment and shared-context pointers. Output IDs such as `integration:structure`
+identify decisions; they are source selectors only when listed in the catalog.
+Structure starts with implementation interactions; diff/docs support concrete
+concerns. Catalogs and inline context provide no reviewed-source coverage or
+additional directory access. Full host source state remains available, and
+partial/unavailable context remains explicit.
 Complete verified windows from successful clean stages are retained and can cover
 later work in the same reviewer/snapshot, including an exact union of read ranges.
 Failed attempts and opaque or uncovered ranges cannot supply reuse. Every new
@@ -714,7 +744,7 @@ make targeted rereads within the existing allowance. Other roles retain
 bounded finalization. The existing 60-minute review ceilings remain outer
 safeguards; fix turns retain their separate 30-minute limit.
 
-Staged contract 6 invalidates older cached reviews. Each invocation has a
+Staged contract 7 invalidates older cached reviews. Each invocation has a
 strict assignment-specific schema and explicit four-key skeleton: triage targets
 are exactly empty; discovery may introduce candidates with an empty candidate ID.
 Tools-enabled Pi calls with a schema and validation use the invocation's exact

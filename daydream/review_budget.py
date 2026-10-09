@@ -21,6 +21,13 @@ cannot establish it. Echo each assigned ID once. Judge only the assigned file, h
 a prefix cannot finish a hunk or file. The host folds file coverage only after every required part succeeds.
 First pass investigates assigned work, with other files supporting concrete candidates. Integration checks
 whole-change interactions and boundaries with targeted reads, without a language/docs audit.
+Follow the active stage method. Structure begins with whole-change interactions and targeted implementation
+evidence; documentation and diff parts support concrete concerns. Output assignment IDs identify decisions,
+not source selectors: integration:structure is readable only if a supplied source catalog explicitly maps it.
+Use only listed selector/side arguments and ranges from the exact source_catalog or supplied source_access.
+The persistent exact access guide names captured context/catalog roots. Read those exact pointers after
+compaction; do not derive storage layout, enumerate siblings, or invent missing/optional source sides.
+Complete inline context is identified honestly. Catalog metadata never replaces required source receipts.
 Discovery candidates use empty candidate_id for host assignment. Triage targets are exactly []; resolve only
 assigned candidates once as confirmed, rejected or unresolved, with no new candidates. Closed decisions stay closed.
 Report contradictions by closed_candidate_ids only with directly contradicting evidence; do not revise the decision.

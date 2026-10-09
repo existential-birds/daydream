@@ -9,6 +9,7 @@ and auth files under ~/.pi/agent; Daydream never writes a models.json override.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ from contextlib import ExitStack
 from functools import partial
 from importlib.resources import as_file, files
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from daydream.backends import (
     AgentEvent,
@@ -159,8 +160,7 @@ WORK STRATEGY:
   unknown, use targeted grep/find/ls to locate it before opening files.
 - Batch related reads. Don't read files one at a time in a loop when a single
   grep would surface every relevant location.
-- Read the diff first. If a diff file or git output is in your context, start
-  there; only explore files referenced by the diff or their direct imports.
+{starting_method}
 - Don't re-read what you've already read. If a file's content is already in
   your context, reuse it for understanding. For staged reviews, diff or prompt
   contents do not satisfy required source reads. Only explicitly host-admitted
@@ -182,7 +182,7 @@ Be concise in your responses. Do not narrate exploration step by step; report
 findings and conclusions."""
 
 
-def render_pi_preamble(wall_budget_s: float, tool_call_budget: int | None) -> str:
+def render_pi_preamble(wall_budget_s: float, tool_call_budget: int | None, *, staged: bool = False) -> str:
     """Render the preamble with the invocation's actual allowances.
 
     Requirement 17: the numbers are rendered, never hardcoded, and the tool-call
@@ -203,14 +203,17 @@ def render_pi_preamble(wall_budget_s: float, tool_call_budget: int | None) -> st
             f"This turn's effective wall allowance is {wall} seconds and its tool-call "
             f"budget is {int(tool_call_budget)} calls."
         )
-    return _PI_PREAMBLE_TEMPLATE.format(allowance=allowance)
+    return _PI_PREAMBLE_TEMPLATE.format(allowance=allowance, starting_method=(
+        '- Follow the active stage method and persistent exact access guide when choosing where to start.'
+        if staged else '- Read the diff first. If a diff file or git output is in your context, start\n'
+        '  there; only explore files referenced by the diff or their direct imports.'))
 
 
 _PI_SYSTEM_PREAMBLE = render_pi_preamble(DEFAULT_WALL_BUDGET_S, DEFAULT_TOOL_CALL_BUDGET)
 
 
 def pi_system_preamble(
-    wall_budget_s: float | None = None, tool_call_budget: int | None = None
+    wall_budget_s: float | None = None, tool_call_budget: int | None = None, *, staged: bool = False
 ) -> str:
     """Render this invocation's preamble, defaulting to the module allowances.
 
@@ -222,9 +225,9 @@ def pi_system_preamble(
     """
     wall = DEFAULT_WALL_BUDGET_S if wall_budget_s is None else wall_budget_s
     calls = DEFAULT_TOOL_CALL_BUDGET if tool_call_budget is None else tool_call_budget
-    if wall == DEFAULT_WALL_BUDGET_S and calls == DEFAULT_TOOL_CALL_BUDGET:
+    if not staged and wall == DEFAULT_WALL_BUDGET_S and calls == DEFAULT_TOOL_CALL_BUDGET:
         return _PI_SYSTEM_PREAMBLE
-    return render_pi_preamble(wall, calls)
+    return render_pi_preamble(wall, calls, staged=staged)
 
 
 _PI_FINALIZATION_PREAMBLE = """\
@@ -685,7 +688,9 @@ class PiBackend:
         system_prompt = (
             _PI_FINALIZATION_PREAMBLE
             if finalization
-            else pi_system_preamble(wall_budget_s, tool_call_budget)
+            else pi_system_preamble(wall_budget_s, tool_call_budget,
+                                    staged=bool(review_instructions
+                                                and "Staged review contract:" in review_instructions))
         )
         if review_instructions and not finalization:
             system_prompt += (
@@ -742,6 +747,9 @@ class PiBackend:
         # Finalized toolResult messages supply transcript order; this tracks only
         # association/settlement, never proposal order or completion-time ranking.
         submission_calls: dict[str, str] = {}
+        incomplete_calls: set[str] = set()
+        source_calls: set[str] = set()
+        packet_digest: str | None = None
         pending_submission: Any = None
         # Non-JSON lines (stderr merged into stdout, pi diagnostic output, etc.)
         # captured for error reporting when the process exits non-zero.
@@ -825,6 +833,7 @@ class PiBackend:
                 no_skills=True,
                 schema_emulated=output_schema is not None and not native_output,
                 no_extensions=source_enabled,
+                source_tool_enabled=source_enabled,
             ),
             model_source="configured",
             provider_source="configured" if provider is not None else None,
@@ -841,7 +850,9 @@ class PiBackend:
                     packet = source_recipe.to_packet()
                 if native_output:
                     packet["output_schema"] = output_schema
-                packet_path = _write_prompt_attachment(json.dumps(packet, ensure_ascii=False), attachments)
+                packet_text = json.dumps(packet, ensure_ascii=False)
+                packet_digest = hashlib.sha256(packet_text.encode()).hexdigest()
+                packet_path = _write_prompt_attachment(packet_text, attachments)
                 child_env["DAYDREAM_PI_SOURCE_PACKET"] = str(packet_path)
                 extension = attachments.enter_context(as_file(files("daydream.backends").joinpath("pi_read_source.ts")))
                 if source_enabled:
@@ -972,6 +983,13 @@ class PiBackend:
                                 # and never authors or duplicates the choice part.
                                 call_id = block.get("id")
                                 call_name = block.get("name")
+                                if msg.get("stopReason") == "length":
+                                    if (not isinstance(call_id, str) or not call_id or len(call_id.encode()) > 2048
+                                            or any(ord(char) < 32 for char in call_id)
+                                            or call_id in incomplete_calls or len(incomplete_calls) >= 4096):
+                                        raise PiError("Incomplete tool input association lost", retryable=False,
+                                                      category="STREAM_TRUNCATION")
+                                    incomplete_calls.add(call_id)
                                 if native_output and call_name == "structured_output":
                                     associate_submission(call_id, None, "proposed")
                                 if isinstance(call_id, str) and call_id and isinstance(call_name, str) and call_name:
@@ -1045,10 +1063,18 @@ class PiBackend:
 
                 elif event_type == "tool_execution_start":
                     active_tool_calls += 1
+                    call_id = event.get("toolCallId")
+                    if source_enabled and event.get("toolName") == "read_source":
+                        if (not isinstance(call_id, str) or not call_id or len(call_id.encode()) > 2048
+                                or call_id in source_calls or len(source_calls) >= 4096):
+                            raise PiError("Invalid source tool association", retryable=False,
+                                          category="STREAM_TRUNCATION")
+                        source_calls.add(call_id)
                     yield ToolStartEvent(
-                        id=event.get("toolCallId") or str(uuid.uuid4()),
+                        id=call_id or str(uuid.uuid4()),
                         name=event.get("toolName", "unknown"),
                         input=event.get("args") or {},
+                        input_incomplete=isinstance(call_id, str) and call_id in incomplete_calls,
                     )
                     if native_output and event.get("toolName") == "structured_output":
                         if event.get("parentToolCallId") is not None:
@@ -1057,13 +1083,28 @@ class PiBackend:
 
                 elif event_type == "tool_execution_end":
                     active_tool_calls = max(0, active_tool_calls - 1)
+                    call_id = event.get("toolCallId")
+                    owned_source = (isinstance(call_id, str) and call_id in source_calls
+                                    and event.get("toolName") == "read_source")
+                    result = event.get("result")
+                    details = result.get("details") if isinstance(result, dict) else None
+                    disposition: Literal["zero_match"] | None = None
+                    if (owned_source and event.get("isError") is True and isinstance(details, dict)
+                            and set(details) == {"source_free_disposition", "packet_sha256"}
+                            and details.get("source_free_disposition") == "zero_match"
+                            and packet_digest is not None and details.get("packet_sha256") == packet_digest):
+                        disposition = "zero_match"
                     yield ToolResultEvent(
-                        id=event.get("toolCallId") or str(uuid.uuid4()),
-                        output=_render_tool_result(event.get("result")),
+                        id=call_id or str(uuid.uuid4()),
+                        output=_render_tool_result(result),
                         is_error=bool(event.get("isError", False)),
+                        source_free_disposition=disposition,
                         **_tool_completion_metadata(event,
                             output_control=native_output and event.get("toolName") == "structured_output"),
                     )
+                    if isinstance(call_id, str):
+                        incomplete_calls.discard(call_id)
+                        source_calls.discard(call_id)
                     if native_output and event.get("toolName") == "structured_output":
                         if type(event.get("isError")) is not bool:
                             raise PiError("Invalid output status", retryable=False, category="STREAM_TRUNCATION")
@@ -1150,6 +1191,7 @@ class PiBackend:
 
             native_unsettled = native_output and (
                 active_tool_calls != 0 or open_generation_id is not None
+                or bool(incomplete_calls) or bool(source_calls)
                 or any(state != "finalized" for state in submission_calls.values())
                 or finish_reason in {"aborted", "length", "error"}
                 or not (saw_turn_start and saw_finish_reason and saw_native_settlement)

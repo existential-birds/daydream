@@ -103,10 +103,11 @@ replaced successes; source receipt counters exclude output control.
 source recipe disables ambient extensions while explicitly loading the shipped
 extension. It is false without that restriction and unavailable on other backends.
 Staged phase metadata adds content-free `nonblocking_unavailable_reads` (completed
-failed built-in reads of absent unambiguous operands outside all source/support identities),
+failed absent builtin reads and executed zero-match selectors, independently proved
+source-free at matched completion),
 `blocking_opaque_receipts` (incomplete opaque completions excluding that narrow
-exception), and `blocking_pending_receipts` (unfinished non-supporting source or
-opaque starts). All are integer counts from the invocation's retained evidence,
+exception), and `blocking_pending_receipts` (unfinished source, furnished-pointer or
+opaque starts, including input retention loss). All are integer counts from the invocation's retained evidence,
 including failed starts; they reveal no operands or result text.
 `sanctioned_input_count` counts all prepared exact/inline input slots;
 `sanctioned_input_bytes` sums validated captured UTF-8 payload bytes, excluding
@@ -129,6 +130,7 @@ not inferred from provider prose or counted as tool starts.
 | `daydream.output_mode` | All | output mode constant | attempt | string | – | 0..1 | Request event | When known | – | Span attribute | metadata | metadata | T1 | verified | Conditional |
 | `daydream.backend.config.*` (bounded) | Per-backend effective config | exact argv/option facts per backend admission contract | attempt | bool/int/string/enum | – | 0..N | Effective config table (Task 1) | per admission table | Secret/path-free | Span attributes | metadata | `invocation_params` | `test_observability_config.py` + backend protocol suites | verified | Conditional; unsupported identities omitted with fixed diagnostics, never truncated aliases |
 | `daydream.request.config.no_extensions` | Pi RequestEvent | exact `--no-extensions` argv fact | attempt | bool | – | 0..1 | frozen recipe disables ambient extension discovery | Every Pi request | Content-free | Span attribute | metadata | invocation_params | `test_installed_pi_native_output_through_review_runner` | offline verified; live pending | Other backends omit; false without source recipe |
+| `daydream.request.config.source_tool_enabled` | Pi RequestEvent | invocation-local packaged frozen-source tool configured | attempt | bool | – | 0..1 | exact source recipe/tool argv facts | Every Pi request | Content-free | Span attribute | metadata | invocation_params | `test_installed_pi_compaction_restores_exact_structure_access_and_settles_lookup_failures` | offline verified; live pending | Other backends omit; false without active source recipe |
 
 ## Generation lifecycle (pi native interval; only real generation model spans)
 

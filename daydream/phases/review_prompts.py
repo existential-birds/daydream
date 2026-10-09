@@ -19,6 +19,9 @@ from daydream.severity import SEVERITY_RUBRIC
 
 def build_review_stage_system_instruction(review_stage: dict[str, Any]) -> str:
     """Persist the stage's source and output duties through native compaction."""
+    access_guide = review_stage.get('access_guide', '{}')
+    if not isinstance(access_guide, str):
+        access_guide = '{}'
     return (
         STAGED_REVIEW_GUIDANCE + '\nPersistent assignment identities: '
         + json.dumps({
@@ -26,7 +29,8 @@ def build_review_stage_system_instruction(review_stage: dict[str, Any]) -> str:
             'targets': review_stage['assigned_target_ids'],
             'candidate_ids': review_stage.get('assigned_candidate_ids', []),
             'closed_candidate_ids': review_stage.get('closed_candidate_ids', []),
-        }, ensure_ascii=False) + '.'
+        }, ensure_ascii=False) + '.\nPersistent exact access guide (supporting metadata): '
+        + access_guide
     )
 
 

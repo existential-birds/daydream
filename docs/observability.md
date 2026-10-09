@@ -436,7 +436,10 @@ id — a project id yields HTTP 403 because it is forwarded as
 
 Staged review evidence reports content-free nonblocking unavailable-read and
 blocking opaque/pending receipt counts (see the field contract). Pi's typed
-`no_extensions` argv fact supports the narrow completed optional-read exception;
+`no_extensions` and `source_tool_enabled` request facts support completed source-free
+lookups. Checkout absence requires a frozen complete HEAD inventory; zero-match
+source lookups require an executed packet-bound disposition independently checked
+by evidence. Length-terminated call inputs remain typed incomplete across later turns;
 failed starts stay charged and failed receipts supply no source coverage. A single
 native missing-submission continuation retains the same attempt and original
 allowances, with any additional provider generations recorded normally.

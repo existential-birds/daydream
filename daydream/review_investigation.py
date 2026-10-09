@@ -28,7 +28,7 @@ from daydream.review_evidence import (
 from daydream.review_result import reason_for_exception
 from daydream.trajectory import DaydreamPhase, LifecycleReasonCode, LifecycleStatus, phase_scope
 
-STAGED_REVIEW_CONTRACT = 6
+STAGED_REVIEW_CONTRACT = 7
 HANDOFF_MAX_BYTES = 64 * 1024
 HANDOFF_MAX_ITEMS = 128
 

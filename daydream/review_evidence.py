@@ -55,11 +55,13 @@ class EvidenceReceipt:
     retained_bytes: int
     overflow: bool = False
     source: SourceWindow | None = None
+    source_free: bool = False
 
     @property
     def complete(self) -> bool:
         result = self.result
-        return not (self.overflow or result.truncated or result.is_error or result.cancelled
+        return not (self.call.input_incomplete or self.overflow or result.truncated or result.is_error
+                    or result.cancelled
                     or result.exit_code not in (None, 0)
                     or (result.status is not None and result.status.lower() not in
                         {'success', 'succeeded', 'completed', 'complete', 'ok', 'finished', 'done', 'passed'}))
@@ -197,6 +199,7 @@ class ReviewEvidence:
         """A retry must not inherit a failed attempt's evidence or findings."""
         self.native_output = False
         self.builtin_pi_reader = False
+        self.owned_pi_source_tool = False
         self.output_calls: set[str] = set()
         self.output_starts = 0
         self.output_successes = 0
@@ -306,13 +309,23 @@ class ReviewEvidence:
         if self.unmatched_results or self.opaque_retention_loss or assigned.intersection(self.retention_failed_files):
             return True
         for receipt in self.receipts:
-            if not receipt.supporting and not receipt.complete and not self._unavailable_optional_read(receipt) and (
+            if receipt.supporting and (receipt.overflow or _read_paths(receipt.call)[0] and (
+                receipt.call.input_incomplete or receipt.result.is_error or receipt.result.cancelled
+                or receipt.result.exit_code not in (None, 0)
+                or receipt.result.status is not None and receipt.result.status.lower() not in {
+                    'success', 'succeeded', 'completed', 'complete', 'ok', 'finished', 'done', 'passed', 'truncated',
+                }
+            )):
+                # Search misses and supporting clipping differ from failure of
+                # an exact furnished pointer. A later read cannot erase it.
+                return True
+            if not receipt.supporting and not receipt.complete and not receipt.source_free and (
                 receipt.opaque or assigned.intersection(receipt.paths)
             ):
                 return True
-        for _, _, _, classification in self.full_pending.values():
+        for call, _, overflow, classification in self.full_pending.values():
             paths, supporting, opaque = classification
-            if not supporting and (opaque or assigned.intersection(paths)):
+            if overflow or not supporting and (opaque or paths) or supporting and _read_paths(call)[0]:
                 return True
         if not require_source:
             return False
@@ -327,52 +340,32 @@ class ReviewEvidence:
                     return True
         return not bool(assigned.intersection(grounded)) if interaction else not assigned <= grounded
 
-    def _unavailable_optional_read(self, receipt: EvidenceReceipt) -> bool:
-        """A completed built-in Pi read of an ungranted operand cannot lose source."""
-        call, result = receipt.call, receipt.result
+    def _source_free_lookup(self, call: ToolStartEvent, result: ToolResultEvent, *, overflow: bool) -> bool:
+        """Classify once at matched completion; failed receipts remain failed and charged."""
         if (not self.builtin_pi_reader or self.source_recipe is None or self.cwd is None
-                or call.name != 'read' or not receipt.opaque or receipt.paths or receipt.supporting
-                or receipt.source is not None or receipt.overflow or result.truncated or result.cancelled
+                or call.input_incomplete or overflow or result.truncated or result.cancelled
                 or not result.is_error or result.exit_code == 0
                 or result.status is not None and result.status.lower() not in {'error', 'failed', 'failure'}):
             return False
-        data = call.input
-        if set(data) - {'path', 'offset', 'limit'}:
+        if call.name == 'read_source' and not (
+            self.owned_pi_source_tool and result.source_free_disposition == 'zero_match'
+        ):
             return False
-        path = data.get('path')
-        offset, limit = data.get('offset', 1), data.get('limit')
-        if (not isinstance(path, str) or not path or '\x00' in path
-                or type(offset) is not int or offset < 1
-                or limit is not None and (type(limit) is not int or limit < 1)):
-            return False
-        # Pi normalizes Unicode spaces and retries NFD, curly-apostrophe and
-        # screenshot AM/PM spellings. Ambiguous spellings cannot prove that
-        # the effective native operand is outside a granted source identity.
-        if (not Path(path).is_absolute() or '..' in Path(path).parts or not path.isascii() or "'" in path
-                or any(marker in path.lower() for marker in (' am.', ' pm.'))):
-            return False
-        try:
-            resolved = (self.cwd / path).resolve()
-            return (not resolved.exists() and not resolved.is_relative_to(self.cwd)
-                    and resolved not in self.supporting_paths
-                    and not any(window.projection is not None and resolved == window.projection.resolve()
-                                for window in self.source_recipe.windows))
-        except (OSError, ValueError, RuntimeError):
-            return False
+        return self.source_recipe.unavailable_lookup(call.name, call.input, self.cwd, self.supporting_paths)
 
     @property
     def nonblocking_unavailable_reads(self) -> int:
-        return sum(self._unavailable_optional_read(receipt) for receipt in self.receipts)
+        return sum(receipt.source_free for receipt in self.receipts)
 
     @property
     def blocking_opaque_receipts(self) -> int:
-        return sum(receipt.opaque and not receipt.complete and not self._unavailable_optional_read(receipt)
+        return sum(receipt.opaque and not receipt.complete and not receipt.source_free
                    for receipt in self.receipts)
 
     @property
     def blocking_pending_receipts(self) -> int:
-        return sum(not supporting and (opaque or bool(paths))
-                   for _, _, _, (paths, supporting, opaque) in self.full_pending.values())
+        return sum(bool(overflow or not supporting and (opaque or paths) or supporting and _read_paths(call)[0])
+                   for call, _, overflow, (paths, supporting, opaque) in self.full_pending.values())
 
     def compact_for_files(
         self, files: set[str], *, receipts: list[EvidenceReceipt] | None = None,
@@ -427,7 +420,7 @@ class ReviewEvidence:
             call = ToolStartEvent(key if metadata_overflow else event.id,
                                   'unavailable' if metadata_overflow else event.name,
                                   {} if overflow else json.loads(serialized),
-                                  '' if metadata_overflow else event.timestamp)
+                                  '' if metadata_overflow else event.timestamp, event.input_incomplete)
             if key in self.full_pending:
                 _, released, _, _ = self.full_pending.pop(key)
                 self.full_retained_bytes -= released
@@ -454,7 +447,7 @@ class ReviewEvidence:
         result = ToolResultEvent(call.id, '' if overflow else event.output, event.is_error,
                                  '' if metadata_overflow else event.timestamp,
                                  event.exit_code, None if metadata_overflow else event.status,
-                                 event.duration_ms, event.cancelled, event.truncated)
+                                 event.duration_ms, event.cancelled, event.truncated, event.source_free_disposition)
         self.full_retained_bytes += output_size
         self.native_truncated_results += int(event.truncated)
         self.retention_overflow_results += int(overflow)
@@ -467,11 +460,12 @@ class ReviewEvidence:
             return
         source = None
         source_size = 0
+        source_free = self._source_free_lookup(call, result, overflow=overflow)
         if self.source_recipe is not None and not overflow:
             if call.name == "read_source":
                 source = self.source_recipe.native_result(call.input, result.output)
                 if source is None:
-                    self.source_access_failures += 1
+                    self.source_access_failures += int(not source_free)
                     paths, supporting, opaque = classification[0], False, True
             elif self.cwd is not None and paths and not supporting:
                 source = self.source_recipe.match_read(call.input, result.output, self.cwd)
@@ -494,14 +488,17 @@ class ReviewEvidence:
                 else:
                     self.full_retained_bytes += source_size
             elif paths:
-                if self._declared_source_read(call):
+                if not source_free and self._declared_source_read(call):
                     self.source_access_failures += 1
                 # Unknown ranges and commands may support understanding, but only
                 # a targeted verified read can supply source authority. Failed
                 # opaque calls remain capture failures through their native status.
                 paths, opaque = (), True
-        self.receipts.append(EvidenceReceipt(call, result, paths, supporting, opaque,
-                                             input_size + output_size + source_size, overflow, source))
+        receipt = EvidenceReceipt(call, result, paths, supporting, opaque,
+                                  input_size + output_size + source_size, overflow, source, source_free)
+        if source is not None and not receipt.complete:
+            self.source_access_failures += 1
+        self.receipts.append(receipt)
 
     def valid(self, value: Any) -> bool:
         return self.schema is not None and validates_schema(value, self.schema)
@@ -511,6 +508,8 @@ class ReviewEvidence:
             self.builtin_pi_reader = (type(event.config) is PiRequestConfig
                                       and event.config.no_extensions is True
                                       and event.config.no_tools is False)
+            self.owned_pi_source_tool = (self.builtin_pi_reader and isinstance(event.config, PiRequestConfig)
+                                         and event.config.source_tool_enabled is True)
             self.native_output = (isinstance(event.config, PiRequestConfig)
                                   and event.output_schema is not None
                                   and event.config.schema_emulated is False)
