@@ -433,3 +433,10 @@ HoneyHive's documented JSON ack (`{"success": true}`) is recorded as
 Operator note: `LANGSMITH_WORKSPACE_ID` must be the LangSmith *workspace*
 id — a project id yields HTTP 403 because it is forwarded as
 `x-tenant-id`.
+
+Staged review evidence reports content-free nonblocking unavailable-read and
+blocking opaque/pending receipt counts (see the field contract). Pi's typed
+`no_extensions` argv fact supports the narrow completed optional-read exception;
+failed starts stay charged and failed receipts supply no source coverage. A single
+native missing-submission continuation retains the same attempt and original
+allowances, with any additional provider generations recorded normally.

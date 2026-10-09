@@ -13,6 +13,7 @@ from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolResultEven
 from tests.deep_orchestrator.test_review_investigation import InvestigationRun, StagedBackend, stage_ends
 from tests.harness.git_helpers import seed_feature_branch
 from tests.harness.stub_backend import review_stage_state, stage_result
+from tests.test_deep_orchestrator import _sanctioned_inputs
 
 
 @pytest.mark.parametrize(('split_owner', 'syntax_failure'), [(True, False), (False, False), (False, True)],
@@ -140,6 +141,15 @@ async def test_structure_initial_prompt_is_compact_with_complete_bounded_support
         path = f'00_context_{index}.md'
         before[path] = '# Request boundary\n'
         after[path] = before[path] + 'Preserve the dry-run request boundary.\n'
+    for index in range(43):
+        path = f'transport/module_{index:02}.py'
+        before[path], after[path] = 'VALUE = 0\n', 'VALUE = 1\n'
+    # Full enclosing source remains captured alongside deferred changed parts;
+    # their combined capture exceeds the previous 4 MiB transport allowance.
+    for path in before:
+        context = ''.join(f'# Transport context {index:03}: ' + 'c' * 28 + '\n' for index in range(400))
+        before[path] += context
+        after[path] += context
     repo = tmp_path / 'large_interaction'
     seed_feature_branch(repo, base=before, feature=after)
     review = InvestigationRun(repo, tmp_path, monkeypatch)
@@ -147,8 +157,11 @@ async def test_structure_initial_prompt_is_compact_with_complete_bounded_support
     title = 'Whole-change request construction drops the parsed dry-run flag'
     judged: list[bool] = []
     prompt_sizes: list[int] = []
+    catalog_paths: set[Path] = set()
+    transport_sizes: list[tuple[int, int]] = []
 
     def catalog(path: Path, found: list[dict[str, Any]]) -> Iterable[AgentEvent]:
+        catalog_paths.add(path)
         raw = path.read_text()
         assert len(raw.encode()) <= 12_000
         yield ToolStartEvent(id=f'catalog-{path.name}', name='Read', input={'file_path': str(path)})
@@ -164,8 +177,8 @@ async def test_structure_initial_prompt_is_compact_with_complete_bounded_support
         if stage['scope_id'] != 'structure':
             return
         prompt_sizes.append(len(review.backend.calls[-1]['prompt'].encode()))
-        assert prompt_sizes[-1] < 70_683
-        assert len(stage['assigned_files']) == 47 and stage['assigned_target_ids'] == ['integration:structure']
+        assert prompt_sizes[-1] < 128 * 1024
+        assert len(stage['assigned_files']) == 90 and stage['assigned_target_ids'] == ['integration:structure']
         assert stage['folded_alternatives'] is True
         assert 'supporting_parts' not in stage
         assert all('path' not in window['access'] for window in stage['source_access'])
@@ -173,6 +186,21 @@ async def test_structure_initial_prompt_is_compact_with_complete_bounded_support
         yield from catalog(Path(stage['supporting_catalog']['path']), found)
         assert len(found) == stage['supporting_catalog']['part_count'] > 90
         assert {part['file'] for part in found} == set(stage['assigned_files'])
+        recipe = review.backend.calls[-1]['source_recipe']
+        assert {window.file for window in recipe.windows} == set(stage['assigned_files'])
+        inputs = catalog_paths | {Path(part['path']) for part in found}
+        for window in recipe.windows:
+            assert window.projection is not None
+            assert window.projection.read_text() == window.body
+            assert window.body == (before if window.side == 'before' else after)[window.file]
+            inputs.add(window.projection)
+        inputs.update(_sanctioned_inputs(review.backend.calls[-1]['prompt']).values())
+        # Inspect complete available bytes, including pointers omitted from the
+        # compact initial prompt, at the external provider dispatch boundary.
+        sizes = [len(path.read_bytes()) for path in inputs]
+        transport_sizes.append((sum(sizes), len(sizes)))
+        assert 4_194_304 < sum(sizes) < 8_388_608
+        assert max(sizes) <= 1_048_576 and len(sizes) <= 512
         producer, consumer = 'package_0/module_00.py', 'package_8/module_40.py'
         deferred, = [part for part in found if part['file'] == consumer]
         raw = Path(deferred['path']).read_text()
@@ -180,7 +208,6 @@ async def test_structure_initial_prompt_is_compact_with_complete_bounded_support
         yield ToolStartEvent(id='late-supporting-diff', name='Read', input={'file_path': deferred['path']})
         yield ToolResultEvent(id='late-supporting-diff', output=raw, is_error=False)
         bodies: dict[str, str] = {}
-        recipe = review.backend.calls[-1]['source_recipe']
         for path in (producer, consumer):
             source = recipe.selector(path, 'after')
             assert source is not None
@@ -210,6 +237,13 @@ async def test_structure_initial_prompt_is_compact_with_complete_bounded_support
                                      'disposition': 'confirmed', 'finding': finding}]
 
     review.backend.stage_response = response
-    await review.finish('structure', findings=(title,) if not wired else ())
+    data = await review.finish('structure', findings=(title,) if not wired else ())
     assert judged == [wired] and len(prompt_sizes) == 1
+    assert len(transport_sizes) == 1
+    assert transport_sizes[0][0] > 32 * prompt_sizes[0]
+    metadata = stage_ends(review, 'structure')[0]['metadata']
+    assert 4 * 1024 * 1024 < metadata['sanctioned_input_bytes'] <= 8 * 1024 * 1024
+    assert 180 < metadata['sanctioned_input_count'] <= 512
     assert all(event['metadata']['admitted'] for event in stage_ends(review, 'structure'))
+    phases = {phase['phase']: phase for phase in data['terminal_result']['phase_outcomes']}
+    assert phases['alternatives']['status'] == 'complete'

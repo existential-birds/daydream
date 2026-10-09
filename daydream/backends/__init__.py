@@ -503,6 +503,7 @@ class PiRequestConfig(EffectiveRequestConfig):
     no_tools: bool | None = field(default=None, kw_only=True)
     no_skills: bool | None = None
     schema_emulated: bool | None = None
+    no_extensions: bool | None = field(default=None, kw_only=True)
 
 
 

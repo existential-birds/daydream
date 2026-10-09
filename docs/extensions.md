@@ -601,7 +601,7 @@ supported versions; migrate the callable to accept this kwarg and declare
   bounded-read LF representation, including its exact continuation footer, is
   verified against frozen bytes; native results and completion flags remain
   unchanged. Unknown wrappers, forged footers and truncation supply no coverage.
-  Complete older cache entries miss staged contract 5.
+  Complete older cache entries miss staged contract 6.
 - `assignment_parts` describes each required target: `target_id`, `file`,
   one-based `part_index`, `part_count`, and `kind` (`file`, `hunk`, or
   `continuation`). Split hunks include zero-based `hunk_index`, `old_start`,
@@ -698,6 +698,14 @@ Compact views retain the 12,000-byte per-output and
 inputs are classified only from revalidated prepared identities, never basenames;
 mixed/opaque calls are treated conservatively. Supporting reads cannot establish
 source coverage. Irrelevant failed searches alone do not invalidate complete source.
+A completed unavailable Pi built-in `read` is also nonblocking only with a frozen
+recipe and typed `no_extensions=True`, one absent, unambiguous absolute `path` operand with supported
+positive integer offset/limit, and no repository, source-projection or supporting
+identity. Normalization-sensitive filename spellings, prefix aliases, existing operands and
+parent components remain opaque and blocking.
+Its opaque failed receipt and start charge remain; it provides no
+coverage or reusable evidence. Custom tools, pending/unmatched results, actual
+source failures, cancellation, truncation and retention overflow stay blocking.
 Every reviewed assertion, including an empty-candidate claim, needs complete
 source evidence and explicit valid host-assigned coverage. Free-form citations
 are not authenticated by receipts. Triage sees only relevant admitted partial
@@ -715,7 +723,12 @@ stage, attempt, observed starts, remaining hard allowance, advisory target,
 admission, safe schema rejection, retained bytes and compact clipping separately
 from native truncation and host retention overflow. Diagnostics distinguish
 quantitative exhaustion, schema rejection, capture loss and admission failure.
-Stage contract **5** invalidates older complete cache entries. ATIF is
+Tools-enabled native Pi may add one hidden missing-submission reminder at its
+public settlement boundary after completed prose, preserving existing boundary
+entries. Reminder state spans native continuations; successful finalized serializer
+calls suppress it. Repeated prose remains missing output. Native validation
+correction stays Pi-owned, with no host attempt or allowance reset.
+Stage contract **6** invalidates older complete cache entries. ATIF is
 optional recording, never the admission authority; other evidence finalization
 consumers preserve their existing behavior.
 
@@ -853,13 +866,13 @@ Working contracts for extension steps:
   inaccessible beyond its cwd.
 - Inline inputs have a combined limit of 12,288 UTF-8 payload bytes per model
   call. Exact-path inputs have separate validation limits: 512 files, 1 MiB per
-  file, and 4 MiB combined. Missing, changed, non-regular, invalid UTF-8, or
+  file, and 8 MiB combined. Missing, changed, non-regular, invalid UTF-8, or
   over-limit inputs fail before backend entry instead of being truncated.
   Exact-path validation streams and hashes the named files without retaining
   their full contents.
   Pi's exact-path `diff` input is a pointer-only durable artifact: it has a
   separate 128 MiB streaming-validation limit and does not consume the 1 MiB
-  captured-file or 4 MiB aggregate allowances. It remains in the exact-file
+  captured-file or 8 MiB aggregate allowances. It remains in the exact-file
   allowlist, is UTF-8 validated and stream-hashed again before each attempt,
   and is never copied into recovery finalization context. Its path must be the
   active session path supplied by the host. All other required inputs retain

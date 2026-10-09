@@ -196,6 +196,7 @@ class ReviewEvidence:
     def reset(self) -> None:
         """A retry must not inherit a failed attempt's evidence or findings."""
         self.native_output = False
+        self.builtin_pi_reader = False
         self.output_calls: set[str] = set()
         self.output_starts = 0
         self.output_successes = 0
@@ -305,7 +306,7 @@ class ReviewEvidence:
         if self.unmatched_results or self.opaque_retention_loss or assigned.intersection(self.retention_failed_files):
             return True
         for receipt in self.receipts:
-            if not receipt.supporting and not receipt.complete and (
+            if not receipt.supporting and not receipt.complete and not self._unavailable_optional_read(receipt) and (
                 receipt.opaque or assigned.intersection(receipt.paths)
             ):
                 return True
@@ -325,6 +326,53 @@ class ReviewEvidence:
                 ):
                     return True
         return not bool(assigned.intersection(grounded)) if interaction else not assigned <= grounded
+
+    def _unavailable_optional_read(self, receipt: EvidenceReceipt) -> bool:
+        """A completed built-in Pi read of an ungranted operand cannot lose source."""
+        call, result = receipt.call, receipt.result
+        if (not self.builtin_pi_reader or self.source_recipe is None or self.cwd is None
+                or call.name != 'read' or not receipt.opaque or receipt.paths or receipt.supporting
+                or receipt.source is not None or receipt.overflow or result.truncated or result.cancelled
+                or not result.is_error or result.exit_code == 0
+                or result.status is not None and result.status.lower() not in {'error', 'failed', 'failure'}):
+            return False
+        data = call.input
+        if set(data) - {'path', 'offset', 'limit'}:
+            return False
+        path = data.get('path')
+        offset, limit = data.get('offset', 1), data.get('limit')
+        if (not isinstance(path, str) or not path or '\x00' in path
+                or type(offset) is not int or offset < 1
+                or limit is not None and (type(limit) is not int or limit < 1)):
+            return False
+        # Pi normalizes Unicode spaces and retries NFD, curly-apostrophe and
+        # screenshot AM/PM spellings. Ambiguous spellings cannot prove that
+        # the effective native operand is outside a granted source identity.
+        if (not Path(path).is_absolute() or '..' in Path(path).parts or not path.isascii() or "'" in path
+                or any(marker in path.lower() for marker in (' am.', ' pm.'))):
+            return False
+        try:
+            resolved = (self.cwd / path).resolve()
+            return (not resolved.exists() and not resolved.is_relative_to(self.cwd)
+                    and resolved not in self.supporting_paths
+                    and not any(window.projection is not None and resolved == window.projection.resolve()
+                                for window in self.source_recipe.windows))
+        except (OSError, ValueError, RuntimeError):
+            return False
+
+    @property
+    def nonblocking_unavailable_reads(self) -> int:
+        return sum(self._unavailable_optional_read(receipt) for receipt in self.receipts)
+
+    @property
+    def blocking_opaque_receipts(self) -> int:
+        return sum(receipt.opaque and not receipt.complete and not self._unavailable_optional_read(receipt)
+                   for receipt in self.receipts)
+
+    @property
+    def blocking_pending_receipts(self) -> int:
+        return sum(not supporting and (opaque or bool(paths))
+                   for _, _, _, (paths, supporting, opaque) in self.full_pending.values())
 
     def compact_for_files(
         self, files: set[str], *, receipts: list[EvidenceReceipt] | None = None,
@@ -460,6 +508,9 @@ class ReviewEvidence:
 
     def observe(self, event: AgentEvent) -> None:
         if isinstance(event, RequestEvent):
+            self.builtin_pi_reader = (type(event.config) is PiRequestConfig
+                                      and event.config.no_extensions is True
+                                      and event.config.no_tools is False)
             self.native_output = (isinstance(event.config, PiRequestConfig)
                                   and event.output_schema is not None
                                   and event.config.schema_emulated is False)

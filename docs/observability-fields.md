@@ -99,6 +99,27 @@ Native provider generations retain their own timing/token/cost records; addition
 correction generations are not host fresh attempts or additional tool starts.
 Staged transitions separately report submission starts, successes, failures and
 replaced successes; source receipt counters exclude output control.
+`daydream.request.config.no_extensions` is Pi's boolean argv fact: a frozen
+source recipe disables ambient extensions while explicitly loading the shipped
+extension. It is false without that restriction and unavailable on other backends.
+Staged phase metadata adds content-free `nonblocking_unavailable_reads` (completed
+failed built-in reads of absent unambiguous operands outside all source/support identities),
+`blocking_opaque_receipts` (incomplete opaque completions excluding that narrow
+exception), and `blocking_pending_receipts` (unfinished non-supporting source or
+opaque starts). All are integer counts from the invocation's retained evidence,
+including failed starts; they reveal no operands or result text.
+`sanctioned_input_count` counts all prepared exact/inline input slots;
+`sanctioned_input_bytes` sums validated captured UTF-8 payload bytes, excluding
+pointer-only references. These content-free stage integers describe host input
+resource use independently of source receipt retention and tool allowances. Runner owners
+`test_failed_unrelated_search_does_not_poison_complete_source_review` and
+`test_installed_pi_native_output_through_review_runner` cover these fields.
+The general capture-loss diagnostic is “Review evidence capture incomplete”;
+source-specific labels remain reserved for source access/receipt failures.
+One native missing-submission reminder may add provider generations under the
+same attempt and original deadline; their native usage/cost is recorded as usual.
+Reminder occurrences are observable in the native session's hidden custom messages,
+not inferred from provider prose or counted as tool starts.
 
 | field name | source backend/event | source authority/provenance | owning span | type | unit | cardinality | derivation | completeness | capture/redaction | generic OTLP disposition | HoneyHive canonical destination | LangSmith native destination | offline test node | live evidence status | applicability and omission reason |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -107,6 +128,7 @@ replaced successes; source receipt counters exclude output control.
 | `daydream.request.timestamp` | All, RequestEvent | exact request timestamp | attempt | string | – | 0..1 | RequestEvent.timestamp | When supplied | – | Span attribute | metadata | metadata | T5 | verified | Conditional |
 | `daydream.output_mode` | All | output mode constant | attempt | string | – | 0..1 | Request event | When known | – | Span attribute | metadata | metadata | T1 | verified | Conditional |
 | `daydream.backend.config.*` (bounded) | Per-backend effective config | exact argv/option facts per backend admission contract | attempt | bool/int/string/enum | – | 0..N | Effective config table (Task 1) | per admission table | Secret/path-free | Span attributes | metadata | `invocation_params` | `test_observability_config.py` + backend protocol suites | verified | Conditional; unsupported identities omitted with fixed diagnostics, never truncated aliases |
+| `daydream.request.config.no_extensions` | Pi RequestEvent | exact `--no-extensions` argv fact | attempt | bool | – | 0..1 | frozen recipe disables ambient extension discovery | Every Pi request | Content-free | Span attribute | metadata | invocation_params | `test_installed_pi_native_output_through_review_runner` | offline verified; live pending | Other backends omit; false without source recipe |
 
 ## Generation lifecycle (pi native interval; only real generation model spans)
 

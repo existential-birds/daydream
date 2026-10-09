@@ -824,6 +824,7 @@ class PiBackend:
                 no_tools=finalization or tools_disabled,
                 no_skills=True,
                 schema_emulated=output_schema is not None and not native_output,
+                no_extensions=source_enabled,
             ),
             model_source="configured",
             provider_source="configured" if provider is not None else None,

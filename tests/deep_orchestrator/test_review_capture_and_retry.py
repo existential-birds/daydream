@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
@@ -9,7 +10,16 @@ from typing import Any
 
 import pytest
 
-from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent, TurnEndEvent
+from daydream.backends import (
+    AgentEvent,
+    PiRequestConfig,
+    RequestEvent,
+    ResultEvent,
+    TextEvent,
+    ToolResultEvent,
+    ToolStartEvent,
+    TurnEndEvent,
+)
 from daydream.config_file import DaydreamFileConfig
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.test_review_completion import record, scopes
@@ -144,23 +154,76 @@ async def test_incomplete_required_source_cannot_establish_reviewed_coverage(
         assert metadata['unmatched_results'] > 0
 
 
+@pytest.mark.parametrize('fault', [
+    'search', 'optional', 'offset', 'custom', 'ambient', 'ambiguous', 'unsupported', 'source',
+    'truncated', 'cancelled', 'pending', 'overflow', 'normalized-source', 'prefixed-source', 'parent-source',
+])
 async def test_failed_unrelated_search_does_not_poison_complete_source_review(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str, artifact_runtime_root: Path,
 ) -> None:
+    if fault == 'normalized-source':
+        # Reuse the harness's private-storage configuration seam with a real
+        # spaced artifact root; all ownership and source operations remain real.
+        private_base = tmp_path.parent / f'{tmp_path.name}-source alias'
+        monkeypatch.setattr('daydream.artifacts.ownership._default_private_base', lambda: private_base)
     review = source_review(tmp_path, monkeypatch, source_bytes=400, files=2)
+    nonblocking = fault in {'search', 'optional', 'offset'}
 
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         if stage['scope_id'] != 'python':
             return
-        yield ToolStartEvent(id='optional-search', name='Bash', input={'command': 'rg absent_optional_hook .'})
-        yield ToolResultEvent(id='optional-search', output='', is_error=True, exit_code=1)
+        if fault not in {'search', 'custom'}:
+            yield RequestEvent(prompt=review.backend.calls[-1]['prompt'],
+                               output_schema=review.backend.calls[-1]['output_schema'],
+                               config=PiRequestConfig(no_extensions=fault != 'ambient', no_tools=False,
+                                                      schema_emulated=False))
         for path in stage['assigned_files']:
-            yield from read_source(review, path, f'complete-{path}')
+            yield from read_source(review, path, f'complete-{path}', stage=stage)
+        operands: dict[str, Any] = {'path': str(tmp_path / 'unavailable-optional.txt')}
+        if fault == 'offset':
+            operands.update(offset=2, limit=3)
+        elif fault == 'ambiguous':
+            operands['file_path'] = 'api.py'
+        elif fault == 'unsupported':
+            operands['encoding'] = 'utf8'
+        elif fault == 'source':
+            operands['path'] = 'api.py'
+        elif fault in {'normalized-source', 'prefixed-source', 'parent-source'}:
+            projection = next(window['access']['path'] for window in stage['source_access']
+                              if window['access'].get('path') is not None)
+            if fault == 'normalized-source':
+                assert 'source alias' in projection
+                operand = projection.replace('source alias', 'source\u00a0alias')
+            elif fault == 'parent-source':
+                target = tmp_path / 'alias' / 'deep'
+                target.mkdir(parents=True)
+                base = artifact_runtime_root.parent
+                link = base / 'source-link'
+                link.symlink_to(target, target_is_directory=True)
+                operand = str(link / '..' / Path(projection).relative_to(base))
+            else:
+                cwd = review.backend.calls[-1]['cwd']
+                operand = '@../../../' + os.path.relpath(projection, cwd.parents[2])
+                assert '..' in Path(operand).parts
+            operands.update(path=operand, offset=999999)
+        call = ToolStartEvent(id='optional-read', name='read', input=operands)
+        if fault == 'search':
+            call = ToolStartEvent(id='optional-read', name='Bash', input={'command': 'rg absent_optional_hook .'})
+        yield call
+        if fault != 'pending':
+            yield ToolResultEvent(id=call.id, output='x' * (2 * 1024 * 1024 + 1) if fault == 'overflow' else '',
+                                  is_error=True, exit_code=1, truncated=fault == 'truncated',
+                                  cancelled=fault == 'cancelled')
         output['candidates'] = [candidate(disposition='confirmed', finding=record())]
 
     review.backend.stage_response = response
-    await review.finish('python', findings=('Grounded defect',))
-    assert stage_ends(review, 'python')[0]['metadata']['observed_tool_starts'] == 3
+    await review.finish('python', findings=('Grounded defect',) if nonblocking else (),
+                        reason=None if nonblocking else 'evidence_incomplete')
+    metadata = stage_ends(review, 'python')[0]['metadata']
+    assert metadata['observed_tool_starts'] == 3
+    assert metadata['admitted'] is nonblocking
+    assert metadata['nonblocking_unavailable_reads'] == int(fault in {'optional', 'offset'})
+    assert metadata['blocking_pending_receipts'] == int(fault == 'pending')
 
 
 @pytest.mark.parametrize('outcome', ['success', 'second-rejection', 'capture-loss'])

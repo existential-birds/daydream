@@ -170,10 +170,12 @@ async def test_installed_pi_bounded_read_footer_is_verified_against_actual_sourc
 
 @pytest.mark.parametrize(('mode', 'defective'), [
     ('submitted', False), ('submitted', True), ('corrected', True), ('normalized', True),
-    ('length', True), ('prose', True), ('mixed', True), ('mixed-read-first', True),
+    ('length', True), ('prose', True), ('reminder', True), ('invalid-prose', True),
+    ('mixed', True), ('mixed-read-first', True),
     ('multiple', True), ('later-failed', True),
     ('host-rejected', True), ('exhausted', True), ('boundary-corrected', True),
-    ('over-limit-corrected', True), ('ordinary', True),
+    ('over-limit-corrected', True), ('ordinary', True), ('ordinary-reminder', True), ('optional-unavailable', True),
+    ('cancelled', True), ('deadline', True),
 ])
 async def test_installed_pi_native_output_through_review_runner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_pi: Path, mode: str, defective: bool,
@@ -190,6 +192,7 @@ async def test_installed_pi_native_output_through_review_runner(
     from tests.deep_orchestrator.test_review_completion import scopes
     from tests.deep_orchestrator.test_review_investigation import InvestigationRun, stage_ends
     from tests.deep_orchestrator.test_review_native_sources import NativeSourceBackend
+    from tests.harness.fake_clock import FakeClock
     from tests.harness.stub_backend import review_stage_state, stage_result
 
     repo = tmp_path / 'native_review'
@@ -201,6 +204,9 @@ async def test_installed_pi_native_output_through_review_runner(
     title = 'Greeting violates the retained world contract'
     ordinary_title = 'Native ordinary schema verdict applied'
     ordinary_events: list[AgentEvent] = []
+    native_events: list[AgentEvent] = []
+    prose_pending, release_prose = threading.Event(), threading.Event()
+    clock = FakeClock().install(monkeypatch) if mode == 'deadline' else None
 
     class Provider(BaseHTTPRequestHandler):
         def log_message(self, *_args: Any) -> None:
@@ -218,7 +224,7 @@ async def test_installed_pi_native_output_through_review_runner(
             text = ''
             finish = 'tool_calls'
             if stage is None:
-                assert mode == 'ordinary'
+                assert mode in {'ordinary', 'ordinary-reminder'}
                 tools = {tool['function']['name']: tool['function'] for tool in request['tools']}
                 assert 'read_source' not in tools and tools['structured_output']['parameters'] == SUPERVISE_SCHEMA
                 if not results:
@@ -230,7 +236,10 @@ async def test_installed_pi_native_output_through_review_runner(
                     verdicts = [{'id': item['id'], 'action': 'edit', 'reason': 'Native ordinary output applied',
                                  'severity': None, 'confidence': None, 'description': ordinary_title,
                                  'rationale': None, 'evidence': None} for item in items]
-                    calls = [('ordinary-submit', 'structured_output', {'verdicts': verdicts})]
+                    if mode == 'ordinary-reminder' and len(requests) == 4:
+                        text, finish = json.dumps({'verdicts': verdicts}), 'stop'
+                    else:
+                        calls = [('ordinary-submit', 'structured_output', {'verdicts': verdicts})]
             elif not results:
                 window = next(window for window in stage['source_access'] if window['side'] == 'after')
                 calls = [('source', 'read_source', {'target_id': window['target_ids'][0], 'side': 'after'})]
@@ -249,12 +258,18 @@ async def test_installed_pi_native_output_through_review_runner(
                                              'consequence': 'AssertionError', 'grounds': finding['evidence'],
                                              'disposition': 'confirmed', 'finding': finding}]
                 if len(results) == 1:
-                    if mode in {'corrected', 'length', 'exhausted', 'boundary-corrected', 'over-limit-corrected'}:
+                    if mode in {'corrected', 'length', 'exhausted', 'boundary-corrected', 'over-limit-corrected',
+                                'invalid-prose'}:
                         calls = [('invalid', 'structured_output', {})]
                         if mode == 'length':
                             finish = 'length'
-                    elif mode == 'prose':
+                    elif mode in {'prose', 'cancelled', 'deadline'} or mode == 'reminder' and len(requests) == 2:
                         text, finish = json.dumps(output), 'stop'
+                        if mode in {'cancelled', 'deadline'}:
+                            prose_pending.set()
+                            assert release_prose.wait(10), 'The runner must stop within its original allowance'
+                    elif mode == 'optional-unavailable':
+                        calls = [('optional-read', 'read', {'path': str(tmp_path / 'unrequested-missing.txt')})]
                     elif mode == 'multiple':
                         calls = [('first', 'structured_output', stage_result(stage)),
                                  ('last', 'structured_output', output)]
@@ -276,6 +291,15 @@ async def test_installed_pi_native_output_through_review_runner(
                     rejected = (mode == 'exhausted' or mode == 'boundary-corrected' and len(results) < 47
                                 or mode == 'over-limit-corrected' and len(results) < 48)
                     calls = [(f'correction-{len(results)}', 'structured_output', {} if rejected else output)]
+                elif mode == 'optional-unavailable':
+                    assert len(results) == 2 and 'ENOENT' in results[-1]['content']
+                    calls = [('after-optional', 'structured_output', output)]
+                elif mode == 'invalid-prose':
+                    assert len(results) == 2 and 'Validation failed' in results[-1]['content']
+                    if len(requests) == 3:
+                        text, finish = json.dumps(output), 'stop'
+                    else:
+                        calls = [('after-reminder', 'structured_output', output)]
                 else:
                     # Mixed and error batches naturally continue; a later failure supplies no replacement.
                     text, finish = 'Review complete.', 'stop'
@@ -311,7 +335,7 @@ async def test_installed_pi_native_output_through_review_runner(
     class NativeReview(NativeSourceBackend):
         async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
             stage = review_stage_state(prompt)
-            ordinary = mode == 'ordinary' and 'supervisor adjudication' in prompt.lower()
+            ordinary = mode in {'ordinary', 'ordinary-reminder'} and 'supervisor adjudication' in prompt.lower()
             if ordinary or stage is not None and stage['scope_id'] == 'python':
                 if stage is not None:
                     self.stages.append(stage)
@@ -321,6 +345,8 @@ async def test_installed_pi_native_output_through_review_runner(
                 async for event in PiBackend(model='native-test').execute(cwd, prompt, *args, **kwargs):
                     if ordinary:
                         ordinary_events.append(event)
+                    else:
+                        native_events.append(event)
                     yield event
                 return
             async for event in super().execute(cwd, prompt, *args, **kwargs):
@@ -328,7 +354,28 @@ async def test_installed_pi_native_output_through_review_runner(
 
     review.backend = NativeReview(repo)
     try:
-        assert await review.run() == 0
+        if mode in {'cancelled', 'deadline'}:
+            task = asyncio.create_task(review.run())
+            try:
+                pending = await asyncio.to_thread(prose_pending.wait, 30)
+                if task.done():
+                    await task
+                assert pending
+                if mode == 'cancelled':
+                    task.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+                else:
+                    assert clock is not None
+                    clock.advance(100_000)
+                    release_prose.set()
+                    assert await task == 0
+            finally:
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+        else:
+            assert await review.run() == 0
         completed_requests = len(requests)
         for pid in (isolated_pi / 'pids').read_text().splitlines():
             with pytest.raises(ProcessLookupError):
@@ -336,12 +383,20 @@ async def test_installed_pi_native_output_through_review_runner(
         await asyncio.sleep(0.05)
         assert len(requests) == completed_requests, 'Native recovery must stop when cancellation and reaping finish'
     finally:
+        release_prose.set()
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
-    admitted = mode not in {'prose', 'host-rejected', 'exhausted', 'over-limit-corrected'}
+    if mode == 'cancelled':
+        assert not review.output.exists()
+        interrupted = stage_ends(review, 'python')
+        assert len(interrupted) == 1 and interrupted[0]['metadata']['admitted'] is False
+        assert interrupted[0]['metadata']['observed_tool_starts'] == 1
+        assert len(requests) == 2
+        return
+    admitted = mode not in {'prose', 'host-rejected', 'exhausted', 'over-limit-corrected', 'deadline'}
     data = review.load()
-    expected_title = ordinary_title if mode == 'ordinary' else title
+    expected_title = ordinary_title if mode in {'ordinary', 'ordinary-reminder'} else title
     assert [finding['title'] for finding in data['findings']] == ([expected_title] if admitted and defective else [])
     assert scopes(data)['python']['status'] == ('complete' if admitted else 'incomplete')
     ends = stage_ends(review, 'python')
@@ -350,10 +405,20 @@ async def test_installed_pi_native_output_through_review_runner(
     assert metadata['admitted'] is admitted
     assert metadata['fresh_source_reads'] == (2 if mode in {'mixed', 'mixed-read-first'} else 1)
     expected_starts = (49 if mode in {'exhausted', 'over-limit-corrected'} else
-                       48 if mode == 'boundary-corrected' else 1 if mode == 'prose' else 3 if mode in {
-                           'corrected', 'length', 'mixed', 'mixed-read-first', 'multiple', 'later-failed'} else 2)
+                       48 if mode == 'boundary-corrected' else 1 if mode in {'prose', 'deadline'} else 3 if mode in {
+                           'corrected', 'length', 'mixed', 'mixed-read-first', 'multiple', 'later-failed',
+                           'optional-unavailable', 'invalid-prose'} else 2)
     assert metadata['observed_tool_starts'] == expected_starts
     assert metadata['remaining_tool_calls'] == max(0, metadata['hard_tool_call_allowance'] - expected_starts)
+    native_request = next(event for event in native_events if isinstance(event, RequestEvent))
+    assert isinstance(native_request.config, PiRequestConfig) and native_request.config.no_extensions is True
+    if mode == 'optional-unavailable':
+        failed = next(event for event in native_events if isinstance(event, ToolResultEvent)
+                      and event.id == 'optional-read')
+        assert failed.is_error and not failed.cancelled and not failed.truncated
+        assert metadata['source_access_failures'] == 0
+        assert metadata['nonblocking_unavailable_reads'] == 1
+        assert metadata['blocking_opaque_receipts'] == metadata['blocking_pending_receipts'] == 0
     if mode in {'exhausted', 'over-limit-corrected'}:
         assert metadata['hard_tool_call_allowance'] == 48 and metadata['submission_starts'] == 48
         assert scopes(data)['python']['reason_codes'] == ['host_tool_budget_exhaustion']
@@ -362,8 +427,8 @@ async def test_installed_pi_native_output_through_review_runner(
         assert metadata['hard_tool_call_allowance'] == 48 and metadata['submission_starts'] == 47
         assert metadata['failed_submissions'] == 46 and metadata['successful_submissions'] == 1
         assert len(requests) == 48
-    elif mode == 'ordinary':
-        assert len(requests) == 4
+    elif mode in {'ordinary', 'ordinary-reminder'}:
+        assert len(requests) == (5 if mode == 'ordinary-reminder' else 4)
         assert [event.name for event in ordinary_events if isinstance(event, ToolStartEvent)] == [
             'read', 'structured_output']
         ordinary_request = next(event for event in ordinary_events if isinstance(event, RequestEvent))
@@ -372,9 +437,22 @@ async def test_installed_pi_native_output_through_review_runner(
         assert result.structured_output_origin == 'native'
         assert isinstance(result.structured_output, dict)
         assert result.structured_output['verdicts'][0]['description'] == ordinary_title
+    elif mode == 'deadline':
+        assert len(requests) in {2, 3}, 'A raced reminder must stop when the native process is reaped'
+        assert scopes(data)['python']['reason_codes'] == ['host_wall_budget_exhaustion']
+    elif mode == 'invalid-prose':
+        assert len(requests) == 4
+        assert metadata['failed_submissions'] == metadata['successful_submissions'] == 1
     else:
-        continued = mode in {'corrected', 'length', 'mixed', 'mixed-read-first', 'later-failed'}
+        continued = mode in {'corrected', 'length', 'mixed', 'mixed-read-first', 'later-failed', 'reminder', 'prose',
+                            'optional-unavailable'}
         assert len(requests) == (3 if continued else 2)
+    reminders = [message for request in requests for message in request['messages']
+                 if message['role'] == 'user' and 'Assistant prose is not a submission.' in str(message['content'])]
+    if mode == 'deadline':
+        assert len(reminders) <= 1
+    else:
+        assert len(reminders) == (1 if mode in {'reminder', 'prose', 'ordinary-reminder', 'invalid-prose'} else 0)
     if mode == 'prose':
         assert scopes(data)['python']['reason_codes'] == ['missing_output']
     elif mode == 'host-rejected':

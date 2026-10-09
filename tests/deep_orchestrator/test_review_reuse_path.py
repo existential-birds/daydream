@@ -355,7 +355,7 @@ async def test_no_review_cache_disables_the_store_and_bypasses_the_exploration_c
 
 @pytest.mark.parametrize("damage", ["legacy", "corrupt", "incomplete", "head", "diff", "scope", "origin",
                                      "partial_payload", "malformed_payload", "unstaged", "prior-staged",
-                                     "contract-3", "contract-4"])
+                                     "contract-3", "contract-4", "contract-5"])
 async def test_legacy_cache_without_coverage_proof_recomputes_review(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     damage: str,
@@ -368,13 +368,15 @@ async def test_legacy_cache_without_coverage_proof_recomputes_review(
     downgraded = 0
     for manifest_path in entries.glob("*/manifest.json"):
         manifest = json.loads(manifest_path.read_text())
-        if damage in {"unstaged", "prior-staged", "contract-3", "contract-4"}:
+        if damage in {"unstaged", "prior-staged", "contract-3", "contract-4", "contract-5"}:
             if not manifest["unit"].startswith("shard:"):
                 continue
             if damage == "unstaged":
                 manifest["components"].pop("staged_review_contract")
             else:
-                manifest["components"]["staged_review_contract"] = {"contract-3": 3, "contract-4": 4}.get(damage, 2)
+                manifest["components"]["staged_review_contract"] = {
+                    "contract-3": 3, "contract-4": 4, "contract-5": 5,
+                }.get(damage, 2)
                 assert manifest['coverage']['status'] == 'complete'
             legacy_key = hashlib.sha256(json.dumps({
                 "format": manifest["format"], "unit": manifest["unit"], "components": manifest["components"],
@@ -410,13 +412,14 @@ async def test_legacy_cache_without_coverage_proof_recomputes_review(
         else:
             manifest["coverage"]["planned_scopes"][0]["files"] = ["foreign.py"]
         manifest_path.write_text(json.dumps(manifest))
-    assert damage not in {"unstaged", "prior-staged", "contract-3", "contract-4"} or downgraded > 0
+    assert damage not in {"unstaged", "prior-staged", "contract-3", "contract-4", "contract-5"} or downgraded > 0
     stub.calls.clear()
     assert await run(config) == 0
     assert _count_review_prompts(stub.calls) > 0
-    if damage not in {"partial_payload", "malformed_payload", "unstaged", "prior-staged", "contract-3", "contract-4"}:
+    if damage not in {"partial_payload", "malformed_payload", "unstaged", "prior-staged",
+                      "contract-3", "contract-4", "contract-5"}:
         assert _count_merge_prompts(stub.calls) > 0
-    if damage in {"unstaged", "prior-staged", "contract-3", "contract-4"}:
+    if damage in {"unstaged", "prior-staged", "contract-3", "contract-4", "contract-5"}:
         assert _reused_stacks(multi_stack_target / ".daydream/deep") == set()
     coverage = json.loads((multi_stack_target / ".daydream" / "deep" / "review-coverage.json").read_text())
     assert all(outcome["status"] == "complete" for outcome in coverage["stack_outcomes"])

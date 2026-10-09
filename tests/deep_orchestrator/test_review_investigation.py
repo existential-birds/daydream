@@ -46,7 +46,8 @@ class StagedBackend(EmptyReviewBackend):
         stage = review_stage_state(prompt)
         if stage is not None:
             self.stages.append(stage)
-            self.calls.append({'prompt': prompt, 'output_schema': args[0] if args else kwargs.get('output_schema'),
+            self.calls.append({'cwd': cwd, 'prompt': prompt,
+                               'output_schema': args[0] if args else kwargs.get('output_schema'),
                                **kwargs})
             if self.stage_delay is not None:
                 await asyncio.sleep(self.stage_delay(stage))

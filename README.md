@@ -671,7 +671,13 @@ resource limits, not new model allowances. Compact output/handoff views keep the
 missing association, failed required reads and full-retention overflow remain
 incomplete evidence. Supporting diff, index, intent and exploration inputs never
 establish source coverage; their compact clipping does not invalidate complete
-source receipts. Frozen source windows carry the original repository path, rename
+source receipts. A completed failed Pi built-in `read` of one absent, unambiguous absolute operand outside
+repository source, granted projections and supporting pointers is nonblocking only
+when a frozen recipe is supplied and ambient extensions are disabled. Ambiguous
+filename normalization remains blocking. It remains
+an opaque failed receipt and a charged start, supplies no coverage or reuse, and
+cannot excuse pending, unmatched, truncated, cancelled, overflowing or required
+source failures. Frozen source windows carry the original repository path, rename
 side, full revision/blob identity and exact line/byte range. Exact projections are
 written and revalidated through the owning artifact session. Pi also offers an
 invocation-local `read_source(target_id, side)` tool backed only by the frozen
@@ -690,6 +696,10 @@ assignment input. API-7 custom builders retain real legacy diff/index files unle
 they explicitly opt in. Structure receives a compact whole-change inventory and
 targeted bounded supporting parts; its interaction and default design duties
 remain whole-change reviews. Supporting reads remain distinct from source reads.
+Exact-path input capture permits 8 MiB combined, 1 MiB per item and 512 items;
+the inline allowance remains 12,288 bytes. The aggregate increase admits the
+measured 452-input, 4,670,624-byte Structure workload without dropping diff parts,
+source projections or catalogs. The independent count limit still applies.
 An optional catalog exposes those exact part pointers on demand through bounded
 12,000-byte files, with complete file/target inventory and no directory grant.
 Recipe-capable Structure uses native source selectors instead of duplicating
@@ -704,7 +714,7 @@ make targeted rereads within the existing allowance. Other roles retain
 bounded finalization. The existing 60-minute review ceilings remain outer
 safeguards; fix turns retain their separate 30-minute limit.
 
-Staged contract 5 invalidates older cached reviews. Each invocation has a
+Staged contract 6 invalidates older cached reviews. Each invocation has a
 strict assignment-specific schema and explicit four-key skeleton: triage targets
 are exactly empty; discovery may introduce candidates with an empty candidate ID.
 Tools-enabled Pi calls with a schema and validation use the invocation's exact
@@ -714,7 +724,10 @@ submission, including failed and replaced calls, counts as a tool start. The las
 successful normalized result in transcript order is host-validated only after
 clean process/stream settlement; later failed calls do not replace it. Assistant
 prose cannot supply native output, and host rejection never revives an older
-proposal. Native submission results supply no source coverage. Pi owns correction
+proposal. If a completed native invocation omitted submission, Pi adds one hidden
+native reminder and may continue under the original deadline and cumulative
+allowance. A second prose-only completion remains `missing_output`; errors,
+aborts and successful submissions do not trigger this reminder. Native submission results supply no source coverage. Pi owns correction
 in this mode; no host schema-only fresh stage attempt is added. Other backends
 and Pi's no-schema, no-tools, finalization and validation-opt-out paths preserve
 legacy behavior, including the eligible schema-only fresh attempt. Identity/source

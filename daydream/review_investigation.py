@@ -28,7 +28,7 @@ from daydream.review_evidence import (
 from daydream.review_result import reason_for_exception
 from daydream.trajectory import DaydreamPhase, LifecycleReasonCode, LifecycleStatus, phase_scope
 
-STAGED_REVIEW_CONTRACT = 5
+STAGED_REVIEW_CONTRACT = 6
 HANDOFF_MAX_BYTES = 64 * 1024
 HANDOFF_MAX_ITEMS = 128
 
@@ -214,6 +214,7 @@ class ReviewInvestigation:
         candidate_count = 0
         identity_failure = False
         source_access_failure = False
+        prepared: PreparedSanctionedInputs | None = None
         async with phase_scope(DaydreamPhase.DEEP, stage=f'review-{stage.replace('_', '-')}') as transition:
             prior_admitted = self.admitted_stages
             try:
@@ -349,7 +350,7 @@ class ReviewInvestigation:
                               'assignment_mismatch': 'Stage assignment identities rejected',
                               'missing_source_receipt': 'Required source receipt missing',
                               'source_access_failure': 'Frozen source access unavailable or rejected',
-                              'capture_loss': 'Required source evidence capture incomplete',
+                              'capture_loss': 'Review evidence capture incomplete',
                               'admission_failure': 'Stage evidence admission failed',
                               'quantitative_exhaustion': 'Review limit exhausted'}
                     self.failure_diagnostic = f"{labels.get(self.failure_class or '', 'Review stopped')}: {self.reason}"
@@ -366,6 +367,9 @@ class ReviewInvestigation:
                     schema_retry_eligible=retry_rejection is not None,
                     retry_feedback=rejection.to_dict() if rejection else None,
                     full_retained_bytes=evidence.full_retained_bytes,
+                    sanctioned_input_count=len(prepared.inputs) if prepared else 0,
+                    sanctioned_input_bytes=sum(item.size for item in prepared.inputs if not item.pointer_only)
+                    if prepared else 0,
                     compact_view_clipped=evidence.clipped,
                     native_truncated_results=evidence.native_truncated_results,
                     source_access_failures=evidence.source_access_failures + int(source_access_failure),
@@ -391,6 +395,9 @@ class ReviewInvestigation:
                                            and receipt.source.side == "after" for receipt in evidence.receipts),
                     retention_overflow_results=evidence.retention_overflow_results,
                     unmatched_results=evidence.unmatched_results,
+                    nonblocking_unavailable_reads=evidence.nonblocking_unavailable_reads,
+                    blocking_opaque_receipts=evidence.blocking_opaque_receipts,
+                    blocking_pending_receipts=evidence.blocking_pending_receipts,
                     failure_class=self.failure_class,
                     syntax_error=syntax_error,
                     stage_candidate_count=candidate_count,
