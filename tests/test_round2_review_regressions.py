@@ -74,6 +74,7 @@ async def test_pi_backend_honors_structured_output_opt_out() -> None:
         pathlib.Path("/tmp"),
         "Parse",
         output_schema=PER_STACK_RECORD_SCHEMA,
+        finalization=True,  # The excluded legacy path retains schema-aware prose selection.
     )
     validated = [e for e in events if isinstance(e, ResultEvent)]
     assert len(validated) == 1

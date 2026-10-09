@@ -704,15 +704,26 @@ make targeted rereads within the existing allowance. Other roles retain
 bounded finalization. The existing 60-minute review ceilings remain outer
 safeguards; fix turns retain their separate 30-minute limit.
 
-Staged contract 4 invalidates contract-3 cached reviews. Each invocation has a
+Staged contract 5 invalidates older cached reviews. Each invocation has a
 strict assignment-specific schema and explicit four-key skeleton: triage targets
 are exactly empty; discovery may introduce candidates with an empty candidate ID.
-JSON syntax errors and identity/source failures are terminal; only the existing
-schema-only fresh attempt remains. Diagnostics distinguish syntax, schema,
+Tools-enabled Pi calls with a schema and validation use the invocation's exact
+schema as a native `structured_output` tool. Pi parses, normalizes, validates and
+corrects tool arguments within the same cumulative allowance and deadline. Every
+submission, including failed and replaced calls, counts as a tool start. The last
+successful normalized result in transcript order is host-validated only after
+clean process/stream settlement; later failed calls do not replace it. Assistant
+prose cannot supply native output, and host rejection never revives an older
+proposal. Native submission results supply no source coverage. Pi owns correction
+in this mode; no host schema-only fresh stage attempt is added. Other backends
+and Pi's no-schema, no-tools, finalization and validation-opt-out paths preserve
+legacy behavior, including the eligible schema-only fresh attempt. Identity/source
+failures remain terminal. Diagnostics distinguish syntax, schema,
 assignment identity, source access/receipts, capture loss and quantitative
 exhaustion without exposing rejected values. Folded alternatives inherit
 Structure's actual failure reason and diagnostic, with no independent model call.
-Remaining-work/read estimates are transport floors, not proof of meaningful
+Read estimates remain read estimates; native stages add a separate submission
+and total start floor. These transport floors are not proof of meaningful
 native review capacity. Numeric call, deadline and token policies are unchanged;
 their adequacy requires repeated matched cold production measurements.
 

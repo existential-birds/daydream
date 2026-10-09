@@ -10,6 +10,7 @@ from typing import Any
 
 from daydream import agent
 from daydream.backends import Backend
+from daydream.backends.pi import PiBackend
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import StackAssignment
 from daydream.deep.sharding import file_change_bytes, pack_file_batches
@@ -27,7 +28,7 @@ from daydream.review_evidence import (
 from daydream.review_result import reason_for_exception
 from daydream.trajectory import DaydreamPhase, LifecycleReasonCode, LifecycleStatus, phase_scope
 
-STAGED_REVIEW_CONTRACT = 4
+STAGED_REVIEW_CONTRACT = 5
 HANDOFF_MAX_BYTES = 64 * 1024
 HANDOFF_MAX_ITEMS = 128
 
@@ -263,6 +264,20 @@ class ReviewInvestigation:
                             supporting_reads + remaining["current_stage_fresh_source_windows"])
                         remaining["read_estimate_scope"] = (
                             "Transport lower bound only; candidate and dependency investigation are additional.")
+                # Planning floor only; actual output authority comes from RequestEvent.
+                if isinstance(backend, PiBackend) and not (
+                    kwargs.get("tools_disabled") or kwargs.get("finalization")
+                    or kwargs.get("validate_structured_output") is False
+                ):
+                    state["max_attempts"] = 1
+                    remaining = state.setdefault("remaining_work", {})
+                    remaining["current_stage_submission_start_floor"] = 1
+                    triage_stages = (sum(candidate['disposition'] == 'open'
+                                         for candidate in self.handoff['candidates']) + 7) // 8
+                    remaining["remaining_submission_start_floor"] = max(
+                        1, remaining.get("stages", 1) + triage_stages)
+                    remaining["current_stage_total_start_floor"] = (
+                        remaining.get("current_stage_mandatory_read_estimate", 0) + 1)
                 evidence.configure_capture(cwd, allowance=FULL_REVIEW_MAX_BYTES - self.admitted_retained_bytes,
                                            sanctioned_inputs=prepared, reused_receipts=reused,
                                            snapshot_revisions=tuple(self.revision[key] for key in
@@ -301,7 +316,7 @@ class ReviewInvestigation:
                 candidate_count = len(output.get('candidates', [])) if isinstance(output, dict) else 0
                 if self.reason is None:
                     if (actual_rejection is not None and isinstance(output, agent.StructuredOutputFailure)
-                            and output.schema_retry_eligible
+                            and output.schema_retry_eligible and not evidence.native_output
                             and not evidence.capture_failure(files or state['assigned_files'], require_source=False,
                                                              interaction=stage == 'integration')):
                         retry_rejection = actual_rejection
@@ -356,6 +371,11 @@ class ReviewInvestigation:
                     source_access_failures=evidence.source_access_failures + int(source_access_failure),
                     reused_source_windows=sum(not access.get("read_required", True) and "reuse" in access
                                               for access in state.get("source_access", [])),
+                    native_output=evidence.native_output,
+                    submission_starts=evidence.output_starts,
+                    successful_submissions=evidence.output_successes,
+                    failed_submissions=evidence.output_failures,
+                    replaced_submissions=max(0, evidence.output_successes - 1),
                     fresh_source_reads=sum(receipt.complete and receipt.source is not None
                                            for receipt in evidence.receipts),
                     before_source_reads=sum(receipt.complete and receipt.source is not None

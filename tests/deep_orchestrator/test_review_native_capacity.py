@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from daydream.backends import AgentEvent, ToolResultEvent, ToolStartEvent
+from daydream.backends import AgentEvent, PiRequestConfig, RequestEvent, ToolResultEvent, ToolStartEvent
 from tests.deep_orchestrator.test_review_capture_and_retry import read_source, source_review
 from tests.deep_orchestrator.test_review_completion import scopes
 from tests.deep_orchestrator.test_review_investigation import InvestigationRun, stage_ends
@@ -71,6 +71,9 @@ async def test_all_41_files_and_late_contract_are_reviewed_within_192_native_sta
         if stage['scope_id'] != 'python':
             yield from completed_stage_reads(repo, stage)
             return
+        yield RequestEvent(prompt=review.backend.calls[-1]['prompt'],
+                           output_schema=stage['response_contract']['schema'],
+                           config=PiRequestConfig(schema_emulated=False, no_tools=False))
         assert stage['remaining_tool_calls'] <= 192
         bodies = {block['files'][0]: block['excerpt'] for block in stage['evidence']
                   if len(block['files']) == 1 and not block['partial']}
@@ -136,6 +139,12 @@ async def test_all_41_files_and_late_contract_are_reviewed_within_192_native_sta
                                          'consequence': 'The request omits dry_run', 'grounds': finding['evidence'],
                                          'disposition': 'confirmed', 'finding': finding}]
 
+        if not stage['progress']:
+            yield ToolStartEvent(id='failed-submit', name='structured_output', input={})
+            yield ToolResultEvent(id='failed-submit', output='Validation failed', is_error=True)
+        yield ToolStartEvent(id=f'submit-{len(supporting_reads)}', name='structured_output', input=output)
+        yield ToolResultEvent(id=f'submit-{len(supporting_reads)}', output='Submitted.', is_error=False)
+
     review.backend.stage_response = response
     await review.finish('python', findings=() if wired else ('Late request builder drops the parsed dry-run flag',))
     data = review.load()
@@ -145,6 +154,8 @@ async def test_all_41_files_and_late_contract_are_reviewed_within_192_native_sta
     metadata = [phase['metadata'] for phase in stage_ends(review, 'python')]
     assert metadata[0]['hard_tool_call_allowance'] == 192
     assert metadata[-1]['observed_tool_starts'] <= 192
+    assert sum(phase['submission_starts'] for phase in metadata) == len(metadata) + 1
+    assert metadata[-1]['observed_tool_starts'] == len(source_reads) + len(supporting_reads) + len(metadata) + 1
     assert source_reads.count(late) == 1 and len(set(source_reads)) == 41
     assert 42 <= len(source_reads) <= 46
     assert supporting_reads.count('review-assignment') == len(metadata)

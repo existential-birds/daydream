@@ -15,6 +15,7 @@ from daydream.dataset import LocalRecordStore
 from daydream.findings import FindingsValidationError, load_findings_artifact
 from daydream.phases import findings
 from daydream.phases.review import ReviewOutputError
+from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.console import collapse_panel_text
 from tests.harness.dataset import read_records
@@ -126,12 +127,14 @@ async def test_outcomes(review: ReviewRun, archive_dir: Path, case: str, state: 
         assert json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text()) == saved
 
 
-@pytest.mark.parametrize(('mode', 'reason'), [('missing', 'missing_output'), ('malformed', 'malformed_output'),
-                                             ('invalid', 'malformed_output'),
-                                             ('rejected-native', 'malformed_output'), ('text-only', None)])
-async def test_schema_output(review: ReviewRun, mode: str, reason: str | None) -> None:
-    payload = {'missing': None, 'text-only': None, 'invalid': {'issues': [{'id': 1}, 'invalid']}}.get(
-        mode, {'unexpected': []})
+@pytest.mark.parametrize(('mode', 'reason', 'payload'), [
+    ('missing', 'missing_output', None), ('malformed', 'malformed_output', {'unexpected': []}),
+    ('invalid', 'malformed_output', {'issues': [{'id': 1}, 'invalid']}),
+    ('rejected-native', 'malformed_output', {'unexpected': []}), ('text-only', None, None),
+    *[('invalid-envelope', 'malformed_output', payload) for payload in
+      ({}, {'issues': 'bad'}, {'issues': [{'description': 'unfinished'}]})],
+])
+async def test_schema_output(review: ReviewRun, mode: str, reason: str | None, payload: Any) -> None:
 
     def response(prompt: str) -> list[AgentEvent] | None:
         state = review_stage_state(prompt)
@@ -147,6 +150,9 @@ async def test_schema_output(review: ReviewRun, mode: str, reason: str | None) -
     data = review.load()
     assert data['terminal_result']['analysis_state'] == ('complete' if reason is None else 'incomplete')
     assert scopes(data)['python']['reason_codes'] == ([] if reason is None else [reason])
+    assert data['findings'] == []
+    saved = json.loads((review.repo / '.daydream/deep/stack-python-records.json').read_text())
+    assert saved['issues'] == [] and bool(saved.get('incomplete')) is (reason is not None)
 
 
 @pytest.mark.parametrize('case', ['live', 'dirty', 'no-diff', 'dirty-no-diff', 'interactive', 'mismatch',
@@ -383,6 +389,69 @@ async def test_required_phase_faults(review: ReviewRun, phase: str, reason: str)
         expected = 'incomplete' if phase == 'omitted' else 'failed'
         assert (outcome['status'], outcome['reason_codes']) == (expected, [reason])
         assert any('supervisor adjudication' in c['prompt'].lower() for c in review.backend.calls)
+
+
+@pytest.mark.parametrize('late_event', ['legacy-result', 'native-start'])
+@pytest.mark.parametrize('offset', [0, 1], ids=['at-deadline', 'after-deadline'])
+async def test_late_supervision_events_cannot_supply_reserved_finalization_or_replace_prior_findings(
+    review: ReviewRun, ext_dir: ExtDir, late_event: str, offset: int,
+) -> None:
+    import re
+
+    from daydream.backends import PiRequestConfig, RequestEvent
+    from daydream.phases.schemas import SUPERVISE_SCHEMA
+
+    fake = FakeClock().install(review.patch)
+    finalized: list[str] = []
+    marker = review.tmp / 'supervised-native-start.json'
+    ext_dir.write_module(
+        'from pathlib import Path\n'
+        'from daydream.extensions import ToolDecision\n'
+        'def supervise(name, tool_input, *, phase):\n'
+        '    if name == "structured_output":\n'
+        f'        Path({str(marker)!r}).write_text(name)\n'
+        '    return ToolDecision(veto=False)\n'
+        'def register(registry): registry.register_tool_supervisor(supervise)\n'
+    )
+    late_title = 'LATE_RESULT_MUST_NOT_REPLACE_PRIOR_FINDING'
+
+    def response(prompt: str) -> Any:
+        if prompt.startswith('INVESTIGATION HAS ENDED.'):
+            finalized.append(prompt)
+            assert late_title not in prompt
+            yield ResultEvent(structured_output={'verdicts': []}, continuation=None)
+        elif 'supervisor adjudication' in prompt.lower():
+            if late_event == 'native-start':
+                yield RequestEvent(prompt=prompt, output_schema=SUPERVISE_SCHEMA,
+                                   config=PiRequestConfig(schema_emulated=False, no_tools=False))
+            allowance = re.search(r'Investigation allowance: at most ([\d.e+-]+) seconds', prompt)
+            assert allowance is not None
+            fake.advance(float(allowance[1]) + offset)
+            proposal = {'verdicts': [{'id': 1, 'action': 'edit', 'reason': 'Late proposal',
+                                     'severity': None, 'confidence': None, 'description': late_title,
+                                     'rationale': None, 'evidence': None}]}
+            yield (ToolStartEvent(id='expired-native-submit', name='structured_output', input=proposal)
+                   if late_event == 'native-start' else ResultEvent(structured_output=proposal, continuation=None))
+
+    review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
+                                        review_by_stack={'structure': [record()]},
+                                        responder=lambda prompt: response(prompt) if (
+                                            prompt.startswith('INVESTIGATION HAS ENDED.')
+                                            or 'supervisor adjudication' in prompt.lower()) else None)
+    review.backend.merge_echo_records = True
+    assert await review.run() == 0
+    data = review.load()
+    assert [finding['title'] for finding in data['findings']] == ['Grounded defect']
+    assert len(finalized) == 1, 'A result arriving after expiry must not become the legacy fallback checkpoint'
+    outcome = next(phase for phase in data['terminal_result']['phase_outcomes'] if phase['phase'] == 'supervision')
+    assert outcome['status'] == 'incomplete' and outcome['reason_codes'] == ['host_wall_budget_exhaustion']
+    assert all(scope['status'] == 'complete' for scope in scopes(data).values())
+    if late_event == 'native-start':
+        assert marker.read_text() == 'structured_output'
+        trajectory = json.loads((review.tmp / 'trajectory.json').read_text())
+        starts = [call['tool_call_id'] for trace in [trajectory, *trajectory['extra']['subtrajectories']]
+                  for step in trace.get('steps', []) for call in step.get('tool_calls') or []]
+        assert starts.count('expired-native-submit') == 1
 
 
 @pytest.mark.parametrize('fault', ['absent-install', 'prior-install', 'staging'])

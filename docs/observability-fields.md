@@ -92,6 +92,13 @@ Emitted by `SpanScope`/`TraceSession` common attributes
 
 Emitted from closed typed `EffectiveRequestConfig` facts only; every admitted
 parameter has exact bounds (`daydream/backends/*.py`, request events).
+Pi's `schema_emulated=False` with a supplied schema means invocation-native tool
+schema validation; it does not claim server-constrained decoding. Selected-tool
+counts include the registered submission tool where an explicit allowlist is used.
+Native provider generations retain their own timing/token/cost records; additional
+correction generations are not host fresh attempts or additional tool starts.
+Staged transitions separately report submission starts, successes, failures and
+replaced successes; source receipt counters exclude output control.
 
 | field name | source backend/event | source authority/provenance | owning span | type | unit | cardinality | derivation | completeness | capture/redaction | generic OTLP disposition | HoneyHive canonical destination | LangSmith native destination | offline test node | live evidence status | applicability and omission reason |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |

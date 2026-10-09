@@ -771,7 +771,10 @@ async def test_shared_intent_uses_actual_transport_allowance_after_required_assi
     else:
         await review.finish('python', findings=('Grounded defect',), file_config=DaydreamFileConfig(supervisor='off'))
     event, = stage_ends(review, 'python')
-    assert event['metadata']['compact_view_clipped'] is (not sandbox)
+    # Full supporting intent is separate from the small, complete source compact view.
+    assert event['metadata']['compact_view_clipped'] is False
+    if not sandbox:
+        assert event['metadata']['full_retained_bytes'] > len(shared_intent.encode())
     assert event['metadata']['observed_tool_starts'] == (2 if sandbox else 3)
 
 
@@ -864,6 +867,10 @@ async def test_final_turn_selection_distinguishes_inferred_text_from_native_stru
     events = stage_ends(review, 'python')
     assert len(events) == (2 if selection == 'text-origin-nested' else 1)
     assert events[-1]['metadata']['admitted'] is (selection == 'native-prose')
+    if selection == 'text-origin-nested':
+        metadata = events[-1]['metadata']
+        assert metadata['observed_tool_starts'] == 4 and metadata['remaining_tool_calls'] == 44
+        assert metadata['schema_rejection']['error_count'] > 0
 
 
 async def test_opaque_assignment_handles_cannot_alias_real_changed_filenames(
@@ -1070,8 +1077,8 @@ async def test_old_only_hunk_and_later_continuations_keep_their_own_canonical_ra
         assert combined.count(f'LATER_REQUIRED_CHANGE_{index:04}') == 1
 
 
-@pytest.mark.parametrize('fault', ['missing-notes', 'wrong-type-notes'])
-async def test_schema_only_field_shape_rejection_still_allows_one_fresh_attempt(
+@pytest.mark.parametrize('fault', ['missing-notes', 'wrong-type-notes', 'native-missing-notes'])
+async def test_schema_only_field_shape_rejection_uses_backend_correction_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
 ) -> None:
     review = source_review(tmp_path, monkeypatch, source_bytes=400, files=2)
@@ -1081,13 +1088,18 @@ async def test_schema_only_field_shape_rejection_still_allows_one_fresh_attempt(
         nonlocal attempts
         if stage['scope_id'] != 'python':
             return
+        if fault == 'native-missing-notes':
+            from daydream.backends import PiRequestConfig, RequestEvent
+            yield RequestEvent(prompt=review.backend.calls[-1]['prompt'],
+                               output_schema=stage['response_contract']['schema'],
+                               config=PiRequestConfig(schema_emulated=False, no_tools=False))
         attempts += 1
         for path in stage['assigned_files']:
             yield from read_source(review, path, f'fresh-{attempts}-{path}')
         if attempts == 1:
             output['candidates'] = [candidate(disposition='confirmed', finding=dict(
                 record(), description='FAILED_SCHEMA_ONLY_ATTEMPT'))]
-            if fault == 'missing-notes':
+            if fault in {'missing-notes', 'native-missing-notes'}:
                 output.pop('notes')
             else:
                 output['notes'] = 3
@@ -1099,11 +1111,13 @@ async def test_schema_only_field_shape_rejection_still_allows_one_fresh_attempt(
             output['candidates'] = [candidate(disposition='confirmed', finding=record())]
 
     review.backend.stage_response = response
-    await review.finish('python', findings=('Grounded defect',))
-    assert attempts == 2
+    native = fault == 'native-missing-notes'
+    await review.finish('python', reason='malformed_output' if native else None,
+                        findings=() if native else ('Grounded defect',))
+    assert attempts == (1 if native else 2)
     events = stage_ends(review, 'python')
-    assert [event['metadata']['admitted'] for event in events] == [False, True]
-    assert events[-1]['metadata']['observed_tool_starts'] == 4
+    assert [event['metadata']['admitted'] for event in events] == ([False] if native else [False, True])
+    assert events[-1]['metadata']['observed_tool_starts'] == (2 if native else 4)
 
 
 @pytest.mark.parametrize('nonempty', [False, True], ids=['clean-interaction', 'unread-candidate'])

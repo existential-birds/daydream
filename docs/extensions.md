@@ -601,7 +601,7 @@ supported versions; migrate the callable to accept this kwarg and declare
   bounded-read LF representation, including its exact continuation footer, is
   verified against frozen bytes; native results and completion flags remain
   unchanged. Unknown wrappers, forged footers and truncation supply no coverage.
-  Complete contract-3 cache entries miss the new source/input/schema contract.
+  Complete older cache entries miss staged contract 5.
 - `assignment_parts` describes each required target: `target_id`, `file`,
   one-based `part_index`, `part_count`, and `kind` (`file`, `hunk`, or
   `continuation`). Split hunks include zero-based `hunk_index`, `old_start`,
@@ -618,6 +618,8 @@ supported versions; migrate the callable to accept this kwarg and declare
   evidence are supplied. `closed_candidate_ids` are handles for reporting
   contradictions, not permission to reopen decisions. No new discovery occurs
   during triage.
+- `remaining_work` keeps source/read estimates separate from native submission
+  and total start floors. These are optimistic transport hints, not quality proof.
 - `advisory_tool_call_target` suggests a compact stage workload;
   `remaining_tool_calls` is the hard remaining cumulative allowance.
   `observed_tool_starts` includes retries and the received start exceeding the
@@ -631,15 +633,19 @@ supported versions; migrate the callable to accept this kwarg and declare
   admitted whole within the transport budget. Missing context is advisory and
   cannot establish evidence; any necessary pointer reads consume tool calls.
   Triage receives admitted candidate context rather than whole-review inputs.
-- `attempt` is 1 or 2, with `max_attempts=2`. Only a normally completed,
-  complete object rejected at the strict schema selection boundary may receive
+- `attempt` is 1 or 2, with `max_attempts=2` on legacy paths and 1 for native Pi.
+  Only a normally completed,
+  complete object on a legacy output path rejected at the strict schema selection boundary may receive
   one fresh stage attempt. `schema_rejection` contains bounded validator
   `category`, host `schema_path`, `error_count`, and `candidate_count`, never
   rejected values or arbitrary unknown property names. The selected registered
   builder runs anew for every stage and attempt. Rejected evidence, notes and
   candidates are discarded; necessary source grounding must be obtained anew.
   There is no serializer recovery, conversation continuation, reserve, extra
-  calls, deadline reset or `max_turns`. Backend transport retries remain separate.
+  calls, deadline reset or `max_turns`. Native tools-enabled Pi instead owns
+  schema correction within its invocation; its errors consume the same allowance
+  and deadline and never trigger this host fresh attempt. Backend transport
+  retries remain separate.
   Retry eligibility also checks the untouched rejected candidate for independent
   terminal identity, contradiction, grounding and handoff failures. A schema
   error combined with one of these failures does not permit a fresh attempt.
@@ -655,8 +661,18 @@ the backend inferred a candidate from assistant text. Staged callers validate
 the complete final assistant turn for text-derived candidates, excluding earlier
 planning/tool-turn prose. Native structured results remain authoritative despite
 prose. The final-turn text buffer is bounded to 128 KiB; overflow is terminal,
-never a truncated candidate or a schema-retry witness. Other consumers retain
-their existing extraction behavior. Pi forwards typed native tool truncation,
+never a truncated candidate or a schema-retry witness. Pi activates native output from existing schema/validation/tools arguments;
+`RequestEvent` with typed `PiRequestConfig.schema_emulated=False` and a schema
+identifies native tool validation, not provider-constrained decoding. Native mode
+accepts only the last successful finalized `structured_output` details in
+transcript order after EOF/reap and clean settlement, bounded to 128 KiB. Failed
+submissions do not replace prior successes; a selected host-invalid success
+cannot fall back to earlier output. Both assistant-text fallback and prose
+checkpoints are disabled. Mixed batches and native corrections remain ordinary
+charged work. Invocation-authorized submission tools are output control, excluded
+from source receipts and compact source retention; their recoverable errors do
+not invalidate source evidence. No-schema, no-tools/finalization and explicit
+validation opt-out preserve their text behavior. API remains 7. Pi forwards typed native tool truncation,
 exit, status and cancellation metadata; printed notices are not capture authority.
 
 Build the stage prompt from its assignment and semantic policy. Do not append a
@@ -699,7 +715,7 @@ stage, attempt, observed starts, remaining hard allowance, advisory target,
 admission, safe schema rejection, retained bytes and compact clipping separately
 from native truncation and host retention overflow. Diagnostics distinguish
 quantitative exhaustion, schema rejection, capture loss and admission failure.
-Stage contract **3** invalidates complete contract-2 cache entries. ATIF is
+Stage contract **5** invalidates older complete cache entries. ATIF is
 optional recording, never the admission authority; other evidence finalization
 consumers preserve their existing behavior.
 

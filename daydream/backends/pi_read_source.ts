@@ -1,4 +1,4 @@
-/** Invocation-local frozen-source access. No path or execution arguments are accepted. */
+/** Invocation-local frozen-source access and exact-schema final submission. */
 import { constants, closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -16,24 +16,42 @@ export default function (pi: ExtensionAPI) {
   } finally {
     closeSync(fd);
   }
-  const windows = packet.windows;
-  if (!Array.isArray(windows)) throw new Error("Frozen source packet unavailable");
-  pi.registerTool({
-    name: "read_source",
-    label: "Read frozen source",
-    description: "Read one supplied before/after source window by assigned target ID and captured side.",
-    promptSnippet: "Read frozen before/after source windows using supplied target_id and side.",
-    defaultActive: false,
-    parameters: Type.Object({ target_id: Type.String(), side: Type.Union([Type.Literal("before"), Type.Literal("after")]) },
-                            { additionalProperties: false }),
-    async execute(_callId, params, signal) {
-      if (signal?.aborted) throw new Error("Frozen source read cancelled");
-      const matches = windows.filter((entry: any) => entry.source.side === params.side &&
-                                    entry.source.target_ids.includes(params.target_id));
-      if (matches.length !== 1) throw new Error("Frozen source selector unavailable");
-      const text = JSON.stringify(matches[0]);
-      if (Buffer.byteLength(text, "utf8") > 2 * 1024 * 1024) throw new Error("Frozen source window exceeds bound");
-      return { content: [{ type: "text", text }] };
-    },
-  });
+  if (!packet || typeof packet !== "object" || Array.isArray(packet)) throw new Error("Invocation packet unavailable");
+  if ("windows" in packet) {
+    const windows = packet.windows;
+    if (!Array.isArray(windows)) throw new Error("Frozen source packet unavailable");
+    pi.registerTool({
+      name: "read_source",
+      label: "Read frozen source",
+      description: "Read one supplied before/after source window by assigned target ID and captured side.",
+      promptSnippet: "Read frozen before/after source windows using supplied target_id and side.",
+      defaultActive: false,
+      parameters: Type.Object({ target_id: Type.String(), side: Type.Union([Type.Literal("before"), Type.Literal("after")]) },
+                              { additionalProperties: false }),
+      async execute(_callId, params, signal) {
+        if (signal?.aborted) throw new Error("Frozen source read cancelled");
+        const matches = windows.filter((entry: any) => entry.source.side === params.side &&
+                                      entry.source.target_ids.includes(params.target_id));
+        if (matches.length !== 1) throw new Error("Frozen source selector unavailable");
+        const text = JSON.stringify(matches[0]);
+        if (Buffer.byteLength(text, "utf8") > 2 * 1024 * 1024) throw new Error("Frozen source window exceeds bound");
+        return { content: [{ type: "text", text }] };
+      },
+    });
+  }
+  if ("output_schema" in packet) {
+    if (!packet.output_schema || typeof packet.output_schema !== "object" || Array.isArray(packet.output_schema)) {
+      throw new Error("Output schema unavailable");
+    }
+    pi.registerTool({
+      name: "structured_output",
+      label: "Structured Output",
+      description: "Submit the final result. Call this tool alone as your final action.",
+      promptSnippet: "Submit the final structured result",
+      parameters: packet.output_schema,
+      async execute(_toolCallId, params) {
+        return { content: [{ type: "text", text: "Structured result submitted." }], details: params, terminate: true };
+      },
+    });
+  }
 }

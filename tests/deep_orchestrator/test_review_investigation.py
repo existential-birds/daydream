@@ -10,7 +10,17 @@ from typing import Any
 
 import pytest
 
-from daydream.backends import AgentEvent, MaxTurnsError, ResultEvent, ToolResultEvent, ToolStartEvent
+from daydream.backends import (
+    AgentEvent,
+    MaxTurnsError,
+    PiRequestConfig,
+    RequestEvent,
+    ResultEvent,
+    TextEvent,
+    ToolResultEvent,
+    ToolStartEvent,
+    TurnEndEvent,
+)
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
 from tests.deep_orchestrator.test_review_completion import ReviewRun, record, scopes
@@ -366,6 +376,7 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
     backend = review.backend
     dispatch_deadlines: list[float] = []
     deadline_test_wall_s = 60
+    no_tool_turns = 0
 
     if stop == 'deadline':
         def delay_later_provider(stage: dict[str, Any]) -> float:
@@ -375,14 +386,39 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
                                   backend.calls[-1]['prompt'])
             assert allowance is not None
             dispatch_deadlines.append(asyncio.get_running_loop().time() + float(allowance[1]))
-            # Leave real Git preparation and the first admission unstalled. The
-            # later provider alone outlives the existing absolute deadline.
-            return deadline_test_wall_s * 2 if stage['progress'] else 0
+            return 0
 
+        class ProseDeadlineBackend(StagedBackend):
+            async def execute(self, cwd: Path, prompt: str, *args: Any,
+                              **kwargs: Any) -> AsyncIterator[AgentEvent]:
+                nonlocal no_tool_turns
+                stage = review_stage_state(prompt)
+                if stage is not None and stage['scope_id'] == 'python' and stage['progress']:
+                    self.stages.append(stage)
+                    self.calls.append({'prompt': prompt, **kwargs})
+                    delay_later_provider(stage)
+                    yield RequestEvent(prompt=prompt, output_schema=stage['response_contract']['schema'],
+                                       config=PiRequestConfig(schema_emulated=False, no_tools=False))
+                    proposal = stage_result(stage, candidates=[candidate(disposition='confirmed', finding=dict(
+                        record(), description='Unadmitted prose checkpoint'))])
+                    while True:
+                        no_tool_turns += 1
+                        yield TextEvent(text=json.dumps(proposal))
+                        yield TurnEndEvent()
+                        await asyncio.sleep(1)
+                else:
+                    async for event in super().execute(cwd, prompt, *args, **kwargs):
+                        yield event
+
+        backend = ProseDeadlineBackend(review.repo)
+        review.backend = backend
         backend.stage_delay = delay_later_provider
 
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         if stage['scope_id'] == 'python':
+            yield RequestEvent(prompt=backend.calls[-1]['prompt'],
+                               output_schema=stage['response_contract']['schema'],
+                               config=PiRequestConfig(schema_emulated=False, no_tools=False))
             if not stage['progress']:
                 output['targets'] = []
                 for path in stage['assigned_files']:
@@ -394,13 +430,18 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
                 assert "return 'world'" in (review.repo / 'api.py').read_text()
                 output['candidates'] = [dict(candidate(disposition='confirmed', finding=record()),
                                              grounds="api.py:1-2 defines hello() and returns 'world'.")]
+                yield ToolStartEvent(id='admitted-submit', name='structured_output', input=output)
+                yield ToolResultEvent(id='admitted-submit', output='Submitted.', is_error=False)
                 return
+            yield ToolStartEvent(id='later-submit', name='structured_output', input=output)
+            yield ToolResultEvent(id='later-submit', output='Submitted.', is_error=False)
             yield ResultEvent(structured_output=stage_result(stage, candidates=[
                 candidate(disposition='confirmed', finding=dict(record(), description='Unadmitted defect'))]),
                 continuation=None)
             if stop == 'tool':
-                for i in range(stage['remaining_tool_calls'] + 1):
-                    yield ToolStartEvent(id=f'cutoff-{i}', name='Read', input={'file_path': 'api.py'})
+                for i in range(stage['remaining_tool_calls']):
+                    yield ToolStartEvent(id=f'cutoff-{i}', name='structured_output', input={})
+                    yield ToolResultEvent(id=f'cutoff-{i}', output='Validation failed', is_error=True)
             else:
                 raise MaxTurnsError('model exhausted') if stop == 'model' else RuntimeError('backend unavailable')
 
@@ -415,13 +456,18 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
     assert admitted['status'] == 'succeeded'
     assert admitted['metadata']['observed_tool_starts'] > 0
     assert stopped['metadata']['observed_tool_starts'] == (
-        49 if stop == 'tool' else admitted['metadata']['observed_tool_starts'])
+        49 if stop == 'tool' else admitted['metadata']['observed_tool_starts']
+        + (0 if stop in {'builder', 'deadline'} else 1))
     assert scopes(data)['python']['partial_evidence'] is True
     assert (stopped['status'], stopped.get('reason_code')) == (
         ('timed_out', 'timed_out') if stop == 'deadline' else ('failed', 'domain_failure'))
     assert [stage['stage'] for stage in backend.stages if stage['scope_id'] == 'python'] == (
         ['first_pass'] if stop == 'builder' else ['first_pass'] * 2)
     if stop == 'deadline':
+        assert no_tool_turns > 1
+        assert stopped['metadata']['native_output'] is True
+        assert stopped['metadata']['submission_starts'] == stopped['metadata']['fresh_source_reads'] == 0
+        assert stopped['metadata']['admitted'] is False
         assert len(dispatch_deadlines) == 2
         # The prompt allowance precedes provider entry and is therefore an
         # upper bound on the deadline. Variable dispatch overhead may lower

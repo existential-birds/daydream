@@ -9,7 +9,16 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent, TurnEndEvent
+from daydream.backends import (
+    AgentEvent,
+    PiRequestConfig,
+    RequestEvent,
+    ResultEvent,
+    TextEvent,
+    ToolResultEvent,
+    ToolStartEvent,
+    TurnEndEvent,
+)
 from daydream.json_utils import extract_json_by_schema, validates_schema
 from daydream.prompt_budget import PreparedSanctionedInputs, truncate_utf8_to_budget
 from daydream.review_source import SourceRecipe, SourceWindow
@@ -186,6 +195,11 @@ class ReviewEvidence:
 
     def reset(self) -> None:
         """A retry must not inherit a failed attempt's evidence or findings."""
+        self.native_output = False
+        self.output_calls: set[str] = set()
+        self.output_starts = 0
+        self.output_successes = 0
+        self.output_failures = 0
         self.pending: dict[str, str] = {}
         self.blocks: list[str] = []
         self.seen: set[str] = set()
@@ -330,15 +344,18 @@ class ReviewEvidence:
             if not receipt.complete or not relevant:
                 continue
             mixed = receipt.opaque or not set(receipt.paths) <= files
+            partial = mixed or len(receipt.result.output.encode()) > 12000
             block = {
-                'files': sorted(relevant), 'partial': mixed or len(receipt.result.output.encode()) > 12000,
+                'files': sorted(relevant), 'partial': partial,
                 'excerpt': ('[mixed receipt omitted from this assignment; targeted reread remains available]'
                             if mixed else truncate_utf8_to_budget(receipt.result.output, 12000,
                                                                  '[partial tool excerpt]')),
             }
+            self.clipped |= partial
             block_size = len(json.dumps(block, ensure_ascii=False).encode())
             if size + block_size + marker_size > 48000 or len(blocks) >= 63:
                 blocks.append({**marker, "omitted_receipts": len(retained) - index})
+                self.clipped = True
                 break
             blocks.append(block)
             size += block_size
@@ -442,31 +459,45 @@ class ReviewEvidence:
         return self.schema is not None and validates_schema(value, self.schema)
 
     def observe(self, event: AgentEvent) -> None:
+        if isinstance(event, RequestEvent):
+            self.native_output = (isinstance(event.config, PiRequestConfig)
+                                  and event.output_schema is not None
+                                  and event.config.schema_emulated is False)
+        if self.native_output:
+            if isinstance(event, ToolStartEvent) and event.name == "structured_output":
+                self.output_starts += 1
+                if len(self.output_calls) < FULL_RECEIPT_MAX_COUNT:
+                    self.output_calls.add(_association_key(event.id))
+                return
+            if isinstance(event, ToolResultEvent) and _association_key(event.id) in self.output_calls:
+                self.output_calls.remove(_association_key(event.id))
+                if event.is_error:
+                    self.output_failures += 1
+                else:
+                    self.output_successes += 1
+                return
         if self.full_capture and isinstance(event, (ToolStartEvent, ToolResultEvent)):
+            # Staged callers use complete receipts and compact_for_files, never
+            # the legacy no-tools finalization transcript below.
             self._observe_receipt(event)
+            return
         if isinstance(event, ToolStartEvent):
             if len(self.pending) >= 64:
                 self.pending.pop(next(iter(self.pending)))
                 self.omitted += 1
-                if self.full_capture:
-                    self.clipped = True
-            key = _association_key(event.id) if self.full_capture else event.id
-            name = event.name if not self.full_capture or _metadata_fits(event.name) else '[tool metadata omitted]'
-            self.pending[key] = truncate_utf8_to_budget(
-                json.dumps({"tool": name, "input": event.input}, sort_keys=True), 2048, "[call truncated]",
+                self.clipped = True
+            self.pending[event.id] = truncate_utf8_to_budget(
+                json.dumps({"tool": event.name, "input": event.input}, sort_keys=True), 2048, "[call truncated]",
             )
         elif isinstance(event, ToolResultEvent):
-            key = _association_key(event.id) if self.full_capture else event.id
-            call = self.pending.pop(key, None)
+            call = self.pending.pop(event.id, None)
             if call is None:
                 self.omitted += 1
                 return
             output = truncate_utf8_to_budget(event.output, 12000, "[tool output truncated]")
-            metadata_overflow = self.full_capture and not _metadata_fits(event.status)
-            self.clipped |= metadata_overflow
             status = json.dumps({
                 "exit_code": event.exit_code,
-                "status": '[native metadata omitted; retention overflow]' if metadata_overflow else event.status,
+                "status": event.status,
                 "cancelled": event.cancelled, "truncated": event.truncated,
             }, sort_keys=True)
             block = f"{call}\nerror={event.is_error}\n{status}\n{output}"
@@ -482,10 +513,10 @@ class ReviewEvidence:
             self.blocks.append(block)
             self.retained_bytes += size
             self.clipped |= output != event.output or bool(event.truncated)
-        elif isinstance(event, TextEvent):
+        elif isinstance(event, TextEvent) and not self.native_output:
             self.text = truncate_utf8_to_budget(self.text + event.text, 48000, "[text truncated]")
         elif isinstance(event, TurnEndEvent):
-            if self.schema is not None:
+            if self.schema is not None and not self.native_output:
                 parsed = extract_json_by_schema(self.text, schema=self.schema, accept=validates_schema).value
                 if self.valid(parsed):
                     self.checkpoint = parsed

@@ -72,6 +72,7 @@ from daydream.review_source import SourceRecipe
 # Mirror Codex's generous stdout cap so large JSONL events (big file reads,
 # patch payloads) do not trip asyncio's "chunk is longer than limit" guard.
 _PI_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
+_PI_FINAL_PAYLOAD_MAX_BYTES = 128 * 1024
 
 # Known AgentSessionEvent types. Used to decide whether the first
 # stdout line — the session header — also carries a dispatchable event type.
@@ -79,6 +80,7 @@ _PI_EVENT_TYPES: frozenset[str] = frozenset(
     {
         "agent_start",
         "agent_end",
+        "agent_settled",
         "turn_start",
         "turn_end",
         "message_start",
@@ -418,11 +420,11 @@ def _render_tool_result(result: Any) -> str:
     return json.dumps(result, ensure_ascii=False) if result else ""
 
 
-def _tool_completion_metadata(event: dict[str, Any]) -> dict[str, Any]:
+def _tool_completion_metadata(event: dict[str, Any], *, output_control: bool = False) -> dict[str, Any]:
     """Retain explicit native completion fields; rendered notices are not authority."""
     result = event.get('result')
     result = result if isinstance(result, dict) else {}
-    details = result.get('details')
+    details = None if output_control else result.get('details')
     details = details if isinstance(details, dict) else {}
     truncation = details.get('truncation')
     truncation = truncation if isinstance(truncation, dict) else {}
@@ -457,7 +459,7 @@ def _extract_usage(message: dict[str, Any]) -> dict[str, Any]:
 
 
 def _schema_instruction(schema: dict[str, Any]) -> str:
-    """Append a schema instruction; Pi has no native schema flag and parses at agent_end."""
+    """Append the schema for excluded modes that retain prose serialization."""
     return (
         "\n\nRespond with ONLY a single valid JSON object matching this JSON "
         "schema. Do not include any prose, explanations, or markdown fences "
@@ -569,8 +571,9 @@ class PiBackend:
     ) -> AsyncGenerator[AgentEvent, None]:
         """Yield Pi events; a turn error raises PiError and nonempty agents are unsupported.
 
-        Schemas are appended to the prompt and final assistant text is parsed at
-        agent_end. Pi tokens resume via --session-id when persistence is enabled;
+        Tools-enabled schema requests submit through Pi's exact-schema output tool;
+        excluded modes retain assistant-text serialization. Pi tokens resume via
+        --session-id when persistence is enabled;
         persist_session=False uses --no-session and suppresses continuation.
 
         read_only allows read/find/ls/grep. finalization disables tools, substitutes
@@ -588,6 +591,9 @@ class PiBackend:
             )
 
         args: list[str] = ["pi", "--mode", "json"]
+        native_output = (output_schema is not None and validate_structured_output
+                         and not (finalization or tools_disabled))
+        source_enabled = source_recipe is not None and not (finalization or tools_disabled)
 
         configured_model = None
         if self._model_override is None:
@@ -702,7 +708,8 @@ class PiBackend:
         if finalization or tools_disabled:
             args.append("--no-tools")
         elif read_only:
-            args.extend(["--tools", _PI_READ_ONLY_TOOLS + (",read_source" if source_recipe is not None else "")])
+            args.extend(["--tools", _PI_READ_ONLY_TOOLS + (",read_source" if source_enabled else "")
+                         + (",structured_output" if native_output else "")])
 
         resume_id: str | None = None
         if persist_session and continuation and continuation.backend == "pi":
@@ -717,7 +724,9 @@ class PiBackend:
         args.append("--no-skills")
 
         full_prompt = prompt
-        if output_schema and not (require_complete_root and _stage_supplies_schema(prompt, output_schema)):
+        if native_output:
+            full_prompt += "\n\nSubmit the final result using structured_output alone as your final action."
+        elif output_schema and not (require_complete_root and _stage_supplies_schema(prompt, output_schema)):
             full_prompt = prompt + _schema_instruction(output_schema)
 
         # P18 Task 1: generation lifecycle correlation state (Pi only —
@@ -730,6 +739,10 @@ class PiBackend:
         session_id: str | None = None
         last_assistant_text: str | None = None
         structured_result: Any = None
+        # Finalized toolResult messages supply transcript order; this tracks only
+        # association/settlement, never proposal order or completion-time ranking.
+        submission_calls: dict[str, str] = {}
+        pending_submission: Any = None
         # Non-JSON lines (stderr merged into stdout, pi diagnostic output, etc.)
         # captured for error reporting when the process exits non-zero.
         stderr_lines: list[str] = []
@@ -744,8 +757,16 @@ class PiBackend:
         finish_reason: str | None = None
         saw_finish_reason = False
         saw_turn_start = False
+        saw_native_settlement = False
 
         transport: CliTransport | None = None
+
+        def associate_submission(call_id: Any, expected: str | None, state: str) -> None:
+            if (not isinstance(call_id, str) or not call_id or len(call_id.encode()) > 2048
+                    or submission_calls.get(call_id) != expected
+                    or (expected is None and len(submission_calls) >= 4096)):
+                raise PiError("Invalid structured output association", retryable=False, category="STREAM_TRUNCATION")
+            submission_calls[call_id] = state
 
         def terminal_events() -> tuple[CostEvent, ResultEvent]:
             native_session = session_id or effective_session_id
@@ -772,14 +793,14 @@ class PiBackend:
                     provider_name=last_provider,
                     session_id=native_session,
                     finish_reason=finish_reason,
-                    structured_output_origin="text",
+                    structured_output_origin="native" if native_output else "text",
                 ),
             )
 
         # P18 Task 1: closed typed effective-config admission from the exact
         # argv built above. max_turns is accepted-but-not-enforced by Pi (no
-        # native flag) so it stays None; output_schema is emulated by prompt
-        # appendix (schema_emulated=True whenever a schema was supplied).
+        # native flag) so it stays None. Native schemas validate tool arguments;
+        # they do not constrain provider decoding.
         yield RequestEvent(
             prompt=full_prompt,
             system_prompt=system_prompt,
@@ -796,12 +817,13 @@ class PiBackend:
                 model_mode="single",
                 selected_tools_count=(
                     0 if finalization or tools_disabled else
-                    len(_PI_READ_ONLY_TOOLS.split(",")) + int(source_recipe is not None) if read_only else None
+                    len(_PI_READ_ONLY_TOOLS.split(",")) + int(source_enabled) + int(native_output)
+                    if read_only else None
                 ),
                 selected_tools_present=read_only and not (finalization or tools_disabled),
                 no_tools=finalization or tools_disabled,
                 no_skills=True,
-                schema_emulated=output_schema is not None,
+                schema_emulated=output_schema is not None and not native_output,
             ),
             model_source="configured",
             provider_source="configured" if provider is not None else None,
@@ -810,13 +832,20 @@ class PiBackend:
 
         attachments = ExitStack()
         try:
-            if source_recipe is not None and not finalization and not tools_disabled:
-                source_recipe.revalidate()
-                packet_path = _write_prompt_attachment(json.dumps(source_recipe.to_packet(), ensure_ascii=False),
-                                                       attachments)
+            if source_enabled or native_output:
+                packet: dict[str, Any] = {}
+                if source_enabled:
+                    assert source_recipe is not None
+                    source_recipe.revalidate()
+                    packet = source_recipe.to_packet()
+                if native_output:
+                    packet["output_schema"] = output_schema
+                packet_path = _write_prompt_attachment(json.dumps(packet, ensure_ascii=False), attachments)
                 child_env["DAYDREAM_PI_SOURCE_PACKET"] = str(packet_path)
                 extension = attachments.enter_context(as_file(files("daydream.backends").joinpath("pi_read_source.ts")))
-                args.extend(["--no-extensions", "--extension", str(extension)])
+                if source_enabled:
+                    args.append("--no-extensions")
+                args.extend(["--extension", str(extension)])
             else:
                 child_env.pop("DAYDREAM_PI_SOURCE_PACKET", None)
             if not tools_disabled:
@@ -862,6 +891,8 @@ class PiBackend:
                 try:
                     event = json.loads(raw_line)
                 except json.JSONDecodeError:
+                    if native_output and raw_line.lstrip().startswith(("{", "[")):
+                        raise PiError("Malformed native event", retryable=True, category="STREAM_TRUNCATION")
                     # Capture non-JSON lines — these are stderr merged into
                     # stdout (pi diagnostics, login prompts, errors). Kept for
                     # error reporting when the process exits non-zero.
@@ -885,6 +916,8 @@ class PiBackend:
                         continue
 
                 event_type = event.get("type", "")
+                if event_type in {"agent_start", "turn_start", "message_start", "tool_execution_start"}:
+                    saw_native_settlement = False
 
                 if event_type == "agent_start":
                     pass  # Lifecycle marker; nothing to emit.
@@ -938,6 +971,8 @@ class PiBackend:
                                 # and never authors or duplicates the choice part.
                                 call_id = block.get("id")
                                 call_name = block.get("name")
+                                if native_output and call_name == "structured_output":
+                                    associate_submission(call_id, None, "proposed")
                                 if isinstance(call_id, str) and call_id and isinstance(call_name, str) and call_name:
                                     arguments_admitted, _arguments_diag = _admit_json_value(block.get("arguments"))
                                     if arguments_admitted is not None or block.get("arguments") is None:
@@ -989,6 +1024,23 @@ class PiBackend:
                             )
                             open_generation_id = None
                             generation_start_ns = None
+                    elif (native_output and msg.get("role") == "toolResult"
+                          and msg.get("toolName") == "structured_output"):
+                        is_error = msg.get("isError")
+                        if type(is_error) is not bool:
+                            raise PiError("Invalid output status", retryable=False, category="STREAM_TRUNCATION")
+                        associate_submission(msg.get("toolCallId"), "error" if is_error else "success", "finalized")
+                        if not is_error:
+                            details = msg.get("details")
+                            try:
+                                size = len(json.dumps(details, ensure_ascii=False, allow_nan=False,
+                                                      separators=(",", ":")).encode())
+                            except (ValueError, RecursionError):
+                                size = _PI_FINAL_PAYLOAD_MAX_BYTES + 1
+                            admitted, diagnostic = _admit_json_value(details)
+                            if details is None or diagnostic is not None or size > _PI_FINAL_PAYLOAD_MAX_BYTES:
+                                raise PiError("Invalid output details", retryable=False, category="STREAM_TRUNCATION")
+                            pending_submission = admitted
 
                 elif event_type == "tool_execution_start":
                     active_tool_calls += 1
@@ -997,6 +1049,10 @@ class PiBackend:
                         name=event.get("toolName", "unknown"),
                         input=event.get("args") or {},
                     )
+                    if native_output and event.get("toolName") == "structured_output":
+                        if event.get("parentToolCallId") is not None:
+                            raise PiError("Nested output call", retryable=False, category="STREAM_TRUNCATION")
+                        associate_submission(event.get("toolCallId"), "proposed", "started")
 
                 elif event_type == "tool_execution_end":
                     active_tool_calls = max(0, active_tool_calls - 1)
@@ -1004,11 +1060,18 @@ class PiBackend:
                         id=event.get("toolCallId") or str(uuid.uuid4()),
                         output=_render_tool_result(event.get("result")),
                         is_error=bool(event.get("isError", False)),
-                        **_tool_completion_metadata(event),
+                        **_tool_completion_metadata(event,
+                            output_control=native_output and event.get("toolName") == "structured_output"),
                     )
+                    if native_output and event.get("toolName") == "structured_output":
+                        if type(event.get("isError")) is not bool:
+                            raise PiError("Invalid output status", retryable=False, category="STREAM_TRUNCATION")
+                        associate_submission(event.get("toolCallId"), "started",
+                                             "error" if event["isError"] else "success")
 
                 elif event_type == "turn_end":
-                    active_tool_calls = 0
+                    if not native_output:
+                        active_tool_calls = 0
                     msg = event.get("message") or {}
                     stop_reason = msg.get("stopReason")
                     last_model = msg.get("responseModel") or msg.get("model") or last_model
@@ -1072,6 +1135,8 @@ class PiBackend:
                     # the single post-loop path below. The loop keeps
                     # draining to EOF so the stdout pipe cannot fill mid-run.
                     pass
+                elif event_type == "agent_settled":
+                    saw_native_settlement = True
 
                 # turn_start / message_start / message_update /
                 # tool_execution_update are streaming-only; the full content is
@@ -1082,7 +1147,15 @@ class PiBackend:
             # captured stderr lines (the events must stay between the two).
             returncode = await reap(transport)
 
-            if output_schema and last_assistant_text:
+            native_unsettled = native_output and (
+                active_tool_calls != 0 or open_generation_id is not None
+                or any(state != "finalized" for state in submission_calls.values())
+                or finish_reason in {"aborted", "length", "error"}
+                or not (saw_turn_start and saw_finish_reason and saw_native_settlement)
+            )
+            if native_output and returncode == 0 and not native_unsettled:
+                structured_result = pending_submission
+            elif not native_output and output_schema and last_assistant_text:
                 if validate_structured_output:
                     # Schema-aware selection: the last candidate the per-stack schema
                     # admits wins, so an incidental larger span cannot displace a valid
@@ -1112,9 +1185,9 @@ class PiBackend:
                 retryable=_is_retryable_exit_code(returncode),
             )
 
-            if saw_turn_start and not saw_finish_reason:
+            if native_unsettled or (saw_turn_start and not saw_finish_reason):
                 raise PiError(
-                    "Stream ended without finish_reason",
+                    "Native stream did not settle" if native_unsettled else "Stream ended without finish_reason",
                     retryable=True,
                     category="STREAM_TRUNCATION",
                 )

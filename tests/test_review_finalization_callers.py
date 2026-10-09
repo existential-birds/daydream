@@ -75,7 +75,6 @@ async def test_structural_stage_cutoff_publishes_without_model_finalizer(
     assert saved["issues"] == []
 
 
-
 async def test_intent_requires_nonempty_provider_evidence(
     tmp_path: Path, make_work: Callable[..., WorkContext],
 ) -> None:

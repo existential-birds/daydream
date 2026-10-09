@@ -28,16 +28,19 @@ export default function (pi: any) {
                         delta: JSON.stringify(toolCall.arguments), partial: message });
           stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
         } else {
-          const text = JSON.stringify({
+          const output = {
             observed_body: result.isError ? "" : result.toolName === "read_source"
               ? JSON.parse(result.content[0].text).body : result.content[0].text,
             source_error: result.isError,
             active_tools: getCurrentTools(context.messages).map((tool: any) => tool.name).sort(),
-          });
-          message.content = [{ type: "text", text }];
-          stream.push({ type: "text_start", contentIndex: 0, partial: message });
-          stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message });
-          stream.push({ type: "text_end", contentIndex: 0, content: text, partial: message });
+          };
+          const text = JSON.stringify(output);
+          const toolCall = { type: "toolCall", id: "native-output-001", name: "structured_output", arguments: output };
+          message.content = [toolCall];
+          message.stopReason = "toolUse";
+          stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
+          stream.push({ type: "toolcall_delta", contentIndex: 0, delta: text, partial: message });
+          stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
         }
         stream.push({ type: "done", reason: message.stopReason, message });
         stream.end(message);

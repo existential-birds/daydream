@@ -25,6 +25,8 @@ from daydream.backends import (
     Backend,
     ContinuationToken,
     DiagnosticEvent,
+    PiRequestConfig,
+    RequestEvent,
     ResultEvent,
     TextEvent,
     ToolStartEvent,
@@ -392,7 +394,7 @@ async def run_agent(
             + (f"Advisory stage call target: {advisory_tool_call_target}; this is a planning hint, "
                "not a ceiling. Useful assigned work may borrow available cumulative capacity. "
                if advisory_tool_call_target is not None else "")
-            + "\n\n" + review_budget.STAGED_REVIEW_GUIDANCE
+            + ("\n\n" + review_budget.STAGED_REVIEW_GUIDANCE if not review_system_instructions else "")
         )
     if review_limits is not None:
         review_limits = review_limits_for_scope(review_limits)
@@ -645,6 +647,7 @@ async def _run_agent(
                 completed_assistant_text = None
                 completed_assistant_overflow = False
                 structured_result = None
+                native_output = False
                 result_continuation = None
                 evidence_incomplete = False
                 if investigation_budget is None:
@@ -761,31 +764,35 @@ async def _run_agent(
                                 if investigation_budget is not None and isinstance(event, ToolStartEvent):
                                     investigation_budget.observed_tool_starts += 1
                                     tool_calls += 1
-                                # The single effective deadline is enforced per streamed
-                                # event so an injected clock can expire mid-turn even
-                                # though move_on_after only measures real time.
-                                if (
-                                    effective_deadline is not None
-                                    and clock.monotonic() >= effective_deadline
-                                ):
-                                    budget_reason = "wall_budget_exceeded"
-                                    break
+                                elif native_output and isinstance(event, ToolStartEvent):
+                                    tool_calls += 1
                                 # The sole telemetry observer runs before UI callbacks,
                                 # supervision and budgets can interrupt event handling.
                                 observed.observe(event)
-                                if review_evidence is not None:
-                                    review_evidence.observe(event)
                                 # Recorder-only parser/transport evidence and the
                                 # invocation ledger must be forwarded before any
                                 # branch-specific break; _dispatch is UI-free and
                                 # ignores RequestEvent (the one armless member).
                                 if inv is not None:
                                     inv.observe(event)
+                                # Received native starts still reach supervision and
+                                # charging after expiry; no late completion/checkpoint does.
+                                deadline_expired = (effective_deadline is not None
+                                                    and clock.monotonic() >= effective_deadline)
+                                if deadline_expired and not (native_output and isinstance(event, ToolStartEvent)):
+                                    budget_reason = "wall_budget_exceeded"
+                                    break
+                                if review_evidence is not None:
+                                    review_evidence.observe(event)
                                 if (isinstance(event, DiagnosticEvent)
                                         and event.code == "codex_transport_coverage"
                                         and event.metadata.get("coverage") == "incomplete"):
                                     evidence_incomplete = True
-                                if isinstance(event, TextEvent):
+                                if isinstance(event, RequestEvent):
+                                    native_output = (isinstance(event.config, PiRequestConfig)
+                                                     and event.output_schema is not None
+                                                     and event.config.schema_emulated is False)
+                                elif isinstance(event, TextEvent) and not native_output:
                                     if investigation_budget is None:
                                         output_parts.append(event.text)
                                     elif event.text:
@@ -806,14 +813,6 @@ async def _run_agent(
                                                          and event.structured_output_origin == 'text'
                                                          else event.structured_output)
                                     result_continuation = event.continuation
-                                if not (
-                                    require_full_schema and output_schema is not None
-                                    and isinstance(event, ResultEvent)
-                                    and (not validates_schema(event.structured_output, output_schema)
-                                         or (investigation_budget is not None
-                                             and event.structured_output_origin == 'text'))
-                                ):
-                                    await display.observe(event)
                                 if isinstance(event, ToolStartEvent):
                                     if tool_supervisor is not None:
                                         try:
@@ -835,11 +834,23 @@ async def _run_agent(
                                             budget_reason = f"tool_vetoed:{event.name}"
                                             break
 
-                                    if investigation_budget is None:
+                                    if deadline_expired:
+                                        budget_reason = "wall_budget_exceeded"
+                                        break
+                                    if investigation_budget is None and not native_output:
                                         tool_calls += 1
                                     if tool_call_budget is not None and tool_calls > tool_call_budget:
                                         budget_reason = "tool_call_budget_exceeded"
                                         break
+
+                                if not (
+                                    require_full_schema and output_schema is not None
+                                    and isinstance(event, ResultEvent)
+                                    and (not validates_schema(event.structured_output, output_schema)
+                                         or (investigation_budget is not None
+                                             and event.structured_output_origin == 'text'))
+                                ):
+                                    await display.observe(event)
 
                             await display.flush()
 
@@ -1102,11 +1113,15 @@ async def _run_agent(
         """Accept explicit validation opt-out or a downstream-salvageable value."""
         return not validate_structured_output or (
             output_schema is not None and (
-                validates_schema(value, output_schema) if require_full_schema
+                validates_schema(value, output_schema) if require_full_schema or native_output
                 else _salvageable(value, output_schema)
             )
         )
 
+    if native_output and aborted_reason is not None:
+        structured_result = None
+        if review_evidence is not None:
+            review_evidence.checkpoint = None
     if output_schema is not None and structured_result is not None and _usable(structured_result):
         return structured_result, result_continuation, aborted_reason
     selection: SchemaAwareSelection | None = None
@@ -1130,7 +1145,7 @@ async def _run_agent(
         # accepted.
         # A staged native candidate is authoritative. Rejecting it cannot be
         # followed by salvaging another text fragment from the same invocation.
-        if raw.strip() and not text_overflow and not (
+        if not native_output and raw.strip() and not text_overflow and not (
             investigation_budget is not None and structured_result is not None
         ):
             selected: Any = None
@@ -1145,7 +1160,7 @@ async def _run_agent(
                 selected = extract_json(raw)
             if selected is not None and _usable(selected):
                 return selected, result_continuation, aborted_reason
-    if output_schema is not None and require_full_schema:
+    if output_schema is not None and (require_full_schema or native_output):
         reason = ("malformed_output" if structured_result is not None or raw.strip() or text_overflow
                   else "missing_output")
         # Content-free rejection trace: the selected candidate's Python type name,
@@ -1161,7 +1176,7 @@ async def _run_agent(
         if rejection is not None:
             reject_detail = (f"schema {rejection.category} at {rejection.schema_path}; "
                              f"{rejection.error_count} error(s); {rejection.candidate_count} candidate(s)")
-        eligible = (rejection is not None and (schema_rejection_guard is None
+        eligible = not native_output and (rejection is not None and (schema_rejection_guard is None
                                               or schema_rejection_guard(structured_result))
                     if structured_result is not None else
                     selection.schema_retry_eligible if selection is not None else False)

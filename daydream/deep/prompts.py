@@ -343,21 +343,8 @@ def _stage_source_instruction() -> str:
         "Read it through the supplied projection or read_source arguments; do not try the missing "
         "HEAD path or infer host artifact paths. Source projections contain actual source, not diff "
         "text. Use only the current invocation's supplied selectors with read_source. "
-        "Every read_required:true window needs a completed source read in this invocation, even "
-        "when its contents already appear in the supporting diff or prompt. General reuse-diff "
-        "advice does not waive this obligation. A read_required:false window may be optional "
-        "before-side context or covered by an admitted complete receipt; that flag alone does not "
-        "establish evidence. Reuse requires a verified covered window explicitly bound in "
-        "admitted_source_windows from a successful stage in this reviewer and snapshot. Optional "
-        "source needed for a decision still needs a read when no admitted receipt covers it. "
-        "Relevant admitted_source_windows and notes are available for current "
-        "first-pass work as well as triage; their compact excerpts may be partial. Reuse the "
-        "verified covered window without repeating its read if it suffices for judgment. Unknown "
-        "or opaque ranges, uncovered enclosing context and insufficient excerpts need a fresh "
-        "targeted read. Failed attempts contribute no reusable evidence. A receipt or reused "
-        "window never supplies the new assignment's review decision by itself. If needed source "
-        "is unavailable, do not claim a reviewed target or confirmed candidate; explain unfinished "
-        "work in its assigned output fields."
+        "Use admitted_source_windows and notes for verified reusable ranges; partial excerpts may "
+        "need targeted rereads. The persistent staged contract governs required reads and reuse."
     )
 
 
@@ -373,30 +360,10 @@ def _stage_output_instruction(review_stage: dict[str, Any]) -> str:
         if contract else
         "REVIEW_STAGE_SCHEMA:\n" + json.dumps(REVIEW_STAGE_SCHEMA, ensure_ascii=False)
     )
-    identity = (
-        "This is triage: targets must be exactly []. Echo every assigned candidate ID exactly "
-        "once, with no new candidates, target entries, IDs or open dispositions. "
-        if review_stage['stage'] == 'triage' else
-        "Echo every assigned target_id exactly once. Discovery may produce newly discovered "
-        "nonempty candidates; leave each candidate_id empty so the host assigns its identity. "
-    )
     return (
-        "Return only one JSON object conforming exactly to the invocation REVIEW_STAGE_SCHEMA, with "
-        "targets, notes, candidates, and contradictions. Do not write artifacts or a markdown report. "
-        "The host owns terminal findings serialization. Keep all four members inside the root "
-        "object and close it once after contradictions; append no member suffix or prose.\n"
-        + identity + "Mark a target reviewed only after judging its assigned "
-        "changed behavior using complete enclosing-source evidence. Reads alone do not establish "
-        "reviewed coverage. A target can name a file, hunk, or ordered continuation segment: judge "
-        "only its assigned part, never claim a prefix completes a hunk. The host folds a file's "
-        "coverage only after every required part succeeds. Explain unfinished work with "
-        "not_reviewed and a nonempty reason. "
-        "Keep notes short and specific to this assignment. Each candidate needs a concrete trigger, "
-        "observable consequence, and grounds citing completed source evidence. A confirmed candidate must carry its "
-        "grounded finding; other dispositions carry finding: null. Never reopen a closed decision. "
-        "contradictions may name only the supplied closed_candidate_ids when evidence directly "
-        "contradicts one; do not revise that decision.\n"
-        + output_contract
+        "Provide one complete structured result conforming exactly to the invocation REVIEW_STAGE_SCHEMA. "
+        "Use the backend-selected output transport; the host persists terminal findings. "
+        "Fill all four members: targets, notes, candidates, contradictions.\n" + output_contract
     )
 
 
@@ -418,10 +385,8 @@ def _build_review_stage_prompt(
     attempt = review_stage.get("attempt", 1)
     parts.append(
         f"Stage attempt: {attempt} of {review_stage.get('max_attempts', 2)}. "
-        "This is a fresh invocation for the same logical assignment and frozen snapshot. "
-        "Obtain necessary fresh source grounding in this invocation; unsuccessful attempts contribute "
-        "no source evidence, notes, candidates, or excerpts. Previously admitted stages remain "
-        "available only within their verified source windows and stated scope."
+        "This fresh invocation has the same logical assignment and frozen snapshot; unsuccessful "
+        "attempts contribute no evidence. Admitted prior stages remain available within verified scope."
     )
     parts.append(_stage_source_instruction())
     rejection = review_stage.get("schema_rejection")
@@ -543,35 +508,13 @@ def _build_review_stage_prompt(
         parts.append(TRUST_MODEL_INSTRUCTION)
         if structural:
             parts.append(CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION)
-    parts.append(
-        "Complete associated tool receipts are retained separately from compact prompt and handoff "
-        "views. Compact views are bounded to 12,000 bytes per output and 48,000 bytes in aggregate, "
-        "and clipped views are explicitly partial; this presentation clipping does not mean complete "
-        "source receipts were lost. Request targeted line ranges and compact searches, reading complete "
-        "enclosing symbols or configuration sections in contiguous segments when needed. "
-        "Full retention has separate host resource limits: 2 MiB per result and 8 MiB across live and "
-        "admitted captures. Native truncation, missing association, failed or unavailable required reads, "
-        "and retention overflow cannot ground reviewed assertions, even with no candidates. "
-        "Supporting intent, exploration, diff and index reads alone never establish source coverage. "
-        "Reads alone never establish reviewed coverage, and free-form citations are not authenticated "
-        "by receipts. Keep notes and handoffs compact, citing precise locations instead of duplicating "
-        "large outputs. Relevant admitted partial excerpts may require targeted rereads within the "
-        "same cumulative tool allowance."
-    )
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(SEVERITY_RUBRIC)
     parts.append(
         f"Advisory stage tool-call target: {review_stage['advisory_tool_call_target']}. "
         f"Remaining hard cumulative tool allowance: {review_stage['remaining_tool_calls']}. "
-        "The advisory target guides pace and is not a stopping limit: useful assigned investigation "
-        "may borrow available cumulative capacity. Plan reads around the required source windows, "
-        "reuse admitted covered windows and the supporting bundle, and combine related targeted "
-        "searches. Trace dependencies only to answer concrete changed-behavior questions; stop a "
-        "trace once its contract agrees or the candidate is decided. Broad source reads may be "
-        "legitimate when they resolve a specific dependency question. Every stage, pointer read and retry consumes the "
-        "same hard allowance and absolute reviewer deadline. Finish this finite assignment without "
-        "reopening decisions or repeating speculative passes; never skip assigned work to satisfy "
-        "the advisory target."
+        "Plan around required source windows, verified reuse, the supporting bundle and combined "
+        "targeted searches. The advisory target guides pace; the cumulative allowance is the hard limit."
     )
     if review_stage.get('remaining_work'):
         parts.append(
