@@ -4,7 +4,7 @@ version = "0.29.0"
 description = "Automated code review and fix loop using Claude"
 requires-python = ">=3.12.13"
 dependencies = [
-    "claude-agent-sdk==0.2.159",
+    "claude-agent-sdk==0.2.163",
     "anyio>=4.15.1",
     "rich>=15.0.0",
     "pyfiglet>=1.0",
@@ -22,8 +22,8 @@ dependencies = [
     "tree-sitter-go==0.25.0",
     "tree-sitter-rust==0.24.2",
     "pyyaml>=6.0",
-    "traceloop-sdk==0.62.3",
-    "opentelemetry-api>=1.42,<2",
+    "traceloop-sdk==0.62.4",
+    "opentelemetry-api>=1.45.0,<2",
     "opentelemetry-sdk>=1.42,<2",
     "opentelemetry-exporter-otlp-proto-http>=1.42,<2",
     "opentelemetry-exporter-otlp-proto-grpc>=1.42,<2",
@@ -44,7 +44,7 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "pytest-xdist>=3.6",
-    "ruff>=0.16.8",
+    "ruff>=0.16.10",
     "types-jsonschema>=4.26",  # tracked to jsonschema 4.26.x
     "types-pyyaml>=6.0.12.20260906",
     "types-requests>=2.33.0.20260906",
