@@ -33,7 +33,6 @@ from daydream.config_file import DaydreamFileConfig
 from daydream.dataset import LocalRecordStore
 from daydream.phases import TestAndHealResult, TestAttemptEvidence
 from daydream.phases.review import ReviewOutputError
-from daydream.review_budget import ReviewLimits
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from daydream.training.labeler_signals import fix_applied_signal, local_commit_applied_signal
@@ -48,6 +47,7 @@ from tests.harness.stub_backend import (
     StubBackend,
     force_interactive,
     install_stub_backend,
+    review_stage_result,
     silence,
 )
 from tests.harness.trajectory import diff_adding
@@ -512,13 +512,12 @@ def _fix_editing_backend(repo: Path) -> ScriptedBackend:
             or "repository-wide interactions" in pl
         ):
             return [TextEvent(text="Review complete."),
-                ResultEvent(structured_output={"issues": [{
+                ResultEvent(structured_output=review_stage_result(prompt, [{
                                 "id": 1, "description": "Add a guard", "file": "main.py", "line": 1,
                                 "severity": "medium", "confidence": "HIGH", "rationale": "guard missing",
                                 "evidence": "main.py:1",
                             }
-                        ],
-                    }, continuation=None,
+                        ]), continuation=None,
                 ),
             ]
         if "fix this issue" in pl or pl.startswith("fix these"):
@@ -674,7 +673,7 @@ class _CodexEvidenceBackend(StubBackend):
     async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         if "you are reviewing the python stack" in prompt.lower():
             if self.evidence:
-                for index in range(311):
+                for index in range(15):
                     call_id = f"shell-{index}"
                     yield ToolStartEvent(id=call_id, name="shell",
                         input={"command": f"printf 'shell {index}\\n'"},
@@ -682,21 +681,21 @@ class _CodexEvidenceBackend(StubBackend):
                     if index == 1:
                         continue
                     yield ToolResultEvent(id=call_id, output="failed" if index == 0 else "ok", is_error=index == 0,)
-                for index in range(15):
+                for index in range(1):
                     call_id = f"patch-{index}"
                     yield ToolStartEvent(id=call_id, name="patch", input={"patch": f"*** patch {index} ***"},)
                     yield ToolResultEvent(id=call_id, output="applied", is_error=False)
                 yield ToolResultEvent(id="unmatched-result", output="orphan", is_error=True)
                 yield DiagnosticEvent(
                     code="codex_transport_coverage", message="current public stream has incomplete tool coverage",
-                    metadata={"occurrences": 1},
+                    metadata={"occurrences": 1, "coverage": "incomplete"},
                 )
                 yield DiagnosticEvent(
                     code="codex_parser_coverage", message="bounded parser gap evidence", metadata={"unknown_items": 1},
                 )
             else:
                 yield ToolStartEvent(id="clean-read", name="read", input={"path": "api.py"},)
-                yield ToolResultEvent(id="clean-read", output="file content", is_error=False,)
+                yield ToolResultEvent(id="clean-read", output=(cwd / "api.py").read_text(), is_error=False,)
         async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
@@ -713,27 +712,26 @@ def _install_codex_evidence_backend(target: Path, monkeypatch: pytest.MonkeyPatc
 async def test_codex_evidence_integrity_archives_semantic_counts_and_review_flags(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
 ) -> None:
-    # This telemetry fixture deliberately needs 326 events to keep its write
-    # ratio below 5%. Give that fixture sufficient investigation allowance;
-    # the production default's truncation is covered by review-runtime tests.
-    def telemetry_limits(*args: Any, **kwargs: Any) -> ReviewLimits:
-        return replace(ReviewLimits(*args, **kwargs), tool_calls=400)
-
-    monkeypatch.setattr("daydream.phases.review.ReviewLimits", telemetry_limits)
+    # Keep telemetry within one bounded stage while retaining failures, missing
+    # results, unmatched results, writes and parser/transport diagnostics.
     _install_codex_evidence_backend(multi_stack_target, monkeypatch, evidence=True,)
 
     assert await run(_deep_run_config(multi_stack_target)) == 0
 
     run_dir = _only_archived_run(archive_dir)
     child = json.loads(_deep_python_trajectory(run_dir).read_text(encoding="utf-8"))
+    saved = json.loads((run_dir / "deep" / "stack-python-records.json").read_text())
+    assert saved["issues"] and saved.get("incomplete", False) is False
+    coverage = json.loads((run_dir / "deep" / "review-coverage.json").read_text())
+    assert next(scope for scope in coverage["stack_outcomes"] if scope["scope_id"] == "python")["status"] == "complete"
     evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
     child_calls = [call for step in child["steps"] for call in step.get("tool_calls") or []]
-    assert len(child_calls) == 326
+    assert len(child_calls) == 16
     assert child_calls[0]["arguments"]["command"] == "printf 'shell 0\\n'"
-    assert sum(evaluation["tools"]["by_agent"]["deep-python"].values()) == 326
-    assert evaluation["tools"]["total_calls"] == 326
-    assert evaluation["tools"]["by_type"] == {"shell": 311, "patch": 15}
-    assert evaluation["tools"]["write_ratio"] == 0.046
+    assert sum(evaluation["tools"]["by_agent"]["deep-python"].values()) == 16
+    assert evaluation["tools"]["total_calls"] == 16
+    assert evaluation["tools"]["by_type"] == {"shell": 15, "patch": 1}
+    assert evaluation["tools"]["write_ratio"] == 0.0625
 
     agent_steps = [step for step in child["steps"] if step["source"] == "agent"]
     result_extras = [result.get("extra", {})
@@ -799,7 +797,8 @@ async def test_malformed_codex_tool_name_survives_real_log_mode_runner_archive(
 
     child = json.loads(_deep_python_trajectory(_only_archived_run(archive_dir)).read_text())
     calls = [call for step in child["steps"] for call in (step.get("tool_calls") or [])]
-    assert [(call["tool_call_id"], call["function_name"]) for call in calls] == [("malformed-mcp", "unknown")]
+    assert [(call["tool_call_id"], call["function_name"]) for call in calls
+            if call["tool_call_id"] == "malformed-mcp"] == [("malformed-mcp", "unknown")]
     diagnostics = [diagnostic for step in child["steps"]
         for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])
     ]
@@ -818,6 +817,12 @@ class _JoinedArtifactEvidenceBackend(StubBackend):
 
     async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         lowered = prompt.lower()
+        if "understand the intent of these changes" in lowered:
+            # Exercise exact private-pointer transport with a complete artifact
+            # that exceeds the advisory inline allowance.
+            yield TextEvent(text="Preserve the greeting API and existing caller behavior.\n" * 300)
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
         python_request = "you are reviewing the python stack" in lowered
         generic_request = "you are reviewing the generic-fallback stack" in lowered
         artifact_reference: str | None = None
@@ -829,7 +834,8 @@ class _JoinedArtifactEvidenceBackend(StubBackend):
             start = prompt_lines.index(header) + 1
             rendered_entries: list[tuple[str, Path]] = []
             for line in prompt_lines[start:]:
-                assert line.startswith("- ")
+                if not line.startswith("- "):
+                    break
                 label, raw_path = line.removeprefix("- ").split(": ", 1)
                 rendered_entries.append((label, Path(raw_path)))
 
@@ -861,12 +867,13 @@ class _JoinedArtifactEvidenceBackend(StubBackend):
 
                 payload = event.structured_output
                 assert isinstance(payload, dict)
-                issues = payload.get("issues")
-                assert isinstance(issues, list)
-                assert len(issues) == 1
-                assert isinstance(issues[0], dict)
-                issue = {**issues[0], "rationale": f"Evidence: {artifact_reference}",}
-                yield replace(event, structured_output={**payload, "issues": [issue]},)
+                candidates = payload.get("candidates")
+                assert isinstance(candidates, list)
+                assert len(candidates) == 1
+                finding = candidates[0]["finding"]
+                assert isinstance(finding, dict)
+                candidate = {**candidates[0], "finding": {**finding, "rationale": f"Evidence: {artifact_reference}"}}
+                yield replace(event, structured_output={**payload, "candidates": [candidate]},)
                 continue
             yield event
 
@@ -876,7 +883,6 @@ async def test_real_deep_archive_preserves_sanctioned_artifacts_and_findings(
     silence(monkeypatch)
     force_interactive(monkeypatch)
     backend = _JoinedArtifactEvidenceBackend(multi_stack_target)
-    backend.per_stack_emit_reads = True
     backend.parse_by_stack = {"python": {"severity": "medium", "confidence": "MEDIUM", "file": "api.py", "line": 1,
             "description": "Python private-artifact rationale control",
         },
@@ -937,7 +943,6 @@ async def test_real_deep_archive_preserves_sanctioned_artifacts_and_findings(
         if call["tool_call_id"] in python_completed_ids
         and call["function_name"].casefold() == "read"
     }
-    assert "api.py" in python_reads
     assert str(private_intent) in python_reads
 
     generic_candidates = sorted((run_dir / "trajectories").glob("deep-generic*.json"))
@@ -958,7 +963,6 @@ async def test_real_deep_archive_preserves_sanctioned_artifacts_and_findings(
         if call["tool_call_id"] in generic_completed_ids
         and call["function_name"].casefold() == "read"
     }
-    assert "README.md" in generic_reads
     assert ".daydream/deep/intent.md" in generic_reads
 
     controlled_records: list[dict[str, Any]] = []

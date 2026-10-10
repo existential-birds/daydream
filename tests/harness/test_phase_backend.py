@@ -4,6 +4,7 @@ Drives the production shallow mode through ``runner.run`` with the shared
 phase-dispatch fake injected at the ``daydream.runner.create_backend`` seam.
 Asserts the observable outcome and that the removed parse phase is not invoked.
 """
+import json
 from pathlib import Path
 from typing import Any
 
@@ -27,17 +28,22 @@ async def test_shared_phase_backend_drives_shallow_pass(feature_branch_repo: Pat
     mock_ui_loop: Any,  # noqa: F841
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One issue on the single pass → the shallow deep run completes and exits 0."""
-    backend = PhaseDispatchBackend(parse_results=[[ISSUE]])
+    """Language and initial interaction fixtures both reach the published review."""
+    structural_issue = {"id": 1, "description": "Check greeting contract", "file": "main.py", "line": 2}
+    backend = PhaseDispatchBackend(parse_results=[[ISSUE], [structural_issue]])
     monkeypatch.setattr("daydream.runner.create_backend", lambda n, model=None, **kwargs: backend)
     exit_code = await run(
         RunConfig(target=str(feature_branch_repo), stack="python", quiet=True, cleanup=False, shallow=True,)
     )
 
     assert exit_code == 0
-    # Issue #745: the per-stack reviewers emit PER_STACK_RECORD_SCHEMA records
-    # directly -- the spine no longer has a parse phase. The single shallow
-    # pass still fires the per-stack reviews for the combined python stack +
-    # the structural meta-stack.
+    report = (feature_branch_repo / ".review-output.md").read_text()
+    assert "Add type hints" in report
+    assert "Check greeting contract" in report
+    # Language discovery and structural interactions each run once before
+    # deterministic publication; structure does not repeat the file audit.
     assert backend.parse_calls == 0
-    assert len(backend.review_prompts) == 2
+    stages = [json.JSONDecoder().raw_decode(prompt.split("Host review stage:\n", 1)[1])[0]
+              for prompt in backend.review_prompts]
+    assert sorted((stage["scope_id"], stage["stage"]) for stage in stages) == [
+        ("python", "first_pass"), ("structure", "integration")]

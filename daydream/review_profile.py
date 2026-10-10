@@ -226,9 +226,9 @@ def build_default_profile() -> ReviewProfile:
                 "searches, not as permission to apply a memorized framework checklist.\n"
                 "\n"
                 "Method:\n"
-                "1. Read each relevant hunk in every assigned file with its full "
-                "enclosing symbol or configuration section. Expand to other sections "
-                "only when needed to resolve a concrete candidate. Follow changed callers, "
+                "1. Start with the supplied hunks and context. Inspect an enclosing "
+                "symbol or configuration section when more context would resolve a "
+                "concrete candidate. Follow changed callers, "
                 "callees, types, configuration, "
                 "persistence or network boundaries, error paths, and cleanup or lifecycle "
                 "paths as needed.\n"
@@ -250,8 +250,9 @@ def build_default_profile() -> ReviewProfile:
                 "\n"
                 "For every surviving finding, identify the precise file and line, the "
                 "triggering path or state, the observable impact, and the smallest safe "
-                "remediation. If no candidate survives after the required reads, report "
-                "every read assigned file as clean and every unread assigned file as not "
+                "remediation. Mark an assigned target reviewed after assessing its "
+                "changed behavior from the supplied diff and context, with ordinary "
+                "source investigation when useful. Mark unfinished assigned work not "
                 "reviewed; never invent a finding to fill the review."
             ),
             source="authored: #886 NATIVE_PER_STACK_DISCOVERY_STRATEGY",
@@ -298,9 +299,8 @@ def build_default_profile() -> ReviewProfile:
         "discovery.generic_fallback": Strategy(
             content=(
                 "Review these files for correctness, clarity, and consistency with the "
-                "author's intent. Read each relevant hunk in every assigned file with "
-                "its full enclosing symbol or configuration section before judging it. "
-                "Expand to other sections only to resolve a concrete candidate. Apply "
+                "author's intent. Start from the supplied hunks and context; inspect "
+                "an enclosing symbol or other sections when useful to resolve a concrete candidate. Apply "
                 "language-agnostic review practices."
             ),
             source="copied: daydream.deep.prompts.build_generic_fallback_prompt",

@@ -34,6 +34,9 @@ def _unquote_git_path(quoted: str) -> str:
             elif nxt == '"':
                 out.append(ord('"'))
                 i += 2
+            elif nxt in "abtnvfr":
+                out.append({"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13}[nxt])
+                i += 2
             elif nxt in "01234567":
                 val = 0
                 j = i + 1

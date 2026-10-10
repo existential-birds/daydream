@@ -135,9 +135,9 @@ async def test_cold_empty_merge_preserves_failed_stack_diagnostics(
     failed_scope = next(row for row in result["stack_outcomes"] if row["scope_id"] == "python")
     assert failed_scope["reason_codes"] == ["policy_veto" if budget_stop else "backend_failure"]
     if budget_stop:
-        assert failures["python"].startswith("budget exhausted:")
+        assert "tool_vetoed" in failures["python"] and "budget exhausted" not in failures["python"]
     else:
-        assert "review provider unavailable" in failures["python"]
+        assert "backend_failure" in failures["python"] and "review provider unavailable" not in failures["python"]
 
 
 @pytest.mark.parametrize("input_kind", ["language", "alternatives", "custom"])
@@ -276,7 +276,15 @@ def test_diff_changed_files_handles_modify_add_delete_binary() -> None:
         "index 1234..5678 100644\n"
         "Binary files a/logo.png and b/logo.png differ\n"
     )
-    assert _diff_changed_files(mixed) == ["keep.py", "new.py", "old.py", "logo.png"]
+    mixed += (
+        'diff --git "a/removed\\tfile.py" "b/removed\\tfile.py"\n'
+        'deleted file mode 100644\n--- "a/removed\\tfile.py"\n+++ /dev/null\n'
+        '@@ -1 +0,0 @@\n-x = 1\n'
+        'diff --git "a/logo\\"quoted\\".png" "b/logo\\"quoted\\".png"\n'
+        'index 1234..5678 100644\nBinary files differ\n'
+    )
+    assert _diff_changed_files(mixed) == ["keep.py", "new.py", "old.py", "logo.png",
+                                        "removed\tfile.py", 'logo"quoted".png']
 
 async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
@@ -315,14 +323,15 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
 
     failures_payload = saved_coverage(multi_stack_target / ".daydream/deep").unfinished_scopes
     assert "react" in failures_payload
-    assert "simulated react failure" in failures_payload["react"]
+    assert "backend_failure" in failures_payload["react"]
+    assert "simulated react failure" not in failures_payload["react"]
 
     merge_prompts = [c["prompt"] for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
     assert merge_prompts, "merge agent was not invoked"
     prompt = merge_prompts[0]
     assert "Uncovered stacks" in prompt
     assert "react" in prompt
-    assert "simulated react failure" in prompt
+    assert "backend_failure" in prompt and "simulated react failure" not in prompt
 
 async def test_resume_merge_errors_on_missing_stack_records(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

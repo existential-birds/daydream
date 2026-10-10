@@ -16,13 +16,41 @@ from daydream.backends import (
     MaxTurnsError,
     ResultEvent,
     TextEvent,
-    ToolResultEvent,
     ToolStartEvent,
 )
 from daydream.deep.records import record_issues_or_empty, record_uid, stack_name_from_uid
 from tests.harness.review_result import merge_result
 
 PARTIAL_FIX_MARKER = "// PARTIAL BROKEN EDIT -- max turns exhausted mid-fix\n"
+
+
+def review_stage_state(prompt: str) -> dict[str, Any] | None:
+    """Decode the host state before any trailing invocation instructions."""
+    _, marker, payload = prompt.partition("Host review stage:\n")
+    state: dict[str, Any] | None = json.JSONDecoder().raw_decode(payload)[0] if marker else None
+    return state
+
+
+def stage_result(stage: dict[str, Any], *, candidates: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    return {"targets": [{"target_id": target, "status": "reviewed", "reason": ""}
+                    for target in stage["assigned_target_ids"]],
+        "notes": "Assigned changed behavior reviewed", "candidates": candidates or [], "contradictions": []}
+
+
+def review_stage_result(prompt: str, issues: list[dict[str, Any]]) -> dict[str, Any]:
+    """Emit fixture findings once, in the first discovery batch; retain legacy output."""
+    state = review_stage_state(prompt)
+    if state is None:
+        return {"issues": issues}
+    candidates = []
+    if state["stage"] in {"first_pass", "integration"} and not state["progress"]:
+        candidates = [{"candidate_id": "", "file": issue["file"], "line": issue["line"],
+            "trigger": "The changed path is exercised", "consequence": issue["description"],
+            "grounds": issue["evidence"], "disposition": "confirmed", "finding": issue} for issue in issues]
+    elif state["stage"] == "triage":
+        candidates = [dict(candidate, disposition="confirmed") for candidate in state["candidates"]
+                      if candidate["candidate_id"] in state["assigned_candidate_ids"]]
+    return stage_result(state, candidates=candidates)
 
 
 class _StubRetryableError(RuntimeError):
@@ -184,8 +212,6 @@ class StubBackend:
         # Fail exploration specialists: pre_scan must degrade to incomplete
         # artifacts without a cache key.
         self.fail_exploration: bool = False
-        # Paired source reads let recovery tests exercise real review evidence.
-        self.per_stack_emit_reads: bool = False
         # Per-kind author/repair spec queue; repeat its last entry when exhausted.
         # An absent queue returns an empty spec, which grounds to an omission.
         self.diagram_specs: dict[str, list[dict[str, Any]]] = {}
@@ -234,14 +260,6 @@ class StubBackend:
             return "flowchart", False
         return None
 
-
-    @staticmethod
-    def _stack_scope_files(prompt: str) -> list[str]:
-        """Split the comma-separated Assigned files marker in a scope instruction."""
-        m = re.search(r"Assigned files:\s*([^\n]+)", prompt)
-        if m is None:
-            return []
-        return [part.strip() for part in m.group(1).split(",") if part.strip()]
 
     def _tick(self) -> None:
         """Charge one configured event step to the injected clock, if present."""
@@ -429,12 +447,7 @@ class StubBackend:
         if stack_label is None and "you are the structural reviewer" in pl:
             stack_label = "structure"
         if stack_label is not None:
-            if self.per_stack_emit_reads:
-                scope_files = self._stack_scope_files(prompt)
-                for scope_file in scope_files:
-                    yield ToolStartEvent(id=f"read-{scope_file}", name="Read", input={"file_path": scope_file})
-                    # Budget recovery retains only completed source reads.
-                    yield ToolResultEvent(id=f"read-{scope_file}", output="file content", is_error=False)
+            state = review_stage_state(prompt)
             out_match = re.search(r"write your full review to (\S+)", prompt, flags=re.IGNORECASE)
             if out_match is not None:
                 raw = out_match.group(1).rstrip(".")
@@ -453,9 +466,12 @@ class StubBackend:
                 ), "file": "api.py", "line": 1, "severity": self.parse_severity or "medium", "confidence": "MEDIUM",
                 "rationale": "stub", "evidence": "api.py:1",
             }
+            if state is not None and not (cwd / 'api.py').is_file():
+                issue.update(file=state['assigned_files'][0], evidence=f"{state['assigned_files'][0]}:1")
             issues: list[dict[str, Any]] = self._apply_parse_by_stack_override(prompt, issue)
+            payload = review_stage_result(prompt, issues)
             yield TextEvent(text="")
-            yield ResultEvent(structured_output={"issues": issues}, continuation=None,)
+            yield ResultEvent(structured_output=payload, continuation=None,)
             return
 
         # Echo arbiter IDs with keep=True; stamp descriptions so revisions remain

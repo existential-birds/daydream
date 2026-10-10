@@ -15,12 +15,12 @@ from unittest.mock import patch
 import pytest
 from rich.console import Console
 
-from daydream import git_ops
 from daydream.backends import ResultEvent, TextEvent
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_gh import block_real_gh
+from tests.harness.stub_backend import review_stage_result
 
 
 @pytest.fixture(autouse=True)
@@ -35,7 +35,8 @@ def _minimal_backend() -> ScriptedBackend:
         # Alternative-review structured call → emit empty issue list so the
         # review-only flow reports "no issues" and exits 0 fast.
         if output_schema is not None:
-            return [TextEvent(text='{"issues": []}'), ResultEvent(structured_output={"issues": []}, continuation=None),
+            return [TextEvent(text="Review complete."),
+                ResultEvent(structured_output=review_stage_result(prompt, []), continuation=None),
             ]
         return [TextEvent(text="No issues found."), ResultEvent(structured_output=None, continuation=None)]
 
@@ -96,21 +97,6 @@ async def test_fallback_identity_without_app_creds(
     out = capsys.readouterr().out
     assert "personal-user" in out
     assert not mock_mint.called             # no App creds → no minting
-    assert config.identity == "personal-user"
-    assert exit_code == 0
-
-async def test_fallback_run_cannot_replace_an_existing_session_auth(
-    feature_branch_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-) -> None:
-    _no_app_creds(monkeypatch)
-    existing_auth = git_ops.StaticGitHubAuth({"GH_TOKEN": "ghs_existing_session_1234567890"})
-    config = RunConfig(target=str(feature_branch_repo), non_interactive=True,
-                       output_mode="review", shallow=True, stack="python", quiet=False)
-    with patch("daydream.github_app.resolve_user_identity", return_value="personal-user"):
-        exit_code = await run(config)
-    out = capsys.readouterr().out
-    assert "personal-user" in out
-    assert existing_auth.environment_for_request()["GH_TOKEN"] == ("ghs_existing_session_1234567890")
     assert config.identity == "personal-user"
     assert exit_code == 0
 

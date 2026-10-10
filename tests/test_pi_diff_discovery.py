@@ -1,42 +1,78 @@
 """Pi discovery uses admitted diff references even for small changes."""
 
+import json
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from daydream.backends import AgentEvent, ResultEvent, ToolResultEvent, ToolStartEvent
 from daydream.backends.pi import PiBackend
 from daydream.deep.detection import StackAssignment
+from daydream.hunk_index import write_hunk_index
 from daydream.run_context import InteractionPolicy, RunContext
+from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
+from tests.harness.git_helpers import git, seed_feature_branch
 from tests.harness.review_result import review_scopes
+from tests.harness.stub_backend import review_stage_result, review_stage_state
+from tests.test_deep_orchestrator import _sanctioned_inputs
 
 
+@pytest.mark.parametrize('advance_refs', [False, True])
 async def test_small_pi_review_keeps_structural_dispatch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Any, advance_refs: bool,
 ) -> None:
     (tmp_path / "app.py").write_text("value = 'DIFF_SENTINEL'\n")
+    seed_feature_branch(tmp_path, base={'app.py': 'value = 0\n'}, feature={'app.py': "value = 'DIFF_SENTINEL'\n"})
     diff = tmp_path / "diff.patch"
     diff.write_text("diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
                     "@@ -1 +1 @@\n-value = 0\n+value = 'DIFF_SENTINEL'\n")
+    write_hunk_index(tmp_path, diff.read_text())
     intent = tmp_path / "intent.md"
     intent.write_text("Change the value")
     calls: list[str] = []
+    base, head = git(tmp_path, "rev-parse", "main"), git(tmp_path, "rev-parse", "HEAD")
+    work = make_work(tmp_path, base_sha=base, head_sha=head, head_branch="feature")
+    if advance_refs:
+        git(tmp_path, "checkout", "main")
+        (tmp_path / "base-only.txt").write_text("Advanced base tip\n")
+        git(tmp_path, "add", "base-only.txt")
+        git(tmp_path, "commit", "-m", "advance base")
+        git(tmp_path, "checkout", "feature")
+        (tmp_path / "head-only.txt").write_text("Advanced head tip\n")
+        git(tmp_path, "add", "head-only.txt")
+        git(tmp_path, "commit", "-m", "advance head")
 
-    async def review(*args: Any, **kwargs: Any) -> Any:
-        prompt = args[2]
-        assert str(diff) in prompt
+    async def review(self: PiBackend, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+        assert str(diff) not in prompt
+        assert "review-assignment" in _sanctioned_inputs(prompt)
+        state = review_stage_state(prompt)
+        assert state is not None
+        assert state['analyzed_revision']['head_sha'] == head
+        assert state['analyzed_revision']['merge_base_sha'] == base
+        if state['scope_id'] == 'python':
+            captured_diff = supporting_contents(prompt)['diff']
+        else:
+            catalog_path = state['supporting_catalog']['path']
+            catalog_body = Path(catalog_path).read_text()
+            yield ToolStartEvent(id='supporting-catalog', name='Read', input={'file_path': catalog_path})
+            yield ToolResultEvent(id='supporting-catalog', output=catalog_body, is_error=False)
+            parts = json.loads(catalog_body)['parts']
+            captured_diff = ''.join(Path(part['path']).read_text() for part in parts)
+        assert "DIFF_SENTINEL" in captured_diff
         assert "DIFF_SENTINEL" not in prompt
         assert kwargs["read_only"] is True
         assert not kwargs.get("tools_disabled")
-        inputs = kwargs["sanctioned_inputs"]
-        inputs.revalidate(args[0], args[1], True)
-        assert "DIFF_SENTINEL" not in inputs.finalization_text(args[0], args[1], True)
-        assert "DIFF_SENTINEL" not in repr(kwargs["finalization_context"])
+        assert "Host review stage:" in prompt
+        assert "INVESTIGATION HAS ENDED" not in prompt
         calls.append(prompt)
-        return {"issues": []}, None, None
+        yield ToolStartEvent(id="source-app", name="Read", input={"file_path": "app.py"})
+        yield ToolResultEvent(id="source-app", output=(cwd / "app.py").read_text(), is_error=False)
+        yield ResultEvent(structured_output=review_stage_result(prompt, []), continuation=None)
 
-    monkeypatch.setattr("daydream.agent.run_agent", review)
-    results, failures = await review_scopes(PiBackend(model="fixture"), make_work(tmp_path),
+    monkeypatch.setattr(PiBackend, "execute", review)
+    results, failures = await review_scopes(PiBackend(model="fixture"), work,
         [StackAssignment("python", ["app.py"]), StackAssignment("structure", ["app.py"])],
         diff_path=diff, diff_text=diff.read_text(), intent_path=intent,
         alternatives_path=tmp_path / "alternatives.json", allow_standalone=True,
@@ -44,4 +80,7 @@ async def test_small_pi_review_keeps_structural_dispatch(
     )
     assert failures == {}
     assert set(results) == {"python", "structure"}
-    assert len(calls) == 2
+    stages = [review_stage_state(prompt) for prompt in calls]
+    assert sorted((stage["scope_id"], stage["stage"], stage["assigned_files"])
+                  for stage in stages if stage is not None) == [
+        ("python", "first_pass", ["app.py"]), ("structure", "integration", ["app.py"])]

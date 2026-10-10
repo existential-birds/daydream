@@ -25,6 +25,8 @@ from daydream.backends import (
     ResultEvent,
     RetryPolicy,
     TextEvent,
+    ToolResultEvent,
+    ToolStartEvent,
     TurnEndEvent,
     create_backend,
 )
@@ -187,7 +189,8 @@ async def test_structured_output() -> None:
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("structured_output.jsonl")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
-    events, mock_exec = await replay_process(backend, mock_proc, Path("/tmp"), "Parse", output_schema=schema)
+    events, mock_exec = await replay_process(backend, mock_proc, Path("/tmp"), "Parse",
+                                             output_schema=schema, finalization=True)
     result_events = [e for e in events if isinstance(e, ResultEvent)]
     assert len(result_events) == 1
     assert result_events[0].structured_output == {
@@ -207,10 +210,71 @@ async def test_structured_output_selects_schema_valid_empty_result() -> None:
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("issue1445_empty_results.jsonl")
     events, _ = await replay_process(backend, mock_proc, Path("/tmp"), "Parse",
-                                     output_schema=PER_STACK_RECORD_SCHEMA)
+                                     output_schema=PER_STACK_RECORD_SCHEMA, finalization=True)
     result_events = [e for e in events if isinstance(e, ResultEvent)]
     assert len(result_events) == 1
     assert result_events[0].structured_output == {"issues": []}
+
+@pytest.mark.parametrize('fault', ['none', 'domain-truncation', 'failed-last', 'mixed-read', 'mixed-read-first',
+                                  'null-details', 'oversized-details', 'wrong-id', 'unsettled', 'late-exit'])
+async def test_native_output_uses_finalized_transcript_order_and_requires_complete_settlement(fault: str) -> None:
+    """Daydream selects settled successful submissions independently of execution completion order."""
+    calls: list[dict[str, Any]] = [
+        {'type': 'toolCall', 'id': call_id, 'name': 'structured_output', 'arguments': {'answer': value}}
+             for call_id, value in [('first', 'first'), ('last', 'last')]]
+    if fault == 'domain-truncation':
+        calls[-1]['arguments']['truncation'] = {'truncated': True, 'firstLineExceedsLimit': True}
+    rows: list[dict[str, Any]] = [{'type': 'agent_start'}, {'type': 'turn_start'},
+        {'type': 'message_end', 'message': {'role': 'assistant', 'content': calls, 'stopReason': 'toolUse'}},
+        *[{'type': 'tool_execution_start', 'toolCallId': call['id'], 'toolName': 'structured_output',
+           'args': call['arguments']} for call in calls],
+        # Parallel completion arrives in the reverse order; finalized messages remain transcript ordered.
+        *[{'type': 'tool_execution_end', 'toolCallId': call['id'], 'toolName': 'structured_output',
+           'isError': False, 'result': {'content': [{'type': 'text', 'text': 'Submitted.'}],
+                                      'details': call['arguments']}} for call in reversed(calls)],
+        *[{'type': 'message_end', 'message': {'role': 'toolResult', 'toolCallId': call['id'],
+           'toolName': 'structured_output', 'isError': False,
+           'content': [{'type': 'text', 'text': 'Submitted.'}], 'details': call['arguments']}} for call in calls],
+        {'type': 'turn_end', 'message': {'role': 'assistant', 'content': calls, 'stopReason': 'toolUse'}},
+        {'type': 'agent_end', 'messages': []}, {'type': 'agent_settled'}]
+    if fault == 'failed-last':
+        rows[5]['isError'] = True
+        rows[-4]['message']['isError'] = True
+    elif fault in {'mixed-read', 'mixed-read-first'}:
+        read_call = {'type': 'toolCall', 'id': 'read', 'name': 'read', 'arguments': {'path': 'api.py'}}
+        calls.insert(0 if fault == 'mixed-read-first' else len(calls), read_call)
+        rows[3:3] = [{'type': 'tool_execution_start', 'toolCallId': 'read', 'toolName': 'read',
+                     'args': read_call['arguments']},
+                    {'type': 'tool_execution_end', 'toolCallId': 'read', 'toolName': 'read',
+                     'isError': False, 'result': {'content': [{'type': 'text', 'text': 'VALUE = 1'}]}}]
+    elif fault == 'null-details':
+        rows[-4]['message']['details'] = None
+    elif fault == 'oversized-details':
+        rows[-4]['message']['details'] = {'answer': 'x' * (129 * 1024)}
+    elif fault == 'wrong-id':
+        rows[-4]['message']['toolCallId'] = 'unassociated'
+    elif fault == 'unsettled':
+        rows.pop()
+    process = make_mock_process([json.dumps(row) for row in rows])
+    if fault == 'late-exit':
+        process.wait.return_value = process.returncode = 7
+    schema = {'type': 'object', 'properties': {'answer': {'type': 'string'}, 'truncation': {
+        'type': 'object', 'properties': {'truncated': {'type': 'boolean'},
+                                          'firstLineExceedsLimit': {'type': 'boolean'}}}}, 'required': ['answer']}
+    if fault in {'none', 'domain-truncation', 'failed-last', 'mixed-read', 'mixed-read-first'}:
+        events, _ = await replay_process(PiBackend(model='fixture'), process, Path('/tmp'), 'Answer',
+                                         output_schema=schema)
+        result = next(event for event in events if isinstance(event, ResultEvent))
+        expected = {'answer': 'first' if fault == 'failed-last' else 'last',
+                    **({'truncation': {'truncated': True, 'firstLineExceedsLimit': True}}
+                                       if fault == 'domain-truncation' else {})}
+        assert result.structured_output == expected and result.structured_output_origin == 'native'
+        assert all(not event.truncated for event in events if isinstance(event, ToolResultEvent))
+        assert [event.id for event in events if isinstance(event, ToolStartEvent)] == (
+            ['read', 'first', 'last'] if fault in {'mixed-read', 'mixed-read-first'} else ['first', 'last'])
+    else:
+        with pytest.raises(PiError):
+            await replay_process(PiBackend(model='fixture'), process, Path('/tmp'), 'Answer', output_schema=schema)
 
 
 async def test_error_turn_raises_pi_error() -> None:
@@ -947,14 +1011,20 @@ def test_pi_replay_fixture_is_sanitized_labeled() -> None:
     assert "395.332" not in text.split("\n")[0]
 
 
-async def test_pi_request_event_config_matches_exact_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize('mode', ['native', 'no-schema', 'disabled', 'finalization', 'validation-opt-out'])
+async def test_pi_request_event_config_matches_exact_argv(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
     monkeypatch.delenv("PI_PROVIDER", raising=False)
     monkeypatch.delenv("PI_API_KEY", raising=False)
     backend = PiBackend(model="glm-5.2")
-    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+    schema = None if mode == "no-schema" else {"type": "object", "properties": {"answer": {"type": "string"}}}
+    process = make_mock_process((FIXTURES_DIR / 'simple_text.jsonl').read_text().splitlines()
+                                + ['{"type":"agent_settled"}'])
+    if mode == 'disabled':
+        process.stdin = MagicMock()
     events, spawn = await replay_process(
-        backend, make_mock_process_from_fixture("simple_text.jsonl"), Path("/tmp"), "structured please",
-        output_schema=schema,
+        backend, process, Path("/tmp"), "structured please",
+        output_schema=schema, tools_disabled=mode == "disabled", finalization=mode == "finalization",
+        validate_structured_output=mode != "validation-opt-out",
         read_only=True, persist_session=False,
     )
     flat_args = list(spawn.call_args.args)
@@ -962,16 +1032,23 @@ async def test_pi_request_event_config_matches_exact_argv(monkeypatch: pytest.Mo
     config = request.config
     assert isinstance(config, PiRequestConfig)
     assert config.read_only is True
-    assert flat_args[flat_args.index("--tools") + 1] == "read,find,ls,grep"
-    assert config.selected_tools_count == 4 and config.selected_tools_present is True
+    if mode in {'disabled', 'finalization'}:
+        assert '--no-tools' in flat_args and config.selected_tools_count == 0
+    else:
+        assert flat_args[flat_args.index('--tools') + 1] == 'read,find,ls,grep' + (
+            ',structured_output' if mode == 'native' else '')
+        assert config.selected_tools_count == (5 if mode == 'native' else 4)
+        assert config.selected_tools_present is True
     assert config.no_skills is True and "--no-skills" in flat_args
-    assert config.schema_emulated is True  # no native Pi schema flag
+    assert config.schema_emulated is (mode not in {"native", "no-schema"})
     assert config.persist_session is False and "--no-session" in flat_args
     assert config.continuation_mode == "fresh"
     assert config.model_mode == "single"
     assert config.max_turns is None  # accepted by daydream, never passed to Pi
     # System preamble is invocation-level content, never a config value.
-    assert request.system_prompt is not None and "tool-call budget" in request.system_prompt
+    assert request.system_prompt is not None
+    if mode != "finalization":
+        assert "tool-call budget" in request.system_prompt
 
 
 async def test_pi_error_turn_sets_explicit_incomplete_boundary() -> None:
@@ -1010,7 +1087,7 @@ async def test_large_prompt_uses_private_attachment_until_child_exits(
     request = next(event for event in events if isinstance(event, RequestEvent))
     assert observed["prompt_sha256"] == hashlib.sha256(request.prompt.encode()).hexdigest()
     assert request.prompt.startswith(prompt)
-    assert json.dumps(schema) in request.prompt
+    assert request.output_schema == schema and "structured_output" in request.prompt
     attachment = Path(observed["prompt_attachment"])
     assert attachment.is_absolute()
     assert not attachment.exists()

@@ -8,6 +8,7 @@ completion marker written last. A lookup is a hit only when all three agree.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from daydream.deep import reuse_store
@@ -53,6 +54,12 @@ def test_entry_is_a_hit_only_when_payload_and_marker_agree(tmp_path: Path) -> No
     miss = store.lookup("a" * 64)
     assert isinstance(miss, reuse_store.ReuseMiss) and "payload" in miss.reason
     payload_file.write_bytes(b"{}")
+    manifest_path = reuse_store.entry_manifest_path(store.store_dir, hit.key)
+    original_manifest = manifest_path.read_bytes()
+    manifest_path.write_text(json.dumps({**hit.manifest, "format": 1}))
+    miss = store.lookup(hit.key)
+    assert isinstance(miss, reuse_store.ReuseMiss) and miss.reason == "manifest format mismatch"
+    manifest_path.write_bytes(original_manifest)
     reuse_store.entry_marker_path(tmp_path / "review-cache", "a" * 64).unlink()
     miss = store.lookup("a" * 64)
     assert isinstance(miss, reuse_store.ReuseMiss) and "marker" in miss.reason

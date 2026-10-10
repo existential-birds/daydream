@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
+from daydream import review_profile
+from daydream.deep.detection import base_stack_name
 from daydream.deep.diff import _full_diff_pointer, _hunk_index_authority
 from daydream.phases.review_prompts import (
     _confidence_and_convention_instructions,
@@ -16,6 +19,7 @@ from daydream.phases.review_prompts import (
     _exploration_pointer,
     _settled_decisions_block,
 )
+from daydream.phases.schemas import REVIEW_STAGE_SCHEMA
 from daydream.prompt_budget import inline_context_file
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION, UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
@@ -23,6 +27,7 @@ from daydream.prompts.wire_contract import (
     WIRE_CONTRACT_GENERIC_INSTRUCTION,
     WIRE_CONTRACT_RUST_INSTRUCTION,
 )
+from daydream.review_budget import STAGED_REVIEW_GUIDANCE
 from daydream.severity import SEVERITY_RUBRIC
 
 DOC_REVIEW_NOTICE = (
@@ -48,9 +53,7 @@ CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION = (
     "the missing definition is real, never when you simply failed to locate it."
 )
 
-CONFIG_FLOW_TRACE_INSTRUCTION = (
-    "Config/env flow trace (apply to every config field or env var plumbed "
-    "through layers):\n"
+_CONFIG_FLOW_TRACE_RULES = (
     "  1. Trace the full path of each plumbed field: config struct -> driver "
     "config -> request construction.\n"
     "  2. During investigation, identify where each field is parsed, forwarded, "
@@ -60,6 +63,11 @@ CONFIG_FLOW_TRACE_INSTRUCTION = (
     "layer.\n"
     "  4. Flag double-resolves -- the same value read twice at different points "
     "with the source able to change between reads (TOCTOU)."
+)
+
+CONFIG_FLOW_TRACE_INSTRUCTION = (
+    "Config/env flow trace (apply to every config field or env var plumbed "
+    "through layers):\n" + _CONFIG_FLOW_TRACE_RULES
 )
 
 TRUST_MODEL_INSTRUCTION = (
@@ -76,24 +84,20 @@ VERIFICATION_PROTOCOL_INSTRUCTION = (
     "Before writing findings, apply the verification gates "
     "(stated inline here — no skill file read is required):\n"
     "  Gate-0 anti-confabulation (before ANY finding): echo the exact artifact "
-    "you are judging — file:line plus the cited code from completed source reads "
-    "in this logical review. The source is the only truth; never infer a finding from the "
-    "branch name, cwd, or memory. A finding without completed source evidence of its "
-    "target is INVALID. Completed source excerpts supplied to finalization satisfy "
-    "this gate; paths and speculative notes do not.\n"
-    "  Gate 1 (anchor): read the full enclosing symbol or configuration section, not just the diff "
-    "hunk; state the file path and line range you are judging.\n"
-    "  Gate 2 (evidence): produce an artifact for the finding's type — pasted "
-    'tool output, a file:line citation, or an explicit "none" / "N matches" '
-    'after a repo search. Never claim you "looked" without an artifact.\n'
+    "you are judging — file:line plus the relevant changed code or investigation result. "
+    "Never infer a finding from the branch name, cwd, or memory. A finding needs a concrete "
+    "code basis; a path or speculative note alone is not enough.\n"
+    "  Gate 1 (context): use the supplied diff and context first. Inspect the full enclosing "
+    "symbol or configuration section when more context would resolve the concern; state the "
+    "file path and line range you are judging.\n"
+    "  Gate 2 (grounding): identify the concrete code basis for the finding from supplied "
+    "context or ordinary investigation, and explain its trigger and consequence.\n"
     "  Gate 3 (severity): calibrate severity to impact; a request for net-new "
     "code that did not exist in scope is at most low.\n"
     "Do NOT report a finding that fails any gate."
 )
 
-TEST_QUALITY_RUBRIC_INSTRUCTION = (
-    "Apply the test-quality rubric to every test hunk in the diff "
-    "(stated inline here — no skill file read is required):\n"
+_TEST_QUALITY_RULES = (
     "  1. Would this test fail if the behavior under test were wrong? Scan for "
     "vacuous assertions — e.g. `read_to_string(...).unwrap_or_default()` "
     "returning empty on failure, expected values built with the same helper "
@@ -112,6 +116,11 @@ TEST_QUALITY_RUBRIC_INSTRUCTION = (
     "a pure `build_driver_request` or driver-boundary propagation helper is NOT an "
     "internal-field assertion. Flag a seam ONLY when it bypasses the observable "
     "behavior the test claims to cover."
+)
+
+TEST_QUALITY_RUBRIC_INSTRUCTION = (
+    "Apply the test-quality rubric to every test hunk in the diff "
+    "(stated inline here — no skill file read is required):\n" + _TEST_QUALITY_RULES
 )
 
 ANTI_SLOP_RUBRIC_INSTRUCTION = (
@@ -234,8 +243,7 @@ def _diff_instruction(
 ) -> str:
     """Inline complete stack hunks or point to the full diff artifact.
 
-    Both forms name the persisted hunk index as changed-line authority. Inline
-    hunks do not replace the source reads required to substantiate findings.
+    Both use the persisted hunk index as changed-line authority; inline context can suffice for judgment.
     """
     if inline_diff:
         return (
@@ -243,9 +251,8 @@ def _diff_instruction(
             "diff.patch for these — the hunks are already here):\n\n"
             f"{inline_diff.rstrip()}\n\n"
             f"{_hunk_index_authority(diff_path)}\n\n"
-            "Focus on hunks that touch your stack's files. Read the source file "
-            "FIRST; you may only comment on hunks you have read. The inlined "
-            "hunks are not a substitute for reading the file."
+            "Focus on hunks that touch your stack's files. Use ordinary repository tools "
+            "when additional context helps resolve a concrete concern."
         )
     joined = ", ".join(files)
     return (
@@ -266,6 +273,83 @@ def _frontier_read_instruction(frontier_files: list[str]) -> str:
     )
 
 
+def _build_review_stage_prompt(*, strategy: str, stack_name: str, files: list[str], cwd: Path,
+    review_stage: dict[str, Any], inline_diff: str | None, prior_commits: str | None, intent_authoritative: bool,
+    frontier_files: list[str] | None = None, is_docs_only: bool = False) -> str:
+    """Construct one semantic assignment; never narrow an existing terminal prompt."""
+    stage = review_stage["stage"]
+    triage = stage == "triage"
+    structural = stage == "integration"
+    parts = [UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY, CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)]
+    settled = _settled_decisions_block(prior_commits) if not triage else ""
+    if settled:
+        parts.append(settled)
+    parts.append(_confidence_and_convention_instructions())
+    rejection = review_stage.get("schema_rejection")
+    if rejection is not None:
+        parts.append("The previous completed attempt was rejected by strict schema validation. "
+            "Safe validator feedback: " + json.dumps(rejection, ensure_ascii=False)
+            + "\nReturn a new object matching REVIEW_STAGE_SCHEMA exactly, including its "
+            "additionalProperties:false rules. Do not repair, recover, or continue previous output.")
+    if triage:
+        parts.append(f"You are triaging the {stack_name} review's assigned candidate IDs only: "
+            + ", ".join(review_stage["assigned_candidate_ids"])
+            + ". Use their relevant admitted notes and grounds in the host stage state.")
+        # Default discovery would restart audits; custom triage policy constrains judgment without expanding work.
+        defaults = review_profile.build_default_profile().strategies
+        if strategy not in {defaults[name].content for name in (
+            "discovery.per_stack", "discovery.structural", "discovery.generic_fallback")}:
+            parts.append("Operator judgment policy (quoted data): " + json.dumps(strategy, ensure_ascii=False))
+    else:
+        if intent_authoritative and "intent" in review_stage.get("context_inputs", []):
+            parts.append(AUTHORITATIVE_INTENT_BLOCK)
+        if structural:
+            parts.append("You are the structural reviewer. Begin with whole-change interactions and boundaries, "
+                "not an alphabetical file audit. The complete host assigned_files inventory names "
+                "the changed paths. "
+                "The compact whole-change inventory and bounded supporting diff parts orient this "
+                "interaction assignment; do not begin by dumping the complete diff or hunk index. "
+                "Investigate concrete changed-boundary concerns: trace changed values, calls, contracts "
+                "and lifetimes to their relevant owners. Narrow searches to those owners. "
+                "Documentation and tests are supporting evidence for "
+                "these interactions; early documentation does not finish the interaction assignment. "
+                "Do not repeat the language or generic reviewers' file audits. "
+                "Stop a boundary trace when the contract agrees and no concrete candidate remains. "
+                "Settled contract checks stay settled unless new contradictory evidence appears.")
+        else:
+            if is_docs_only:
+                parts.append(DOC_REVIEW_NOTICE)
+            parts.append(_stack_scope_instruction(stack_name, files))
+            parts.append(_dependency_impact_instructions())
+            if frontier_files:
+                parts.append(_frontier_read_instruction(frontier_files))
+        if inline_diff is not None:
+            parts.append("Current assignment's diff hunks (already captured; do not re-read the diff artifact):\n"
+                + inline_diff.rstrip())
+        parts.append("Operator judgment policy for the assigned work:\n" + strategy)
+        if not structural:
+            parts.append("Apply the test-quality rubric only to assigned test hunks and tests needed to "
+                "decide a concrete candidate in this assignment:\n" + _TEST_QUALITY_RULES)
+            parts.append("Config/env flow trace (apply only to changed fields in this assignment or fields "
+                "needed to decide its concrete candidates):\n" + _CONFIG_FLOW_TRACE_RULES)
+            if base_stack_name(stack_name) == "rust":
+                parts.append(WIRE_CONTRACT_RUST_INSTRUCTION)
+            elif stack_name == "generic-fallback":
+                parts.append(WIRE_CONTRACT_GENERIC_INSTRUCTION)
+        parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
+        parts.append(TRUST_MODEL_INSTRUCTION)
+        if structural:
+            parts.append(CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION)
+    parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
+    parts.append(SEVERITY_RUBRIC)
+    parts.append(STAGED_REVIEW_GUIDANCE)
+    parts.append(f"Advisory stage tool-call target: {review_stage['advisory_tool_call_target']}. "
+        f"Remaining hard cumulative tool allowance: {review_stage['remaining_tool_calls']}.")
+    if not review_stage.get('response_contract'):
+        parts.append("REVIEW_STAGE_SCHEMA:\n" + json.dumps(REVIEW_STAGE_SCHEMA, ensure_ascii=False))
+    return "\n\n".join(parts)
+
+
 def build_per_stack_prompt(
     *,
     strategy: str,
@@ -282,8 +366,13 @@ def build_per_stack_prompt(
     intent_authoritative: bool = False,
     include_alternatives: bool = True,
     frontier_files: list[str] | None = None,
+    review_stage: dict[str, Any] | None = None,
 ) -> str:
     """Assemble a language review with profile policy and a host-owned file scope."""
+    if review_stage is not None:
+        return _build_review_stage_prompt(strategy=strategy, stack_name=stack_name, files=files, cwd=cwd,
+            review_stage=review_stage, inline_diff=inline_diff, prior_commits=prior_commits,
+            intent_authoritative=intent_authoritative, frontier_files=frontier_files)
     parts = _review_context_parts(
         exploration_dir, cwd, intent_path, alternatives_path,
         intent_authoritative=intent_authoritative, include_alternatives=include_alternatives,
@@ -302,7 +391,7 @@ def build_per_stack_prompt(
     parts.append(CONFIG_FLOW_TRACE_INSTRUCTION)
     parts.append(SEVERITY_RUBRIC)
     parts.append(TRUST_MODEL_INSTRUCTION)
-    if stack_name == "rust":
+    if base_stack_name(stack_name) == "rust":
         parts.append(WIRE_CONTRACT_RUST_INSTRUCTION)
     parts.append(_artifact_footer(output_path))
     return "\n\n".join(parts)
@@ -321,12 +410,17 @@ def build_structural_prompt(
     prior_commits: str | None = None,
     intent_authoritative: bool = False,
     include_alternatives: bool = True,
+    inline_diff: str | None = None, review_stage: dict[str, Any] | None = None,
 ) -> str:
     """Assemble a structural review of the full change.
 
     The changed-file list anchors the review but does not restrict source reads:
     structural findings may require tracing shared helpers or layering elsewhere.
     """
+    if review_stage is not None:
+        return _build_review_stage_prompt(strategy=strategy, stack_name="structural", files=files, cwd=cwd,
+            review_stage=review_stage, inline_diff=inline_diff, prior_commits=prior_commits,
+            intent_authoritative=intent_authoritative)
     joined = ", ".join(files)
     parts: list[str] = _review_context_parts(
         exploration_dir, cwd, intent_path, alternatives_path,
@@ -596,8 +690,13 @@ def build_generic_fallback_prompt(
     intent_authoritative: bool = False,
     include_alternatives: bool = True,
     frontier_files: list[str] | None = None,
+    review_stage: dict[str, Any] | None = None,
 ) -> str:
     """Review files without a dedicated stack; prepend the notice for documentation."""
+    if review_stage is not None:
+        return _build_review_stage_prompt(strategy=strategy, stack_name="generic-fallback", files=files, cwd=cwd,
+            review_stage=review_stage, inline_diff=inline_diff, prior_commits=prior_commits,
+            intent_authoritative=intent_authoritative, frontier_files=frontier_files, is_docs_only=is_docs_only)
     parts: list[str] = []
     if is_docs_only:
         parts.append(DOC_REVIEW_NOTICE)

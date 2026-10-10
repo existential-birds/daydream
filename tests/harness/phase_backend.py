@@ -9,6 +9,7 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 from daydream.backends import AgentEvent, ResultEvent, TextEvent
+from tests.harness.stub_backend import review_stage_result, review_stage_state
 
 
 def _shape_issues(issues: list[dict[str, Any]], severity: str | None = None,) -> list[dict[str, Any]]:
@@ -90,13 +91,17 @@ class PhaseDispatchBackend:
             yield TextEvent(text="Review complete.")
             if output_schema is not None:
                 # Native review emits structured records directly.
-                issues = (self._parse_results[self._review_call]
-                    if self._review_call < len(self._parse_results)
-                    else []
-                )
-                self._review_call += 1
+                state = review_stage_state(prompt)
+                first_discovery = state is None or (state["stage"] in {"first_pass", "integration"}
+                                                    and not state["progress"])
+                issues = []
+                if first_discovery:
+                    issues = (self._parse_results[self._review_call] if self._review_call < len(self._parse_results)
+                        else []
+                    )
+                    self._review_call += 1
                 issues = _shape_issues(issues, severity="medium")
-                structured = {"issues": issues}
+                structured = review_stage_result(prompt, issues)
         elif "extract" in prompt_lower and "json" in prompt_lower:
             issues = (self._parse_results[self._parse_call] if self._parse_call < len(self._parse_results) else [])
             self._parse_call += 1

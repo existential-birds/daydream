@@ -426,7 +426,7 @@ There is no environment-variable tier. `DAYDREAM_MODEL` and `DAYDREAM_BACKEND` a
 
 ### Extensions
 
-A fork can extend daydream. A top-level `daydream_ext` package exposes a `register(registry)` function. The function can add phases, reorder flow steps, override prompts, and register stack rules. The extension API is version 6. Verify an extension with `daydream ext validate`. See [docs/extensions.md](docs/extensions.md).
+A fork can extend daydream. A top-level `daydream_ext` package exposes a `register(registry)` function. The function can add phases, reorder flow steps, override prompts, and register stack rules. The extension API is version 8. Verify an extension with `daydream ext validate`. See [docs/extensions.md](docs/extensions.md).
 
 ## Configuration
 
@@ -518,15 +518,17 @@ that fits one group is unsharded and keeps the pre-profile arbiter effort
 (Codex `xhigh`, the Claude/Pi ambient default) whatever the profile: the
 route's arbiter effort is a per-group knob. Each run writes
 its decision to `.daydream/deep/latency-routing.json`, and the archived
-`evaluation.json` carries the selected profile. See
-[review runtime](docs/review-runtime.md#latency-profiles-and-the-per-profile-report)
-for the per-profile report command.
+`evaluation.json` carries the selected profile. Compare profiles with:
 
-The same corpus declares `selection_cases` for the recommendation-verifier
-comparison, and the documented command
-`uv run python -m daydream.eval.latency_report --corpus tests/fixtures/latency_profiles/manifest.json`
-then emits a `verify_selection` block contrasting today's conservative verifier
-(`verify_all`) with the selective mode. It reports, per mode: the selected item
+```sh
+uv run python -m daydream.eval.latency_report --corpus tests/fixtures/latency_profiles/manifest.json
+```
+
+The report covers the recorded corpus only; its arbiter latency includes the
+whole deep phase.
+
+The corpus's `selection_cases` produce a `verify_selection` block comparing the
+conservative verifier (`verify_all`) with the selective mode. It reports, per mode: the selected item
 and backend-call counts (a mode with no selected item makes no call), how many
 the mode skips, how many skipped items the archived arm had verdicted
 `contradicts` or `uncertain` (the offline counterfactual), the fraction of each
@@ -639,11 +641,47 @@ and 6× review time and per-role tool-call allowances respectively. The 4× and
 6× tiers also enable deep-review sharding unless explicitly disabled. An explicit review
 profile keeps its configured whole-review deadline. Set
 `pipeline.review_wall_budget_s` in a `--review-profile` TOML file to change it.
-Individual reviewers also have bounded investigation and finalization stages:
-per-stack investigation stops after eight minutes or 48 tool starts, reserving
-up to two minutes to return validated findings. Intent, exploration, and other
-roles have smaller bounds. The existing 60-minute review ceilings remain outer
-safeguards; fix turns retain their separate 30-minute limit.
+The nonstructural role cap coarsens the largest packed stacks by repeatedly merging adjacent groups with the smallest
+combined diff-byte weight (leftmost on ties). Final shard names are contiguous and frontiers are recomputed. File/byte
+targets are soft under the cap; files stay indivisible, each stack retains at least one role, and whole-change Structure
+is outside the cap. More groups increase aggregate model opportunity: the captured 81-file Python workload grows from
+one to eight groups, 288 to 2,304 maximum starts, and 48 to 384 nominal role-minutes. Shared pipeline time, queueing and
+concurrency still limit execution; these are neither billing estimates nor guarantees of cold review completion.
+
+Per-stack reviewers share eight minutes and 48 observed tool starts across stages and retries. Language/generic
+assignments prefer nearby complete files, at most four per batch, within 24,576 bytes for exact paths or 12,288 bytes
+inline, including wrappers, scoped diff/index and snapshot bindings. Exact assignment pointers do not consume the
+separate inline allowance for shared bytes and their wrappers. Oversized files split into hunks and ordered
+continuations with old/new ranges and exact fragment offsets; every required part must succeed for its file to be
+complete. Required assignments take priority over separately bounded context.
+
+Each stage gets a fresh prompt. Structure reviews whole-change interactions using a compact inventory, bounded diff
+parts and supporting documentation; discovery candidates marked `open` or `unresolved` receive one finite triage round.
+A candidate still `unresolved` after triage keeps coverage incomplete. Call targets guide pace, while the cumulative
+allowance and absolute deadline remain hard limits. For native Pi stages, the host withholds minimum input-read and
+submission capacity for undispatched assignments and submission capacity for known pending triage. Each invocation
+has a hard allowance within that reservation and may borrow above its advisory target only within that allowance.
+The host stops before dispatch if the current stage's minimum input-read and submission needs cannot fit. Reservations
+do not guarantee model completion: observed tool starts can arrive after execution, and a stage that spends its own
+allowance without submitting remains incomplete. Native Pi supplies bounded live feedback on invocation-local tool
+starts before each model request, including failed tools and submissions; every member of a parallel batch counts.
+This improves pacing without changing tool admission or the recorded provider proposals. One fresh full-stage retry
+is permitted after a normally completed
+invocation fails strict schema validation; only safe validator metadata carries over, never rejected output. Other
+admission failures are terminal. Failed attempts admit no semantic state, and later failure preserves findings from
+successful stages while marking unfinished work incomplete.
+
+Optional Structure projections and their navigation catalogs share the remaining exact-input allowance
+(512 files and 8 MiB) after required/shared context. Catalogs list admitted pointers only; partial status and
+omitted-part counts describe unavailable supporting context without aborting the interaction review.
+
+Valid decisions can rely on supplied diff/context without source reads; ordinary file/Git tools remain available,
+recorded and charged, but do not authenticate claims or establish completion. Findings and typed coverage are
+snapshot-bound and atomically published. `complete` requires success or explicit host no-op for every planned scope and
+required phase; it does not guarantee exhaustive defect discovery. The
+[stage contract](docs/extensions.md#stage-aware-review-builders-api-8) specifies identity/capture checks, triage state,
+backend transports and native output rules. Stage contract 8 invalidates older cached reviews; extension API 8 requires
+staged builders.
 
 When a review agent exhausts its time or tool-call budget, Daydream continues with
 completed reviewers' findings and validated partial checkpoints, and marks the
@@ -661,8 +699,8 @@ and posting jobs to the same Daydream revision. Leave CI headroom beyond the
 model deadline for setup, host processing, and artifact publication; a 60-minute
 job with the default model budget leaves 15 minutes for those operations. An
 external job cancellation cannot use the graceful budget-exhaustion path.
-See [review runtime and rollout](docs/review-runtime.md) for role limits,
-measurements, quality limitations, and trajectory-upload guidance.
+For diagnosis, capture `--trajectory PATH` and `--dump-artifacts DIRECTORY`.
+Inspect diagnostic bundles for credentials before sharing them.
 
 ### Retry recovery
 

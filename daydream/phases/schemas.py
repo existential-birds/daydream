@@ -3,7 +3,7 @@
 import copy
 from typing import Any
 
-from daydream.output_schema import result_array_schema, severity_enum_schema
+from daydream.output_schema import result_array_schema, severity_enum_schema, strict_object
 from daydream.repository_paths import REPOSITORY_FILE_PATH_SCHEMA
 
 _FINDING_FIELDS = {
@@ -22,6 +22,41 @@ PER_STACK_RECORD_SCHEMA = result_array_schema("issues", {
 PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["required"] = [
     "id", "description", "file", "line", "severity", "confidence", "rationale", "evidence"
 ]
+# Private progress protocol. Terminal records keep their public contract unchanged.
+REVIEW_STAGE_SCHEMA = strict_object({
+    "targets": {"type": "array", "items": strict_object({
+        "target_id": {"type": "string"},
+        "status": {"type": "string", "enum": ["reviewed", "not_reviewed"]},
+        "reason": {"type": "string"},
+    })},
+    "notes": {"type": "string"},
+    "candidates": {"type": "array", "items": strict_object({
+        "candidate_id": {"type": "string"},
+        "file": REPOSITORY_FILE_PATH_SCHEMA,
+        "line": {"type": "integer"},
+        **{name: {"type": "string"} for name in ("trigger", "consequence", "grounds")},
+        "disposition": {"type": "string", "enum": ["open", "confirmed", "rejected", "unresolved"]},
+        "finding": {"anyOf": [copy.deepcopy(PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]),
+                               {"type": "null"}]},
+    })},
+    "contradictions": {"type": "array", "items": {"type": "string"}},
+})
+
+
+def review_stage_schema(target_ids: list[str], candidate_ids: list[str], *, triage: bool) -> dict[str, Any]:
+    """Specialize output transport to the assignment; semantic admission stays independent."""
+    schema = copy.deepcopy(REVIEW_STAGE_SCHEMA)
+    targets = schema['properties']['targets']
+    targets.update(minItems=len(target_ids), maxItems=len(target_ids))
+    if target_ids:
+        targets['items']['properties']['target_id']['enum'] = target_ids
+    candidates = schema['properties']['candidates']
+    candidates['items']['properties']['candidate_id']['enum'] = candidate_ids if triage else ['']
+    if triage:
+        candidates.update(minItems=len(candidate_ids), maxItems=len(candidate_ids))
+        candidates['items']['properties']['disposition']['enum'] = ['confirmed', 'rejected', 'unresolved']
+    return schema
+
 ALTERNATIVE_REVIEW_SCHEMA = result_array_schema("issues", {
     "id": {"type": "integer"},
     "title": {"type": "string"},

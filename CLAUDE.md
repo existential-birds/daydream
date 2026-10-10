@@ -13,7 +13,8 @@ Default flow is the deep multi-stack pipeline; `--shallow` is a single-stack, si
 are review-only. Four backends — Claude
 (in-process SDK), Codex, Pi, and Osprey (subprocess CLIs) — all emit the same `AgentEvent` stream.
 
-Reference docs: `README.md` (user CLI + config), `docs/{extensions,benchmark,observability}.md`.
+First read Makefile/config (current commands/settings/exemptions) and README.md/CONTRIBUTING.md#where-to-look-deeper;
+update changed contracts. Corpus requires docs/calibration.md; follow docs/coverage.md's ratchet without lowering it.
 Review exports follow the [terminal findings contract](README.md#terminal-review-findings-contract); preserve typed coverage, snapshot binding and atomic publication.
 
 ## Commands
@@ -53,13 +54,8 @@ packaged workflows (`daydream/templates/workflows/README.md`); `daydream benchma
 
 ## Testing standard (mandatory)
 
-Every user-visible behavior must have at least one **real-path test**: a test that enters from the
-production entrypoint (`runner.run` / the CLI) with real dependencies (real temp git worktree, real
-filesystem, real event loop), mocking only the external network/API backend (via the `Backend` protocol /
-`create_backend` seam). Tests must assert observable outcomes (exit code, files written, fixes applied or
-declined, transcript state), never that a function was merely called. Unit tests are supplementary, not a
-substitute. Reference exemplar: the non-interactive/EOF gate tests in
-`tests/deep_orchestrator/test_fix_gate_cleanup_and_precision.py`.
+Follow mandatory CONTRIBUTING.md#testing-policy and #exemplars; also assert retained fixes and trajectory state.
+Inject terminal-finding faults at actual filesystem operations (README.md#terminal-review-findings-contract).
 
 **No caveats.** All work is completed and proven, or explicitly in progress. No deferred items, no
 "optional" follow-ups, no smoke-tests substituted for real coverage.
@@ -193,9 +189,12 @@ CLI subprocess env also sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` and lifts 
 | `EXPLORATION_MAX_TURNS` | 50 | exploration specialists — the only `max_turns` call site |
 | `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | 600s / 2700s | pi response silence / active-tool and codex silence before the subprocess is killed |
 
-- Exhaustion emits a `TurnEndEvent` and marks the trajectory partial. **Truncation is never silently
-  absorbed**: a truncated wonder or parse raises; a truncated per-stack review goes to `failed_stacks` so
-  merge lists it under "Uncovered stacks" instead of recording a clean pass.
+- Failed/truncated/malformed reviews retain admitted evidence and incomplete coverage; read README.md#review-budgets.
+- Staged discovery's `open` and `unresolved` candidates receive one triage round; unresolved triage remains incomplete.
+  Native Pi stage allowances reserve minimum capacity for undispatched assignment inputs/submissions and known triage
+  submissions. Stop before dispatch when the current stage's minimum needs cannot fit; retain prior admitted evidence.
+  Bounded native Pi calls receive one refreshed live budget note per model request, counting local tool starts;
+  feedback does not rewrite provider proposals or prospectively admit tools. The host ledger remains authoritative.
 - Do not add `max_turns` to fix or verify — it does not fail soft. The turn ends `error_max_turns`, the
   backend raises `MaxTurnsError`, and the fix group lands in `fix-failures.json` and is reverted, throwing
   a real fix away rather than trimming it.
@@ -246,16 +245,10 @@ exploration pre-scan (cached across runs)
   stops publication. Post-test re-verification permits existing unresolved
   findings but stops newly actionable findings; tree identity, scope, tests, and
   repository hooks remain required. Commit messages list only resolved findings.
-- Wonder ∥ per-stack are siblings in one task group on a fresh multi-stack run (wonder feeds only merge and
-  the dedup pre-filter, so reviewer prompts drop the `alternatives.json` pointer; they join before parse).
-  Single-stack mode and every `--start-at` resume keep the serial order **and** the pointer — single-stack
-  has no merge agent, so that pointer is the only path wonder findings take into the report. This boundary
-  is why the extension API is v4.
 - Reviewers return structured records, loaded in **stack-name order** to keep merge input ordering
   and global issue numbering reproducible.
 - **Record identity is host-assigned, not content-derived.** Every per-stack record is stamped with a `uid`
-  (`stack:ordinal`, `deep/records.py`) at birth by the per-stack reviewers and backfilled by the same
-  deterministic rule when loaded, so pre-`uid` artifacts resume cleanly.
+  (`stack:ordinal`, `deep/records.py`) at birth by the per-stack reviewers.
   The reviewer's `id` restarts at 1 per stack and is *not* unique; `normalize_items` mints the human-facing
   `id` only at the final merge write. Dedup, arbitration, suppression and the structural fold all run before
   that, so they key on `uid`. A content key (`compute_fingerprint`, `descriptions_match`) answers
@@ -274,15 +267,7 @@ exploration pre-scan (cached across runs)
   is), `source_uids` (which records it was made of). Provenance is *not* identity — two items may cite the
   same record, so `source_uids` is not unique. Keep `id` integer: five strict `*_SCHEMA` constants type the
   echoed `id`/`issue_id` as `integer`, and the report renders it as the finding number.
-- Pi discovery always references the actual live session `diff.patch`, including small diffs. It uses
-  ordinary read-only tools and separate structural review, never preloaded finite evidence packets.
-  The pointer-only diff has a separate 128 MiB validation ceiling; other sanctioned-input budgets stay
-  unchanged. Recovery finalization uses completed investigation evidence and never recaptures raw diff.
-  Other backends' intent, wonder and per-stack prompts keep their bounded 12 KiB inline policy and
-  transport-specific isolation. Small diffs can still collapse the fan-out.
-- Pi sends normal logical prompts plus schema through private temporary `@file` attachments. Dynamic
-  review system instructions use Pi's system-prompt file support. Files survive until child teardown
-  and are removed on success, failure, cancellation or generator close; tools-disabled calls retain stdin.
+- Before changing staged review or Pi transport, read docs/extensions.md#stage-aware-review-builders-api-8.
 - Merge resumes the arbiter's session when both phases resolve to the same backend instance; the resumed
   prompt forces a re-read of the per-stack record files, rewritten after arbitration.
 - **Diagrams (`diagram` step, after merge/supervision).** The LLM **never writes mermaid**: it emits a
@@ -318,7 +303,7 @@ exploration pre-scan (cached across runs)
 
 A fork customizes phases, flows, and prompts from a top-level `daydream_ext` package (found via
 `$DAYDREAM_EXT_DIR` → `import daydream_ext`) without editing `daydream/`. It must export
-`DAYDREAM_EXT_API` within `MIN_SUPPORTED_EXTENSION_API_VERSION..EXTENSION_API_VERSION` (both 6), may
+`DAYDREAM_EXT_API` within `MIN_SUPPORTED_EXTENSION_API_VERSION..EXTENSION_API_VERSION` (see `extensions/api.py`), may
 register one `ToolDecision`-returning tool supervisor, and is resolve-checked by `daydream ext validate`.
 Full contract: `docs/extensions.md`.
 
@@ -327,7 +312,7 @@ Full contract: `docs/extensions.md`.
 - **SDK** `claude-agent-sdk==0.2.152`, must stay ≥ 0.2.111: earlier versions tear down the CLI subprocess
   unshielded on cancellation, so a budget/fan-out cancel mid-stream corrupts anyio's cancel-scope stack.
 - **ATIF** vendored from Harbor v0.17.1-9 under `daydream/atif/` (Apache-2.0), pinned to v1.7 emission.
-  Re-vendor wholesale on Harbor updates; no local patches. **No `harbor` runtime dep** — ATIF models live in
+  Re-vendor wholesale on Harbor updates; no local patches. **No `harbor` runtime dep** — ATIF construction belongs in
   `daydream/trajectory/` only. **Module-bloat ban**: no ATIF construction in `phases/` or `ui/`.
 - Deps live in `pyproject.toml`; keep `uv.lock` in sync via `uv lock` or `make check` fails at step one.
 - **`make check`** = root `uv lock --check` + install + ruff over `daydream tests` + vulture dead-code scan over `daydream tests` and the RL package + mypy over `daydream tests` + pytest + actionlint (Docker) + coverage-report existence check + naming-convention check; `scripts/hooks/pre-push` verifies signatures then delegates to it. `rl-check` is **not** part of it, mirroring `ci.yml`, whose `check` job carries no RL gate either — the RL project has its own job (own runner, own `uv sync`, Python 3.12) and one of its e2e tests drives the real `claude` CLI that runner never installs, so as a `check` dependency it failed the pre-push gate on changes that never touch `rl/`. Run `make rl-check` when you change `rl/daydream_review`.
@@ -346,7 +331,8 @@ Full contract: `docs/extensions.md`.
   The local diagnostic archive uses runs-only schema version 9. Unsupported indexes are preserved and rejected; use a fresh archive directory instead of migrating. Annotation history lives only in LocalRecordStore observations.
   Evaluation consumes the immutable write snapshot and leaves unavailable lifecycle timing unmeasured.
 - **Conventional Commits** (`feat(backends): ...`). Stage explicitly (`git add <path>`), never `git add -A`.
-- Fix bugs at the root. Never bypass the hook, skip tests, or `git push --no-verify`.
+- Never bypass hooks (`--no-verify` or disabling env vars), even for pre-existing failures. Stage only related paths explicitly.
+  Fix/retry on this branch or report the blocker. Sign commits; commit/push completes only after hook-enabled success.
 - Own your own bugs in plain language. Never describe your defect as the tool being buggy.
 - Never claim success that isn't verified-working.
 

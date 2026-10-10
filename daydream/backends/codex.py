@@ -21,7 +21,7 @@ import uuid
 from collections import Counter
 from collections.abc import AsyncGenerator, Iterator, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from daydream import git_ops
 from daydream.backends import (
@@ -550,6 +550,7 @@ class CodexBackend:
         model_name = self.model
         last_agent_text: str | None = None
         structured_result: Any = None
+        structured_output_origin: Literal["native", "text"] = "native"
 
         # Pair idless starts/completions by FIFO; misses get
         # observable orphan ids. Accumulate item.updated text because completion
@@ -922,19 +923,23 @@ class CodexBackend:
 
                     elif item_type == "mcp_tool_call":
                         result_content = ""
+                        result_error = False
                         if "result" in item:
                             result = item["result"]
                             if isinstance(result, dict):
-                                result_content = str(result.get("content", ""))
+                                content = result.get("content", "")
+                                result_content = str(content)
+                                result_error = result.get("isError") is True
                             else:
                                 _warn("tool_result_not_object")
                                 for diagnostic in _take_early_diagnostics():
                                     yield diagnostic
                         error = item.get("error")
+                        status = item.get("status")
                         yield ToolResultEvent(
                             id=item_id,
                             output=result_content,
-                            is_error=bool(error),
+                            is_error=bool(error) or result_error, status=status if isinstance(status, str) else None,
                         )
 
                     elif item_type == "error":
@@ -1000,6 +1005,7 @@ class CodexBackend:
                     if output_schema and last_agent_text:
                         try:
                             structured_result = json.loads(last_agent_text)
+                            structured_output_origin = "text"
                         except json.JSONDecodeError:
                             # Observable failure path — surface the bad payload
                             # instead of silently degrading to None.
@@ -1009,6 +1015,7 @@ class CodexBackend:
 
                     # Fallback: result/output field directly on turn.completed.
                     if output_schema and structured_result is None:
+                        structured_output_origin = "native"
                         for key in ("result", "output"):
                             raw = event.get(key)
                             if raw is not None:
@@ -1040,6 +1047,7 @@ class CodexBackend:
                         provider_name=provider_name,
                         session_id=thread_id,
                         finish_reason=event.get("finish_reason"),
+                        structured_output_origin=structured_output_origin,
                     )
 
                 elif event_type == "turn.failed":

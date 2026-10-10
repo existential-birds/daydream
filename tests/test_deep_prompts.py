@@ -20,6 +20,7 @@ from daydream.deep.prompts import (
     build_structural_prompt,
 )
 from daydream.phases import append_extended_facts
+from daydream.phases.review_prompts import _exploration_pointer
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE, PR_DESCRIPTION_UNTRUSTED_FRAMING
 from daydream.prompts.grounding import (
@@ -125,6 +126,31 @@ def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -
 # =============================================================================
 
 # --- Issue #731: coverage-evidence grounding + frontier-read instruction ---
+
+
+@pytest.mark.parametrize('name', ['per_stack', 'generic_fallback'])
+def test_diff_instruction_allows_useful_source_investigation(tmp_path: Path, name: str) -> None:
+    """Supplied hunks come first and reviewers can inspect more context when useful."""
+    prompt = _review_prompt(name, tmp_path, inline_diff="@@ -1 +1 @@\n-'x'\n+'y'\n")
+    assert "supplied hunks and context" in prompt or "supplied changed hunks" in prompt
+    assert "when more context" in prompt or "when useful" in prompt
+
+def test_exploration_pointer_keeps_artifacts_bounded_and_source_work_optional(tmp_path: Path) -> None:
+    """Exploration pointers stay bounded while useful source inspection remains optional."""
+    out = _review_prompt("per_stack", tmp_path, exploration_dir=tmp_path / ".daydream" / "exploration")
+    assert "Read the pre-scan summary at" in out
+    assert str(tmp_path / ".daydream" / "exploration" / "summary.md") in out
+    assert "Do not infer or enumerate sibling artifact files" in out
+    assert "Inspect enclosing symbols or other sections when useful" in out
+    assert "MUST read in full all assigned source files" not in out
+    assert str(tmp_path / ".daydream" / "exploration" / "affected_files.md") in out
+    assert "when useful to resolve concrete candidates" in out
+    assert "assigned source files" not in out
+    assert _exploration_pointer(None) == ""
+    assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in out
+    assert out.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < out.index("summary.md")
+    assert out.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < out.index("affected_files.md")
+
 
 # Issue #972 R1 — host-owned severity rubric reaches every assigning prompt
 

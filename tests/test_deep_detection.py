@@ -61,7 +61,6 @@ def test_infrastructure_defaults_preserve_explicit_and_nested_ownership() -> Non
     assert stacks["build"] == ["scripts/custom.cjs"]
 
 
-
 @pytest.mark.parametrize(("files", "expected"),
     [pytest.param(["config.yaml"], {"generic"}, id="D-13a-config-default-generic"),
         pytest.param(["pyproject.toml"], {"generic"}, id="D-13c-no-static-promotion"),
@@ -73,7 +72,6 @@ def test_language_classification(files: list[str], expected: set[str]) -> None:
     result = detect_stacks(files)
     language_names = {a.stack_name for a in result if a.stack_name != "structure"}
     assert language_names == expected
-
 
 
 def test_no_files_dropped() -> None:
@@ -173,3 +171,22 @@ def test_build_import_graph_resolves_multilanguage_edges(tmp_path: Path) -> None
     assert "b.ts" in graph["a.ts"]          # './b' resolves to sibling b.ts
     assert "b.go" in graph["a.go"]          # go import path -> b.go
     assert "b.rs" in graph["a.rs"]          # rust 'use b::c' -> module file b.rs
+
+
+@pytest.mark.parametrize('cap', [0, 1, 3, 4])
+def test_coarsening_merges_adjacent_lowest_weights_and_recomputes_frontiers(cap: int) -> None:
+    py = StackAssignment(stack_name='python', files=['a.py', 'b.py', 'c.py', 'd.py'])
+    other = StackAssignment(stack_name='generic', files=['README.md'])
+    diff = ''.join(f'diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n+{body}\n'
+                   for path, body in [('a.py', 'x' * 500), ('b.py', 'x'), ('c.py', 'x'), ('d.py', 'x' * 600)])
+    result = shard_stacks([py, other], diff, max_files=1, max_bytes=10000, fanout_cap=cap,
+                          frontier_max=8, graph={'b.py': {'c.py', 'README.md'}})
+    python = [stack for stack in result if stack.stack_name.startswith('python')]
+    expected = ([['a.py', 'b.py', 'c.py', 'd.py']] if cap <= 1 else
+                [['a.py', 'b.py', 'c.py'], ['d.py']] if cap == 3 else
+                [['a.py'], ['b.py', 'c.py'], ['d.py']])
+    assert [stack.files for stack in python] == expected
+    assert [stack.stack_name for stack in python] == (
+        ['python'] if len(expected) == 1 else [f'python#{i}' for i in range(len(expected))])
+    assert next(stack for stack in python if 'b.py' in stack.files).frontier_files == ['README.md']
+    assert sum(len(stack.files) for stack in result) == 5

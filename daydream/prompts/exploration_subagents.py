@@ -109,8 +109,8 @@ def _change_overview(diff: str) -> str:
     blocks = [block for path, block in iter_diff_blocks(diff) if path]
     opening = (
         "<change_overview>\nAdvisory changed-line excerpts; unchanged context is omitted. "
-        "This is not source-read or review-coverage evidence, nor a complete patch. "
-        "Use it to scope mapping; read source only for unresolved direct relationships.\n"
+        "This is not a complete patch or a review decision. "
+        "Use it to scope mapping; inspect source only for unresolved direct relationships.\n"
     )
     closing = "</change_overview>"
     omitted_notice = "[Some file excerpts omitted: insufficient space for their headers.]\n"

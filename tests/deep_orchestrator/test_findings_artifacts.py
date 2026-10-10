@@ -12,6 +12,8 @@ import pytest
 import daydream.deep.orchestrator as orch_mod
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.deep.diff import bound_deep_diff
+from daydream.deep.orchestrator import STEPS
+from daydream.extensions.api import EXTENSION_API_VERSION
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
@@ -20,6 +22,7 @@ from tests.deep_orchestrator.support import (
 )
 from tests.harness.git_helpers import git as _git
 from tests.harness.review_profile import independent_alternatives_profile
+from tests.harness.stub_backend import review_stage_state
 from tests.test_deep_orchestrator import (
     MakeConfig,
     Mute,
@@ -148,7 +151,6 @@ async def test_test_verdict_persists_actual_suite_outcome_and_operator_override(
         assert stub.test_suite_calls == 1
 
 
-
 async def test_deep_run_inlines_small_diff_into_intent_and_wonder(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -203,14 +205,25 @@ async def test_over_budget_diff_preserves_full_disk_evidence_and_uses_safe_promp
         assert "Read the diff file at" in intent and "in the diff at " in wonder and "diff.patch" in wonder
         for prompt in (intent, wonder):
             assert "line 500 of filler content" not in prompt and "SMALL_RETAINED_MARKER" not in prompt
-    python_prompt = _matching_prompt(stub.calls, "you are reviewing the python stack")
-    assert "Read it directly" in python_prompt
-    assert "diff --git" not in python_prompt and "line 50 of filler content" not in python_prompt
-    assert "SMALL_RETAINED_MARKER" not in python_prompt
+    python_calls = [(call["prompt"], stage) for call in stub.calls
+                    if (stage := review_stage_state(call["prompt"])) is not None
+                    and stage["scope_id"] == "python" and stage["stage"] == "first_pass"]
+    assert python_calls
+    assert {path for _, stage in python_calls for path in stage["assigned_files"]} == set(files) | {"api.py"}
+    for python_prompt, stage in python_calls:
+        assert "review-assignment" in stage["context_inputs"]
+        from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
+        supporting = supporting_contents(python_prompt)
+        scoped_diff = supporting["diff"]
+        scoped_index = json.loads(supporting["hunk-index"])
+        assert set(scoped_index) == set(stage['assigned_files'])
+        assert len(Path(stage['supporting_bundle']['path']).read_bytes()) <= 24 * 1024
+        assert all(f'diff --git a/{path} b/{path}' in scoped_diff for path in stage['assigned_files'])
+        assert 'Read the supporting_bundle once' in python_prompt
+        assert "diff --git" not in python_prompt
     if not oversize:
-        # React's complete retained block remains inline while Python spans dropped evidence.
-        assert "diff --git" in _matching_prompt(stub.calls, "you are reviewing the react stack")
-
+        react = _matching_prompt(stub.calls, "you are reviewing the react stack")
+        assert 'diff --git a/App.tsx b/App.tsx' in supporting_contents(react)['diff']
 
 
 async def test_intent_artifact_survives_wonder_failure(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
@@ -233,6 +246,13 @@ async def test_skip_tier_writes_empty_alternatives(tiny_diff_target: Path, monke
     deep = tiny_diff_target / ".daydream" / "deep"
     assert (deep / "intent.md").read_text().strip()
     assert isinstance(json.loads((deep / "alternatives.json").read_text()), list)
+
+
+def test_extension_api_version_and_alternatives_step_removal() -> None:
+    assert EXTENSION_API_VERSION == 8
+    names = [s.name for s in STEPS]
+    assert "alternatives" not in names
+    assert "per-stack-reviews" in names
 
 @pytest.mark.parametrize("change", ["committed", "worktree", "missing-key"])
 async def test_start_at_merge_refuses_stale_or_unverifiable_artifacts(

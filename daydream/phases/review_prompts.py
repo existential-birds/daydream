@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
 from daydream import review_profile as _rp
 from daydream.phases.inputs import _PR_BODY_MAX_CHARS
@@ -12,25 +13,47 @@ from daydream.prompts.authorial_intent import (
     AUTHORITATIVE_INTENT_BLOCK,
 )
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+from daydream.review_budget import STAGED_REVIEW_GUIDANCE
 from daydream.severity import SEVERITY_RUBRIC
+
+
+def build_review_stage_system_instruction(review_stage: dict[str, Any]) -> str:
+    """Persist assignment identities and output duties through native compaction."""
+    access_guide = review_stage.get('access_guide', '{}')
+    if not isinstance(access_guide, str):
+        access_guide = '{}'
+    return (
+        STAGED_REVIEW_GUIDANCE + '\nPersistent assignment identities: '
+        + json.dumps({'stage': review_stage['stage'], 'targets': review_stage['assigned_target_ids'],
+            'candidate_ids': review_stage.get('assigned_candidate_ids', []),
+            'closed_candidate_ids': review_stage.get('closed_candidate_ids', []),
+            'closed_decisions': review_stage.get('closed_decisions', []),
+        }, ensure_ascii=False) + '.\nPersistent exact access guide (supporting metadata): ' + access_guide
+    )
 
 
 def _confidence_and_convention_instructions() -> str:
     """Shared confidence, convention, and error-handling rules, appended after Exploration Context."""
     return (
+        "Apply the following judgment rules only to the assigned changed behavior or candidates. "
+        "Convention and canonical-helper checks are bounded support for those concrete concerns; "
+        "they do not assign a new audit.\n\n"
         "## Confidence and Convention Rules\n\n"
         "For every issue you report, you MUST set `confidence` and `rationale`:\n"
-        "- HIGH: directly verified by a specific entry in the Exploration Context above. "
+        "- HIGH: directly verified by the supplied change, ordinary investigation, or Exploration Context. "
+        "Name the precise code location and applicable convention or dependency. "
         "Your rationale MUST name the specific Dependency edge, Convention entry, or "
         "affected file that supports the issue.\n"
-        "- MEDIUM: consistent with the Exploration Context but not pinned to a specific entry.\n\n"
+        "- MEDIUM: supported by concrete code with remaining uncertainty about impact, "
+        "including Exploration Context support not pinned to a specific entry.\n\n"
         "Convention handling has TWO distinct cases — do not conflate them:\n"
         "1. Before proposing a fix, check it against the Codebase Conventions section. "
         "If your fix would violate a convention, DROP IT — do not include it.\n"
         "2. If the reviewed code itself violates a convention, that IS the issue. "
         "flag it as HIGH confidence and cite the convention by name in `rationale`.\n\n"
-        "You are reviewing AI-generated code. Be strict. Only report an issue you can ground "
-        "in evidence — the diff itself or a specific Exploration Context entry. If you cannot "
+        "You are reviewing AI-generated code. Be strict. Use the supplied change and useful ordinary "
+        "investigation for both findings and clean decisions. Ground issues in evidence — the diff itself, "
+        "a specific Exploration Context entry, or ordinary investigation. If you cannot "
         "point to what proves the issue is real, do not emit it. Do not pad the review with "
         "speculative or 'might-be' findings.\n\n"
         "## Error Handling Semantics (QUAL-04)\n\n"
@@ -73,8 +96,9 @@ def _dependency_impact_instructions() -> str:
     """
     return (
         "## Dependency Impact\n\n"
-        "Apply dependency-impact analysis to every changed symbol listed in the Exploration "
-        "Context dependencies above:\n"
+        "Apply dependency-impact analysis to each changed symbol in the assigned work, including supplied "
+        "file/hunk parts and ordered continuation segments. Use Exploration Context dependencies as support; "
+        "other paths are supporting context only for concrete candidates in that assigned work:\n"
         "  1. Trace the call chain from each changed symbol through its dependents, so a "
         "defect is judged by what it actually breaks downstream rather than by how its own "
         "body reads.\n"
@@ -106,17 +130,17 @@ def _exploration_pointer(exploration_dir: Path | None, *, fixer: bool = False) -
             f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
             "Shared exploration context (complete captured artifacts; do not re-read these files):\n"
             + json.dumps({"summary": summary, "affected_files": affected}, ensure_ascii=False)
-            + "\nAssigned source files still require same-review reads; this context does not establish clean coverage."
+            + "\nMake explicit decisions for every assigned target; optional investigation "
+            "does not substitute for them."
         )
     return (
         f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
         f"Read the pre-scan summary at {exploration_dir / 'summary.md'} and the "
         f"deterministic structural/import map at {exploration_dir / 'affected_files.md'} "
-        "as bounded context for this review. Do not infer or enumerate sibling "
+        "as bounded context for this review. For host artifacts: Do not infer or enumerate sibling "
         "artifact files.\n"
-        "Assigned source files are different: read the changed hunks in all assigned source files "
-        "with the full enclosing symbol or configuration section; expand only as needed "
-        "to resolve concrete candidates.\n"
+        "Use the supplied changed hunks as the starting context. Inspect enclosing symbols or "
+        "other sections when useful to resolve concrete candidates.\n"
     )
 
 

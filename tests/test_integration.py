@@ -95,7 +95,8 @@ async def render_agent(
     output = StringIO()
     extra: dict[str, Any] = {} if color_system is None else {"color_system": color_system}
     monkeypatch.setattr(
-        "daydream.agent.console", Console(file=output, force_terminal=True, width=120, theme=NEON_THEME, **extra),
+        "daydream.agent.console",
+        Console(file=output, force_terminal=True, no_color=False, width=120, theme=NEON_THEME, **extra),
     )
     await run_agent(
         ScriptedBackend(events=events, model="mock-model"), Path("/tmp"), prompt, phase=DaydreamPhase.REVIEW,
@@ -761,7 +762,9 @@ async def test_quiet_mode_error_shows_header_with_red_border(monkeypatch: pytest
     assert "Bash" in output_text
     assert "Command failed" not in output_text  # quiet mode: header only, no error body
     assert "╭" in output_text or "│" in output_text
-    assert "\x1b[" in output_text  # ANSI styling present (red border)
+    assert re.search(r"\x1b\[[0-9;]*38;2;255;85;85(?:;[0-9;]+)?m[╭│╰─]", output_text), (
+        "the failed tool's border must render red, not merely carry ANSI styling"
+    )
 
 async def test_skill_tool_panel_collapses_output(monkeypatch: pytest.MonkeyPatch) -> None:
     """Suppress the redundant Skill launch output already named in its header."""
@@ -903,15 +906,12 @@ async def test_run_comment_pr_lookup_failure_and_absence_exit_nonzero(
 
 async def test_run_comment_does_not_prompt_for_skill(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, install_backend: Callable[[object], object],
-    silence_console: Callable[..., None], make_config: Callable[..., 'RunConfig'],
+    silence_console: Callable[..., None], make_config: Callable[..., 'RunConfig'], fake_gh: FakeGh,
 ) -> None:
     """--comment mode should never prompt for skill selection."""
     _two_commit_repo(tmp_path, "f.txt", "a", "b", "feat")
-    install_backend(ScriptedBackend(
-        events=[
-            TextEvent(text="Intent: changes f.txt."), ResultEvent(structured_output={"issues": []}, continuation=None),
-        ], model="mock-model",
-    ))
+    install_backend(PhaseDispatchBackend())
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td, **_kwargs: _COMMENT_PR)
     silence_console("daydream.ui")
     silence_console("daydream.runner")
     # Trap: skill selection must never prompt in --comment mode.
@@ -982,7 +982,9 @@ async def test_run_populates_exploration_context(
     review_prompts = [call["prompt"] for call in backend.calls if call.get("output_schema")
                       and "you are reviewing the" in call["prompt"].lower()]
     assert review_prompts
-    assert all("exploration/summary.md" in prompt for prompt in review_prompts)
+    from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
+    expected_summary = (multi_stack_target / ".daydream/exploration/summary.md").read_text()
+    assert all(supporting_contents(prompt)["exploration-summary"] == expected_summary for prompt in review_prompts)
 
 async def test_codex_backend_raises_on_agents(tmp_path: Path) -> None:
     """CodexBackend.execute() refuses agents= with NotImplementedError."""

@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from daydream.agent import StructuredOutputFailure, run_agent
-from daydream.backends import DiagnosticEvent, ResultEvent, TextEvent
+from daydream.backends import ResultEvent, TextEvent
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
 
@@ -37,18 +37,12 @@ _VALID = {"issues": [{"id": 1, "description": "Fix type hints", "file": "app.py"
     pytest.param(_FILE, {"line": 3}, '{"file": "src/a.py"}', "REVIEW",
                  {"require_full_schema": True}, {"file": "src/a.py"}, None,
                  id="strict-fallback"),
-    pytest.param(_FILE, {"file": "src/a.py"}, None, "REVIEW",
-                 {"require_full_schema": True}, {"file": "src/a.py"}, "evidence_incomplete",
-                 id="transport-incomplete"),
 ])
 async def test_primary_validation_and_host_witness(
     tmp_path: Path, schema: dict[str, Any], payload: Any, text: str | None, phase: str,
     options: dict[str, Any], expected: Any, reason: str | None,
 ) -> None:
     events: list[Any] = []
-    if reason:
-        events.append(DiagnosticEvent(code="codex_transport_coverage", message="tool unavailable",
-                                      metadata={"coverage": "incomplete"}))
     if text is not None:
         events.append(TextEvent(text=text))
     events.append(ResultEvent(structured_output=payload, continuation=None))

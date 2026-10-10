@@ -76,7 +76,8 @@ async def test_pi_actual_identity_cache_totals_and_failed_billing(failed: bool) 
            "errorMessage": "provider failed", "usage": {"input": 10, "output": 5, "cacheRead": 20,
                                                           "cacheWrite": 30, "cost": {"total": 0.02}}}
     native = [{"type": "session", "id": "native-session"}, {"type": "turn_start"},
-              {"type": "message_end", "message": msg}, {"type": "turn_end", "message": msg}]
+              {"type": "message_end", "message": msg}, {"type": "turn_end", "message": msg},
+              {"type": "agent_end", "messages": []}, {"type": "agent_settled"}]
     proc = FakeCliProcess([json.dumps(item) for item in native])
     schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
     events: list[Any] = []

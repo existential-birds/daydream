@@ -12,7 +12,7 @@ from daydream.deep.detection import StackAssignment
 from daydream.deep.diff import iter_diff_blocks
 
 
-def _file_change_bytes(diff: str) -> dict[str, int]:
+def file_change_bytes(diff: str) -> dict[str, int]:
     """Map changed paths to UTF-8 block sizes; the first block wins.
 
     Files absent from the map still receive a one-byte shard weight.
@@ -23,7 +23,7 @@ def _file_change_bytes(diff: str) -> dict[str, int]:
     return sizes
 
 
-def _pack_shards(
+def pack_file_batches(
     stack: StackAssignment,
     sizes: dict[str, int],
     max_files: int,
@@ -113,11 +113,11 @@ def shard_stacks(
     Frontiers provide bounded cross-shard context. Stacks within both bounds, or
     packing into one shard, keep their original names. Structure passes through.
 
-    Reduce fan-out by restoring the largest shard groups to unsplit stacks, even
-    if those exceed file/byte bounds. If distinct non-structural stacks alone exceed
+    Reduce the largest groups just enough by merging adjacent lowest-weight pairs.
+    Cap-induced groups may exceed soft file/byte targets. If distinct stacks alone exceed
     fanout_cap, retain them all: the cap cannot discard or merge stacks.
     """
-    sizes = _file_change_bytes(diff)
+    sizes = file_change_bytes(diff)
     structural: list[StackAssignment] = []
     unsharded: list[StackAssignment] = []
     sharded: list[tuple[StackAssignment, list[StackAssignment]]] = []
@@ -135,24 +135,32 @@ def shard_stacks(
             blocks = co_locate_groups(stack.files, edges)
         else:
             blocks = [[f] for f in sorted(stack.files)]
-        shards = _pack_shards(stack, sizes, max_files, max_bytes, blocks)
+        shards = pack_file_batches(stack, sizes, max_files, max_bytes, blocks)
         if len(shards) == 1:
             # Single-shard packs keep their original identity and cannot reduce fan-out.
             unsharded.append(stack)
             continue
-        _assign_frontiers(shards, edges, frontier_max)
         sharded.append((stack, shards))
 
     total = len(unsharded) + sum(len(shards) for _, shards in sharded)
     if total > fanout_cap and sharded:
-        # Each restored multi-shard stack removes at least one task; distinct stacks remain the floor.
         excess = total - fanout_cap
         for stack, shards in sorted(sharded, key=lambda t: (-len(t[1]), t[0].stack_name)):
             if excess <= 0:
                 break
-            sharded.remove((stack, shards))
-            unsharded.append(stack)
-            excess -= len(shards) - 1
+            chosen = max(1, len(shards) - excess)
+            excess -= len(shards) - chosen
+            weights = [sum(sizes.get(path, 1) for path in shard.files) for shard in shards]
+            while len(shards) > chosen:
+                left = min(range(len(shards) - 1), key=lambda i: (weights[i] + weights[i + 1], i))
+                shards[left].files.extend(shards[left + 1].files)
+                weights[left] += weights.pop(left + 1)
+                del shards[left + 1]
+
+    for stack, shards in sharded:
+        for index, shard in enumerate(shards):
+            shard.stack_name = stack.stack_name if len(shards) == 1 else f'{stack.stack_name}#{index}'
+        _assign_frontiers(shards, edges, frontier_max)
 
     out: list[StackAssignment] = []
     out.extend(structural)

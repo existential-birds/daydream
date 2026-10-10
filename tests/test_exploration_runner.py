@@ -214,7 +214,7 @@ def test_large_diff_overview_preserves_small_edits_after_large_additions() -> No
     assert "+++ b/workflow.yml" in overview and "+++ b/component.tsx" in overview
     assert "@@ -20,2 +20,3 @@" in overview and "+aria-label={label}" in overview
     assert "omitted" in overview
-    assert "not source-read or review-coverage evidence" in overview
+    assert "not a complete patch or a review decision" in overview
 
 def test_change_overview_byte_limit_handles_many_long_unicode_paths() -> None:
 

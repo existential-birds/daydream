@@ -52,6 +52,12 @@ _CONFIG_OWNERSHIP_SIGNALS: dict[str, str] = {
 GENERIC_STACK = "generic"
 
 
+def base_stack_name(stack_name: str) -> str:
+    """Select stack policy without replacing a public shard's identity."""
+    base, separator, shard = stack_name.partition("#")
+    return base if separator and shard.isdecimal() else stack_name
+
+
 @dataclass
 class StackAssignment:
     """Nonempty file scope; only generic may mark an entirely docs-only diff."""

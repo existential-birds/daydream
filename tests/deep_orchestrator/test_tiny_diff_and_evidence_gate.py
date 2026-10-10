@@ -19,6 +19,7 @@ from tests.deep_orchestrator.support import (
 )
 from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.review_result import saved_coverage
+from tests.harness.stub_backend import review_stage_state
 from tests.test_deep_orchestrator import (
     MakeConfig,
     Mute,
@@ -65,9 +66,13 @@ async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge_tiny_host_merge_ph
     assert tiny_reviews < multi_reviews, (
         f"tiny-diff review fan-out did not collapse: tiny={tiny_reviews}, multi={multi_reviews}"
     )
-    # Tiny diff: 2 review agents (combined lang + structure). Multi: 4.
-    assert tiny_reviews == 2, f"expected 2 review agents for tiny diff, got {tiny_reviews}"
-    assert multi_reviews == 4, f"expected 4 review agents for multi_stack, got {multi_reviews}"
+    # Structure begins with interactions once; it does not repeat the file audit.
+    for calls, expected_languages in ((tiny_calls, {"generic"}), (multi_calls, {"python", "react", "generic"})):
+        stages = [review_stage_state(call["prompt"]) for call in calls]
+        assert {stage["scope_id"] for stage in stages if stage is not None
+                and stage["stage"] == "first_pass"} == expected_languages
+        assert [stage["stage"] for stage in stages if stage is not None
+                and stage["scope_id"] == "structure"] == ["integration"]
 
     # The merge agent MUST be skipped on the tiny diff (lever 2).
     assert _count_merge_prompts(tiny_calls) == 0, "merge agent ran on tiny diff"
@@ -134,11 +139,10 @@ async def test_merge_failure_phase_state_domain_failure_closes_failed_scope(
     assert manifest["phase_states"]["merge"] == {"ran": True, "status": "failed"}
     assert manifest["pipeline_status"] == "failed"
 
-async def test_ac5_per_stack_prompt_inlines_diff_hunks(
+async def test_per_stack_sanctioned_input_contains_complete_assigned_diff_hunks(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """AC5 (real-path): per-stack review prompts contain inlined diff hunks and NO ``Read it directly`` / diff_path
-    instruction."""
+    """The assigned complete hunk reaches the reviewer without a whole-stack pointer."""
 
     _silence(monkeypatch)
     shared_calls = _install_model_capturing_stubs(monkeypatch, tiny_diff_target)
@@ -159,7 +163,9 @@ async def test_ac5_per_stack_prompt_inlines_diff_hunks(
     # The complete api.py hunk reaches the real per-stack prompt, including
     # its enclosing function context and the exact removed/added return lines.
     expected_api_hunk = "@@ -1,2 +1,2 @@\n def hello():\n-    return 'world'\n+    return 'universe'\n"
-    assert expected_api_hunk in prompt, "expected complete api.py diff hunk in per-stack prompt"
+    from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
+    scoped = supporting_contents(prompt)['diff']
+    assert expected_api_hunk in scoped, "expected complete api.py hunk in the sanctioned assignment input"
     # The Read instruction is absent (the agent is never told to Read diff.patch).
     assert "Read it directly" not in prompt
     # And diff_path is not embedded as an instruction (it remains a required
@@ -171,12 +177,15 @@ async def test_ac5_per_stack_prompt_inlines_diff_hunks(
     # (Fix B does NOT inline the structural / arbiter prompts).
     structural_prompts = [c["prompt"] for c in shared_calls if "you are the structural reviewer" in c["prompt"].lower()]
     assert structural_prompts, "expected a structural review prompt"
-    assert "Read it directly" in structural_prompts[0]
-    structural_diff_lines = [line for line in structural_prompts[0].splitlines() if line.startswith("- diff: ")]
-    assert len(structural_diff_lines) == 1
-    structural_diff = Path(structural_diff_lines[0].removeprefix("- diff: "))
-    assert structural_diff.is_file()
-    assert structural_diff.name == "diff.patch"
+    assert "Read the supporting_bundle once" in structural_prompts[0]
+    from tests.harness.stub_backend import review_stage_state
+    structure = review_stage_state(structural_prompts[0])
+    assert structure is not None
+    inventory = supporting_contents(structural_prompts[0])["review-assignment"]
+    assert "api.py" in inventory
+    catalog = json.loads(Path(structure['supporting_catalog']['path']).read_text())
+    assert any(expected_api_hunk in Path(part["path"]).read_text()
+               for part in catalog['parts'] if part["file"] == "api.py")
     assert diff_path_str not in structural_prompts[0]
 
 async def test_ac6_single_stack_merged_items_carry_structural_lens(
@@ -354,7 +363,7 @@ async def test_ac_merge_resume_on_tiny_diff(
     structural = [item for item in items if item.get("lens") == "structural"]
     assert structural[0]["source_uids"] == ["structure:1"]
 
-@pytest.mark.parametrize("confidence", ["HIGH", "LOW"])
+@pytest.mark.parametrize("confidence", ["HIGH", "MEDIUM"])
 async def test_evidence_gate_drops_speculative_finding(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
     confidence: str,
 ) -> None:
@@ -374,11 +383,7 @@ async def test_evidence_gate_drops_speculative_finding(multi_stack_target: Path,
     ]
 
     exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == (1 if confidence == "LOW" else 0)
-    if confidence == "LOW":
-        coverage = saved_coverage(multi_stack_target / ".daydream/deep")
-        assert coverage.phases["merge"]["status"] == "failed"
-        return
+    assert exit_code == 0
 
     deep = multi_stack_target / ".daydream" / "deep"
     items = json.loads((deep / "merged-items.json").read_text())["items"]

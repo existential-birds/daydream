@@ -106,6 +106,10 @@ _CI_ONLY_STEPS: dict[str, str] = {"Run vulture": (
         "root project only — the standalone RL scan runs in the separate rl-check job, "
         "so the local gate's wider dead-code scope is not restated here"
     ),
+    "Install Pi for native output contract tests": (
+        "provision the native CLI on the disposable CI runner — the local gate exercises installed tools "
+        "without globally installing or replacing a contributor's optional backend runtimes"
+    ),
 }
 
 _MAKE_INVOCATION_RE = re.compile(r"^make\s+([A-Za-z0-9_.-]+)\s*$")

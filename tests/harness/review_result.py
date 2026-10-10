@@ -1,4 +1,5 @@
 """Current review-result and findings fixtures shared by unit and consumer tests."""
+import hashlib
 import json
 from collections.abc import Iterable
 from pathlib import Path
@@ -41,7 +42,12 @@ def findings_artifact(
 async def review_scopes(backend: Any, work: Any, stacks: list[StackAssignment], **options: Any) -> Any:
     """Exercise the real provider phase with an explicit planned execution inventory."""
     from daydream.phases.review import phase_per_stack_reviews
-    coverage = ReviewCoverage("scope-test", AnalyzedRevision("h" * 40, "b" * 40, "diff-1"),
+    head, base = work.head_sha, work.base_sha
+    if head is None or base is None:
+        raise ValueError('review scopes require captured commit anchors')
+    diff_path = options['diff_path']
+    diff_key = hashlib.sha256(Path(diff_path).read_bytes()).hexdigest()
+    coverage = ReviewCoverage("scope-test", AnalyzedRevision(head, base, diff_key),
                               [PlannedScope(s.stack_name, s.stack_name, tuple(s.files)) for s in stacks], ())
     return await phase_per_stack_reviews(backend, work, stacks, coverage=coverage, **options)
 

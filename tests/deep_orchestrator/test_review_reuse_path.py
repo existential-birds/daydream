@@ -155,7 +155,7 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
         assert _count_arbiter_prompts(stub.calls) >= 1
     stub.calls.clear()
     assert await run(config) == 0
-    assert _review_surface_prompts(stub.calls) == [], f"paid work on a warm run: {stub.calls}"
+    assert _review_surface_prompts(stub.calls) == [], "the warm run dispatched fresh reviewer work"
     assert {name: (deep / name).read_bytes() for name in canonical} == canonical
     assert saved_coverage(deep).unfinished_scopes == failures
     second = json.loads((deep / "review-coverage.json").read_text())
@@ -353,7 +353,8 @@ async def test_no_review_cache_disables_the_store_and_bypasses_the_exploration_c
 
 
 @pytest.mark.parametrize("damage", ["legacy", "corrupt", "incomplete", "head", "diff", "scope", "origin",
-                                     "partial_payload", "malformed_payload"])
+                                     "partial_payload", "malformed_payload", "unstaged", "prior-staged",
+                                     "contract-3", "contract-4", "contract-5", "contract-6"])
 async def test_legacy_cache_without_coverage_proof_recomputes_review(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     damage: str,
@@ -363,8 +364,26 @@ async def test_legacy_cache_without_coverage_proof_recomputes_review(
     config = make_config(multi_stack_target)
     assert await run(config) == 0
     entries = multi_stack_target / ".daydream" / "review-cache" / "entries"
+    staged_damage = damage in {"unstaged", "prior-staged", "contract-3", "contract-4", "contract-5", "contract-6"}
+    downgraded = 0
     for manifest_path in entries.glob("*/manifest.json"):
         manifest = json.loads(manifest_path.read_text())
+        if staged_damage:
+            if not manifest["unit"].startswith("shard:"):
+                continue
+            if damage == "unstaged":
+                manifest["components"].pop("staged_review_contract")
+            else:
+                manifest["components"]["staged_review_contract"] = 2 if damage == "prior-staged" else int(damage[-1])
+                assert manifest['coverage']['status'] == 'complete'
+            legacy_key = hashlib.sha256(json.dumps({
+                "format": manifest["format"], "unit": manifest["unit"], "components": manifest["components"],
+            }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            manifest["key"] = legacy_key
+            manifest_path.write_text(json.dumps(manifest))
+            manifest_path.parent.rename(entries / legacy_key)
+            downgraded += 1
+            continue
         if damage == "legacy":
             manifest.pop("coverage", None)
         elif damage == "corrupt":
@@ -391,11 +410,14 @@ async def test_legacy_cache_without_coverage_proof_recomputes_review(
         else:
             manifest["coverage"]["planned_scopes"][0]["files"] = ["foreign.py"]
         manifest_path.write_text(json.dumps(manifest))
+    assert not staged_damage or downgraded > 0
     stub.calls.clear()
     assert await run(config) == 0
     assert _count_review_prompts(stub.calls) > 0
-    if damage not in {"partial_payload", "malformed_payload"}:
+    if not staged_damage and damage not in {"partial_payload", "malformed_payload"}:
         assert _count_merge_prompts(stub.calls) > 0
+    if staged_damage:
+        assert _reused_stacks(multi_stack_target / ".daydream/deep") == set()
     coverage = json.loads((multi_stack_target / ".daydream" / "deep" / "review-coverage.json").read_text())
     assert all(outcome["status"] == "complete" for outcome in coverage["stack_outcomes"])
 
@@ -435,30 +457,55 @@ async def test_resume_rejects_missing_or_mismatched_coverage(
     assert initial.is_file()
 
 
+@pytest.mark.parametrize("recovery", ["resume", "cache"])
 async def test_successful_scope_rerun_clears_prior_failure_for_same_revision(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recovery: str,
 ) -> None:
-    """A failed scope stays incomplete until the real reviewer succeeds on resume."""
-    from daydream.findings import load_findings_artifact
-    from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
-    from tests.test_deep_orchestrator import _pin_findings_pr
+    """Unfinished scopes require successful investigation before resume or cache reuse."""
+    from daydream.backends import AgentEvent, ResultEvent
+    from tests.deep_orchestrator.test_review_completion import ReviewRun
+    from tests.harness.stub_backend import review_stage_result
 
-    pr = _pin_findings_pr(monkeypatch, multi_stack_target)
-    backend = EmptyReviewBackend(multi_stack_target, fail_stack="python")
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    outputs = [tmp_path / "failed-sibling.json", tmp_path / "scope-rerun.json"]
-    assert await run(empty_review_config(multi_stack_target, tmp_path / "trajectory.json",
-                                        findings_out=str(outputs[0]), pr_number=pr.number)) == 0
-    backend.fail_stack = None
-    assert await run(empty_review_config(multi_stack_target, tmp_path / "trajectory-resume.json", start_at="per-stack",
-                                        findings_out=str(outputs[1]), pr_number=pr.number)) == 0
-    artifacts = [load_findings_artifact(path, expected_repo="o/r", expected_pr_number=pr.number,
-                                        expected_head_sha=pr.head_sha) for path in outputs]
-    first, second = [artifact.terminal_result for artifact in artifacts]
-    assert first is not None and second is not None
+    review = ReviewRun(multi_stack_target, tmp_path, monkeypatch)
+    backend = review.backend
+
+    def unfinished_python(prompt: str) -> list[AgentEvent] | None:
+        if "python stack" not in prompt.lower():
+            return None
+        result = review_stage_result(prompt, [])
+        for target in result["targets"]:
+            target.update(status="not_reviewed", reason="Dependency conclusion is unfinished")
+        return [ResultEvent(structured_output=result, continuation=None)]
+
+    if recovery == "cache":
+        backend.responder = unfinished_python
+    else:
+        backend.fail_stack = "python"
+    options: dict[str, Any] = {"review_cache_enabled": recovery == "cache"}
+    assert await review.run(**options) == 0
+    first = review.load()["terminal_result"]
+    deep = multi_stack_target / ".daydream/deep"
     assert first["analysis_state"] == "incomplete"
-    assert first["failed_stacks"] == ["python"]
-    assert second["analysis_state"] == "complete"
-    assert second["failed_stacks"] == []
+    assert first["failed_stacks"] == ([] if recovery == "cache" else ["python"])
+    if recovery == "cache":
+        assert saved_coverage(deep).unfinished_scopes.keys() == {"python"}
+        assert _entry_count_for_unit(deep, "shard:python") == 0
+        assert _entry_count_for_unit(deep, "shard:structure") == 1
+    else:
+        options["start_at"] = "per-stack"
+    backend.fail_stack = backend.responder = None
+    backend.calls.clear()
+    assert await review.run(**options) == 0
+    second = review.load()["terminal_result"]
+    assert second["analysis_state"] == "complete" and second["failed_stacks"] == []
     assert "backend_failure" not in second["reason_codes"]
     assert first["analyzed_revision"] == second["analyzed_revision"]
+    if recovery == "cache":
+        assert _reviewed_stacks(backend.calls) == {"python"}
+        assert _entry_count_for_unit(deep, "shard:python") == 1
+        assert saved_coverage(deep).unfinished_scopes == {}
+        backend.calls.clear()
+        assert await review.run(**options) == 0
+        assert _count_review_prompts(backend.calls) == 0
+        assert _reused_stacks(deep) == {"python", "react", "generic", "structure"}
+        assert saved_coverage(deep).unfinished_scopes == {}

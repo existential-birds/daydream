@@ -1,18 +1,22 @@
 """Structural findings remain partitioned through review and resume."""
 
 import json
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from daydream.backends import AgentEvent, ResultEvent
 from daydream.backends.pi import PiBackend
 from daydream.deep.detection import StackAssignment
 from daydream.deep.review_steps import _per_stack_body, _step_per_stack_parse
 from daydream.extensions import Registry, get_registry
 from daydream.flows.engine import FlowContext
+from daydream.hunk_index import write_hunk_index
 from daydream.run_context import InteractionPolicy, RunContext
 from tests.harness.review_result import records_artifact, review_coverage
+from tests.harness.stub_backend import review_stage_result
 
 
 @pytest.mark.parametrize("start_at", [None, "merge", "fix"])
@@ -49,29 +53,38 @@ async def test_per_stack_rerun_clears_stale_structural_outputs_before_review(
     artifacts = [dd / name for name in ("stack-structure-records.json", "stack-structure-review.md",)]
     for path in artifacts:
         path.write_text("STALE")
-    (tmp_path / "api.py").write_text("value = 1\n")
+    import hashlib
+
+    from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
+    from tests.harness.git_helpers import git, seed_feature_branch
+
+    seed_feature_branch(tmp_path, base={"api.py": "value = 0\n"}, feature={"api.py": "value = 1\n"})
     diff = dd / "diff.patch"
     diff.write_text("diff --git a/api.py b/api.py\n--- a/api.py\n+++ b/api.py\n"
                     "@@ -1 +1 @@\n-value = 0\n+value = 1\n")
+    write_hunk_index(dd, diff.read_text())
     intent = dd / "intent.md"
     intent.write_text("Preserve behavior")
     alternatives = dd / "alternatives.json"
     alternatives.write_text("[]")
     attempted: list[str] = []
 
-    async def review(*args: Any, **kwargs: Any) -> Any:
+    async def review(self: PiBackend, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         assert not artifacts[0].exists()
-        assert "STALE" not in args[2]
-        attempted.append("structure" if "repository-wide interactions" in args[2] else "primary")
-        return {"issues": []}, None, None
+        assert "STALE" not in prompt
+        attempted.append("structure" if "repository-wide interactions" in prompt else "primary")
+        yield ResultEvent(structured_output=review_stage_result(prompt, []), continuation=None)
 
-    monkeypatch.setattr("daydream.agent.run_agent", review)
+    monkeypatch.setattr(PiBackend, "execute", review)
     backend = PiBackend(model="test", reasoning_effort="high")
     ctx = FlowContext(
         config=make_config(tmp_path, start_at=start_at), work=make_work(tmp_path), registry=get_registry(),
         allow_standalone_artifacts=True, run_context=RunContext(InteractionPolicy(interactive=False)),
         _backend_factory=lambda *_: backend,
-        data={"dd": dd, "review_coverage": review_coverage(files=("api.py",), phases=()),
+        data={"dd": dd, "review_coverage": ReviewCoverage("source-test", AnalyzedRevision(
+                  git(tmp_path, "rev-parse", "HEAD"), git(tmp_path, "rev-parse", "main"),
+                  hashlib.sha256(diff.read_bytes()).hexdigest()),
+                  [PlannedScope(scope, scope, ("api.py",)) for scope in ("python", "structure")], ()) ,
               "diff_path": diff, "diff": diff.read_text(), "intent_path": intent,
               "alts_path": alternatives, "exploration_dir": None, "failed_stacks": {},
               "stacks": [StackAssignment("python", ["api.py"]), StackAssignment("structure", ["api.py"])]},

@@ -112,13 +112,14 @@ def _cwd_observation(cwd: Path) -> dict[str, Any]:
 
 def _observed_argv(backend: str, argv: list[str]) -> tuple[list[str], dict[str, list[dict[str, Any]]]]:
     """Admit known fixture flags only; content values become lengths/hashes."""
-    switches = frozenset({"codex": "exec --experimental-json", "pi": "--no-session --no-skills --no-tools",
+    switches = frozenset({"codex": "exec --experimental-json",
+        "pi": "--no-session --no-skills --no-tools --no-extensions",
         "osprey": "agent --events-jsonl --sandbox --read-only --ultracode"
                   " --atif-system-prompt-plaintext --immutable-runtime-surface"
                   " --compress-context=true --compress-context=false",
     }[backend].split())
     values = frozenset({"codex": "--model --sandbox --cd --output-schema resume",
-        "pi": "--mode --model --provider --thinking --tools --session-id",
+        "pi": "--mode --model --provider --thinking --tools --session-id --extension",
         "osprey": "--model --toolset --temperature --atif-output --max-turns --turn-timeout"
                   " --stream-idle-timeout-secs --streaming-timeout-secs --empty-completion-threshold"
                   " --driver-max-retries --approval --allowed-root --compress-min-bytes"
@@ -190,6 +191,7 @@ def _pi_events(text: str, model: str, *, failed: bool) -> None:
     _emit({"type": "message_end", "message": completed})
     _emit({"type": "turn_end", "message": completed})
     _emit({"type": "agent_end", "messages": []})
+    _emit({"type": "agent_settled"})
 
 
 def _osprey_events(text: str, model: str, *, failed: bool, exit_code: int) -> None:

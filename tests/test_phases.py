@@ -26,10 +26,7 @@ from daydream.backends import (
 from daydream.backends.codex import CodexBackend
 from daydream.config import TEST_WALL_BUDGET_S
 from daydream.config_file import DaydreamFileConfig
-from daydream.deep.artifacts import (
-    DeepArtifact,
-    deep_dir,
-)
+from daydream.deep.artifacts import DeepArtifact
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.git_ops import GitError, IndexSnapshot, WorktreeRollbackSnapshot
 from daydream.hunk_index import write_hunk_index
@@ -41,7 +38,6 @@ from daydream.phases import (
     phase_commit_push,
     phase_cross_stack_merge,
     phase_understand_intent,
-    phase_verify_recommendations,
     publish,
     require_empty_staged_index,
 )
@@ -933,6 +929,9 @@ async def test_phase_fix_prompt_enumerates_explicit_edit_scope(
     prompt_without = backend_without.prompts[0]
     assert "Authorized edit scope" in prompt_without
     assert "src/handler.py" in prompt_without
+    assert "Forbid working-tree or index git mutation" in prompt_without
+    for forbidden in ("`git add`", "`git stash`", "`git checkout`", "`git reset`", "`git commit`"):
+        assert forbidden in prompt_without
 
 
 @pytest.mark.parametrize("inline", [False, True])
@@ -1370,10 +1369,7 @@ def test_is_evidenced_gate_branches() -> None:
         {"confidence": "HIGH", "rationale": "r", "lens": "structural", "file": "big.py", "line": 0, "evidence": ""}
     ) is False
 
-# Every phrase that orders a *separate output section* rather than prose inside the
-# required JSON object. Markers are scoped to output emission ("before the JSON",
-# "that summarizes") because the same builders legitimately say "read the full
-# enclosing symbol or configuration section before judging it".
+
 @pytest.mark.asyncio
 async def test_phase_commit_push_writes_daydream_trailers_host_side(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
@@ -1576,10 +1572,8 @@ async def test_unreplaced_test_command_retries_original_prompt(
         assert any("Setup investigator failed" in message for message in warnings), warnings
 
 
-
-
-
 # phase_test_and_heal — option 4 failure-summarizer + handoff
+
 
 def _install_recorder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, on_write: Any=None) -> Any:
     """Install a recorder/path fixture and no-op forks, with on_write indicating archival."""
@@ -1762,6 +1756,8 @@ async def test_recorderless_handoff_rejects_a_bound_session_without_explicit_own
     async with _private_session(tmp_path, work, "missing-handoff-session"):
         with pytest.raises(ArtifactVisibilityError, match="explicit artifact session"):
             _resolve_handoff_paths(None, work, allow_standalone=True)
+
+
 
 # _write_handoff — must report write failure so the caller can fall back
 
@@ -2168,48 +2164,6 @@ async def test_phase_understand_intent_non_clone_inline_correction_omits_diff_pa
     assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in correction
     assert "Re-examine the codebase and the diff inlined below" in correction
 
-async def test_verifier_excludes_structural_lens(
-    tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None,
-) -> None:
-    """Structural canonical items remain verdict-exempt and never enter the verifier prompt."""
-
-    work = make_work(tmp_path)
-    dd = deep_dir(work.repo, allow_standalone=True)
-    dd.mkdir(parents=True, exist_ok=True)
-
-    structural_id = 1
-    per_stack_id = 2
-    items = {"items": [{"id": structural_id, "lens": "structural", "file": "big.py", "line": 1, "severity": "high",
-                "description": "1k-line file", "confidence": "HIGH", "rationale": "r",
-            },
-            {"id": per_stack_id, "lens": "per-stack", "file": "a.py", "line": 9, "severity": "low",
-                "description": "bug", "confidence": "HIGH", "rationale": "r",
-            },
-        ]
-    }
-    items_path = DeepArtifact.MERGED_ITEMS.at(dd)
-    items_path.write_text(json.dumps(items))
-
-    # MockBackend returns a verdict ONLY for the per-stack id, mimicking an
-    # agent that was never shown the structural item.
-    structured = {"verdicts": [
-            {"issue_id": per_stack_id, "verdict": "consistent", "evidence": "e", "unverified_assumptions": [],}
-        ]
-    }
-
-    backend = ScriptedBackend(events=_structured_turn(structured))
-    _, payload = await phase_verify_recommendations(backend, work, merged_items_path=items_path, deep_dir=dd,)
-
-    verified_ids = {v["issue_id"] for v in payload["verdicts"]}
-    assert structural_id not in verified_ids  # structural deliberately not verified
-    assert per_stack_id in verified_ids  # the language-lens item was a candidate
-    # Structural findings are excluded before prompt construction.
-    assert "1k-line file" not in backend.last_prompt
-    assert "bug" in backend.last_prompt
-    # Verdicts file is written for downstream consumers.
-    assert DeepArtifact.VERDICTS.at(dd).is_file()
-    # The verifier diagnostic must use the read-only profile.
-    assert backend.read_only_calls == [True]
 
 @pytest.mark.asyncio
 async def test_phase_fix_parallel_restores_whole_group_worktree_before_batch_fallback(

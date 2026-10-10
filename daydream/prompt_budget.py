@@ -20,7 +20,7 @@ INLINE_DIFF_BUDGET_BYTES = 12_288
 SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES = INLINE_DIFF_BUDGET_BYTES
 SANCTIONED_EXACT_INPUT_MAX_FILES = 512
 SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES = 1_048_576
-SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES = 4_194_304
+SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES = 8_388_608
 # Durable references cost streaming I/O, not model context. Bound that resource
 # independently of captured prompt inputs (one required diff per input set).
 SANCTIONED_DIFF_REFERENCE_MAX_BYTES = 128 * 1024 * 1024
@@ -53,6 +53,8 @@ class PreparedSanctionedInput:
     size: int
     mtime_ns: int
     pointer_only: bool = False
+    prompt_visible: bool = True
+    inline_advisory: bool = False
 
 
 @dataclass(frozen=True)
@@ -70,13 +72,13 @@ class PreparedSanctionedInputs:
         if not self.inputs:
             return ""
         if self.transport is SanctionedInputTransport.EXACT_PATHS:
-            lines = [
-                "The exact-file restriction below applies to host phase artifacts only. "
-                "It does not restrict repository source reads permitted by the assigned task; "
-                "do not browse other host artifacts.",
-                "Sanctioned phase inputs (read only these exact files):",
-            ]
-            lines.extend(f"- {item.label}: {item.path}" for item in self.inputs)
+            lines = ["Sanctioned phase inputs (read only these exact files):"]
+            lines.extend(f"- {item.label}: {item.path}" for item in self.inputs
+                         if item.prompt_visible and not item.inline_advisory)
+            for item in self.inputs:
+                if item.inline_advisory:
+                    lines.extend([_sanctioned_inline_open_tag(item.label), item.text or "",
+                                  _SANCTIONED_INLINE_CLOSE_TAG])
             return "\n".join(lines)
         blocks = [_SANCTIONED_INLINE_HEADER]
         for item in self.inputs:
@@ -132,7 +134,8 @@ class PreparedSanctionedInputs:
             limit = min(remaining, 12000)
             current = _capture_input(item.label, item.path, self.transport, aggregate, text_budget=limit)
             aggregate += current.size
-            if replace(current, text=item.text) != item:
+            if replace(current, text=item.text, prompt_visible=item.prompt_visible,
+                       inline_advisory=item.inline_advisory) != item:
                 raise SanctionedInputUnavailable(f"sanctioned input {item.label!r} changed before finalization")
             text = current.text or ""
             block = f"Input {item.label!r} (sha256={item.sha256}):\n{text}"
@@ -169,10 +172,11 @@ class PreparedSanctionedInputs:
                 continue
             current = _capture_input(
                 item.label, item.path, self.transport, aggregate, pointer_only=item.pointer_only,
+                text_budget=item.size if item.inline_advisory else None,
             )
             if not item.pointer_only:
                 aggregate += current.size
-            if current != item:
+            if replace(current, prompt_visible=item.prompt_visible, inline_advisory=item.inline_advisory) != item:
                 raise SanctionedInputUnavailable(f"sanctioned input {item.label!r} changed before model execution")
 
 
@@ -386,6 +390,9 @@ def select_advisory_inputs(
         except OSError:
             omitted.append(OmittedAdvisoryInput(candidate.label, 0, "unavailable"))
             continue
+        if not inline and len(admitted) >= SANCTIONED_EXACT_INPUT_MAX_FILES:
+            omitted.append(OmittedAdvisoryInput(candidate.label, size, "exceeds-file-count"))
+            continue
         if inline:
             entries = [(item.label, item.size) for item in admitted]
             entries.append((candidate.label, size))
@@ -467,7 +474,7 @@ def inline_section_emitted_bytes(entries: Sequence[tuple[str, int]]) -> int:
 
 
 def inline_context_file(path: Path, budget_bytes: int = 4096) -> str | None:
-    """Inline a whole bounded host-context artifact, else use its pointer; never a source receipt."""
+    """Inline a whole bounded host-context artifact, else use its pointer."""
     try:
         with path.open("rb") as stream:
             raw = stream.read(budget_bytes + 1)

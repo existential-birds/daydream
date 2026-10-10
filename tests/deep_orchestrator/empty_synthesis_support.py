@@ -10,7 +10,7 @@ from typing import Any
 from daydream.backends import AgentEvent, ResultEvent, ToolStartEvent
 from daydream.config_file import DaydreamFileConfig
 from daydream.run_config import RunConfig
-from tests.harness.stub_backend import StubBackend
+from tests.harness.stub_backend import StubBackend, review_stage_result
 
 
 class EmptyReviewBackend(StubBackend):
@@ -62,7 +62,8 @@ class EmptyReviewBackend(StubBackend):
                 return
             if stack == self.fail_stack:
                 raise self.stack_error
-            yield ResultEvent(structured_output={"issues": self.review_by_stack.get(stack, [])}, continuation=None)
+            output = review_stage_result(prompt, self.review_by_stack.get(stack, []))
+            yield ResultEvent(structured_output=output, continuation=None)
             return
         if "would you have done this differently" in lower or "evaluate the implementation" in lower:
             self.calls.append({"prompt": prompt, "model": self.model})

@@ -25,6 +25,7 @@ from tests.deep_orchestrator.support import (
     _make_record_issue,
     _silence_gate_noise,
 )
+from tests.harness.git_helpers import seed_base_support_files
 from tests.test_deep_orchestrator import (
     PR_SENTINEL,
     MakeConfig,
@@ -111,7 +112,8 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     assert all(c["agents"] is None for c in stub.calls)
 
     for p in per_stack_prompts:
-        assert "intent.md" in p
+        from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
+        assert supporting_contents(p)["intent"] == (deep / "intent.md").read_text()
         # Folded design review has no independent alternatives to consume.
         assert "alternatives.json" not in p
 
@@ -401,6 +403,8 @@ async def test_fix_gate_runs_when_all_canonical_findings_are_outside_reviewed_di
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    seed_base_support_files(multi_stack_target, {'docs/elsewhere.md': '# Greeting contract\nhello() returns world.\n',
+        'notes.txt': 'Calling hello() must preserve the documented world greeting.\n'})
     stub.merge_items = [_merge_item(1, "notes.txt", "high", desc="out-of-scope finding")]
     # Route the appended structural finding to another off-diff file; the
     # stub's default structural parse emits ``file=api.py``.

@@ -448,12 +448,13 @@ def test_redactor_linear_scan_separatorless_large_text_unchanged() -> None:
 def test_redactor_sensitive_suffix_scan_is_linear() -> None:
     """Bound a long nonsensitive run while still redacting its trailing sensitive pair.
 
-    The 5s ceiling is generous; the credential marker proves the structured pass ran."""
+    The 5s CPU ceiling excludes scheduler delays from parallel test workers;
+    the credential marker proves the structured pass ran."""
 
     text = "a" * 200_000 + "=x token=opaque-test-only-sentinel"
-    start = time.perf_counter()
+    start = time.process_time()
     out = redact_structured_text(text)
-    elapsed = time.perf_counter() - start
+    elapsed = time.process_time() - start
     assert elapsed < 5
     assert "opaque-test-only-sentinel" not in out
     assert "[REDACTED_CREDENTIAL]" in out

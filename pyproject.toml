@@ -67,6 +67,7 @@ build-backend = "hatchling.build"
 packages = ["daydream", "daydream_ext"]
 include = [
     "daydream/templates/**",
+    "daydream/backends/pi_structured_output.ts",
     "daydream/training/schema/**",
     "daydream/atif/LICENSE",
     "daydream/atif/NOTICE",

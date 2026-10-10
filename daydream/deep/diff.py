@@ -10,13 +10,15 @@ from pathlib import Path
 from daydream.agent import console
 from daydream.deep.state import DeepState
 from daydream.flows.engine import FlowContext
+from daydream.hunk_index import _unquote_git_path
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget
 from daydream.ui import print_warning
 
 _DIFF_BLOCK_SPLIT = re.compile(r"^(?=diff --git )", re.MULTILINE)
 _DIFF_PLUS_HEADER = re.compile(r"^\+\+\+ (.+)$", re.MULTILINE)
 _DIFF_MINUS_HEADER = re.compile(r"^--- (.+)$", re.MULTILINE)
-_DIFF_GIT_HEADER = re.compile(r"^diff --git a/(\S+) b/(\S+)")
+_DIFF_GIT_HEADER = re.compile(r'^diff --git ("(?:[^"\\]|\\.)*"|a/.+?) ("(?:[^"\\]|\\.)*"|b/.+)$', re.MULTILINE)
+_DIFF_RENAME_HEADER = re.compile(r"^rename to (.+)$", re.MULTILINE)
 # Markers carry dropped paths without matching any diff header, so all block
 # consumers skip the marker while file selection can reject partial input.
 _DIFF_TRUNCATION_MARKER = re.compile(
@@ -36,10 +38,22 @@ def _diff_block_path(block: str) -> str | None:
         return None
     for pattern, prefix in ((_DIFF_PLUS_HEADER, "b/"), (_DIFF_MINUS_HEADER, "a/")):
         match = pattern.search(block)
-        if match and match.group(1) != "/dev/null":
-            return match.group(1).removeprefix(prefix)
+        if match:
+            path = _unquote_git_path(match.group(1).rstrip("\t"))
+            if path != "/dev/null":
+                return path.removeprefix(prefix)
+    renamed = _DIFF_RENAME_HEADER.search(block)
+    if renamed:
+        return _unquote_git_path(renamed.group(1))
+    # Unquoted Git paths may contain spaces or " b/"; symmetric a/ and b/ halves resolve unchanged identities.
+    header = block.partition("\n")[0].removeprefix("diff --git ")
+    midpoint = len(header) // 2
+    before, after = header[:midpoint], header[midpoint + 1:]
+    if (header[midpoint:midpoint + 1] == " " and before.startswith("a/")
+            and after.startswith("b/") and before[2:] == after[2:]):
+        return after[2:]
     git = _DIFF_GIT_HEADER.match(block)
-    return git.group(2) if git else None
+    return _unquote_git_path(git.group(2)).removeprefix("b/") if git else None
 
 
 def iter_diff_blocks(diff: str) -> Iterator[tuple[str, str]]:

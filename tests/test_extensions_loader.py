@@ -12,12 +12,14 @@ from tests.conftest import ExtDir
 
 @pytest.mark.parametrize(("declaration", "message"),
     [
-        pytest.param("99", r"99.*supports 6\.\.6", id="above-ceiling"),
-        pytest.param("0", r"= 0;.*supports 6\.\.6", id="below-floor"),
-        pytest.param("5", r"= 5;.*supports 6\.\.6", id="aged-out-v5"),
-        pytest.param("'1'", r"= '1';.*supports 6\.\.6", id="string"),
-        pytest.param("1.5", r"= 1\.5;.*supports 6\.\.6", id="float"),
-        pytest.param("True", r"= True;.*supports 6\.\.6", id="bool"),
+        pytest.param("99", r"99.*supports 8\.\.8", id="above-ceiling"),
+        pytest.param("0", r"= 0;.*supports 8\.\.8", id="below-floor"),
+        pytest.param("7", r"= 7;.*supports 8\.\.8", id="aged-out-v7-stage-builder"),
+        pytest.param("6", r"= 6;.*supports 8\.\.8", id="aged-out-v6"),
+        pytest.param("5", r"= 5;.*supports 8\.\.8", id="aged-out-v5"),
+        pytest.param("'1'", r"= '1';.*supports 8\.\.8", id="string"),
+        pytest.param("1.5", r"= 1\.5;.*supports 8\.\.8", id="float"),
+        pytest.param("True", r"= True;.*supports 8\.\.8", id="bool"),
     ],
 )
 def test_unsupported_extension_version_is_rejected(ext_dir: ExtDir, declaration: str, message: str,) -> None:

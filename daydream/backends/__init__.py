@@ -503,6 +503,7 @@ class PiRequestConfig(EffectiveRequestConfig):
     no_tools: bool | None = field(default=None, kw_only=True)
     no_skills: bool | None = None
     schema_emulated: bool | None = None
+    no_extensions: bool | None = field(default=None, kw_only=True)
 
 
 
@@ -625,6 +626,7 @@ class ToolStartEvent:
     name: str
     input: dict[str, Any]
     timestamp: str = field(default_factory=now_iso)
+    input_incomplete: bool = False
 
 
 @dataclass
@@ -854,6 +856,8 @@ class ResultEvent:
     finish_reason: str | None = None
     duration_ms: float | None = None
     duration_api_ms: float | None = None
+    # Emulated schemas may select text fragments; staged callers validate the original final turn.
+    structured_output_origin: Literal["native", "text"] = "native"
 
 
 AgentEvent = (
@@ -903,6 +907,8 @@ class Backend(Protocol):
     - supports_budget_preamble: accepts wall_budget_s/tool_call_budget so the
       backend's own system prompt can state this turn's real allowances rather
       than its module defaults. The host enforces the bound either way.
+    - supports_complete_output: accepts optional require_complete_root for strict
+      staged JSON syntax; malformed roots remain terminal.
     - reasoning_effort: native level fixed at construction; None defers to the driver.
       Backend instances are cached by kind, model, effort, and audit root.
     """

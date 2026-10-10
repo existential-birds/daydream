@@ -7,7 +7,7 @@ from a top-level `daydream_ext` package, without editing any file under
 contract: the module shape daydream loads, the exact name inventories a fork
 programs against, and the policy for when those names may change.
 
-Current contract version: **`EXTENSION_API_VERSION = 6`** (supported: `6..6`).
+Current contract version: **`EXTENSION_API_VERSION = 8`** (supported: `8..8`).
 
 ## Extension module contract
 
@@ -21,7 +21,7 @@ daydream_ext/
 `__init__.py` must export exactly two things:
 
 ```python
-DAYDREAM_EXT_API = 6          # must be within daydream's supported range
+DAYDREAM_EXT_API = 8          # must be within daydream's supported range
 
 def register(registry):       # receives a daydream.extensions.Registry
     ...                       # mutate flows / prompts / stacks here
@@ -215,7 +215,7 @@ from opentelemetry.sdk.trace.export import SpanExporter
 
 from daydream.extensions import ObservabilityConfig, Registry
 
-DAYDREAM_EXT_API = 6
+DAYDREAM_EXT_API = 8
 
 def company_exporter(config: ObservabilityConfig) -> SpanExporter:
     return OTLPSpanExporter(
@@ -513,9 +513,9 @@ kwargs are keyword-only except where noted.
 | `intent` | `strategy`, `diff_path`, `branch`, `log`, `exploration_dir`, `pr_description`, `inline_diff`, `inline_exploration_summary` |
 | `alternatives` | `strategy`, `intent_summary`, `diff_path`, `exploration_dir`, `inline_diff` |
 | `fix` | `test_output`, `feedback_items` (both positional), `repo`, `concise_mode` |
-| `per-stack` | `strategy`, `stack_name`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `prior_commits`, `inline_diff`, `intent_authoritative`, `include_alternatives`, `frontier_files` |
-| `structural` | `strategy`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `prior_commits`, `intent_authoritative`, `include_alternatives` |
-| `generic-fallback` | `strategy`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `is_docs_only`, `prior_commits`, `inline_diff`, `intent_authoritative`, `include_alternatives`, `frontier_files` |
+| `per-stack` | `strategy`, `stack_name`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `prior_commits`, `inline_diff`, `intent_authoritative`, `include_alternatives`, `frontier_files`, `review_stage` |
+| `structural` | `strategy`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `prior_commits`, `intent_authoritative`, `include_alternatives`, `review_stage` |
+| `generic-fallback` | `strategy`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `is_docs_only`, `prior_commits`, `inline_diff`, `intent_authoritative`, `include_alternatives`, `frontier_files`, `review_stage` |
 | `arbiter` | `strategy`, `arbiter_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir`, `intent_authoritative` |
 | `supervise` | `strategy`, `supervise_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
 | `suppression` | `strategy`, `suppression_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
@@ -527,6 +527,66 @@ kwargs are keyword-only except where noted.
 | `audit` | `category`, `strategy`, `group`, `scope_note`, `recon_summary`, `cwd`, `tier` |
 | `vet` | `strategy`, `findings`, `cwd` |
 | `plan-writer` | `finding`, `recon_summary`, `verification_commands`, `cwd` |
+
+#### Stage-aware review builders (API 8)
+
+The host invokes the selected `per-stack`, `structural`, or `generic-fallback` builder anew for each stage with
+`review_stage`, a mapping of host-owned assignment and admitted state. Declare `DAYDREAM_EXT_API = 8`; older extensions
+fail at load time. Overrides are invoked, never silently replaced. Stage contract 8 also invalidates older complete
+review cache entries.
+
+| Host field group | Contract |
+| --- | --- |
+| Identity: `stage`, `scope_id`, `analyzed_revision` | `first_pass`, `integration`, or `triage`, bound to the public reviewer and frozen snapshot. |
+| Assignment: `assigned_files` | Current assignment, also passed as the builder's `files`. |
+| Bundle: `supporting_bundle` | Bounded diff/index/binding or integration context. Built-ins use it; custom builders opt in with `review_input_bundle = True`. Otherwise `diff_path` and adjacent `hunk-index.json` retain their real file semantics. |
+| Navigation: `supporting_catalog` | Exact pointers to admitted Structure diff projections; `status` and `omitted_part_count` declare partial availability. Navigation grants no directory access. |
+| Residual work: `remaining_work` | Estimated residual assignments, files and stages; native Pi also exposes current submission/total start floors, remaining submission floor and reserved future starts. |
+| Budget: `advisory_tool_call_target`, `remaining_tool_calls`, `hard_tool_call_allowance` | Suggested pace, remaining cumulative allowance and the current invocation's hard allowance. Native Pi limits preserve minimum capacity for known later work. |
+| Context: `context_inputs`, `context_transport`, `context_statuses`, `canonical_input_identities` | Admitted supporting inputs, transport/availability and original artifact identities. Omitted optional context is advisory; corrupted required inputs block admission. |
+
+The stage factory projects canonical frozen diff/index inputs through the owning `ArtifactSession`. Required assignment
+bytes take priority over separately bounded shared context. Structure receives a whole-change interaction assignment,
+compact inventory and targeted diff parts. Optional parts and their catalogs fit within the remaining exact-input
+file and byte limits after required/shared context; omitted parts remain unavailable without aborting Structure. The
+[review budgets](../README.md#review-budgets) specify transport and assignment caps.
+
+Admission requires the strict invocation schema, exact target/candidate IDs, valid dispositions and findings, meaningful
+claim fields, and nonempty `not_reviewed` reasons. The host validates revision/input hashes, complete transport,
+backend/cwd/mode, confinement and unchanged capture identity. Backend failure, cancellation, exhausted bounds,
+malformed/truncated output, invalid IDs, required-input corruption, handoff overflow and unfinished decisions remain
+unsuccessful or incomplete. The [review budgets](../README.md#review-budgets) define admission/retry and source-read policy.
+
+Discovery may leave candidates `open` or `unresolved`; both receive one triage round. Triage receives bounded admitted
+notes, candidate grounds/triggers/consequences, dispositions/findings and closed decisions. It can decide from those
+facts or investigate within the same cumulative allowance/deadline. Candidates still unresolved after triage keep
+coverage incomplete. Contradictions among known closed candidates mark affected work incomplete without reopening
+decisions or discarding retained findings.
+The host owns candidate/finding identities and validates the final result; snapshot-bound typed coverage and findings
+are [atomically published](../README.md#terminal-review-findings-contract).
+
+For native Pi stages, the host reserves minimum assignment-input reads and structured submissions for undispatched
+batches, plus submissions for known later triage chunks. The current invocation's hard allowance excludes that reserve;
+the host does not dispatch a stage or transport retry whose minimum input-read and submission needs cannot fit.
+Advisory targets allow borrowing only within that invocation allowance. This bounds observed starts, rather than prospectively admitting
+tools, and does not force submission within a dispatched stage. Budget stops preserve prior admitted findings and
+truthful incomplete coverage.
+
+For bounded native Pi invocations, the packaged output extension refreshes one live budget note before each model
+request. It counts invocation-local tool starts, including failed tools, parallel batch members and structured
+submissions. The feedback cannot change a batch already proposed by the model; raw provider proposals and host
+accounting retain their existing authority.
+
+Pi keeps read-only `read`, `find`, `ls` and `grep`, with materialized ordinary files for useful before-side
+deleted/renamed source. Codex keeps its disposable read-only checkout; Claude/Codex may inspect captured revisions with
+ordinary Git commands. Pi's native `structured_output` accepts only the last successfully finalized submission after
+clean EOF/reaping and settlement. Failed submissions do not replace an earlier success; a selected host-invalid success
+cannot fall back to an older one. Assistant prose cannot supply native output. One hidden missing-submission reminder
+may run under the original deadline/cumulative allowance. Read-only invocations explicitly loading the packaged output
+extension isolate it from ambient extensions; other invocation policies, the read-only tool allowlist, no-schema and
+validation-opt-out text behavior remain unchanged.
+[Trace semantics](observability-fields.md#effective-request-configuration) distinguish native generations, submissions
+and host attempts.
 
 #### `plan-writer` compatibility and output contract
 
@@ -662,13 +722,13 @@ Working contracts for extension steps:
   inaccessible beyond its cwd.
 - Inline inputs have a combined limit of 12,288 UTF-8 payload bytes per model
   call. Exact-path inputs have separate validation limits: 512 files, 1 MiB per
-  file, and 4 MiB combined. Missing, changed, non-regular, invalid UTF-8, or
+  file, and 8 MiB combined. Missing, changed, non-regular, invalid UTF-8, or
   over-limit inputs fail before backend entry instead of being truncated.
   Exact-path validation streams and hashes the named files without retaining
   their full contents.
   Pi's exact-path `diff` input is a pointer-only durable artifact: it has a
   separate 128 MiB streaming-validation limit and does not consume the 1 MiB
-  captured-file or 4 MiB aggregate allowances. It remains in the exact-file
+  captured-file or 8 MiB aggregate allowances. It remains in the exact-file
   allowlist, is UTF-8 validated and stream-hashed again before each attempt,
   and is never copied into recovery finalization context. Its path must be the
   active session path supplied by the host. All other required inputs retain
@@ -679,7 +739,7 @@ Working contracts for extension steps:
   the legacy paths without an active artifact session. Production runner and
   custom-flow calls bind a session and cannot opt out of the model-cwd check.
 
-API v6 retains `ctx.artifacts`, the stable data keys, and verifier routing
+API v8 retains `ctx.artifacts`, the stable data keys, and verifier routing
 headings. Extensions using implicit artifact lookup must update their calls
 as shown below.
 
@@ -694,7 +754,7 @@ from daydream.flows.engine import FlowContext
 from daydream.prompt_budget import prepare_sanctioned_inputs
 from daydream.trajectory import DaydreamPhase, run_directory
 
-DAYDREAM_EXT_API = 6
+DAYDREAM_EXT_API = 8
 
 async def explain_note(ctx: FlowContext) -> None:
     assert ctx.artifacts is not None
@@ -787,7 +847,7 @@ honors a forced answer, declines unattended changes, and otherwise prompts.
 `choice()` accepts explicit `assume_yes` and `assume_no` mappings for menus;
 free-form input without those mappings follows the run's interactivity policy.
 
-The runner binds this context for the run, so the shared console and API v6
+The runner binds this context for the run, so the shared console and API v8
 extensions that omit the new argument still use the emitting run's policy.
 Built-in phases also bind an explicitly supplied `run_context` for the entire
 invocation, including output before and after agent execution.
@@ -795,7 +855,7 @@ Standalone callers can use `with bind_run_context(RunContext(InteractionPolicy(.
 from `daydream.run_context` to scope several calls together. Without an explicit
 or bound context, standalone calls use a fresh interactive, non-quiet, non-log
 default with no assumed answer. Binding restores the previous context on exit,
-including exceptions. This additive field does not change API version 6,
+including exceptions. This additive field does not change API version 8,
 `ctx.artifacts`, or the shared `ctx.data` mapping.
 
 ### Stable `ctx.data` keys
@@ -803,7 +863,7 @@ including exceptions. This additive field does not change API version 6,
 Built-in deep steps use an internal `DeepState` view over this same dictionary.
 The view checks a value when a step reads it and writes back to the existing
 key. It does not copy the mapping or cache its values, so extension writes remain
-visible to later steps. Extensions continue to use `ctx.data` under API v6.
+visible to later steps. Extensions continue to use `ctx.data` under API v8.
 
 Steps share state through `FlowContext.data`. Forks may **read** these keys;
 every other key is internal and may change without a version bump:
@@ -909,7 +969,7 @@ import json
 
 from daydream.extensions import FlowStep, ToolDecision
 
-DAYDREAM_EXT_API = 6
+DAYDREAM_EXT_API = 8
 
 async def _filter_items(ctx):
     items_file = ctx.data["items_file"]
@@ -1023,7 +1083,7 @@ builders' outputs and are replaced along with them).
 ```python
 from daydream.extensions import FlowStep, get_registry
 
-DAYDREAM_EXT_API = 6
+DAYDREAM_EXT_API = 8
 
 def _ro_prompt(*, policy):
     return f"RO-GATE {policy}"

@@ -130,7 +130,8 @@ async def test_concurrent_per_stack_prompts_omit_alternatives_pointer(
     assert per_stack
     for prompt in per_stack:
         assert "alternatives.json" not in prompt
-        assert "intent.md" in prompt
+        from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
+        assert supporting_contents(prompt)["intent"] == (multi_stack_target / ".daydream/deep/intent.md").read_text()
     for phrase in ("you are the arbiter", "cross-stack merge agent"):
         matching = [c["prompt"] for c in stub.calls if phrase in c["prompt"].lower()]
         assert matching, phrase
@@ -149,7 +150,9 @@ async def test_single_stack_keeps_serial_order_and_pointer(tiny_diff_target: Pat
     assert wonder_idx < per_stack_idx, "single-stack mode must stay serial"
     per_stack = [c["prompt"] for c in stub.calls if "you are reviewing the" in c["prompt"].lower()]
     assert per_stack
-    assert all("alternatives.json" in p for p in per_stack)
+    from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
+    assert all(json.loads(supporting_contents(p)["alternatives"]) ==
+               json.loads((tiny_diff_target / ".daydream/deep/alternatives.json").read_text()) for p in per_stack)
 
 async def test_wonder_failure_fails_run_with_fanout_outputs_on_disk(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,

@@ -195,8 +195,14 @@ def test_prepare_sanctioned_exact_inputs_enforces_resource_caps(tmp_path: Path) 
     maximum.write_bytes(b"x" * (SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES + 1))
     with pytest.raises(SanctionedInputUnavailable, match="file byte limit"):
         prepare_sanctioned_inputs(backend, tmp_path, {"maximum": maximum}, read_only=False)
-    files = _sized_inputs(tmp_path, 4, SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES // 4)
-    assert len(prepare_sanctioned_inputs(backend, tmp_path, files, read_only=False).inputs) == 4
+    count = SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES // SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES + 1
+    size, remainder = divmod(SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES, count)
+    files = _sized_inputs(tmp_path, count, size)
+    files[f"input-{count - 1}"].write_bytes(b"x" * (size + remainder))
+    boundary = prepare_sanctioned_inputs(backend, tmp_path, files, read_only=False)
+    assert len(boundary.inputs) == count
+    assert sum(item.size for item in boundary.inputs) == SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES
+    assert all(item.size < SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES for item in boundary.inputs)
     files["overflow"] = tmp_path / "overflow.txt"
     files["overflow"].write_text("x", encoding="utf-8")
     with pytest.raises(SanctionedInputUnavailable, match="aggregate byte limit"):
@@ -212,7 +218,8 @@ def test_prepare_sanctioned_exact_inputs_bounds_aggregate_streaming_reads(
 ) -> None:
     """Aggregate refusal reads only the admitted bytes plus one look-ahead."""
     backend = ScriptedBackend()
-    inputs = _sized_inputs(tmp_path, 5, SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES)
+    count = SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES // SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES + 1
+    inputs = _sized_inputs(tmp_path, count, SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES)
     delegated_bytes = _count_prompt_budget_reads(monkeypatch)
     with pytest.raises(SanctionedInputUnavailable, match="aggregate byte limit"):
         prepare_sanctioned_inputs(backend, tmp_path, inputs, read_only=False)
@@ -223,9 +230,10 @@ def test_revalidate_sanctioned_exact_inputs_keeps_aggregate_read_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     backend = ScriptedBackend()
-    inputs = _sized_inputs(tmp_path, 5, SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES // 5)
+    count = SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES // SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES + 1
+    inputs = _sized_inputs(tmp_path, count, SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES // count)
     prepared = prepare_sanctioned_inputs(backend, tmp_path, inputs, read_only=False)
-    inputs["input-4"].write_bytes(b"x" * SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES)
+    inputs[f"input-{count - 1}"].write_bytes(b"x" * SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES)
     delegated_bytes = _count_prompt_budget_reads(monkeypatch)
     with pytest.raises(SanctionedInputUnavailable, match="aggregate byte limit"):
         prepared.revalidate(backend, tmp_path, read_only=False)

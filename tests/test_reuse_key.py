@@ -90,6 +90,9 @@ def test_components_move_the_key_and_grounding_never_does(tmp_path: Path) -> Non
     base = _shard_payload(tmp_path, files=["a.py"], frontier=[], blob=b"A = 1\n")
     key = reuse_key.unit_key(base)
     assert key is not None and len(key) == 64
+    assert base["format"] == 2
+    obsolete_format = _mutate(_mutate(base, "format", value=1), "components.format", value=1)
+    assert reuse_key.unit_key(obsolete_format) != key
     for name in ("format", "hunk_slice", "assigned_files", "assigned_blobs", "frontier_files",
                  "frontier_blobs", "profile", "model", "effort", "intent_authoritative",
                  "include_alternatives", "exploration_present", "docs_only", "schema"):

@@ -59,11 +59,12 @@ async def test_cli_finalization_controls_are_local_to_overlapping_calls(
             started.set()
         await asyncio.wait_for(started.wait(), timeout=3)
         if kind == "pi":
-            return pi_process([
-                json.dumps({"type": "agent_end", "messages": [
-                    {"role": "assistant", "content": [{"type": "text", "text": '{"findings":[]}'}]},
-                ]}),
-            ])
+            message = {"role": "assistant", "content": [{"type": "text", "text": '{"findings":[]}'}],
+                       "stopReason": "stop"}
+            return pi_process([json.dumps(event) for event in [
+                {"type": "turn_start"}, {"type": "message_end", "message": message},
+                {"type": "turn_end", "message": message}, {"type": "agent_end", "messages": []},
+                {"type": "agent_settled"}]])
         return codex_process([json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}})])
     async def run(finalization: bool) -> list[Any]:
         return [event async for event in backend.execute(
@@ -92,6 +93,11 @@ async def test_cli_finalization_controls_are_local_to_overlapping_calls(
         assert isinstance(final.config, PiRequestConfig)
         assert final.config.no_tools is True
         assert final.config.selected_tools_count == 0
+        assert final.config.schema_emulated is True
+        assert isinstance(normal.config, PiRequestConfig) and normal.config.schema_emulated is False
+        assert next(event for event in final_events if isinstance(event, ResultEvent)).structured_output == {
+            'findings': []}
+        assert next(event for event in normal_events if isinstance(event, ResultEvent)).structured_output is None
     else:
         assert any(f'model_reasoning_effort="{expected}"' in args for args in commands)
         assert all("--no-tools" not in args for args in commands)

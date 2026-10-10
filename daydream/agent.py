@@ -17,14 +17,15 @@ if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
     from rich.text import Text
 
-from daydream import clock
+from daydream import clock, review_budget
 from daydream.agent_retry import _plan_retry_delay, _resolve_retry_settings, _retry_hint, _RetryTelemetry
 from daydream.artifact_visibility import ArtifactVisibilityError, artifact_session_active, assert_model_cwd_clean
 from daydream.backends import (
     AgentEventStream,
     Backend,
     ContinuationToken,
-    DiagnosticEvent,
+    PiRequestConfig,
+    RequestEvent,
     ResultEvent,
     TextEvent,
     ToolStartEvent,
@@ -36,8 +37,10 @@ from daydream.diagnostics import exception_text, sanitize_verbose_message
 from daydream.extensions import get_registry
 from daydream.json_utils import (
     SchemaAwareSelection,
+    SchemaRejection,
     extract_json,
     extract_json_by_schema,
+    schema_rejection,
     validates_schema,
 )
 from daydream.observability.spans import agent_scope, attempt_scope
@@ -49,7 +52,7 @@ from daydream.retry_policy import (
     RetryRecoveryBudget,
     classify_failure,
 )
-from daydream.review_budget import ReviewLimits, review_deadline, review_limits_for_scope
+from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits, review_deadline, review_limits_for_scope
 from daydream.review_evidence import FinalizationContext, ReviewEvidence
 from daydream.run_context import (
     RunContext,
@@ -255,11 +258,19 @@ class StructuredOutputFailure(str):
 
     reason: str
     detail: str | None
+    rejection: SchemaRejection | None
+    schema_retry_eligible: bool
+    syntax_error: dict[str, int] | None
 
-    def __new__(cls, text: str, reason: str, detail: str | None = None) -> "StructuredOutputFailure":
+    def __new__(cls, text: str, reason: str, detail: str | None = None, *,
+        rejection: SchemaRejection | None = None, schema_retry_eligible: bool = False,
+        syntax_error: dict[str, int] | None = None) -> "StructuredOutputFailure":
         value = super().__new__(cls, text)
         value.reason = reason
         value.detail = detail
+        value.rejection = rejection
+        value.schema_retry_eligible = schema_retry_eligible
+        value.syntax_error = syntax_error
         return value
 
 
@@ -325,6 +336,9 @@ async def run_agent(
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext | None = None,
     review_limits: ReviewLimits | None = None,
+    investigation_budget: ReviewInvestigationBudget | None = None, advisory_tool_call_target: int | None = None,
+    tool_call_start_floor: int = 0,
+    review_evidence: ReviewEvidence | None = None, schema_rejection_guard: Callable[[Any], bool] | None = None,
     finalization_context: FinalizationContext | None = None,
     tools_disabled: bool = False,
     review_system_instructions: str | None = None,
@@ -333,13 +347,15 @@ async def run_agent(
 
     Backend retry, supervision, budget and ATIF semantics live in the invocation
     executor. The outer scope owns exactly the result the phase receives.
+    Stages use investigation_budget and optional bounded review_evidence; failure/cutoff blocks automatic serialization.
+    tool_call_start_floor prevents fresh attempts whose allocation cannot fit the stage's minimum work.
     """
     if tools_disabled and not getattr(backend, "supports_tools_disabled", False):
         raise NotImplementedError(f"{type(backend).__name__} does not support tools_disabled")
     if review_system_instructions is not None:
-        if not tools_disabled:
-            raise ValueError("review_system_instructions requires tools_disabled=True")
-        if not getattr(backend, "supports_review_instructions", False):
+        if not tools_disabled and investigation_budget is None:
+            raise ValueError("review_system_instructions requires tools_disabled=True or a staged investigation")
+        if investigation_budget is None and not getattr(backend, "supports_review_instructions", False):
             raise NotImplementedError(f"{type(backend).__name__} does not support review_instructions")
     if sanctioned_inputs is not None:
         # Callers may already have rendered this suffix. Move it after the
@@ -348,10 +364,33 @@ async def run_agent(
         if rendered_suffix and prompt.endswith(rendered_suffix):
             prompt = prompt.removesuffix(rendered_suffix)
     context = resolve_run_context(run_context)
-    evidence = ReviewEvidence(output_schema) if review_limits is not None else None
+    if investigation_budget is not None and review_limits is not None:
+        raise ValueError("staged investigation uses investigation_budget instead of review_limits")
+    evidence = review_evidence or (ReviewEvidence(output_schema) if review_limits is not None else None)
     review_instructions = review_system_instructions
     hard_deadline = deadline
     shared: float | None = None
+    if investigation_budget is not None:
+        shared = investigation_budget.shared_deadline
+        bounds = [investigation_budget.deadline]
+        if deadline is not None:
+            bounds.append(deadline)
+        if wall_budget_s is not None:
+            bounds.append(clock.monotonic() + wall_budget_s)
+        deadline = min(bounds)
+        hard_deadline = deadline
+        remaining_calls = investigation_budget.remaining_tool_calls
+        tool_call_budget = min(tool_call_budget, remaining_calls) if tool_call_budget is not None else remaining_calls
+        budget_instructions = (
+            f"Hard reviewer allowance: at most {max(0.0, deadline - clock.monotonic()):g} seconds until "
+            f"the absolute deadline and {tool_call_budget} tool starts for this invocation. "
+            f"The reviewer scope has {remaining_calls} remaining cumulative tool starts. "
+            f"Cumulative observed starts: {investigation_budget.observed_tool_starts}. "
+            + (f"Advisory stage call target: {advisory_tool_call_target}; this is a planning hint, "
+               "not a ceiling. Useful assigned work may borrow within this invocation allocation. "
+               if advisory_tool_call_target is not None else "")
+            + ("\n\n" + review_budget.STAGED_REVIEW_GUIDANCE if not review_system_instructions else "")
+        )
     if review_limits is not None:
         review_limits = review_limits_for_scope(review_limits)
         started = clock.monotonic()
@@ -375,6 +414,7 @@ async def run_agent(
             f"Investigation allowance: at most {investigation_allowance:g} seconds and "
             f"{tool_call_budget} tool calls. " + REVIEW_STOPPING_GUIDANCE
         )
+    if investigation_budget is not None or review_limits is not None:
         prompt += "\n\n" + budget_instructions
         review_instructions = "\n\n".join(
             item for item in (review_system_instructions, budget_instructions) if item
@@ -398,12 +438,14 @@ async def run_agent(
                 sanctioned_inputs=sanctioned_inputs,
                 run_context=context,
                 review_evidence=evidence,
+                schema_rejection_guard=schema_rejection_guard, investigation_budget=investigation_budget,
+                tool_call_start_floor=tool_call_start_floor,
                 review_instructions=review_instructions,
                 tools_disabled=tools_disabled,
             )
         except Exception as exc:
             from daydream.review_result import ReasonCode, reason_for_exception
-            if (evidence is None or not evidence.valid(evidence.checkpoint)
+            if (investigation_budget is not None or evidence is None or not evidence.valid(evidence.checkpoint)
                     or reason_for_exception(exc) != ReasonCode.MODEL_BUDGET_EXHAUSTION):
                 raise
             # Provider turn exhaustion retains this invocation's strictly validated
@@ -480,6 +522,9 @@ async def _run_agent(
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext,
     review_evidence: ReviewEvidence | None = None,
+    schema_rejection_guard: Callable[[Any], bool] | None = None,
+    investigation_budget: ReviewInvestigationBudget | None = None,
+    tool_call_start_floor: int = 0,
     review_instructions: str | None = None,
     finalization: bool = False,
     tools_disabled: bool = False,
@@ -496,10 +541,12 @@ async def _run_agent(
     the public run_agent wrapper.
     """
     output_parts: list[str] = []
+    assistant_turn_bytes, assistant_turn_overflow = 0, False
+    completed_assistant_text: str | None = None
+    completed_assistant_overflow = False
     structured_result: Any = None
     result_continuation: ContinuationToken | None = None
     aborted_reason: str | None = None
-    evidence_incomplete = False
     tool_supervisor = get_registry().tool_supervisor_if_registered()
 
     with run_context.backend_registration(backend):
@@ -539,6 +586,7 @@ async def _run_agent(
             # Set when the invocation already emitted its one stop record, so the
             # post-loop deadline emitter never writes a second, contradicting one.
             stop_recorded = False
+            tool_calls = 0
 
             def _emit_ladder_stop(
                 stop_reason: str, limit_expired: str = "retry_ladder"
@@ -584,10 +632,15 @@ async def _run_agent(
                 # pre-backoff break) ends the ladder, so the caller sees only
                 # output from the attempt that actually completed the turn.
                 output_parts = []
+                assistant_turn_bytes, assistant_turn_overflow = 0, False
+                completed_assistant_text = None
+                completed_assistant_overflow = False
                 structured_result = None
+                native_output = False
                 result_continuation = None
-                evidence_incomplete = False
-                tool_calls = 0
+                if investigation_budget is None:
+                    tool_calls = 0
+                remaining_calls = tool_call_budget - tool_calls if tool_call_budget is not None else None
                 if review_evidence is not None:
                     review_evidence.reset()
                 budget_reason: str | None = None
@@ -603,6 +656,10 @@ async def _run_agent(
                             limit_expired=limit_expired or "invocation_wall_budget",
                         )
                         stop_recorded = True
+                    break
+                if investigation_budget is not None and (investigation_budget.remaining_tool_calls == 0
+                    or (remaining_calls is not None and remaining_calls < max(1, tool_call_start_floor))):
+                    aborted_reason = "tool_call_budget_exceeded"
                     break
                 # Dispatch bookkeeping: the opening attempt is useful work, every
                 # later one is retry overhead. Retry attempts' backend time is
@@ -623,6 +680,8 @@ async def _run_agent(
                         "max_turns": max_turns,
                         "read_only": read_only,
                     }
+                    if investigation_budget is not None and getattr(backend, "supports_complete_output", False):
+                        execute_kwargs["require_complete_root"] = True
                     if finalization and getattr(backend, "supports_finalization", False):
                         execute_kwargs["finalization"] = True
                     if tools_disabled and getattr(backend, "supports_tools_disabled", False):
@@ -640,9 +699,20 @@ async def _run_agent(
                         # deadline above is derived from the same value, so
                         # the prompt cannot promise time the host withholds.
                         execute_kwargs["wall_budget_s"] = wall_budget_s
-                        execute_kwargs["tool_call_budget"] = tool_call_budget
+                        execute_kwargs["tool_call_budget"] = remaining_calls
+                    attempt_prompt = prompt
+                    if investigation_budget is not None and attempt > 0:
+                        retry_budget_update = (
+                            "\n\nHost retry budget update: failed-attempt starts remain charged. "
+                            f"Hard remaining invocation allowance: {remaining_calls} tool starts; "
+                            f"{investigation_budget.remaining_tool_calls} remain for this reviewer "
+                            f"after {investigation_budget.observed_tool_starts} observed starts."
+                        )
+                        attempt_prompt += retry_budget_update
+                        if "review_instructions" in execute_kwargs:
+                            execute_kwargs["review_instructions"] += retry_budget_update
                     event_iter = backend.execute(
-                        cwd, prompt, output_schema, continuation,
+                        cwd, attempt_prompt, output_schema, continuation,
                         **execute_kwargs,
                     )
                     invocation_cm: Any = (
@@ -656,7 +726,7 @@ async def _run_agent(
                         event_stream_scope,
                     ):
                         if inv is not None:
-                            inv.observe_user_step(prompt=prompt)
+                            inv.observe_user_step(prompt=attempt_prompt)
 
                         # Per-invocation abort controls live here so both backends
                         # are covered without a backend-signature change: the tool-call
@@ -674,41 +744,52 @@ async def _run_agent(
 
                         with wall_scope:
                             async for event in event_iter:
-                                # The single effective deadline is enforced per streamed
-                                # event so an injected clock can expire mid-turn even
-                                # though move_on_after only measures real time.
-                                if (
-                                    effective_deadline is not None
-                                    and clock.monotonic() >= effective_deadline
-                                ):
-                                    budget_reason = "wall_budget_exceeded"
-                                    break
+                                if investigation_budget is not None and isinstance(event, ToolStartEvent):
+                                    investigation_budget.observed_tool_starts += 1
+                                    tool_calls += 1
+                                elif native_output and isinstance(event, ToolStartEvent):
+                                    tool_calls += 1
                                 # The sole telemetry observer runs before UI callbacks,
                                 # supervision and budgets can interrupt event handling.
                                 observed.observe(event)
-                                if review_evidence is not None:
-                                    review_evidence.observe(event)
                                 # Recorder-only parser/transport evidence and the
                                 # invocation ledger must be forwarded before any
                                 # branch-specific break; _dispatch is UI-free and
                                 # ignores RequestEvent (the one armless member).
                                 if inv is not None:
                                     inv.observe(event)
-                                if (isinstance(event, DiagnosticEvent)
-                                        and event.code == "codex_transport_coverage"
-                                        and event.metadata.get("coverage") == "incomplete"):
-                                    evidence_incomplete = True
-                                if isinstance(event, TextEvent):
-                                    output_parts.append(event.text)
+                                # After expiry, supervise/charge received native starts; reject completions/checkpoints.
+                                deadline_expired = (effective_deadline is not None
+                                                    and clock.monotonic() >= effective_deadline)
+                                if deadline_expired and not (native_output and isinstance(event, ToolStartEvent)):
+                                    budget_reason = "wall_budget_exceeded"
+                                    break
+                                if review_evidence is not None:
+                                    review_evidence.observe(event)
+                                if isinstance(event, RequestEvent):
+                                    native_output = (isinstance(event.config, PiRequestConfig)
+                                                     and event.output_schema is not None
+                                                     and event.config.schema_emulated is False)
+                                elif isinstance(event, TextEvent) and not native_output:
+                                    if investigation_budget is None:
+                                        output_parts.append(event.text)
+                                    elif event.text:
+                                        size = len(event.text.encode())
+                                        if assistant_turn_bytes + size > 128 * 1024:
+                                            assistant_turn_overflow = True
+                                        else:
+                                            output_parts.append(event.text)
+                                            assistant_turn_bytes += size
+                                elif isinstance(event, TurnEndEvent) and investigation_budget is not None:
+                                    completed_assistant_text = ''.join(output_parts)
+                                    completed_assistant_overflow = assistant_turn_overflow
+                                    output_parts = []
+                                    assistant_turn_bytes, assistant_turn_overflow = 0, False
                                 elif isinstance(event, ResultEvent):
-                                    structured_result = event.structured_output
+                                    structured_result = (None if investigation_budget is not None
+                                                         and event.structured_output_origin == 'text'
+                                                         else event.structured_output)
                                     result_continuation = event.continuation
-                                if not (
-                                    require_full_schema and output_schema is not None
-                                    and isinstance(event, ResultEvent)
-                                    and not validates_schema(event.structured_output, output_schema)
-                                ):
-                                    await display.observe(event)
                                 if isinstance(event, ToolStartEvent):
                                     if tool_supervisor is not None:
                                         try:
@@ -730,10 +811,22 @@ async def _run_agent(
                                             budget_reason = f"tool_vetoed:{event.name}"
                                             break
 
-                                    tool_calls += 1
+                                    if deadline_expired:
+                                        budget_reason = "wall_budget_exceeded"
+                                        break
+                                    if investigation_budget is None and not native_output:
+                                        tool_calls += 1
                                     if tool_call_budget is not None and tool_calls > tool_call_budget:
                                         budget_reason = "tool_call_budget_exceeded"
                                         break
+
+                                if not (
+                                    require_full_schema and output_schema is not None and isinstance(event, ResultEvent)
+                                    and (not validates_schema(event.structured_output, output_schema)
+                                         or (investigation_budget is not None
+                                             and event.structured_output_origin == 'text'))
+                                ):
+                                    await display.observe(event)
 
                             await display.flush()
 
@@ -804,6 +897,9 @@ async def _run_agent(
                         # and record any retry overhead already spent.
                         if effective_deadline is not None and clock.monotonic() >= effective_deadline:
                             output_parts = []
+                            assistant_turn_bytes, assistant_turn_overflow = 0, False
+                            completed_assistant_text = None
+                            completed_assistant_overflow = False
                             structured_result = None
                             result_continuation = None
                             aborted_reason = "wall_budget_exceeded"
@@ -965,28 +1061,42 @@ async def _run_agent(
             # above never sees them. Deterministically reap the tracked subprocesses
             # via backend.cancel() before unwinding.
             try:
-                await backend.cancel()
+                # AnyIO task groups keep scopes cancelled at each await; existing bounded grace lets teardown reap
+                # without masking the original cancellation.
+                with anyio.move_on_after(BUDGET_CLEANUP_GRACE_S, shield=True) as shutdown_scope:
+                    await backend.cancel()
+                if shutdown_scope.cancel_called:
+                    _logger.warning("backend shutdown exceeded its %ss grace", BUDGET_CLEANUP_GRACE_S)
             except Exception:  # cancel() must not mask the original signal
                 _logger.exception("backend.cancel() failed during shutdown")
             raise
 
-    if evidence_incomplete and aborted_reason is None and require_full_schema:
-        aborted_reason = "evidence_incomplete"
+
+    if investigation_budget is not None:
+        raw = (''.join(output_parts) if output_parts or assistant_turn_overflow
+               else completed_assistant_text or '')
+        text_overflow = (assistant_turn_overflow if output_parts or assistant_turn_overflow
+                         else completed_assistant_overflow)
+    else:
+        raw, text_overflow = ''.join(output_parts), False
 
     def _usable(value: Any) -> bool:
         """Accept explicit validation opt-out or a downstream-salvageable value."""
         return not validate_structured_output or (
             output_schema is not None and (
-                validates_schema(value, output_schema) if require_full_schema
+                validates_schema(value, output_schema) if require_full_schema or native_output
                 else _salvageable(value, output_schema)
             )
         )
 
+    if native_output and aborted_reason is not None:
+        structured_result = None
+        if review_evidence is not None:
+            review_evidence.checkpoint = None
     if output_schema is not None and structured_result is not None and _usable(structured_result):
         return structured_result, result_continuation, aborted_reason
     selection: SchemaAwareSelection | None = None
     if output_schema is not None:
-        raw = "".join(output_parts)
         # Fallback: robust extraction (prose-wrapped JSON, markdown fences) when
         # structured output failed. Selection is schema-driven rather than
         # size-driven — the last candidate this same gate admits wins — so
@@ -1004,18 +1114,23 @@ async def _run_agent(
         # callers keep largest-span extraction. Everything else narrows to the
         # last candidate its own gate admits, which never widens what is
         # accepted.
-        if raw.strip():
+        # Staged native output is authoritative; rejection forbids salvaging text fragments from the same invocation.
+        if not native_output and raw.strip() and not text_overflow and not (
+            investigation_budget is not None and structured_result is not None):
             selected: Any = None
             if validate_structured_output:
-                selection = _select_by_schema(raw, output_schema, require_full_schema=require_full_schema)
+                selection = (extract_json_by_schema(raw, schema=output_schema, accept=validates_schema,
+                                                    require_complete_root=True, rejection_guard=schema_rejection_guard)
+                             if investigation_budget is not None else
+                             _select_by_schema(raw, output_schema, require_full_schema=require_full_schema))
                 selected = selection.value
             else:
                 selected = extract_json(raw)
             if selected is not None and _usable(selected):
                 return selected, result_continuation, aborted_reason
-    raw = "".join(output_parts)
-    if output_schema is not None and require_full_schema:
-        reason = "malformed_output" if structured_result is not None or raw.strip() else "missing_output"
+    if output_schema is not None and (require_full_schema or native_output):
+        reason = ("malformed_output" if structured_result is not None or raw.strip() or text_overflow
+                  else "missing_output")
         # Content-free rejection trace: the selected candidate's Python type name,
         # its first schema error as "<validator> at <json_path>" (never the
         # jsonschema message, which embeds candidate content), and how many spans
@@ -1024,5 +1139,17 @@ async def _run_agent(
         if reason == "malformed_output" and selection is not None and selection.rejected_type is not None:
             reject_detail = (f"candidate type {selection.rejected_type} failed {selection.rejected_reason}"
                              f"; {selection.candidate_count} candidate(s)")
-        return StructuredOutputFailure(raw, reason, reject_detail), result_continuation, aborted_reason
+        rejection = (schema_rejection(structured_result, output_schema) if structured_result is not None else
+                     selection.rejection if selection is not None else None)
+        if rejection is not None:
+            reject_detail = (f"schema {rejection.category} at {rejection.schema_path}; "
+                             f"{rejection.error_count} error(s); {rejection.candidate_count} candidate(s)")
+        eligible = not native_output and (rejection is not None and (schema_rejection_guard is None
+                                              or schema_rejection_guard(structured_result))
+                    if structured_result is not None else
+                    selection.schema_retry_eligible if selection is not None else False)
+        failure = StructuredOutputFailure(raw, reason, reject_detail, rejection=rejection,
+                                          schema_retry_eligible=eligible,
+                                          syntax_error=selection.syntax_error if selection is not None else None)
+        return failure, result_continuation, aborted_reason
     return raw, result_continuation, aborted_reason
