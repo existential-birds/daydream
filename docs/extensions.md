@@ -552,11 +552,9 @@ compact inventory and targeted diff parts; omitted supporting parts remain unava
 
 Admission requires the strict invocation schema, exact target/candidate IDs, valid dispositions and findings, meaningful
 claim fields, and nonempty `not_reviewed` reasons. The host validates revision/input hashes, complete transport,
-backend/cwd/mode, confinement and unchanged capture identity. Supplied diff/context can support valid decisions without
-source reads; ordinary file/Git tools are recorded and charged, but do not authenticate claims or gate semantic output.
-Backend failure, cancellation, exhausted bounds, malformed/truncated output, invalid IDs, required-input corruption,
-handoff overflow and unfinished decisions remain unsuccessful or incomplete. Failed attempts admit nothing; successful
-earlier stages retain their findings.
+backend/cwd/mode, confinement and unchanged capture identity. Backend failure, cancellation, exhausted bounds,
+malformed/truncated output, invalid IDs, required-input corruption, handoff overflow and unfinished decisions remain
+unsuccessful or incomplete. The [review budgets](../README.md#review-budgets) define admission/retry and source-read policy.
 
 Triage receives bounded admitted notes, candidate grounds/triggers/consequences, dispositions/findings and closed
 decisions. It can decide from those facts or investigate within the same cumulative allowance/deadline. Contradictions

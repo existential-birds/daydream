@@ -20,6 +20,7 @@ from daydream.deep.prompts import (
     build_structural_prompt,
 )
 from daydream.phases import append_extended_facts
+from daydream.phases.review_prompts import _exploration_pointer
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE, PR_DESCRIPTION_UNTRUSTED_FRAMING
 from daydream.prompts.grounding import (
@@ -142,6 +143,13 @@ def test_exploration_pointer_keeps_artifacts_bounded_and_source_work_optional(tm
     assert "Do not infer or enumerate sibling artifact files" in out
     assert "Inspect enclosing symbols or other sections when useful" in out
     assert "MUST read in full all assigned source files" not in out
+    assert str(tmp_path / ".daydream" / "exploration" / "affected_files.md") in out
+    assert "when useful to resolve concrete candidates" in out
+    assert "assigned source files" not in out
+    assert _exploration_pointer(None) == ""
+    assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in out
+    assert out.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < out.index("summary.md")
+    assert out.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < out.index("affected_files.md")
 
 
 # Issue #972 R1 — host-owned severity rubric reaches every assigning prompt

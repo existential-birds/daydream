@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import pytest
 
@@ -26,9 +25,6 @@ from tests.test_deep_orchestrator import (
     _run_deep,
     _silence,
 )
-
-if TYPE_CHECKING:
-    pass
 
 
 def test_deep_shard_enabled_default_off(tmp_path: Path) -> None:

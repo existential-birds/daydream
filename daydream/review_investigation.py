@@ -275,12 +275,7 @@ class ReviewInvestigation:
     def _assessment(self, output: dict[str, Any], stage: str, targets: list[str],
                     candidate_ids: list[str], *, files: list[str],
                     admitting: bool = False) -> tuple[_AdmissionPlan | None, str | None]:
-        """Assess proven assertions and prospective bounds without admitting output.
-
-        Schema-rejected objects may lack a known field or carry the wrong type.
-        Unassessable fields alone are schema errors; available assertions still
-        cannot override assignment identity, grounded evidence, or closed decisions.
-        """
+        """Assess available domain failures and bounds without admitting output or repairing unassessable fields."""
         raw_targets = output.get('targets')
         declared_targets = [item for item in raw_targets if isinstance(item, dict)] if (
             isinstance(raw_targets, list)) else []

@@ -29,6 +29,7 @@ from daydream.prompt_budget import (
     prepare_sanctioned_inputs,
     sanctioned_transport_for,
     select_advisory_inputs,
+    truncate_utf8_to_budget,
 )
 from daydream.workspace import WorkContext
 
@@ -58,12 +59,7 @@ def _bounded_groups[T](values: list[T], fits: Callable[[list[T]], bool], error: 
 
 
 class StageInputFactory:
-    """Required work takes priority over advisory context on either transport.
-
-    Batches fit the transport's bounded assignment allowance, including wrappers
-    and binding metadata. Exact-path transport permits larger assignments than
-    inline transport, never whole-change artifacts as first-pass inputs.
-    """
+    """Project scoped first-pass assignments with required-work priority; see README.md#review-budgets for bounds."""
 
     def __init__(self, backend: Backend, work: WorkContext, stack: StackAssignment, *,
         diff_path: Path, hunk_index_path: Path, shared_paths: dict[str, Path | None],
@@ -150,11 +146,11 @@ class StageInputFactory:
         return {'review-assignment': '\n\n'.join(f'### {label} (supporting)\n{text}'
                                                  for label, text in contents.items())}
 
-    def _fits(self, contents: dict[str, str]) -> bool:
+    def _remaining_bytes(self, contents: dict[str, str]) -> int:
         contents = self._bundled(contents)
         cap = (_EXACT_PATH_ASSIGNMENT_MAX_BYTES if self.transport is SanctionedInputTransport.EXACT_PATHS
                else SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES)
-        return inline_section_emitted_bytes([(label, len(text.encode())) for label, text in contents.items()]) <= cap
+        return cap - inline_section_emitted_bytes([(label, len(text.encode())) for label, text in contents.items()])
 
     def _parts(self) -> list[_Part]:
         result: list[_Part] = []
@@ -166,7 +162,7 @@ class StageInputFactory:
         for path in sorted(self.stack.files):
             whole = _Part({"target_id": path, "file": path, "part_index": 1, "part_count": 1,
                            "kind": "file", "hunk_index": None}, blocks.get(path, ""))
-            if self._fits(self._render([whole])):
+            if self._remaining_bytes(self._render([whole])) >= 0:
                 result.append(whole)
                 continue
             pieces = self._split_file(path, whole.diff)
@@ -205,7 +201,7 @@ class StageInputFactory:
         base = {"target_id": "part:000000", "file": path, "part_index": 999999, "part_count": 999999,
                 "kind": "hunk", "hunk_index": hunk_index,
                 "old_start": old_start, "old_count": old_count, "new_start": new_start, "new_count": new_count}
-        if self._fits(self._render([_Part(base, header + body)])):
+        if self._remaining_bytes(self._render([_Part(base, header + body)])) >= 0:
             return [_Part(base, header + body)]
         # Prefer complete diff lines. Very long single lines use ordered UTF-8
         # fragments with exact byte offsets; none is called a complete hunk.
@@ -217,16 +213,11 @@ class StageInputFactory:
         line_kind = body[:1]
         notice = "[Ordered continuation: this is a partial hunk; see assignment mapping.]\n"
         while rest:
-            low, high = 0, len(rest)
             meta = {**base, "kind": "continuation", "segment_index": 999999, "segment_count": 999999,
                     "fragment_offset": byte_offset, "fragment_bytes": 999999999,
                     "old_line": old_line, "new_line": new_line, "fragment_line_offset": line_offset}
-            while low < high:
-                mid = (low + high + 1) // 2
-                if self._fits(self._render([_Part(meta, notice + header + rest[:mid])])):
-                    low = mid
-                else:
-                    high = mid - 1
+            allowance = self._remaining_bytes(self._render([_Part(meta, notice + header)]))
+            low = len(truncate_utf8_to_budget(rest, max(0, allowance)))
             if low == 0:
                 raise SanctionedInputUnavailable("required change header exceeds the assignment allowance")
             boundary = rest.rfind("\n", 0, low)
@@ -253,7 +244,8 @@ class StageInputFactory:
 
     def _batches(self) -> list[list[dict[str, Any]]]:
         batches = _bounded_groups(self.parts,
-            lambda parts: len({p.assignment['file'] for p in parts}) <= 4 and self._fits(self._render(parts)),
+            lambda parts: len({p.assignment['file'] for p in parts}) <= 4
+            and self._remaining_bytes(self._render(parts)) >= 0,
             "required assignment exceeds the assignment allowance")
         return [[part.assignment for part in batch] for batch in batches]
 
@@ -343,7 +335,7 @@ class StageInputFactory:
                          for path in self.stack.files}
             contents = {"diff": "Whole-change interaction assignment. Use the inventory and targeted source reads.\n",
                         "hunk-index": _json(inventory), "input-binding": _json(self.binding)}
-            if not self._fits(contents):
+            if self._remaining_bytes(contents) < 0:
                 contents['hunk-index'] = _json({"status": "partial", "file_count": len(inventory),
                                                "canonical_sha256": self.canonical[1].sha256})
                 statuses.append({"label": "hunk-index", "status": "partial"})
@@ -357,7 +349,7 @@ class StageInputFactory:
                 candidate = {**contents, label: part.diff}
                 if (self.transport is SanctionedInputTransport.EXACT_PATHS and len(contents) < 128
                         and sum(len(text.encode()) for text in candidate.values()) <= 1024 * 1024
-                        or self._fits(candidate)):
+                        or self._remaining_bytes(candidate) >= 0):
                     contents[label] = part.diff
                 else:
                     statuses.append({"label": label, "status": "unavailable"})

@@ -66,7 +66,6 @@ from daydream.phases.repair_outcome import (
     RepairOutcome,
     classify_repair_outcome,
 )
-from daydream.phases.review_prompts import _exploration_pointer
 from daydream.phases.test_evidence import (
     TestAndHealResult,
     _test_command_wall_budget,
@@ -1369,21 +1368,6 @@ def test_is_evidenced_gate_branches() -> None:
     assert _is_evidenced(
         {"confidence": "HIGH", "rationale": "r", "lens": "structural", "file": "big.py", "line": 0, "evidence": ""}
     ) is False
-
-
-def test_exploration_pointer_names_only_bounded_files_and_optional_investigation(tmp_path: Path) -> None:
-    exploration_dir = tmp_path / "exploration"
-    pointer = _exploration_pointer(exploration_dir)
-    assert str(exploration_dir / "summary.md") in pointer
-    assert str(exploration_dir / "affected_files.md") in pointer
-    assert "Do not infer or enumerate sibling artifact files" in pointer
-    assert "when useful to resolve concrete candidates" in pointer
-    assert "assigned source files" not in pointer
-    assert _exploration_pointer(None) == ""
-    assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in pointer
-    assert pointer.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < pointer.index("summary.md")
-    assert pointer.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < pointer.index("affected_files.md")
-    assert _exploration_pointer(None) == ""
 
 
 @pytest.mark.asyncio

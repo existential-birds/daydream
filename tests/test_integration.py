@@ -45,7 +45,7 @@ from tests.harness.remote_ci import (
     seed_pr_identity,
     start_remote_ci_fake,
 )
-from tests.harness.stub_backend import force_interactive, install_stub_backend, review_stage_result, silence
+from tests.harness.stub_backend import force_interactive, install_stub_backend, silence
 from tests.test_deep_orchestrator import _install_stub_backend, _silence
 from tests.test_runner import _fix_item, _seed_fix_resume
 
@@ -910,11 +910,7 @@ async def test_run_comment_does_not_prompt_for_skill(
 ) -> None:
     """--comment mode should never prompt for skill selection."""
     _two_commit_repo(tmp_path, "f.txt", "a", "b", "feat")
-    def response(cwd: Path, prompt: str, *_args: Any) -> list[AgentEvent]:
-        return [TextEvent(text="Intent: changes f.txt."),
-                ResultEvent(structured_output=review_stage_result(prompt, []), continuation=None)]
-
-    install_backend(ScriptedBackend(responder=response, model="mock-model"))
+    install_backend(PhaseDispatchBackend())
     monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td, **_kwargs: _COMMENT_PR)
     silence_console("daydream.ui")
     silence_console("daydream.runner")

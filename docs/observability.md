@@ -433,6 +433,3 @@ HoneyHive's documented JSON ack (`{"success": true}`) is recorded as
 Operator note: `LANGSMITH_WORKSPACE_ID` must be the LangSmith *workspace*
 id — a project id yields HTTP 403 because it is forwarded as
 `x-tenant-id`.
-
-The [request field matrix](observability-fields.md#effective-request-configuration)
-defines staged submission counters, native reminder generations and Pi extension isolation.
