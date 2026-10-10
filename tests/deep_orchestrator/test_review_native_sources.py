@@ -40,9 +40,8 @@ async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
     title = ('Renamed greeting no longer satisfies the consumer contract' if renamed else
              'Retained consumer imports a deleted greeting module')
 
+    @review.backend.script('python')
     def respond(stage: dict[str, Any], output: dict[str, Any]) -> None:
-        if stage['scope_id'] != 'python':
-            return
         contexts = json.loads(stage['access_guide'])['contexts']
         context, = [item for item in contexts if item['label'].startswith('before-context-')]
         path = Path(context['path'])
@@ -62,7 +61,6 @@ async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
                                                       'ModuleNotFoundError'),
                                          grounds=finding['evidence'])]
 
-    review.backend.stage_response = respond
     await review.finish('python', findings=(title,) if broken else ())
     assert not (repo / old_path).exists()
     assert (repo / 'modern.py').is_file() is renamed

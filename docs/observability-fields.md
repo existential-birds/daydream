@@ -92,16 +92,13 @@ Emitted by `SpanScope`/`TraceSession` common attributes
 
 Emitted from closed typed `EffectiveRequestConfig` facts only; every admitted
 parameter has exact bounds (`daydream/backends/*.py`, request events).
-Pi's `schema_emulated=False` with a schema means native tool validation, not
-server-constrained decoding. Explicit selected-tool counts include the submission
-tool. Real provider generations retain timing/tokens/cost; corrections and the
-single hidden missing-submission reminder are not fresh host attempts or tool starts.
-The reminder shares the original deadline/allowance and is evidenced by native
-session hidden custom messages, not provider prose. Staged transitions count
-submission starts, successes, failures and replaced successes without source-read
-proof counters; failed starts stay charged and length-terminated call inputs remain
-incomplete across later turns. The matrix row below defines
-Pi's content-free `daydream.request.config.no_extensions` argv fact and applicability.
+Pi's `schema_emulated=False` with a schema means native tool validation, not server-constrained decoding. Explicit
+selected-tool counts include the submission tool. Real provider generations retain timing/tokens/cost; corrections and
+the single hidden missing-submission reminder are not fresh host attempts or tool starts. The reminder shares the
+original deadline/allowance and is evidenced by native session hidden custom messages, not provider prose. Staged
+transitions count submission starts, successes, failures and replaced successes without source-read proof counters;
+failed starts stay charged and length-terminated call inputs remain incomplete across later turns. The matrix row below
+defines Pi's content-free `daydream.request.config.no_extensions` argv fact and applicability.
 
 | field name | source backend/event | source authority/provenance | owning span | type | unit | cardinality | derivation | completeness | capture/redaction | generic OTLP disposition | HoneyHive canonical destination | LangSmith native destination | offline test node | live evidence status | applicability and omission reason |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |

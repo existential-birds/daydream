@@ -1062,7 +1062,6 @@ class PiBackend:
                     active_tool_calls = max(0, active_tool_calls - 1)
                     call_id = event.get("toolCallId")
                     result = event.get("result")
-                    details = result.get("details") if isinstance(result, dict) else None
                     yield ToolResultEvent(
                         id=call_id or str(uuid.uuid4()), output=_render_tool_result(result),
                         is_error=bool(event.get("isError", False)),

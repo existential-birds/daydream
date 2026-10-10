@@ -52,9 +52,8 @@ async def test_late_cross_file_judgment_fits_cumulative_native_budget(
     assigned_files: set[str] = set()
     assignment_units = 0
 
+    @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
-        if stage['scope_id'] != 'python':
-            return
         nonlocal assignment_units
         yield RequestEvent(prompt=review.backend.calls[-1]['prompt'],
                            output_schema=stage['response_contract']['schema'],
@@ -75,10 +74,8 @@ async def test_late_cross_file_judgment_fits_cumulative_native_budget(
         yield ToolStartEvent(id='submit', name='structured_output', input=output)
         yield ToolResultEvent(id='submit', output='Submitted.', is_error=False)
 
-    review.backend.stage_response = response
-    await review.finish('python', findings=() if wired else ('Late request builder drops the parsed dry-run flag',),
-                        deep_shard_enabled=False)
-    data = review.load()
+    data = await review.finish('python', deep_shard_enabled=False,
+                               findings=() if wired else ('Late request builder drops the parsed dry-run flag',))
     assert len(scopes(data)['python']['files']) == 41 and late in scopes(data)['python']['files']
     assert assigned_files == set(after for after in before if after.endswith('.py'))
     assert assignment_units == 48

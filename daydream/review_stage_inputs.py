@@ -329,13 +329,6 @@ class StageInputFactory:
             level = following
         return Path(level[0]['path']), captured
 
-    def _access_guide(self, state: dict[str, Any], prepared: PreparedSanctionedInputs) -> str:
-        """Keep compact pointers to assignment and ordinary context inputs."""
-        exact_paths = prepared.transport is SanctionedInputTransport.EXACT_PATHS
-        contexts = [{"label": item.label, **({"path": str(item.path)} if exact_paths else {"transport": "inline"})}
-                    for item in prepared.inputs if item.prompt_visible]
-        return _json({"stage": state["stage"], "contexts": contexts})
-
     def prepare(self, state: dict[str, Any]) -> PreparedSanctionedInputs:
         self._revalidate_canonical()
         shared_paths = {} if state['stage'] == 'triage' else self.shared_paths
@@ -478,5 +471,8 @@ class StageInputFactory:
             'files': len({part.assignment['file'] for part in remaining}),
             'stages': 1 if state['stage'] == 'integration' else sum(
                 any(part['target_id'] not in decided for part in batch) for batch in self.assignment_batches)}
-        state['access_guide'] = self._access_guide(state, prepared)
+        exact_paths = prepared.transport is SanctionedInputTransport.EXACT_PATHS
+        contexts = [{"label": item.label, **({"path": str(item.path)} if exact_paths else {"transport": "inline"})}
+                    for item in prepared.inputs if item.prompt_visible]
+        state['access_guide'] = _json({"stage": state["stage"], "contexts": contexts})
         return prepared

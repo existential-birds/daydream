@@ -537,7 +537,6 @@ async def _run_agent(
     the public run_agent wrapper.
     """
     output_parts: list[str] = []
-    assistant_turn_parts: list[str] = []
     assistant_turn_bytes = 0
     assistant_turn_overflow = False
     completed_assistant_text: str | None = None
@@ -630,7 +629,6 @@ async def _run_agent(
                 # pre-backoff break) ends the ladder, so the caller sees only
                 # output from the attempt that actually completed the turn.
                 output_parts = []
-                assistant_turn_parts = []
                 assistant_turn_bytes = 0
                 assistant_turn_overflow = False
                 completed_assistant_text = None
@@ -779,12 +777,12 @@ async def _run_agent(
                                         if assistant_turn_bytes + size > 128 * 1024:
                                             assistant_turn_overflow = True
                                         else:
-                                            assistant_turn_parts.append(event.text)
+                                            output_parts.append(event.text)
                                             assistant_turn_bytes += size
                                 elif isinstance(event, TurnEndEvent) and investigation_budget is not None:
-                                    completed_assistant_text = ''.join(assistant_turn_parts)
+                                    completed_assistant_text = ''.join(output_parts)
                                     completed_assistant_overflow = assistant_turn_overflow
-                                    assistant_turn_parts = []
+                                    output_parts = []
                                     assistant_turn_bytes = 0
                                     assistant_turn_overflow = False
                                 elif isinstance(event, ResultEvent):
@@ -899,7 +897,6 @@ async def _run_agent(
                         # and record any retry overhead already spent.
                         if effective_deadline is not None and clock.monotonic() >= effective_deadline:
                             output_parts = []
-                            assistant_turn_parts = []
                             assistant_turn_bytes = 0
                             assistant_turn_overflow = False
                             completed_assistant_text = None
@@ -1078,9 +1075,9 @@ async def _run_agent(
 
 
     if investigation_budget is not None:
-        raw = (''.join(assistant_turn_parts) if assistant_turn_parts or assistant_turn_overflow
+        raw = (''.join(output_parts) if output_parts or assistant_turn_overflow
                else completed_assistant_text or '')
-        text_overflow = (assistant_turn_overflow if assistant_turn_parts or assistant_turn_overflow
+        text_overflow = (assistant_turn_overflow if output_parts or assistant_turn_overflow
                          else completed_assistant_overflow)
     else:
         raw, text_overflow = ''.join(output_parts), False
