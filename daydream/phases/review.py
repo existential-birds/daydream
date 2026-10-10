@@ -557,23 +557,21 @@ async def phase_per_stack_reviews(
             def build_stage_prompt(stage: dict[str, Any]) -> str:
                 # Invoke the registered builder anew: its kwargs describe this
                 # assignment rather than a terminal whole-stack review.
-                stage_args = dict(prompt_args)
                 from daydream.review_profile import FOLDED_ALTERNATIVES_INSTRUCTION
                 stage['folded_alternatives'] = (stack.stack_name == STRUCTURE_STACK_NAME
                                                 and builder is build_structural_prompt
                                                 and FOLDED_ALTERNATIVES_INSTRUCTION in strategies[strategy_name])
-                stage_args["files"] = stage["assigned_files"]
-                stage_args["review_stage"] = stage
                 paths = input_factory.current_paths
-                stage_args.update(diff_path=paths.get("diff", Path("unavailable-stage-diff")),
+                prompt_args.update(files=stage["assigned_files"], review_stage=stage,
+                    diff_path=paths.get("diff", Path("unavailable-stage-diff")),
                     intent_path=paths.get("intent", Path("unavailable-intent")),
                     alternatives_path=paths.get("alternatives", Path("unavailable-alternatives")),
                     output_path=Path("host-owned-review-output"))
                 if stack.stack_name != STRUCTURE_STACK_NAME and stage["stage"] == "triage":
-                    stage_args["frontier_files"] = []
-                prompt = active_registry.prompt(prompt_name)(**stage_args)
+                    prompt_args["frontier_files"] = []
+                prompt = active_registry.prompt(prompt_name)(**prompt_args)
                 prompt = append_extended_facts(prompt, recipe_for_prompts)
-                return prompt + "\n\nHost review stage:\n" + json.dumps(stage_args["review_stage"], ensure_ascii=False)
+                return prompt + "\n\nHost review stage:\n" + json.dumps(stage, ensure_ascii=False)
 
             stack_name = stack.stack_name
             structured: Any = None

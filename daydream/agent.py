@@ -537,8 +537,7 @@ async def _run_agent(
     the public run_agent wrapper.
     """
     output_parts: list[str] = []
-    assistant_turn_bytes = 0
-    assistant_turn_overflow = False
+    assistant_turn_bytes, assistant_turn_overflow = 0, False
     completed_assistant_text: str | None = None
     completed_assistant_overflow = False
     structured_result: Any = None
@@ -629,8 +628,7 @@ async def _run_agent(
                 # pre-backoff break) ends the ladder, so the caller sees only
                 # output from the attempt that actually completed the turn.
                 output_parts = []
-                assistant_turn_bytes = 0
-                assistant_turn_overflow = False
+                assistant_turn_bytes, assistant_turn_overflow = 0, False
                 completed_assistant_text = None
                 completed_assistant_overflow = False
                 structured_result = None
@@ -783,8 +781,7 @@ async def _run_agent(
                                     completed_assistant_text = ''.join(output_parts)
                                     completed_assistant_overflow = assistant_turn_overflow
                                     output_parts = []
-                                    assistant_turn_bytes = 0
-                                    assistant_turn_overflow = False
+                                    assistant_turn_bytes, assistant_turn_overflow = 0, False
                                 elif isinstance(event, ResultEvent):
                                     structured_result = (None if investigation_budget is not None
                                                          and event.structured_output_origin == 'text'
@@ -897,8 +894,7 @@ async def _run_agent(
                         # and record any retry overhead already spent.
                         if effective_deadline is not None and clock.monotonic() >= effective_deadline:
                             output_parts = []
-                            assistant_turn_bytes = 0
-                            assistant_turn_overflow = False
+                            assistant_turn_bytes, assistant_turn_overflow = 0, False
                             completed_assistant_text = None
                             completed_assistant_overflow = False
                             structured_result = None

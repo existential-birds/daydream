@@ -53,9 +53,7 @@ class ReviewEvidence:
         """A retry starts without tool context or output from the rejected attempt."""
         self.native_output = False
         self.output_calls: set[str] = set()
-        self.output_starts = 0
-        self.output_successes = 0
-        self.output_failures = 0
+        self.output_starts = self.output_successes = self.output_failures = 0
         self.pending: dict[str, str] = {}
         self.blocks: list[str] = []
         self.seen: set[str] = set()

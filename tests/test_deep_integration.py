@@ -278,7 +278,7 @@ async def test_310_prompt_gates_reach_built_prompts_in_real_run(
         assert TRUST_MODEL_INSTRUCTION in prompt, ("structural prompt missing the trust-model gate")
         assert CONFIG_FLOW_TRACE_INSTRUCTION not in prompt, ("config-trace gate leaked into the structural prompt")
 
-    for prompt in per_stack:
+    for prompt in [*per_stack, *generic]:
         assert "Config/env flow trace (apply only to changed fields in this assignment" in prompt
         assert "config struct -> driver config -> request construction" in prompt
         assert "Flag silent drops" in prompt and "Flag double-resolves" in prompt
@@ -286,16 +286,6 @@ async def test_310_prompt_gates_reach_built_prompts_in_real_run(
         assert TRUST_MODEL_INSTRUCTION in prompt, ("per-stack prompt missing the trust-model gate")
         assert CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION not in prompt, (
             "cross-file gate leaked into the per-stack prompt"
-        )
-
-    for prompt in generic:
-        assert "Config/env flow trace (apply only to changed fields in this assignment" in prompt
-        assert "config struct -> driver config -> request construction" in prompt
-        assert "Flag silent drops" in prompt and "Flag double-resolves" in prompt
-        assert CONFIG_FLOW_TRACE_INSTRUCTION not in prompt, "whole-scope config audit leaked into a generic stage"
-        assert TRUST_MODEL_INSTRUCTION in prompt, ("generic-fallback prompt missing the trust-model gate")
-        assert CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION not in prompt, (
-            "cross-file gate leaked into the generic-fallback prompt"
         )
 
 async def test_311_wire_contract_reaches_delivered_prompts_in_real_run(

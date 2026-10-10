@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from daydream import prompt_budget as inputs
 from daydream.artifact_visibility import ArtifactSession, artifact_dir_for
 from daydream.backends import Backend
 from daydream.deep.detection import StackAssignment
@@ -17,20 +18,6 @@ from daydream.git_ops.models import GitError
 from daydream.git_ops.source import frozen_source
 from daydream.hunk_index import _HUNK_HEADER, _unquote_git_path
 from daydream.json_utils import atomic_write_bytes, canonical_json as _json
-from daydream.prompt_budget import (
-    SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES,
-    AdvisoryCandidate,
-    PreparedSanctionedInput,
-    PreparedSanctionedInputs,
-    SanctionedInputTransport,
-    SanctionedInputUnavailable,
-    _capture_input,
-    inline_section_emitted_bytes,
-    prepare_sanctioned_inputs,
-    sanctioned_transport_for,
-    select_advisory_inputs,
-    truncate_utf8_to_budget,
-)
 from daydream.workspace import WorkContext
 
 _EXACT_PATH_ASSIGNMENT_MAX_BYTES = 24 * 1024
@@ -48,7 +35,7 @@ def _bounded_groups[T](values: list[T], fits: Callable[[list[T]], bool], error: 
     current: list[T] = []
     for value in values:
         if not fits([value]):
-            raise SanctionedInputUnavailable(error)
+            raise inputs.SanctionedInputUnavailable(error)
         if current and not fits([*current, value]):
             groups.append(current)
             current = []
@@ -70,7 +57,7 @@ class StageInputFactory:
         self.session, self.allow_standalone, self.read_only = artifact_session, allow_standalone, read_only
         self.shared_paths = shared_paths
         self.bundle_capable = bundle_capable
-        self.transport = sanctioned_transport_for(backend, work.repo, read_only=read_only)
+        self.transport = inputs.sanctioned_transport_for(backend, work.repo, read_only=read_only)
         # Capture hashes through the existing no-follow, bounded streaming
         # capture. These identities stay host-only, regardless of transport.
         self.canonical = tuple(self._canonical(label, path) for label, path in (
@@ -80,11 +67,11 @@ class StageInputFactory:
         self.index = json.loads(index_text)
         self._revalidate_canonical()
         if hashlib.sha256(self.full_diff.encode()).hexdigest() != self.canonical[0].sha256:
-            raise SanctionedInputUnavailable("canonical change bytes changed during preparation")
+            raise inputs.SanctionedInputUnavailable("canonical change bytes changed during preparation")
         if hashlib.sha256(index_text.encode()).hexdigest() != self.canonical[1].sha256:
-            raise SanctionedInputUnavailable("canonical index bytes changed during preparation")
+            raise inputs.SanctionedInputUnavailable("canonical index bytes changed during preparation")
         if not isinstance(self.index, dict):
-            raise SanctionedInputUnavailable("canonical hunk index is malformed")
+            raise inputs.SanctionedInputUnavailable("canonical hunk index is malformed")
         self.binding = {"analyzed_revision": revision,
                         "canonical_inputs": {item.label: item.sha256 for item in self.canonical}}
         self.scope_name = hashlib.sha256(stack.stack_name.encode()).hexdigest()[:20]
@@ -95,13 +82,13 @@ class StageInputFactory:
         self.blocks = dict(iter_diff_blocks(self.full_diff))
 
     @staticmethod
-    def _canonical(label: str, path: Path) -> PreparedSanctionedInput:
-        return _capture_input(label, path, SanctionedInputTransport.EXACT_PATHS, 0, pointer_only=True)
+    def _canonical(label: str, path: Path) -> inputs.PreparedSanctionedInput:
+        return inputs._capture_input(label, path, inputs.SanctionedInputTransport.EXACT_PATHS, 0, pointer_only=True)
 
     def _revalidate_canonical(self) -> None:
         for expected in self.canonical:
             if self._canonical(expected.label, expected.path) != expected:
-                raise SanctionedInputUnavailable("canonical review inputs changed")
+                raise inputs.SanctionedInputUnavailable("canonical review inputs changed")
 
     def _render(self, parts: list[_Part]) -> dict[str, str]:
         files = {part.assignment["file"] for part in parts}
@@ -134,7 +121,7 @@ class StageInputFactory:
                         selected.append({**dict(zip(keys, bounds, strict=True)),
                                          'added': 0, 'removed': part['old_count'], 'old_only': True})
                     else:
-                        raise SanctionedInputUnavailable("canonical hunk ranges do not match assigned work")
+                        raise inputs.SanctionedInputUnavailable("canonical hunk ranges do not match assigned work")
             index[path] = {"hunks": selected, "assignments": assignments,
                            "status": "partial" if any(part['part_count'] > 1 for part in assignments) else "complete"}
         return {"diff": "".join(part.diff for part in parts), "hunk-index": _json(index),
@@ -148,9 +135,10 @@ class StageInputFactory:
 
     def _remaining_bytes(self, contents: dict[str, str]) -> int:
         contents = self._bundled(contents)
-        cap = (_EXACT_PATH_ASSIGNMENT_MAX_BYTES if self.transport is SanctionedInputTransport.EXACT_PATHS
-               else SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES)
-        return cap - inline_section_emitted_bytes([(label, len(text.encode())) for label, text in contents.items()])
+        cap = (_EXACT_PATH_ASSIGNMENT_MAX_BYTES if self.transport is inputs.SanctionedInputTransport.EXACT_PATHS
+               else inputs.SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES)
+        return cap - inputs.inline_section_emitted_bytes(
+            [(label, len(text.encode())) for label, text in contents.items()])
 
     def _parts(self) -> list[_Part]:
         result: list[_Part] = []
@@ -217,9 +205,9 @@ class StageInputFactory:
                     "fragment_offset": byte_offset, "fragment_bytes": 999999999,
                     "old_line": old_line, "new_line": new_line, "fragment_line_offset": line_offset}
             allowance = self._remaining_bytes(self._render([_Part(meta, notice + header)]))
-            low = len(truncate_utf8_to_budget(rest, max(0, allowance)))
+            low = len(inputs.truncate_utf8_to_budget(rest, max(0, allowance)))
             if low == 0:
-                raise SanctionedInputUnavailable("required change header exceeds the assignment allowance")
+                raise inputs.SanctionedInputUnavailable("required change header exceeds the assignment allowance")
             boundary = rest.rfind("\n", 0, low)
             take = boundary + 1 if boundary >= 0 else low
             chunk = rest[:take]
@@ -316,11 +304,11 @@ class StageInputFactory:
         while len(level) > 1:
             following = write_groups('catalogs', level)
             if len(following) >= len(level):
-                raise SanctionedInputUnavailable('supporting catalog cannot fit its bounded index')
+                raise inputs.SanctionedInputUnavailable('supporting catalog cannot fit its bounded index')
             level = following
         return Path(level[0]['path']), captured
 
-    def prepare(self, state: dict[str, Any]) -> PreparedSanctionedInputs:
+    def prepare(self, state: dict[str, Any]) -> inputs.PreparedSanctionedInputs:
         self._revalidate_canonical()
         shared_paths = {} if state['stage'] == 'triage' else self.shared_paths
         statuses: list[dict[str, str]] = []
@@ -343,11 +331,11 @@ class StageInputFactory:
             # INLINE selects whole parts fitting the same aggregate allowance.
             for index, part in enumerate(self.parts):
                 label = f"diff-part-{index:06d}"
-                if self.bundle_capable and self.transport is SanctionedInputTransport.EXACT_PATHS:
+                if self.bundle_capable and self.transport is inputs.SanctionedInputTransport.EXACT_PATHS:
                     deferred_contents[label] = part.diff
                     continue
                 candidate = {**contents, label: part.diff}
-                if (self.transport is SanctionedInputTransport.EXACT_PATHS and len(contents) < 128
+                if (self.transport is inputs.SanctionedInputTransport.EXACT_PATHS and len(contents) < 128
                         and sum(len(text.encode()) for text in candidate.values()) <= 1024 * 1024
                         or self._remaining_bytes(candidate) >= 0):
                     contents[label] = part.diff
@@ -368,7 +356,8 @@ class StageInputFactory:
             paths = {label: self._write(directory / f'{label}.txt', text) for label, text in bundled.items()}
             contents = bundled
             state['supporting_bundle'] = (
-                {'path': str(paths['review-assignment'])} if self.transport is SanctionedInputTransport.EXACT_PATHS
+                {'path': str(paths['review-assignment'])}
+                if self.transport is inputs.SanctionedInputTransport.EXACT_PATHS
                 else {'label': 'review-assignment', 'transport': 'inline'})
         deferred_paths = {label: self._write(directory / f'{label}.patch', text)
                           for label, text in deferred_contents.items()}
@@ -390,13 +379,14 @@ class StageInputFactory:
             if new_path == "/dev/null" and old_path != "/dev/null":
                 before_files.add(file)
         before_context = self._before_context(before_files, directory, statuses)
-        selection = select_advisory_inputs(self.backend, self.work.repo,
-            [AdvisoryCandidate(label, path) for label, path in paths.items()]
-            + [AdvisoryCandidate(label, path) for label, path in shared_paths.items() if path is not None]
-            + [AdvisoryCandidate(label, path) for label, path in before_context.items()], read_only=self.read_only)
+        selection = inputs.select_advisory_inputs(self.backend, self.work.repo,
+            [inputs.AdvisoryCandidate(label, path) for label, path in paths.items()]
+            + [inputs.AdvisoryCandidate(label, path) for label, path in shared_paths.items() if path is not None]
+            + [inputs.AdvisoryCandidate(label, path) for label, path in before_context.items()],
+            read_only=self.read_only)
         admitted = selection.selected_paths()
         if not paths.keys() <= admitted.keys():
-            raise SanctionedInputUnavailable("required stage inputs exceed the transport allowance")
+            raise inputs.SanctionedInputUnavailable("required stage inputs exceed the transport allowance")
         for label, before_path in before_context.items():
             if label in admitted:
                 paths[label] = before_path
@@ -410,19 +400,19 @@ class StageInputFactory:
                 statuses.append({"label": label, "status": "unavailable"})
                 continue
             try:
-                captured = _capture_input(label, path, self.transport, aggregate)
-            except SanctionedInputUnavailable:
+                captured = inputs._capture_input(label, path, self.transport, aggregate)
+            except inputs.SanctionedInputUnavailable:
                 statuses.append({"label": label, "status": "unavailable"})
                 continue
             aggregate += captured.size
             paths[label] = path
         paths.update(deferred_paths)
         paths.update(catalog_paths)
-        prepared = prepare_sanctioned_inputs(self.backend, self.work.repo, paths, read_only=self.read_only)
+        prepared = inputs.prepare_sanctioned_inputs(self.backend, self.work.repo, paths, read_only=self.read_only)
         prepared = replace(prepared, inputs=tuple(replace(item, prompt_visible=False)
                                                   if (item.label in deferred_paths or item.label in catalog_paths)
                                                   else item for item in prepared.inputs))
-        if self.bundle_capable and self.transport is SanctionedInputTransport.EXACT_PATHS:
+        if self.bundle_capable and self.transport is inputs.SanctionedInputTransport.EXACT_PATHS:
             # Required assignments travel as exact pointers. Only shared bytes
             # actually inlined consume the inline allowance, including wrappers.
             entries: list[tuple[str, int]] = []
@@ -431,11 +421,12 @@ class StageInputFactory:
                 if item.label not in shared_paths:
                     continue
                 inline_entries = [*entries, (item.label, item.size)]
-                if inline_section_emitted_bytes(inline_entries) > SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES:
+                if (inputs.inline_section_emitted_bytes(inline_entries)
+                        > inputs.SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES):
                     continue
-                captured = _capture_input(item.label, item.path, self.transport, 0, text_budget=item.size)
+                captured = inputs._capture_input(item.label, item.path, self.transport, 0, text_budget=item.size)
                 if captured.sha256 != item.sha256:
-                    raise SanctionedInputUnavailable('shared supporting input changed during preparation')
+                    raise inputs.SanctionedInputUnavailable('shared supporting input changed during preparation')
                 inline_shared[item.label] = captured.text or ''
                 entries = inline_entries
             prepared = replace(prepared, inputs=tuple(
@@ -462,7 +453,7 @@ class StageInputFactory:
             'files': len({part.assignment['file'] for part in remaining}),
             'stages': 1 if state['stage'] == 'integration' else sum(
                 any(part['target_id'] not in decided for part in batch) for batch in self.assignment_batches)}
-        exact_paths = prepared.transport is SanctionedInputTransport.EXACT_PATHS
+        exact_paths = prepared.transport is inputs.SanctionedInputTransport.EXACT_PATHS
         contexts = [{"label": item.label, **({"path": str(item.path)} if exact_paths else {"transport": "inline"})}
                     for item in prepared.inputs if item.prompt_visible]
         state['access_guide'] = _json({"stage": state["stage"], "contexts": contexts})
