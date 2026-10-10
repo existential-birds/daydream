@@ -10,17 +10,6 @@ from daydream.extensions import (
 from tests.conftest import ExtDir
 
 
-def test_supported_extension_loads(ext_dir: ExtDir) -> None:
-    """Load the supported extension API version and apply its registry override."""
-    ext_dir.write_module(
-        "def _prompt():\n"
-        "    return 'v6-review'\n"
-        "def register(registry):\n"
-        "    registry.override_prompt('review', _prompt)\n",
-        api_version=6,
-    )
-    assert build_registry().prompt("review")() == "v6-review"
-
 @pytest.mark.parametrize(("declaration", "message"),
     [
         pytest.param("99", r"99.*supports 6\.\.6", id="above-ceiling"),

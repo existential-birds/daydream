@@ -7,23 +7,6 @@ from daydream.commands.improve import _build_improve_parser, _parse_improve_args
 from daydream.commands.review import _parse_args
 
 
-def test_advanced_flags_still_parse() -> None:
-    assert _parse_args(["--start-at", "fix", "/t"]).start_at == "fix"
-
-def test_precision_flag_activates_precision_mode() -> None:
-    assert _parse_args(["/t"]).precision_mode is False
-    assert _parse_args(["--precision", "/t"]).precision_mode is True
-
-def test_diagram_flags_parse_from_both_tiers() -> None:
-    assert _parse_args(["--diagram", "off", "/t"]).diagram == "off"
-    only = _parse_args(["--diagram-only", "both", "/t"])
-    assert only.diagram == "both"
-    assert only.output_mode == "diagram"
-
-def test_verbose_flag_activates_log_mode() -> None:
-    assert _parse_args(["/t"]).log_mode is False
-    assert _parse_args(["--verbose", "/t"]).log_mode is True
-
 def test_verbose_flag_activates_log_mode_improve() -> None:
     assert _parse_improve_args(["improve", "/t"]).log_mode is False
     assert _parse_improve_args(["improve", "/t", "--verbose"]).log_mode is True

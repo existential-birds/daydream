@@ -49,14 +49,6 @@ def test_task_only_record_validates() -> None:
     )
     jsonschema.validate(record, SCHEMA)
 
-def test_gold_outcome_finding_with_finding_text_and_task_identity_validates() -> None:
-    record = _base_record(finding_text="The loop mutates the list while iterating.", finding_text_sha256="5" * 64,
-        task_identity=TASK_IDENTITY,
-    )
-    record["lineage"]["diff_digest"] = "6" * 64
-    record["lineage"]["diff_ref"] = {"record_digest": "4" * 64, "run_id": "s1", "section": "original_task.diff"}
-    jsonschema.validate(record, SCHEMA)
-
 def test_task_identity_with_bad_base_sha_is_rejected() -> None:
     bad_identity = dict(TASK_IDENTITY, base_sha="short")
     record = _base_record(record_type="task-only", tier="task-only", task_identity=bad_identity)

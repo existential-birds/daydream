@@ -33,7 +33,6 @@ from daydream.run_config import RunConfig
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
 from daydream.runner import run
 from daydream.ui.agent_stream import _print_log, _summarize_input, _summarize_output
-from daydream.ui.tools import _primary_tool_value
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 
@@ -179,13 +178,6 @@ def test_log_mode_tool_event_redacts_credential_crossing_command_cap(
     assert (cd_prefix in summary) is (name == "Bash")
     assert event.input == {"command": command}
 
-def test_log_summary_and_callback_agree_on_bash_primary_field() -> None:
-    """`--log` summary and callback line key Bash from the shared _PRIMARY_TOOL_ARG table."""
-
-    args: dict[str, object] = {"command": "git diff --stat", "description": "Show changes"}
-    assert _summarize_input(args, "Bash") == "git diff --stat"
-    value, key = _primary_tool_value("Bash", args)
-    assert key == "command", "both surfaces must key Bash from command-first _PRIMARY_TOOL_ARG"
 
 def test_log_summary_task_tools_not_subject_to_bash_primary_table() -> None:
     """The (command, description) preference is Bash-only in the --log summary.

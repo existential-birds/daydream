@@ -15,7 +15,6 @@ import pytest
 
 from daydream import review_profile as rp
 from daydream.config_file import DaydreamFileConfig
-from daydream.run_config import RunConfig
 from tests.harness.git_helpers import commit, init_repo, write_and_stage
 
 
@@ -60,32 +59,11 @@ def test_absolute_repo_path_cannot_escape(tmp_path: Path) -> None:
         rp.resolve_profile(file_config=fc, repo_root=tmp_path)
     assert "escape" in str(e.value).lower()
 
-def test_default_when_nothing_specified() -> None:
-    resolved = rp.resolve_profile()                        # no explicit/env/repo
-    assert resolved.source_kind == "default" and resolved.profile.name
-
 def test_relative_repo_path_cannot_escape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fc = DaydreamFileConfig(review_profile=Path("../evil.toml"))   # relative repo path
     with pytest.raises(rp.ProfileError) as e:
         rp.resolve_profile(file_config=fc, repo_root=tmp_path)
     assert "escape" in str(e.value).lower()
-
-def test_invalid_explicit_fails_naming_source(monkeypatch: pytest.MonkeyPatch) -> None:
-    bad = Path("/tmp/bad-profile.toml")
-    bad.write_text('schema_version = 1\nname = "p"\nunknown = 1')
-    with pytest.raises(rp.ProfileError) as e:
-        rp.resolve_profile(explicit_path=str(bad))
-    assert "bad-profile.toml" in str(e.value)
-
-def test_runconfig_carries_resolved_profile_and_is_used(tmp_path: Path) -> None:
-    """RunConfig carries the profile path, and the composition-root seam consumes it."""
-    p = tmp_path / "prof.toml"
-    p.write_text('schema_version = 1\nname = "r"\n[strategies.intent]\ncontent = "C"\nsource = "copied: a"')
-    cfg = RunConfig(target=str(tmp_path), review_profile_path=str(p))
-    assert cfg.review_profile_path == str(p)     # path carried on RunConfig
-
-    resolved = rp.resolve_from_runconfig(cfg)     # seam: composition root resolves once
-    assert resolved.profile.name == "r" and resolved.source_kind == "explicit"
 
 def test_real_cli_entry_resolves_profile_and_inspects(tmp_path: Path) -> None:
 

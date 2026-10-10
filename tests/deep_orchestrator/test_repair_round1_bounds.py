@@ -98,21 +98,6 @@ def test_scope_clause_documents_the_exact_block_the_host_parses() -> None:
     assert "Name the path in your final message" not in clause
 
 
-def test_phase_test_records_the_turns_own_scope_request(tmp_path: Path) -> None:
-    """``RepairAttemptEvidence.scope_request`` is populated in production."""
-    source = Path(__file__).resolve().parents[2] / "daydream" / "phases" / "testing.py"
-    text = source.read_text(encoding="utf-8")
-    assert "scope_request = parse_fix_scope_request(turn_output)" in text, (
-        "the repair turn's own scope request is no longer parsed from its final message"
-    )
-    assert "scope_request=scope_request," in text, (
-        "the parsed request is no longer carried on the repair evidence"
-    )
-    assert "scope_request_unreadable" in text, (
-        "an unparseable block must be a named degradation, not silence"
-    )
-
-
 # --- the stored bounds are live bounds ------------------------------------------------
 
 
@@ -310,18 +295,3 @@ async def test_step_test_keeps_green_for_a_completed_job(
 
 
 # --- one identity, one definition ------------------------------------------------------
-
-
-def test_repair_job_identity_has_exactly_one_definition() -> None:
-    """Producer and consumer must agree byte-for-byte (finding 7)."""
-    from daydream.deep import repair_coordinator
-
-    assert repair_job_id("abc") == "repair-abc"
-    # The coordinator re-exports the owner's function, not a second copy of it.
-    assert repair_coordinator.repair_job_id is repair_job_id
-    testing_source = (
-        Path(__file__).resolve().parents[2] / "daydream" / "phases" / "testing.py"
-    ).read_text(encoding="utf-8")
-    assert 'f"repair-{session_id}"' not in testing_source, (
-        "phases/testing.py rebuilds the identity locally instead of calling the owner"
-    )

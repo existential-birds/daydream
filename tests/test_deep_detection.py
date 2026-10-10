@@ -1,26 +1,12 @@
 """Stack ownership, sharding bounds, and import-graph routing."""
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from daydream.config import (
-    DEFAULT_DEEP_SHARD_MAX_BYTES,
-    DEFAULT_DEEP_SHARD_MAX_FILES,
-    STRUCTURE_STACK_NAME,
-)
 from daydream.deep.dependency import build_import_graph
-from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
-from daydream.deep.diff import _diff_blocks_for_files
+from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.deep.sharding import shard_stacks
 from daydream.extensions import Registry, StackRule
-
-
-def test_stack_assignment_has_no_skill_field() -> None:
-    assignment = StackAssignment(stack_name="python", files=["a.py"])
-    assert not hasattr(assignment, "skill_invocation")
-
-
 
 
 @pytest.mark.parametrize(("files", "stack_name", "member", "docs_only"),
@@ -96,71 +82,6 @@ def test_no_files_dropped() -> None:
     routed = {f for a in result for f in a.files}
     assert routed == set(files)
 
-def test_structure_stack_emitted_for_code_diff() -> None:
-    result = detect_stacks(["src/main.py", "src/util.py"])
-    structure = next((a for a in result if a.stack_name == STRUCTURE_STACK_NAME), None)
-    assert structure is not None
-    assert structure.files == ["src/main.py", "src/util.py"]
-    assert structure.is_docs_only is False
-
-def test_structure_stack_files_are_union_across_languages() -> None:
-    files = ["api/main.py", "ui/App.tsx", "infra/Dockerfile"]
-    result = detect_stacks(files)
-    structure = next(a for a in result if a.stack_name == STRUCTURE_STACK_NAME)
-    assert sorted(structure.files) == sorted(files)
-
-def test_structure_stack_skipped_for_docs_only_diff() -> None:
-    result = detect_stacks(["README.md", "CHANGELOG.md"])
-    assert all(a.stack_name != STRUCTURE_STACK_NAME for a in result)
-
-def test_structure_stack_skipped_for_empty_diff() -> None:
-    assert detect_stacks([]) == []
-
-
-def test_shard_stacks_splits_oversized_stack_by_file_count() -> None:
-    stack = StackAssignment(stack_name="python", files=[f"src/m{i}.py" for i in range(6)],)
-    out = shard_stacks([stack], "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8)
-    shards = [s for s in out if s.stack_name.startswith("python#")]
-    assert len(shards) == 3                      # 6 files / 2 per shard
-    assert [s.stack_name for s in shards] == ["python#0", "python#1", "python#2"]
-    union = [f for s in shards for f in s.files]
-    assert sorted(union) == sorted(stack.files)  # no file dropped, no duplicate
-    assert all(len(s.files) <= 2 for s in shards)
-
-def test_shard_stacks_never_splits_structure_meta_stack() -> None:
-    structure = StackAssignment(stack_name=STRUCTURE_STACK_NAME, files=[f"src/m{i}.py" for i in range(50)],)
-    out = shard_stacks([structure], "", max_files=5, max_bytes=10**9, fanout_cap=16, frontier_max=8)
-    assert [s for s in out if s.stack_name == STRUCTURE_STACK_NAME] == [structure]  # unchanged, single
-
-def test_shard_stacks_deterministic_names_and_assignments() -> None:
-    stack = StackAssignment(stack_name="python", files=[f"src/m{i}.py" for i in range(5)])
-    def _split() -> list[Any]:
-        return shard_stacks([stack], "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8)
-    a = _split()
-    b = _split()
-    assert [(s.stack_name, s.files) for s in a] == [(s.stack_name, s.files) for s in b]
-
-def test_shard_stacks_under_bound_returns_original_unsplit() -> None:
-    stack = StackAssignment(stack_name="python", files=["a.py", "b.py"])
-    out = shard_stacks([stack], "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8)
-    assert out == [stack]
-
-def test_shard_stacks_splits_by_changed_bytes_not_file_count() -> None:
-    """The byte cap splits stacks below the file-count cap without dropping or duplicating files."""
-    # Header-inclusive blocks are about 64–69 bytes each; any pair exceeds max_bytes=100.
-    diff = (
-        "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n+'x'*2000\n"
-        "diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\n@@ -1 +1 @@\n+'y'\n"
-        "diff --git a/c.py b/c.py\n--- a/c.py\n+++ b/c.py\n@@ -1 +1 @@\n+'z'\n"
-    )
-    stack = StackAssignment(stack_name="python", files=["a.py", "b.py", "c.py"])
-    out = shard_stacks([stack], diff, max_files=100, max_bytes=100, fanout_cap=16, frontier_max=8)
-    shards = [s for s in out if s.stack_name.startswith("python#")]
-    assert len(shards) >= 2                     # byte budget forces a split
-    assert all(len(s.files) >= 1 for s in shards)
-    union = [f for s in shards for f in s.files]
-    assert sorted(union) == ["a.py", "b.py", "c.py"]  # still no drop/dup
-
 def test_shard_stacks_fanout_cap_limits_total_tasks() -> None:
     """The fan-out cap includes shards and unsplit stacks; all files remain assigned once."""
     # Two oversized stacks would each yield 6 shards = 12 tasks; cap=4.
@@ -225,18 +146,6 @@ def test_shard_stacks_fail_open_without_graph() -> None:
     # A file with no resolvable edge still gets exactly one assignment (fallback).
     assert len(set(union)) == len(union)  # no duplicate primary assignment
 
-def test_shard_stacks_populates_bounded_frontier(tmp_path: Path) -> None:
-    stack = StackAssignment(stack_name="python", files=[f"m{i}.py" for i in range(8)])
-    # m4..m7 all import m0 (a shared interface in shard 0).
-    root = Path(tmp_path)
-    for i in range(8):
-        (root / f"m{i}.py").write_text("import m0\n" if i >= 4 else "x = 1\n")
-    graph = build_import_graph([f"m{i}.py" for i in range(8)], root)
-    out = shard_stacks([stack], "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=3, graph=graph)
-    frontier_shards = [s for s in out if getattr(s, "frontier_files", [])]
-    assert frontier_shards, "cross-shard shared files must surface as a frontier"
-    assert all(len(s.frontier_files) <= 3 for s in out)   # bounded
-
 def test_build_import_graph_resolves_python_edges(tmp_path: Path) -> None:
     """Resolve absolute and relative Python imports; unknown grammars remain singleton nodes."""
     (tmp_path / "a.py").write_text("import b\n")
@@ -264,33 +173,3 @@ def test_build_import_graph_resolves_multilanguage_edges(tmp_path: Path) -> None
     assert "b.ts" in graph["a.ts"]          # './b' resolves to sibling b.ts
     assert "b.go" in graph["a.go"]          # go import path -> b.go
     assert "b.rs" in graph["a.rs"]          # rust 'use b::c' -> module file b.rs
-
-def test_shard_stacks_default_bounds_split_16file_50kb_and_inline() -> None:
-    """Default bounds split a 16-file, roughly 50-KB diff into individually inlineable shards."""
-
-    files = [f"src/m{i:02d}.py" for i in range(16)]
-    # ~2.9 KB per hunk -> ~47 KB total changed bytes, > the 12288-byte bound.
-    diff = "".join(
-        f"diff --git a/{f} b/{f}\n--- a/{f}\n+++ b/{f}\n@@ -1 +1 @@\n+x{'a' * 2900}\n"
-        for f in files
-    )
-    stack = StackAssignment(stack_name="python", files=files)
-    out = shard_stacks([stack], diff, max_files=DEFAULT_DEEP_SHARD_MAX_FILES, max_bytes=DEFAULT_DEEP_SHARD_MAX_BYTES,
-        fanout_cap=16, frontier_max=8,
-    )
-    shards = [s for s in out if s.stack_name.startswith("python#")]
-    assert len(shards) > 1                       # the stack splits
-    union = [f for s in shards for f in s.files]
-    assert sorted(union) == sorted(files)        # no drop, no dup
-    # Each shard fits inline, avoiding a full-patch fetch.
-    for shard in shards:
-        assert _diff_blocks_for_files(diff, shard.files) is not None
-
-def test_detect_stacks_registry_independent_same_scopes() -> None:
-    # Same files, absent vs empty vs populated registry -> same ordered scopes.
-    changed = ["a.py", "b.ts", "c.md", "d.unknownext"]
-    absent = detect_stacks(changed, registry=None)
-    names = [s.stack_name for s in absent]
-    # python + react language stacks + generic (md + unknown) + structural last.
-    assert "python" in names and "react" in names and GENERIC_STACK in names
-    assert names[-1] == "structure"

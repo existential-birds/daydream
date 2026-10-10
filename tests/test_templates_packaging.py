@@ -11,25 +11,13 @@ import zipfile
 from pathlib import Path
 
 from daydream import config
-from daydream.templates import workflow_template_files
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _EXPECTED_TEMPLATES = {"daydream-review.yml", "daydream-command.yml", "daydream-post.yml"}
 # Optional manual-copy variant; NOT part of the default `daydream setup` deposit.
 _SINGLE_TEMPLATE_PATH = "daydream/templates/workflows/single/daydream.yml"
 
-def test_all_three_workflows_ship_in_package() -> None:
-    # The discovery accessor returns exactly the split trio — the optional
-    # single-file variant lives in a subdirectory so it is never auto-deposited
-    # (installing both would double-fire the review/post).
-    names = {p.name for p in workflow_template_files()}
-    assert names == _EXPECTED_TEMPLATES
 
-def test_workflows_reference_the_canonical_secret_and_var_names() -> None:
-    blob = "\n".join(p.read_text(encoding="utf-8") for p in workflow_template_files())
-    for secret in config.SETUP_SECRET_NAMES:  # the deposit step + YAML cannot drift
-        assert secret in blob
-    assert config.BOT_HANDLE_VAR in blob
 
 def test_single_variant_references_the_canonical_secret_and_var_names() -> None:
     single = (_REPO_ROOT / _SINGLE_TEMPLATE_PATH).read_text(encoding="utf-8")

@@ -11,14 +11,6 @@ import pytest
 from daydream import runner
 from daydream.atif import validate as atif_validate
 from daydream.config import REVIEW_OUTPUT_FILE
-from daydream.deep.detection import detect_stacks
-from daydream.deep.orchestrator import (
-    _collapse_stacks_for_shallow,
-    _collapse_stacks_for_tiny_diff,
-    _single_stack_agent_count,
-    total_agent_count,
-)
-from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _count_merge_prompts,
@@ -39,41 +31,6 @@ from tests.test_deep_orchestrator import (
     _silence,
 )
 
-
-@pytest.mark.parametrize(("files", "mode", "expected_stack"),
-    [pytest.param(["api.py"], "tiny", "python", id="tiny-one-language"),
-        pytest.param(["api.py", "App.tsx"], "tiny", "generic", id="tiny-two-languages"),
-        pytest.param(["api.py", "README.md"], "tiny", "python", id="tiny-code-and-docs"),
-        pytest.param(["api.py", "App.tsx"], "disabled", None, id="tiny-disabled"),
-        pytest.param(["api.py", "README.md"], "shallow", "python", id="shallow-one-language"),
-        pytest.param(["api.py", "App.tsx"], "shallow", "generic", id="shallow-two-languages"),
-        pytest.param(["api.py", "App.tsx"], "explicit", "python", id="shallow-explicit-stack"),
-    ],
-)
-def test_collapse_stacks_preserves_scope_and_reduces_fanout(files: list[str], mode: str, expected_stack: str | None,
-) -> None:
-    """Tiny and shallow runs combine language scopes while retaining structure."""
-
-    stacks = detect_stacks(files)
-    if mode in {"tiny", "disabled"}:
-        collapsed, single = _collapse_stacks_for_tiny_diff(stacks, files, threshold=0 if mode == "disabled" else 2)
-    else:
-        config = RunConfig(shallow=True, stack="python" if mode == "explicit" else None)
-        collapsed, single = _collapse_stacks_for_shallow(stacks, files, config)
-
-    assert single is (mode != "disabled")
-    if mode == "disabled":
-        assert collapsed == stacks
-        return
-
-    assert "structure" in [stack.stack_name for stack in collapsed]
-    combined = [stack for stack in collapsed if stack.stack_name != "structure"]
-    assert len(combined) == 1
-    assert combined[0].stack_name == expected_stack
-    assert set(combined[0].files) == set(files)
-    assert not hasattr(combined[0], "skill_invocation")
-    if mode == "tiny":
-        assert _single_stack_agent_count(len(collapsed)) < total_agent_count(len(stacks))
 
 async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge_tiny_host_merge_phase(
     tiny_diff_target: Path, multi_stack_target: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,

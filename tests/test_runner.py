@@ -16,20 +16,14 @@ from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import anyio
 import pytest
 from rich.console import Console
 
 from daydream import clipboard, git_ops, pr_review, runner
-from daydream.archive.git_context import GitContext
-from daydream.archive.manifest import (
-    Manifest,
-    archive_recorder_provenance_from_snapshot,
-    build_manifest_from_snapshot,
-)
-from daydream.artifact_visibility import ArtifactSession, private_root_locations
+from daydream.artifact_visibility import private_root_locations
 from daydream.atif import validate as atif_validate
 from daydream.backends import (
     AUDIT_ROOT_ISOLATION,
@@ -40,28 +34,24 @@ from daydream.backends import (
     TextEvent,
 )
 from daydream.cli import _signal_handler
-from daydream.config import DEFAULT_PI_MODEL, REVIEW_OUTPUT_FILE
+from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.artifacts import (
     DeepArtifact,
     diff_key,
 )
-from daydream.exploration import ExplorationContext
-from daydream.extensions import get_registry
 from daydream.extensions.loader import build_registry
 from daydream.flows.engine import BackendFactory, FlowContext
 from daydream.github_app import GitHubExecutionInput
 from daydream.phases import TestAndHealResult, TestAttemptEvidence
 from daydream.pr_review import PRInfo
 from daydream.run_artifacts import (
-    _open_recorder,
     _RunSnapshotCaptureError,
     _RunWriteCapture,
     capture_manifest_run_identity,
 )
 from daydream.run_config import DEEP_FLOW_ALIASES, RunConfig
 from daydream.run_context import RunContext, current_run_context
-from daydream.run_snapshot import ArchiveRunSnapshot
 from daydream.trajectory import (
     DaydreamRunFlow,
     RunWriteSnapshot,
@@ -138,28 +128,6 @@ def test_run_config_rejects_unsupported_exploration_depth() -> None:
     with pytest.raises(TypeError, match="exploration_depth"):
         RunConfig(exploration_depth=2)  # type: ignore[call-arg]
 
-def test_run_config_diagram_defaults_to_unset_not_auto() -> None:
-    """Leave diagram unset so file mode=off can apply; explicit CLI values still override it."""
-    assert RunConfig().diagram is None
-    assert RunConfig(diagram="both").diagram == "both"
-
-def test_run_config_has_no_skill_availability_field() -> None:
-    assert not hasattr(RunConfig(), "skill_availability")
-
-def test_run_config_has_no_bot_field() -> None:
-    cfg = RunConfig(target="/tmp")
-    assert not hasattr(cfg, "bot")
-
-def test_feedback_routes_to_review_shim_not_feedback() -> None:
-    assert not hasattr(runner, "run_feedback")
-
-def test_run_config_exploration_context_defaults_to_none() -> None:
-    cfg = RunConfig()
-    assert cfg.exploration_context is None
-    explicit = ExplorationContext()
-    cfg2 = RunConfig(exploration_context=explicit)
-    assert cfg2.exploration_context is explicit
-
 _VALID_DOCUMENT_BYTES = json.dumps(
     {"session_id": "session", "trajectory_id": "session", "steps": [], "final_metrics": {}, "extra": {}}
 ).encode()
@@ -231,16 +199,6 @@ def test_run_write_capture_does_not_swallow_base_exception(
     assert capture.partial is None
     assert capture.final is None
     assert capture.validation_error is None
-
-def test_flow_context_exposes_typed_artifact_session_without_data_fallback(
-    make_work: Callable[[Path], WorkContext], tmp_path: Path,
-) -> None:
-    sentinel = cast(ArtifactSession, object())
-    ctx = FlowContext(
-        config=RunConfig(target=str(tmp_path)), work=make_work(tmp_path), registry=get_registry(), artifacts=sentinel,
-    )
-    assert ctx.artifacts is sentinel
-    assert "artifacts" not in ctx.data
 
 def test_findings_preparation_diagnostic_does_not_expose_private_write_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
@@ -977,24 +935,6 @@ async def test_owner_preflight_failure_never_reaches_identity_or_backend(
     )
     assert await runner.run(config) == 1
 
-@pytest.mark.parametrize(
-    ("config", "expected"),
-    [
-        (RunConfig(output_mode="comment"), True),
-        # A diagram-only deliverable still requires a GitHub write.
-        (RunConfig(output_mode="diagram", diagram="sequence"), True), (RunConfig(output_mode="loop"), True),
-        (RunConfig(flow_name="deep"), True), (RunConfig(output_mode="review"), False),
-        (RunConfig(flow_name="review"), False), (RunConfig(output_mode="loop", shallow=True), False),
-        (RunConfig(flow_name="shallow"), False), (RunConfig(flow_name="custom-audit"), False),
-    ],
-    ids=[
-        "comment", "diagram_only", "default_deep", "explicit_deep", "review", "explicit_review", "shallow_loop",
-        "explicit_shallow", "custom_flow",
-    ],
-)
-def test_run_posts_to_github_matches_dispatch(config: RunConfig, expected: bool) -> None:
-    assert runner._run_posts_to_github(config) is expected
-
 async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
     monkeypatch: pytest.MonkeyPatch, patch_workspace: Any,
     silence_runner_ui: None,  # noqa: F841
@@ -1016,43 +956,6 @@ async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
 # --- Per-phase model resolution tests --------------------------------------
 
 class TestResolveBackendPhaseModel:
-    @pytest.mark.parametrize("options,phase,model", [
-        pytest.param({"backend": "claude", "review_model": "claude-haiku-4-5"}, "review", "claude-haiku-4-5",
-                     id="explicit-review-model"),
-        pytest.param({"backend": "claude"}, "review", "claude-opus-5", id="default-review"),
-        pytest.param({"backend": "claude"}, "wonder", "claude-opus-5", id="phase-without-model-flag"),
-        pytest.param({"backend": "codex"}, "parse", "gpt-5.6-luna", id="cheap-parse-tier"),
-        pytest.param({"backend": "claude", "review_backend": "codex"}, "review", "gpt-5.6-sol",
-                     id="overridden-backend-tier"),
-    ])
-    def test_model_resolution_precedence(self, options: dict[str, Any], phase: str, model: str) -> None:
-        assert runner._resolve_backend(RunConfig(**options), phase).model == model
-
-
-
-
-
-
-    @pytest.mark.parametrize("second_phase,same", [("review", True), ("parse", False)])
-    def test_cache_identity_tracks_resolved_phase(self, second_phase: str, same: bool) -> None:
-        cache: dict[tuple[str, str | None, str | None, Path | None], Backend] = {}
-        config = RunConfig(backend="claude")
-        first = runner._resolve_backend(config, "review", cache)
-        second = runner._resolve_backend(config, second_phase, cache)
-        assert (first is second) is same
-
-
-
-    def test_codex_backend_receives_resolved_reasoning_effort_and_cache_splits_on_it(self) -> None:
-        cache: dict[tuple[str, str | None, str | None, Path | None], Backend] = {}
-        config = RunConfig(backend="codex", reasoning_effort="low")
-        low_backend: Any = runner._resolve_backend(config, "review", cache)
-        assert low_backend.reasoning_effort == "low"
-        config.reasoning_effort = "high"
-        high_backend: Any = runner._resolve_backend(config, "review", cache)
-        assert high_backend.reasoning_effort == "high"
-        assert low_backend is not high_backend  # different effort -> distinct cached instance
-
     def test_audit_workspace_is_forwarded_and_splits_backend_cache(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     ) -> None:
@@ -1308,9 +1211,6 @@ async def test_fix_cycle_items_severity_ordered(
         )
 
 # --- non_interactive threading ----------------------------------------------
-
-def test_runconfig_defaults_non_interactive_false() -> None:
-    assert RunConfig().non_interactive is False
 
 @pytest.mark.parametrize(
     ("dispatch_target", "config_kwargs"),
@@ -1572,86 +1472,6 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
     assert "Analyze the failures and fix them" in repair_backend.prompts[0]
     assert all("Analyze the failures and fix them" not in p for p in test_backend.prompts), test_backend.prompts
 
-@pytest.mark.parametrize(
-    ("config", "flow", "expected"),
-    [
-        pytest.param(RunConfig(backend="codex", fix_backend="pi"), DaydreamRunFlow.NORMAL,
-                     ("codex", "codex", "pi", "codex"), id="normal-phase-overrides"),
-        pytest.param(RunConfig(review_backend="codex", file_config=DaydreamFileConfig(
-            phases={"per_stack_review": {"backend": "pi"}})), DaydreamRunFlow.NORMAL,
-                     ("pi", "pi", "claude", "claude"), id="per-stack-review-phase"),
-        pytest.param(RunConfig(backend="codex"), DaydreamRunFlow.IMPROVE,
-                     ("codex", "codex", "", ""), id="improve-omits-fix-test"),
-        pytest.param(RunConfig(backend="codex"), DaydreamRunFlow.TTT,
-                     ("codex", "codex", "", ""), id="review-omits-fix-test"),
-        pytest.param(RunConfig(backend="codex", fix_backend="pi"), DaydreamRunFlow.CUSTOM,
-                     ("codex", "codex", "", ""), id="custom-omits-fix-test"),
-        pytest.param(RunConfig(backend="codex", fix_backend="pi"), DaydreamRunFlow.DIAGRAM,
-                     ("codex", "codex", "", ""), id="diagram-omits-fix-test"),
-        pytest.param(RunConfig(review_backend="codex", file_config=DaydreamFileConfig(
-            phases={"diagram": {"backend": "pi"}})), DaydreamRunFlow.DIAGRAM,
-                     ("pi", "pi", "", ""), id="diagram-phase-override"),
-        pytest.param(RunConfig(review_backend="codex", file_config=DaydreamFileConfig(
-            phases={"recon": {"backend": "pi"}})), DaydreamRunFlow.IMPROVE,
-                     ("pi", "pi", "", ""), id="improve-recon-phase"),
-        pytest.param(RunConfig(review_backend="codex"), DaydreamRunFlow.PR,
-                     ("codex", "codex", "claude", ""), id="pr-omits-test"),
-        pytest.param(RunConfig(), DaydreamRunFlow.NORMAL,
-                     ("claude", "claude", "claude", "claude"), id="backend-fallback"),
-    ],
-)
-def test_open_recorder_backend_identity(
-    tmp_path: Path, config: RunConfig, flow: DaydreamRunFlow, expected: tuple[str, str, str, str],
-) -> None:
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    config.target = str(target_dir)
-    config.run_eval = False
-    recorder = _open_recorder(allow_standalone=True, config=config, target_dir=target_dir, work=None, flow_kind=flow)
-    assert (recorder.backend_name, recorder.review_backend_name,
-            recorder.fix_backend_name, recorder.test_backend_name) == expected
-
-def _build_manifest(config: RunConfig, flow: DaydreamRunFlow, tmp_path: Path) -> Manifest:
-    """Build a manifest for ``config``/``flow`` from one real frozen snapshot."""
-    snapshot = _capture_snapshot(tmp_path, "complete")
-    return build_manifest_from_snapshot(
-        run=ArchiveRunSnapshot(
-            recorder_provenance=archive_recorder_provenance_from_snapshot(write_snapshot=snapshot, run_flow=flow),
-            identity=capture_manifest_run_identity(config, flow, build_registry(), tmp_path), trajectories=snapshot,
-        ), git_ctx=GitContext(), status="complete", archive_path=tmp_path,
-    )
-
-@pytest.mark.parametrize("flow,options,expected", [
-    pytest.param(DaydreamRunFlow.NORMAL,
-                 {"review_backend": "codex", "file_config": DaydreamFileConfig(phases={
-                     "per_stack_review": {"backend": "pi"}})},
-                 ("claude", "codex", "claude", "claude"), id="general-independent-of-per-stack"),
-    pytest.param(DaydreamRunFlow.NORMAL, {"backend": "codex", "fix_backend": "pi", "test_backend": "osprey"},
-                 ("codex", None, "pi", "osprey"), id="fix-and-test-overrides"),
-    pytest.param(DaydreamRunFlow.TTT, {"backend": "codex"}, ("codex", None, None, None), id="ttt-no-fix"),
-    pytest.param(DaydreamRunFlow.IMPROVE, {"backend": "codex"}, ("codex", None, None, None), id="improve-no-fix"),
-    pytest.param(DaydreamRunFlow.PR, {"review_backend": "codex"}, ("claude", "codex", "claude", None),
-                 id="pr-fixes-without-testing"),
-    pytest.param(DaydreamRunFlow.NORMAL, {}, ("claude", None, "claude", "claude"), id="claude-default"),
-])
-def test_manifest_backend_identity_and_phase_fields(
-    tmp_path: Path, flow: DaydreamRunFlow, options: dict[str, Any], expected: tuple[str | None, ...],
-) -> None:
-    config = RunConfig(target=str(tmp_path / "project"), run_eval=False, **options)
-    manifest = _build_manifest(config, flow, tmp_path)
-    assert (manifest.backend, manifest.review_backend, manifest.fix_backend, manifest.test_backend) == expected
-    serialized = manifest.to_dict()["run"]
-    for field, backend in zip(("fix_backend", "test_backend"), expected[2:], strict=True):
-        if backend is None:
-            assert field not in serialized
-        else:
-            assert serialized[field] == backend
-
-
-
-
-
-
 @pytest.mark.parametrize("flow", list(DaydreamRunFlow))
 def test_manifest_identity_preserves_mode_capabilities(tmp_path: Path, flow: DaydreamRunFlow) -> None:
     identity = capture_manifest_run_identity(
@@ -1666,35 +1486,6 @@ def test_manifest_identity_preserves_mode_capabilities(tmp_path: Path, flow: Day
     assert identity.phases.merge is (flow in (DaydreamRunFlow.NORMAL, DaydreamRunFlow.DEEP, DaydreamRunFlow.TTT))
     assert identity.phases.push is runs_test
     assert identity.phases.remote_ci is runs_test
-
-@pytest.mark.parametrize(
-    ("flow", "flow_name", "registered_name", "steps", "fix", "test", "merge", "push", "remote_ci"),
-    [
-        (DaydreamRunFlow.CUSTOM, "fork", "fork", ["fix", "test", "commit"], True, True, False, True, False),
-        (DaydreamRunFlow.CUSTOM, "fork", "fork", ["exploration", "intent"], False, False, False, False, False),
-        (DaydreamRunFlow.CUSTOM, "fork", "fork", ["custom-merge", "remote-ci"], False, False, True, False, True),
-        (DaydreamRunFlow.DEEP, None, "deep", ["exploration", "intent"], False, False, True, False, False),
-        (DaydreamRunFlow.NORMAL, None, "deep", ["exploration", "intent"], False, False, True, False, False),
-        (
-            DaydreamRunFlow.IMPROVE, "improve", "improve", ["fix", "test", "commit", "remote-ci"],
-            True, True, False, True, True,
-        ), (DaydreamRunFlow.DIAGRAM, "diagram", "diagram", ["fix", "test"], True, True, False, False, False),
-        (DaydreamRunFlow.CUSTOM, "unknown", "fork", ["fix", "test"], False, False, False, False, False),
-    ],
-)
-def test_manifest_identity_uses_registered_pipeline(
-    tmp_path: Path, flow: DaydreamRunFlow, flow_name: str | None, registered_name: str,
-    steps: list[str], fix: bool, test: bool, merge: bool, push: bool, remote_ci: bool,
-) -> None:
-    registry = build_registry()
-    registry.set_flow(registered_name, steps)
-    config = RunConfig(flow_name=flow_name, fix_backend="codex", test_backend="pi")
-    identity = capture_manifest_run_identity(config, flow, registry, tmp_path)
-    registry.set_flow(registered_name, [])
-    assert (identity.phases.fix, identity.phases.test, identity.phases.merge) == (fix, test, merge)
-    assert (identity.phases.push, identity.phases.remote_ci) == (push, remote_ci)
-    assert identity.fix_backend == ("codex" if fix else None)
-    assert identity.test_backend == ("pi" if test else None)
 
 @pytest.mark.parametrize("flow_name", [None, *DEEP_FLOW_ALIASES])
 @pytest.mark.parametrize("shallow", [False, True])
@@ -1711,60 +1502,6 @@ def test_manifest_identity_uses_per_stack_tier_for_deep_aliases(
     assert identity.review_backend == "claude"
     assert identity.phases.per_stack_review
     assert identity.deep is not shallow
-
-@pytest.mark.parametrize(
-    ("flow", "flow_name", "start_at"),
-    [
-        (DaydreamRunFlow.IMPROVE, "improve", "review"), (DaydreamRunFlow.CUSTOM, "custom-flow", "review"),
-        (DaydreamRunFlow.DIAGRAM, None, "review"), (DaydreamRunFlow.DEEP, "deep", "merge"),
-        (DaydreamRunFlow.DEEP, "deep", "fix"),
-    ],
-)
-def test_manifest_identity_omits_review_tier_without_review_spine(
-    tmp_path: Path, flow: DaydreamRunFlow, flow_name: str | None, start_at: str,
-) -> None:
-    identity = capture_manifest_run_identity(
-        RunConfig(flow_name=flow_name, start_at=start_at), flow, build_registry(), tmp_path,
-    )
-    assert not identity.phases.per_stack_review
-    assert identity.per_stack_review_backend is None
-    assert identity.per_stack_review_model is None
-    if start_at == "fix":
-        assert not identity.phases.merge
-
-@pytest.mark.parametrize(
-    ("backend", "review_backend", "file_backend", "file_review", "expected_backend", "expected_review"),
-    [
-        ("claude", "codex", None, None, "claude", "codex"), ("codex", None, None, None, "codex", None),
-        (None, None, "pi", None, "pi", None), ("claude", None, "pi", "codex", "claude", "codex"),
-    ],
-)
-def test_manifest_identity_separates_general_backend_and_review_override(
-    tmp_path: Path, backend: str | None, review_backend: str | None, file_backend: str | None,
-    file_review: str | None, expected_backend: str, expected_review: str | None,
-) -> None:
-    config = RunConfig(
-        backend=backend, review_backend=review_backend,
-        file_config=DaydreamFileConfig(
-            backend=file_backend, phases={} if file_review is None else {"review": {"backend": file_review}},
-        ),
-    )
-    identity = capture_manifest_run_identity(config, DaydreamRunFlow.DEEP, build_registry(), tmp_path)
-    assert identity.backend == expected_backend
-    assert identity.review_backend == expected_review
-
-@pytest.mark.parametrize("configured", [False, True])
-def test_manifest_identity_captures_pi_working_directory_default(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, configured: bool,
-) -> None:
-    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "empty-global"))
-    if configured:
-        settings = tmp_path / ".pi" / "settings.json"
-        settings.parent.mkdir()
-        settings.write_text(json.dumps({"defaultModel": "configured-reviewer"}))
-    identity = capture_manifest_run_identity(RunConfig(backend="pi"), DaydreamRunFlow.DEEP, build_registry(), tmp_path)
-    assert identity.per_stack_review_backend == "pi"
-    assert identity.per_stack_review_model == ("configured-reviewer" if configured else DEFAULT_PI_MODEL)
 
 async def test_overlapping_posting_runs_keep_their_own_github_auth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir,

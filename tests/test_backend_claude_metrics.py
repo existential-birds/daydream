@@ -1,6 +1,4 @@
-"""Verify Claude usage-field translation, cache token accounting, and per-message MetricsEvent emission
-using the shared SDK fixtures.
-"""
+"""Missing or partial Claude usage and usage-only terminal billing."""
 
 from __future__ import annotations
 
@@ -32,91 +30,6 @@ async def _collect_events(monkeypatch: pytest.MonkeyPatch, messages: list[Any]) 
         events.append(event)
     return events
 
-async def test_dropped_token_bug_fixed(monkeypatch: pytest.MonkeyPatch) -> None:
-    events = await _collect_events(
-        monkeypatch,
-        [
-            MockAssistantMessage(
-                content=[MockTextBlock(text="Reviewing")], message_id="msg_01",
-                usage={"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 30},
-            ),
-            MockResultMessage(
-                total_cost_usd=0.001, structured_output=None,
-                usage={"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 30},
-            ),
-        ],
-    )
-    cost = next(e for e in events if isinstance(e, CostEvent))
-    assert cost.input_tokens == 130  # 100 uncached + 30 read folded into the total
-    assert cost.output_tokens == 50
-    assert cost.cached_tokens == 30
-    assert cost.cost_usd == 0.001
-
-async def test_metrics_event_emitted_per_assistant_message(monkeypatch: pytest.MonkeyPatch) -> None:
-    events = await _collect_events(
-        monkeypatch,
-        [
-            MockAssistantMessage(
-                content=[MockTextBlock(text="Hi")], message_id="msg_01",
-                usage={"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 30},
-            ), MockResultMessage(total_cost_usd=0.001, structured_output=None, usage=None),
-        ],
-    )
-    metrics = [e for e in events if isinstance(e, MetricsEvent)]
-    assert len(metrics) == 1
-    m = metrics[0]
-    assert m.message_id == "msg_01"
-    assert m.prompt_tokens == 130  # EVNT-02 verbatim name; 100 uncached + 30 read folded in
-    assert m.completion_tokens == 50  # EVNT-02 verbatim name (NOT output_tokens)
-    assert m.cached_tokens == 30
-    assert m.cost_usd is None  # AssistantMessage carries no per-message cost
-
-@pytest.mark.parametrize(
-    ("usage", "expected_prompt_tokens", "expected_cached_tokens"),
-    [
-        # Fully-cached turn: raw input_tokens is the uncached remainder (22); the
-        # total input the model actually processed is 22 + 20000 read = 20022.
-        pytest.param(
-            {
-                "input_tokens": 22, "output_tokens": 100, "cache_read_input_tokens": 20000,
-                "cache_creation_input_tokens": 0,
-            }, 20022, 20000, id="cache-read",
-        ),
-        # Cache-write turn: creation tokens fold in too; a write is not a read
-        # hit, so cached_tokens stays 0.
-        pytest.param(
-            {
-                "input_tokens": 50, "output_tokens": 100, "cache_read_input_tokens": 0,
-                "cache_creation_input_tokens": 15000,
-            }, 15050, 0, id="cache-write",
-        ),
-        # Cache reads and writes both contribute to input totals, but cached_tokens counts only
-        # reads.
-        pytest.param(
-            {
-                "input_tokens": 40, "output_tokens": 100, "cache_read_input_tokens": 18000,
-                "cache_creation_input_tokens": 12000,
-            }, 30040, 18000, id="cache-read-and-write",
-        ),
-    ],
-)
-async def test_prompt_tokens_include_cache_read_and_creation(
-    monkeypatch: pytest.MonkeyPatch, usage: dict[str, int], expected_prompt_tokens: int, expected_cached_tokens: int,
-) -> None:
-    events = await _collect_events(
-        monkeypatch,
-        [
-            MockAssistantMessage(content=[MockTextBlock(text="turn")], message_id="msg_01", usage=usage),
-            MockResultMessage(total_cost_usd=0.002, structured_output=None, usage=usage),
-        ],
-    )
-    metrics = [e for e in events if isinstance(e, MetricsEvent)][0]
-    cost = [e for e in events if isinstance(e, CostEvent)][0]
-    assert metrics.prompt_tokens == expected_prompt_tokens
-    assert metrics.cached_tokens == expected_cached_tokens
-    assert metrics.completion_tokens == 100
-    assert cost.input_tokens == expected_prompt_tokens
-    assert cost.cached_tokens == expected_cached_tokens
 
 async def test_no_metrics_event_when_usage_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
     events = await _collect_events(

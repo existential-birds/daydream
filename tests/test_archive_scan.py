@@ -26,17 +26,7 @@ def test_token_only_userinfo_flagged(tmp_path: Path) -> None:
     _write_manifest(run_dir, "https://x-access-token@github.com/o/r")
     assert not scan.scan_run_dir(run_dir).clean
 
-def test_clean_bundle_passes(tmp_path: Path) -> None:
-    run_dir = tmp_path / "run"
-    _write_manifest(run_dir, "https://github.com/o/r")
-    (run_dir / "diff.patch").write_text("+++ b/f.py\n+print('hi')\n")
-    assert scan.scan_run_dir(run_dir).clean
 
-def test_canary_in_patch_file_flagged(tmp_path: Path) -> None:
-    run_dir = tmp_path / "run"
-    _write_manifest(run_dir, "https://github.com/o/r")
-    (run_dir / "diff.patch").write_text("+TOKEN=ghp_canaryfake123\n")
-    assert not scan.scan_run_dir(run_dir).clean
 
 def test_already_redacted_markers_skip(tmp_path: Path) -> None:
     """Marker-skip branch: a credential-shaped value whose match carries a

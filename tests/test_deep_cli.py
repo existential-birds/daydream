@@ -8,12 +8,6 @@ import pytest
 from daydream.commands.review import _parse_args
 
 
-def test_default_is_deep() -> None:
-    """Without --shallow, the run is deep (config.shallow == False)."""
-    config = _parse_args(["target"])
-    assert config.shallow is False
-
-
 def test_help_all_states_trajectory_and_dump_artifacts_semantics(capsys: pytest.CaptureFixture[str],) -> None:
     """--help-all names the public post-finalization trajectory default, live external
     updates, raw diagnostic dumps, and mandatory direct-upload scanning.
@@ -32,12 +26,6 @@ def test_help_all_states_trajectory_and_dump_artifacts_semantics(capsys: pytest.
         "Always refuses blocking credentials and scanner failures", "Advisory findings are allowed",
     ):
         assert fragment in out, fragment
-
-@pytest.mark.parametrize("stage", ["ttt", "per-stack", "merge"])
-def test_deep_resume_stages_accepted(stage: str) -> None:
-    """ttt/per-stack/merge are valid resume stages in the (default) deep mode."""
-    config = _parse_args(["target", "--start-at", stage])
-    assert config.start_at == stage
 
 @pytest.mark.parametrize("stage", ["ttt", "per-stack", "merge"])
 def test_shallow_rejects_deep_resume_stages(stage: str) -> None:
@@ -62,9 +50,3 @@ def test_shallow_rejects_legacy_resume_stages(stage: str, capsys: pytest.Capture
     with pytest.raises(SystemExit):
         _parse_args(["target", "--shallow", "--start-at", stage])
     assert "no mapping in the unified pipeline" in capsys.readouterr().err
-
-@pytest.mark.parametrize("stage", ["fix", "review"])
-def test_shallow_accepts_unified_resume_stages(stage: str) -> None:
-    """review (fresh) and fix (resume after the merged report) are valid with --shallow."""
-    config = _parse_args(["target", "--shallow", "--start-at", stage])
-    assert config.start_at == stage

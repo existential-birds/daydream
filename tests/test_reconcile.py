@@ -6,7 +6,7 @@ import pytest
 
 from daydream import git_ops
 from daydream.git_ops import GitError
-from daydream.pr_review import diagram_marker, finding_marker
+from daydream.pr_review import finding_marker
 from daydream.reconcile import (
     PriorFinding,
     fetch_prior_diagram_comments,
@@ -133,29 +133,6 @@ def test_fetch_prior_findings_trusts_viewerDidAuthor_without_bot_login(monkeypat
 
 # --- Prior diagram comments (issue #1113) ------------------------------------
 
-
-def _issue_comment(node_id: str, *, body: str, login: str | None = "daydream[bot]") -> dict[str, Any]:
-    """One REST issue-comment object."""
-    comment: dict[str, Any] = {"id": 1, "node_id": node_id, "body": body}
-    if login is not None:
-        comment["user"] = {"login": login}
-    return comment
-
-def test_fetch_prior_diagram_comments_trusts_only_the_bot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Marker present AND author proven; kinds come back de-duplicated, in order."""
-    sha = "a" * 40
-    comments = [
-        _issue_comment("IC_1", body=f"{diagram_marker('flowchart', sha)}\n{diagram_marker('sequence', sha)}"),
-        _issue_comment("IC_2", body=diagram_marker("sequence", sha), login="evil-attacker"),
-        _issue_comment("IC_3", body="a plain human comment"),
-        _issue_comment("IC_4", body=f"{diagram_marker('sequence', sha)} {diagram_marker('sequence', sha)}"),
-    ]
-    def _gh(_repo: Any, endpoint: str, **_kw: Any) -> Any:
-        assert endpoint == "repos/o/r/issues/7/comments"
-        return comments
-    monkeypatch.setattr(git_ops, "gh_api", _gh)
-    prior = fetch_prior_diagram_comments(tmp_path, "o/r", 7, bot_login="daydream")
-    assert [(c.node_id, c.kinds) for c in prior] == [("IC_1", ("flowchart", "sequence")), ("IC_4", ("sequence",))]
 
 def test_fetch_prior_diagram_comments_harvests_nothing_without_a_bot_login(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

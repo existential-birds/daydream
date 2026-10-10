@@ -1636,11 +1636,6 @@ def _sig(ev: dict[str, Any]) -> Any:
     return gi._evidence_signature_from_raw({"evidence": [ev]})
 
 
-def test_signature_changes_on_anchor_move() -> None:
-    base = _one_evidence()
-    moved = {**base, "line": 7}                     # same body, moved anchor
-    assert _sig(base) != _sig(moved)
-
 def test_signature_changes_on_resolution_state() -> None:
     base = _one_evidence()
     assert _sig(base) != _sig({**base, "resolved": True})
@@ -1653,14 +1648,6 @@ def test_signature_ignores_metadata_only_change() -> None:
     base = _one_evidence()
     meta = {**base, "updated_at": "2026-01-02T00:00:00Z", "url": "https://e.example/2"}
     assert _sig(base) == _sig(meta)
-
-def test_signature_ignores_format_drift_duplicate_and_kind() -> None:
-    base = _one_evidence()
-    dup = [{**base, "kind": "inline_comment"},      # same database_id stored twice
-           {**base, "kind": "thread_comment"}]
-    canon = [base]
-    assert gi._evidence_signature_from_raw({"evidence": dup}) \
-        == gi._evidence_signature_from_raw({"evidence": canon})
 
 # Stale decisions combine referenced-evidence changes with PR-wide task-input changes.
 

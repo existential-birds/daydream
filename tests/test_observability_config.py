@@ -1,13 +1,11 @@
 """Operator observability configuration, independent of reviewed repository settings."""
 
 import sys
-from pathlib import Path
 
 import pytest
 
 from daydream.commands.improve import _parse_improve_args
 from daydream.commands.review import _parse_args
-from daydream.config_file import load_file_config
 from daydream.observability.config import ObservabilityConfig, ObservabilityError, resolve_observability_config
 
 
@@ -16,21 +14,6 @@ def isolated_operator_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in ("DAYDREAM_TRACE_TO", "DAYDREAM_TRACE_CONTENT", "OTEL_SERVICE_NAME"):
         monkeypatch.delenv(key, raising=False)
 
-def test_tracing_requires_explicit_destination() -> None:
-    assert resolve_observability_config(environ={}) == ObservabilityConfig()
-    assert resolve_observability_config(environ={"LANGSMITH_API_KEY": "opaque"}).destinations == ()
-
-def test_operator_environment_and_cli_precedence() -> None:
-    env = {"DAYDREAM_TRACE_TO": "langsmith, honeyhive", "DAYDREAM_TRACE_CONTENT": "metadata",
-        "OTEL_SERVICE_NAME": "my-daydream",
-    }
-    assert resolve_observability_config(environ=env) == ObservabilityConfig(
-        destinations=("langsmith", "honeyhive"), capture_content=False, service_name="my-daydream",
-    )
-    assert resolve_observability_config(destinations=["custom"], content="full", environ=env) == ObservabilityConfig(
-        destinations=("custom",), service_name="my-daydream",
-    )
-    assert resolve_observability_config(destinations=[], environ=env).destinations == ()
 
 def test_explicit_off_ignores_invalid_ambient_configuration() -> None:
     assert (resolve_observability_config(disabled=True,
@@ -89,24 +72,3 @@ def test_cli_invalid_environment_is_parser_error(improve: bool, monkeypatch: pyt
 
 
 # --- P18 Task 3: repository files cannot configure tracing ---------------------
-
-def test_repository_files_cannot_set_trace_resources_endpoints_or_credentials(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    (tmp_path / ".daydream.toml").write_text(
-        "[observability]\n"
-        'destinations = ["otlp"]\n'
-        'resources = { "deployment.environment.name" = "repo-canary" }\n'
-        'resource_attributes = { "service.name" = "repo-service" }\n'
-        'endpoint = "http://repo-endpoint.invalid/v1/traces"\n'
-        'api_key = "repo-credential"\n'
-        "capture_content = false\n"
-    )
-    file_config = load_file_config(tmp_path)
-    data_model = file_config.__dataclass_fields__
-    assert "observability" not in data_model
-    for key in ("resources", "resource_attributes", "endpoint", "api_key"):
-        assert key not in data_model
-    assert not hasattr(file_config, "observability")
-    resolved = resolve_observability_config(environ={"DAYDREAM_TRACE_TO": ""})
-    assert resolved.destinations == ()

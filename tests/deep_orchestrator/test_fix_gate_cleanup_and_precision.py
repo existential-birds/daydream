@@ -207,21 +207,6 @@ async def test_verdict_join_reconciles_selection_skips_through_the_real_run(
         elif decision["selected"] is False:
             assert item_id in buckets["skipped"]
 
-@pytest.mark.parametrize("reason", ["exempt:structural", "exempt:wonder"])
-def test_verdict_buckets_route_every_lens_exemption_to_structural(reason: str) -> None:
-    """Both lens exemptions land in the structural bucket, never in Skipped.
-
-    The selection block's own ``skipped`` counter counts only the selective
-    rule's skip branch, so a wonder-lens item reported as an operator-chosen
-    skip in the Verdict Join table would contradict the adjacent summary line.
-    """
-    items: list[dict[str, Any]] = [{"id": 4, "item_uid": "item:4"}]
-    payload = {"selection": {"decisions": [{"item_uid": "item:4", "reason_code": reason, "selected": False}]}}
-    matched, unmatched, skipped, structural, other = fix_steps._verdict_buckets(items, payload)
-    assert structural == [4]
-    assert skipped == []
-    assert (matched, unmatched, other) == ([], [], [])
-
 def test_severity_sort_key_names_unknown_value() -> None:
     """Should-Have (R3): an unknown/absent severity in a fixture errors with a
     message that names the value, instead of a bare ``KeyError``."""

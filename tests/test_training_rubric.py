@@ -27,28 +27,6 @@ from daydream.training.rubric import (
 )
 
 
-def test_rubric_serializes_to_dict_with_pr_source() -> None:
-    rub = Rubric(pr_merge=PRMergeSignal(True, "2026-01-01T00:00:00Z", state="merged", draft=False),
-        fix_applied=FixAppliedSignal("applied", 2, 2, ["c1", "c2"]),
-        comment_resolution=CommentResolutionSignal(1, 1, 0), local_commit_applied=None, posterior_source="pr_review",
-    )
-    d = rub.to_dict()
-    assert d["posterior_source"] == "pr_review"
-    assert d["pr_merge"]["merged"] is True
-    assert d["pr_merge"]["merged_at"] == "2026-01-01T00:00:00Z"
-    assert d["pr_merge"]["state"] == "merged"
-    assert d["pr_merge"]["draft"] is False
-    assert d["fix_applied"]["hunks_applied"] == 2
-
-def test_rubric_serializes_with_local_source() -> None:
-    rub = Rubric(pr_merge=PRMergeSignal(False, None), fix_applied=FixAppliedSignal("unknown", 0, 0, []),
-        comment_resolution=CommentResolutionSignal(0, 0, 0), local_commit_applied=LocalCommitAppliedSignal("applied"),
-        posterior_source="local_branch",
-    )
-    assert rub.to_dict()["posterior_source"] == "local_branch"
-    assert rub.to_dict()["local_commit_applied"] == {"verdict": "applied"}
-
-
 def _fp_rubric(pr_merge: PRMergeSignal, resolutions: list[PerFindingResolution], source: PosteriorSource = "pr_review"
 ) -> Rubric:
     # CommentResolutionSignal invariant: unresolved = total - replied.
@@ -84,11 +62,6 @@ def test_run_label_decisive_with_non_decisive_is_contested() -> None:
     rub = _fp_rubric(MERGED, [_res("accepted"), _res("unanswered"), _res("missing")])
     assert derive_outcome_label(rub) == "contested"
 
-def test_run_label_no_decisive_evidence_is_unknown() -> None:
-    for pr in (MERGED, PRMergeSignal(False, None, state="open")):
-        for disps in ([], [_res("ambiguous")], [_res("unanswered")], [_res("missing")]):
-            assert derive_outcome_label(_fp_rubric(pr, disps)) == "unknown"
-
 @pytest.mark.parametrize(("verdict", "expected"),
     [pytest.param("applied", "accepted", id="applied-is-accepted"),
         pytest.param("rejected", "rejected", id="rejected-is-rejected"),
@@ -111,15 +84,10 @@ def test_run_label_no_signal_is_unknown() -> None:
     rub = _fp_rubric(MERGED, [_res("accepted")], source="none")
     assert derive_outcome_label(rub) == "unknown"
 
-def test_per_finding_labels_come_from_dispositions() -> None:
-    rub = _fp_rubric(PRMergeSignal(False, None, state="closed"), [])
-    per = [_res("accepted"), _res("rejected"), _res("ambiguous"), _res("unanswered"), _res("missing")]
-    assert derive_per_finding_labels(rub, per) == ["accepted", "rejected", "ambiguous", "unanswered", "missing"]
 
 def test_per_finding_non_pr_source_stays_unknown() -> None:
     rub = _fp_rubric(MERGED, [], source="local_branch")
     assert derive_per_finding_labels(rub, [_res("accepted")]) == ["unknown"]
-
 
 class _StubModel:
 

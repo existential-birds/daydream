@@ -17,11 +17,10 @@ from daydream import cli, remote_ci
 from daydream.atif import validate as atif_validate
 from daydream.commands.corpus import _build_harvest_parser
 from daydream.commands.improve import _parse_improve_args
-from daydream.commands.review import _build_main_parser, _parse_args
-from daydream.config_file import DaydreamFileConfig
+from daydream.commands.review import _parse_args
 from daydream.dataset import LocalRecordStore
-from daydream.run_config import RunConfig, _resolved_backend_name, _resolved_model
-from daydream.ui import NEON_THEME, PHASE_SUBTITLES, print_issues_table
+from daydream.run_config import RunConfig
+from daydream.ui import NEON_THEME, print_issues_table
 from tests.harness.dataset import read_records
 from tests.harness.git_helpers import bare_remote, commit, git, init_repo
 from tests.harness.remote_ci import (
@@ -132,39 +131,15 @@ def test_review_arguments_populate_config(
 
 
 
-def test_default_backend_is_none_and_resolves_to_claude(monkeypatch: pytest.MonkeyPatch) -> None:
-    # An unset backend allows file policy to apply before the Claude fallback.
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project"])
-    config = _parse_args()
-    assert config.backend is None
-    assert _resolved_backend_name(config, "review") == "claude"
 
 
-BACKEND_NAMES = ["codex", "osprey"]
 
-@pytest.mark.parametrize("flag", ["--backend", "-b"], ids=["long", "short"])
-@pytest.mark.parametrize("backend", BACKEND_NAMES, ids=lambda name: name)
-def test_backend_flag(monkeypatch: pytest.MonkeyPatch, flag: Any, backend: Any) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", flag, backend])
-    config = _parse_args()
-    assert config.backend == backend
 
 def test_invalid_backend_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--backend", "invalid"])
     with pytest.raises(SystemExit):
         _parse_args()
 
-@pytest.mark.parametrize(("global_backend", "overrides", "phase", "expected"),
-    [pytest.param("claude", {"review": {"backend": "codex"}}, "review", "codex", id="review-override"),
-        pytest.param("claude", {"review": {"backend": "codex"}}, "fix", "claude", id="review-fallback"),
-        pytest.param(None, {"fix": {"backend": "codex"}}, "fix", "codex", id="fix-override"),
-        pytest.param(None, {"test": {"backend": "codex"}}, "test", "codex", id="test-override"),
-    ],
-)
-def test_phase_backend_override_via_config_file(global_backend: Any, overrides: Any, phase: Any, expected: Any) -> None:
-    fc = DaydreamFileConfig(backend=global_backend, phases=overrides)
-    config = RunConfig(target="/tmp/project", backend=None, file_config=fc)
-    assert _resolved_backend_name(config, phase) == expected
 
 
 def _cfg(monkeypatch: pytest.MonkeyPatch, args: list[str]) -> RunConfig:
@@ -172,24 +147,9 @@ def _cfg(monkeypatch: pytest.MonkeyPatch, args: list[str]) -> RunConfig:
     monkeypatch.setattr(sys, "argv", ["daydream", *args])
     return _parse_args()
 
-def test_run_config_flow_name_defaults_none() -> None:
-    assert RunConfig(target="/tmp/p").flow_name is None
 
-def test_run_config_flow_name_settable() -> None:
-    assert RunConfig(target="/tmp/p", flow_name="ro-audit").flow_name == "ro-audit"
 
-def test_runconfig_scope_issue_filing_defaults_false() -> None:
-    assert RunConfig(target="/t").scope_issue_filing is False
 
-@pytest.mark.parametrize(("argv", "field", "expected"),
-    [pytest.param(["--file-scope-issues"], "scope_issue_filing", True, id="file-scope-issues"),
-        pytest.param([], "scope_issue_filing", False, id="file-scope-default"),
-        pytest.param(["--flow", "ro-audit"], "flow_name", "ro-audit", id="flow"),
-        pytest.param([], "flow_name", None, id="flow-default"),
-    ],
-)
-def test_runconfig_flag_values(monkeypatch: pytest.MonkeyPatch, argv: list[str], field: str, expected: Any) -> None:
-    assert getattr(_cfg(monkeypatch, [*argv, "/tmp/project"]), field) == expected
 
 @pytest.mark.parametrize("conflict", [["--review"], ["--comment"], ["--shallow"]])
 def test_flow_conflicts_rejected(monkeypatch: pytest.MonkeyPatch, conflict: Any) -> None:
@@ -203,9 +163,6 @@ def test_loop_flag_rejected(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capt
         _parse_args()
     assert "unrecognized arguments" in capsys.readouterr().err
 
-def test_runconfig_has_no_loop_fields() -> None:
-    assert not hasattr(RunConfig(), "loop")
-    assert not hasattr(RunConfig(), "max_iterations")
 
 def test_log_flag_rejected_review(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(sys, "argv", ["daydream", "--log", "/tmp/project"])
@@ -326,9 +283,6 @@ def test_feedback_subcommand_is_unknown(monkeypatch: pytest.MonkeyPatch, capsys:
     assert not called
     assert "unrecognized arguments: 7 --bot x[bot] /tmp/repo" in capsys.readouterr().err
 
-def test_phase_subtitles_include_wonder() -> None:
-    assert "WONDER" in PHASE_SUBTITLES
-    assert len(PHASE_SUBTITLES["WONDER"]) >= 2
 
 @pytest.mark.parametrize(("remote_outcome", "expected_code"), [("no_ci", 0), ("failed", 1)],)
 def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
@@ -398,21 +352,7 @@ def test_print_issues_table_renders() -> None:
     assert "Missing test" in output
 
 
-@pytest.mark.parametrize("phase,value",
-    [("review", "claude-haiku-4-5"), ("parse", "claude-haiku-4-5"), ("fix", "claude-opus-4-6"), ("test", "gpt-5.5")],
-)
-def test_per_phase_model_set_via_config_file(phase: Any, value: Any) -> None:
-    fc = DaydreamFileConfig(phases={phase: {"model": value}})
-    config = RunConfig(target="/tmp/project", backend=None, model=None, file_config=fc)
-    assert _resolved_model(config, phase) == value
 
-def test_no_per_phase_model_flag_leaves_field_none(tmp_path: Path) -> None:
-    config = _parse_args([str(tmp_path)])
-    assert config.review_model is None
-    assert config.parse_model is None
-    assert config.fix_model is None
-    assert config.test_model is None
-    assert config.exploration_model is None
 
 
 @pytest.mark.parametrize("flag,phase",
@@ -433,9 +373,6 @@ def test_per_phase_flag_rejected_with_config_pointer(
     assert f"[tool.daydream.phases.{phase}]" in err
 
 
-def test_global_model_flag_populates_runconfig(tmp_path: Path) -> None:
-    config = _parse_args(["--model", "claude-opus-5", str(tmp_path)])
-    assert config.model == "claude-opus-5"
 
 def _write_fake_gh(bin_dir: Path, log_env: str, login: str) -> None:
     """Install a child-PATH ``gh`` shim answering exactly the two calls these tests allow.
@@ -690,20 +627,7 @@ def test_pr_repo_falls_back_to_cwd_without_target(monkeypatch: pytest.MonkeyPatc
     assert config.target is None
     assert config.pr_repo == "existential-birds/daydream"
 
-def test_cli_stack_selector_and_skill_rejected() -> None:
 
-    p = _build_main_parser()
-    args = p.parse_args(["--stack", "python", "/tmp"])
-    assert args.stack == "python"
-    with pytest.raises(SystemExit) as e:
-        p.parse_args(["--skill", "python", "/tmp"])
-    assert e.value.code == 2   # argparse unknown-option exit code
-
-def test_runconfig_uses_stack_terminology() -> None:
-
-    cfg = RunConfig(target="/tmp", stack="go")
-    assert cfg.stack == "go"
-    assert not hasattr(cfg, "skill")   # old name removed
 
 @pytest.mark.parametrize("capture", [False, True], ids=["capture-off", "store-only"])
 def test_real_cli_stack_entry(

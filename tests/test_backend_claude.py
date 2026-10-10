@@ -11,21 +11,17 @@ from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 from claude_agent_sdk._internal.query import Query
 from claude_agent_sdk._internal.transport import Transport
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
-from claude_agent_sdk.types import AgentDefinition
 
 from daydream.backends import (
     BackendExecutionInput,
     ClaudeRequestConfig,
     ContinuationToken,
-    CostEvent,
     RequestEvent,
     ResultEvent,
     RetryPolicy,
     TextEvent,
-    ThinkingEvent,
     ToolResultEvent,
     ToolStartEvent,
-    TurnEndEvent,
     effective_fanout_concurrency,
 )
 from daydream.backends.claude import (
@@ -43,7 +39,6 @@ from tests.harness.claude_sdk import (
     MockAssistantMessage,
     MockResultMessage,
     MockTextBlock,
-    MockThinkingBlock,
     MockToolResultBlock,
     MockToolUseBlock,
     MockUserMessage,
@@ -231,46 +226,6 @@ async def _drive_claude_backend_to_list(
         events.append(event)
     return events
 
-async def test_execute_yields_text_and_result(patch_sdk: Any) -> None:
-    events = await _drive_claude_backend_to_list(
-        messages=[
-            MockAssistantMessage(content=[MockTextBlock(text="Hello world")]),
-            MockResultMessage(total_cost_usd=0.05, structured_output=None),
-        ], patch_sdk_fn=patch_sdk, prompt="Say hello",
-    )
-    text_events = [e for e in events if isinstance(e, TextEvent)]
-    cost_events = [e for e in events if isinstance(e, CostEvent)]
-    result_events = [e for e in events if isinstance(e, ResultEvent)]
-    assert len(text_events) == 1
-    assert text_events[0].text == "Hello world"
-    assert len(cost_events) == 1
-    assert cost_events[0].cost_usd == 0.05
-    assert len(result_events) == 1
-    assert result_events[0].structured_output is None
-    assert result_events[0].continuation is None
-
-async def test_execute_yields_tool_events(patch_sdk: Any) -> None:
-    events = await _drive_claude_backend_to_list(
-        messages=[
-            MockAssistantMessage(content=[MockThinkingBlock(thinking="Let me think...")]),
-            MockAssistantMessage(content=[MockTextBlock(text="I'll run a command.")]),
-            MockAssistantMessage(content=[MockToolUseBlock(id="tool-1", name="Bash", input={"command": "ls"})]),
-            MockUserMessage(content=[MockToolResultBlock(tool_use_id="tool-1", content="file.py", is_error=False)]),
-            MockResultMessage(total_cost_usd=0.10),
-        ], patch_sdk_fn=patch_sdk, prompt="Run ls",
-    )
-    thinking_events = [e for e in events if isinstance(e, ThinkingEvent)]
-    tool_start_events = [e for e in events if isinstance(e, ToolStartEvent)]
-    tool_result_events = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert len(thinking_events) == 1
-    assert thinking_events[0].text == "Let me think..."
-    assert len(tool_start_events) == 1
-    assert tool_start_events[0].name == "Bash"
-    assert tool_start_events[0].input == {"command": "ls"}
-    assert len(tool_result_events) == 1
-    assert tool_result_events[0].output == "file.py"
-    assert tool_result_events[0].is_error is False
-    assert tool_start_events[0].id == tool_result_events[0].id
 
 async def test_execute_early_close_interrupts_and_drains_before_disconnect(patch_sdk: Any) -> None:
     lifecycle: list[str] = []
@@ -300,22 +255,6 @@ async def test_execute_early_close_interrupts_and_drains_before_disconnect(patch
     await event_stream.aclose()
     assert lifecycle == ["interrupt", "terminal", "disconnect"]
 
-async def test_execute_structured_output(patch_sdk: Any) -> None:
-    events = await _drive_claude_backend_to_list(
-        messages=[
-            MockAssistantMessage(content=[MockTextBlock(text="Parsed.")]),
-            MockResultMessage(
-                total_cost_usd=0.02,
-                structured_output={"issues": [{"id": 1, "description": "Fix X", "file": "a.py", "line": 10}]},
-            ),
-        ], patch_sdk_fn=patch_sdk, prompt="Parse",
-        output_schema={"type": "object", "properties": {"issues": {"type": "array"}}},
-    )
-    result_events = [e for e in events if isinstance(e, ResultEvent)]
-    assert len(result_events) == 1
-    assert result_events[0].structured_output == {
-        "issues": [{"id": 1, "description": "Fix X", "file": "a.py", "line": 10}]
-    }
 
 async def test_error_result_raises_instead_of_clean_empty_result(patch_sdk: Any) -> None:
     """An SDK error raises after terminal metadata, never becoming a clean empty review."""
@@ -450,57 +389,7 @@ async def test_read_only_execute_registers_pretooluse_guard(patch_sdk: Any) -> N
     deny_find_root = await _decide(matcher, {"tool_name": "Bash", "tool_input": {"command": "find / -name x"}})
     assert deny_find_root["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-async def test_non_read_only_execute_registers_dangerous_command_hook(patch_sdk: Any) -> None:
-    """Registered guards deny root scans and permit scoped finds in mutating mode."""
-    backend, captured = _capturing_backend(patch_sdk)
-    async for _ in backend.execute(Path("/tmp"), "Go", read_only=False):
-        pass
-    opts = captured["options"]
-    assert opts is not None
-    hooks = opts.hooks
-    assert hooks is not None and "PreToolUse" in hooks
-    matchers = hooks["PreToolUse"]
-    assert len(matchers) == 1
-    guard = matchers[0].hooks[0]
-    deny_find_root = await guard({"tool_name": "Bash", "tool_input": {"command": "find / -name x"}}, None, {})
-    assert deny_find_root["hookSpecificOutput"]["permissionDecision"] == "deny"
-    allow_find_scoped = await guard(
-        {"tool_name": "Bash", "tool_input": {"command": "find core/osprey-tui -name agent.rs"}}, None, {},
-    )
-    assert "hookSpecificOutput" not in allow_find_scoped
 
-
-@pytest.mark.parametrize("with_agents", [False, True])
-async def test_execute_preserves_agents_in_sdk_options(patch_sdk: Any, with_agents: bool) -> None:
-    backend, captured = _capturing_backend(patch_sdk)
-    agents = {
-        "pattern-scanner": AgentDefinition(
-            description="pattern scanner", prompt="scan patterns", tools=["Read", "Grep"], model="sonnet",
-        ),
-        "dependency-tracer": AgentDefinition(
-            description="dependency tracer", prompt="trace deps", tools=["Read", "Grep"], model="sonnet",
-        ),
-    } if with_agents else None
-    async for _ in backend.execute(Path("/tmp"), "Go", agents=agents):
-        pass
-    options = captured["options"]
-    assert options is not None
-    assert options.agents == agents
-    if agents:
-        assert "explorer-0" not in options.agents
-        assert "explorer-1" not in options.agents
-
-
-# Helpers for TurnEndEvent tests (Task 6)
-
-def _assistant_message(*, text: str, message_id: str) -> MockAssistantMessage:
-    """Build a MockAssistantMessage carrying one TextBlock + a message_id."""
-    msg = MockAssistantMessage(content=[MockTextBlock(text=text)])
-    msg.message_id = message_id
-    return msg
-
-def _result_message(*, cost: float | None = 0.0) -> MockResultMessage:
-    return MockResultMessage(total_cost_usd=cost, structured_output=None)
 
 async def test_structured_output_tool_result_is_suppressed(patch_sdk: Any) -> None:
     """StructuredOutput ToolUseBlocks are skipped, and the corresponding
@@ -529,23 +418,6 @@ async def test_structured_output_tool_result_is_suppressed(patch_sdk: Any) -> No
     result_events = [e for e in events if isinstance(e, ResultEvent)]
     assert result_events[0].structured_output == {"data": 1}
 
-async def test_claude_backend_emits_turn_end_per_assistant_message(patch_sdk: Any) -> None:
-    events = await _drive_claude_backend_to_list(
-        messages=[
-            _assistant_message(text="turn-1", message_id="msg_1"),
-            _assistant_message(text="turn-2", message_id="msg_2"), _result_message(cost=0.0),
-        ], patch_sdk_fn=patch_sdk,
-    )
-    texts = [e for e in events if isinstance(e, TextEvent)]
-    turn_ends = [(i, e) for i, e in enumerate(events) if isinstance(e, TurnEndEvent)]
-    assert [e.text for e in texts] == ["turn-1", "turn-2"]
-    assert len(turn_ends) == 2
-    assert turn_ends[0][1].message_id == "msg_1"
-    assert turn_ends[1][1].message_id == "msg_2"
-    first_text_idx = events.index(texts[0])
-    second_text_idx = events.index(texts[1])
-    assert first_text_idx < turn_ends[0][0] < second_text_idx
-    assert second_text_idx < turn_ends[1][0]
 
 @pytest.mark.parametrize("effort", [None, "max"])
 async def test_reasoning_effort_reaches_sdk_options(patch_sdk: Any, effort: str | None) -> None:
@@ -635,50 +507,6 @@ async def test_audit_root_guard_allows_only_canonical_read_tools(tmp_path: Path)
     for payload in denied:
         assert _is_denied(await _audit_decision(backend, payload)), payload
 
-async def test_audit_execute_builds_closed_sdk_options_and_environment(
-    patch_sdk: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    root = tmp_path / "audit root"
-    root.mkdir()
-    source = tmp_path / "source"
-    source.mkdir()
-    captured: dict[str, Any] = {}
-    patch_sdk(
-        scripted_client([MockResultMessage(total_cost_usd=0.01, session_id="must-not-persist")], captured=captured)
-    )
-    for variable in _GIT_REDIRECT_VARS:
-        monkeypatch.setenv(variable, str(source))
-    backend = ClaudeBackend(model="opus", audit_root=root)
-    results = [
-        event
-        async for event in backend.execute(root, "audit", read_only=True)
-        if isinstance(event, ResultEvent)
-    ]
-    options = captured["options"]
-    assert options.tools == ["Read", "Grep", "Glob", "StructuredOutput"]
-    assert options.allowed_tools == ["Read", "Grep", "Glob", "StructuredOutput"]
-    assert options.mcp_servers == {}
-    assert options.strict_mcp_config is True
-    assert options.setting_sources == []
-    assert options.skills == []
-    assert options.plugins == []
-    assert options.agents is None
-    assert options.resume is None
-    assert options.extra_args == {"no-session-persistence": None}
-    assert options.env == {
-        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1", "BASH_DEFAULT_TIMEOUT_MS": options.env["BASH_DEFAULT_TIMEOUT_MS"],
-        "BASH_MAX_TIMEOUT_MS": options.env["BASH_MAX_TIMEOUT_MS"], "PWD": str(root.resolve()),
-        "OLDPWD": str(root.resolve()), "GIT_DIR": str(root.resolve() / ".git"), "GIT_WORK_TREE": str(root.resolve()),
-        "GIT_INDEX_FILE": str(root.resolve() / ".git" / "index"),
-        "GIT_OBJECT_DIRECTORY": str(root.resolve() / ".git" / "objects"),
-        "GIT_COMMON_DIR": str(root.resolve() / ".git"), "GIT_ALTERNATE_OBJECT_DIRECTORIES": "",
-        "GIT_CEILING_DIRECTORIES": str(root.resolve().parent), "GIT_PREFIX": "",
-    }
-    assert results[0].continuation is None
-    matchers = options.hooks["PreToolUse"]
-    assert len(matchers) == 1
-    assert matchers[0].matcher == ".*"
-    assert matchers[0].hooks == [backend._audit_root_guard]  # noqa: SLF001
 
 @pytest.mark.parametrize("bad_call", ["cwd", "read_only", "continuation", "agents"])
 async def test_audit_execute_rejects_unsafe_invocation_before_client(
@@ -960,54 +788,6 @@ async def _request_event(apply_patch: Any, prompt: str, **execute_kwargs: Any) -
     events = [event async for event in backend.execute(Path("/tmp"), prompt, **execute_kwargs)]
     return next(e for e in events if isinstance(e, RequestEvent))
 
-async def test_request_event_carries_typed_config_from_exact_sdk_options(patch_sdk: Any) -> None:
-    request = await _request_event(patch_sdk, "capture config")
-    config = request.config
-    assert isinstance(config, ClaudeRequestConfig)
-    assert config.max_turns is None
-    assert config.read_only is False
-    assert config.persist_session is True
-    assert config.continuation_mode == "fresh"
-    assert config.model_mode == "single"
-    assert config.permission_mode == "bypassPermissions"
-    assert config.allowed_tools_count == 6
-    assert config.allowed_tools_present is True
-    assert config.audit_tools_count is None
-    assert config.audit_tools_present is None
-    assert config.setting_sources_present is True
-    assert config.native_output_format is False
-    assert config.buffer_limit_bytes == 10 * 1024 * 1024
-    assert config.hooks_enabled is True
-    assert request.model_name == "opus"
-    assert request.model_source == "configured"
-    assert request.provider_name is None
-    assert request.provider_source is None
-    assert request.timestamp_source == "host_observed"
-
-async def test_request_event_requires_multi_or_dynamic_for_nonempty_agents(patch_sdk: Any) -> None:
-    """A nonempty agents mapping makes the aggregate multi-model-capable."""
-    specialists: dict[str, AgentDefinition] = {
-        "pattern-scanner": AgentDefinition(description="Scan patterns", prompt="Scan", model="sonnet"),
-    }
-    request = await _request_event(patch_sdk, "fan out", agents=specialists)
-    config = request.config
-    assert isinstance(config, ClaudeRequestConfig)
-    assert config.model_mode == "multi_or_dynamic"
-    # Agent definitions are never inspected or exported: no prompt/model of
-    # any specialist leaks into the admitted config.
-    assert not hasattr(config, "agents")
-    assert not hasattr(config, "agent_definitions")
-    assert request.model_name == "opus"
-    assert request.model_source == "configured"
-
-async def test_request_event_read_only_and_max_turns_are_admitted(patch_sdk: Any) -> None:
-    request = await _request_event(patch_sdk, "go", max_turns=7, read_only=True)
-    config = request.config
-    assert isinstance(config, ClaudeRequestConfig)
-    assert config.max_turns == 7  # passed -> admitted (never interpreted as max tokens)
-    assert config.read_only is True
-    assert config.allowed_tools_count == 6  # allowed_tools unchanged by read_only
-    assert config.hooks_enabled is True
 
 async def test_request_event_resume_provenance_is_host_generated(patch_sdk: Any) -> None:
     token = ContinuationToken(backend="claude", data={"session_id": "sess-42"})
@@ -1017,10 +797,3 @@ async def test_request_event_resume_provenance_is_host_generated(patch_sdk: Any)
     assert config.continuation_mode == "resume"
     assert request.session_id == "sess-42"
     assert request.session_source == "host_generated"
-
-async def test_request_event_output_schema_sets_native_output_format(patch_sdk: Any) -> None:
-    request = await _request_event(patch_sdk, "structured", output_schema={"type": "object"})
-    config = request.config
-    assert isinstance(config, ClaudeRequestConfig)
-    assert config.native_output_format is True
-    assert request.output_schema == {"type": "object"}

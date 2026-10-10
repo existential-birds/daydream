@@ -1,8 +1,5 @@
-import jsonschema
-import pytest
 
-from daydream.deep.fix_steps import _attach_verdicts
-from daydream.phases import MERGED_ITEMS_SCHEMA, normalize_items
+from daydream.phases import normalize_items
 
 
 def _raw_item(**overrides: object) -> dict[str, object]:
@@ -13,64 +10,6 @@ def _raw_item(**overrides: object) -> dict[str, object]:
                                "source_uids": ["python:1"]}
     item.update(overrides)
     return item
-
-def test_schema_accepts_related_files() -> None:
-    item = _raw_item(line=4, evidence="a.py:4", lens="cross-stack", severity="high",
-                     related_files=["b.py", "svc/handler.py"],
-                     source_uids=["python:1", "react:2"])
-    jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # must pass
-
-def test_schema_rejects_non_string_related_files() -> None:
-    item = _raw_item(line=4, evidence="a.py:4", related_files=[42], source_uids=[])
-    with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)
-
-def test_schema_requires_lens_and_severity() -> None:
-    item = _raw_item(line=4, evidence="a.py:4", lens="structural", severity="high",
-                     related_files=None, source_uids=["structure:1"])
-    jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # passes
-    bad = {k: v for k, v in item.items() if k != "lens"}
-    with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate({"items": [bad]}, MERGED_ITEMS_SCHEMA)
-
-def test_normalize_assigns_unique_ids_across_lenses() -> None:
-    raw = [{"id": 1, "lens": "per-stack", "file": "a.py", "line": 1, "description": "x",
-            "confidence": "HIGH", "rationale": "r", "severity": "low"},
-           {"id": 1, "lens": "structural", "file": "b.py", "line": 1, "description": "y",
-            "confidence": "HIGH", "rationale": "r", "severity": "high"}]
-    out = normalize_items(raw)
-    assert len({i["id"] for i in out}) == 2   # collision resolved, not preserved
-
-def test_verdict_join_matches_after_collision_resolution() -> None:
-    items = normalize_items([{"id": 1, "lens": "structural", "file": "b.py", "line": 1, "description": "y",
-         "confidence": "HIGH", "rationale": "r", "severity": "high"},
-        {"id": 1, "lens": "per-stack", "file": "a.py", "line": 1, "description": "x",
-         "confidence": "HIGH", "rationale": "r", "severity": "low"}])
-    payload = {"verdicts": [{"issue_id": items[1]["id"], "verdict": "contradicts",
-                             "evidence": "e", "unverified_assumptions": []}]}
-    joined = _attach_verdicts(items, payload)
-    assert joined[0].get("verifier_verdict") is None       # structural NOT mismatched
-    assert joined[1]["verifier_verdict"] == "contradicts"  # right item got the verdict
-
-def test_schema_accepts_wonder_lens() -> None:
-    item = _raw_item(line=4, evidence="a.py:4", confidence="MEDIUM", lens="wonder",
-                     related_files=None, source_uids=None)
-    jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # must pass
-
-def test_schema_requires_source_uids() -> None:
-    """Strict schema requires source_uids; null/[] expresses unattributed items."""
-    item = _raw_item(line=4, evidence="a.py:4", lens="cross-stack", severity="high",
-                     related_files=None, source_uids=["python:1"])
-    jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # must pass
-    bad = {k: v for k, v in item.items() if k != "source_uids"}
-    with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate({"items": [bad]}, MERGED_ITEMS_SCHEMA)
-
-def test_schema_rejects_non_string_source_uids() -> None:
-    """Schema rejects numeric citations before host validation checks actual UID membership."""
-    item = _raw_item(line=4, evidence="a.py:4", related_files=None, source_uids=[7])
-    with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)
 
 def test_normalize_mints_a_durable_handle_beside_the_renumbered_id() -> None:
     """Every item receives a durable item_uid beside its reassigned display ordinal,

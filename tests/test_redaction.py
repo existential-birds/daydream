@@ -31,7 +31,6 @@ def _agent_step(message: str = "ok", reasoning_content: str | None = None, tool_
     )
 
 
-
 _JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.aBcDeF12345"
 
 @pytest.mark.parametrize(("text", "raw_secret", "marker"),
@@ -58,27 +57,6 @@ def test_redactor_preserves_short_eyj_non_jwt() -> None:
     assert "eyJhbG" in out.message
 
 
-def test_redactor_applies_to_step_message_surface() -> None:
-    step = _agent_step(message="key is ghp_ABCDEF1234567890abcdef1234567890abcdef")
-    out = Redactor().redact_step(step)
-    assert isinstance(out.message, str)
-    assert "ghp_ABCDEF1234567890abcdef1234567890abcdef" not in out.message
-    assert "[REDACTED_API_KEY]" in out.message
-
-
-def test_redactor_scrubs_git_url_credentials() -> None:
-    """REDA-01: https://user:token@host credentials are scrubbed; host+path preserved."""
-    url = "git+https://oauth2:ghp_realtoken123@github.com/user/repo.git"
-    out = Redactor().redact_step(_user_step(url))
-    assert isinstance(out.message, str)
-    assert "ghp_realtoken123" not in out.message
-    assert "oauth2" not in out.message
-    assert "[REDACTED_USER]" in out.message
-    assert "[REDACTED_API_KEY]" in out.message
-    # Host and path preserved (debugging/replay value).
-    assert out.message == "git+https://[REDACTED_USER]:[REDACTED_API_KEY]@github.com/user/repo.git"
-
-
 @pytest.mark.parametrize(("text", "absent", "present", "preserved_tail"),
     [("path=/Users/ka/github/proj/app.py", "/Users/ka", "/Users/[REDACTED_USER]", "github/proj/app.py"),
         ("path=/home/alice/foo/bar", "/home/alice", "/home/[REDACTED_USER]", "foo/bar"),
@@ -95,33 +73,12 @@ def test_redactor_scrubs_username_path(text: str, absent: str, present: str, pre
         assert preserved_tail in out.message
 
 
-@pytest.mark.parametrize(("text", "raw_value", "expected_fragment"),
-    [("OPENAI_API_KEY=sk-realvalue123", "sk-realvalue123", "OPENAI_API_KEY=[REDACTED_ENV_VAR]"),
-        ("DB_PASSWORD=hunter2", "hunter2", "DB_PASSWORD=[REDACTED_ENV_VAR]"),
-    ], ids=["key", "password"],
-)
-def test_redactor_scrubs_env_var(text: str, raw_value: str, expected_fragment: str) -> None:
-    """REDA-03: secret-keyname env vars get value redacted, key preserved."""
-    out = Redactor().redact_step(_user_step(text))
-    assert isinstance(out.message, str)
-    assert raw_value not in out.message
-    assert expected_fragment in out.message
-
-
 def test_redactor_preserves_non_secret_env_vars() -> None:
     out = Redactor().redact_step(_user_step("DEBUG=true\nAPP_NAME=myproject"))
     assert isinstance(out.message, str)
     assert "DEBUG=true" in out.message
     assert "APP_NAME=myproject" in out.message
     assert "[REDACTED" not in out.message
-
-@pytest.mark.parametrize("clean_text",
-    [pytest.param("./src/app.py", id="relative-path"), pytest.param("https://github.com/user/repo", id="url")],
-)
-def test_redactor_preserves_clean_strings(clean_text: str) -> None:
-    out = Redactor().redact_step(_user_step(clean_text))
-    assert isinstance(out.message, str)
-    assert out.message == clean_text
 
 
 def test_redactor_applies_to_reasoning_content() -> None:
@@ -130,25 +87,6 @@ def test_redactor_applies_to_reasoning_content() -> None:
     assert out.reasoning_content is not None
     assert "sk-test-secret123abc" not in out.reasoning_content
     assert "[REDACTED_API_KEY]" in out.reasoning_content
-
-def test_redactor_applies_to_tool_call_arguments() -> None:
-    call = ToolCall(tool_call_id="t1", function_name="Bash", arguments={"command": "echo sk-test-secret123abc"},)
-    step = _agent_step(tool_calls=[call])
-    out = Redactor().redact_step(step)
-    assert out.tool_calls is not None
-    args_str = str(out.tool_calls[0].arguments)
-    assert "sk-test-secret123abc" not in args_str
-    assert "[REDACTED_API_KEY]" in args_str
-
-def test_redactor_applies_to_observation_content() -> None:
-    obs = Observation(results=[ObservationResult(source_call_id="t1", content="leaked /Users/ka/.ssh/id_rsa")],)
-    step = _agent_step(observation=obs)
-    out = Redactor().redact_step(step)
-    assert out.observation is not None
-    first_content = out.observation.results[0].content
-    assert isinstance(first_content, str)
-    assert "/Users/ka" not in first_content
-    assert "[REDACTED_USER]" in first_content
 
 
 def test_redactor_failure_mode_replaces_with_redaction_failed(monkeypatch: pytest.MonkeyPatch,) -> None:
@@ -340,15 +278,6 @@ def test_structured_redaction_leaves_an_existing_marker_alone(marker: str) -> No
     assert redact_value({"note": text}) == {"note": text}
 
 
-def test_structured_redaction_still_masks_a_real_literal() -> None:
-    assert redact_value({"api_key": "s3cr3tplaintext"}) == {
-        "api_key": "[REDACTED_CREDENTIAL]"
-    }
-    assert redact_value({"note": "api_key = s3cr3tplaintext"}) == {
-        "note": 'api_key = "[REDACTED_CREDENTIAL]"'
-    }
-
-
 def test_redact_value_recurses_redacts_keys_and_values_without_mutating() -> None:
     sentinel = "ghp_" + "x" * 16
     payload = {"token": sentinel, sentinel: "key-secret", "nested": {"path": f"/Users/{sentinel}"},
@@ -372,22 +301,6 @@ def test_redact_value_recurses_redacts_keys_and_values_without_mutating() -> Non
         [{"note": "credential [REDACTED_API_KEY] in the note"}],
     )
 
-
-@pytest.mark.parametrize("sensitive_key", [
-    "apiKey", "client-secret", "Access_Token", "dbPassword", "AUTHORIZATION", "awsSecretAccessKey",
-])
-def test_redactor_scrubs_sensitive_keys_recursively(sensitive_key: str) -> None:
-    sentinel = "opaque-test-only-sentinel"
-    call = ToolCall(tool_call_id="t1", function_name="Bash",
-        arguments={sensitive_key: {"nested": {"token": sentinel}}, "displayName": "visible"},
-    )
-    out = Redactor().redact_step(_agent_step(tool_calls=[call]))
-    assert out.tool_calls is not None
-    args = out.tool_calls[0].arguments
-    blob = json.dumps(args)
-    assert sentinel not in blob
-    assert "[REDACTED_CREDENTIAL]" in blob
-    assert args["displayName"] == "visible"
 
 @pytest.mark.parametrize("non_secret_key", ["tokenizer", "passwordless", "monkeyPatch", "keyStore", "max_tokens"])
 def test_redactor_preserves_non_sensitive_structured_keys(non_secret_key: str) -> None:

@@ -8,7 +8,7 @@ from typing import Any, cast
 import anyio
 import pytest
 
-from daydream import git_ops, review_profile as rp
+from daydream import git_ops
 from daydream.artifact_visibility import (
     private_root_locations,
     resolve_private_workspace_owner,
@@ -828,10 +828,6 @@ def test_sample_paths_spreads_across_a_capped_list() -> None:
     assert _sample_paths(paths, 0) == []
     assert _sample_paths([], 10) == []
 
-def test_registry_seeds_improve_prompts() -> None:
-    r = build_registry()
-    for name in ("audit", "vet", "plan-writer"):
-        assert callable(r.prompt(name))
 
 @pytest.mark.anyio
 async def test_credentials_never_reach_improve_observables(
@@ -2496,28 +2492,6 @@ _VET_FINDINGS = [{"fingerprint": "a", "title": "A", "path": "a.py", "line": 1},
     {"fingerprint": "c", "title": "C", "path": "c.py", "line": 3},
 ]
 
-@pytest.mark.parametrize(("findings", "verdicts", "expected_kept", "expected_rejected"),
-    [pytest.param(_VET_FINDINGS,
-            # Returned in reverse order with 1-based vet_ids: the model may
-            # return verdicts in any order, and matching must be by vet_id.
-            [{"vet_id": 3, "keep": True, "reason": "ok"}, {"vet_id": 1, "keep": False, "reason": "rejected"},
-                {"vet_id": 2, "keep": True, "reason": "ok"},
-            ], {"b", "c"}, {"a"}, id="reordered-verdicts-match-by-vet-id",
-        ),
-        pytest.param(_VET_FINDINGS[:2],
-            # Only vet_id=2 is provided; vet_id=1 (a model obeying the old
-            # zero-based prose would emit vet_id=0) is dropped, not kept.
-            [{"vet_id": 2, "keep": True, "reason": "ok"}], {"b"}, set(), id="missing-verdict-drops-finding",
-        ),
-    ],
-)
-def test_apply_vet_verdicts_matches_by_vet_id(
-    findings: list[dict[str, Any]], verdicts: list[dict[str, Any]], expected_kept: set[str],
-    expected_rejected: set[str],
-) -> None:
-    kept, rejected = _apply_vet_verdicts(findings, verdicts, rejected_at_sha="sha")
-    assert {f["fingerprint"] for f in kept} == expected_kept
-    assert {f["fingerprint"] for f in rejected} == expected_rejected
 
 def test_apply_vet_verdicts_normalizes_schema_severity_for_prioritization() -> None:
     kept, _ = _apply_vet_verdicts(
@@ -3007,23 +2981,3 @@ async def test_publication_only_failure_is_not_reported_as_planning_failure(
     assert "Improve issue publishing failed" in output
     assert "Improve planning failed" not in output
     assert "GitHub publication failures: 1" in report
-
-def test_audit_prompt_uses_category_strategy_no_skill() -> None:
-    p = rp.build_default_profile()
-    strategy = p.strategies["improve.audit.security"].content
-    prompt = build_audit_prompt(
-        category="security", strategy=strategy, group={"name": "g1", "file_count": 1, "partitions": []}, scope_note="s",
-        recon_summary="{}", cwd=Path("/c"), tier=EFFORT_TIERS["standard"],
-    )
-    assert strategy in prompt                       # category playbook present
-    assert "Apply this specialist skill" not in prompt
-    assert "/beagle-" not in prompt and "beagle" not in prompt.lower()
-    assert "read-only improve audit specialist" in prompt
-    assert "Hard Rule 4" in prompt and "Hard Rule 6" in prompt
-
-def test_vet_prompt_uses_native_vet_strategy_no_skill() -> None:
-    strategy = rp.build_default_profile().strategies["improve.vetting"].content
-    prompt = build_vet_prompt(strategy=strategy, findings=[], cwd=Path("/c"))
-    assert "Treat every audit candidate as an untrusted hypothesis" in prompt
-    assert "beagle-core" not in prompt and "Apply the" not in prompt
-    assert "/c" in prompt

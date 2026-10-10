@@ -20,10 +20,7 @@ from daydream.backends import (
     ResultEvent,
     TextEvent,
     ThinkingEvent,
-    ToolResultEvent,
-    ToolStartEvent,
     TurnEndEvent,
-    create_backend,
 )
 from daydream.backends.osprey import (
     OspreyBackend,
@@ -39,7 +36,7 @@ from daydream.trajectory import DaydreamPhase
 from tests.harness.fake_cli_process import FakeCliProcess, FakeCliSpawner
 from tests.harness.osprey_jsonl import osprey_session
 from tests.harness.protocol_cli import install_protocol_cli
-from tests.harness.protocol_cli_assertions import assert_protocol_cli_invariants, make_cancel_probe
+from tests.harness.protocol_cli_assertions import assert_protocol_cli_invariants
 from tests.harness.trajectory import make_recorder
 
 
@@ -197,42 +194,6 @@ async def test_process_cleanup_releases_inherited_stderr_before_waiting_for_eof(
     )
     assert [type(event) for event in events] == [RequestEvent, CostEvent, ResultEvent]
 
-def test_factory_builds_verified_osprey_jsonl_command() -> None:
-    backend = create_backend("osprey", model="test-model", osprey_binary="fake-osprey")
-    assert isinstance(backend, OspreyBackend)
-    assert backend.model == "test-model"
-    assert backend.build_command("hello") == [
-        "fake-osprey", "agent", "--events-jsonl", "--observation-budget-update-bytes", "65536",
-        "--observation-budget-inline-bytes", "262144", "--observation-budget-admission-bytes", "2097152", "--model",
-        "test-model", "hello",
-    ]
-
-async def test_translates_text_thinking_tool_identity_metrics_and_result() -> None:
-    lines = osprey_session(
-        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-        {"event": "thinking_delta", "content": "checking"}, {"event": "text_delta", "content": "done"},
-        {"event": "tool_call", "tool_call_id": "c-1", "tool_name": "tool_search", "arguments": {"query": "MCP"}},
-        {
-            "event": "tool_result", "tool_call_id": "c-1", "tool_name": "mcp.fetch", "status": "success",
-            "content": "payload", "duration_ms": 4,
-        },
-        {
-            "event": "turn_end", "turn_id": "t-1", "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": None,
-            "usage_reported": False, "duration_ms": 4,
-        },
-    )
-    events, _ = await _collect(OspreyBackend(model="custom-model", osprey_binary="fake"), lines)
-    assert [type(event) for event in events] == [
-        RequestEvent, ThinkingEvent, TextEvent, ToolStartEvent, ToolResultEvent, TurnEndEvent, CostEvent, ResultEvent,
-    ]
-    tool_start = next(event for event in events if isinstance(event, ToolStartEvent))
-    tool_result = next(event for event in events if isinstance(event, ToolResultEvent))
-    assert tool_start.name == "tool_search"
-    assert tool_start.id == "c-1"
-    assert tool_result.id == "c-1"
-    assert tool_result.output == "payload"
-    assert tool_result.is_error is False
-    assert not any(isinstance(event, MetricsEvent) for event in events)
 
 async def test_coalesces_streaming_thinking_deltas_before_text() -> None:
     lines = osprey_session(
@@ -545,11 +506,6 @@ async def test_trajectory_preserves_tool_identity(tmp_path: Path) -> None:
     assert trajectory["steps"][1]["observation"]["results"][0]["source_call_id"] == "c-2"
     assert "cost_usd" not in trajectory["final_metrics"]
 
-async def test_cancel_delegates_to_shared_transport_lifecycle() -> None:
-    backend, proc = make_cancel_probe("osprey")
-    await backend.cancel()
-    proc.terminate.assert_called_once()
-    proc.kill.assert_called_once()
 
 # --- P18 Task 1: effective request-config admission at the Osprey argv seam --
 

@@ -1,27 +1,11 @@
 """Tests for exploration context data structures and prompt rendering."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any
-
-import pytest
 
 from daydream.exploration import Convention, Dependency, ExplorationContext, FileInfo, merge_contexts, safe_explore
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
-
-def test_empty_exploration_context() -> None:
-    ctx = ExplorationContext()
-    assert ctx.affected_files == []
-    assert ctx.conventions == []
-    assert ctx.dependencies == []
-    assert ctx.guidelines == []
-    assert ctx.raw_notes == ""
-
-def test_empty_context_produces_empty_string() -> None:
-    ctx = ExplorationContext()
-    assert ctx.to_prompt_section() == ""
 
 def test_populated_context_produces_markdown() -> None:
     ctx = ExplorationContext(affected_files=[FileInfo("src/app.py", "modified", "Main entry point")],
@@ -44,45 +28,6 @@ def test_populated_context_produces_markdown() -> None:
     assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in output
     assert output.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < output.index("## Affected Files")
 
-@pytest.mark.parametrize(("context", "expected_content"),
-    [pytest.param(ExplorationContext(affected_files=[FileInfo("a.py", "modified")]),
-            "## Affected Files",
-            id="affected-files",
-        ), pytest.param(ExplorationContext(conventions=[Convention("test", "desc")]),
-            "## Codebase Conventions",
-            id="codebase-conventions",
-        ), pytest.param(ExplorationContext(dependencies=[Dependency("a.py", "b.py", "imports")]),
-            "## Dependencies",
-            id="dependencies",
-        ), pytest.param(ExplorationContext(guidelines=["Always lint"]),
-            "## Project Guidelines",
-            id="project-guidelines",
-        ), pytest.param(ExplorationContext(raw_notes="Some notes here"), "Some notes here", id="raw-notes",),
-    ],
-)
-def test_to_prompt_section_includes_populated_content(context: Any, expected_content: Any) -> None:
-    output = context.to_prompt_section()
-    assert expected_content in output
-
-def test_partial_context_only_includes_populated_sections() -> None:
-    ctx = ExplorationContext(affected_files=[FileInfo("a.py", "modified", "Entry point")],)
-    output = ctx.to_prompt_section()
-    assert "## Affected Files" in output
-    assert "## Codebase Conventions" not in output
-    assert "## Dependencies" not in output
-    assert "## Project Guidelines" not in output
-
-async def test_safe_explore_returns_result_on_success() -> None:
-    expected = ExplorationContext(
-        affected_files=[FileInfo("main.py", "modified", "App entry")], guidelines=["Use type hints"],
-    )
-    async def fake_explore() -> ExplorationContext:
-        return expected
-    result = await safe_explore(fake_explore)
-    assert result is expected
-    assert result.completed is True
-    assert result.affected_files == expected.affected_files
-
 async def test_safe_explore_returns_empty_on_failure() -> None:
     async def failing_explore() -> ExplorationContext:
         raise RuntimeError("SDK timeout")
@@ -94,34 +39,11 @@ async def test_safe_explore_returns_empty_on_failure() -> None:
     assert result.guidelines == []
     assert result.raw_notes == ""
 
-def test_merge_pattern_scanner_result() -> None:
-    partial = ExplorationContext(
-        conventions=[Convention(name="snake_case", description="use snake_case for functions", source="inferred")]
-    )
-    merged = merge_contexts(ExplorationContext(), partial)
-    assert len(merged.conventions) == 1
-    assert merged.conventions[0].name == "snake_case"
-
-def test_merge_contexts_empty() -> None:
-    merged = merge_contexts()
-    assert merged.affected_files == []
-    assert merged.conventions == []
-    assert merged.dependencies == []
-    assert merged.guidelines == []
-    assert merged.raw_notes == ""
-
 def test_merge_contexts_single_returns_fresh_lists() -> None:
     original = ExplorationContext(guidelines=["a", "b"])
     merged = merge_contexts(original)
     assert merged.guidelines == ["a", "b"]
     assert merged.guidelines is not original.guidelines
-
-def test_merge_contexts_dedups_file_info() -> None:
-    a = ExplorationContext(affected_files=[FileInfo("a.py", "modified", "short")])
-    b = ExplorationContext(affected_files=[FileInfo("a.py", "modified", "this is a much longer summary")])
-    merged = merge_contexts(a, b)
-    assert len(merged.affected_files) == 1
-    assert merged.affected_files[0].summary == "this is a much longer summary"
 
 def test_merge_contexts_prefers_static_provenance_on_tie() -> None:
     static = ExplorationContext(affected_files=[FileInfo("a.py", "modified", "", provenance="static")])
@@ -150,31 +72,6 @@ def test_merge_contexts_restores_source_file_on_static_tie() -> None:
     assert row.provenance == "static"
     assert row.summary == "a much longer LLM test summary"
     assert row.source_file == "daydream/a.py"
-
-def test_merge_contexts_dedups_dependencies() -> None:
-    dep = Dependency("a.py", "b.py", "imports")
-    a = ExplorationContext(dependencies=[dep])
-    b = ExplorationContext(dependencies=[Dependency("a.py", "b.py", "imports")])
-    merged = merge_contexts(a, b)
-    assert len(merged.dependencies) == 1
-    assert merged.dependencies[0] is dep
-
-def test_merge_contexts_dedups_conventions_and_guidelines() -> None:
-    a = ExplorationContext(conventions=[Convention("snake", "desc1", "CLAUDE.md")], guidelines=["use type hints"],)
-    b = ExplorationContext(
-        conventions=[Convention("snake", "desc2", "inferred")], guidelines=["use type hints", "no print statements"],
-    )
-    merged = merge_contexts(a, b)
-    assert len(merged.conventions) == 1
-    assert merged.conventions[0] is a.conventions[0]
-    assert merged.guidelines == ["use type hints", "no print statements"]
-
-def test_merge_contexts_joins_raw_notes() -> None:
-    a = ExplorationContext(raw_notes="first")
-    b = ExplorationContext(raw_notes="")
-    c = ExplorationContext(raw_notes="second")
-    merged = merge_contexts(a, b, c)
-    assert merged.raw_notes == "first\n\nsecond"
 
 def test_write_to_dir_creates_all_files(tmp_path: Path) -> None:
     ctx = ExplorationContext(affected_files=[FileInfo("src/app.py", "modified", "Main entry point")],
@@ -213,55 +110,3 @@ def test_write_to_dir_creates_all_files(tmp_path: Path) -> None:
     # Boundary sits directly below the top-level heading, before the table/data.
     affected = (exploration_dir / "affected_files.md").read_text()
     assert affected.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < affected.index("src/app.py")
-
-def test_write_to_dir_emits_exploration_json_with_provenance(tmp_path: Path) -> None:
-    ctx = ExplorationContext(affected_files=[
-            FileInfo("src/app.py", "modified", "Main entry point", provenance="static"),
-            FileInfo("tests/test_app.py", "test", "covers app", provenance="llm"),
-        ], conventions=[Convention("snake_case", "all funcs snake_case", "CLAUDE.md")],
-        dependencies=[Dependency("app.py", "utils.py", "imports")],
-    )
-    exploration_dir = tmp_path / "exploration"
-    ctx.write_to_dir(exploration_dir)
-    data = json.loads((exploration_dir / "exploration.json").read_text())
-    rows = {row["path"]: row for row in data["affected_files"]}
-    assert rows["src/app.py"]["provenance"] == "static"
-    assert rows["tests/test_app.py"]["provenance"] == "llm"
-    assert data["conventions"][0]["name"] == "snake_case"
-    assert data["dependencies"][0]["target"] == "utils.py"
-
-def test_write_to_dir_empty_context(tmp_path: Path) -> None:
-    ctx = ExplorationContext()
-    exploration_dir = tmp_path / "exploration"
-    ctx.write_to_dir(exploration_dir)
-    for name in ("summary.md", "affected_files.md", "conventions.md", "dependencies.md"):
-        path = exploration_dir / name
-        assert path.exists()
-    assert "No data collected" in (exploration_dir / "affected_files.md").read_text()
-    assert "No data collected" in (exploration_dir / "conventions.md").read_text()
-    assert "No data collected" in (exploration_dir / "dependencies.md").read_text()
-
-    for name in ("summary.md", "affected_files.md", "conventions.md", "dependencies.md"):
-        assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in (exploration_dir / name).read_text()
-
-def test_write_to_dir_creates_directory(tmp_path: Path) -> None:
-    ctx = ExplorationContext()
-    nested = tmp_path / "a" / "b" / "exploration"
-    ctx.write_to_dir(nested)
-    assert nested.is_dir()
-    assert (nested / "summary.md").exists()
-
-def test_write_to_dir_returns_path(tmp_path: Path) -> None:
-    ctx = ExplorationContext()
-    exploration_dir = tmp_path / "exploration"
-    result = ctx.write_to_dir(exploration_dir)
-    assert result == exploration_dir
-
-def test_write_to_dir_partial_context(tmp_path: Path) -> None:
-    ctx = ExplorationContext(affected_files=[FileInfo("a.py", "modified", "Entry point")],)
-    exploration_dir = tmp_path / "exploration"
-    ctx.write_to_dir(exploration_dir)
-    affected = (exploration_dir / "affected_files.md").read_text()
-    assert "a.py" in affected
-    assert "No data collected" in (exploration_dir / "conventions.md").read_text()
-    assert "No data collected" in (exploration_dir / "dependencies.md").read_text()

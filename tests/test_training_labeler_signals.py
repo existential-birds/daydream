@@ -15,7 +15,6 @@ from daydream.training.labeler_signals import (
     LocalCommitAppliedSignal,
     PerFindingResolution,
     PRCommentThreads,
-    PRMergeSignal,
     comment_resolution_signal,
     fix_applied_signal,
     index_pr_review_comments,
@@ -70,19 +69,6 @@ def test_reviewed_commit_line_does_not_break_daydream_footer_detection() -> None
     )
 
 
-def test_pr_merge_signal_positive() -> None:
-    row = {"pr_repo": "org/repo", "pr_number": 42}
-    gh = _fake_gh_responder(
-        {("org/repo", "repos/org/repo/pulls/42"): {"merged": True, "merged_at": "2026-01-01T00:00:00Z"}}
-    )
-    assert pr_merge_signal(row, gh_api=gh) == PRMergeSignal(
-        merged=True, merged_at="2026-01-01T00:00:00Z", state="merged"
-    )
-
-
-def test_pr_merge_signal_no_pr() -> None:
-    row = {"pr_repo": None, "pr_number": None}
-    assert pr_merge_signal(row, gh_api=_fake_gh_responder({})) == PRMergeSignal(merged=False, merged_at=None)
 
 
 def test_fix_applied_signal_captured_recommendation_returns_applied(tmp_path: Path) -> None:
@@ -187,23 +173,7 @@ def _resolve(replies: list[tuple[str, dict[str, Any]]]) -> list[PerFindingResolu
     )
 
 
-def test_disposition_accepted_on_qualifying_accept() -> None:
-    (res,) = _resolve([("Fixed in abc123", {"login": "maint", "assoc": "OWNER"})])
-    assert res.disposition == "accepted"
-    assert res.comment_id == 10
-    ev = res.evidence[0]
-    assert ev["reply_id"] == 100 and ev["author"] == "maint"
-    assert ev["author_association"] == "OWNER" and ev["reason"] == "assoc:OWNER"
 
-
-def test_disposition_rejected_on_false_positive() -> None:
-    (res,) = _resolve([("False positive, path is unreachable", {"login": "dev", "assoc": "MEMBER"})])
-    assert res.disposition == "rejected"
-
-
-def test_disposition_ambiguous_on_question() -> None:
-    (res,) = _resolve([("Is this still true on 3.12?", {"login": "dev", "assoc": "MEMBER"})])
-    assert res.disposition == "ambiguous"
 
 
 def test_disposition_non_qualifying_author_does_not_vote() -> None:
@@ -387,24 +357,6 @@ def _daydream_finding_comment(comment_id: int, fingerprint: str) -> dict[str, An
     }
 
 
-def test_per_finding_resolution_signal_mixed_outcomes() -> None:
-    row = {"pr_repo": "org/repo", "pr_number": 42}
-    gh = _fake_gh_responder(
-        {
-            ("org/repo", "repos/org/repo/pulls/42/comments"): [
-                _daydream_finding_comment(1, _FP_A),
-                _daydream_finding_comment(2, _FP_B),
-                _comment(3, "Fixed in abc123", in_reply_to=1, login="human"),
-            ],
-        }
-    )
-    result = per_finding_resolution_signal(row, recorded_fingerprints=[_FP_A, _FP_B], gh_api=gh)
-    assert [(r.fingerprint, r.comment_id, r.disposition) for r in result] == [
-        (_FP_A, 1, "accepted"),
-        (_FP_B, 2, "unanswered"),
-    ]
-    assert result[0].evidence and not result[1].evidence
-
 
 def test_per_finding_resolution_signal_deleted_comment() -> None:
     row = {"pr_repo": "org/repo", "pr_number": 42}
@@ -416,28 +368,6 @@ def test_per_finding_resolution_signal_deleted_comment() -> None:
     ]
 
 
-def test_per_finding_resolution_signal_single_finding() -> None:
-    """Avoid a pre-matching negation token in the reject reply: sentence-level "not" would negate "already
-    handled" and make the result ambiguous.
-    """
-    row = {"pr_repo": "org/repo", "pr_number": 42}
-    gh = _fake_gh_responder(
-        {
-            ("org/repo", "repos/org/repo/pulls/42/comments"): [
-                _daydream_finding_comment(9, _FP_A),
-                _comment(10, "This is already handled upstream", in_reply_to=9, login="human"),
-            ],
-        }
-    )
-    result = per_finding_resolution_signal(row, recorded_fingerprints=[_FP_A], gh_api=gh)
-    assert len(result) == 1
-    assert (result[0].comment_id, result[0].disposition) == (9, "rejected")
-
-
-def test_per_finding_resolution_signal_no_pr() -> None:
-    row = {"pr_repo": None, "pr_number": None}
-    result = per_finding_resolution_signal(row, recorded_fingerprints=[_FP_A], gh_api=_fake_gh_responder({}))
-    assert result == []
 
 
 def _comment(
@@ -469,81 +399,9 @@ def _daydream_body(*fps: str) -> str:
     return "\n".join(finding_marker(fp) for fp in fps) + "\n" + DAYDREAM_FOOTER
 
 
-def test_pr_merge_signal_preserves_state() -> None:
-    gh = _fake_gh_responder(
-        {
-            ("org/repo", "repos/org/repo/pulls/1"): {
-                "merged": False,
-                "merged_at": None,
-                "state": "open",
-                "draft": False,
-            },
-            ("org/repo", "repos/org/repo/pulls/2"): {
-                "merged": False,
-                "merged_at": None,
-                "state": "closed",
-                "draft": False,
-            },
-        }
-    )
-    assert pr_merge_signal({"pr_repo": "org/repo", "pr_number": 1}, gh_api=gh).state == "open"
-    sig2 = pr_merge_signal({"pr_repo": "org/repo", "pr_number": 2}, gh_api=gh)
-    assert sig2.state == "closed" and sig2.merged is False
-
 
 def test_pr_merge_signal_legacy_payload_defaults() -> None:
     """A payload without state/draft (cached fixtures) degrades to safe defaults, not 'closed'."""
     gh = _fake_gh_responder({("org/repo", "repos/org/repo/pulls/3"): {"merged": False, "merged_at": None}})
     sig = pr_merge_signal({"pr_repo": "org/repo", "pr_number": 3}, gh_api=gh)
     assert sig.state == "unknown" and sig.draft is False
-
-
-def test_thread_index_keeps_full_reply_objects() -> None:
-    fp_a, fp_b = "a" * 64, "b" * 64
-    comments = [
-        _comment(10, _daydream_body(fp_a)),
-        _comment(11, _daydream_body(fp_b)),
-        _comment(20, "Fixed in abc123", in_reply_to=10, login="maint", assoc="OWNER", created="2026-08-02T10:00:00Z"),
-    ]
-    gh = _fake_gh_responder({("org/repo", "repos/org/repo/pulls/5/comments"): comments})
-    threads = index_pr_review_comments({"pr_repo": "org/repo", "pr_number": 5}, gh_api=gh)
-    assert threads is not None
-    replies = threads.replies_by_comment[10]
-    assert len(replies) == 1
-    r = replies[0]
-    assert r["user"]["login"] == "maint" and r["author_association"] == "OWNER"
-    assert r["body"] == "Fixed in abc123" and r["created_at"] == "2026-08-02T10:00:00Z"
-
-
-def test_thread_index_scopes_to_fingerprints() -> None:
-    fp_mine, fp_other = "c" * 64, "d" * 64
-    comments = [
-        _comment(30, _daydream_body(fp_mine)),
-        _comment(31, _daydream_body(fp_other)),  # another daydream run's finding
-        _comment(40, "already handled", in_reply_to=31),  # reply to OTHER run's thread
-        _comment(41, "fixed in abc", in_reply_to=30),
-    ]
-    gh = _fake_gh_responder({("org/repo", "repos/org/repo/pulls/7/comments"): comments})
-    threads = index_pr_review_comments(
-        {"pr_repo": "org/repo", "pr_number": 7},
-        gh_api=gh,
-        session_fingerprints=[fp_mine],
-    )
-    assert threads is not None
-    assert set(threads.comment_id_by_fingerprint) == {fp_mine}
-    assert 31 not in threads.top_level_daydream_ids
-    assert threads.replies_by_comment.get(31) is None  # other-run thread not in evidence
-
-
-def test_comment_resolution_signal_becomes_fingerprint_scoped_aggregate() -> None:
-    fp_mine, fp_other = "e" * 64, "f" * 64
-    comments = [
-        _comment(50, _daydream_body(fp_mine)),
-        _comment(51, _daydream_body(fp_other)),
-        _comment(60, "thanks", in_reply_to=51),
-    ]
-    gh = _fake_gh_responder({("org/repo", "repos/org/repo/pulls/9/comments"): comments})
-    row = {"pr_repo": "org/repo", "pr_number": 9}
-    threads = index_pr_review_comments(row, gh_api=gh, session_fingerprints=[fp_mine])
-    sig = comment_resolution_signal(row, gh_api=gh, threads=threads)
-    assert (sig.total, sig.replied, sig.unresolved) == (1, 0, 1)

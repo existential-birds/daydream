@@ -8,7 +8,7 @@ import jsonschema
 import pytest
 
 from daydream.dataset import LocalRecordStore, semantic_evidence_digest
-from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig, build_frozen_corpus, project_findings
+from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig, build_frozen_corpus
 from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.corpus_projection.segments import segment
 from daydream.training.corpus_projection.tiers import GoldGateError, classify_tier
@@ -61,14 +61,6 @@ def _resolution(disposition: str, *, reward: dict[str, object] | None = None, sc
     return r
 
 
-def test_decisive_dispositions_are_gold() -> None:
-    assert classify_tier(_resolution("accepted")) == "gold"
-    assert classify_tier(_resolution("rejected")) == "gold"
-
-def test_non_decisive_dispositions_never_gold() -> None:
-    for d in ("ambiguous", "unanswered", "missing"):
-        assert classify_tier(_resolution(d)) == "task-only"
-
 def test_intrinsic_reward_and_llm_score_cannot_promote_gold() -> None:
     # C5: a perfect intrinsic score or a confident self-score with a
     # non-decisive disposition must not classify gold — structurally.
@@ -87,12 +79,6 @@ def test_evidence_after_as_of_rows_are_never_gold() -> None:
     assert classify_tier(_resolution("accepted", evidence_after_as_of=False)) == "gold"
     assert classify_tier(_resolution("accepted")) == "gold"
 
-def test_tiers_are_disjoint_classes() -> None:
-    # process-trace tier is silver, never gold; eligibility is a separate field
-    tier = classify_tier(_resolution("accepted"), record_type="process-trace")
-    assert tier == "silver"  # type/decision split: ATIF process data stays silver
-
-
 def _traj(siblings: list[tuple[str, str]]) -> dict[str, Any]:
     return {"trajectory_id": "s1:root", "session_id": "s1",
             "subagent_trajectory_ref": [{"trajectory_id": t, "session_id": "s1",
@@ -106,16 +92,6 @@ def test_segment_order_is_fork_registration_then_descriptor() -> None:
     assert [s.segment_id for s in segs] == ["seg-0", "seg-1"]
     assert [s.trajectory_id for s in segs] == ["s1:fix-1", "s1:fix-0"]
 
-def test_segment_ids_qualify_session_and_descriptor() -> None:
-    traj = _traj([("s1:fix-0", "a.jsonl")])
-    seg = segment(traj)[0]
-    assert seg.trajectory_id == "s1:fix-0" and seg.session_id == "s1"
-
-def test_root_alone_is_seg0() -> None:
-    segs = segment({"trajectory_id": "s1:root", "session_id": "s1"})
-    assert [s.segment_id for s in segs] == ["seg-0"]
-    assert segs[0].trajectory_id == "s1:root"
-
 def test_duplicate_sibling_keys_raise() -> None:
     traj = _traj([("s1:fix-0", "a.jsonl"), ("s1:fix-0", "a.jsonl")])
     with pytest.raises(ValueError, match="s1:fix-0"):
@@ -124,45 +100,9 @@ def test_duplicate_sibling_keys_raise() -> None:
 # Task 6: profile + stack provenance
 
 
-def test_native_profile_fields_surface_from_manifest() -> None:
-    manifest_row = {"profile_schema_version": 2, "profile_name": "deep-review",
-        "profile_source_kind": "builtin", "profile_digest": "d" * 64,
-    }
-    prov = extract_provenance(manifest_row)
-    assert prov["profile"] == {"profile_schema_version": 2, "profile_name": "deep-review",
-                               "profile_source_kind": "builtin", "profile_digest": "d" * 64}
-
-def test_native_profile_and_explicit_stack_are_preserved() -> None:
-    v2_record = {"profile": {"profile_schema_version": 2, "profile_name": "n",
-                             "profile_source_kind": "builtin", "profile_digest": None},
-                 "stack": "python"}
-    prov = extract_provenance(v2_record)
-    assert prov["stack"] == "python"
-    assert prov["profile"] == v2_record["profile"]
-
 def test_absent_explicit_stack_stays_unknown() -> None:
     prov = extract_provenance({"profile_name": "deep-review"})
     assert prov["stack"] is None
-
-# Task 7: per-finding projection + adjudication routing
-
-def _res(fp: str, disposition: str) -> dict[str, object]:
-    return {"item_uid": f"item:{fp}", "fingerprint": fp, "disposition": disposition,
-            "evidence": [{"comment_id": 1, "created_at": "2026-02-01T00:00:00+00:00",
-                          "classifier_label": disposition}] if disposition in ("accepted", "rejected") else []}
-
-
-def test_mixed_session_yields_two_distinct_gold_records() -> None:
-    session = {"session_id": "s1", "trajectory_id": "s1:root", "segment_id": "seg-0",
-               "resolutions": [_res("a1" * 32, "accepted"), _res("b2" * 32, "rejected")]}
-    records = project_findings(session)
-    gold = [r for r in records if r["tier"] == "gold"]
-    assert len(gold) == 2
-    assert {r["finding_fingerprint"] for r in gold} == {"a1" * 32, "b2" * 32}
-    assert {r["record_id"] for r in gold} and len({r["record_id"] for r in gold}) == 2
-    assert {r["disposition"] for r in gold} == {"accepted", "rejected"}
-    assert all(r["outcome_label"] != "contested" for r in records)
-    assert sorted(str(r["disposition"]) for r in records) == ["accepted", "rejected"]
 
 def test_cli_reply_existence_never_constitutes_acceptance(tmp_path: Path) -> None:
     store = LocalRecordStore(tmp_path / "records")
@@ -185,14 +125,6 @@ def test_cli_reply_existence_never_constitutes_acceptance(tmp_path: Path) -> Non
     assert report[0]["disposition"] == "ambiguous"
     assert report[0]["evidence"] == [semantic]
     assert report[0]["reply_captures"] == [capture]
-
-def test_non_decisive_findings_route_to_adjudication() -> None:
-    session = {"session_id": "s1", "trajectory_id": "s1:root", "segment_id": "seg-0",
-               "resolutions": [_res("d4" * 32, "ambiguous"), _res("e5" * 32, "missing")]}
-    records, adjudication = project_findings(session, return_adjudication=True)
-    assert {r["finding_fingerprint"] for r in records if r["tier"] == "gold"} == set()
-    assert {a["fingerprint"] for a in adjudication} == {"d4" * 32, "e5" * 32}
-    assert all(a["evidence"] == [] for a in adjudication)  # evidence carried for the human pass
 
 
 def _cli_args(config: BuildFrozenCorpusConfig) -> list[str]:

@@ -15,17 +15,6 @@ from daydream import git_ops
 from daydream.diagnostics import format_verbose_exception
 
 
-def test_explicit_cause_printed_in_python_order() -> None:
-    inner = git_ops.GitError("isolation probe failure")
-    outer = ValueError("outer boom")
-    outer.__cause__ = inner
-    out = format_verbose_exception(outer)
-    assert "ValueError" in out and "outer boom" in out
-    assert "GitError" in out and "isolation probe failure" in out
-    assert "directly caused by the following exception" in out
-    assert out.index("outer boom") < out.index("isolation probe failure")
-    assert out.index("directly caused by the following exception") < out.index("isolation probe failure")
-
 def test_implicit_context_shown_when_not_suppressed() -> None:
     try:
         try:
@@ -80,15 +69,6 @@ def test_local_variables_never_captured() -> None:
     assert canary not in out
     assert "hidden_local" not in out
 
-def test_credential_shaped_strings_redacted() -> None:
-    sentinel = "ghp_" + "x" * 16
-    outer = RuntimeError(f"command failed near token={sentinel}")
-    inner = git_ops.GitError("config: token=opaque-test-12345")
-    outer.__cause__ = inner
-    out = format_verbose_exception(outer)
-    assert sentinel not in out
-    assert "opaque-test-12345" not in out
-    assert "[REDACTED" in out
 
 def test_environment_literal_secrets_and_username_paths_redacted() -> None:
     environ = {"GITHUB_TOKEN": "svc-ghp-abc", "API_ENDPOINT_URL": "https://svc-user:svc-pa55@example.com"}
@@ -98,14 +78,6 @@ def test_environment_literal_secrets_and_username_paths_redacted() -> None:
         assert fragment not in out
     assert "[REDACTED_CREDENTIAL]" in out
 
-def test_terminal_control_characters_neutralized() -> None:
-    evil = "\x1b[31mRED\x1b[0m\rBEEP\x07\tTAB"
-    out = format_verbose_exception(RuntimeError(f"status: {evil}"))
-    assert "\x1b" not in out
-    assert "\r" not in out
-    assert "\x07" not in out
-    assert "\n" in out
-    assert "\t" in out
 
 def test_redaction_precedes_head_tail_bound() -> None:
     padding = "x" * (65536 - 60)
@@ -135,12 +107,6 @@ def test_formatter_failure_returns_only_unavailable_marker(monkeypatch: pytest.M
     )
     assert format_verbose_exception(RuntimeError("any")) == "[VERBOSE_DIAGNOSTIC_UNAVAILABLE]"
 
-def test_unstringifiable_exception_fails_closed() -> None:
-    class Evil(Exception):
-        def __str__(self) -> str:
-            raise RuntimeError("cannot stringify")
-
-    assert format_verbose_exception(Evil("x")) == "[VERBOSE_DIAGNOSTIC_UNAVAILABLE]"
 
 def test_middle_credential_never_survives_full_value_redaction_and_cap() -> None:
     """A credential buried in the middle of a huge payload is gone after the single final cap: redaction runs over

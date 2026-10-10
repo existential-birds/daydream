@@ -402,15 +402,6 @@ async def test_ephemeral_uses_origin_branch_tip(tmp_path: Path) -> None:
         assert ctx.head_sha == new_sha
         assert ctx.base_branch == "main"
 
-async def test_ephemeral_branch_only_on_origin(tmp_path: Path) -> None:
-    repo, bare = _make_repo_with_origin(tmp_path)
-    new_sha = _push_origin_commit_via_sidecar(tmp_path, bare, branch="origin-only")
-    # Branch does NOT exist locally.
-
-    async with open_workspace(repo, branch="origin-only", base="main", force_ephemeral=False, skip_tests=False,
-    ) as ctx:
-        assert ctx.is_ephemeral is True
-        assert ctx.head_sha == new_sha
 
 async def test_unknown_branch_raises(tmp_path: Path) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)

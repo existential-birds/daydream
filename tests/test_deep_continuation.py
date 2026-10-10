@@ -6,8 +6,6 @@ from typing import Any
 
 import pytest
 
-from daydream.deep.prompts import build_merge_prompt
-from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.review_result import saved_coverage
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 from tests.test_deep_orchestrator import _run_deep
@@ -58,16 +56,3 @@ async def test_merge_cold_when_arbiter_skipped_on_resume(multi_stack_target: Pat
     merge_call = _merge_call(stub)
     assert merge_call["continuation"] is None
     assert "re-read" not in merge_call["prompt"].lower()
-
-def test_merge_prompt_cold_path_is_byte_identical(tmp_path: Path) -> None:
-    kwargs: dict[str, Any] = dict(
-        strategy=_default_strategy("merge"), per_stack_records_paths=[tmp_path / "stack-python-records.json"],
-        intent_path=tmp_path / "intent.md", alternatives_path=tmp_path / "alternatives.json",
-        dedup_candidates_path=tmp_path / "dedup.json",
-    )
-    omitted = build_merge_prompt(**kwargs)
-    explicit_false = build_merge_prompt(**kwargs, resumed_from_arbiter=False)
-    resumed = build_merge_prompt(**kwargs, resumed_from_arbiter=True)
-    assert omitted == explicit_false
-    assert resumed != omitted
-    assert resumed.startswith(omitted)

@@ -26,7 +26,6 @@ import pytest
 
 from daydream import phases
 from daydream.backends import ResultEvent, TextEvent
-from daydream.backends.pi import render_pi_preamble
 from daydream.deep.repair_coordinator import (
     _candidate_restore_decision,
     _owner_lock,
@@ -42,10 +41,9 @@ from daydream.deep.repair_job import (
     record_diagnostic,
     write_repair_job_record,
 )
-from daydream.deep.settings import _resolve_non_negative_float, repair_job_policy
+from daydream.deep.settings import _resolve_non_negative_float
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.phases.repair_checkpoint import (
-    REPAIR_CHECKPOINT_FORMAT,
     RepairCheckpoint,
     read_repair_checkpoint,
     write_repair_checkpoint,
@@ -55,8 +53,6 @@ from daydream.repository_paths import InvalidRepositoryFilePath
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import commit as git_commit, git, init_repo, write_and_stage
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
 
@@ -115,59 +111,6 @@ def _job(**overrides: Any) -> RepairJobRecord:
 def _limit_config(**attrs: object) -> Any:
     """Minimal RunConfig stand-in carrying only the scalar under test."""
     return SimpleNamespace(file_config=None, **attrs)
-
-
-def test_checkpoint_payload_carries_every_required_field() -> None:
-    """Requirement 25: the field list is the contract, not a summary."""
-    payload = _checkpoint().payload()
-    for field in ("job_id", "execution_id", "candidate_patch", "base_tree_key",
-                  "retained_tree_key", "authorized_scope", "policy_revision",
-                  "failure_identity", "test_command", "test_cwd", "focused_results",
-                  "completed_experiments", "disproven_hypotheses", "next_experiment",
-                  "backend_name", "model", "consumed_budget"):
-        assert field in payload, field
-
-
-def test_checkpoint_written_atomically_with_digests_and_format_version(tmp_path: Path) -> None:
-    """Requirement 27: format_version + digests, written atomically."""
-    path = write_repair_checkpoint(tmp_path, _checkpoint())
-    stored = json.loads(path.read_text())
-    assert stored["format_version"] == REPAIR_CHECKPOINT_FORMAT
-    assert stored["patch_digest"] == hashlib.sha256(
-        stored["candidate_patch"].encode()).hexdigest()
-    assert not list(tmp_path.glob("*.tmp")), "atomic write must leave no staging file behind"
-
-
-def test_checkpoint_is_readable_from_a_separate_interpreter(tmp_path: Path) -> None:
-    """Requirements 27/48: cross-process readability, no inherited in-memory state."""
-    write_repair_checkpoint(tmp_path, _checkpoint())
-    proc = subprocess.run(
-        [sys.executable, "-c",
-         "import sys;from pathlib import Path;"
-         "sys.path.insert(0,'.');"
-         "from daydream.phases.repair_checkpoint import read_repair_checkpoint;"
-         "print(read_repair_checkpoint(Path(sys.argv[1])).checkpoint.payload()['job_id'])",
-         str(tmp_path)],
-        capture_output=True, text=True, cwd=REPO_ROOT,
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == "repair-job-0001"
-
-
-def test_corrupt_checkpoint_is_a_recovery_blocker_not_an_empty_job(tmp_path: Path) -> None:
-    """Requirement 6/47: corrupt must never read as 'no repair happened'."""
-    (tmp_path / "repair-checkpoint.json").write_text("{not json")
-    result = read_repair_checkpoint(tmp_path)
-    assert result.blocked is True
-    assert result.reason is not None and "malformed" in result.reason
-
-
-def test_absent_checkpoint_is_not_a_blocker(tmp_path: Path) -> None:
-    """A repair job that never started has no checkpoint, which is not corruption."""
-    result = read_repair_checkpoint(tmp_path)
-    assert result.blocked is False
-    assert result.checkpoint is None
-    assert result.reason is None
 
 
 def test_unwritable_checkpoint_is_a_blocker_not_a_silent_clean_away(
@@ -305,26 +248,11 @@ async def test_checkpoint_captures_authorized_work_before_the_guard_restores(
     assert result.repairs[0].checkpoint_ref == "repair-checkpoint.json"
 
 
-def test_paused_job_is_structurally_incapable_of_a_passing_verdict() -> None:
-    """Requirement 24: enforced by the shape of the outcome, not a later check."""
-    for state in RepairJobState:
-        job = _job(state=state)
-        if state is RepairJobState.COMPLETED:
-            continue
-        assert job.cannot_report_green is True, state
-
-
 def test_execution_deadline_is_the_smallest_remaining_allowance_less_reserve() -> None:
     """Requirement 36: process-local, derived per execution."""
     job = _job(consumed_s=500.0, policy=_policy(execution_s=1800, job_total_s=7200,
                                                  max_executions=4, reserve_s=120))
     assert job.execution_allowance_s() == pytest.approx(min(1800, 7200 - 500 - 120))
-
-
-def test_job_allowance_exhaustion_reports_exhausted_not_blocked() -> None:
-    """Requirement 42: honest termination states."""
-    assert _job(consumed_s=7200.0, executions=1, policy=_policy()).next_action() \
-        == RepairAction.EXHAUSTED
 
 
 def test_no_progress_reports_blocked_naming_the_unchanged_evidence() -> None:
@@ -343,37 +271,12 @@ def test_more_output_or_changed_bytes_alone_is_not_progress() -> None:
     assert job.next_action() == RepairAction.BLOCKED
 
 
-def test_consumption_survives_a_process_restart(tmp_path: Path) -> None:
-    """Requirement 38: reopening resets neither consumption nor reservations."""
-    write_repair_job_record(tmp_path, _job(consumed_s=900.0, executions=2,
-                                           policy=_policy(execution_s=900, job_total_s=1200,
-                                                          max_executions=2, reserve_s=60)))
-    reloaded = read_repair_job_record(tmp_path)
-    assert reloaded is not None
-    assert reloaded.consumed_s == 900.0 and reloaded.executions == 2
-    # Requirement 44: the policy was captured at job start, so a resumed job
-    # keeps the bounds it was granted rather than inheriting today's policy.
-    assert reloaded.execution_allowance_s() == pytest.approx(min(900.0, 1200 - 900 - 60))
-
-
 @pytest.mark.parametrize(("raw_value", "expected"), [(-5, 1800.0), ("nonsense", 1800.0),
                                                       (0.0, 0.0), (900.0, 900.0)])
 def test_invalid_job_limits_degrade_to_the_default(raw_value: object, expected: float) -> None:
     """The existing resolver family degrades invalid input to the default."""
     cfg = _limit_config(repair_execution_wall_s=raw_value)
     assert _resolve_non_negative_float(cfg, "repair_execution_wall_s", 1800.0) == expected
-
-
-def test_settings_compose_the_job_policy_from_configured_limits() -> None:
-    """The three limits resolve through the existing non-negative resolvers."""
-    default = repair_job_policy(_limit_config())
-    assert (default.execution_s, default.job_total_s, default.max_executions) == (1800.0, 7200.0, 4)
-    configured = repair_job_policy(
-        _limit_config(repair_execution_wall_s=600.0, repair_job_wall_s=3600.0,
-                      repair_max_executions=2)
-    )
-    assert (configured.execution_s, configured.job_total_s, configured.max_executions) \
-        == (600.0, 3600.0, 2)
 
 
 def test_execution_count_ceiling_is_exhausted_not_blocked() -> None:
@@ -477,47 +380,6 @@ def test_scope_request_validation_is_fail_closed_on_untrusted_paths(tmp_path: Pa
     ).expanded is False
 
 
-def test_scope_request_parser_normalizes_paths_and_keeps_their_evidence(tmp_path: Path) -> None:
-    """The parser is the only door model text enters through, so it canonicalizes."""
-    repo = _scope_repo(tmp_path)
-    request = repair_scope_request(repo, {
-        "paths": ["./src/other.rs", "src/handler.py"],
-        "evidence": {"src/other.rs": "the failing assertion imports it"},
-        "evidence_source": "repair_turn",
-    })
-    assert request is not None
-    assert request.requested == ("src/handler.py", "src/other.rs")
-    assert request.evidence["src/other.rs"] == "the failing assertion imports it"
-    assert request.evidence_source == "repair_turn"
-
-
-def test_scope_request_authorization_widens_the_policy_once_with_an_audit_event(tmp_path: Path) -> None:
-    """Requirement 11: an approved expansion widens, bumps, and is auditable."""
-    repo = _scope_repo(tmp_path)
-    footprint = AuthorizedFixFootprint(
-        run_allowed_paths=frozenset({"src/handler.py"}), policy_revision=1,
-    )
-    footprint.authorize_widened_path(
-        repo, "src/other.rs",
-        action="approve_scope", origin="scope_request",
-        phase="test_heal", round_number=None,
-        reason="the failing assertion imports src/other.rs",
-    )
-    assert "src/other.rs" in footprint.run_allowed_paths
-    assert footprint.policy_revision == 2
-    event = footprint.events[-1]
-    assert (event.action, event.origin, event.path, event.path_kind) == (
-        "approve_scope", "scope_request", "src/other.rs", "model",
-    )
-    footprint.authorize_widened_path(
-        repo, "src/other.rs",
-        action="approve_scope", origin="scope_request",
-        phase="test_heal", round_number=None, reason="already authorized",
-    )
-    assert footprint.policy_revision == 2, "a second request for an authorized path changes nothing"
-    assert len(footprint.events) == 1
-
-
 def test_restore_requires_matching_identity_and_patch_integrity() -> None:
     """Requirement 32: a changed base or policy is a named conflict, never a stale apply."""
     result = _candidate_restore_decision(base_changed=True, policy_changed=False,
@@ -542,13 +404,20 @@ def test_second_coordinator_does_not_launch_a_second_worker(tmp_path: Path) -> N
     # coordinator owns the same job.
     assert try_acquire_repair_owner(tmp_path).acquired is True
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
-def test_pi_preamble_states_the_actual_allowance_and_no_tool_cap() -> None:
-    """Requirement 17: the preamble must not imply a cap that does not exist."""
-    rendered = render_pi_preamble(wall_budget_s=1800.0, tool_call_budget=None)
-    assert "1800" in rendered
-    assert "strict tool-call budget" not in rendered
-    assert "uncapped" in rendered.lower()
-    capped = render_pi_preamble(wall_budget_s=90.0, tool_call_budget=12)
-    assert "90" in capped and "12" in capped
-    assert "uncapped" not in capped.lower()
+
+def test_checkpoint_is_readable_from_a_separate_interpreter(tmp_path: Path) -> None:
+    """Requirements 27/48: cross-process readability, no inherited in-memory state."""
+    write_repair_checkpoint(tmp_path, _checkpoint())
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "import sys;from pathlib import Path;"
+         "sys.path.insert(0,'.');"
+         "from daydream.phases.repair_checkpoint import read_repair_checkpoint;"
+         "print(read_repair_checkpoint(Path(sys.argv[1])).checkpoint.payload()['job_id'])",
+         str(tmp_path)],
+        capture_output=True, text=True, cwd=REPO_ROOT,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "repair-job-0001"

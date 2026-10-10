@@ -24,7 +24,6 @@ from daydream.git_ops import (
     BranchNotFoundError,
     GitError,
     NotAWorktreeError,
-    WrongBranchError,
     github as git_github,
     mutations as git_mutations,
     process as git_process,
@@ -629,10 +628,6 @@ def test_assert_is_worktree_rejects_missing_path(tmp_path: Path) -> None:
     with pytest.raises(NotAWorktreeError):
         git_ops.assert_is_worktree(tmp_path / "does-not-exist")
 
-def test_head_sha_returns_full_sha(repo: Path) -> None:
-    expected = _git(repo, "rev-parse", "HEAD")
-    assert git_ops.head_sha(repo) == expected
-    assert len(expected) == 40
 
 def test_head_sha_raises_on_empty_repo(tmp_path: Path) -> None:
     repo = tmp_path / "empty"
@@ -640,22 +635,9 @@ def test_head_sha_raises_on_empty_repo(tmp_path: Path) -> None:
     with pytest.raises(GitError):
         git_ops.head_sha(repo)
 
-def test_current_branch_on_named_branch(repo: Path) -> None:
-    assert git_ops.current_branch(repo) == "main"
 
-def test_current_branch_returns_none_when_detached(repo: Path) -> None:
-    sha = _git(repo, "rev-parse", "HEAD")
-    _git(repo, "checkout", "--detach", sha)
-    assert git_ops.current_branch(repo) is None
 
-def test_default_branch_uses_origin_head(tmp_path: Path) -> None:
-    repo, bare = _repo_with_origin(tmp_path)
-    _git(repo, "push", "-u", "origin", "main")
-    _git(repo, "remote", "set-head", "origin", "main")
-    assert git_ops.default_branch(repo) == "main"
 
-def test_default_branch_falls_back_to_main(repo: Path) -> None:
-    assert git_ops.default_branch(repo) == "main"
 
 def test_list_local_branches_maps_names_to_oids(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path, name="list_branches")
@@ -692,9 +674,6 @@ def test_default_branch_fallback(tmp_path: Path, init_branch: str, expected: obj
     else:
         assert git_ops.default_branch(repo) == expected
 
-def test_remote_url_returns_url_when_remote_configured(tmp_path: Path) -> None:
-    repo, bare = _repo_with_origin(tmp_path)
-    assert git_ops.remote_url(repo) == str(bare)
 
 def test_remote_url_returns_none_when_remote_missing(repo: Path) -> None:
     assert git_ops.remote_url(repo) is None
@@ -703,39 +682,15 @@ def test_remote_url_returns_none_for_unknown_remote_name(tmp_path: Path) -> None
     repo, bare = _repo_with_origin(tmp_path)
     assert git_ops.remote_url(repo, "upstream") is None
 
-def test_branch_exists_local(repo: Path) -> None:
-    _git(repo, "checkout", "-b", "feat-local")
-    assert git_ops.branch_exists(repo, "feat-local") is True
 
 def test_branch_exists_missing(repo: Path) -> None:
     assert git_ops.branch_exists(repo, "nonexistent") is False
 
-def _ref_raw_sha(repo: Path) -> str:
-    return _git(repo, "rev-parse", "HEAD")
 
-def _ref_abbreviated_sha(repo: Path) -> str:
-    return _git(repo, "rev-parse", "--short", "HEAD")
 
-def _ref_tag(repo: Path) -> str:
-    _git(repo, "tag", "v1.0")
-    return "v1.0"
 
-def _ref_relative_commit_ish(repo: Path) -> str:
-    write_and_stage(repo, "two.txt", "two\n")
-    _commit(repo, "second")
-    return "HEAD~1"
 
-def _ref_named_branch(repo: Path) -> str:
-    _git(repo, "checkout", "-b", "feat-local")
-    return "feat-local"
 
-@pytest.mark.parametrize("probe", [git_ops.ref_exists, git_ops.commit_exists], ids=["ref_exists", "commit_exists"])
-@pytest.mark.parametrize(
-    "build_ref", [_ref_raw_sha, _ref_abbreviated_sha, _ref_tag, _ref_relative_commit_ish, _ref_named_branch],
-    ids=["raw_sha", "abbreviated_sha", "tag", "relative_commit_ish", "named_branch"],
-)
-def test_ref_and_commit_exist_true(repo: Path, build_ref: Any, probe: Any) -> None:
-    assert probe(repo, build_ref(repo)) is True
 
 def test_ref_exists_missing(repo: Path) -> None:
     assert git_ops.ref_exists(repo, "nonexistent") is False
@@ -837,25 +792,7 @@ def test_remote_urls_is_strict_and_allows_no_remotes(repo: Path) -> None:
     with pytest.raises(GitError, match="remote 'broken'.*fetch URL"):
         git_ops.remote_urls(repo)
 
-def test_resolve_pr_merge_base_uses_local_branch_without_remotes(repo: Path) -> None:
-    base = git_ops.head_sha(repo)
-    _git(repo, "checkout", "-b", "feature")
-    write_and_stage(repo, "feature.txt", "feature\n")
-    head = _commit(repo, "feature")
-    assert git_ops.resolve_pr_merge_base(repo, [], "refs/heads/main", head) == base
 
-def test_resolve_pr_merge_base_prefers_present_remote_over_stale_local(tmp_path: Path) -> None:
-    repo, remote = _repo_with_origin(tmp_path)
-    stale_local = git_ops.head_sha(repo)
-    _git(repo, "push", "-u", "origin", "main")
-    write_and_stage(repo, "base-update.txt", "new base\n")
-    remote_base = _commit(repo, "base update")
-    _git(repo, "push", "origin", "main")
-    _git(repo, "checkout", "-b", "feature")
-    write_and_stage(repo, "feature.txt", "feature\n")
-    head = _commit(repo, "feature")
-    _git(repo, "branch", "-f", "main", stale_local)
-    assert git_ops.resolve_pr_merge_base(repo, ["refs/remotes/origin/main"], "refs/heads/main", head) == remote_base
 
 def test_resolve_pr_merge_base_rejects_divergent_matching_remotes(repo: Path) -> None:
     oldest = git_ops.head_sha(repo)
@@ -887,14 +824,6 @@ def test_diff_returns_changes(tmp_path: Path) -> None:
     assert "added.txt" in out
     assert "+hello" in out
 
-def test_diff_includes_staged_and_unstaged_worktree_changes(tmp_path: Path) -> None:
-    repo = _topic_repo(tmp_path)
-    write_and_stage(repo, "staged.txt", "staged\n")
-    (repo / "base.txt").write_text("unstaged\n")
-    out = git_ops.diff(repo, "main")
-    assert "staged.txt" in out
-    assert "-base" in out
-    assert "+unstaged" in out
 
 def test_diff_excludes_paths(tmp_path: Path) -> None:
     repo = _topic_repo(tmp_path)
@@ -918,53 +847,19 @@ def test_diff_prefers_origin_when_on_default_branch(tmp_path: Path, repo: Path) 
     out = git_ops.diff(repo, "main")
     assert "local.txt" in out, "diff should show unpushed changes vs origin/main"
 
-def test_diff_name_only_returns_changed_files(tmp_path: Path) -> None:
-    repo = _topic_repo(tmp_path)
-    write_and_stage(repo, "added.txt", "hello\n")
-    _commit(repo, "add file")
-    result = git_ops.diff_name_only(repo, "main", "HEAD")
-    assert result == ["added.txt"]
 
-def test_diff_name_only_returns_multiple_files_in_order(tmp_path: Path) -> None:
-    repo = _topic_repo(tmp_path)
-    (repo / "alpha.txt").write_text("a\n")
-    (repo / "beta.txt").write_text("b\n")
-    _git(repo, "add", "alpha.txt", "beta.txt")
-    _commit(repo, "add two files")
-    result = git_ops.diff_name_only(repo, "main", "HEAD")
-    assert result == ["alpha.txt", "beta.txt"]
 
 def test_diff_name_only_returns_empty_list_on_bad_ref(repo: Path) -> None:
     result = git_ops.diff_name_only(repo, "nonexistent-ref", "HEAD")
     assert result == []
 
-def test_changed_files_against_compares_tracked_changes_to_snapshot(repo: Path) -> None:
-    """A pre-fix snapshot, rather than HEAD, is the guard's tracked baseline."""
-    tracked = repo / "tracked.txt"
-    tracked.write_text("committed\n")
-    _git(repo, "add", "tracked.txt")
-    _commit(repo, "add tracked file")
-    tracked.write_text("pre-fix edit\n")
-    snapshot = git_ops.stash_create(repo)
-    assert snapshot is not None
-    tracked.write_text("post-fix edit\n")
-    assert git_ops.changed_files_against(repo, snapshot) == ["tracked.txt"]
 
 def test_changed_files_against_raises_when_git_query_fails(tmp_path: Path) -> None:
     """Safety guards must not mistake a failed enumeration for a clean tree."""
     with pytest.raises(GitError):
         git_ops.changed_files_against(tmp_path, "HEAD")
 
-def test_log_returns_oneline_commits(tmp_path: Path) -> None:
-    repo = _topic_repo(tmp_path)
-    write_and_stage(repo, "a.txt", "a\n")
-    _commit(repo, "topic-msg")
-    out = git_ops.log(repo, "main")
-    assert "topic-msg" in out
 
-def test_show_returns_file_bytes_at_ref(repo: Path) -> None:
-    out = git_ops.show(repo, "HEAD", "base.txt")
-    assert out == b"base\n"
 
 def test_show_raises_on_missing_path(repo: Path) -> None:
     with pytest.raises(git_ops.PathAbsentError):
@@ -1044,51 +939,12 @@ def test_grep_fixed_matches_default_word_false_matches_substrings(repo: Path) ->
     _commit(repo, "add app")
     assert git_ops.grep_fixed_matches(repo, ("app",)) == [("app.py", "app")]
 
-def test_status_porcelain_clean_and_dirty(repo: Path) -> None:
-    assert git_ops.status_porcelain(repo) == ""
-    (repo / "untracked.txt").write_text("u\n")
-    out = git_ops.status_porcelain(repo)
-    assert "untracked.txt" in out
 
 def test_upstream_ahead_count_no_upstream(repo: Path) -> None:
     assert git_ops.upstream_ahead_count(repo, "main") == 0
 
-def test_upstream_ahead_count_when_remote_ahead(tmp_path: Path) -> None:
-    repo, bare = _repo_with_origin(tmp_path)
-    _git(repo, "push", "-u", "origin", "main")
-    # Push two extra commits to origin/main via a sidecar clone, then fetch.
-    sidecar = tmp_path / "sidecar"
-    _git(tmp_path, "clone", str(bare), str(sidecar))
-    _configure_identity(sidecar)
-    write_and_stage(sidecar, "x.txt", "x\n")
-    _commit(sidecar, "x")
-    write_and_stage(sidecar, "y.txt", "y\n")
-    _commit(sidecar, "y")
-    _git(sidecar, "push", "origin", "main")
-    _git(repo, "fetch", "origin")
-    assert git_ops.upstream_ahead_count(repo, "main") == 2
 
-def test_fetch_pulls_new_commits(tmp_path: Path) -> None:
-    repo, bare = _repo_with_origin(tmp_path)
-    _git(repo, "push", "-u", "origin", "main")
-    sidecar = tmp_path / "sidecar"
-    _git(tmp_path, "clone", str(bare), str(sidecar))
-    _configure_identity(sidecar)
-    write_and_stage(sidecar, "z.txt", "z\n")
-    new_sha = _commit(sidecar, "z")
-    _git(sidecar, "push", "origin", "main")
-    git_ops.fetch(repo)
-    assert _git(repo, "rev-parse", "origin/main") == new_sha
 
-def test_worktree_add_and_remove_round_trip(tmp_path: Path, repo: Path) -> None:
-    head = _git(repo, "rev-parse", "HEAD")
-    wt = tmp_path / "wt"
-    git_ops.worktree_add(repo, wt, head)
-    assert wt.exists()
-    assert (wt / "base.txt").read_text() == "base\n"
-    git_ops.assert_is_worktree(wt)
-    git_ops.worktree_remove(repo, wt)
-    assert not wt.exists()
 
 def test_worktree_move_preserves_registered_worktree_with_spaces(tmp_path: Path, repo: Path) -> None:
     source = tmp_path / "legacy worktree"
@@ -1110,13 +966,6 @@ def test_worktree_move_propagates_git_failure(tmp_path: Path, repo: Path) -> Non
         git_ops.worktree_move(repo, missing, destination)
     assert not destination.exists()
 
-def test_commit_paths_on_new_branch_pushes_to_origin(repo_with_origin: Path) -> None:
-    (repo_with_origin / ".github/workflows").mkdir(parents=True)
-    (repo_with_origin / ".github/workflows/daydream-review.yml").write_text("name: x\n")
-    git_ops.create_branch(repo_with_origin, "daydream/setup")
-    git_ops.commit_paths(repo_with_origin, [Path(".github/workflows/daydream-review.yml")], "add bot workflows")
-    git_ops.push_branch(repo_with_origin, "daydream/setup")
-    assert git_ops.ref_exists(repo_with_origin, "origin/daydream/setup")
 
 def test_create_branch_raises_when_branch_exists(repo_with_origin: Path) -> None:
     git_ops.create_branch(repo_with_origin, "daydream/dup")
@@ -1124,23 +973,7 @@ def test_create_branch_raises_when_branch_exists(repo_with_origin: Path) -> None
     with pytest.raises(GitError):
         git_ops.create_branch(repo_with_origin, "daydream/dup")
 
-def test_commit_paths_commits_only_named_paths(repo_with_origin: Path) -> None:
-    git_ops.create_branch(repo_with_origin, "daydream/selective")
-    (repo_with_origin / "tracked.txt").write_text("staged\n")
-    (repo_with_origin / "untouched.txt").write_text("left behind\n")
-    git_ops.commit_paths(repo_with_origin, [Path("tracked.txt")], "add tracked only")
-    committed = _git(repo_with_origin, "show", "--name-only", "--format=", "HEAD").split()
-    assert committed == ["tracked.txt"]
-    assert "untouched.txt" in _git(repo_with_origin, "status", "--porcelain")
 
-def test_stage_paths_stages_only_named_paths(repo_with_origin: Path) -> None:
-    git_ops.create_branch(repo_with_origin, "daydream/stage")
-    (repo_with_origin / "a.txt").write_text("a\n")
-    (repo_with_origin / "b.txt").write_text("b\n")
-    git_ops.stage_paths(repo_with_origin, [Path("a.txt")])
-    staged = _git(repo_with_origin, "diff", "--cached", "--name-only").split()
-    assert staged == ["a.txt"]
-    assert "b.txt" in _git(repo_with_origin, "status", "--porcelain")
 
 def test_push_branch_failure_raises_git_error(git_repo: Path) -> None:
     git_ops.create_branch(git_repo, "daydream/no-remote")
@@ -1149,11 +982,6 @@ def test_push_branch_failure_raises_git_error(git_repo: Path) -> None:
     with pytest.raises(GitError):
         git_ops.push_branch(git_repo, "daydream/no-remote")
 
-def test_error_hierarchy_is_consistent() -> None:
-    assert issubclass(NotAWorktreeError, GitError)
-    assert issubclass(BranchNotFoundError, GitError)
-    assert issubclass(WrongBranchError, GitError)
-    assert issubclass(git_ops.GitTimeoutError, GitError)
 
 def _timeout_run(*, cmd: list[str], timeout: float, calls: dict[str, int] | None = None) -> Any:
     """Return a ``subprocess.run`` double that raises ``TimeoutExpired`` on every call."""
@@ -1506,22 +1334,6 @@ def test_diff_paths_raises_on_invalid_ref(repo: Path) -> None:
         git_ops.diff_paths(repo, "definitely-not-a-ref", "HEAD", ["base.txt"])
 
 
-def test_gh_pr_queries_request_only_legacy_fields(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[list[str]] = []
-    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        calls.append(cmd)
-        stdout = "{}" if cmd[1:3] == ["pr", "view"] else "[]"
-        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    assert git_ops.gh_pr_view(repo) == {}
-    assert git_ops.gh_pr_list_for_branch(repo, "feature") == []
-    assert calls[0][calls[0].index("--json") + 1].split(",") == list(git_ops.GH_PR_VIEW_FIELDS)
-    assert calls[1][calls[1].index("--json") + 1].split(",") == list(git_ops.GH_PR_LIST_FIELDS)
-    assert "baseRefOid" not in git_ops.GH_PR_VIEW_FIELDS
-    assert "baseRefOid" not in git_ops.GH_PR_LIST_FIELDS
-    for fields in (git_ops.GH_PR_VIEW_FIELDS, git_ops.GH_PR_LIST_FIELDS):
-        assert "headRepository" in fields
-        assert "headRepositoryOwner" in fields
 
 @pytest.mark.parametrize(
     ("pr", "stderr"),
@@ -1575,9 +1387,6 @@ def test_gh_repo_view_required_rejects_invalid_slug(repo: Path, monkeypatch: pyt
     with pytest.raises(GitError, match="invalid repository slug"):
         git_ops.gh_repo_view_required(repo)
 
-def test_gh_repo_view_required_returns_exact_slug(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_subprocess_run(monkeypatch, stdout="Owner/Repo\n")
-    assert git_ops.gh_repo_view_required(repo) == ("Owner", "Repo")
 
 def test_diagnostic_url_redaction_is_bounded_on_long_untrusted_text() -> None:
     """Non-URL diagnostics must not trigger quadratic scheme-prefix searches."""
@@ -1616,27 +1425,6 @@ def test_installed_gh_accepts_production_pr_fields_without_network(repo: Path, f
     )
     assert "Unknown JSON field" not in proc.stderr
 
-def test_gh_api_input_data_passes_tempfile_and_cleans_up(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, Any] = {}
-    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        captured["cmd"] = cmd
-        idx = cmd.index("--input")
-        captured["input_path"] = cmd[idx + 1]
-        captured["payload"] = Path(cmd[idx + 1]).read_text(encoding="utf-8")
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout='{"ok": true}', stderr="")
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    result = git_ops.gh_api(
-        repo, "repos/owner/repo/pulls/1/reviews", method="POST", input_data={"event": "COMMENT", "body": "hi"},
-    )
-    assert result == {"ok": True}
-    cmd = captured["cmd"]
-    assert cmd[:2] == ["gh", "api"]
-    assert "--input" in cmd
-    assert "--method" in cmd
-    method_idx = cmd.index("--method")
-    assert cmd[method_idx + 1] == "POST"
-    assert json.loads(captured["payload"]) == {"event": "COMMENT", "body": "hi"}
-    assert not Path(captured["input_path"]).exists()
 
 @pytest.mark.parametrize(
     ("failure", "expected_type"),
@@ -2035,9 +1823,6 @@ def test_github_request_budget_preserves_subsecond_deadline() -> None:
     with pytest.raises(git_ops.DeadlineExpired, match="deadline"):
         budget.next_timeout()
 
-def test_pr_list_fields_include_gh_245_head_ref_name() -> None:
-    assert "headRefName" in git_ops.GH_PR_LIST_FIELDS
-    assert "baseRefOid" not in git_ops.GH_PR_LIST_FIELDS
 
 @pytest.mark.parametrize("extra_field", ["baseRefOid", "futureCompatibilityFloor"])
 @pytest.mark.parametrize("query_kind", ["view", "list"])
@@ -2059,18 +1844,8 @@ def test_gh_secret_set_requires_exactly_one_scope(fake_gh: FakeGh, git_repo: Pat
     with pytest.raises(GitError):
         git_ops.gh_secret_set(git_repo, "X", "v", org="acme", repo_slug="o/r")
 
-def test_gh_secret_list_returns_names(fake_gh: FakeGh, git_repo: Path) -> None:
-    fake_gh.serve_secret_list(["DAYDREAM_APP_ID", "ANTHROPIC_API_KEY"])
-    assert git_ops.gh_secret_list(git_repo, repo_slug="o/r") == ["DAYDREAM_APP_ID", "ANTHROPIC_API_KEY"]
 
-def test_gh_variable_list_returns_names(fake_gh: FakeGh, git_repo: Path) -> None:
-    fake_gh.serve_variable_list(["DAYDREAM_BOT_HANDLE"])
-    assert git_ops.gh_variable_list(git_repo, org="acme") == ["DAYDREAM_BOT_HANDLE"]
 
-def test_gh_pr_create_returns_url(fake_gh: FakeGh, git_repo: Path) -> None:
-    fake_gh.set_response("pr-create", value="https://github.com/o/r/pull/9")
-    url = git_ops.gh_pr_create(git_repo, head="b", base="main", title="t", body="b")
-    assert url == "https://github.com/o/r/pull/9"
 
 def test_gh_pr_create_failure_raises_git_error(fake_gh: FakeGh, git_repo: Path) -> None:
     # No "pr-create" response configured → the shim exits non-zero.

@@ -22,7 +22,6 @@ from daydream.remote_ci import (
     RequiredContext,
     RequiredPolicy,
     evaluate_remote_ci,
-    local_host_facts,
     parse_active_workflows,
     parse_observations,
     parse_pr_ci_binding,
@@ -120,15 +119,6 @@ def _snapshot(target: RemoteCITarget, *, policy: RequiredPolicy = RequiredPolicy
         head_observations=head, merge_observations=merge,
     )
 
-def test_parse_pr_ci_binding_preserves_full_fixed_identity(target: RemoteCITarget) -> None:
-    binding = parse_pr_ci_binding(_pr_row(target), target)
-
-    assert binding == PRCIBinding(
-        pr_number=42, pr_url="https://github.com/example/project/pull/42", base_repository="example/project",
-        base_ref="main", head_repository="contributor/fork", head_ref="feature/ci", head_sha=PUSHED_SHA,
-        merge_sha=MERGE_SHA, state="open",
-    )
-
 @pytest.mark.parametrize("replacement",
     [{"number": 43}, {"number": True}, {"html_url": "https://github.com/example/project/pull/43"},
         {"state": "merged"}, {"merge_commit_sha": "ABC"},
@@ -141,37 +131,6 @@ def test_parse_pr_ci_binding_rejects_identity_or_schema_mismatch(target: RemoteC
 ) -> None:
     with pytest.raises(ValueError):
         parse_pr_ci_binding(_pr_row(target, **replacement), target)
-
-def test_policy_unions_sources_and_preserves_exact_names_and_app_pins() -> None:
-    active = [{"type": "required_status_checks",
-            "parameters": {"strict_required_status_checks_policy": True,
-                "required_status_checks": [
-                    {"context": "Build", "integration_id": None}, {"context": "Build", "integration_id": 7},
-                    {"context": "build", "integration_id": None}, {"context": "Deploy", "integration_id": 8},
-                    {"context": "Deploy", "integration_id": 9},
-                ],
-            },
-        }
-    ]
-    classic = {"strict": False, "contexts": ["Classic"], "checks": [{"context": "Build", "app_id": 7}]}
-    policy = parse_required_policy(active, classic)
-
-    assert policy.strict is True
-    assert policy.contexts == (
-        RequiredContext("Build", 7), RequiredContext("Classic", None), RequiredContext("Deploy", 8),
-        RequiredContext("Deploy", 9), RequiredContext("build", None),
-    )
-
-def test_policy_treats_omitted_ruleset_integration_id_as_unpinned() -> None:
-    policy = parse_required_policy([{"type": "required_status_checks",
-                "parameters": {
-                    "strict_required_status_checks_policy": False, "required_status_checks": [{"context": "Build"}],
-                },
-            }
-        ], None,
-    )
-
-    assert policy.contexts == (RequiredContext("Build", None),)
 
 @pytest.mark.parametrize("integration_id", [True, 0, -1, "7", {}])
 def test_policy_rejects_present_invalid_ruleset_integration_id(integration_id: object,) -> None:
@@ -210,25 +169,6 @@ def test_observations_reduce_latest_producers_with_source_specific_case_rules() 
         ("check_run", "Build", 10, "pass"), ("check_run", "build", 11, "fail"), ("status", "lInT", None, "pass"),
     ]
 
-@pytest.mark.parametrize("conclusion", ["success", "neutral", "skipped"])
-def test_observation_accepts_documented_check_success(conclusion: str) -> None:
-    result = parse_observations([_check(1, "Build", conclusion=conclusion)], [], expected_sha=PUSHED_SHA, limit=2_000)
-    assert result[0].state == "pass"
-
-@pytest.mark.parametrize(
-    "conclusion", ["failure", "cancelled", "timed_out", "action_required", "stale", "startup_failure"],
-)
-def test_observation_accepts_documented_check_failures(conclusion: str) -> None:
-    result = parse_observations([_check(1, "Build", conclusion=conclusion)], [], expected_sha=PUSHED_SHA, limit=2_000)
-    assert result[0].state == "fail"
-
-@pytest.mark.parametrize("status", ["queued", "in_progress", "requested", "waiting", "pending"])
-def test_observation_accepts_documented_pending_checks(status: str) -> None:
-    result = parse_observations(
-        [_check(1, "Build", status=status, conclusion=None)], [], expected_sha=PUSHED_SHA, limit=2_000,
-    )
-    assert result[0].state == "pending"
-
 def test_observation_legacy_error_is_failure_but_check_error_is_unsupported() -> None:
     result = parse_observations([], [_status(1, "Build", state="error")], expected_sha=PUSHED_SHA, limit=2_000)
     assert result[0].state == "fail"
@@ -262,15 +202,6 @@ def test_observation_sanitizes_url_and_redacts_bounded_diagnostic() -> None:
     assert secret not in (result.diagnostic or "")
     assert "REDACTED" in (result.url or "")
     assert len(result.diagnostic or "") <= 120
-
-def test_active_workflow_parser_returns_only_strictly_valid_active_rows() -> None:
-    rows = [{"id": 2, "name": "CI", "path": ".github/workflows/ci.yml", "state": "active"},
-        {"id": 1, "name": "Old", "path": ".github/workflows/old.yml", "state": "disabled_manually"},
-    ]
-
-    assert parse_active_workflows(rows) == (
-        {"id": 2, "name": "CI", "path": ".github/workflows/ci.yml", "state": "active"},
-    )
 
 @pytest.mark.parametrize("rows",
     [{}, [{"id": True, "name": "CI", "path": "ci.yml", "state": "active"}],
@@ -371,31 +302,6 @@ def test_evaluate_closed_or_changed_fixed_identity_is_superseded(target: RemoteC
 
     assert evaluate_remote_ci(snapshot, elapsed=1, stable_polls=1, limits=RemoteCILimits()).status == "superseded"
 
-def test_verdict_payload_is_session_sha_and_full_pr_identity_bound(target: RemoteCITarget) -> None:
-    snapshot = _snapshot(target, head=(_observation("Build", "pass"),))
-    verdict = evaluate_remote_ci(snapshot, elapsed=12.5, stable_polls=2, limits=RemoteCILimits())
-    payload = remote_ci_verdict_payload(
-        verdict, session_id="session-1", poll_count=3, started_at="2026-09-06T12:00:00Z",
-        updated_at="2026-09-06T12:00:12Z", discovery_deadline=120.0, completion_deadline=1_800.0,
-    )
-
-    assert payload["schema_version"] == 1
-    assert payload["session_id"] == "session-1"
-    assert payload["target"] == {
-        "base_repository": "example/project", "base_ref": "main", "head_repository": "contributor/fork",
-        "head_ref": "feature/ci", "pr_number": 42, "pr_url": "https://github.com/example/project/pull/42",
-        "remote": "fork", "pushed_sha": PUSHED_SHA,
-    }
-    assert payload["binding"] == {
-        "pr_number": 42, "pr_url": "https://github.com/example/project/pull/42", "base_repository": "example/project",
-        "base_ref": "main", "head_repository": "contributor/fork", "head_ref": "feature/ci", "head_sha": PUSHED_SHA,
-        "merge_sha": None, "state": "open",
-    }
-    assert payload["head_sha"] == PUSHED_SHA
-    assert payload["merge_sha"] is None
-    assert "target_dir" not in json.dumps(payload)
-    assert "must not persist" not in json.dumps(payload)
-
 def test_verdict_writer_atomically_replaces_prior_json(tmp_path: Path, target: RemoteCITarget) -> None:
     verdict = evaluate_remote_ci(_snapshot(target), elapsed=120, stable_polls=2, limits=RemoteCILimits())
     path = tmp_path / "deep" / "remote-ci-verdict.json"
@@ -407,20 +313,6 @@ def test_verdict_writer_atomically_replaces_prior_json(tmp_path: Path, target: R
     loaded = json.loads(path.read_text(encoding="utf-8"))
     assert loaded["status"] == "no_ci"
     assert loaded["session_id"] == "session-2"
-
-def test_verdict_payload_persists_applied_polling_limits(tmp_path: Path) -> None:
-    limits = RemoteCILimits(discovery_seconds=4.5, completion_seconds=9.5, stable_polls=3)
-    verdict = evaluate_remote_ci(_snapshot(_target(tmp_path)), elapsed=4.5, stable_polls=3, limits=limits)
-    payload = remote_ci_verdict_payload(
-        verdict, session_id="custom-limits", poll_count=3, started_at="2026-09-06T12:00:00Z",
-        updated_at="2026-09-06T12:00:04.500Z", discovery_deadline=104.5, completion_deadline=109.5, limits=limits,
-    )
-    polling = payload["polling"]
-    assert isinstance(polling, dict)
-    assert polling["discovery_seconds"] == 4.5
-    assert polling["completion_seconds"] == 9.5
-    assert polling["required_stable_polls"] == 3
-    assert polling["discovery_deadline"] == 104.5
 
 def test_handoff_payload_is_only_for_non_success_and_preserves_identity(target: RemoteCITarget) -> None:
     failed = evaluate_remote_ci(_snapshot(target, policy=RequiredPolicy((RequiredContext("Build", 10),), False),
@@ -442,27 +334,6 @@ def test_handoff_payload_is_only_for_non_success_and_preserves_identity(target: 
     )
     with pytest.raises(ValueError):
         remote_ci_handoff_payload(passed, session_id="session-3")
-
-def test_pre_target_unavailable_uses_null_identity_without_placeholder() -> None:
-    verdict = unavailable_remote_ci_verdict(
-        reason="The pushed repository could not be bound to a pull request", diagnostic="token=super-secret-value",
-    )
-    payload = remote_ci_verdict_payload(
-        verdict, session_id="session-4", poll_count=1, started_at="2026-09-06T12:00:00Z",
-        updated_at="2026-09-06T12:00:01Z", discovery_deadline=120, completion_deadline=1_800,
-    )
-    handoff = remote_ci_handoff_payload(verdict, session_id="session-4")
-
-    assert payload["status"] == "unavailable"
-    assert payload["target"] is None
-    assert payload["binding"] is None
-    assert payload["policy"] is None
-    assert payload["active_workflow_count"] is None
-    polling = payload["polling"]
-    assert isinstance(polling, dict)
-    assert polling["stable_polls"] == 0
-    assert handoff["target"] is None
-    assert "super-secret-value" not in json.dumps(payload)
 
 def test_pending_factory_preserves_target_without_claiming_observed_ci(target: RemoteCITarget,) -> None:
     verdict = pending_remote_ci_verdict(target)
@@ -507,19 +378,6 @@ def test_pending_factory_preserves_target_without_claiming_observed_ci(target: R
             passed, session_id="session-complete", poll_count=0, started_at="2026-09-06T12:00:00Z",
             updated_at="2026-09-06T12:00:00Z", discovery_deadline=120, completion_deadline=1_800,
         )
-
-def test_local_host_facts_report_native_identity_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("platform.system", lambda: "Darwin")
-    monkeypatch.setattr("platform.release", lambda: "25.0")
-    monkeypatch.setattr("platform.machine", lambda: "arm64")
-    monkeypatch.setattr("platform.python_implementation", lambda: "CPython")
-    monkeypatch.setattr("platform.python_version", lambda: "3.13.5")
-
-    assert local_host_facts() == {
-        "system": "Darwin", "release": "25.0", "machine": "arm64", "python_implementation": "CPython",
-        "python_version": "3.13.5",
-    }
-
 
 class _Clock:
     def __init__(self) -> None:

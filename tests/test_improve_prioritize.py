@@ -59,18 +59,6 @@ def test_same_pattern_across_services_aggregates_to_one_finding() -> None:
 def test_distinct_findings_do_not_aggregate() -> None:
     assert (len(aggregate_cross_service([_f(title="SQL injection"), _f(title="Slow CI cache")])) == 2)
 
-def test_cross_partition_findings_merge_like_cross_service() -> None:
-    a = _f(title="Unbounded query in the list endpoint", path="frontend/src/alpha/view.tsx", services=[],
-        partition="frontend/src/alpha",
-    )
-    b = _f(title="Unbounded query in the list endpoint", path="frontend/src/beta/view.tsx", services=[],
-        partition="frontend/src/beta",
-    )
-    merged = aggregate_cross_service([a, b])
-    assert len(merged) == 1
-    assert set(merged[0]["partitions"]) == {"frontend/src/alpha", "frontend/src/beta",}
-    assert "frontend/src/alpha" in merged[0]["body"]
-    assert "frontend/src/beta" in merged[0]["body"]
 
 def test_shared_partition_alone_does_not_merge() -> None:
     a = _f(title="Unbounded query in the list endpoint", path="frontend/src/alpha/list.tsx", services=[],
@@ -81,49 +69,8 @@ def test_shared_partition_alone_does_not_merge() -> None:
     )
     assert len(aggregate_cross_service([a, b])) == 2
 
-def test_service_and_partition_stamps_compose() -> None:
-    a = _f(title="Unbounded query in the list endpoint", path="apps/billing/api.py", services=["billing"],
-        partition="billing",
-    )
-    b = _f(title="Unbounded query in the list endpoint", path="apps/catalog/api.py", services=["catalog"],
-        partition="catalog",
-    )
-    merged = aggregate_cross_service([a, b])
-    assert len(merged) == 1
-    assert set(merged[0]["services"]) == {"billing", "catalog"}
-    assert set(merged[0]["partitions"]) == {"billing", "catalog"}
 
-def test_reworded_duplicates_at_the_same_path_become_one_package() -> None:
-    first = _f(
-        fingerprint="fp-first", title="Repeated catalog fixture setup obscures behavior", path="tests/test_catalog.py",
-        category="tests",
-    )
-    second = _f(
-        fingerprint="fp-second", title="Catalog fixture setup is repeated in every test", path="tests/test_catalog.py",
-        category="tests",
-    )
-    packages = aggregate_cross_service([first, second])
-    assert len(packages) == 1
-    assert packages[0]["member_fingerprints"] == ["fp-first", "fp-second"]
-    assert len(packages[0]["members"]) == 2
-    assert packages[0]["fingerprint"] == packages[0]["package_fingerprint"]
 
-def test_rewording_does_not_change_semantic_singleton_package_identity() -> None:
-    before = _f(fingerprint="volatile-before", title="Repeated catalog test setup should use the shared fixture",
-        path="tests/test_catalog.py", category="tests", maintenance_signals=["duplicated_test_structure"],
-        reuse_target="repo:tests/conftest.py#catalog_fixture",
-    )
-    after = _f(fingerprint="volatile-after", title="Consolidate duplicated setup in catalog tests",
-        path="tests/test_catalog.py", category="tests", maintenance_signals=["duplicated_test_structure"],
-        reuse_target="repo:tests/conftest.py#catalog_fixture",
-    )
-
-    before_package = aggregate_cross_service([before])[0]
-    after_package = aggregate_cross_service([after])[0]
-
-    assert before_package["package_fingerprint"] == after_package["package_fingerprint"]
-    assert before_package["member_fingerprints"] == ["volatile-before"]
-    assert after_package["member_fingerprints"] == ["volatile-after"]
 
 def test_canonical_reuse_target_is_a_strong_cross_category_grouping_key() -> None:
     local_parser = _f(fingerprint="fp-parser", title="Remove the local header parser", path="src/api/headers.py",

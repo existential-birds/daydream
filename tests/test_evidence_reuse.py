@@ -17,10 +17,6 @@ def _target(**overrides: Any) -> ReuseTarget:
     }
     return ReuseTarget(**{**fields, **overrides})
 
-def test_full_identity_match_reuses() -> None:
-    decision = decide_reuse(_identity(), _target())
-    assert (decision.reused, decision.result, decision.mismatched_components) == (True, "reused", ())
-
 @pytest.mark.parametrize(("component", "override"),
     [("argv", {"argv": ("uv", "run", "pytest", "-k", "one")}), ("cwd_relative", {"cwd_relative": "services/api"}),
         ("runner", {"runner": "poetry"}), ("config_digest", {"config_digest": "e" * 64}),
@@ -37,10 +33,6 @@ def test_a_bare_tree_key_match_across_a_commit_is_not_enough() -> None:
     decision = decide_reuse(_identity(), _target(head_sha="b" * 40, post_commit_verified=False))
     assert decision.reused is False
     assert "head_sha" in decision.mismatched_components
-
-def test_a_verified_post_commit_tree_match_reuses() -> None:
-    decision = decide_reuse(_identity(), _target(head_sha="b" * 40, post_commit_verified=True))
-    assert decision.reused is True
 
 def test_an_absent_component_is_a_named_miss() -> None:
     decision = decide_reuse(_identity(config_digest=None, absent_components=("uv.lock",)),

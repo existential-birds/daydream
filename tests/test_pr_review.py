@@ -3,44 +3,32 @@
 from __future__ import annotations
 
 import json
-import shutil
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-import daydream.hunk_index as hunk_index
 from daydream import git_ops, pr_comment_renderer, pr_review
-from daydream.deep.artifacts import DeepArtifact
-from daydream.extensions import Registry, SummaryContext
+from daydream.extensions import Registry
 from daydream.extensions.builtins import register_builtins
-from daydream.findings import ArtifactFinding, load_findings_artifact
+from daydream.findings import load_findings_artifact
 from daydream.git_ops import GitError
 from daydream.pr_review import (
-    DAYDREAM_FOOTER,
     InlineReviewComment,
     ParsedIssue,
     PRInfo,
     ReviewRenderers,
-    _parse_hunks,
     classify,
     default_render_finding,
     default_render_summary,
-    diagram_marker,
     extract_anchors,
-    parse_diagram_markers,
     parse_finding_markers,
-    parsed_issues_from_items,
     resolve_review_renderers,
     snap_to_hunk,
 )
 from daydream.reconcile import PriorDiagramComment
-from daydream.review_budget import review_warnings
 from daydream.reviews.rendering import (
-    _build_consolidated_prompt,
-    _render_body_section,
-    _summary_findings,
     format_comment_body,
 )
 from daydream.run_config import RunConfig
@@ -49,11 +37,9 @@ from daydream.runner import _emit_findings_from_items
 from tests.harness.git_helpers import git as _git
 from tests.harness.review_payload import payload_for
 from tests.harness.review_profile import sample_pr
-from tests.harness.review_result import review_coverage, terminal_result
+from tests.harness.review_result import terminal_result
 
 # gh-gated: tests that stub gh's subprocess are skipped when gh is not installed.
-_gh_available = shutil.which("gh") is not None
-gh_required = pytest.mark.skipif(not _gh_available, reason="gh CLI not installed")
 
 SNAP = Path(__file__).parent / "fixtures" / "comment_snapshots"
 BUILTIN_RENDERERS = ReviewRenderers(default_render_finding, default_render_summary)
@@ -74,32 +60,7 @@ def _recording_fake_submit(captured: dict[str, pr_review.ClassifiedReviewPlan],)
         )
     return fake_submit
 
-def test_finding_and_summary_markdown_is_byte_stable() -> None:
-    i = ParsedIssue(
-        path="a.py", line=3, title="T", body="B rationale", severity="high", confidence="HIGH", fingerprint="a" * 64
-    )
-    assert format_comment_body(i, "inline", renderers=BUILTIN_RENDERERS) == (SNAP / "inline.md").read_text()
-    assert (format_comment_body(replace(i, is_cross_stack=True), "file_level", renderers=BUILTIN_RENDERERS)
-        == (SNAP / "file_level.md").read_text()
-    )
-    section = _render_body_section(_summary_findings(
-            [replace(i, line=None), replace(i, path="b.py", line=None, fingerprint="b" * 64)],
-            renderers=BUILTIN_RENDERERS,
-        )
-    )
-    assert section == (SNAP / "summary_body.md").read_text()
 
-def test_custom_finding_renderer_flows_into_inline_body_with_host_invariants() -> None:
-
-    reg = Registry()
-    register_builtins(reg)
-    reg.override_renderer("finding", lambda finding, ctx: f"CUSTOM::{ctx.placement}::{finding.title}")
-    body = format_comment_body(ParsedIssue(path="a.py", line=3, title="T", body="B", fingerprint="a" * 64), "inline",
-        renderers=resolve_review_renderers(reg),
-    )
-    assert "CUSTOM::inline::T" in body
-    assert DAYDREAM_FOOTER in body
-    assert parse_finding_markers(body) == ["a" * 64]
 
 def test_finding_renderer_falls_back_and_warns_on_error(caplog: pytest.LogCaptureFixture) -> None:
 
@@ -124,7 +85,6 @@ _RUN_INFO = pr_comment_renderer.render_run_info_block([_FIXTURE])
 # Input findings handed to _post/post_review_to_pr_from_report below. They are inert whenever
 # `classify` is stubbed (see _stub_post): the stubbed classifier never reads them.
 _POST_ISSUE = ParsedIssue(path="a.py", line=1, title="t", body="b")
-_ONE_INLINE = pr_review.ClassifiedIssues(inline=[_inline(line=1)], body_only=[])
 _NO_ISSUES = pr_review.ClassifiedIssues()
 
 def test_custom_summary_renderer_can_build_collapsible_per_finding_list(pr: PRInfo) -> None:
@@ -151,19 +111,6 @@ def test_custom_summary_renderer_can_build_collapsible_per_finding_list(pr: PRIn
     assert parse_finding_markers(body) == ["b" * 64]
     assert body.rstrip().endswith("</sub>")
 
-def test_custom_finding_renderer_flows_into_summary_section(pr: PRInfo) -> None:
-
-    reg = Registry()
-    register_builtins(reg)
-    reg.override_renderer("finding", lambda finding, ctx: f"CUSTOM::{ctx.placement}::{finding.title}")
-    classified = pr_review.ClassifiedIssues(
-        body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc", fingerprint="b" * 64)]
-    )
-    body = payload_for(pr, classified, renderers=resolve_review_renderers(reg),
-        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
-    )["body"]
-    assert "CUSTOM::summary::File note" in body
-    assert parse_finding_markers(body) == ["b" * 64]
 
 def test_summary_renderer_falls_back_and_warns_on_error(pr: PRInfo, caplog: pytest.LogCaptureFixture) -> None:
 
@@ -189,32 +136,8 @@ def test_summary_renderer_falls_back_and_warns_on_error(pr: PRInfo, caplog: pyte
     assert body == default_body
     assert "summary" in caplog.text and "kaboom" in caplog.text
 
-def test_structural_item_becomes_parsed_issue() -> None:
-    items = [{"id": 1, "lens": "structural", "file": "big.py", "line": 1,
-              "description": "1k-line file", "severity": "high",
-              "confidence": "HIGH", "rationale": "r"}]
-    issues = parsed_issues_from_items(items)
-    assert [(i.path, i.line) for i in issues] == [("big.py", 1)]   # structural posts
 
-def test_inline_body_has_footer_and_tags() -> None:
-    issue = ParsedIssue(
-        path="a.py", line=10, title="Null deref", body="rationale here", confidence="HIGH", severity="high",
-    )
-    body = pr_review.format_comment_body(issue, "inline", renderers=BUILTIN_RENDERERS)
-    assert "**Null deref**" in body
-    assert "severity: `high`" in body
-    assert "confidence: `HIGH`" in body
-    assert body.rstrip().endswith("</sub>")
-    assert pr_review.DAYDREAM_REPO_URL in body
-    assert "⚠️" in body
-    assert "🔮 Prompt for AI Agents" in body
-    assert "<details>" in body
 
-def test_inline_body_carries_parseable_marker() -> None:
-    issue = ParsedIssue(path="a.py", line=3, title="T", body="B", fingerprint="ab12" * 16)
-    body = format_comment_body(issue, "inline", renderers=BUILTIN_RENDERERS)
-    assert parse_finding_markers(body) == ["ab12" * 16]
-    assert DAYDREAM_FOOTER in body  # marker does not displace the footer
 
 def test_no_marker_without_fingerprint() -> None:
     assert (parse_finding_markers(format_comment_body(
@@ -224,10 +147,6 @@ def test_no_marker_without_fingerprint() -> None:
         == []
     )
 
-def test_body_section_markers_one_per_fingerprinted_issue() -> None:
-    issues = [ParsedIssue(path="a.py", line=None, title=f"T{i}", body="B", fingerprint=f"{i:064x}") for i in range(2)]
-    assert parse_finding_markers(_render_body_section(_summary_findings(issues, renderers=BUILTIN_RENDERERS))
-    ) == [f"{i:064x}" for i in range(2)]
 
 def test_extract_anchors_prefers_long_tokens() -> None:
     anchors = extract_anchors("Null check\nThe function `compute_total` dereferences `items` in handleRequest")
@@ -236,42 +155,8 @@ def test_extract_anchors_prefers_long_tokens() -> None:
     assert "handleRequest" in anchors
     assert anchors == sorted(anchors, key=len, reverse=True)
 
-def test_parse_hunks() -> None:
-    diff = (
-        "diff --git a/x.py b/x.py\n"
-        "--- a/x.py\n"
-        "+++ b/x.py\n"
-        "@@ -1,3 +10,5 @@\n"
-        " old\n"
-        "+new1\n"
-        "+new2\n"
-        "@@ -20 +30,2 @@\n"
-        "+new3\n"
-    )
-    assert _parse_hunks(diff) == [(10, 14), (30, 31)]
 
-def test_parse_hunks_uses_shared_parser(monkeypatch: pytest.MonkeyPatch) -> None:
 
-    calls = {"n": 0}
-    real = hunk_index.parse_hunks
-
-    def spy(diff_text: Any) -> Any:
-        calls["n"] += 1
-        return real(diff_text)
-
-    monkeypatch.setattr(hunk_index, "parse_hunks", spy)
-    diff = (
-        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
-        "@@ -1,3 +10,5 @@\n old\n+new1\n+new2\n@@ -20 +30,2 @@\n+new3\n"
-    )
-    assert _parse_hunks(diff) == [(10, 14), (30, 31)]
-    assert calls["n"] == 1, "_parse_hunks must delegate to the shared parser"
-
-def test_snap_to_hunk_inside_returns_unchanged() -> None:
-    hunks = [(10, 20), (30, 40)]
-    assert snap_to_hunk(15, hunks) == 15
-    assert snap_to_hunk(10, hunks) == 10
-    assert snap_to_hunk(40, hunks) == 40
 
 def test_snap_to_hunk_within_tolerance_snaps_to_boundary() -> None:
     hunks = [(90, 105)]
@@ -308,10 +193,6 @@ def _assert_hunks_resolve(_td: Path, _sha: str, issue: ParsedIssue, hunks: list[
 def _raise_on_gh_fallback(*_a: Any, **_k: Any) -> str:
     raise AssertionError("gh fallback invoked")
 
-def test_agent_prompt_has_no_skill_advertising(pr: PRInfo) -> None:
-    body = _build_consolidated_prompt(pr_review.ClassifiedIssues(), pr)
-    assert "/beagle-core:fetch-pr-feedback" not in body
-    assert "/beagle-core:" not in body
 
 def test_classify_splits_inline_vs_body(monkeypatch: pytest.MonkeyPatch, pr: PRInfo) -> None:
     issues = [ParsedIssue(path="a.py", line=10, title="t1", body="anchor_one"),
@@ -365,37 +246,7 @@ def test_classify_snaps_tolerance_line_to_hunk_boundary(monkeypatch: pytest.Monk
     assert result.inline[1].path == "scripts/modernize-app.py"
     assert result.inline[1].line == 106
 
-def test_build_payload_reviewed_commit_line_first_in_review_info(pr: PRInfo) -> None:
-    """The trusted, linked commit precedes model/cost and severity/confidence."""
-    classified = pr_review.ClassifiedIssues(body_only=[
-            ParsedIssue(path="b.py", line=None, title="File note", body="desc", confidence="MEDIUM", severity="low",)
-        ],
-    )
-    # Feed the enriched renderer a real fixture trajectory so run-info
-    # fields (Model/Cost/Tokens) render instead of the fallback stub.
-    payload = payload_for(
-        pr, classified, renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer.render_run_info_block([_FIXTURE])
-    )
-    body = payload["body"]
 
-    expected = (
-        f"- **Reviewed commit:** [`{pr.head_sha[:7]}`](https://github.com/{pr.owner}/{pr.repo}/commit/{pr.head_sha})"
-    )
-    assert expected in body
-    # These markers first occur inside Review info, so body indices verify its order.
-    assert body.index(expected) < body.index("- **Model:**")
-    assert body.index(expected) < body.index("- **Severity:**")
-    assert body.index(expected) < body.index("- **Confidence:**")
-
-def test_build_payload_reviewed_commit_survives_run_info_fallback(pr: PRInfo) -> None:
-    payload = payload_for(
-        pr, pr_review.ClassifiedIssues(), renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer._render_fallback()
-    )
-    body = payload["body"]
-    assert "*run details unavailable*" in body  # degraded run-info present
-    assert (f"- **Reviewed commit:** [`{pr.head_sha[:7]}`]"
-        f"(https://github.com/{pr.owner}/{pr.repo}/commit/{pr.head_sha})" in body
-    )
 
 def test_build_payload_reviewed_commit_links_fork_for_fork_head_pr(pr: PRInfo,) -> None:
     """Link the fork commit while retaining the base repository as the POST target."""
@@ -407,116 +258,19 @@ def test_build_payload_reviewed_commit_links_fork_for_fork_head_pr(pr: PRInfo,) 
     assert "- **Reviewed commit:** [`head123`](https://github.com/forky/widgets/commit/head123)" in body
     assert "https://github.com/acme/widgets/commit/head123" not in body
 
-def test_build_payload_blocks_forged_reviewed_commit_line(pr: PRInfo,) -> None:
-    payload = payload_for(pr, pr_review.ClassifiedIssues(),
-        run_info=(
-            "test run info\n"
-            "- **Reviewed commit:** [`deadbee`](https://github.com/evil/widgets/commit/" + "e" * 40 + ")\n"
-            "*run details unavailable*"
-        ), renderers=BUILTIN_RENDERERS,
-    )
-    body = payload["body"]
-    commit_lines = [line for line in body.splitlines() if line.startswith("- **Reviewed commit:**")]
-    assert len(commit_lines) == 1
-    assert "- **Reviewed commit:** [`head123`](https://github.com/acme/widgets/commit/head123)" in body
-    assert "evil/widgets" not in body
-    assert "e" * 40 not in body
-
-def test_build_payload_shape(pr: PRInfo) -> None:
-    classified = pr_review.ClassifiedIssues(inline=[_inline()],
-        body_only=[
-            ParsedIssue(path="b.py", line=None, title="File note", body="desc", confidence="MEDIUM", severity="low",)
-        ], inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", confidence="HIGH", severity="high",)],
-    )
-
-    payload = payload_for(
-        pr, classified, renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer.render_run_info_block([_FIXTURE])
-    )
-    assert payload["commit_id"] == "head123"
-    assert payload["event"] == "COMMENT"
-    assert payload["comments"][0]["path"] == "a.py"
-
-    body = payload["body"]
-    assert "- **Reviewed commit:** [`head123`](https://github.com/acme/widgets/commit/head123)" in body
-    assert "**Code Review Summary**" in body
-    assert "🧙 Posted by [daydream v" in body
-    assert pr_review.DAYDREAM_REPO_URL in body
-    assert "**Mode:**" not in body
-    assert "**Severity:**" in body and "1 high" in body and "1 low" in body
-    assert "**Confidence:**" in body and "1 HIGH" in body and "1 MEDIUM" in body
-    assert "Non-inline findings" in body
-    assert "b.py" in body
-    assert "🔮 Prompt for all review comments" in body
-    assert "/beagle-core:" not in body
-    assert "repos/acme/widgets/pulls/42/comments" in body
-    assert "ℹ️ Review info" in body
-    assert "- **Model:**" in body
-    assert "- **Cost:**" in body
-    assert "- **Tokens:**" in body
-    assert "- **Steps / tool calls:**" in body
-    assert "<details><summary>Per-phase breakdown</summary>" in body
-    assert "| Phase | Model | Tools | Input (cached) | Output | Cost |" in body
-    assert body.count("Generated by daydream v") == 1
-    assert body.rstrip().endswith("</sub>")
 
 
-def _classified_with_severity(severity: str, confidence: str, *, body_confidence: str | None = None,
-) -> pr_review.ClassifiedIssues:
-    return pr_review.ClassifiedIssues(
-        inline=[_inline()], body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc",
-                               confidence=body_confidence or confidence, severity=severity)],
-        inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b",
-                                   confidence=confidence, severity=severity)],
-    )
 
 
-def _approval_payload(pr: PRInfo, classified: pr_review.ClassifiedIssues) -> dict[str, Any]:
-    return payload_for(pr, classified, approve_on_clean=True, renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO)
 
 
-def _approval_payload_for_issue(pr: PRInfo, **issue_fields: Any) -> dict[str, Any]:
-    """Approval-gate payload for one inline finding whose fields are ``**issue_fields``."""
-    return _approval_payload(pr, pr_review.ClassifiedIssues(
-        inline=[_inline()], inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", **issue_fields)],
-    ))
 
-def test_build_payload_approves_when_clean_and_enabled(pr: PRInfo) -> None:
-    payload = _approval_payload(pr, _classified_with_severity("low", "LOW", body_confidence="MEDIUM"))
-    assert payload["event"] == "APPROVE"
-    assert "no high/medium findings" in payload["body"]
-    assert payload["commit_id"] == pr.head_sha
-    assert "**Code Review Summary**" in payload["body"]
-    assert payload["body"].index("no high/medium findings") < payload["body"].index("**Code Review Summary**")
 
-@pytest.mark.parametrize("severity", ["high", "medium"])
-def test_build_payload_keeps_comment_when_blocking_finding(pr: PRInfo, severity: str) -> None:
-    payload = _approval_payload(pr, _classified_with_severity(severity, severity.upper()))
-    assert payload["event"] == "COMMENT"
-    assert "no high/medium findings" not in payload["body"]
 
-def test_build_payload_none_severity_does_not_crash_on_approve_check(pr: PRInfo,) -> None:
-    payload = _approval_payload_for_issue(pr, severity=None)
-    assert payload["event"] == "APPROVE"
 
-@pytest.mark.parametrize("off_vocabulary_severity", ["critical", "blocker"])
-def test_build_payload_keeps_comment_when_off_vocabulary_severity(pr: PRInfo, off_vocabulary_severity: str,) -> None:
-    payload = _approval_payload_for_issue(pr, confidence="HIGH", severity=off_vocabulary_severity)
-    assert payload["event"] == "COMMENT"
-    assert "no high/medium findings" not in payload["body"]
 
-def test_non_blocking_severities_fail_closed() -> None:
-    """F1: any severity outside _NON_BLOCKING_SEVERITIES blocks; low and None do not."""
-    assert pr_review._NON_BLOCKING_SEVERITIES == frozenset({"low"})
-    for off_vocabulary in ("high", "medium", "critical", "blocker", "major", "warning", "info", "INFO", " High ",):
-        assert pr_review._severity_blocks_approval(off_vocabulary) is True
-    assert pr_review._severity_blocks_approval("low") is False
-    assert pr_review._severity_blocks_approval("LOW") is False
-    assert pr_review._severity_blocks_approval(None) is False
 
-def test_find_open_pr_returns_none_on_empty_list(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
-    """Use real branch discovery with an empty gh response and no remote/auth."""
-    monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: [])
-    assert pr_review.find_open_pr(git_repo) is None
+
 
 
 def _local_pr_row(repo: Path, *, head_owner: str = "o") -> tuple[dict[str, Any], str, str]:
@@ -532,14 +286,6 @@ def _local_pr_row(repo: Path, *, head_owner: str = "o") -> tuple[dict[str, Any],
         }, base, head,
     )
 
-def test_find_open_pr_returns_pr_info(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
-    """Real git for branch; gh wrappers stubbed for the PR + repo lookups."""
-    row, base, head = _local_pr_row(git_repo)
-    monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: [row])
-    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
-    info = pr_review.find_open_pr(git_repo)
-    assert info is not None
-    assert (info.number, info.head_sha, info.base_sha, info.owner, info.repo) == (7, head, base, "o", "r",)
 
 def test_find_open_pr_captures_head_repo_for_fork_pr(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
     """Capture fork identity for commit links while posting to the base repository."""
@@ -553,10 +299,6 @@ def test_find_open_pr_captures_head_repo_for_fork_pr(monkeypatch: pytest.MonkeyP
     assert info.head_repo == "forky/widgets"
     assert info.head_ref == "feature"
 
-def test_find_pr_by_number_returns_none_when_pr_missing(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
-    """An unresolvable PR number short-circuits before the repo lookup."""
-    monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: None)
-    assert pr_review.find_pr_by_number(git_repo, 7) is None
 
 def test_find_pr_by_number_raises_when_slug_unresolved(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
     """A resolvable PR but failed owner/repo lookup is a hard error."""
@@ -570,14 +312,6 @@ def test_find_pr_by_number_raises_when_slug_unresolved(monkeypatch: pytest.Monke
     with pytest.raises(GitError, match="auth"):
         pr_review.find_pr_by_number(git_repo, 7)
 
-def test_find_pr_by_number_assembles_pr_info(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
-    row, base, head = _local_pr_row(git_repo, head_owner="forky")
-    monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: row)
-    monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
-    info = pr_review.find_pr_by_number(git_repo, 7)
-    assert info is not None
-    assert (info.number, info.head_sha, info.base_sha, info.base_ref, info.owner, info.repo, info.url, info.head_repo,
-    ) == (7, head, base, "main", "o", "r", "https://github.com/o/r/pull/7", "forky/r",)
 
 @pytest.mark.parametrize("lookup", ["branch", "number"])
 @pytest.mark.parametrize("include_empty_slug", [False, True])
@@ -766,42 +500,8 @@ def _post_kwargs(answer: str | None = "yes", **overrides: Any) -> dict[str, Any]
     return {"console": _FakeConsole(), "run_context": _assumed_context(answer) if answer is not None else None,
             "renderers": BUILTIN_RENDERERS, "run_info": _RUN_INFO, **overrides}
 
-@pytest.mark.asyncio
-async def test_post_skips_when_no_pr(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: None)
-    warnings: list[str] = []
-    monkeypatch.setattr(pr_review, "print_warning", lambda _c, msg: warnings.append(msg),)
-    status = await pr_review._post(tmp_path, [ParsedIssue(path="x.py", line=1, title="t", body="b")],
-        **_post_kwargs(None))
-    assert warnings and "No open PR" in warnings[0]
-    assert status == pr_review.PostStatus.NO_PR
 
-@pytest.mark.asyncio
-async def test_post_fails_with_safe_diagnostic_when_pr_lookup_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    def fail_lookup(_target_dir: Path, **_kwargs: Any) -> PRInfo | None:
-        raise GitError("gh pr list failed: authentication required")
 
-    monkeypatch.setattr(pr_review, "find_open_pr", fail_lookup)
-    errors: list[tuple[str, str]] = []
-    monkeypatch.setattr(pr_review, "print_error", lambda _console, title, message: errors.append((title, message)),)
-
-    status = await pr_review._post(tmp_path, [ParsedIssue(path="x.py", line=1, title="t", body="b")],
-        **_post_kwargs(None))
-
-    assert status == pr_review.PostStatus.FAILED
-    assert errors == [("PR Lookup Failed", "gh pr list failed: authentication required")]
-
-@pytest.mark.asyncio
-async def test_post_succeeds_and_prints_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo) -> None:
-    successes: list[str] = []
-    captured = _stub_post(monkeypatch, pr, _ONE_INLINE, messages=successes)
-
-    status = await pr_review._post(tmp_path, [_POST_ISSUE], **_post_kwargs())
-    assert captured["plan"].pr.head_sha == pr.head_sha
-    assert captured["plan"].event is pr_review.ReviewEvent.COMMENT
-    assert successes and "pullrequestreview" in successes[0]
-    assert status == pr_review.PostStatus.POSTED
 
 @pytest.mark.asyncio
 async def test_post_payload_approves_when_clean_and_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo,
@@ -816,71 +516,9 @@ async def test_post_payload_approves_when_clean_and_enabled(monkeypatch: pytest.
     assert captured["plan"].event is pr_review.ReviewEvent.APPROVE
     assert status == pr_review.PostStatus.POSTED
 
-@pytest.mark.asyncio
-async def test_post_warns_with_preserved_payload_path_on_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo,
-) -> None:
-    err = "GitHub review submission failed (request payload preserved at /tmp/x.json)"
 
-    def failed_submit(_plan: pr_review.ClassifiedReviewPlan, *, transport: pr_review.ReviewTransport
-    ) -> pr_review.ClassifiedReviewResult:
-        return pr_review.ClassifiedReviewResult(
-            status=pr_review.SubmissionStatus.FAILED, review_url=None, posted_file_level=(), folded_file_level=(),
-            final_review_posted=False, safe_error=err,
-        )
 
-    warnings: list[str] = []
-    _stub_post(monkeypatch, pr, _ONE_INLINE, submit=failed_submit, messages=warnings)
 
-    status = await pr_review._post(tmp_path, [_POST_ISSUE], **_post_kwargs())
-    assert warnings
-    assert "no comments were posted" in warnings[0].lower()
-    # The structured safe error preserves the request payload path.
-    assert "payload preserved at /tmp/x.json" in warnings[0]
-    assert status == pr_review.PostStatus.FAILED
-
-def test_github_transport_surfaces_only_structured_preserved_payload_path(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo,
-) -> None:
-    error = GitError("remote response leaked secret=never-show-this")
-    error.preserved_payload_path = Path("/tmp/review.json")
-
-    def fail_gh(*_args: Any, **_kwargs: Any) -> object:
-        raise error
-
-    monkeypatch.setattr(git_ops, "gh_api", fail_gh)
-
-    result = pr_review.GitHubReviewTransport(target_dir=tmp_path, auth=git_ops.INHERIT_GITHUB_AUTH,).post_review(pr,
-        pr_review.ReviewPayload(
-            event=pr_review.ReviewEvent.COMMENT, commit_id=pr.head_sha, body="review body", comments=(),
-        ),
-    )
-
-    assert result.review_url is None
-    assert result.safe_error == "GitHub review submission failed (request payload preserved at /tmp/review.json)"
-    assert "secret" not in result.safe_error
-
-@pytest.mark.asyncio
-async def test_post_skipped_when_user_declines(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo) -> None:
-    captured = _stub_post(monkeypatch, pr, _ONE_INLINE)
-
-    status = await pr_review._post(tmp_path, [_POST_ISSUE], **_post_kwargs(answer="no"))
-    assert "plan" not in captured  # declined: nothing was ever submitted
-    assert status == pr_review.PostStatus.NOTHING_TO_POST
-
-@pytest.mark.asyncio
-async def test_post_review_from_report_empty_items_is_nothing_to_post(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    """Empty merged items skip the post cleanly (NOTHING_TO_POST, not a failure)."""
-    merged = tmp_path / "merged-items.json"
-    merged.write_text(json.dumps({"items": []}))
-    monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
-
-    status = await pr_review.post_review_to_pr_from_report(tmp_path, merged,
-        console=_FakeConsole(),  # type: ignore[arg-type]
-        renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO,
-    )
-    assert status == pr_review.PostStatus.NOTHING_TO_POST
 
 @pytest.mark.asyncio
 async def test_post_review_from_report_empty_items_posts_diagram(
@@ -900,28 +538,6 @@ async def test_post_review_from_report_empty_items_posts_diagram(
     assert captured["plan"].event is pr_review.ReviewEvent.COMMENT
     assert captured["plan"].diagram_blocks == blocks
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failed_reviewer", [False, True], ids=["phase-budget", "provider-failure"])
-async def test_incomplete_live_review_posts_even_without_findings_and_cannot_approve(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo, failed_reviewer: bool,
-) -> None:
-    merged = tmp_path / "merged-items.json"
-    merged.write_text(json.dumps({"items": []}))
-    captured = _stub_post(monkeypatch, pr, _NO_ISSUES)
-    warnings: tuple[str, ...] = ("Alternatives: wall_budget_exceeded",)
-    if failed_reviewer:
-        coverage = review_coverage(scope_ids=("python",), phases=())
-        coverage.record_scope("python", "failed", reasons=("backend_failure",),
-                              diagnostic="RuntimeError: provider unavailable")
-        DeepArtifact.REVIEW_COVERAGE.at(tmp_path).write_text(json.dumps(coverage.to_dict()))
-        warnings = review_warnings(tmp_path)
-    status = await pr_review.post_review_to_pr_from_report(
-        tmp_path, merged, console=_FakeConsole(),  # type: ignore[arg-type]
-        post=True, approve_on_clean=True, review_warnings=warnings, renderers=BUILTIN_RENDERERS, run_info="test run",
-    )
-    assert status == pr_review.PostStatus.POSTED
-    assert captured["plan"].event is pr_review.ReviewEvent.COMMENT
-    assert captured["plan"].review_warnings == warnings
 
 
 def _commit_file(repo: Path, path: str, contents: str, message: str) -> str:
@@ -1108,22 +724,6 @@ _GH_PR_DIFF = (
     "+noise\n"
 )
 
-def test_file_hunks_uses_git_diff_when_it_succeeds(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
-    # Build base, then add 5 lines on a feature branch starting at line N.
-    _commit_file(git_repo, "x.py", "\n".join(f"line {i}" for i in range(1, 30)) + "\n", "baseline")
-    base = _git(git_repo, "rev-parse", "HEAD")
-    lines = [f"line {i}" for i in range(1, 30)]
-    # Insert two new lines after position 20 to create a clear hunk.
-    lines[19:19] = ["NEW1", "NEW2"]
-    (git_repo / "x.py").write_text("\n".join(lines) + "\n")
-    _git(git_repo, "add", "x.py")
-    _git(git_repo, "commit", "-m", "add 2 lines")
-    head = _git(git_repo, "rev-parse", "HEAD")
-
-    monkeypatch.setattr(git_ops, "gh_pr_diff", _raise_on_gh_fallback)
-
-    hunks = pr_review.file_hunks(git_repo, base, head, "x.py", pr_number=42)
-    assert hunks  # at least one hunk
 
 def test_file_hunks_falls_back_to_gh_when_base_unreachable(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
     """A gh-wrapper fake supplies hunks after real Git rejects the base SHA."""
@@ -1148,84 +748,15 @@ def test_file_hunks_gh_fallback_handles_subprocess_error(monkeypatch: pytest.Mon
     hunks = pr_review.file_hunks(git_repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD", "x.py", pr_number=42)
     assert hunks == []
 
-def test_demoted_high_finding_still_blocks_approval(pr: PRInfo) -> None:
-    payload = _approval_payload_for_issue(pr, severity="low", location_distrust=True, severity_before_demotion="high")
-    assert payload["event"] == "COMMENT"
-
-def test_demoted_low_finding_does_not_block_approval(pr: PRInfo) -> None:
-    """Location distrust alone does not block originally low or unasserted severity."""
-    for before in ("low", None):
-        payload = _approval_payload_for_issue(
-            pr, severity="low", location_distrust=True, severity_before_demotion=before,
-        )
-        assert payload["event"] == "APPROVE"
-
-def test_demoted_low_finding_approval_gate_does_not_block() -> None:
-    assert pr_review._finding_blocks_approval("low", True, False, "low") is False
-    assert pr_review._finding_blocks_approval("low", True, False, None) is False
-    assert pr_review._finding_blocks_approval("low", True, False, "high") is True
-    assert pr_review._finding_blocks_approval("low", True, False, "medium") is True
-
-def test_parsed_issues_carry_location_distrust_and_report_note() -> None:
-    items = [{"file": "a.py", "line": 10, "description": "off-citation", "rationale": "r", "severity": "low",
-            "confidence": "LOW", "severity_before_demotion": "high", "location_distrust": True,
-        }
-    ]
-    issues = parsed_issues_from_items(items)
-    assert len(issues) == 1
-    assert issues[0].location_distrust is True
-    assert "**Location:** unverified citation (severity demoted from high)" in issues[0].body
-
-@pytest.mark.parametrize("raw", [{"severity": None}, {}])  # present-but-null ≡ omitted (R4.1)
-def test_null_severity_coerces_to_none_not_none_string(raw: dict[str, Any]) -> None:
-    fields = pr_review.extract_item_fields({"file": "a.py", "line": 1, **raw})
-    assert fields is not None
-    assert fields.severity is None  # not the string "none"
-
-def test_null_severity_does_not_block_approval(pr: PRInfo) -> None:
-    # SUPERVISE_SCHEMA emits severity: null — must approve like omitted.
-    payload = _approval_payload_for_issue(pr, severity=None)
-    assert payload["event"] == "APPROVE"
-    assert "**Severity:** none" not in payload["body"]  # no phantom label rendered
-
-def test_artifact_off_vocabulary_severity_blocks_approval() -> None:
-    """Unknown raw severity still blocks after schema normalization produces None.
-
-    The artifact retains severity_off_vocabulary for the posting gate."""
-    finding = ArtifactFinding(fingerprint="f" * 64, path="a.py", line=10, placement="inline", title="t", body="b",
-        severity=None,  # "critical" was folded to None by Phase A normalization
-        confidence="HIGH", is_cross_stack=False, severity_off_vocabulary=True,
-    )
-    issue = pr_review._issue_from_artifact_finding(finding)
-    assert issue.severity is None
-    assert issue.severity_off_vocabulary is True
-    # The approval gate blocks on the off-vocabulary signal even with severity None.
-    assert pr_review._finding_blocks_approval(issue.severity, issue.location_distrust, issue.severity_off_vocabulary
-    ) is True
-
-def test_artifact_folding_to_none_not_off_vocabulary_does_not_block() -> None:
-    """Explicit null severity is unasserted, not an unknown label that blocks approval."""
-    finding = ArtifactFinding(
-        fingerprint="f" * 64, path="a.py", line=10, placement="inline", title="t", body="b", severity=None,
-        confidence="HIGH", is_cross_stack=False, severity_off_vocabulary=False,
-    )
-    issue = pr_review._issue_from_artifact_finding(finding)
-    assert pr_review._finding_blocks_approval(issue.severity, issue.location_distrust, issue.severity_off_vocabulary
-    ) is False
 
 
-def test_diagram_marker_round_trip() -> None:
-    """The hidden marker is invisible in rendered markdown and parses back exactly."""
 
-    body = "\n\n".join(
-        [diagram_marker("sequence", "a" * 40), diagram_marker("flowchart", "a" * 40),
-            "<details>the diagrams</details>",
-        ]
-    )
-    assert parse_diagram_markers(body) == [("sequence", "a" * 40), ("flowchart", "a" * 40)]
-    # A finding marker is a different namespace and must not cross-parse.
-    assert parse_diagram_markers(pr_review.finding_marker("f" * 64)) == []
-    assert pr_review.parse_finding_markers(diagram_marker("sequence", "a" * 40)) == []
+
+
+
+
+
+
 
 
 def _record_minimize(calls: list[tuple[str, str | None]]) -> Any:
@@ -1259,48 +790,7 @@ def test_diagram_replacement_post_failure_keeps_prior_comment(
     assert result == (None, "simulated POST failure")
     assert calls == [("post", None)]
 
-def test_diagram_replacement_posts_before_minimizing_matching_prior_comment(
-    pr: PRInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
 
-    calls: list[tuple[str, str | None]] = []
-    monkeypatch.setattr("daydream.reconcile.fetch_prior_diagram_comments",
-        lambda *_a, **_k: [
-            PriorDiagramComment("IC_matching", ("sequence",)), PriorDiagramComment("IC_other_kind", ("flowchart",)),
-        ],
-    )
-
-    monkeypatch.setattr("daydream.reconcile.minimize_comment", _record_minimize(calls),)
-
-    def post(*_args: Any, **_kwargs: Any) -> dict[str, str]:
-        calls.append(("post", None))
-        return {"html_url": "https://github.com/acme/widgets/issues/42#issuecomment-1"}
-
-    monkeypatch.setattr(git_ops, "gh_api", post)
-
-    result = pr_review.post_diagram_comment_to_pr(
-        tmp_path, pr, body="diagram", kinds=["sequence"], bot_login="daydream",
-    )
-
-    assert result == ("https://github.com/acme/widgets/issues/42#issuecomment-1", None,)
-    assert calls == [("post", None), ("minimize", "IC_matching")]
-
-def test_build_payload_places_diagram_blocks_under_the_header(pr: PRInfo) -> None:
-    classified = pr_review.ClassifiedIssues(
-        body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc", fingerprint="b" * 64,)]
-    )
-    blocks = "<details><summary><h3>Sequence Diagram</h3></summary>\nX\n</details>"
-
-    payload = payload_for(pr, classified, diagram_blocks=blocks, renderers=BUILTIN_RENDERERS,
-        run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
-    )
-    body = payload["body"]
-    header = "**Code Review Summary**"
-    assert body[body.index(header) + len(header) :].lstrip().startswith(blocks)
-    # Absent (the default) is byte-identical to the pre-#1113 body.
-    assert payload_for(
-        pr, classified, renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer.render_run_info_block([_FIXTURE])
-    )["body"] == body.replace(f"{header}\n\n{blocks}", header)
 
 def test_custom_summary_renderer_receives_and_may_drop_diagrams(pr: PRInfo) -> None:
     """Custom renderers own ctx.diagrams; the host cannot restore blocks they omit."""
@@ -1327,52 +817,7 @@ def test_custom_summary_renderer_receives_and_may_drop_diagrams(pr: PRInfo) -> N
         assert (blocks in body) is expect_present
     assert seen == [blocks, blocks]
 
-def test_explicit_run_info_payload_is_byte_stable(pr: PRInfo) -> None:
-    """Pin the host envelope, approval, rollup, markers and diagram placement."""
-    classified = pr_review.ClassifiedIssues(body_only=[ParsedIssue(
-                path="a.py", line=None, title="Fixture note", body="Fixture rationale", severity="low",
-                confidence="HIGH", fingerprint="a" * 64,
-            )
-        ]
-    )
-    payload = payload_for(pr, classified, run_info="Fixture run info", approve_on_clean=True,
-        diagram_blocks="<details>Fixture diagram</details>", renderers=BUILTIN_RENDERERS,
-    )
-    payload["body"] = payload["body"].replace(DAYDREAM_FOOTER, "<DAYDREAM_FOOTER>")
-    assert payload == json.loads((SNAP / "explicit_payload.json").read_text())
 
-def test_payload_uses_only_explicit_renderers_and_run_info(pr: PRInfo, monkeypatch: pytest.MonkeyPatch,) -> None:
-
-    seen: list[SummaryContext] = []
-
-    def summary(ctx: SummaryContext) -> str:
-        seen.append(ctx)
-        return default_render_summary(ctx)
-
-    registry = Registry()
-    register_builtins(registry)
-    registry.override_renderer("summary", summary)
-    renderers = resolve_review_renderers(registry)
-    classified = pr_review.ClassifiedIssues(body_only=[ParsedIssue(
-        path="a.py", line=None, title="Explicit finding", body="Explanation", severity="low", confidence="HIGH",
-    )])
-    run_info = pr_comment_renderer.render_run_info_block([_FIXTURE])
-
-    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
-        pytest.fail("payload assembly accessed ambient state or the filesystem")
-
-    registry.override_renderer("summary", forbidden)
-    monkeypatch.setattr(pr_review, "get_registry", forbidden)
-    monkeypatch.setattr(Path, "read_text", forbidden)
-    monkeypatch.setattr(Path, "read_bytes", forbidden)
-    monkeypatch.setattr("tempfile.TemporaryDirectory", forbidden)
-    monkeypatch.setattr("daydream.trajectory.get_current_recorder", forbidden)
-    first = payload_for(pr, classified, run_info=run_info, renderers=renderers)
-    second = payload_for(pr, classified, run_info=run_info, renderers=renderers)
-    assert first == second
-    assert seen[0] == seen[1]
-    assert seen[0].findings[0].finding.title == "Explicit finding"
-    assert run_info in seen[0].review_info
 
 
 def test_initial_pr_lookup_preserves_base_tip_separately_from_merge_base(

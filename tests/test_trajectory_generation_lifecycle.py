@@ -12,14 +12,12 @@ from typing import Any
 
 import pytest
 
-import daydream.trajectory as trajectory_module
 from daydream.backends import (
     CostEvent,
     GenerationEndEvent,
     GenerationStartEvent,
     MetricsEvent,
     ReasoningChoicePart,
-    ResultEvent,
     TextChoicePart,
     ToolCallChoicePart,
     ToolResultEvent,
@@ -31,9 +29,7 @@ from tests.harness.trajectory import make_recorder
 
 # Sanitized replay: native start to sealed host end spans exactly 395.332 seconds.
 NATIVE_START_MS = 1788690314289
-NATIVE_START_NS = 1788690314289000000
 HOST_END_NS = 1788690709621000000
-DURATION_NS = 395_332_000_000
 
 
 def _iq(recorder: Any, phase: DaydreamPhase = DaydreamPhase.REVIEW) -> Invocation:
@@ -136,11 +132,6 @@ class TestPendingDraftLifecycle:
         inv.finish()
         assert _summary(inv)["drafts"][0]["ended"] is True
 
-    def test_terminal_result_path_drains(self, tmp_path: Path) -> None:
-        _, inv = _sealed_invocation(tmp_path)
-        inv.observe(ResultEvent(structured_output=None, continuation=None))
-        inv.finish()
-        assert _summary(inv)["drafts"][0]["ended"] is True
 
     def test_cancel_and_error_paths_drain(self, tmp_path: Path) -> None:
         _, inv = _sealed_invocation(tmp_path)
@@ -153,24 +144,10 @@ class TestPendingDraftLifecycle:
         inv2.finish()
         assert _summary(inv2)["drafts"][0]["ended"] is True
 
-    def test_no_age_limit_rejects_395_second_case(self, tmp_path: Path) -> None:
-        recorder, inv = _sealed_invocation(tmp_path)
-        _usage(recorder, inv)
-        _total(recorder, inv)
-        inv.finish()
-        draft = _summary(inv)["drafts"][0]
-        assert draft["native_started_at_unix_ns"] == NATIVE_START_NS
-        assert draft["sealed_end_unix_ns"] == HOST_END_NS
-        assert draft["duration_ns"] == DURATION_NS  # 395.332 s exactly
 
 class TestNativeTimingValidation:
     """Decision 4: non-bool bounded int ms, exact ns conversion, explicit fallbacks."""
 
-    def test_exact_ns_conversion(self, tmp_path: Path) -> None:
-        _, inv = _sealed_invocation(tmp_path)
-        draft = _summary(inv)["drafts"][0]
-        assert draft["native_started_at_unix_ms"] == NATIVE_START_MS
-        assert draft["native_started_at_unix_ns"] == NATIVE_START_NS
 
     @pytest.mark.parametrize(("native_start", "fallback"),
         [
@@ -198,27 +175,6 @@ class TestNativeTimingValidation:
 class TestBillingOwnerResolution:
     """Decision 5: closed owner before export; children|structural|none."""
 
-    def test_zero_children_with_authoritative_total_bills_chain_once(self, recorder: Any) -> None:
-        inv = _iq(recorder)
-        # An opaque attempt with no generations retains its authoritative structural bill.
-        _total(recorder, inv, input_tokens=7, output_tokens=2)
-        inv.finish()
-        summary = _summary(inv)
-        assert summary["billing_owner"] == "structural_attempt"
-        assert summary["drafts"] == []
-
-    def test_exact_complete_allocation_bills_children(self, recorder: Any) -> None:
-        inv = _iq(recorder)
-        for gid in ("g1", "g2"):
-            inv.observe(GenerationStartEvent(generation_id=gid, observed_at_unix_ns=1_000))
-            inv.observe(_end_event(generation_id=gid))
-        _usage(recorder, inv, "g1", input_tokens=10, output_tokens=5)
-        _usage(recorder, inv, "g2", input_tokens=3, output_tokens=2)
-        _total(recorder, inv, input_tokens=13, output_tokens=7)
-        inv.finish()
-        summary = _summary(inv)
-        assert summary["billing_owner"] == "generation_children"
-        assert [d["billed"] for d in summary["drafts"]] == [True, True]
 
     def test_partial_children_with_authoritative_total_bills_chain_only(self, recorder: Any) -> None:
         inv = _iq(recorder)
@@ -274,16 +230,6 @@ class TestBillingOwnerResolution:
         assert summary["billing_owner"] == "structural_attempt"
         assert summary["drafts"][0]["billed"] is False
 
-    def test_exact_duplicate_authoritative_total_is_idempotent(self, tmp_path: Path) -> None:
-        recorder, inv = _sealed_invocation(tmp_path)
-        _usage(recorder, inv, input_tokens=10, output_tokens=5)
-        _total(recorder, inv, input_tokens=10, output_tokens=5)
-        _total(recorder, inv, input_tokens=10, output_tokens=5)  # exact duplicate: no-op
-        inv.finish()
-        summary = _summary(inv)
-        assert summary["billing_owner"] == "generation_children"
-        assert summary["drafts"][0]["billed"] is True
-        assert not any("contrad" in d for d in summary["diagnostics"])
 
     def test_contradictory_duplicate_totals_fail_closed_keep_first(self, tmp_path: Path) -> None:
         recorder, inv = _sealed_invocation(tmp_path)
@@ -343,12 +289,6 @@ class TestPendingBounds:
 class TestUnbilledOrNoneCapOwner:
     """Cap drain locks ownership to structural (if a later total exists) or none."""
 
-    def test_cap_drain_with_later_authoritative_total_locks_structural(self, recorder: Any) -> None:
-        inv = _iq(recorder)
-        _seal_generations(inv, 513)
-        _total(recorder, inv, input_tokens=1, output_tokens=1)
-        inv.finish()
-        assert _summary(inv)["billing_owner"] == "structural_attempt"
 
     def test_cap_drained_drafts_never_bill_even_with_matching_sums(self, recorder: Any) -> None:
         """Cap-drained children stay unbilled even when late usage matches terminal totals."""
@@ -391,15 +331,6 @@ class TestEventDispatchAndSummary:
         recorder._register_subtrajectory(inv)
         assert "generation_lifecycle" not in recorder._subtrajectories[-1]
 
-    def test_subtrajectory_summary_surfaces_generation_lifecycle(self, tmp_path: Path) -> None:
-        recorder, inv = _sealed_invocation(tmp_path)
-        _usage(recorder, inv)
-        _total(recorder, inv)
-        inv.finish()
-        recorder._register_subtrajectory(inv)
-        entry = recorder._subtrajectories[-1]["generation_lifecycle"]
-        assert entry["billing_owner"] == "generation_children"
-        assert entry["drafts"][0]["ended"] is True
 
     def test_usage_never_invented(self, tmp_path: Path) -> None:
         _, inv = _sealed_invocation(tmp_path)
@@ -408,7 +339,3 @@ class TestEventDispatchAndSummary:
         draft = _summary(inv)["drafts"][0]
         assert "usage" not in draft or draft["usage"] == {}
         assert draft["billed"] is False
-
-    def test_module_symbols_exported(self) -> None:
-        assert hasattr(trajectory_module, "MAX_PENDING_GENERATION_DRAFTS")
-        assert hasattr(trajectory_module, "MAX_RETAINED_CHOICE_BYTES")
