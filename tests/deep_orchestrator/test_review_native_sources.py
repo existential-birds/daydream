@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from daydream.backends import AgentEvent, ResultEvent, ToolResultEvent, ToolStartEvent
@@ -17,7 +18,7 @@ from tests.deep_orchestrator.test_review_investigation import InvestigationRun, 
 from tests.harness.git_helpers import git, seed_feature_branch, tracked_source_state
 from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.review_result import merge_result
-from tests.harness.stub_backend import review_stage_state
+from tests.harness.stub_backend import review_stage_state, stage_result
 
 
 class NativeSourceBackend(StagedBackend):
@@ -40,7 +41,7 @@ class NativeSourceBackend(StagedBackend):
 
 
 @pytest.mark.parametrize('defective', [False, True], ids=['unchanged-compatible', 'unchanged-contract-defect'])
-@pytest.mark.parametrize('transport', ['read', 'full-sha-git-show'])
+@pytest.mark.parametrize('transport', ['read', 'full-sha-git-show', 'native'])
 async def test_unchanged_tracked_dependency_has_independently_verified_source_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defective: bool, transport: str,
 ) -> None:
@@ -52,12 +53,16 @@ async def test_unchanged_tracked_dependency_has_independently_verified_source_au
     review = InvestigationRun(repo, tmp_path, monkeypatch)
     review.backend = NativeSourceBackend(repo)
     decisions: list[str] = []
+    native_bodies: dict[str, str] = {}
     title = 'Unchanged dependency violates the retained greeting contract'
 
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         if stage['scope_id'] != 'python':
             return
         for path in ('api.py', 'dependency.py'):
+            if transport == 'native':
+                assert native_bodies[path] == (repo / path).read_text()
+                continue
             source = (repo / path).read_text()
             if path == 'dependency.py' and transport == 'full-sha-git-show':
                 call = ToolStartEvent(id=f'actual-{path}', name='Bash',
@@ -67,13 +72,16 @@ async def test_unchanged_tracked_dependency_has_independently_verified_source_au
                 call = ToolStartEvent(id=f'actual-{path}', name='Read', input={'file_path': path})
             yield call
             yield ToolResultEvent(id=f'actual-{path}', output=source, is_error=False)
-        tree = ast.parse((repo / 'dependency.py').read_text())
+        dependency_source = (native_bodies['dependency.py'] if transport == 'native'
+                             else (repo / 'dependency.py').read_text())
+        tree = ast.parse(dependency_source)
         fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
         returned = fn.body[0]
         assert isinstance(returned, ast.Return) and isinstance(returned.value, ast.Constant)
         assert isinstance(returned.value.value, str)
         decisions.append(returned.value.value)
-        assert 'EXPECTED = "world"' in (repo / 'api.py').read_text()
+        api_source = native_bodies['api.py'] if transport == 'native' else (repo / 'api.py').read_text()
+        assert 'EXPECTED = "world"' in api_source
         if returned.value.value != 'world':
             finding = {'id': 1, 'file': 'dependency.py', 'line': 2, 'severity': 'medium', 'confidence': 'MEDIUM',
                        'description': title, 'rationale': 'The retained caller requires world from greeting.',
@@ -83,7 +91,46 @@ async def test_unchanged_tracked_dependency_has_independently_verified_source_au
                                      'grounds': finding['evidence'], 'disposition': 'confirmed', 'finding': finding}]
         output['notes'] = 'The retained API expectation was compared to the unchanged tracked dependency return.'
 
-    review.backend.stage_response = response
+    if transport == 'native':
+        class DependencyReaderBackend(NativeSourceBackend):
+            async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+                stage = review_stage_state(prompt)
+                if stage is None or stage['scope_id'] != 'python':
+                    async for event in super().execute(cwd, prompt, *args, **kwargs):
+                        yield event
+                    return
+                from daydream.backends.source_reader import SourceReader
+
+                self.stages.append(stage)
+                self.calls.append({'cwd': cwd, 'prompt': prompt, **kwargs})
+                async with SourceReader(kwargs['source_recipe']) as reader:
+                    headers = {'Authorization': f'Bearer {reader.token}',
+                               'Accept': 'application/json, text/event-stream'}
+                    async with httpx.AsyncClient(headers=headers) as client:
+                        for index, path in enumerate(('api.py', 'dependency.py')):
+                            arguments = {'target_id': path, 'side': 'after'}
+                            yield ToolStartEvent(id=f'native-{path}', name='read_source', input=arguments)
+                            result = await client.post(reader.url, json={
+                                'jsonrpc': '2.0', 'id': index + 1, 'method': 'tools/call',
+                                'params': {'name': 'read_source', 'arguments': arguments},
+                            })
+                            result.raise_for_status()
+                            packet = result.json()['result']
+                            assert packet.get('isError', False) is False
+                            text, = [block['text'] for block in packet['content'] if block['type'] == 'text']
+                            source = json.loads(text)
+                            assert source['source']['revision'] == review.pr.head_sha
+                            assert source['source']['source_path'] == path
+                            native_bodies[path] = source['body']
+                            yield ToolResultEvent(id=f'native-{path}', output=text, is_error=False)
+                output = stage_result(stage)
+                for event in response(stage, output):
+                    yield event
+                yield ResultEvent(structured_output=output, continuation=None)
+
+        review.backend = DependencyReaderBackend(repo)
+    else:
+        review.backend.stage_response = response
     await review.finish('python', findings=(title,) if defective else ())
     assert decisions == ['universe' if defective else 'world']
     metadata, = [event['metadata'] for event in stage_ends(review, 'python')]

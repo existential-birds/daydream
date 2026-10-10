@@ -199,7 +199,7 @@ class ReviewEvidence:
         """A retry must not inherit a failed attempt's evidence or findings."""
         self.native_output = False
         self.builtin_pi_reader = False
-        self.owned_pi_source_tool = False
+        self.owned_source_tool = False
         self.output_calls: set[str] = set()
         self.output_starts = 0
         self.output_successes = 0
@@ -227,10 +227,15 @@ class ReviewEvidence:
             target_id, side = call.input.get("target_id"), call.input.get("side")
             window = self.source_recipe.selector(target_id, side) if (
                 isinstance(target_id, str) and isinstance(side, str)) else None
+            if (window is None and isinstance(target_id, str) and side == 'after'
+                    and self.source_recipe.head_revision is not None
+                    and self.source_recipe.permits_repository_read(target_id)):
+                return (target_id,), False, False
             return ((window.file,), False, False) if window is not None else ((), False, True)
         operands, opaque, search = _read_paths(call)
         command = call.input.get('command', call.input.get('cmd'))
-        if call.name.lower() in {'shell', 'bash', 'exec', 'exec_command'} and isinstance(command, str):
+        if (not self.owned_source_tool and call.name.lower() in {'shell', 'bash', 'exec', 'exec_command'}
+                and isinstance(command, str)):
             try:
                 words = shlex.split(command)
             except ValueError:
@@ -273,6 +278,8 @@ class ReviewEvidence:
         data = call.input
         command = data.get('command', data.get('cmd'))
         if call.name.lower() in {'shell', 'bash', 'exec', 'exec_command'} and isinstance(command, str):
+            if self.owned_source_tool:
+                return False
             try:
                 words = shlex.split(command)
             except ValueError:
@@ -342,14 +349,14 @@ class ReviewEvidence:
 
     def _source_free_lookup(self, call: ToolStartEvent, result: ToolResultEvent, *, overflow: bool) -> bool:
         """Classify once at matched completion; failed receipts remain failed and charged."""
-        if (not self.builtin_pi_reader or self.source_recipe is None or self.cwd is None
+        if (self.source_recipe is None or self.cwd is None
                 or call.input_incomplete or overflow or result.truncated or result.cancelled
                 or not result.is_error or result.exit_code == 0
                 or result.status is not None and result.status.lower() not in {'error', 'failed', 'failure'}):
             return False
-        if call.name == 'read_source' and not (
-            self.owned_pi_source_tool and result.source_free_disposition == 'zero_match'
-        ):
+        if not ((call.name == 'read_source' and self.owned_source_tool
+                 and result.source_free_disposition == 'zero_match')
+                or (call.name == 'read' and self.builtin_pi_reader)):
             return False
         return self.source_recipe.unavailable_lookup(call.name, call.input, self.cwd, self.supporting_paths)
 
@@ -467,7 +474,9 @@ class ReviewEvidence:
                 if source is None:
                     self.source_access_failures += int(not source_free)
                     paths, supporting, opaque = classification[0], False, True
-            elif self.cwd is not None and paths and not supporting:
+            elif (self.cwd is not None and paths and not supporting
+                  and not (self.owned_source_tool and call.name.lower() in
+                           {'shell', 'bash', 'exec', 'exec_command'})):
                 source = self.source_recipe.match_read(call.input, result.output, self.cwd)
             if source is not None:
                 paths, supporting, opaque = (source.file,), False, False
@@ -508,8 +517,7 @@ class ReviewEvidence:
             self.builtin_pi_reader = (type(event.config) is PiRequestConfig
                                       and event.config.no_extensions is True
                                       and event.config.no_tools is False)
-            self.owned_pi_source_tool = (self.builtin_pi_reader and isinstance(event.config, PiRequestConfig)
-                                         and event.config.source_tool_enabled is True)
+            self.owned_source_tool = event.config is not None and event.config.source_tool_enabled is True
             self.native_output = (isinstance(event.config, PiRequestConfig)
                                   and event.output_schema is not None
                                   and event.config.schema_emulated is False)

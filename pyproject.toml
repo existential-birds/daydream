@@ -10,6 +10,8 @@ dependencies = [
     "pyfiglet>=1.0",
     "pydantic>=2.13.5",
     "httpx>=0.28",
+    "mcp>=1.26,<2",
+    "uvicorn>=0.40,<1",
     "PyJWT>=2.0",
     "jsonschema>=4.0",
     # Held at 0.25.2: 0.26.0 has a native Point-getter use-after-free that

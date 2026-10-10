@@ -457,6 +457,7 @@ class EffectiveRequestConfig(_AdmissionBase):
     """
 
     finalization: bool | None = field(default=None, kw_only=True)
+    source_tool_enabled: bool | None = field(default=None, kw_only=True)
     temperature: float | None = None
     max_turns: int | None = None
     read_only: bool | None = None
@@ -504,7 +505,6 @@ class PiRequestConfig(EffectiveRequestConfig):
     no_skills: bool | None = None
     schema_emulated: bool | None = None
     no_extensions: bool | None = field(default=None, kw_only=True)
-    source_tool_enabled: bool | None = field(default=None, kw_only=True)
 
 
 
@@ -911,7 +911,9 @@ class Backend(Protocol):
       backend's own system prompt can state this turn's real allowances rather
       than its module defaults. The host enforces the bound either way.
     - supports_source_recipe: accepts optional invocation-local source_recipe;
-      the immutable recipe grants only frozen source windows, never a private root.
+      the immutable recipe grants frozen windows and tracked current dependencies,
+      never a private root. Owned source tools normalize to read_source; host
+      requests alone do not replace associated native tool completion events.
     - supports_complete_output: accepts optional require_complete_root for strict
       staged JSON syntax; malformed roots remain terminal.
     - reasoning_effort: native level fixed at construction; None defers to the driver.

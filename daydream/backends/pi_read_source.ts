@@ -25,7 +25,7 @@ export default function (pi: ExtensionAPI) {
     const windows = packet.windows;
     if (!Array.isArray(windows) || windows.some((entry: any) => {
       const source = entry?.source;
-      return !source || typeof entry.body !== "string" ||
+      return !source ||
         !["before", "after"].includes(source.side) ||
         !Array.isArray(source.target_ids) || source.target_ids.length === 0 ||
         source.target_ids.some((id: any) => typeof id !== "string" || !id) ||
@@ -35,6 +35,10 @@ export default function (pi: ExtensionAPI) {
           key => !Number.isSafeInteger(source[key]) || source[key] < 0) ||
         source.start_line < 1 || source.end_line < source.start_line || source.end_byte < source.start_byte;
     })) throw new Error("Frozen source packet unavailable");
+    const reader = packet.reader;
+    if (!reader || typeof reader.url !== "string" ||
+        !/^http:\/\/127\.0\.0\.1:[0-9]+\/mcp$/.test(reader.url) ||
+        typeof reader.token !== "string" || !reader.token) throw new Error("Frozen source reader unavailable");
     pi.registerTool({
       name: "read_source",
       label: "Read frozen source",
@@ -45,17 +49,26 @@ export default function (pi: ExtensionAPI) {
                               { additionalProperties: false }),
       async execute(_callId, params, signal) {
         if (signal?.aborted) throw new Error("Frozen source read cancelled");
-        const matches = windows.filter((entry: any) => entry.source.side === params.side &&
-                                      entry.source.target_ids.includes(params.target_id));
-        if (matches.length === 0) {
-          if (signal?.aborted) throw new Error("Frozen source read cancelled");
-          return { content: [{ type: "text", text: "Frozen source selector unavailable" }], isError: true,
-                   details: { source_free_disposition: "zero_match", packet_sha256: packetDigest } };
+        const response = await fetch(reader.url, {
+          method: "POST", signal,
+          headers: { Authorization: `Bearer ${reader.token}`, "Content-Type": "application/json",
+                     Accept: "application/json, text/event-stream" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: _callId, method: "tools/call",
+                                 params: { name: "read_source", arguments: params } }),
+        });
+        if (!response.ok) throw new Error("Frozen source read failed");
+        const raw = await response.text();
+        if (Buffer.byteLength(raw, "utf8") > 4 * 1024 * 1024 + 4096) throw new Error("Frozen source window exceeds bound");
+        const result = JSON.parse(raw).result;
+        if (!result || !Array.isArray(result.content) || result.content.length !== 1 ||
+            result.content[0]?.type !== "text" || typeof result.content[0].text !== "string" ||
+            typeof result.isError !== "boolean") throw new Error("Frozen source result unavailable");
+        if (Buffer.byteLength(result.content[0].text, "utf8") > 2 * 1024 * 1024) {
+          throw new Error("Frozen source window exceeds bound");
         }
-        if (matches.length !== 1) throw new Error("Frozen source selector unavailable");
-        const text = JSON.stringify(matches[0]);
-        if (Buffer.byteLength(text, "utf8") > 2 * 1024 * 1024) throw new Error("Frozen source window exceeds bound");
-        return { content: [{ type: "text", text }] };
+        const details = result.isError && result._meta?.source_free_disposition === "zero_match"
+          ? { source_free_disposition: "zero_match", packet_sha256: packetDigest } : undefined;
+        return { content: result.content, isError: result.isError, details };
       },
     });
   }

@@ -623,16 +623,23 @@ supported versions; migrate the callable to accept this kwarg and declare
   residual assignments/files/stages and separately labels current-stage fresh
   source/read costs. These estimates prove transport feasibility only; native
   quality/capacity needs matched cold measurements under unchanged numeric limits.
-- Pi's optional per-invocation source recipe uses a confined packet grant and
-  packaged native `read_source(target_id, side)` tool. It serves frozen bytes,
-  not arbitrary paths or Git commands, and enables no Bash/private root access.
+- Claude, Codex and Pi expose the same invocation-owned
+  `read_source(target_id, side)` reader. The host serves bounded frozen windows
+  through authenticated loopback MCP; Pi's packaged native tool delegates to it.
+  The server starts before provider execution and joins requests after provider
+  teardown, including cancellation. It serves no private directory or shell access.
   Source projections are atomically owned/revalidated by `ArtifactSession` and
   typed in `PreparedSanctionedInputs`; legacy prepared inputs default to
   supporting. Source bytes/ranges are independently verified, including rename
   sides and bounded enclosing context. Inline prompt bytes alone are not native
-  receipts. Codex's independent snapshot/full-SHA Git-show path is preserved.
-  Normal repository reads may obtain independently verified tracked dependency
-  evidence at captured HEAD without widening recipe selectors. Pi's native
+  receipts. Codex's independent read-only snapshot is preserved; its required
+  source reads no longer depend on shell syntax or merged stderr. Owned MCP names
+  and associated single-text frames normalize through existing AgentEvents.
+  Foreign MCP tools receive no reader identity. Shell commands cannot establish
+  source authority while the owned reader is active. Tracked repository-relative
+  paths can select after-side dependencies at captured HEAD. Existing independently
+  verified file reads remain supported. Osprey retains frozen-file transport pending
+  existential-birds/osprey#1195. Pi's native
   bounded-read LF representation, including its exact continuation footer, is
   verified against frozen bytes; native results and completion flags remain
   unchanged. Unknown wrappers, forged footers and truncation supply no coverage.

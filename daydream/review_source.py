@@ -84,7 +84,8 @@ class SourceRecipe:
             return (set(data) == {'target_id', 'side'} and isinstance(target, str)
                     and bool(target) and len(target.encode()) <= 2048 and isinstance(side, str)
                     and side in {'before', 'after'}
-                    and not any(target in window.target_ids and side == window.side for window in self.windows))
+                    and not any(target in window.target_ids and side == window.side for window in self.windows)
+                    and not (side == 'after' and self.permits_repository_read(target)))
         if name != 'read' or set(data) - {'path', 'offset', 'limit'}:
             return False
         path = data.get('path')
@@ -134,7 +135,7 @@ class SourceRecipe:
     def permits_repository_read(self, path: str) -> bool:
         """Normal repository reads may investigate frozen tracked dependencies.
 
-        This inventory grants no native recipe selector or artifact access.
+        Tracked paths also select frozen current-side dependencies, never artifacts.
         Every admitted range still needs independent regular-blob verification.
         """
         return path in self.allowed_files or path in self.repository_files
@@ -153,8 +154,25 @@ class SourceRecipe:
                             read_required=False)
 
     def selector(self, target_id: str, side: str) -> SourceWindow | None:
+        if (not isinstance(target_id, str) or not target_id or len(target_id.encode()) > 2048
+                or not isinstance(side, str) or side not in {'before', 'after'}):
+            return None
         matches = [w for w in self.windows if target_id in w.target_ids and w.side == side]
         return matches[0] if len(matches) == 1 else None
+
+    def read_source(self, target_id: str, side: str) -> str:
+        """Serve one independently verified frozen window, without executing agent shell."""
+        window = self.selector(target_id, side)
+        if (window is None and side == 'after' and isinstance(target_id, str)
+                and not any(target_id in candidate.target_ids and side == candidate.side
+                            for candidate in self.windows)):
+            window = self._repository_window(target_id)
+        if window is None or not self.verify_window(window):
+            raise ValueError('Frozen source selector unavailable')
+        text = json.dumps({'source': window.metadata(), 'body': window.body}, ensure_ascii=False)
+        if len(text.encode()) > 2 * 1024 * 1024:
+            raise ValueError('Frozen source window exceeds bound')
+        return text
 
     def verify_window(self, window: SourceWindow) -> bool:
         """Revalidate identities and bytes independently of tool-returned provenance."""
@@ -195,22 +213,21 @@ class SourceRecipe:
                 if captured.text != window.body or captured.sha256 != hashlib.sha256(window.body.encode()).hexdigest():
                     raise SourceAccessUnavailable('frozen source projection changed')
 
-    def to_packet(self) -> dict[str, Any]:
-        """The scoped IPC grant is byte-limited by the prepared window factory."""
-        self.revalidate()
-        return {'windows': [{'source': window.metadata(), 'body': window.body} for window in self.windows]}
-
     def native_result(self, call_input: dict[str, Any], output: str) -> SourceWindow | None:
         if set(call_input) != {'target_id', 'side'}:
-            return None
-        window = self.selector(call_input.get('target_id', ''), call_input.get('side', ''))
-        if window is None:
             return None
         try:
             value = json.loads(output)
         except (ValueError, TypeError):
             return None
-        if (not isinstance(value, dict) or set(value) != {'source', 'body'}
+        if not isinstance(value, dict) or set(value) != {'source', 'body'}:
+            return None
+        target, side = call_input.get('target_id'), call_input.get('side')
+        window = self.selector(target, side) if isinstance(target, str) and isinstance(side, str) else None
+        if (window is None and isinstance(target, str) and side == 'after'
+                and not any(target in candidate.target_ids and side == candidate.side for candidate in self.windows)):
+            window = self._repository_window(target)
+        if (window is None
                 or json.dumps(value['source'], sort_keys=True) != json.dumps(window.metadata(), sort_keys=True)
                 or value['body'] != window.body):
             return None

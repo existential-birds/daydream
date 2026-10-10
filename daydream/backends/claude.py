@@ -10,7 +10,7 @@ import re
 import shlex
 import shutil
 from collections.abc import AsyncGenerator, AsyncIterable
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
 from dataclasses import asdict
 from pathlib import Path, PureWindowsPath
 from subprocess import PIPE
@@ -56,7 +56,9 @@ from daydream.backends import (
     TurnEndEvent,
     resolve_fanout_concurrency,
 )
+from daydream.backends.source_reader import SOURCE_TOOL_NAME, SourceReader, source_tool_output
 from daydream.config import TEST_WALL_BUDGET_S
+from daydream.review_source import SourceRecipe
 
 # Shared read-only Bash families; shell controls are rejected separately.
 # _render_bash_allowlist renders this same list into inspection prompts.
@@ -824,6 +826,7 @@ class ClaudeBackend:
     """Translate Claude SDK messages into the unified AgentEvent stream."""
 
     supports_finalization = True
+    supports_source_recipe = True
 
     def __init__(
         self,
@@ -881,6 +884,7 @@ class ClaudeBackend:
         read_only: bool = False,
         persist_session: bool = True,
         finalization: bool = False,
+        source_recipe: SourceRecipe | None = None,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Yield normalized SDK events; error results raise ClaudeAgentError.
 
@@ -912,6 +916,7 @@ class ClaudeBackend:
             persist_session = False
 
         effort = _claude_effort("low") if finalization else self.reasoning_effort
+        source_enabled = source_recipe is not None and not finalization and audit_guard is None
         output_format = (
             {"type": "json_schema", "schema": output_schema}
             if output_schema
@@ -958,8 +963,19 @@ class ClaudeBackend:
                 **_CLI_ENV,
             }
             pre_tool_use_hooks = [_dangerous_command_guard, _background_bash_guard]
-            if read_only:
+            if read_only and source_enabled:
+                async def _invocation_read_only_guard(
+                    input_data: Any, tool_use_id: Any, context: Any,
+                ) -> HookJSONOutput:
+                    if (isinstance(input_data, dict)
+                            and input_data.get('tool_name') == SOURCE_TOOL_NAME):
+                        return {}
+                    return await _read_only_guard(input_data, tool_use_id, context)
+                pre_tool_use_hooks.append(_invocation_read_only_guard)
+            elif read_only:
                 pre_tool_use_hooks.append(_read_only_guard)
+            if source_enabled:
+                options.allowed_tools.append(SOURCE_TOOL_NAME)
         options.hooks = {
             "PreToolUse": [HookMatcher(matcher=_READ_ONLY_HOOK_MATCHER, hooks=pre_tool_use_hooks)]
         }
@@ -1014,195 +1030,214 @@ class ClaudeBackend:
         # ResultMessage.structured_output); track their IDs so the matching
         # ToolResultBlocks aren't logged as unmatched_tool_results.
         skipped_tool_ids: set[str] = set()
+        source_tool_ids: set[str] = set()
         terminal_result: ResultEvent | None = None
 
-        yield RequestEvent(
-            prompt=prompt,
-            model_name=self.model,
-            session_id=options.resume,
-            reasoning_effort=effort,
-            output_schema=output_schema,
-            config=ClaudeRequestConfig(
-                finalization=finalization,
-                tools_count=len(options.tools) if isinstance(options.tools, list) else None,
-                max_turns=max_turns,
-                read_only=read_only,
-                persist_session=persist_session,
-                continuation_mode="resume" if resume_applied else "fresh",
-                model_mode="multi_or_dynamic" if agents_nonempty else "single",
-                permission_mode="bypassPermissions",
-                allowed_tools_count=len(allowed_tools) if finalization or allowed_tools else None,
-                allowed_tools_present=bool(allowed_tools),
-                audit_tools_count=audit_tools_count,
-                audit_tools_present=audit_tools_present,
-                setting_sources_present=bool(options.setting_sources),
-                native_output_format=output_format is not None,
-                buffer_limit_bytes=10 * 1024 * 1024,
-                hooks_enabled=True,
-            ),
-            model_source="configured",
-            session_source="host_generated" if resume_applied else None,
-        )
+        async with AsyncExitStack() as invocation:
+            if source_enabled:
+                assert source_recipe is not None
+                source_reader = await invocation.enter_async_context(SourceReader(source_recipe))
+                options.mcp_servers = {'daydream_source': {
+                    'type': 'http', 'url': source_reader.url,
+                    'headers': {'Authorization': f'Bearer {source_reader.token}'},
+                }}
+                options.strict_mcp_config = True
 
-        if self._execution_input is not None:
-            client: ClaudeSDKClient
-            client = _RunLocalClaudeSDKClient(
-                options=options,
-                transport=_RunLocalSubprocessCLITransport(
-                    options, environment=dict(options.env)
+            yield RequestEvent(
+                prompt=prompt,
+                model_name=self.model,
+                session_id=options.resume,
+                reasoning_effort=effort,
+                output_schema=output_schema,
+                config=ClaudeRequestConfig(
+                    finalization=finalization,
+                    source_tool_enabled=source_enabled,
+                    tools_count=len(options.tools) if isinstance(options.tools, list) else None,
+                    max_turns=max_turns,
+                    read_only=read_only,
+                    persist_session=persist_session,
+                    continuation_mode="resume" if resume_applied else "fresh",
+                    model_mode="multi_or_dynamic" if agents_nonempty else "single",
+                    permission_mode="bypassPermissions",
+                    allowed_tools_count=len(allowed_tools) if finalization or allowed_tools else None,
+                    allowed_tools_present=bool(allowed_tools),
+                    audit_tools_count=audit_tools_count,
+                    audit_tools_present=audit_tools_present,
+                    setting_sources_present=bool(options.setting_sources),
+                    native_output_format=output_format is not None,
+                    buffer_limit_bytes=10 * 1024 * 1024,
+                    hooks_enabled=True,
                 ),
-                initialize_timeout_s=_run_local_initialize_timeout_s(
-                    dict(options.env)
-                ),
+                model_source="configured",
+                session_source="host_generated" if resume_applied else None,
             )
-        else:
-            client = ClaudeSDKClient(options=options)
 
-        async with client:
-            self._active_clients.add(client)
-            response = client.receive_response()
-            response_terminated = False
-            try:
-                await client.query(prompt)
-                async for msg in response:
-                    if isinstance(msg, AssistantMessage):
-                        msg_model = getattr(msg, "model", None)
-                        if isinstance(msg_model, str) and msg_model:
-                            last_assistant_model = msg_model
-                        last_stop_reason = getattr(msg, "stop_reason", None) or last_stop_reason
-                        session_id = getattr(msg, "session_id", None) or session_id
-                        for block in msg.content:
-                            if isinstance(block, TextBlock) and block.text:
-                                yield TextEvent(text=block.text)
-                            elif isinstance(block, ThinkingBlock) and block.thinking:
-                                yield ThinkingEvent(text=block.thinking)
-                            elif isinstance(block, ToolUseBlock):
-                                if block.name == "StructuredOutput":
-                                    # Drift guard: StructuredOutput must stay in the read-only
-                                    # allow-set, else this passthrough becomes a mutation hole.
-                                    assert "StructuredOutput" in _READ_ONLY_ALLOWED_TOOLS, (
-                                        "StructuredOutput must remain in _READ_ONLY_ALLOWED_TOOLS "
-                                        "to preserve the read_only non-mutation contract"
-                                    )
-                                    skipped_tool_ids.add(block.id)
-                                    continue
-                                yield ToolStartEvent(
-                                    id=block.id,
-                                    name=block.name,
-                                    input=block.input or {},
-                                )
-                        # EVNT-06: MetricsEvent per AssistantMessage keyed by message_id.
-                        # Rename SDK input/output_tokens → prompt/completion_tokens; cost_usd
-                        # is None per-message (only on ResultMessage). Skip when either token
-                        # count is missing (EVNT-02 types both as required int).
-                        msg_usage = getattr(msg, "usage", None)
-                        if (
-                            msg_usage is not None
-                            and msg_usage.get("input_tokens") is not None
-                            and msg_usage.get("output_tokens") is not None
-                        ):
-                            total_input = _total_input_tokens(msg_usage)
-                            assert total_input is not None  # guarded by input_tokens check above
-                            yield MetricsEvent(
-                                message_id=getattr(msg, "message_id", "") or "",
-                                prompt_tokens=total_input,
-                                completion_tokens=msg_usage["output_tokens"],
-                                cached_tokens=msg_usage.get("cache_read_input_tokens"),
-                                cost_usd=None,
-                                model_name=last_assistant_model,
-                                cache_creation_tokens=msg_usage.get("cache_creation_input_tokens"),
-                                measurement_source="message_end",
-                            )
-                        yield TurnEndEvent(message_id=getattr(msg, "message_id", "") or "")
-
-                    elif isinstance(msg, UserMessage):
-                        for user_block in msg.content:
-                            if isinstance(user_block, ToolResultBlock):
-                                if user_block.tool_use_id in skipped_tool_ids:
-                                    skipped_tool_ids.discard(user_block.tool_use_id)
-                                    continue
-                                content = user_block.content
-                                content_str = content if isinstance(content, str) else (
-                                    json.dumps(content, ensure_ascii=False) if content is not None else ""
-                                )
-                                yield ToolResultEvent(
-                                    id=user_block.tool_use_id,
-                                    output=content_str,
-                                    is_error=user_block.is_error or False,
-                                )
-
-                    elif isinstance(msg, ResultMessage):
-                        response_terminated = True
-                        session_id = getattr(msg, "session_id", None) or session_id
-                        model_usage = _model_usage_totals(getattr(msg, "model_usage", None))
-                        if last_assistant_model is None and model_usage and len(model_usage) == 1:
-                            last_assistant_model = next(iter(model_usage.values())).model_name
-                        providers = {entry.provider_name for entry in (model_usage or {}).values()
-                                     if entry.provider_name is not None}
-                        provider = next(iter(providers)) if len(providers) == 1 else None
-                        if msg.structured_output is not None:
-                            structured_result = msg.structured_output
-                        # Emit cost when either cost or usage exists. Anthropic input excludes
-                        # cache reads/writes; fold both in while retaining the cached subset.
-                        result_usage = getattr(msg, "usage", None)
-                        if msg.total_cost_usd is not None or result_usage is not None or model_usage:
-                            usage = result_usage or {}
-                            yield CostEvent(
-                                cost_usd=msg.total_cost_usd,
-                                input_tokens=_total_input_tokens(usage),
-                                output_tokens=usage.get("output_tokens"),
-                                cached_tokens=usage.get("cache_read_input_tokens"),
-                                model_name=last_assistant_model,
-                                provider_name=provider,
-                                cache_creation_tokens=usage.get("cache_creation_input_tokens"),
-                                model_usage=model_usage,
-                                measurement_source="terminal",
-                                cost_source="reported" if msg.total_cost_usd is not None else None,
-                            )
-                        terminal_result = ResultEvent(
-                            structured_output=structured_result,
-                            continuation=(
-                                ContinuationToken(backend="claude", data={"session_id": session_id})
-                                if persist_session and session_id and not msg.is_error else None
-                            ),
-                            model_name=last_assistant_model,
-                            provider_name=provider,
-                            session_id=session_id,
-                            finish_reason=getattr(msg, "stop_reason", None) or last_stop_reason or msg.subtype,
-                            duration_ms=getattr(msg, "duration_ms", None),
-                            duration_api_ms=getattr(msg, "duration_api_ms", None),
-                        )
-                        if msg.is_error:
-                            yield terminal_result
-                            detail = msg.result or msg.subtype or "unknown error"
-                            if msg.subtype == "error_max_turns":
-                                raise MaxTurnsError(
-                                    f"Claude agent run failed: {detail}", subtype="error_max_turns",
-                                )
-                            raise ClaudeAgentError(f"Claude agent run failed: {detail}")
-
-                yield terminal_result or ResultEvent(
-                    structured_output=structured_result,
-                    model_name=last_assistant_model,
-                    session_id=session_id,
-                    finish_reason=last_stop_reason,
-                    continuation=(
-                        ContinuationToken(
-                            backend="claude",
-                            data={"session_id": session_id},
-                        )
-                        if persist_session and session_id
-                        else None
+            if self._execution_input is not None:
+                client: ClaudeSDKClient
+                client = _RunLocalClaudeSDKClient(
+                    options=options,
+                    transport=_RunLocalSubprocessCLITransport(
+                        options, environment=dict(options.env)
+                    ),
+                    initialize_timeout_s=_run_local_initialize_timeout_s(
+                        dict(options.env)
                     ),
                 )
-            except GeneratorExit:
-                if not response_terminated:
-                    await client.interrupt()
-                    async for _ in response:
-                        pass
-                raise
-            finally:
-                self._active_clients.discard(client)
+            else:
+                client = ClaudeSDKClient(options=options)
+
+            async with client:
+                self._active_clients.add(client)
+                response = client.receive_response()
+                response_terminated = False
+                try:
+                    await client.query(prompt)
+                    async for msg in response:
+                        if isinstance(msg, AssistantMessage):
+                            msg_model = getattr(msg, "model", None)
+                            if isinstance(msg_model, str) and msg_model:
+                                last_assistant_model = msg_model
+                            last_stop_reason = getattr(msg, "stop_reason", None) or last_stop_reason
+                            session_id = getattr(msg, "session_id", None) or session_id
+                            for block in msg.content:
+                                if isinstance(block, TextBlock) and block.text:
+                                    yield TextEvent(text=block.text)
+                                elif isinstance(block, ThinkingBlock) and block.thinking:
+                                    yield ThinkingEvent(text=block.thinking)
+                                elif isinstance(block, ToolUseBlock):
+                                    if block.name == "StructuredOutput":
+                                        # Drift guard: StructuredOutput must stay in the read-only
+                                        # allow-set, else this passthrough becomes a mutation hole.
+                                        assert "StructuredOutput" in _READ_ONLY_ALLOWED_TOOLS, (
+                                            "StructuredOutput must remain in _READ_ONLY_ALLOWED_TOOLS "
+                                            "to preserve the read_only non-mutation contract"
+                                        )
+                                        skipped_tool_ids.add(block.id)
+                                        continue
+                                    owned_source = source_enabled and block.name == SOURCE_TOOL_NAME
+                                    if owned_source:
+                                        source_tool_ids.add(block.id)
+                                    yield ToolStartEvent(
+                                        id=block.id,
+                                        name='read_source' if owned_source else block.name,
+                                        input=block.input or {},
+                                    )
+                            # EVNT-06: MetricsEvent per AssistantMessage keyed by message_id.
+                            # Rename SDK input/output_tokens → prompt/completion_tokens; cost_usd
+                            # is None per-message (only on ResultMessage). Skip when either token
+                            # count is missing (EVNT-02 types both as required int).
+                            msg_usage = getattr(msg, "usage", None)
+                            if (
+                                msg_usage is not None
+                                and msg_usage.get("input_tokens") is not None
+                                and msg_usage.get("output_tokens") is not None
+                            ):
+                                total_input = _total_input_tokens(msg_usage)
+                                assert total_input is not None  # guarded by input_tokens check above
+                                yield MetricsEvent(
+                                    message_id=getattr(msg, "message_id", "") or "",
+                                    prompt_tokens=total_input,
+                                    completion_tokens=msg_usage["output_tokens"],
+                                    cached_tokens=msg_usage.get("cache_read_input_tokens"),
+                                    cost_usd=None,
+                                    model_name=last_assistant_model,
+                                    cache_creation_tokens=msg_usage.get("cache_creation_input_tokens"),
+                                    measurement_source="message_end",
+                                )
+                            yield TurnEndEvent(message_id=getattr(msg, "message_id", "") or "")
+
+                        elif isinstance(msg, UserMessage):
+                            for user_block in msg.content:
+                                if isinstance(user_block, ToolResultBlock):
+                                    if user_block.tool_use_id in skipped_tool_ids:
+                                        skipped_tool_ids.discard(user_block.tool_use_id)
+                                        continue
+                                    content = user_block.content
+                                    if user_block.tool_use_id in source_tool_ids:
+                                        source_tool_ids.discard(user_block.tool_use_id)
+                                        content_str = source_tool_output(content)
+                                    else:
+                                        content_str = content if isinstance(content, str) else (
+                                            json.dumps(content, ensure_ascii=False) if content is not None else ""
+                                        )
+                                    yield ToolResultEvent(
+                                        id=user_block.tool_use_id,
+                                        output=content_str,
+                                        is_error=user_block.is_error or False,
+                                    )
+
+                        elif isinstance(msg, ResultMessage):
+                            response_terminated = True
+                            session_id = getattr(msg, "session_id", None) or session_id
+                            model_usage = _model_usage_totals(getattr(msg, "model_usage", None))
+                            if last_assistant_model is None and model_usage and len(model_usage) == 1:
+                                last_assistant_model = next(iter(model_usage.values())).model_name
+                            providers = {entry.provider_name for entry in (model_usage or {}).values()
+                                         if entry.provider_name is not None}
+                            provider = next(iter(providers)) if len(providers) == 1 else None
+                            if msg.structured_output is not None:
+                                structured_result = msg.structured_output
+                            # Emit cost when either cost or usage exists. Anthropic input excludes
+                            # cache reads/writes; fold both in while retaining the cached subset.
+                            result_usage = getattr(msg, "usage", None)
+                            if msg.total_cost_usd is not None or result_usage is not None or model_usage:
+                                usage = result_usage or {}
+                                yield CostEvent(
+                                    cost_usd=msg.total_cost_usd,
+                                    input_tokens=_total_input_tokens(usage),
+                                    output_tokens=usage.get("output_tokens"),
+                                    cached_tokens=usage.get("cache_read_input_tokens"),
+                                    model_name=last_assistant_model,
+                                    provider_name=provider,
+                                    cache_creation_tokens=usage.get("cache_creation_input_tokens"),
+                                    model_usage=model_usage,
+                                    measurement_source="terminal",
+                                    cost_source="reported" if msg.total_cost_usd is not None else None,
+                                )
+                            terminal_result = ResultEvent(
+                                structured_output=structured_result,
+                                continuation=(
+                                    ContinuationToken(backend="claude", data={"session_id": session_id})
+                                    if persist_session and session_id and not msg.is_error else None
+                                ),
+                                model_name=last_assistant_model,
+                                provider_name=provider,
+                                session_id=session_id,
+                                finish_reason=getattr(msg, "stop_reason", None) or last_stop_reason or msg.subtype,
+                                duration_ms=getattr(msg, "duration_ms", None),
+                                duration_api_ms=getattr(msg, "duration_api_ms", None),
+                            )
+                            if msg.is_error:
+                                yield terminal_result
+                                detail = msg.result or msg.subtype or "unknown error"
+                                if msg.subtype == "error_max_turns":
+                                    raise MaxTurnsError(
+                                        f"Claude agent run failed: {detail}", subtype="error_max_turns",
+                                    )
+                                raise ClaudeAgentError(f"Claude agent run failed: {detail}")
+
+                    yield terminal_result or ResultEvent(
+                        structured_output=structured_result,
+                        model_name=last_assistant_model,
+                        session_id=session_id,
+                        finish_reason=last_stop_reason,
+                        continuation=(
+                            ContinuationToken(
+                                backend="claude",
+                                data={"session_id": session_id},
+                            )
+                            if persist_session and session_id
+                            else None
+                        ),
+                    )
+                except GeneratorExit:
+                    if not response_terminated:
+                        await client.interrupt()
+                        async for _ in response:
+                            pass
+                    raise
+                finally:
+                    self._active_clients.discard(client)
 
     async def cancel(self) -> None:
         """Interrupt each active client in turn; propagate any interruption error."""

@@ -18,7 +18,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from contextlib import ExitStack
+from contextlib import AsyncExitStack, ExitStack
 from functools import partial
 from importlib.resources import as_file, files
 from pathlib import Path
@@ -65,6 +65,7 @@ from daydream.backends._transport import (
     reap,
     teardown,
 )
+from daydream.backends.source_reader import SourceReader
 from daydream.config import DEFAULT_PI_MODEL, DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
 from daydream.json_utils import extract_json, extract_json_by_schema, validates_schema
 from daydream.retry_policy import classify_failure, parse_message_retry_hint
@@ -841,13 +842,15 @@ class PiBackend:
         )
 
         attachments = ExitStack()
+        source_context = AsyncExitStack()
         try:
             if source_enabled or native_output:
                 packet: dict[str, Any] = {}
                 if source_enabled:
                     assert source_recipe is not None
-                    source_recipe.revalidate()
-                    packet = source_recipe.to_packet()
+                    packet = {'windows': [{'source': window.metadata()} for window in source_recipe.windows]}
+                    reader = await source_context.enter_async_context(SourceReader(source_recipe))
+                    packet['reader'] = {'url': reader.url, 'token': reader.token}
                 if native_output:
                     packet["output_schema"] = output_schema
                 packet_text = json.dumps(packet, ensure_ascii=False)
@@ -1240,7 +1243,10 @@ class PiBackend:
                 if transport is not None:
                     await teardown(transport, self._transports)
             finally:
-                attachments.close()
+                try:
+                    await source_context.aclose()
+                finally:
+                    attachments.close()
 
     async def cancel(self) -> None:
         """Terminate and reap every active Pi transport."""

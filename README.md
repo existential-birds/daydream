@@ -703,18 +703,20 @@ remain incomplete, even after a good reread. Failures of exact furnished support
 pointers remain blocking; supporting clipping alone does not invalidate source.
 Frozen source windows carry the original repository path, rename
 side, full revision/blob identity and exact line/byte range. Exact projections are
-written and revalidated through the owning artifact session. Pi also offers an
-invocation-local `read_source(target_id, side)` tool backed only by the frozen
-window packet; it grants no private directory or Bash access. Inline source text
-is prompt context, not a native source receipt. Codex retains its independent
-snapshot and full-SHA `git show` access. Returned bytes and ranges are checked
-against frozen source independently of tool-provided provenance.
-Execute each supplied bound source read as a separate tool call, preserving its
-quoted arguments (including literal shell metacharacters in paths). Compound
-commands and concatenated source bodies do not establish bound receipts. Parallel
-reads use separate calls; failed required reads remain incomplete.
-Normal reads of tracked current-side dependencies are also verified against the
-captured HEAD; they do not expand the native recipe's permitted selectors.
+written and revalidated through the owning artifact session. Claude, Codex and Pi
+share a host-owned `read_source(target_id, side)` reader. Invocation-local MCP
+transport carries frozen windows and tracked current-side dependencies; Pi's
+native tool delegates to the same reader. The reader grants no private directory
+or shell access. Paths containing shell metacharacters are literal selectors.
+Codex retains its independent read-only checkout. Osprey retains frozen-file reads
+pending [headless MCP trust support](https://github.com/existential-birds/osprey/issues/1195).
+Inline source text and host requests alone are not native receipts: observed,
+associated tool starts/results, completion flags and independently verified frozen
+bytes/ranges still govern coverage. Required failed reads remain incomplete.
+When the owned reader is active, shell commands support investigation but cannot
+establish source coverage, so compound commands and mixed stdout/stderr no longer
+affect the mandatory source-read codec. Existing verified file-read fallbacks and
+current-side dependency reads remain available; preserve their supplied arguments.
 Pi's exact bounded-read representation is decoded against independently frozen
 LF ranges, including its continuation footer. Original native results remain
 intact; forged footers and actual truncation do not establish source evidence.
