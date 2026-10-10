@@ -540,14 +540,15 @@ review cache entries.
 | Identity: `stage`, `scope_id`, `analyzed_revision` | `first_pass`, `integration`, or `triage`, bound to the public reviewer and frozen snapshot. |
 | Assignment: `assigned_files` | Current assignment, also passed as the builder's `files`. |
 | Bundle: `supporting_bundle` | Bounded diff/index/binding or integration context. Built-ins use it; custom builders opt in with `review_input_bundle = True`. Otherwise `diff_path` and adjacent `hunk-index.json` retain their real file semantics. |
-| Navigation: `supporting_catalog` | Exact pointers to targeted Structure diff projections; navigation grants no directory access. |
+| Navigation: `supporting_catalog` | Exact pointers to admitted Structure diff projections; `status` and `omitted_part_count` declare partial availability. Navigation grants no directory access. |
 | Residual work: `remaining_work` | Estimated residual assignments, files and stages. |
 | Budget: `advisory_tool_call_target`, `remaining_tool_calls` | Suggested pace and hard cumulative allowance, respectively; neither requires investigation calls. |
 | Context: `context_inputs`, `context_transport`, `context_statuses`, `canonical_input_identities` | Admitted supporting inputs, transport/availability and original artifact identities. Omitted optional context is advisory; corrupted required inputs block admission. |
 
 The stage factory projects canonical frozen diff/index inputs through the owning `ArtifactSession`. Required assignment
 bytes take priority over separately bounded shared context. Structure receives a whole-change interaction assignment,
-compact inventory and targeted diff parts; omitted supporting parts remain unavailable. The
+compact inventory and targeted diff parts. Optional parts and their catalogs fit within the remaining exact-input
+file and byte limits after required/shared context; omitted parts remain unavailable without aborting Structure. The
 [review budgets](../README.md#review-budgets) specify transport and assignment caps.
 
 Admission requires the strict invocation schema, exact target/candidate IDs, valid dispositions and findings, meaningful
@@ -724,7 +725,7 @@ Working contracts for extension steps:
   the legacy paths without an active artifact session. Production runner and
   custom-flow calls bind a session and cannot opt out of the model-cwd check.
 
-API v6 retains `ctx.artifacts`, the stable data keys, and verifier routing
+API v8 retains `ctx.artifacts`, the stable data keys, and verifier routing
 headings. Extensions using implicit artifact lookup must update their calls
 as shown below.
 
@@ -832,7 +833,7 @@ honors a forced answer, declines unattended changes, and otherwise prompts.
 `choice()` accepts explicit `assume_yes` and `assume_no` mappings for menus;
 free-form input without those mappings follows the run's interactivity policy.
 
-The runner binds this context for the run, so the shared console and API v6
+The runner binds this context for the run, so the shared console and API v8
 extensions that omit the new argument still use the emitting run's policy.
 Built-in phases also bind an explicitly supplied `run_context` for the entire
 invocation, including output before and after agent execution.
@@ -840,7 +841,7 @@ Standalone callers can use `with bind_run_context(RunContext(InteractionPolicy(.
 from `daydream.run_context` to scope several calls together. Without an explicit
 or bound context, standalone calls use a fresh interactive, non-quiet, non-log
 default with no assumed answer. Binding restores the previous context on exit,
-including exceptions. This additive field does not change API version 6,
+including exceptions. This additive field does not change API version 8,
 `ctx.artifacts`, or the shared `ctx.data` mapping.
 
 ### Stable `ctx.data` keys
@@ -848,7 +849,7 @@ including exceptions. This additive field does not change API version 6,
 Built-in deep steps use an internal `DeepState` view over this same dictionary.
 The view checks a value when a step reads it and writes back to the existing
 key. It does not copy the mapping or cache its values, so extension writes remain
-visible to later steps. Extensions continue to use `ctx.data` under API v6.
+visible to later steps. Extensions continue to use `ctx.data` under API v8.
 
 Steps share state through `FlowContext.data`. Forks may **read** these keys;
 every other key is internal and may change without a version bump:

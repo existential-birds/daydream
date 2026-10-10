@@ -785,7 +785,7 @@ def test_ext_dir_renderer_override_reaches_pr_review(tmp_path: Path, monkeypatch
 def test_existing_extension_context_construction_keeps_auth_separate(
     tmp_path: Path, make_work: Callable[..., WorkContext],
 ) -> None:
-    """API v7 positional construction keeps data identity and hides credentials."""
+    """API v8 positional construction keeps data identity and hides credentials."""
     data: dict[str, Any] = {"extension-marker": "retained"}
     config = RunConfig(target=str(tmp_path))
     work = make_work(tmp_path)

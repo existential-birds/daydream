@@ -35,7 +35,8 @@ does not invalidate a decision. When supplied, supporting_bundle contains the co
 hunk index and binding, or integration's compact whole-change inventory/binding and navigation for deferred diff parts.
 Read the supporting_bundle once via its exact pointer when exact transport is used and a bundle is supplied;
 for inline transport, reuse its captured bytes. Separate legacy diff/index reads are unnecessary.
-The optional supporting_catalog lists the complete file/target/pointer inventory for deferred bounded diff parts.
+The optional supporting_catalog lists admitted file/target/pointer entries for deferred bounded diff parts.
+Its status and omitted_part_count declare partial availability; omitted optional parts do not invalidate decisions.
 Read its supplied exact pointer and bounded child catalogs only when relevant parts are needed, using listed pointers;
 catalogs are navigation aids, not a reading checklist. Sanctioned diff inputs assign only current required parts,
 not the rest of the stack; integration's bounded supporting parts orient whole-change boundary traces. A sanctioned

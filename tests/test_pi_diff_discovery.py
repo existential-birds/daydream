@@ -19,8 +19,9 @@ from tests.harness.stub_backend import review_stage_result, review_stage_state
 from tests.test_deep_orchestrator import _sanctioned_inputs
 
 
+@pytest.mark.parametrize('advance_refs', [False, True])
 async def test_small_pi_review_keeps_structural_dispatch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Any, advance_refs: bool,
 ) -> None:
     (tmp_path / "app.py").write_text("value = 'DIFF_SENTINEL'\n")
     seed_feature_branch(tmp_path, base={'app.py': 'value = 0\n'}, feature={'app.py': "value = 'DIFF_SENTINEL'\n"})
@@ -31,12 +32,25 @@ async def test_small_pi_review_keeps_structural_dispatch(
     intent = tmp_path / "intent.md"
     intent.write_text("Change the value")
     calls: list[str] = []
+    base, head = git(tmp_path, "rev-parse", "main"), git(tmp_path, "rev-parse", "HEAD")
+    work = make_work(tmp_path, base_sha=base, head_sha=head, head_branch="feature")
+    if advance_refs:
+        git(tmp_path, "checkout", "main")
+        (tmp_path / "base-only.txt").write_text("Advanced base tip\n")
+        git(tmp_path, "add", "base-only.txt")
+        git(tmp_path, "commit", "-m", "advance base")
+        git(tmp_path, "checkout", "feature")
+        (tmp_path / "head-only.txt").write_text("Advanced head tip\n")
+        git(tmp_path, "add", "head-only.txt")
+        git(tmp_path, "commit", "-m", "advance head")
 
     async def review(self: PiBackend, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         assert str(diff) not in prompt
         assert "review-assignment" in _sanctioned_inputs(prompt)
         state = review_stage_state(prompt)
         assert state is not None
+        assert state['analyzed_revision']['head_sha'] == head
+        assert state['analyzed_revision']['merge_base_sha'] == base
         if state['scope_id'] == 'python':
             captured_diff = supporting_contents(prompt)['diff']
         else:
@@ -58,8 +72,6 @@ async def test_small_pi_review_keeps_structural_dispatch(
         yield ResultEvent(structured_output=review_stage_result(prompt, []), continuation=None)
 
     monkeypatch.setattr(PiBackend, "execute", review)
-    work = make_work(tmp_path, base_sha=git(tmp_path, "rev-parse", "main"),
-                     head_sha=git(tmp_path, "rev-parse", "HEAD"), head_branch="feature")
     results, failures = await review_scopes(PiBackend(model="fixture"), work,
         [StackAssignment("python", ["app.py"]), StackAssignment("structure", ["app.py"])],
         diff_path=diff, diff_text=diff.read_text(), intent_path=intent,

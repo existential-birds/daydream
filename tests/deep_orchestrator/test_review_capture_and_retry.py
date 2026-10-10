@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,7 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.backends.pi import PiBackend
 from daydream.config_file import DaydreamFileConfig
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.test_review_completion import record, scopes
@@ -61,6 +62,89 @@ def capture(review: InvestigationRun, stage: dict[str, Any], *, bundle: bool = T
     if bundle and not review.backend.sandbox:
         assert len(Path(stage['supporting_bundle']['path']).read_bytes()) <= 24 * 1024
     return contents['diff'], index
+
+
+@pytest.mark.parametrize('limit', ['files', 'bytes', 'all-omitted'])
+async def test_structure_keeps_interaction_review_when_optional_projections_exceed_limits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit: str,
+) -> None:
+    if limit == 'files':
+        before = {f'module_{index:04}.py': 'VALUE = 0\n' for index in range(520)}
+        after = {path: 'VALUE = 1\n' for path in before}
+    elif limit == 'bytes':
+        before = {'api.py': 'VALUE = 0\n'}
+        after = {'api.py': 'VALUE = 1\n' + ('# changed contract ' + 'x' * 2100 + '\n') * 4500}
+    else:
+        before = {f'retired_{index:04}.py': 'VALUE = 0\n' for index in range(520)}
+        before['api.py'] = 'VALUE = 0\n'
+        after = {'api.py': 'VALUE = 1\n'}
+    repo = tmp_path / 'structure_limits'
+    seed_feature_branch(repo, base=before, feature=after)
+    if limit == 'all-omitted':
+        from tests.harness.git_helpers import git
+        git(repo, 'rm', *(path for path in before if path != 'api.py'))
+        git(repo, 'commit', '-m', 'remove retired sources')
+    review = InvestigationRun(repo, tmp_path, monkeypatch)
+    if limit != 'files':
+        native = PiBackend(model=review.backend.model)
+
+        async def execute(self: PiBackend, cwd: Path, prompt: str, *args: Any,
+                          **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            kwargs.pop('wall_budget_s', None)
+            kwargs.pop('tool_call_budget', None)
+            async for event in review.backend.execute(cwd, prompt, *args, **kwargs):
+                yield event
+
+        monkeypatch.setattr(PiBackend, 'execute', execute)
+        monkeypatch.setattr('daydream.runner.create_backend', lambda *_a, **_k: native)
+    if limit == 'all-omitted':
+        @review.backend.script('python')
+        def unfinished_language(stage: dict[str, Any], output: dict[str, Any]) -> None:
+            raise RuntimeError('Language reviewer unavailable in this Structure-only fixture.')
+    catalog_seen = False
+
+    @review.backend.script('structure')
+    def respond(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        nonlocal catalog_seen
+        if limit == 'all-omitted':
+            assert 'supporting_catalog' not in stage
+            assert stage['context_availability'] == {
+                'supporting_parts': 0, 'supporting_catalogs': 0, 'omitted_supporting_parts': 521}
+            assert any(status['label'] == 'supporting-parts' and status['status'] == 'unavailable'
+                       for status in stage['context_statuses'])
+            catalog_seen = True
+            return
+        catalog = stage['supporting_catalog']
+        assert catalog['status'] == 'partial'
+        assert catalog['omitted_part_count'] > 0
+        pending = [Path(catalog['path'])]
+        paths = set(_sanctioned_inputs(review.backend.calls[-1]['prompt']).values())
+        parts: list[dict[str, Any]] = []
+        while pending:
+            path = pending.pop()
+            assert path not in paths
+            paths.add(path)
+            node = json.loads(path.read_text())
+            pending.extend(Path(child['path']) for child in node.get('catalogs', []))
+            parts.extend(node.get('parts', []))
+        paths.update(Path(part['path']) for part in parts)
+        assert len(parts) == catalog['part_count'] > 0
+        assert len(paths) <= 512
+        assert sum(path.stat().st_size for path in paths) <= 8 * 1024 * 1024
+        assert all(path.stat().st_size <= 24 * 1024 for path in paths)
+        if limit == 'files':
+            assert len(parts) + catalog['omitted_part_count'] == 520
+        assert stage['context_availability']['omitted_supporting_parts'] == catalog['omitted_part_count']
+        assert any(status['label'] == 'supporting-parts' and status['status'] == 'partial'
+                   for status in stage['context_statuses'])
+        catalog_seen = True
+
+    assert await review.run(deep_shard_enabled=False) == 0
+    data = review.load()
+    assert scopes(data)['structure']['status'] == 'complete'
+    assert scopes(data)['structure']['reason_codes'] == []
+    assert catalog_seen
+    assert data['findings'] == []
 
 
 @pytest.mark.parametrize('outcome', ['success', 'second-rejection'])

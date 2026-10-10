@@ -28,6 +28,14 @@ def frozen_source(repo: Path, revision: str, path: str) -> tuple[str, bytes]:
     mode, kind, oid = identity.split()
     if mode not in {b'100644', b'100755'} or kind != b'blob' or name.decode() != path:
         raise GitError('frozen source is not a regular blob')
+    size = process._run_git(repo, ['cat-file', '-s', oid.decode()], timeout=30,
+                            error_context='frozen source size unavailable')
+    try:
+        blob_size = int(size.stdout.strip())
+    except ValueError as exc:
+        raise GitError('frozen source size is malformed') from exc
+    if blob_size > 8 * 1024 * 1024:
+        raise GitError('captured revision file exceeds the bounded retrieval limit')
     body = queries.show(repo, revision, path)
     if len(body) > 8 * 1024 * 1024:
         raise GitError('captured revision file exceeds the bounded retrieval limit')

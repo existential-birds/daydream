@@ -7,6 +7,7 @@ import re
 import pytest
 
 from tests.conftest import ExtDir
+from tests.harness.console import collapse_panel_text
 from tests.harness.scripts import cli_main as _run_main
 from tests.test_integration import strip_ansi
 
@@ -34,11 +35,14 @@ def test_ext_validate_without_supervisor_reports_none(ext_dir: ExtDir, capsys: p
 
 
 @pytest.mark.parametrize('api_version', [6, 7])
+@pytest.mark.parametrize('width', [68, 80])
 def test_ext_validate_rejects_previous_api(ext_dir: ExtDir, capsys: pytest.CaptureFixture[str], api_version: int,
+                                         width: int, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv('COLUMNS', str(width))
     ext_dir.write_module("def register(r): ...\n", api_version=api_version)
     assert _run_main(["ext", "validate"]) == 1
-    out = strip_ansi(capsys.readouterr().out)
+    out = collapse_panel_text(capsys)
     assert f"DAYDREAM_EXT_API = {api_version}" in out
     assert "supports 8..8" in out
 

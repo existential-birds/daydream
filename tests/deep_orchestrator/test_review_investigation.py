@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from jsonschema import Draft202012Validator
 
+from daydream import clock
 from daydream.backends import (
     AgentEvent,
     MaxTurnsError,
@@ -26,6 +27,7 @@ from daydream.backends import (
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
 from tests.deep_orchestrator.test_review_completion import ReviewRun, record, scopes
+from tests.harness.fake_clock import FakeClock
 from tests.harness.git_helpers import seed_feature_branch
 from tests.harness.stub_backend import review_stage_state, stage_result
 from tests.test_deep_orchestrator import _profile_with_pipeline, _sanctioned_inputs
@@ -95,7 +97,7 @@ class InvestigationRun(ReviewRun):
         assert all(s['status'] == 'complete' for name, s in inventory.items() if name != scope_id)
         assert scope['status'] in (statuses or ('incomplete' if reason else 'complete',)), scope['reason_codes']
         assert scope['reason_codes'] == ([reason] if reason else [])
-        assert not any(call.get('no_tools') for call in self.backend.calls)
+        assert not any(call.get('tools_disabled') for call in self.backend.calls)
         return data
 
 
@@ -332,6 +334,9 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
     backend = review.backend
     dispatch_deadlines: list[float] = []
     deadline_test_wall_s = 60
+    timer = FakeClock(monotonic_value=clock.monotonic())
+    if stop == 'deadline':
+        timer.install(monkeypatch)
     no_tool_turns = 0
 
     @backend.script()
@@ -341,7 +346,7 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
         if stop == 'deadline':
             allowance = re.search(r'Hard reviewer allowance: at most ([\d.e+-]+) seconds', prompt)
             assert allowance is not None
-            dispatch_deadlines.append(asyncio.get_running_loop().time() + float(allowance[1]))
+            dispatch_deadlines.append(timer.monotonic() + float(allowance[1]))
         yield RequestEvent(prompt=prompt, output_schema=stage['response_contract']['schema'],
                            config=PiRequestConfig(schema_emulated=False, no_tools=False))
         if not stage['progress']:
@@ -361,7 +366,8 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
                 no_tool_turns += 1
                 yield TextEvent(text=json.dumps(output))
                 yield TurnEndEvent()
-                await asyncio.sleep(1)
+                timer.advance(1)
+                await asyncio.sleep(0)
         yield ToolStartEvent(id='later-submit', name='structured_output', input=output)
         yield ToolResultEvent(id='later-submit', output='Submitted.', is_error=False)
         yield ResultEvent(structured_output=stage_result(stage, candidates=[
@@ -396,10 +402,8 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
         assert stopped['metadata']['submission_starts'] == 0
         assert stopped['metadata']['admitted'] is False
         assert len(dispatch_deadlines) == 2
-        # Prompt allowances precede provider entry, so they bound the deadline from above. Variable dispatch overhead
-        # may lower the second estimate, but must not extend the first absolute bound.
-        assert dispatch_deadlines[1] <= dispatch_deadlines[0] + 0.5
-        assert asyncio.get_running_loop().time() >= dispatch_deadlines[0] - 0.5
+        assert dispatch_deadlines[1] == pytest.approx(dispatch_deadlines[0], abs=0.01)
+        assert timer.monotonic() >= dispatch_deadlines[0]
 
 
 @pytest.mark.parametrize(('decision', 'reason'), [

@@ -28,15 +28,18 @@ async def test_shared_phase_backend_drives_shallow_pass(feature_branch_repo: Pat
     mock_ui_loop: Any,  # noqa: F841
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One issue on the single pass → the shallow deep run completes and exits 0."""
-    backend = PhaseDispatchBackend(parse_results=[[ISSUE]])
+    """Language and initial interaction fixtures both reach the published review."""
+    structural_issue = {"id": 1, "description": "Check greeting contract", "file": "main.py", "line": 2}
+    backend = PhaseDispatchBackend(parse_results=[[ISSUE], [structural_issue]])
     monkeypatch.setattr("daydream.runner.create_backend", lambda n, model=None, **kwargs: backend)
     exit_code = await run(
         RunConfig(target=str(feature_branch_repo), stack="python", quiet=True, cleanup=False, shallow=True,)
     )
 
     assert exit_code == 0
-    assert "Add type hints" in (feature_branch_repo / ".review-output.md").read_text()
+    report = (feature_branch_repo / ".review-output.md").read_text()
+    assert "Add type hints" in report
+    assert "Check greeting contract" in report
     # Language discovery and structural interactions each run once before
     # deterministic publication; structure does not repeat the file audit.
     assert backend.parse_calls == 0

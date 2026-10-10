@@ -390,6 +390,9 @@ def select_advisory_inputs(
         except OSError:
             omitted.append(OmittedAdvisoryInput(candidate.label, 0, "unavailable"))
             continue
+        if not inline and len(admitted) >= SANCTIONED_EXACT_INPUT_MAX_FILES:
+            omitted.append(OmittedAdvisoryInput(candidate.label, size, "exceeds-file-count"))
+            continue
         if inline:
             entries = [(item.label, item.size) for item in admitted]
             entries.append((candidate.label, size))

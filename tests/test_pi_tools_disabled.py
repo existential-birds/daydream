@@ -9,11 +9,35 @@ from unittest.mock import patch
 import pytest
 
 from daydream.agent import run_agent
-from daydream.backends import PiRequestConfig, RequestEvent
+from daydream.backends import PiRequestConfig, RequestEvent, ResultEvent
 from daydream.backends.pi import PiBackend, _schema_instruction
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
 from tests.harness.protocol_cli import install_protocol_cli
+
+
+@pytest.mark.parametrize('read_only', [False, True])
+async def test_native_output_cli_admits_explicit_extension_isolation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_only: bool,
+) -> None:
+    fixture = install_protocol_cli(tmp_path / "external", "pi")
+    target = tmp_path / "repo"
+    target.mkdir()
+    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("PI_PROVIDER", "nous")
+    monkeypatch.delenv("PI_API_KEY", raising=False)
+    schema = {"type": "object", "properties": {"verdict": {"type": "string"}}, "required": ["verdict"]}
+    events = [event async for event in PiBackend(model="fixture-model").execute(
+        target, "Return a verdict.", output_schema=schema, read_only=read_only, persist_session=False)]
+    observation, = fixture.read_observations()
+    assert observation['process_outcome'] == 'success'
+    assert '--extension' in observation['argv']
+    assert ('--no-extensions' in observation['argv']) is read_only
+    request = next(event for event in events if isinstance(event, RequestEvent))
+    assert isinstance(request.config, PiRequestConfig)
+    assert request.config.no_extensions is read_only
+    assert request.output_schema == schema
+    assert any(isinstance(event, ResultEvent) for event in events)
 
 
 async def test_tools_disabled_large_prompt_uses_stdin_and_preserves_high_reasoning(

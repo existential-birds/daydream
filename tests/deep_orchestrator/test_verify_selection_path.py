@@ -55,7 +55,7 @@ async def test_verify_all_reproduces_the_conservative_item_set(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute
 ) -> None:
     """MH13 real-path: verify_all renders every non-structural item and marks none skipped."""
-    _install_accept_gate_pipeline(monkeypatch, multi_stack_target, mute_side_effects)
+    stub = _install_accept_gate_pipeline(monkeypatch, multi_stack_target, mute_side_effects)
     exit_code = await _run_deep_with(multi_stack_target, verify_all=True)
     assert exit_code == 0
     payload = json.loads(DeepArtifact.VERDICTS.at(multi_stack_target / ".daydream" / "deep").read_text())
@@ -64,3 +64,11 @@ async def test_verify_all_reproduces_the_conservative_item_set(
     assert all(d["reason_code"] in {"verify_all", "exempt:structural", "exempt:wonder"}
         for d in payload["selection"]["decisions"]
     )
+    items = json.loads(DeepArtifact.MERGED_ITEMS.at(multi_stack_target / ".daydream" / "deep").read_text())["items"]
+    structural = [item for item in items if item['lens'] == 'structural']
+    language = [item for item in items if item['lens'] == 'per-stack']
+    assert structural and language
+    prompts = [call['prompt'] for call in stub.calls if _is_verifier_prompt(call['prompt'])]
+    assert prompts
+    assert all(item['description'] not in prompt for item in structural for prompt in prompts)
+    assert all(any(item['description'] in prompt for prompt in prompts) for item in language)

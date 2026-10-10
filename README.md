@@ -662,6 +662,10 @@ invocation fails strict schema validation; only safe validator metadata carries 
 admission failures are terminal. Failed attempts admit no semantic state, and later failure preserves findings from
 successful stages while marking unfinished work incomplete.
 
+Optional Structure projections and their navigation catalogs share the remaining exact-input allowance
+(512 files and 8 MiB) after required/shared context. Catalogs list admitted pointers only; partial status and
+omitted-part counts describe unavailable supporting context without aborting the interaction review.
+
 Valid decisions can rely on supplied diff/context without source reads; ordinary file/Git tools remain available,
 recorded and charged, but do not authenticate claims or establish completion. Findings and typed coverage are
 snapshot-bound and atomically published. `complete` requires success or explicit host no-op for every planned scope and

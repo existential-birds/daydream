@@ -2,18 +2,59 @@
 from __future__ import annotations
 
 import json
+import tracemalloc
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from tests.deep_orchestrator.test_review_completion import record
+from daydream.git_ops.models import GitError
+from daydream.git_ops.source import frozen_source
+from tests.deep_orchestrator.test_review_completion import record, scopes
 from tests.deep_orchestrator.test_review_investigation import InvestigationRun, StagedBackend, candidate
 from tests.harness.git_helpers import git, seed_feature_branch, tracked_source_state
 
 
 class PiBackend(StagedBackend):
     """File-only transport name activates the runner's ordinary before-side input path."""
+
+
+async def test_oversized_renamed_source_is_omitted_without_buffering_the_blob(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / 'oversized_renamed_source'
+    oversized = '#' + 'x' * (9 * 1024 * 1024)
+    seed_feature_branch(repo, base={'retired.py': oversized, 'consumer.py': 'VALUE = 0\n'},
+                        feature={'modern.py': oversized, 'consumer.py': 'VALUE = 1\n'})
+    git(repo, 'rm', 'retired.py')
+    git(repo, 'commit', '-m', 'rename oversized source')
+    base = git(repo, 'rev-parse', 'main')
+    tracemalloc.start()
+    try:
+        with pytest.raises(GitError, match='bounded retrieval limit'):
+            frozen_source(repo, base, 'retired.py')
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 1024 * 1024
+    review = InvestigationRun(repo, tmp_path, monkeypatch)
+    review.backend = PiBackend(repo)
+    omitted = False
+
+    @review.backend.script('python')
+    def respond(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        nonlocal omitted
+        contexts = json.loads(stage['access_guide'])['contexts']
+        assert not any(item['label'].startswith('before-context-') for item in contexts)
+        assert any(status.get('file') == 'modern.py' and status['status'] == 'omitted'
+                   for status in stage['context_statuses'])
+        omitted = True
+
+    assert await review.run() == 0
+    assert scopes(review.load())['python']['status'] == 'complete'
+    assert omitted
+    assert not (repo / 'retired.py').exists()
+    assert (repo / 'modern.py').exists()
 
 
 @pytest.mark.parametrize('renamed', [False, True], ids=['deleted', 'renamed'])

@@ -112,7 +112,8 @@ def _cwd_observation(cwd: Path) -> dict[str, Any]:
 
 def _observed_argv(backend: str, argv: list[str]) -> tuple[list[str], dict[str, list[dict[str, Any]]]]:
     """Admit known fixture flags only; content values become lengths/hashes."""
-    switches = frozenset({"codex": "exec --experimental-json", "pi": "--no-session --no-skills --no-tools",
+    switches = frozenset({"codex": "exec --experimental-json",
+        "pi": "--no-session --no-skills --no-tools --no-extensions",
         "osprey": "agent --events-jsonl --sandbox --read-only --ultracode"
                   " --atif-system-prompt-plaintext --immutable-runtime-surface"
                   " --compress-context=true --compress-context=false",

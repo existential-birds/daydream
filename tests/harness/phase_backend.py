@@ -92,7 +92,8 @@ class PhaseDispatchBackend:
             if output_schema is not None:
                 # Native review emits structured records directly.
                 state = review_stage_state(prompt)
-                first_discovery = state is None or (state["stage"] == "first_pass" and not state["progress"])
+                first_discovery = state is None or (state["stage"] in {"first_pass", "integration"}
+                                                    and not state["progress"])
                 issues = []
                 if first_discovery:
                     issues = (self._parse_results[self._review_call] if self._review_call < len(self._parse_results)

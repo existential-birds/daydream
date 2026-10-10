@@ -355,13 +355,6 @@ class StageInputFactory:
         deferred_paths = {label: self._write(directory / f'{label}.patch', text)
                           for label, text in deferred_contents.items()}
         catalog_paths: dict[str, Path] = {}
-        if deferred_paths:
-            catalog_entries = [{'file': part.assignment['file'], 'target_id': part.assignment['target_id'],
-                                'path': str(deferred_paths[f'diff-part-{index:06d}'])}
-                               for index, part in enumerate(self.parts)]
-            catalog, catalog_paths = self._supporting_catalog(directory, catalog_entries)
-            state['supporting_catalog'] = {'path': str(catalog), 'part_count': len(catalog_entries),
-                                           'status': 'complete'}
         compact_structure = state['stage'] == 'integration' and self.bundle_capable
         # Use the transport allowance with required inputs first. Reuse identity-bound artifacts to avoid
         # copying advisory bytes or following unchecked symlinks.
@@ -398,6 +391,39 @@ class StageInputFactory:
                 continue
             aggregate += captured.size
             paths[label] = path
+        supporting_count = len(deferred_paths)
+        if deferred_paths:
+            supporting = inputs.select_advisory_inputs(self.backend, self.work.repo,
+                [inputs.AdvisoryCandidate(label, path) for label, path in {**paths, **deferred_paths}.items()],
+                read_only=self.read_only).selected_paths()
+            deferred_paths = {label: path for label, path in deferred_paths.items() if label in supporting}
+            while deferred_paths:
+                catalog_entries = [{'file': part.assignment['file'], 'target_id': part.assignment['target_id'],
+                                    'path': str(deferred_paths[f'diff-part-{index:06d}'])}
+                                   for index, part in enumerate(self.parts)
+                                   if f'diff-part-{index:06d}' in deferred_paths]
+                catalog, catalog_paths = self._supporting_catalog(
+                    directory / f'catalog-{len(deferred_paths)}', catalog_entries)
+                all_paths = {**paths, **deferred_paths, **catalog_paths}
+                count = len(all_paths)
+                size = sum(path.stat().st_size for path in all_paths.values())
+                if (count <= inputs.SANCTIONED_EXACT_INPUT_MAX_FILES
+                        and size <= inputs.SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES):
+                    break
+                while deferred_paths and (count > inputs.SANCTIONED_EXACT_INPUT_MAX_FILES
+                        or size > inputs.SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES):
+                    _, omitted_path = deferred_paths.popitem()
+                    count -= 1
+                    size -= omitted_path.stat().st_size
+                catalog_paths = {}
+            omitted_parts = supporting_count - len(deferred_paths)
+            if deferred_paths:
+                state['supporting_catalog'] = {
+                    'path': str(catalog), 'part_count': len(deferred_paths),
+                    'status': 'partial' if omitted_parts else 'complete', 'omitted_part_count': omitted_parts}
+            if omitted_parts:
+                statuses.append({'label': 'supporting-parts', 'status': 'partial' if deferred_paths else 'unavailable',
+                                 'reason': 'exceeds-transport-allowance'})
         paths.update(deferred_paths)
         paths.update(catalog_paths)
         hidden_labels = deferred_paths.keys() | catalog_paths.keys()
@@ -428,7 +454,8 @@ class StageInputFactory:
         statuses.extend({"label": label, "status": "complete"} for label in paths if label not in declared_status)
         if compact_structure:
             state['context_availability'] = {
-                'supporting_parts': len(deferred_paths), 'supporting_catalogs': len(catalog_paths)}
+                'supporting_parts': len(deferred_paths), 'supporting_catalogs': len(catalog_paths),
+                'omitted_supporting_parts': supporting_count - len(deferred_paths)}
             statuses = [status for status in statuses if status['status'] != 'complete' or
                         status['label'] not in hidden_labels]
         state.update(context_inputs=[label for label in paths if not deferred_paths or label not in hidden_labels],

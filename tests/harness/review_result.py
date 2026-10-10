@@ -42,10 +42,9 @@ def findings_artifact(
 async def review_scopes(backend: Any, work: Any, stacks: list[StackAssignment], **options: Any) -> Any:
     """Exercise the real provider phase with an explicit planned execution inventory."""
     from daydream.phases.review import phase_per_stack_reviews
-    from tests.harness.git_helpers import git
-
-    head = git(work.repo, 'rev-parse', 'HEAD')
-    base = git(work.repo, 'rev-parse', work.base_branch)
+    head, base = work.head_sha, work.base_sha
+    if head is None or base is None:
+        raise ValueError('review scopes require captured commit anchors')
     diff_path = options['diff_path']
     diff_key = hashlib.sha256(Path(diff_path).read_bytes()).hexdigest()
     coverage = ReviewCoverage("scope-test", AnalyzedRevision(head, base, diff_key),

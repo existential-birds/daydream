@@ -27,7 +27,19 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Every command below is a declared gate step in the Makefile: the ordered
+      - name: Set up Node for native Pi contract tests
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24.18.1"
+          package-manager-cache: false
+
+      - name: Install Pi for native output contract tests
+        run: |
+          npm install --global @earendil-works/pi-coding-agent@1.0.4
+          node --version
+          pi --version
+
+      # After runtime provisioning, every check below is a gate step in the Makefile: the ordered
       # check set lives there once (see `make check`). This job adds only the
       # setup steps, the root-only vulture scan, and the coverage artifact
       # upload, so a gate change is a one-file edit.
