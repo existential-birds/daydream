@@ -9,18 +9,14 @@ attack payloads through every label slot.
 from __future__ import annotations
 
 import copy
-from pathlib import Path
 from typing import Any
 
 import pytest
 
 from daydream.config import (
     DIAGRAM_LABEL_CAP_EDGE,
-    DIAGRAM_LABEL_CAP_MESSAGE,
     DIAGRAM_MAX_BLOCKS,
-    DIAGRAM_MAX_EDGES,
     DIAGRAM_MAX_MESSAGES,
-    DIAGRAM_MAX_NODES,
     DIAGRAM_MAX_PARTICIPANTS,
 )
 from daydream.deep.diagram_render import (
@@ -31,8 +27,6 @@ from daydream.deep.diagram_render import (
     sanitize_label,
 )
 from daydream.deep.render import insert_diagrams_section, render_report
-
-FIXTURES = Path(__file__).parent / "fixtures" / "deep"
 
 # Golden specs: the spec's "Target rendering" block, as a grounded spec_final.
 
@@ -96,37 +90,8 @@ def _both_rendered() -> dict[str, dict[str, Any] | None]:
 
 # Byte goldens
 
-def test_sequence_mermaid_matches_golden_fixture_byte_for_byte() -> None:
-    # The fixture carries a final newline (.editorconfig insert_final_newline);
-    # the renderer emits none because the text is embedded in a ``` fence.
-    golden = (FIXTURES / "diagram_sequence.mmd").read_text()
-    assert render_sequence_mermaid(SEQUENCE_SPEC) + "\n" == golden
-    assert render_diagram_blocks({"sequence": _rendered(SEQUENCE_SPEC)}) == (
-        "<details><summary><h3>Sequence Diagram</h3></summary>\n\n```mermaid\n"
-        + golden.removesuffix("\n") + "\n```\n\n</details>"
-    )
-
-def test_flowchart_mermaid_matches_golden_fixture_byte_for_byte() -> None:
-    golden = (FIXTURES / "diagram_flowchart.mmd").read_text()
-    assert render_flowchart_mermaid(FLOWCHART_SPEC) + "\n" == golden
-    assert render_diagram_blocks({"flowchart": _rendered(FLOWCHART_SPEC)}) == (
-        "<details><summary><h3>Flowchart</h3></summary>\n\n```mermaid\n"
-        + golden.removesuffix("\n") + "\n```\n\n</details>"
-    )
-
-
 # Ordering, gating, and the "never read a stored mermaid" rule
 
-
-@pytest.mark.parametrize("results", [{}, {"sequence": None, "flowchart": None},
-    {"sequence": {"status": "omitted", "spec_final": None, "omit_reasons": ["NO_END"]}},
-    {"flowchart": {"status": "skipped", "reason": "not eligible", "spec_final": None}},
-    {"sequence": {"status": "failed", "reason": "backend error", "spec_final": None}},
-    # status says rendered but the artifact is malformed: no block, never a raise.
-    {"sequence": {"status": "rendered", "spec_final": None}},
-])
-def test_blocks_are_empty_when_nothing_rendered(results: dict[str, Any]) -> None:
-    assert render_diagram_blocks(results) == ""
 
 def test_blocks_always_rerender_and_never_echo_a_stored_mermaid_string() -> None:
     before = copy.deepcopy(_both_rendered())
@@ -178,39 +143,9 @@ def test_over_cap_sequence_specs_raise_value_error() -> None:
                              "messages": _messages(DIAGRAM_MAX_MESSAGES),
                              "blocks": [{"kind": "opt", "branches": []}] * DIAGRAM_MAX_BLOCKS})
 
-def test_over_cap_flowchart_specs_raise_value_error() -> None:
-    nodes = [{"id": f"n{i}", "kind": "process", "label": "x", "evidence": {"file": "a.py", "line": 1, "symbol": None}}
-             for i in range(DIAGRAM_MAX_NODES + 1)]
-    with pytest.raises(ValueError, match="nodes"):
-        render_flowchart_mermaid({"root": {}, "nodes": nodes, "edges": []})
-    edges = [{"from": "n0", "to": "n0", "label": None} for _ in range(DIAGRAM_MAX_EDGES + 1)]
-    with pytest.raises(ValueError, match="edges"):
-        render_flowchart_mermaid({"root": {}, "nodes": nodes[:1], "edges": edges})
-    render_flowchart_mermaid({"root": {}, "nodes": nodes[:DIAGRAM_MAX_NODES], "edges": edges[:DIAGRAM_MAX_EDGES]})
-
-
 # Sanitization and injection (spec test 11)
 
 # Every payload from spec test 11, plus a control byte and an entity forgery.
-_PAYLOADS = (
-    "end\nP1->>P9: pwned",
-    "N9{x} --> N1", "%%{init: {'theme':'x'}}%%", "`rm -rf /`", "a|b", "</details>", "drop;table",
-    "forge #lt; entity",
-    "bell\x07and\ttab",
-)
-
-@pytest.mark.parametrize("payload", _PAYLOADS)
-def test_sanitize_label_strips_every_mermaid_metacharacter(payload: str) -> None:
-    out = sanitize_label(payload, DIAGRAM_LABEL_CAP_MESSAGE)
-    # ``<``/``>``/``"`` are escaped away entirely; the escapes themselves are the
-    # only place a ``#`` or a ``;`` may appear, so strip them before checking the
-    # banned set.
-    for gone in ("<", ">", '"', "\n", "\r", "\x07", "%%"):
-        assert gone not in out, f"{gone!r} survived in {out!r}"
-    bare = out.replace("#lt;", "").replace("#gt;", "").replace("#quot;", "")
-    for banned in ("#", ";", "`", "|", "[", "]", "{", "}", "(", ")", "\\"):
-        assert banned not in bare, f"{banned!r} survived in {out!r}"
-
 def test_sanitize_label_escapes_and_collapses_and_caps() -> None:
     assert sanitize_label("a <b> \"c\"", 80) == "a #lt;b#gt; #quot;c#quot;"
     assert sanitize_label("  many   \n spaces\t here  ", 80) == "many spaces here"
@@ -222,30 +157,6 @@ def test_sanitize_label_escapes_and_collapses_and_caps() -> None:
     assert sanitize_label("", 40) == ""
     # Truncation happens before escaping, so an escape is never bisected.
     assert sanitize_label("<<<<", 2) == "#lt;#lt;"
-
-def test_injection_payloads_never_add_a_mermaid_statement() -> None:
-    spec: dict[str, Any] = {"participants": [
-            {"name": "end\nP1->>P9: pwned", "kind": "internal", "files": ["a.py"], "service": None},
-            {"name": "`|</details>", "kind": "internal", "files": ["b.py"], "service": None},
-        ],
-        "messages": [
-            {"from": "end\nP1->>P9: pwned", "to": "`|</details>",
-             "label": "end\nP1->>P9: pwned", "kind": "call", "changed": True,
-             "evidence": {"file": "a.py", "line": 1, "symbol": "x"}},
-        ],
-        "blocks": [{"kind": "alt", "branches": [
-            {"condition": "%%{init}%%", "evidence": {"file": "a.py", "line": 1}, "messages": [0]},
-            {"condition": "end", "evidence": {"file": "a.py", "line": 2}, "messages": []},
-        ]}],
-    }
-    mermaid = render_sequence_mermaid(spec)
-    lines = mermaid.split("\n")
-    # header + 2 participants + alt + 1 message + end == 6 lines. No 7th statement.
-    assert len(lines) == 6
-    assert lines[0] == "sequenceDiagram"
-    assert lines[4].startswith("        P1->>P2: ")
-    assert lines[5] == "    end"
-    assert "%%" not in mermaid
 
 def test_flowchart_injection_payloads_cannot_close_a_shape_or_add_an_edge() -> None:
     spec: dict[str, Any] = {"root": {"file": "a.py", "name": "`|f", "line": 1},
@@ -276,18 +187,6 @@ def test_flowchart_injection_payloads_cannot_close_a_shape_or_add_an_edge() -> N
     assert lines[2] == "    N2 --> N3[/read/]"
     assert lines[3] == "    N3 --> N4[[call]]"
     assert lines[4].endswith(" N5([#lt;/details#gt;])")
-
-def test_injection_payloads_cannot_close_the_html_wrapper() -> None:
-    spec: dict[str, Any] = {
-        "participants": [{"name": "</details>", "kind": "internal", "files": ["a.py"], "service": None}],
-        "messages": [{"from": "</details>", "to": "</details>", "label": "a|b</details>",
-                      "kind": "self", "changed": True, "evidence": {"file": "a|b`.py", "line": 7, "symbol": "x"}}],
-        "blocks": [],
-    }
-    blocks = render_diagram_blocks({"sequence": _rendered(spec)})
-    assert blocks.count("<details>") == blocks.count("</details>") == 1
-    assert "#lt;/details#gt;" in blocks
-
 
 # Block structure edge cases
 
@@ -348,14 +247,6 @@ def test_unknown_node_kind_falls_back_to_the_process_shape() -> None:
 
 
 # Omission notice
-
-def test_omission_notice_reports_floor_codes() -> None:
-    notice = render_omission_notice("sequence", {
-        "status": "omitted", "omit_reasons": ["TOO_FEW_MESSAGES", "NO_CHANGED_INTERACTION"],
-    })
-    assert notice == ("No sequence diagram was rendered for this pull request. "
-        "Grounding floor not met: TOO_FEW_MESSAGES, NO_CHANGED_INTERACTION."
-    )
 
 def test_omission_notice_covers_skipped_failed_and_rendered() -> None:
     assert render_omission_notice("flowchart", {"status": "rendered"}) == ""

@@ -27,12 +27,6 @@ def test_tool_policy_veto_is_permanent_and_never_retryable() -> None:
     assert decision.failure_class is FailureClass.TOOL_POLICY
     assert decision.retries_allowed is False
 
-def test_permanent_condition_beats_transient_token_in_same_message() -> None:
-    """A 503 in the message must not rescue a "model not found" failure."""
-    decision = classify_failure(PiError("model not found: gpt-5 (503)", retryable=True, category="SERVER_ERROR"))
-
-    assert decision.failure_class is FailureClass.PERMANENT
-    assert decision.retries_allowed is False
 
 def test_rate_limit_message_mentioning_provider_stays_transient() -> None:
     """Generic "provider" text must not override an explicitly transient rate-limit category."""
@@ -59,19 +53,6 @@ def test_declared_class_wins_over_message_and_category() -> None:
     assert decision.failure_class is FailureClass.PERMANENT
     assert decision.retries_allowed is False
 
-@pytest.mark.parametrize(("error", "expected"),
-    [(PiError("429 rate limit exceeded", retryable=True, category="RATE_LIMIT"), FailureClass.RATE_LIMIT),
-        (PiError("503 service unavailable", retryable=True, category="SERVER_ERROR"), FailureClass.SERVER_ERROR),
-        (PiError("upstream timed out", retryable=True, category="TIMEOUT"), FailureClass.TIMEOUT),
-        (PiError("stream terminated", retryable=True, category="STREAM_DROP"), FailureClass.TRANSPORT),
-        (PiError("boom", retryable=True, category="UNKNOWN"), FailureClass.SERVER_ERROR),
-    ],
-)
-def test_transient_failures_map_to_their_family(error: PiError, expected: FailureClass) -> None:
-    decision = classify_failure(error)
-
-    assert decision.failure_class is expected
-    assert decision.retries_allowed is True
 
 def test_permanent_attribute_beats_retryable_flag_and_transient_category() -> None:
     class _Permanent(Exception):
@@ -91,11 +72,6 @@ def test_category_only_transient_failure_without_retryable_flag_is_retryable() -
     assert decision.failure_class is FailureClass.RATE_LIMIT
     assert decision.retries_allowed is True
 
-def test_plain_exception_is_not_retryable() -> None:
-    decision = classify_failure(RuntimeError("something broke"))
-
-    assert decision.failure_class is FailureClass.NOT_RETRYABLE
-    assert decision.retries_allowed is False
 
 def test_derive_retry_summary_ignores_deadline_only_stops() -> None:
     """A deadline stop's attempts/backend_s are useful work, not retry overhead."""

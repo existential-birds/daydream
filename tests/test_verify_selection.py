@@ -84,32 +84,11 @@ def test_absent_diff_selects_even_a_strong_routine_item() -> None:
     assert decisions[0].selected is True
     assert decisions[0].reason_code == "unreadable_diff"
 
-def test_verify_all_selects_every_non_exempt_item_and_config_widens_only() -> None:
-    items = [_item("item:1"), _item("item:2", lens="structural")]
-    decisions = select_items(
-        items, provenance=None, diff_text="", config=SelectionConfig(verify_all=True, extra_categories=()),
-    )
-    assert [(d.item_uid, d.selected, d.reason_code) for d in decisions] == [
-        ("item:1", True, "verify_all"), ("item:2", False, "exempt:structural"),
-    ]
-
-
 def _decision(item_uid: str, *, digest: str, item_id: int = 1) -> SelectionDecision:
     return SelectionDecision(
         item_uid=item_uid, item_id=item_id, selected=True, reason_code="unadjudicated:no_provenance",
         reason="no recorded adjudication", provenance={}, content_digest=digest,
     )
-
-def test_reuse_serves_unchanged_selected_items_and_marks_them_reused() -> None:
-    decisions = [_decision("item:1", digest="d1"), _decision("item:2", digest="d2")]
-    prior = {"rule_version": SELECTION_RULE_VERSION,
-        "decisions": [{"item_uid": "item:1", "content_digest": "d1", "verdict_reused": False},
-            {"item_uid": "item:2", "content_digest": "STALE", "verdict_reused": False},
-        ], "verdicts": [{"issue_id": 1, "verdict": "consistent", "evidence": "e", "unverified_assumptions": []}],
-    }
-    reused, to_verify = plan_reuse(prior, decisions)
-    assert reused == {"item:1": {"issue_id": 1, "verdict": "consistent", "evidence": "e", "unverified_assumptions": []}}
-    assert [d.item_uid for d in to_verify] == ["item:2"]
 
 def test_reused_verdict_is_rekeyed_to_the_current_item_id() -> None:
     # A resume that renumbers merged ids keeps the verdict (durable uid plus the

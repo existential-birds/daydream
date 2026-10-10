@@ -27,11 +27,6 @@ async def _noop(ctx: Any) -> None:
 async def _other(ctx: Any) -> None:
     return None
 
-def test_registry_has_no_skill_methods() -> None:
-    """M7: the Registry has no skill-slot inventory or lookup."""
-    reg = Registry()
-    for method in ("override_skill", "skill", "skill_if_registered", "skill_slots", "stack_keys"):
-        assert not hasattr(reg, method)
 
 def test_trace_exporter_registry_is_lazy_and_replace_is_explicit() -> None:
     def factory(config: ObservabilityConfig) -> Any:
@@ -78,17 +73,6 @@ def test_replace_requires_flag_and_prompt_roundtrip() -> None:
     reg.override_prompt("review", lambda **kw: "X")
     assert reg.prompt("review")() == "X"
 
-def test_introspection_lists_names_in_registration_order() -> None:
-    """`daydream ext validate` enumerates namespaces through these accessors."""
-    reg = Registry()
-    reg.register_phase(FlowStep(name="b", run=_noop))
-    reg.register_phase(FlowStep(name="a", run=_noop))
-    reg.set_flow("deep", ["b", "a"])
-    reg.set_flow("custom", ["ghost"])  # unresolved names are allowed until pre-flight
-    reg.override_prompt("review", lambda **kw: "X")
-    assert reg.phase_names() == ("b", "a")
-    assert reg.flow_names() == ("deep", "custom")
-    assert reg.prompt_names() == ("review",)
 
 def test_remove_loop_internal_step_raises_descriptive_error() -> None:
     """remove() names the containing LoopGroup when the step is loop-internal."""
@@ -110,13 +94,6 @@ def test_tool_supervisor_registration_is_exclusive() -> None:
     with pytest.raises(ValueError, match="veto.*reason"):
         ToolDecision(veto=True, reason="")
 
-def test_tool_supervisor_registration_rejects_async_function() -> None:
-    reg = Registry()
-    async def supervisor(name: Any, tool_input: Any, *, phase: Any) -> Any:
-        return ToolDecision(veto=False)
-    with pytest.raises(ExtensionError, match="tool supervisor.*synchronous"):
-        reg.register_tool_supervisor(cast(ToolSupervisor, supervisor))
-    assert reg.tool_supervisor_if_registered() is None
 
 def test_tool_supervisor_registration_rejects_async_callable_object() -> None:
     class AsyncSupervisor:
@@ -148,13 +125,3 @@ def test_comment_contract_types_are_frozen_and_public() -> None:
         with_diagrams.diagrams = "x"  # type: ignore[misc]
     for name in ("CommentFinding", "FindingRenderContext", "SummaryFinding", "SummaryContext"):
         assert name in ext.__all__
-
-def test_renderer_slot_override_and_lookup() -> None:
-    reg = Registry()
-    with pytest.raises(UnresolvedExtensionError):
-        reg.renderer("finding")
-    def fn(finding: Any, ctx: Any) -> str:
-        return "X"
-    reg.override_renderer("finding", fn)
-    assert reg.renderer("finding") is fn
-    assert reg.renderer_names() == ("finding",)

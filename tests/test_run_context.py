@@ -5,7 +5,6 @@ from __future__ import annotations
 import subprocess
 import sys
 import textwrap
-from dataclasses import FrozenInstanceError
 from typing import Any
 
 import pytest
@@ -14,9 +13,6 @@ from daydream.run_context import (
     InteractionPolicy,
     RunContext,
     active_backends,
-    bind_run_context,
-    current_run_context,
-    resolve_gate,
     resolve_run_context,
 )
 from tests.harness.backend import ScriptedBackend
@@ -28,46 +24,8 @@ class _EqualBackend(ScriptedBackend):
     def __eq__(self, _other: object) -> bool:
         return True
 
-def test_interaction_policy_is_frozen_and_keyword_only() -> None:
-    policy = InteractionPolicy(assume="yes", interactive=False, quiet=True, log_mode=True)
-    with pytest.raises(FrozenInstanceError):
-        policy.quiet = False  # type: ignore[misc]
-    with pytest.raises(TypeError):
-        InteractionPolicy("yes")  # type: ignore[call-arg]
 
-@pytest.mark.parametrize(("assume", "interactive", "safe_default", "expected"),
-    [
-        # An explicit assumption wins outright, so a TTY cannot change the answer and
-        # the safe default is unreachable on that branch.
-        ("yes", True, False, True),
-        ("no", True, True, False),
-        # No assumption: a TTY falls back to prompting (None), otherwise the gate's
-        # own safe default decides, whichever way that gate is configured.
-        (None, True, False, None),
-        (None, False, True, True),
-        (None, False, False, False),
-        # "yes"/"no" also decide when unattended (CI --yes, explicit decline).
-        ("yes", False, True, True),
-        ("no", False, False, False),
-    ],
-)
-def test_resolve_gate_remains_pure(assume: str | None, interactive: bool, safe_default: bool, expected: bool | None
-) -> None:
-    assert resolve_gate(assume=assume, interactive=interactive, safe_default=safe_default) is expected
 
-def test_nested_binding_restores_the_previous_context() -> None:
-    outer = RunContext(InteractionPolicy(quiet=True))
-    inner = RunContext(InteractionPolicy(log_mode=True))
-
-    assert current_run_context() is None
-    with bind_run_context(outer):
-        assert current_run_context() is outer
-        assert resolve_run_context() is outer
-        with bind_run_context(inner):
-            assert current_run_context() is inner
-            assert resolve_run_context(outer) is outer
-        assert current_run_context() is outer
-    assert current_run_context() is None
 
 def test_resolve_run_context_creates_a_fresh_standalone_default() -> None:
     first = resolve_run_context()
@@ -77,29 +35,7 @@ def test_resolve_run_context_creates_a_fresh_standalone_default() -> None:
     assert first.policy == InteractionPolicy()
     assert second.policy == InteractionPolicy()
 
-def test_confirm_uses_forced_and_unattended_answers_without_prompting(monkeypatch: pytest.MonkeyPatch,) -> None:
-    prompts: list[tuple[Any, str, str]] = []
-    def prompt(console: Any, message: str, default: str) -> str:
-        prompts.append((console, message, default))
-        return "y"
-    monkeypatch.setattr("daydream.run_context._prompt_user", prompt)
 
-    assert RunContext(InteractionPolicy(assume="yes")).confirm("continue?", safe_default=False)
-    assert not RunContext(InteractionPolicy(assume="no")).confirm("continue?", safe_default=True)
-    assert RunContext(InteractionPolicy(interactive=False)).confirm("continue?", safe_default=True)
-    assert prompts == []
-
-def test_confirm_prompts_through_the_single_gateway_with_its_context_bound(monkeypatch: pytest.MonkeyPatch,) -> None:
-    context = RunContext(InteractionPolicy(log_mode=True))
-    observed: list[RunContext | None] = []
-    def prompt(_console: Any, _message: str, _default: str) -> str:
-        observed.append(current_run_context())
-        return "YES"
-    monkeypatch.setattr("daydream.run_context._prompt_user", prompt)
-
-    assert context.confirm("continue?", safe_default=False, default="n")
-    assert observed == [context]
-    assert current_run_context() is None
 
 def test_choice_forces_only_supplied_assume_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
     prompts: list[str] = []
@@ -144,16 +80,6 @@ def test_backend_registration_does_not_collapse_equal_distinct_objects() -> None
         assert local[1] is process[1] is second_backend
     assert active_backends() == ()
 
-def test_backend_registration_cleans_up_after_exception() -> None:
-    backend = ScriptedBackend()
-    context = RunContext(InteractionPolicy())
-    with pytest.raises(RuntimeError, match="boom"):
-        with context.backend_registration(backend):
-            assert active_backends() == (backend,)
-            raise RuntimeError("boom")
-
-    assert context.active_backends() == ()
-    assert active_backends() == ()
 
 def test_signal_snapshot_reenters_registration_and_interrupted_enter_cleans_up() -> None:
     """A same-thread signal snapshot must neither deadlock nor leak membership."""

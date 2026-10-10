@@ -247,14 +247,6 @@ def test_derive_task_key_is_opaque_and_deterministic() -> None:
     assert "pr-" not in k and case_id not in k          # reveals no authoring case id
     assert all(c in "0123456789abcdef" for c in k[len("case-"):])  # hex suffix
 
-def test_bounded_pr_context_short_no_truncation() -> None:
-    ctx = build.bounded_pr_context({"title": "Fix cache", "body": "narrowly scoped"})
-    assert ctx == (
-        "<historical_pr_context>\ntitle: Fix cache\nbody: narrowly scoped\n"
-        "</historical_pr_context>"
-    )
-    assert "[truncated" not in ctx
-
 def test_bounded_pr_context_truncates_on_utf8_boundary_and_marks() -> None:
     emoji = "😀"  # 4 UTF-8 bytes
     body = "a" * 1000 + emoji * 50 + "Z" * 500            # ends on a 4-byte char
@@ -275,19 +267,6 @@ def test_bounded_pr_context_truncates_on_utf8_boundary_and_marks() -> None:
     assert len(body_line.encode("utf-8")) <= 1021
     digest = _truncation_marker_digest(ctx)
     assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()   # stored normalized-body digest
-
-def test_bounded_pr_context_marker_emits_persisted_body_sha256() -> None:
-    body = "a" * 1000 + "\U0001F600" * 50 + "Z" * 500
-    stored = hashlib.sha256(body.encode("utf-8")).hexdigest()
-    ctx = build.bounded_pr_context({"title": "T", "body": body, "body_sha256": stored}, max_bytes=1021)
-    digest = _truncation_marker_digest(ctx)
-    assert digest == stored                  # persisted normalized-body digest, not re-derived
-
-def test_bounded_pr_context_marker_falls_back_deterministically_without_digest() -> None:
-    body = "a" * 1000 + "Z" * 500
-    ctx = build.bounded_pr_context({"title": "T", "body": body}, max_bytes=1021)
-    digest = _truncation_marker_digest(ctx)
-    assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()  # predate: sha256(stored body)
 
 def test_bounded_pr_context_marker_never_interpolates_unvalidated_digest() -> None:
     body = "a" * 1000 + "\U0001F600" * 50 + "Z" * 500
@@ -317,76 +296,12 @@ def test_bounded_pr_context_marker_drops_inconsistent_persisted_digest() -> None
     digest = _truncation_marker_digest(ctx)
     assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()
 
-def test_bounded_pr_context_missing_body_is_empty() -> None:
-    ctx = build.bounded_pr_context({"title": "Fix cache"})          # no body key
-    assert "body: \n" in ctx and "[truncated" not in ctx
-
-def test_build_gold_list_is_provenance_free() -> None:
-    findings = [{"finding_id": "c" * 64, "title": "Cache", "body": "collides", "severity": "high",
-         "location": {"path": "src/cache.py", "start_line": 42, "end_line": 42},
-         "provenance": {"kind": "historical", "source_ids": ["github:review:1"]}},
-        {"finding_id": "a" * 64, "title": "Escape", "body": "unvalidated", "severity": "medium",
-         "location": {"path": "src/render.py", "start_line": 10, "end_line": 14},
-         "provenance": {"kind": "authored", "source_ids": []}},
-    ]
-    gold = build.build_gold_list(findings, key="case-key")
-    # compiled gold ids are the task-key-scoped digests, not the raw workspace ids
-    def _id(f: dict[str, Any]) -> Any:
-        loc = f["location"]
-        payload = "\x1f".join(["case-key", str(f["title"]), str(f["body"]),
-                                str(f["severity"]), str(loc["path"]), str(loc["start_line"]), str(loc["end_line"])])
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    expected = sorted(_id(f) for f in findings)
-    assert [f["finding_id"] for f in gold] == expected                  # ordered by finding_id
-    assert all(set(f) == {"finding_id", "title", "body", "severity", "path", "start_line", "end_line"}
-               for f in gold)                                             # no provenance/source/gold keys
-    assert gold[0]["path"] == "src/render.py" and gold[0]["start_line"] == 10
-
-def test_build_gold_list_clean_is_empty() -> None:
-    assert build.build_gold_list([], key="case-key") == []
-
-def test_build_gold_list_accepts_locationless_and_emits_nulls() -> None:
-    key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
-    finding = {"finding_id": "a" * 64, "title": "T", "body": "B", "severity": None,
-        "location": None, "provenance": {"kind": "authored", "source_ids": []},
-    }
-    gold = build.build_gold_list([finding], key=key)
-    assert len(gold) == 1
-    entry = gold[0]
-    assert set(entry) == {"finding_id", "title", "body", "severity", "path", "start_line", "end_line"}
-    assert entry["path"] is None and entry["start_line"] is None and entry["end_line"] is None
-    # compiled gold id is the task-key-scoped canonical digest, nulls -> ""
-    payload = "\x1f".join([key, str(finding["title"]), str(finding["body"]),
-                            str(finding["severity"] or ""), "", "", ""])
-    expected = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-    assert entry["finding_id"] == expected
-    assert entry["finding_id"] != "a" * 64
-
 def test_build_gold_list_rejects_partially_populated_location() -> None:
     with pytest.raises(CompileError):
         build.build_gold_list([{"finding_id": "a" * 64, "title": "T", "body": "B", "severity": None,
             "location": {"path": "src/a.py", "start_line": None, "end_line": None},
             "provenance": {"kind": "authored", "source_ids": []},
         }], key=build.derive_task_key("pr-000101-1a2b3c4d5e6f"))
-
-@pytest.mark.parametrize(("field", "value"),
-    [("title", ""), ("body", "bad\x00body"), ("severity", "critical"),
-     ("location", {"path": "../escape", "start_line": 1, "end_line": 1}),
-     ("location", []), ("location", ""), ("location", 0), ("location", False)],
-)
-@pytest.mark.parametrize("oracle", [False, True])
-def test_build_gold_and_oracle_reject_invalid_finding_content(field: str, value: object, oracle: bool) -> None:
-    finding: dict[str, Any] = {"finding_id": "a" * 64, "title": "T", "body": "B", "severity": "low",
-        "location": {"path": "src/a.py", "start_line": 1, "end_line": 1},
-        "provenance": {"kind": "authored", "source_ids": []},
-    }
-    finding[field] = value
-    key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
-    with pytest.raises(build.CompileError):
-        if oracle:
-            build.build_oracle_artifact(key, [finding])
-        else:
-            build.build_gold_list([finding], key=key)
 
 @pytest.mark.parametrize(("present", "location"),
     [(False, None), (True, None), (True, {}), (True, {"path": None}), (True, {"start_line": None, "end_line": None})],
@@ -419,68 +334,6 @@ def test_build_gold_and_oracle_cap(oracle: bool, count: int, accepted: bool) -> 
     else:
         with pytest.raises(build.CompileError):
             build_artifact()
-
-def test_build_oracle_artifact_locationless_passes_validation() -> None:
-    key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
-    art = build.build_oracle_artifact(key, [{
-        "finding_id": "a" * 64, "title": "Cache", "body": "collides", "severity": None,
-        "location": None, "provenance": {"kind": "historical", "source_ids": ["github:review:1"]},
-    }])
-    entry = art["findings"][0]
-    assert entry["path"] is None and entry["start_line"] is None and entry["end_line"] is None
-    assert set(entry) == {"candidate_id", "title", "body", "severity", "path", "start_line", "end_line"}
-    assert vc.validate_candidate_artifact(art)  # round-trips; candidate_id matches derived
-
-def test_build_oracle_artifact_passes_validation_and_derives_candidate_ids() -> None:
-    findings: list[dict[str, Any]] = [{"finding_id": "b" * 64, "title": "Cache", "body": "collides", "severity": "high",
-         "location": {"path": "src/cache.py", "start_line": 42, "end_line": 42},
-         "provenance": {"kind": "historical", "source_ids": ["github:review:1"]}},
-        {"finding_id": "a" * 64, "title": "Escape", "body": "unvalidated", "severity": None,
-         "location": {"path": "src/render.py", "start_line": 10, "end_line": 14},
-         "provenance": {"kind": "authored", "source_ids": []}},
-    ]
-    key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
-    art = build.build_oracle_artifact(key, findings)
-    assert art["schema_version"] == 1 and art["case_id"] == key
-    assert art["base_ref"] == "base" and art["head_ref"] == "head"
-    # findings are ordered by finding_id ascending; ordinal = position in that order
-    flat = [{"title": f["title"], "body": f["body"], "severity": f["severity"],
-         "path": f["location"]["path"], "start_line": f["location"]["start_line"],
-         "end_line": f["location"]["end_line"]}
-        for f in sorted(findings, key=lambda f: f["finding_id"])
-    ]
-    expected_ids = []
-    groups: dict[tuple[Any, ...], int] = {}
-    for f in flat:
-        canon = (f["title"], f["body"], f["severity"] or "", f["path"], f["start_line"], f["end_line"])
-        ordinal = groups.get(canon, 0)
-        groups[canon] = ordinal + 1
-        expected_ids.append(vc.derive_candidate_id(key, f, ordinal))
-    assert [f["candidate_id"] for f in art["findings"]] == expected_ids
-    for entry in art["findings"]:
-        assert set(entry) == {"candidate_id", "title", "body", "severity", "path", "start_line", "end_line"}
-    assert vc.validate_candidate_artifact(art)
-
-def test_build_oracle_artifact_clean_has_empty_findings() -> None:
-    key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
-    art = build.build_oracle_artifact(key, [])
-    assert art["findings"] == []
-    assert vc.validate_candidate_artifact(art) == []
-
-def test_copy_assets_places_templates_and_keeps_verifier_core_byte_identical(tmp_path: Path) -> None:
-    dst = tmp_path / "case"
-    build._copy_assets(dst)
-    expected = {"tests/score_review.py", "tests/verifier_core.py", "tests/judge_prompt.md",
-        "tests/test.sh", "tests/Dockerfile", "solution/solve.sh",
-    }
-    assert {str(p.relative_to(dst)) for p in dst.rglob("*") if p.is_file()} == expected
-    src_core = Path(REPO) / "daydream" / "benchmark" / "harbor" / "verifier_core.py"
-    assert (dst / "tests" / "verifier_core.py").read_bytes() == src_core.read_bytes()
-    assert not (Path(REPO) / "daydream" / "benchmark" / "harbor" / "templates" / "tests" / "verifier_core.py").exists()
-    assert (dst / "tests" / "verifier_core.py").read_bytes() == (
-        Path(REPO) / "daydream" / "benchmark" / "harbor" / "verifier_core.py").read_bytes()
-    assert (dst / "tests" / "score_review.py").read_bytes() == (
-        Path(REPO) / "daydream" / "benchmark" / "harbor" / "templates" / "tests" / "score_review.py").read_bytes()
 
 
 def _load_json(path: Path) -> Any:

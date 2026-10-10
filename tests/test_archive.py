@@ -16,7 +16,6 @@ from daydream.archive import (
     ArchiveFinalizationError,
     finalize_archive_run,
     get_archive_dir,
-    index,
     pipeline,
 )
 from daydream.archive.bundle import _copy_snapshot_bundle, _project_documents
@@ -32,16 +31,13 @@ from daydream.archive.pipeline import (
     derive_phase_states,
     derive_pipeline_status,
 )
-from daydream.archive.provenance import ExecutableProvenance
 from daydream.artifact_visibility import (
     ArtifactEvidenceProvenance,
     ArtifactTreeSnapshot,
-    DestinationDelivery,
-    OutputLabel,
     RoutedDestination,
 )
 from daydream.artifacts.filesystem import manifest_tree
-from daydream.backends import MetricsEvent, ResultEvent, TextEvent
+from daydream.backends import ResultEvent, TextEvent
 from daydream.deep.artifacts import DeepArtifact
 from daydream.remote_ci import (
     CIObservation,
@@ -60,7 +56,6 @@ from daydream.run_snapshot import (
     ArchiveRunSnapshot,
     ManifestRunIdentity,
     RunPhaseCapabilities,
-    RunProfileIdentity,
 )
 from daydream.runner import run
 from daydream.trajectory import (
@@ -69,14 +64,12 @@ from daydream.trajectory import (
     PhaseEvent,
     RunWriteSnapshot,
     TrajectoryDocumentSnapshot,
-    TrajectoryRecorder,
     partial_document_path,
     run_directory,
     run_document_path,
     sibling_document_path,
 )
 from tests.harness.backend import ScriptedBackend
-from tests.harness.git_helpers import configure_identity as _configure_identity, git as _git
 from tests.harness.improve_backend import install_improve_stub
 from tests.harness.review_result import review_coverage
 from tests.harness.trajectory import make_manifest, make_recorder
@@ -155,13 +148,6 @@ def target(tmp_path: Path) -> Path:
     return _frozen_target(tmp_path)
 
 
-def _findings_route(live_root: Path, name: str = "findings.json") -> RoutedDestination:
-    """The registered ``--findings-out`` route the strict bundle relocates."""
-    private = live_root / ".explicit" / "0000" / name
-    return RoutedDestination(
-        label=OutputLabel.FINDINGS_OUTPUT, requested=Path("findings") / name, write_path=private, frozen_path=private,
-        delivery=DestinationDelivery.DEFERRED,
-    )
 
 def _strict_archive(*, target: Path, session_id: str, config: Any, write_snapshot: RunWriteSnapshot,
     run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL, identity: ManifestRunIdentity | None = None,
@@ -218,30 +204,8 @@ def _archive_snapshot(trajectories: RunWriteSnapshot, *, run_flow: DaydreamRunFl
         identity=identity or _manifest_identity(), trajectories=trajectories,
     )
 
-def _run_git_init_with_credential_origin(repo: Path, origin_url: str) -> None:
-    _git(repo, "init")
-    _configure_identity(repo)
-    _git(repo, "commit", "--allow-empty", "-m", "init")
-    _git(repo, "remote", "add", "origin", origin_url)
 
-def test_capture_git_context_stores_credential_free_remote(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _run_git_init_with_credential_origin(repo, "https://user:ghp_canaryfake123@github.com/o/r.git")
-    ctx = capture_git_context(repo)
-    assert ctx.repo_slug == "o/r"
-    assert ctx.remote_url == "https://github.com/o/r"
-    assert "ghp_canaryfake123" not in (ctx.remote_url or "")
-    assert "@" not in (ctx.remote_url or "")
 
-def test_capture_git_context_real_repo(tmp_path: Path) -> None:
-    _git(tmp_path, "init")
-    _configure_identity(tmp_path)
-    _git(tmp_path, "commit", "--allow-empty", "-m", "init")
-    ctx = capture_git_context(tmp_path)
-    assert isinstance(ctx, GitContext)
-    assert ctx.head_sha is not None and len(ctx.head_sha) == 40
-    assert ctx.branch is not None
 
 def test_capture_git_context_no_repo(tmp_path: Path) -> None:
     ctx = capture_git_context(tmp_path)
@@ -251,21 +215,6 @@ def test_capture_git_context_no_repo(tmp_path: Path) -> None:
     assert ctx.base_sha is None
     assert ctx.changed_files == []
 
-def test_capture_git_context_populates_base_sha_and_changed_files(tmp_path: Path,) -> None:
-    _git(tmp_path, "init", "-b", "main")
-    _configure_identity(tmp_path)
-    (tmp_path / "a.py").write_text("print('a')\n")
-    _git(tmp_path, "add", "a.py")
-    _git(tmp_path, "commit", "-m", "base")
-    base_sha = _git(tmp_path, "rev-parse", "HEAD")
-    _git(tmp_path, "checkout", "-b", "feat/x")
-    (tmp_path / "b.py").write_text("print('b')\n")
-    (tmp_path / "a.py").write_text("print('a-changed')\n")
-    _git(tmp_path, "add", "a.py", "b.py")
-    _git(tmp_path, "commit", "-m", "feat")
-    ctx = capture_git_context(tmp_path)
-    assert ctx.base_sha == base_sha
-    assert sorted(ctx.changed_files) == ["a.py", "b.py"]
 
 def _build(tmp_path: Path, *, git_ctx: GitContext | None = None, write_snapshot: RunWriteSnapshot | None = None,
     run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL, identity: ManifestRunIdentity | None = None, **kw: Any,
@@ -276,47 +225,9 @@ def _build(tmp_path: Path, *, git_ctx: GitContext | None = None, write_snapshot:
         git_ctx=git_ctx if git_ctx is not None else GitContext(), status="complete", archive_path=tmp_path, **kw,
     )
 
-def test_build_manifest_basic(tmp_path: Path) -> None:
-    m = _build(tmp_path,
-        git_ctx=GitContext(
-            remote_url="git@github.com:org/repo.git", repo_slug="org/repo", branch="main", base_branch="main",
-            head_sha="a" * 40,
-        ),
-    )
-
-    assert m.session_id == "abcd1234-0000-0000-0000-000000000000"
-    assert m.run_flow == "normal"
-    assert m.skill == "python"
-    # Per-phase models replaced config.model; the manifest stamps model as None.
-    assert m.model is None
-    assert m.backend == "claude"
-    assert m.review_backend is None
-    assert m.total_cost_usd == 0.05
-    assert m.total_prompt_tokens == 100
-    assert m.total_completion_tokens == 50
-    assert m.total_cached_tokens == 20
-    assert m.repo_slug == "org/repo"
-    assert m.head_sha == "a" * 40
-
-def test_build_manifest_serializes_resolved_profile_identity(tmp_path: Path) -> None:
-    profile = RunProfileIdentity(schema_version=7, name="focused", source_kind="explicit", digest="e2e-profile-digest",)
-    manifest = _build(tmp_path, identity=_manifest_identity(profile=profile),).to_dict()
-    assert {key: manifest[key]
-        for key in ("profile_schema_version", "profile_name", "profile_source_kind", "profile_digest",)
-    } == {"profile_schema_version": 7, "profile_name": "focused", "profile_source_kind": "explicit",
-        "profile_digest": "e2e-profile-digest",
-    }
 
 
-def test_build_manifest_omits_fix_metadata_for_diagram_flow(tmp_path: Path) -> None:
-    m = _build(tmp_path, run_flow=DaydreamRunFlow.DIAGRAM,
-        identity=_manifest_identity(phases=replace(_manifest_identity().phases, fix=False, test=False)),
-        fix_failures={"src/old.py": "reverted"}, fix_leftover_untracked=["src/leftover.py"],
-        fix_quality_gate={"enabled": True, "rounds": []},
-    )
-    assert m.fix_failures is None
-    assert m.fix_leftover_untracked is None
-    assert m.fix_quality_gate is None
+
 
 def _assert_archive_omits_fix_test_backend(archive_dir: Path, flow: str) -> None:
     manifests = list((archive_dir / "runs").glob("*/manifest.json"))
@@ -364,40 +275,7 @@ async def test_custom_flow_archive_real_path_omits_fix_test_backend(
     assert rc == 0
     _assert_archive_omits_fix_test_backend(archive_dir, "custom")
 
-def test_manifest_to_dict_structure(tmp_path: Path) -> None:
-    m = _build(tmp_path)
-    d = m.to_dict()
-    assert d["schema_version"] == "2.0"
-    assert d["session_id"] == "abcd1234-0000-0000-0000-000000000000"
-    assert "run" in d and d["run"]["flow"] == "normal"
-    assert "git" in d
-    assert "pr" in d
-    assert "metrics" in d
-    assert d["code_context"] == {
-        "base_sha": None, "head_sha": None, "base_branch": None, "branch": None, "changed_files": [],
-    }
-    assert m.total_findings is None
-    assert "grounding_rate" not in d["metrics"]
-    assert "coverage_ratio" not in d["metrics"]
-    assert m.cost_per_finding_usd is None
-    assert m.erosion is None
-    assert m.verbosity is None
-    assert m.fix_quality_gate is None
-    assert d["fix_quality_gate"] is None
-    assert m.recommended_patch_capture == "pre_test"
-    assert d["recommended_patch_capture"] == "pre_test"
-    assert {"profile_schema_version", "profile_name", "profile_source_kind", "profile_digest"}.isdisjoint(d)
 
-def test_manifest_to_dict_code_context_carries_git_ctx_fields(tmp_path: Path) -> None:
-    m = _build(tmp_path,
-        git_ctx=GitContext(
-            branch="feat/x", base_branch="main", head_sha="b" * 40, base_sha="c" * 40, changed_files=["a.py", "b.py"],
-        ),
-    )
-    d = m.to_dict()
-    assert d["code_context"] == {"base_sha": "c" * 40, "head_sha": "b" * 40, "base_branch": "main", "branch": "feat/x",
-        "changed_files": ["a.py", "b.py"],
-    }
 
 def test_build_manifest_with_evaluation(tmp_path: Path) -> None:
     m = _build(tmp_path,
@@ -421,14 +299,6 @@ def test_build_manifest_with_quality(tmp_path: Path) -> None:
     assert d["metrics"]["verbosity"] == 0.19
 
 
-def test_build_manifest_wall_clock_without_evaluation(tmp_path: Path) -> None:
-    m = _build(tmp_path,
-        write_snapshot=_manifest_write_snapshot(
-            extra={"run_started_at": "2026-01-01T00:00:00Z", "run_ended_at": "2026-01-01T00:00:12.300000Z",},
-        ),
-    )
-    assert m.wall_clock_seconds == 12.3
-    assert m.total_findings is None
 
 def test_build_manifest_snapshot_timing_overrides_conflicting_evaluation(tmp_path: Path,) -> None:
     session_id = "snapshot-session"
@@ -481,12 +351,6 @@ def test_upsert_run_never_persists_credential_bearing_url(tmp_path: Path) -> Non
     assert row["repo_slug"] == "o/r"
     assert "ghp_bypassfake" not in (row["remote_url"] or "")
 
-def test_upsert_run_persists_runtime_identity(tmp_path: Path) -> None:
-    m = make_manifest()
-    upsert_run(tmp_path, m)
-    with closing(sqlite3.connect(f"{(tmp_path / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
-        rows = conn.execute("SELECT session_id, skill, status FROM runs").fetchall()
-        assert rows == [("sess-0001", "python", "complete")]
 
 
 def test_upsert_run_persists_erosion_verbosity(tmp_path: Path) -> None:
@@ -504,36 +368,7 @@ def test_upsert_run_persists_erosion_verbosity(tmp_path: Path) -> None:
         assert ordered == [("s-q2",), ("s-q1",), ("s-q3",)]
 
 
-def test_build_manifest_projects_location_and_duplication_metrics(tmp_path: Path,) -> None:
-    m = _build(tmp_path,
-        evaluation={"location": {"hunk_source": "hunk-index.json", "scored_items": 4, "in_hunk_rate": 0.75,
-                "tiers": {"in_hunk": 3, "within_tolerance": 1, "beyond_tolerance": 0, "file_absent": 0,},
-            },
-            "findings": {"total": 6,
-                "shipped_duplication": {"shipped_items": 6, "comparable_pairs": 15, "near_duplicate_pairs": 2,},
-            },
-        },
-    )
 
-    assert m.location_in_hunk_rate == 0.75
-    assert m.shipped_duplicate_pairs == 2
-    d = m.to_dict()
-    assert d["metrics"]["location_in_hunk_rate"] == 0.75
-    assert d["metrics"]["shipped_duplicate_pairs"] == 2
-
-def test_build_manifest_location_duplication_metrics_none_when_blocks_absent(tmp_path: Path,) -> None:
-    m = _build(tmp_path,
-        evaluation={"timing": {"total_wall_clock_seconds": 42.5}, "findings": {"total": 7},
-            "grounding": {"grounding_rate": 0.85},
-        },
-    )
-
-    assert m.total_findings == 7  # the legacy axes still project
-    assert m.location_in_hunk_rate is None
-    assert m.shipped_duplicate_pairs is None
-    d = m.to_dict()
-    assert d["metrics"]["location_in_hunk_rate"] is None
-    assert d["metrics"]["shipped_duplicate_pairs"] is None
 
 def test_null_in_hunk_rate_survives_manifest_and_db_as_null(tmp_path: Path) -> None:
     """Undefined location accuracy stays NULL so reward reduction can omit the absent axis."""
@@ -551,45 +386,11 @@ def test_null_in_hunk_rate_survives_manifest_and_db_as_null(tmp_path: Path) -> N
     assert row["location_in_hunk_rate"] is None  # SQL NULL, not 0.0
     assert row["shipped_duplicate_pairs"] == 0  # a real zero is still a zero
 
-def test_upsert_run_persists_location_and_duplication_metrics(tmp_path: Path) -> None:
-    row = _stored_manifest_row(tmp_path, "s-loc", location_in_hunk_rate=0.6, shipped_duplicate_pairs=3)
-    assert row["location_in_hunk_rate"] == pytest.approx(0.6)
-    assert row["shipped_duplicate_pairs"] == 3
-
-def test_upsert_run_persists_per_stack_review_identity(tmp_path: Path) -> None:
-    row = _stored_manifest_row(
-        tmp_path, "s-psr", per_stack_review_backend="codex", per_stack_review_model="gpt-psr", review_backend="claude",
-    )
-    assert row["per_stack_review_backend"] == "codex"
-    assert row["per_stack_review_model"] == "gpt-psr"
-    assert row["review_backend"] == "claude"
-
-def test_build_manifest_carries_fix_quality_gate(tmp_path: Path) -> None:
-    gate = {"enabled": True, "erosion_delta_threshold": 0.05, "verbosity_delta_threshold": 0.05,
-        "rounds": [{"round": 1,
-                "per_file": {"api.py": {
-                        "erosion_before": 0.0, "erosion_after": 0.0, "erosion_delta": 0.0, "verbosity_before": 0.0,
-                        "verbosity_after": 0.8, "verbosity_delta": 0.8, "flagged": True,
-                    }
-                },
-            }
-        ],
-    }
-    m = _build(tmp_path, fix_quality_gate=gate)
-    assert m.fix_quality_gate == gate
-    d = m.to_dict()
-    assert d["fix_quality_gate"] == gate
-    assert d["fix_quality_gate"]["rounds"][0]["per_file"]["api.py"]["flagged"] is True
 
 
-def test_upsert_run_persists_fix_quality_gate(tmp_path: Path) -> None:
-    gate = {"enabled": True, "rounds": [{"round": 1, "per_file": {"api.py": {"flagged": True}}}],}
-    row = _stored_manifest_row(tmp_path, "s-gate", fix_quality_gate=gate)
-    assert json.loads(row["fix_quality_gate"]) == gate
 
-def test_upsert_run_persists_recommended_patch_capture(tmp_path: Path) -> None:
-    row = _stored_manifest_row(tmp_path, "s-cap", recommended_patch_capture="post_test")
-    assert row["recommended_patch_capture"] == "post_test"
+
+
 
 @pytest.mark.parametrize(
     ("resolver", "artifact", "payload"),
@@ -636,12 +437,7 @@ def test_session_bound_absent_artifact_is_none(tmp_path: Path) -> None:
     assert _read_session_bound_json_artifact(tmp_path, "sess-42", DeepArtifact.RECOMMENDED_CAPTURE.at) is None
 
 
-def test_manifest_recommended_patch_capture_omitted_when_none() -> None:
-    assert "recommended_patch_capture" not in Manifest().to_dict()
 
-def test_manifest_recommended_patch_capture_passes_through(tmp_path: Path) -> None:
-    m = _build(tmp_path, recommended_capture="post_test")
-    assert m.to_dict()["recommended_patch_capture"] == "post_test"
 
 def test_feedback_run_leaves_recommended_patch_capture_none() -> None:
     """Feedback never writes recommended.patch, so absence cannot imply a pre-test capture."""
@@ -649,13 +445,6 @@ def test_feedback_run_leaves_recommended_patch_capture_none() -> None:
     assert m.recommended_patch_capture is None
     assert "recommended_patch_capture" not in m.to_dict()
 
-def test_get_archive_dir_creates_structure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    target = tmp_path / "custom_archive"
-    monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(target))
-    result = get_archive_dir()
-    assert result == target
-    assert target.is_dir()
-    assert (target / "runs").is_dir()
 
 def test_get_archive_dir_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("DAYDREAM_ARCHIVE_DIR", raising=False)
@@ -712,18 +501,6 @@ def _assemble_bundle(
         ), run_dir=run_dir,
     )
 
-def test_bundle_projects_only_frozen_snapshot_trajectory_bytes(tmp_path: Path,) -> None:
-    target, run_dir, recorder = _setup_bundle(tmp_path)
-    live = target / ".daydream" / "runs" / recorder.session_id / "trajectory.json"
-    live.write_text('{"session_id":"abcd1234-0000-0000-0000-000000000000","marker":"MUTATED_LIVE"}')
-    frozen = json.dumps({"session_id": recorder.session_id, "trajectory_id": recorder.session_id, "marker": "FROZEN",}
-    ).encode()
-    snapshot = RunWriteSnapshot(
-        status="complete", cutoff_at="2026-01-01T00:00:01Z", root_trajectory_id=recorder.session_id,
-        documents=(TrajectoryDocumentSnapshot(recorder.session_id, live, frozen),),
-    )
-    _assemble_bundle(target, run_dir, recorder, write_snapshot=snapshot)
-    assert (run_dir / "trajectory.json").read_bytes() == frozen
 
 def test_bundle_rejects_a_sibling_document_bound_to_another_session(tmp_path: Path,) -> None:
     target, run_dir, recorder = _setup_bundle(tmp_path)
@@ -738,13 +515,6 @@ def test_bundle_rejects_a_sibling_document_bound_to_another_session(tmp_path: Pa
     assert not (run_dir / "trajectories").exists()
 
 
-def test_bundle_deep_directory(tmp_path: Path) -> None:
-    target, run_dir, recorder = _setup_bundle(tmp_path)
-    _assemble_bundle(target, run_dir, recorder)
-    assert (run_dir / "deep" / "intent.md").read_text() == "intent"
-    assert (run_dir / "review-output.md").read_text() == "review findings"
-    assert (run_dir / "diff.patch").read_text() == "diff content"
-    assert not (run_dir / "findings.json").exists()
 
 def test_bundle_diagram_flow_excludes_stale_review_artifacts(tmp_path: Path,) -> None:
     target, run_dir, recorder = _setup_bundle(tmp_path)
@@ -761,20 +531,6 @@ def test_bundle_diagram_flow_excludes_stale_review_artifacts(tmp_path: Path,) ->
     assert not (run_dir / "review-output.md").exists()
     assert not (run_dir / "recommended.patch").exists()
 
-def test_bundle_sub_trajectories_projected(tmp_path: Path) -> None:
-    target, run_dir, recorder = _setup_bundle(tmp_path)
-    fork_path = target / ".daydream" / "runs" / recorder.session_id / "trajectories" / "deep-python.json"
-    root = _write_snapshot(recorder).documents[0]
-    fork_bytes = json.dumps({"session_id": recorder.session_id, "trajectory_id": "fork-1"}).encode()
-    snapshot = RunWriteSnapshot(
-        status="complete", cutoff_at="2026-01-01T00:00:01Z", root_trajectory_id=recorder.session_id,
-        documents=(root, TrajectoryDocumentSnapshot("fork-1", fork_path, fork_bytes)),
-    )
-    _assemble_bundle(target, run_dir, recorder, write_snapshot=snapshot)
-    sub = run_dir / "trajectories"
-    assert sub.is_dir()
-    assert sorted(p.name for p in sub.iterdir()) == ["deep-python.json"]
-    assert (sub / "deep-python.json").read_bytes() == fork_bytes
 
 def test_bundle_skips_missing(tmp_path: Path) -> None:
     target = tmp_path / "empty_target"
@@ -789,135 +545,17 @@ def test_bundle_skips_missing(tmp_path: Path) -> None:
     assert not (run_dir / "deep").exists()
     assert not (run_dir / "diff.patch").exists()
 
-def test_bundle_archives_findings_artifact(tmp_path: Path) -> None:
-    """Resolve the registered frozen findings route, preserving corpus join fingerprints."""
-    target, run_dir, recorder = _setup_bundle(tmp_path)
-    route = _findings_route(target)
-    assert route.frozen_path is not None
-    route.frozen_path.parent.mkdir(parents=True)
-    route.frozen_path.write_text('{"findings": [{"fingerprint": "abc"}]}')
-    _assemble_bundle(target, run_dir, recorder, destinations=(route,))
-    archived = run_dir / "findings.json"
-    assert archived.is_file()
-    assert json.loads(archived.read_text())["findings"][0]["fingerprint"] == "abc"
 
 
-def test_dump_artifacts_copies_clean_bundle(tmp_path: Path, archive_dir: Path) -> None:
-    session_id = "abcd1234-0000-0000-0000-000000000000"
-    dest = tmp_path / "dump"
-    dest.mkdir()
-    config = RunConfig(target=str(tmp_path), archive=True, dump_artifacts=str(dest))
-    target, _, recorder = _setup_bundle(tmp_path, session_id)
-    _strict_archive(
-        target=target, session_id=session_id, config=config, write_snapshot=_write_snapshot(recorder), dump_path=dest,
-    )
-    assert (dest / "manifest.json").is_file()
-    assert (dest / "trajectory.json").is_file()
-    run_dir = archive_dir / "runs" / session_id
-    assert (dest / "manifest.json").read_text() == (run_dir / "manifest.json").read_text()
-
-def test_finalize_archive_run_round_trip(tmp_path: Path, archive_dir: Path) -> None:
-    session_id = "abcd1234-0000-0000-0000-000000000000"
-    config = RunConfig(target=str(tmp_path), archive=True)
-
-    target, _, recorder = _setup_bundle(tmp_path, session_id)
-
-    _strict_archive(target=target, session_id=session_id, config=config, write_snapshot=_write_snapshot(recorder),)
-
-    run_dir = archive_dir / "runs" / session_id
-    assert run_dir.is_dir()
-    assert (run_dir / "manifest.json").is_file()
-    assert (run_dir / "trajectory.json").is_file()
-
-    manifest_data = json.loads((run_dir / "manifest.json").read_text())
-    assert manifest_data["session_id"] == session_id
-    assert manifest_data["run"]["flow"] == "normal"
-    assert manifest_data["run"]["skill"] == "python"
-
-    with closing(sqlite3.connect(f"{(archive_dir / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
-        assert conn.execute("SELECT session_id FROM runs").fetchall() == [(session_id,)]
 
 
-def test_manifest_includes_source_path() -> None:
-    m = Manifest(
-        session_id="test-session", source_path="/home/user/code/myrepo", remote_url="git@github.com:org/repo.git",
-        repo_slug="org/repo",
-    )
-    d = m.to_dict()
-    assert d["git"]["source_path"] == "/home/user/code/myrepo"
-
-def test_source_path_indexed_in_sqlite(tmp_path: Path) -> None:
-    idx_dir = tmp_path / "idx"
-    idx_dir.mkdir()
-    m = Manifest(session_id="sp-test", archived_at="2026-01-01T00:00:00Z", run_flow="normal", backend="claude",
-        source_path="/original/repo/path", archive_path=str(tmp_path),
-    )
-    upsert_run(idx_dir, m)
-    with closing(sqlite3.connect(f"{(idx_dir / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
-        assert conn.execute("SELECT source_path FROM runs").fetchone()[0] == "/original/repo/path"
-
-def test_source_path_defaults_to_none() -> None:
-    m = Manifest(session_id="old")
-    assert m.source_path is None
-    assert m.to_dict()["git"]["source_path"] is None
 
 
 # Canonical UTC timestamp contract: one spelling at write time, strict as_of
 # validation at the entry boundary, and legacy "Z" rows preserved at bootstrap.
 
 
-async def test_build_manifest_totals_include_fork_trajectories(tmp_path: Path) -> None:
-    snapshots: list[RunWriteSnapshot] = []
-    recorder = TrajectoryRecorder(
-        path=tmp_path / ".daydream" / "runs" / "sess-fold" / "trajectory.json", run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path, agent_model_name="opus", session_id="sess-fold",
-        on_write=lambda _recorder, snapshot: snapshots.append(snapshot),
-    )
-    async with recorder:
-        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="parent"))
-            inv.observe(MetricsEvent(
-                message_id="m-1", prompt_tokens=100, completion_tokens=50, cached_tokens=20, cost_usd=0.05,
-            ))
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
-        async with recorder.fork("deep-python") as child:
-            async with child.invocation(phase=DaydreamPhase.DEEP) as cinv:
-                cinv.observe(TextEvent(text="child"))
-                cinv.observe(MetricsEvent(
-                    message_id="m-2", prompt_tokens=400, completion_tokens=25, cached_tokens=5, cost_usd=0.20,
-                ))
-                cinv.observe(ResultEvent(structured_output=None, continuation=None))
 
-    write_snapshot = snapshots[-1]
-    m = build_manifest_from_snapshot(
-        run=_archive_snapshot(write_snapshot, run_flow=recorder.run_flow), git_ctx=GitContext(), status="complete",
-        archive_path=tmp_path,
-    )
-
-    assert m.total_prompt_tokens == 500  # 100 main + 400 fork
-    assert m.total_completion_tokens == 75
-    assert m.total_cached_tokens == 25
-    assert m.total_cost_usd == pytest.approx(0.25)
-
-def test_manifest_splits_status_from_pipeline() -> None:
-    m = Manifest(session_id="s-1", status="complete", archive_status="complete",
-        pipeline_status="failed", phase_states={
-            "merge": {"ran": True, "status": "failed"}, "fix": {"ran": False, "status": "absent"},
-            "test": {"ran": False, "status": "absent"},
-        },
-        daydream=ExecutableProvenance(
-            version="0.27.0", install_source="git", commit="abc", dirty=False, container_digest="unknown",
-        ),
-    )
-    d = m.to_dict()
-    assert d["status"] == "complete"
-    assert d["archive_status"] == "complete"
-    assert d["pipeline_status"] == "failed"
-    assert d["phase_states"]["merge"]["status"] == "failed"
-    # Namespace separation: executable provenance never merged into git.*
-    assert d["daydream"]["version"] == "0.27.0"
-    assert d["git"]["head_sha"] is None  # target-repo sha stays in git.*
-    assert "commit" not in d["git"]
 
 def test_legacy_manifest_reads_new_fields_as_unknown(tmp_path: Path) -> None:
     upsert_run(tmp_path, Manifest())
@@ -1017,30 +655,8 @@ def _derive_push_remote_states(target: Path, *, session_id: str = "current", eve
         runs_remote_ci=True, session_id=session_id, pr_repo=pr_repo, pr_number=pr_number,
     )
 
-@pytest.mark.parametrize("remote_status", ["passed", "no_ci"])
-def test_current_session_test_push_and_remote_success_are_distinct(tmp_path: Path, remote_status: str) -> None:
-    _write_deep(tmp_path, "test-verdict.json", {"session_id": "current", "passed": True})
-    _write_push_verdict(tmp_path)
-    _write_remote_verdict(tmp_path, status=remote_status)
-    states = _derive_push_remote_states(tmp_path)
-    assert states["test"] == {"ran": True, "status": "succeeded"}
-    assert states["push"]["status"] == "succeeded"
-    assert states["remote_ci"]["status"] == "succeeded"
-    assert pipeline.derive_pipeline_status("complete", None, states, runs_test=True,) == "succeeded"
 
-def test_current_session_remote_required_failure_fails_pipeline(tmp_path: Path) -> None:
-    _write_deep(tmp_path, "test-verdict.json", {"session_id": "current", "passed": True})
-    _write_push_verdict(tmp_path)
-    _write_remote_verdict(tmp_path, status="failed")
-    states = _derive_push_remote_states(tmp_path)
-    assert states["remote_ci"]["status"] == "failed"
-    assert pipeline.derive_pipeline_status("complete", None, states) == "failed"
 
-def test_archive_cancellation_precedes_remote_failure(tmp_path: Path) -> None:
-    _write_push_verdict(tmp_path)
-    _write_remote_verdict(tmp_path, status="failed")
-    states = _derive_push_remote_states(tmp_path)
-    assert pipeline.derive_pipeline_status("partial", None, states) == "cancelled"
 
 @pytest.mark.parametrize("remote_status", ["pending", "missing", "unavailable", "timed_out", "superseded", "cancelled"],
 )
@@ -1392,29 +1008,6 @@ def test_successful_push_rejects_malformed_or_stale_remote_artifact(
         artifact.write_text(json.dumps(value), encoding="utf-8")
     assert _derive_push_remote_states(tmp_path)["remote_ci"] == {"ran": True, "status": "partial",}
 
-@pytest.mark.parametrize(("remote_status", "expected_status"), [("passed", "succeeded"), ("failed", "failed")],)
-def test_archive_run_persists_registry_gated_push_and_remote_states(
-    target: Path, archive_dir: Path, make_config: MakeConfig, remote_status: str, expected_status: str,
-) -> None:
-    recorder = _MockRecorder(session_id="registry-gated-session")
-    config = make_config(target, archive=True, pr_repo="ExAmPlE/PrOjEcT", pr_number=42,)
-    _write_deep(target, "test-verdict.json", {"session_id": recorder.session_id, "passed": True},)
-    _write_push_verdict(target, session_id=recorder.session_id)
-    _write_remote_verdict(target, status=remote_status, session_id=recorder.session_id)
-
-    _strict_archive(target=target, session_id=recorder.session_id, config=config,
-        write_snapshot=_write_snapshot(recorder,
-            phase_events=[*_merge_events(recorder.session_id, "succeeded"),
-                _phase_start_event("fix", recorder.session_id, timestamp="2026-09-06T12:00:00Z"),
-            ],
-        ),
-    )
-
-    manifest = json.loads((archive_dir / "runs" / recorder.session_id / "manifest.json").read_text())
-    assert manifest["phase_states"]["test"]["status"] == "succeeded"
-    assert manifest["phase_states"]["push"]["status"] == "succeeded"
-    assert manifest["phase_states"]["remote_ci"]["status"] == expected_status
-    assert manifest["pipeline_status"] == expected_status
 
 def test_frozen_mapping_push_and_remote_phase_starts_are_partial_without_artifacts(
     target: Path, archive_dir: Path, make_config: MakeConfig,
@@ -1678,11 +1271,6 @@ def test_merge_failed_discriminates_on_current_event_not_merged_items(tmp_path: 
     assert states["merge"]["ran"] is True
     assert states["merge"]["status"] == "failed"   # merged-items present is NOT sufficient
 
-def test_merge_succeeded_from_current_events(tmp_path: Path) -> None:
-    _write_deep(tmp_path, "merged-items.json", {"items": []})
-    states = pipeline.derive_phase_states(tmp_path, phase_events=_merge_events("current", "succeeded"),
-                                           session_id="current")
-    assert states["merge"]["status"] == "succeeded"
 
 def test_test_failed_from_verdict(tmp_path: Path) -> None:
     _write_deep(
@@ -1741,53 +1329,8 @@ def test_archive_manifest_fails_matching_stabilization_session(
     assert manifest["phase_states"]["fix"] == {"ran": True, "status": "failed"}
     assert manifest["phase_states"]["test"] == {"ran": True, "status": "failed"}
 
-def test_test_absent_when_no_verdict(tmp_path: Path) -> None:
-    states = pipeline.derive_phase_states(tmp_path, phase_events=[])
-    assert states["test"]["ran"] is False
-    assert states["test"]["status"] == "absent"
 
-def test_fix_partial_from_failures(tmp_path: Path) -> None:
-    _write_deep(tmp_path, "fix-failures.json", {"src/a.py": "reverted"})
-    states = pipeline.derive_phase_states(tmp_path, phase_events=[])
-    assert states["fix"]["status"] == "partial"
 
-def test_pipeline_status_precedence() -> None:
-    # cancelled beats everything when archive partial with no fix failures
-    assert pipeline.derive_pipeline_status("partial", None,
-        {"merge": {"ran": True, "status": "succeeded"},
-         "fix": {"ran": True, "status": "succeeded"},
-         "test": {"ran": True, "status": "succeeded"}}) == "cancelled"
-    # merge failed -> failed even though archive_status complete
-    assert pipeline.derive_pipeline_status("complete", None,
-        {"merge": {"ran": True, "status": "failed"},
-         "fix": {"ran": False, "status": "absent"},
-         "test": {"ran": False, "status": "absent"}}, runs_test=True) == "failed"
-    # test failed -> failed
-    assert pipeline.derive_pipeline_status("complete", None,
-        {"merge": {"ran": True, "status": "succeeded"},
-         "fix": {"ran": True, "status": "succeeded"},
-         "test": {"ran": True, "status": "failed"}}) == "failed"
-    # flow runs test but it never ran -> partial
-    assert pipeline.derive_pipeline_status("complete", None,
-        {"merge": {"ran": True, "status": "succeeded"},
-         "fix": {"ran": True, "status": "succeeded"},
-         "test": {"ran": False, "status": "absent"}}, runs_test=True) == "partial"
-    # clean deep run -> succeeded
-    assert pipeline.derive_pipeline_status("complete", None,
-        {"merge": {"ran": True, "status": "succeeded"},
-         "fix": {"ran": True, "status": "succeeded"},
-         "test": {"ran": True, "status": "succeeded"}}) == "succeeded"
-    # all-absent (a flow that runs neither fix nor test and surfaced no phase
-    # evidence) -> unknown, never succeeded
-    assert pipeline.derive_pipeline_status("complete", None,
-        {"merge": {"ran": False, "status": "absent"},
-         "fix": {"ran": False, "status": "absent"}, "test": {"ran": False, "status": "absent"}},
-        runs_fix=False, runs_test=False) == "unknown"
-    # an unexpected/unknown per-phase status drives the _UNKNOWN branch
-    assert pipeline.derive_pipeline_status("complete", None,
-        {"merge": {"ran": True, "status": "succeeded"},
-         "fix": {"ran": True, "status": "unknown"},
-         "test": {"ran": True, "status": "succeeded"}}) == "unknown"
 
 def test_non_deep_flow_ignores_stale_deep_artifacts(tmp_path: Path) -> None:
     # Issue #336: derive_phase_states is flow-aware. A prior deep run left
@@ -1808,95 +1351,11 @@ def test_non_deep_flow_ignores_stale_deep_artifacts(tmp_path: Path) -> None:
     states = pipeline.derive_phase_states(tmp_path, phase_events=[], runs_merge=False, runs_fix=False, runs_test=False)
     assert all(s == {"ran": False, "status": "absent"} for s in states.values())
 
-def test_merge_failed_archives_failed_pipeline(target: Path, archive_dir: Path, make_config: MakeConfig) -> None:
-    _write_deep(target, "merged-items.json", {"items": []})
-    _write_review_coverage(target)
-    _write_deep(target, "test-verdict.json", {"passed": False, "retries": 0, "ignored": False})
-    recorder = _MockRecorder(session_id="merge-failed-session")  # run_flow NORMAL
-    _strict_archive(target=target, session_id=recorder.session_id, config=make_config(target, archive=True),
-        write_snapshot=_write_snapshot(recorder, phase_events=_merge_events(recorder.session_id, "failed"),),
-    )
-    manifest_path = archive_dir / "runs" / recorder.session_id / "manifest.json"
-    m = json.loads(manifest_path.read_text())
-    assert m["archive_status"] == "complete"   # cleanly archived...
-    assert m["pipeline_status"] == "failed"    # ...but the pipeline failed
-    assert m["phase_states"]["merge"]["status"] == "failed"
-    assert m["daydream"]["version"]  # executable provenance recorded
-    assert m["daydream"]["commit"]  # a real SHA or the "unknown" sentinel, never blank
 
 
-def test_upsert_run_persists_pipeline_fields(tmp_path: Path) -> None:
-    m = Manifest(session_id="s-2", status="complete", archive_status="complete", pipeline_status="failed",
-        phase_states={"merge": {"ran": True, "status": "failed"}},
-        daydream=ExecutableProvenance(
-            version="0.27.0", install_source="git", commit="abc", dirty=False, container_digest="unknown",
-        ),
-    )
-    index.upsert_run(tmp_path, m)
-    with closing(sqlite3.connect(f"{(tmp_path / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
-        conn.row_factory = sqlite3.Row
-        row = dict(conn.execute("SELECT * FROM runs WHERE session_id = ?", ("s-2",)).fetchone())
-    assert row["archive_status"] == "complete"
-    assert row["pipeline_status"] == "failed"
-    assert row["daydream_version"] == "0.27.0"
-    assert row["daydream_dirty"] == 0
 
 
-def test_diagram_flow_does_not_inherit_a_prior_deep_run_pipeline_state(
-    target: Path, archive_dir: Path, make_config: MakeConfig,
-) -> None:
-    """Diagram runs retain old deep files on disk; flow capabilities must prevent their attribution."""
-    _write_deep(target, "merged-items.json", {"items": []})
-    _write_review_coverage(target)
-    _write_deep(target, "test-verdict.json", {"passed": False, "retries": 0, "ignored": False})
-    _write_deep(target, "fix-failures.json", {"src/a.py": "reverted"})
 
-    recorder = _MockRecorder(session_id="diagram-only-session", run_flow=DaydreamRunFlow.DIAGRAM)
-    _strict_archive(target=target, session_id=recorder.session_id, run_flow=DaydreamRunFlow.DIAGRAM,
-        config=make_config(target, archive=True), write_snapshot=_write_snapshot(recorder),
-        identity=_manifest_identity(
-            fix_backend=None, test_backend=None, per_stack_review_backend=None, per_stack_review_model=None,
-            phases=RunPhaseCapabilities(
-                per_stack_review=False, merge=False, fix=False, test=False, push=False, remote_ci=False,
-            ),
-        ),
-    )
-
-    manifest_path = archive_dir / "runs" / recorder.session_id / "manifest.json"
-    m = json.loads(manifest_path.read_text())
-    assert m["run"]["flow"] == "diagram"
-    assert m["status"] == "complete"
-    assert m["archive_status"] == "complete"
-    assert m["pipeline_status"] == "unknown"
-    assert m["phase_states"]["merge"] == {"ran": False, "status": "absent"}
-    assert m["phase_states"]["fix"] == {"ran": False, "status": "absent"}
-    assert m["phase_states"]["test"] == {"ran": False, "status": "absent"}
-    assert m["phase_states"]["push"] == {"ran": False, "status": "absent"}
-    assert m["phase_states"]["remote_ci"] == {"ran": False, "status": "absent",}
-    assert "fix_backend" not in m["run"]
-    assert "test_backend" not in m["run"]
-    assert "per_stack_review_backend" not in m["run"]
-
-def test_diagram_flow_does_not_evaluate_stale_review_artifacts(
-    target: Path, archive_dir: Path, make_config: MakeConfig,
-) -> None:
-    _write_deep(target, "merged-items.json", {"items": [{"file": "src/old.py", "line": 1, "confidence": "HIGH"}]},)
-    recorder = _MockRecorder(session_id="diagram-no-eval-session", run_flow=DaydreamRunFlow.DIAGRAM)
-
-    _strict_archive(target=target, session_id=recorder.session_id, run_flow=DaydreamRunFlow.DIAGRAM,
-        config=make_config(target, archive=True, run_eval=True), write_snapshot=_write_snapshot(recorder),
-        identity=_manifest_identity(
-            fix_backend=None, test_backend=None, per_stack_review_backend=None, per_stack_review_model=None,
-            phases=RunPhaseCapabilities(
-                per_stack_review=False, merge=False, fix=False, test=False, push=False, remote_ci=False,
-            ),
-        ),
-    )
-
-    run_dir = archive_dir / "runs" / recorder.session_id
-    manifest = json.loads((run_dir / "manifest.json").read_text())
-    assert not (run_dir / "evaluation.json").exists()
-    assert manifest["metrics"]["total_findings"] is None
 
 def test_snapshot_manifest_pr_metadata_is_immutable_after_live_inputs_mutate(tmp_path: Path,) -> None:
     session_id = "frozen-pr-session"

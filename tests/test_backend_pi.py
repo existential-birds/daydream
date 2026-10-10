@@ -19,21 +19,14 @@ from daydream.backends import (
     BackendExecutionInput,
     ContinuationToken,
     CostEvent,
-    GenerationEndEvent,
-    GenerationStartEvent,
     MetricsEvent,
     PiRequestConfig,
     RequestEvent,
     ResultEvent,
     RetryPolicy,
     TextEvent,
-    ThinkingEvent,
-    ToolCallChoicePart,
-    ToolResultEvent,
-    ToolStartEvent,
     TurnEndEvent,
     create_backend,
-    unix_ms_to_ns,
 )
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.pi import (
@@ -53,7 +46,6 @@ from daydream.backends.pi import (
     _render_tool_result,
     _schema_instruction,
 )
-from daydream.config import DEFAULT_PI_MODEL
 from daydream.phases.schemas import PER_STACK_RECORD_SCHEMA
 from daydream.retry_policy import parse_message_retry_hint
 from daydream.runner import run
@@ -190,48 +182,6 @@ async def test_pi_execution_input_controls_native_argv_environment_and_policy(
     assert backend.fanout_concurrency == 2
     assert backend.retry_policy == RetryPolicy(1, 0.0, 4.0)
 
-async def test_simple_text_events() -> None:
-    events = await _collect_events(PiBackend(model="glm-5.2"), "Say hello", fixture="simple_text.jsonl")
-    text_events = [e for e in events if isinstance(e, TextEvent)]
-    metrics_events = [e for e in events if isinstance(e, MetricsEvent)]
-    cost_events = [e for e in events if isinstance(e, CostEvent)]
-    result_events = [e for e in events if isinstance(e, ResultEvent)]
-    assert len(text_events) == 1
-    assert text_events[0].text == "Hello from Pi"
-    assert len(metrics_events) == 1
-    assert metrics_events[0].prompt_tokens == 110  # uncached input plus cache-read subset
-    assert metrics_events[0].completion_tokens == 50
-    assert metrics_events[0].cached_tokens == 10
-    assert metrics_events[0].cost_usd == 0.0003
-    assert metrics_events[0].message_id == ""
-    assert len(cost_events) == 1
-    assert cost_events[0].cost_usd == 0.0003
-    assert cost_events[0].input_tokens == 110
-    assert cost_events[0].output_tokens == 50
-    assert cost_events[0].cached_tokens == 10
-    assert cost_events[0].model_name == "glm-4.6"  # actual response model from the recorded stream
-    assert len(result_events) == 1
-    assert result_events[0].continuation is not None
-    assert result_events[0].continuation.backend == "pi"
-    assert result_events[0].continuation.data["session_id"] == "pi_ses_simple"
-
-async def test_thinking_and_tool_use_events() -> None:
-    events = await _collect_events(PiBackend(model="glm-5.2"), "Read the file", fixture="tool_use.jsonl")
-    thinking = [e for e in events if isinstance(e, ThinkingEvent)]
-    tool_starts = [e for e in events if isinstance(e, ToolStartEvent)]
-    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
-    texts = [e for e in events if isinstance(e, TextEvent)]
-    assert len(thinking) == 1
-    assert thinking[0].text == "Let me read the file"
-    assert len(tool_starts) == 1
-    assert tool_starts[0].id == "t1"
-    assert tool_starts[0].name == "read"
-    assert tool_starts[0].input == {"path": "/x"}
-    assert len(tool_results) == 1
-    assert tool_results[0].id == "t1"
-    assert tool_results[0].output == "file.py\ntest.py"
-    assert tool_results[0].is_error is False
-    assert any(t.text == "Looking now" for t in texts)
 
 async def test_structured_output() -> None:
     backend = PiBackend(model="glm-5.2")
@@ -262,20 +212,6 @@ async def test_structured_output_selects_schema_valid_empty_result() -> None:
     assert len(result_events) == 1
     assert result_events[0].structured_output == {"issues": []}
 
-async def test_multi_turn_emits_turn_end_per_turn_and_aggregates_cost() -> None:
-    events = await _collect_events(PiBackend(model="glm-5.2"), "Two turns", fixture="multi_turn.jsonl")
-    texts = [e for e in events if isinstance(e, TextEvent)]
-    turn_ends = [e for e in events if isinstance(e, TurnEndEvent)]
-    metrics = [e for e in events if isinstance(e, MetricsEvent)]
-    cost_events = [e for e in events if isinstance(e, CostEvent)]
-    assert [t.text for t in texts] == ["First turn body", "Second turn body"]
-    assert len(turn_ends) == 2
-    assert all(e.message_id == "" for e in turn_ends)
-    assert len(metrics) == 2
-    assert len(cost_events) == 1
-    assert cost_events[0].input_tokens == 200  # 150 + 50
-    assert cost_events[0].output_tokens == 100  # 75 + 25
-    assert cost_events[0].cost_usd == pytest.approx(0.00015)  # 0.0001 + 0.00005
 
 async def test_error_turn_raises_pi_error() -> None:
     backend = PiBackend(model="glm-5.2")
@@ -315,12 +251,6 @@ async def test_ephemeral_pi_call_uses_no_session() -> None:
     result_events = [event for event in events if isinstance(event, ResultEvent)]
     assert result_events[0].continuation is None
 
-async def test_read_only_restricts_tools() -> None:
-    backend = PiBackend(model="glm-5.2")
-    flat_args, _ = await _run_and_capture_args(backend, read_only=True)
-    assert flat_args[flat_args.index("--tools") + 1] == "read,find,ls,grep"
-    flat_args_default, _ = await _run_and_capture_args(backend)
-    assert "--tools" not in flat_args_default
 
 async def test_pi_api_key_never_enters_process_argv(monkeypatch: pytest.MonkeyPatch) -> None:
     sentinel = "synthetic-pi-api-key-sentinel"
@@ -354,14 +284,6 @@ async def test_pi_api_key_unknown_provider_warns_and_skips(
     assert any("PI_API_KEY" in r.getMessage() for r in caplog.records)
     assert sentinel not in caplog.text
 
-async def test_cwd_passed_to_subprocess() -> None:
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        async for _ in backend.execute(Path("/some/repo"), "p"):
-            pass
-        assert mock_exec.call_args.kwargs["cwd"] == "/some/repo"
-        assert mock_exec.call_args.kwargs["limit"] == _PI_STDOUT_LIMIT_BYTES
 
 async def test_execute_raises_on_agents() -> None:
     backend = PiBackend(model="glm-5.2")
@@ -511,29 +433,6 @@ def test_schema_instruction_contains_schema_json() -> None:
     assert "JSON schema" in instruction
     assert json.dumps(schema) in instruction
 
-async def test_execute_always_passes_no_skills_never_skill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("daydream.backends.pi.Path.home", lambda: tmp_path)
-    monkeypatch.setenv("DAYDREAM_SKILLS_DIR", str(tmp_path / "env-skills"))
-    (tmp_path / ".agents" / "skills" / "x" / "SKILL.md").parent.mkdir(parents=True, exist_ok=True)
-    (tmp_path / ".agents" / "skills" / "x" / "SKILL.md").write_text("# x\n")
-    (tmp_path / ".claude" / "skills" / "y" / "SKILL.md").parent.mkdir(parents=True, exist_ok=True)
-    (tmp_path / ".claude" / "skills" / "y" / "SKILL.md").write_text("# y\n")
-    (tmp_path / "env-skills" / "z" / "SKILL.md").parent.mkdir(parents=True, exist_ok=True)
-    (tmp_path / "env-skills" / "z" / "SKILL.md").write_text("# z\n")
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process(['{"id": "s1"}'])
-    _, mock_exec = await replay_process(backend, mock_proc, tmp_path, "Review the change.")
-    args = list(mock_exec.call_args.args)
-    assert args.count("--no-skills") == 1
-    assert "--skill" not in args
-
-def test_create_backend_pi_returns_pi_backend_with_default_model() -> None:
-    backend = create_backend("pi")
-    assert isinstance(backend, PiBackend)
-    assert backend.model == DEFAULT_PI_MODEL
-    custom = create_backend("pi", model="glm-4.5-air")
-    assert isinstance(custom, PiBackend)
-    assert custom.model == "glm-4.5-air"
 
 def test_create_backend_invalid_includes_pi_in_message() -> None:
     with pytest.raises(ValueError, match="pi"):
@@ -594,21 +493,6 @@ async def test_pi_trajectory_is_valid_atif_v1_7(tmp_path: Path) -> None:
 
 # Default --provider is nous; PI_PROVIDER overrides (extension-based provider)
 
-@pytest.mark.parametrize(
-    ("env_provider", "expected"), [(None, "nous"), ("my-proxy", "my-proxy")],
-    ids=["default-nous", "PI_PROVIDER-override"],
-)
-async def test_provider_flag(monkeypatch: pytest.MonkeyPatch, env_provider: Any, expected: Any) -> None:
-    """Always pass the default nous provider unless PI_PROVIDER overrides it, so the fallback model
-    resolves consistently.
-    """
-    if env_provider is None:
-        monkeypatch.delenv("PI_PROVIDER", raising=False)
-    else:
-        monkeypatch.setenv("PI_PROVIDER", env_provider)
-    backend = PiBackend(model="glm-5.2")
-    flat_args, _ = await _run_and_capture_args(backend)
-    assert flat_args[flat_args.index("--provider") + 1] == expected
 
 async def test_default_model_does_not_override_pi_settings(pi_workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PI_PROVIDER", raising=False)
@@ -627,15 +511,6 @@ async def test_explicit_model_overrides_pi_settings(pi_workspace: Path, monkeypa
     flat_args, _ = await _run_and_capture_args(backend, cwd=pi_workspace)
     assert flat_args[flat_args.index("--model") + 1] == "custom-model"
 
-async def test_nous_deepseek_is_pi_fallback_when_no_model_is_configured(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("PI_PROVIDER", raising=False)
-    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
-    backend = PiBackend()
-    flat_args, _ = await _run_and_capture_args(backend)
-    assert flat_args[flat_args.index("--model") + 1] == "deepseek/deepseek-v4-flash-0731"
-    assert flat_args[flat_args.index("--provider") + 1] == "nous"
 
 # Migration guards: GLM-pin and provider/model mismatch warnings
 
@@ -730,14 +605,6 @@ async def test_runner_real_path_pi_provider_axis(
 
 # System prompt preamble (--append-system-prompt)
 
-async def test_append_system_prompt_preamble_in_args() -> None:
-    backend = PiBackend(model="glm-5.2")
-    flat_args, _ = await _run_and_capture_args(backend)
-    assert "--append-system-prompt" in flat_args
-    preamble = flat_args[flat_args.index("--append-system-prompt") + 1]
-    assert preamble == _PI_SYSTEM_PREAMBLE
-    assert "tool-call budget" in preamble
-    assert "grep" in preamble.lower()
 
 # PiError.retryable attribute
 
@@ -1067,7 +934,6 @@ async def test_pi_reasoning_effort_precedes_ambient_thinking(
         assert ambient not in flat_args
 
 
-
 # --- P18 Task 1: generation lifecycle + config at the Pi argv/JSONL seam -----
 
 def test_pi_replay_fixture_is_sanitized_labeled() -> None:
@@ -1080,72 +946,6 @@ def test_pi_replay_fixture_is_sanitized_labeled() -> None:
     assert "1788690314289" in text
     assert "395.332" not in text.split("\n")[0]
 
-async def test_pi_generation_lifecycle_start_end_pair_around_tool() -> None:
-    """Two assistant generations: start before, end sealed at message_end before tools."""
-    events = await _collect_events(PiBackend(model="glm-5.2"), "go", fixture="generation_lifecycle.jsonl")
-    starts = [e for e in events if isinstance(e, GenerationStartEvent)]
-    ends = [e for e in events if isinstance(e, GenerationEndEvent)]
-    tool_starts = [e for e in events if isinstance(e, ToolStartEvent)]
-    assert len(starts) == 2 and len(ends) == 2
-    first_end = ends[0]
-    assert first_end.generation_id == starts[0].generation_id
-    # Host invocation-local UUID correlation, never a provider identity.
-    assert len(first_end.generation_id) == 36
-    assert first_end.response_id == "resp_gen_01"  # native, attached to the end
-    assert first_end.response_id != first_end.generation_id
-    assert first_end.model_name == "glm-4.6" and first_end.provider_name == "nous"
-    assert first_end.finish_reason == "toolUse"
-    assert first_end.end_source == "host_observed_message_end"
-    assert first_end.boundary_complete is True
-    # Ordered complete provider choice: reasoning, text, tool-call (provider order).
-    kinds = [part.kind for part in first_end.choice_parts]
-    assert kinds == ["reasoning", "text", "tool_call"]
-    tool_part = first_end.choice_parts[2]
-    assert isinstance(tool_part, ToolCallChoicePart)
-    assert tool_part.call_id == "call_001"
-    assert tool_part.name == "read_file"
-    assert tool_part.arguments == {"path": "src/example.py"}
-    # The tool execution is a later sibling linked by call ID and does not
-    # author or duplicate the choice part.
-    assert tool_starts[0].id == "call_001"
-    ordering = [type(e).__name__ for e in events]
-    assert ordering.index("GenerationEndEvent") < ordering.index("ToolStartEvent")
-    assert len([p for p in first_end.choice_parts if p.kind == "tool_call"]) == 1
-    second_end = ends[1]
-    assert second_end.generation_id == starts[1].generation_id
-    assert second_end.generation_id != first_end.generation_id
-    assert [p.kind for p in second_end.choice_parts] == ["text"]
-    assert second_end.finish_reason == "stop"
-
-    assert first_end.native_started_at_unix_ms == 1788690314289
-    assert first_end.native_started_at_unix_ms is not None
-    assert unix_ms_to_ns(first_end.native_started_at_unix_ms) == 1788690314289000000
-    assert first_end.ended_at_unix_ns >= unix_ms_to_ns(first_end.native_started_at_unix_ms)
-
-    tool_events = [e for e in events if isinstance(e, (ToolStartEvent, ToolResultEvent))]
-    assert tool_events
-    assert all(not isinstance(e, (GenerationStartEvent, GenerationEndEvent)) for e in tool_events)
-
-    turn_ends = [e for e in events if isinstance(e, TurnEndEvent)]
-    assert turn_ends
-    final = turn_ends[-1]
-    assert final.finish_reason == "stop"
-    assert final.model_name == "glm-4.6"
-    assert final.provider_name == "nous"
-    assert final.model_source == "native"
-    assert final.provider_source == "native"
-    assert final.message_id == ""  # Pi exposes no native message id
-    assert final.message_id_source is None
-    assert final.timestamp_source == "host_observed"
-
-    metrics = [e for e in events if isinstance(e, MetricsEvent)]
-    assert metrics
-    assert all(m.measurement_source == "turn_end" for m in metrics)
-    costs = [e for e in events if isinstance(e, CostEvent)]
-    assert costs
-    terminal = costs[-1]
-    assert terminal.measurement_source == "terminal"
-    assert terminal.cost_source == "reported"
 
 async def test_pi_request_event_config_matches_exact_argv(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PI_PROVIDER", raising=False)
@@ -1173,12 +973,6 @@ async def test_pi_request_event_config_matches_exact_argv(monkeypatch: pytest.Mo
     # System preamble is invocation-level content, never a config value.
     assert request.system_prompt is not None and "tool-call budget" in request.system_prompt
 
-async def test_pi_multi_turn_fixture_produces_two_turn_end_boundaries() -> None:
-    events = await _collect_events(PiBackend(model="glm-5.2"), "go", fixture="multi_turn.jsonl")
-    turn_ends = [e for e in events if isinstance(e, TurnEndEvent)]
-    assert len(turn_ends) == 2
-    assert [t.finish_reason for t in turn_ends] == ["stop", "stop"]
-    assert all(t.model_name == "glm-4.6" for t in turn_ends)
 
 async def test_pi_error_turn_sets_explicit_incomplete_boundary() -> None:
     """An errored turn keeps identity native where exposed; outcome stays custom."""

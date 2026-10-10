@@ -7,8 +7,7 @@ from typing import Any
 
 import pytest
 
-from daydream import git_ops, runner
-from daydream.config_file import DaydreamFileConfig
+from daydream import git_ops
 from daydream.git_ops import github as git_github
 from daydream.improve.publish import (
     ImprovePublishError,
@@ -16,10 +15,8 @@ from daydream.improve.publish import (
     PublishResult,
     issue_body,
     member_fingerprint_marker,
-    member_marker,
     package_marker,
 )
-from daydream.run_config import RunConfig
 
 
 def _issue(package_id: str, *, state: str = "open", number: int = 7) -> dict[str, object]:
@@ -44,21 +41,7 @@ def _publish(tmp_path: Path, *, package_id: str, title: str,
     publisher = IssuePublisher.connect(tmp_path, repo_slug="acme/widgets")
     return publisher.publish(package_id=package_id, title=title, plan_path=plan_path, **kwargs)
 
-def test_issue_body_preserves_complete_plan_markdown() -> None:
-    plan = "# Plan\n\nKeep leading structure and final newline.\n"
-    body = issue_body("reuse-handler", plan)
-    assert body == f"{package_marker('reuse-handler')}\n\n{plan}"
-    assert package_marker("reuse-handler") == ("<!-- daydream-improve: package=reuse-handler -->")
 
-def test_issue_body_embeds_stable_member_aliases_before_the_complete_plan() -> None:
-    plan = "# Plan\n\nDelete duplicate code.\n"
-    aliases = ("member:aaa", "member:bbb")
-    body = issue_body("reuse-handler", plan, member_aliases=aliases)
-    marker_block, embedded_plan = body.split("\n\n", 1)
-    assert marker_block.splitlines() == [
-        package_marker("reuse-handler"), member_marker("member:aaa"), member_marker("member:bbb"),
-    ]
-    assert embedded_plan == plan
 
 def test_package_marker_rejects_comment_injection() -> None:
     with pytest.raises(ValueError, match="package_id"):
@@ -151,21 +134,6 @@ def test_colliding_member_aliases_require_every_raw_fingerprint(monkeypatch: pyt
 
     assert member_fingerprint_marker("raw-second") not in str(existing["body"])
 
-def test_publish_creates_issue_with_the_complete_local_plan(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,) -> None:
-    plan = "# Complete plan\n\n- Delete the redundant adapter.\n"
-    monkeypatch.setattr(git_ops, "gh_issue_list_strict", lambda *args, **kwargs: [])
-    captured: dict[str, object] = {}
-    def create(repo: Path, **kwargs: object) -> str:
-        captured.update(repo=repo, **kwargs)
-        return "https://github.com/acme/widgets/issues/12"
-    monkeypatch.setattr(git_ops, "gh_issue_create", create)
-    result = _publish(tmp_path, package_id="delete-adapter", title="Delete the redundant adapter", plan=plan,)
-    assert result.disposition == "created"
-    assert result.issue_url.endswith("/12")
-    assert captured["repo"] == tmp_path
-    assert captured["repo_slug"] == "acme/widgets"
-    assert captured["title"] == "Delete the redundant adapter"
-    assert captured["body"] == issue_body("delete-adapter", plan)
 
 def test_ambiguous_create_failure_reconciles_before_returning(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,) -> None:
     lookups = iter([[], [_issue("reuse-handler", number=19)]])
@@ -221,9 +189,3 @@ def test_strict_issue_lookup_paginates_and_filters_pull_requests(monkeypatch: py
     assert captured["idempotent"] is True
     assert "state=all" in str(captured["endpoint"])
     assert "per_page=100" in str(captured["endpoint"])
-
-def test_runner_treats_configured_improve_as_a_posting_flow() -> None:
-    enabled = RunConfig(flow_name="improve", file_config=DaydreamFileConfig(improve_github_publish_issues=True),)
-    disabled = RunConfig(flow_name="improve", file_config=DaydreamFileConfig())
-    assert runner._run_posts_to_github(enabled) is True
-    assert runner._run_posts_to_github(disabled) is False

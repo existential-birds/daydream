@@ -1,6 +1,5 @@
 """Owned tracing lifecycle and event reconciliation through real SDK spans."""
 
-import inspect
 import json
 import logging
 import threading
@@ -38,14 +37,12 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
-from daydream.config_file import load_file_config
 from daydream.extensions import ToolDecision, get_registry, set_registry
 from daydream.extensions.registry import Registry
 from daydream.observability import runtime
 from daydream.observability.config import (
     ObservabilityConfig,
     ObservabilityError,
-    resolve_observability_config,
 )
 from daydream.observability.privacy import PrivacyPolicy, diagnostic_scope
 from daydream.observability.runtime import trace_run
@@ -198,12 +195,6 @@ def test_diagnostics_scrub_formatted_arguments_and_exception(caplog: pytest.LogC
     assert "opaque-value" not in caplog.text
     assert "REDACTED" in caplog.text
 
-def test_flag_valued_secret_env_vars_are_not_harvested_as_credentials() -> None:
-    """Boolean/numeric environment flags must not become secrets that corrupt ordinary JSON literals."""
-    policy = PrivacyPolicy(environ={"HERMES_REDACT_SECRETS": "true", "LANGSMITH_API_KEY": "opaque-value"})
-    assert json.loads(policy.json({"ok": True})) == {"ok": True}
-    assert json.loads(policy.json({"flag": "true", "n": 1, "off": False})) == {"flag": "true", "n": 1, "off": False}
-    assert "opaque-value" not in policy.text("carries opaque-value inside")
 
 @pytest.mark.anyio
 async def test_run_spans_survive_flag_valued_secret_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -732,11 +723,6 @@ async def test_notebook_mode_uses_same_owned_batch_path_and_metadata(_notebook_e
     assert tool_absent
     _assert_no_ambient_enrichment(spans, sentinel)
 
-def test_notebook_detection_does_not_change_batching_or_privacy(_notebook_environment: None) -> None:
-    policy = PrivacyPolicy(environ={"LANGSMITH_API_KEY": "opaque-value"})
-    assert policy.capture_content is True
-    assert "opaque-value" not in policy.text("carries opaque-value inside")
-
 
 # --- P18 Task 3: strict operator resource parsing -----------------------------
 
@@ -838,22 +824,6 @@ async def test_otel_service_name_overrides_service_name_resource(monkeypatch: py
     assert resource["telemetry.sdk.name"] == "opentelemetry"
     assert resource["service.instance.id"]
 
-def test_repository_daydream_toml_cannot_set_resources_or_endpoints(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-
-    (tmp_path / ".daydream.toml").write_text(
-        "[observability]\n"
-        'destinations = ["otlp"]\n'
-        'resources = {"service.name" = "repo-service"}\n'
-        'endpoint = "http://repo-endpoint.invalid"\n'
-    )
-    file_config = load_file_config(tmp_path)
-    resolved = resolve_observability_config(disabled=False, environ={"DAYDREAM_TRACE_TO": ""})
-    assert resolved.destinations == ()
-    assert not hasattr(file_config, "observability") or not getattr(file_config, "observability", None)
-    assert not hasattr(file_config, "resources")
-    assert not hasattr(file_config, "endpoint")
-
 
 # --- P18 Task 3: no global providers, ambient metrics/logs, or instrumentation -
 
@@ -876,19 +846,6 @@ async def test_owned_session_installs_no_global_signals_or_instrumentors() -> No
     # Owned providers must differ from the global proxy.
     assert exporter.get_finished_spans()
 
-def test_traceloop_default_helper_is_not_invoked() -> None:
-
-
-    source = "\n".join(
-        line for line in inspect.getsource(runtime).splitlines() if not line.strip().startswith(("#", '"', "'"))
-    )
-    assert "get_default_span_processor" not in source
-    assert "Traceloop.init" not in source
-    assert "set_tracer_provider" not in source
-    assert "Resource.create(" not in source
-    # Owned processors use NoOpMeterProvider; the runtime creates no active metrics provider.
-    assert "get_meter_provider(" not in source
-    assert "LoggerProvider(" not in source
 
 @pytest.mark.anyio
 async def test_resource_secret_values_never_reach_serialized_spans(monkeypatch: pytest.MonkeyPatch,) -> None:

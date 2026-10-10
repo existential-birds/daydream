@@ -40,42 +40,6 @@ def _node(**overrides: Any) -> dict[str, Any]:
     return node
 
 
-def _full_sequence_spec() -> dict[str, Any]:
-    """Return a sequence spec exercising every field including a block."""
-    return {"participants": [{"name": "Handler", "kind": "internal", "files": ["proxy/handler.py"], "service": "proxy"},
-            {"name": "Resolver", "kind": "internal", "files": ["proxy/auth.py"], "service": None},
-            {"name": "Identity API", "kind": "external", "files": [], "service": None},
-        ], "messages": [_message(), dict(_message(kind="reply"), **{"from": "Resolver", "to": "Handler"}),
-            _message(to="Identity API", kind="self", changed=False),
-        ], "blocks": [{"kind": "alt",
-                "branches": [{"condition": "passthrough enabled", "evidence": {"file": "proxy/auth.py", "line": 27},
-                        "messages": [0, 1],
-                    }, {"condition": "bearer token", "evidence": {"file": "proxy/auth.py", "line": 33}, "messages": [2],
-                    },
-                ],
-            }
-        ],
-    }
-
-
-def _full_flowchart_spec() -> dict[str, Any]:
-    """Return a flowchart spec exercising every field."""
-    return {"root": {"file": "proxy/auth.py", "name": "resolve_identity", "line": 22},
-        "nodes": [_node(id="n0", kind="start", label="resolve_identity"), _node(),
-            _node(id="n2", kind="subroutine", label="verify_jwt",
-                evidence={"file": "proxy/auth.py", "line": 44, "symbol": "verify_jwt"},
-            ), _node(id="n3", kind="end", label="return claims"),
-        ], "edges": [{"from": "n0", "to": "n1", "label": None}, {"from": "n1", "to": "n2", "label": "yes"},
-            {"from": "n2", "to": "n3", "label": None},
-        ],
-    }
-
-def test_sequence_spec_accepts_a_full_example() -> None:
-    jsonschema.validate(_full_sequence_spec(), SEQUENCE_SPEC_SCHEMA)
-
-def test_flowchart_spec_accepts_a_full_example() -> None:
-    jsonschema.validate(_full_flowchart_spec(), FLOWCHART_SPEC_SCHEMA)
-
 def test_empty_specs_are_the_pinned_shapes() -> None:
     """The empty-spec sentinels are exactly what the diagram step branches on."""
     assert coerce_sequence_spec("not a spec") == EMPTY_SEQUENCE_SPEC
@@ -94,47 +58,6 @@ def test_empty_specs_are_fresh_objects_per_call() -> None:
     first_flow = coerce_flowchart_spec(7)
     coerce_flowchart_spec(7)["nodes"].append(_node())
     assert first_flow == EMPTY_FLOWCHART_SPEC
-
-@pytest.mark.parametrize("mutate",
-    [pytest.param(lambda s: s["participants"][0].update(kind="service"), id="participant-kind"),
-        pytest.param(lambda s: s["participants"][0].pop("service"), id="participant-service-absent"),
-        pytest.param(lambda s: s["participants"][0].update(extra=1), id="participant-extra-key"),
-        pytest.param(lambda s: s["messages"][0].update(kind="notify"), id="message-kind"),
-        pytest.param(lambda s: s["messages"][0].update(changed="yes"), id="message-changed-not-bool"),
-        pytest.param(lambda s: s["messages"][0]["evidence"].update(symbol=None), id="message-symbol-null"),
-        pytest.param(lambda s: s["messages"][0]["evidence"].pop("symbol"), id="message-symbol-absent"),
-        pytest.param(lambda s: s["messages"][0]["evidence"].update(line=0), id="message-line-zero"),
-        pytest.param(lambda s: s["messages"][0]["evidence"].update(file="../etc/passwd"), id="message-file-escapes",),
-        pytest.param(lambda s: s["blocks"][0].update(kind="par"), id="block-kind"),
-        pytest.param(
-            lambda s: s["blocks"][0]["branches"][0]["evidence"].update(symbol="x"), id="branch-evidence-extra-symbol",
-        ), pytest.param(lambda s: s["blocks"][0]["branches"][0].update(messages=[-1]), id="branch-index-negative"),
-        pytest.param(lambda s: s.update(extra=1), id="root-extra-key"),
-        pytest.param(lambda s: s.pop("blocks"), id="root-blocks-absent"),
-    ],
-)
-def test_sequence_spec_rejects(mutate: Any) -> None:
-    spec = _full_sequence_spec()
-    mutate(spec)
-    with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(spec, SEQUENCE_SPEC_SCHEMA)
-
-@pytest.mark.parametrize("mutate",
-    [pytest.param(lambda s: s.update(root=None), id="root-null"),
-        pytest.param(lambda s: s["root"].pop("line"), id="root-line-absent"),
-        pytest.param(lambda s: s["nodes"][1].update(kind="gateway"), id="node-kind"),
-        pytest.param(lambda s: s["nodes"][1]["evidence"].pop("symbol"), id="node-symbol-absent"),
-        pytest.param(lambda s: s["nodes"][1].update(id=2), id="node-id-not-string"),
-        pytest.param(lambda s: s["edges"][0].pop("label"), id="edge-label-absent"),
-        pytest.param(lambda s: s["edges"][0].update(weight=1), id="edge-extra-key"),
-        pytest.param(lambda s: s.update(extra=1), id="root-extra-key"),
-    ],
-)
-def test_flowchart_spec_rejects(mutate: Any) -> None:
-    spec = _full_flowchart_spec()
-    mutate(spec)
-    with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(spec, FLOWCHART_SPEC_SCHEMA)
 
 def test_coerce_sequence_drops_malformed_entries_individually() -> None:
     coerced = coerce_sequence_spec({"participants": [

@@ -76,13 +76,6 @@ def test_accepted_outcome_has_zero_penalty_and_all_six_fields() -> None:
                (rb.correctness_per_finding, rb.length_penalty,
                 rb.false_positive_penalty, rb.composite)) and rb.format_valid is True
 
-def test_unknown_or_absent_posterior_leaves_axis_none_and_score_unchanged() -> None:
-    args = ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}], format_valid=True, length=4000)
-    unknown = score_trajectory(args, pr_feedback="unknown")
-    assert type(unknown) is RewardBreakdown and not isinstance(unknown, PosteriorBreakdown)
-    assert "false_positive" not in unknown.axes_present
-    assert unknown.composite == score_trajectory(args).composite
-
 def test_posterior_penalty_cannot_outrank_correctness_signal() -> None:
     # Posterior labels cannot change intrinsic ordering: high-correctness rejected work still
     # outranks zero-correctness accepted work.

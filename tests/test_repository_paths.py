@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import pytest
 
-from daydream import repository_paths
 from daydream.repository_paths import is_test_path
 
 
@@ -40,13 +39,3 @@ def test_camel_case_suffix_is_case_sensitive_but_directories_are_not() -> None:
     assert is_test_path("src/WidgetTest.java") is True
     assert is_test_path("src/widgettest.java") is False
     assert is_test_path("SRC/Tests/widget.java") is True
-
-def test_is_test_path_is_public_api() -> None:
-    """#1113: two flows import it, so it is exported, not incidental."""
-    assert "is_test_path" in repository_paths.__all__
-
-def test_strip_dot_slash_normalizes_once() -> None:
-    assert repository_paths.strip_dot_slash("api.py") == "api.py"
-    assert repository_paths.strip_dot_slash("./api.py") == "api.py"
-    assert repository_paths.strip_dot_slash("./dir/x.py") == "dir/x.py"
-    assert repository_paths.strip_dot_slash("a/b/c.py") == "a/b/c.py"

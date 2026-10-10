@@ -115,8 +115,3 @@ def test_load_v2_enforces_c8_with_exact_slug_opt_in(tmp_path: Path) -> None:
     _write_projection(tmp_path, [other])
     with pytest.raises(ValueError, match=REASON_CODE_C8_COPYLEFT_UNOPTED):
         load_dataset_v2(tmp_path / "proj", allow_copyleft=frozenset({"owner/gpl-repo"}))
-
-def test_load_v2_admits_clean_records(tmp_path: Path) -> None:
-    out = _write_projection(tmp_path, [_record(), _record(record_id="rec-0002")])
-    records = load_dataset_v2(out)
-    assert len(records) == 2

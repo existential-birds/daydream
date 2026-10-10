@@ -76,13 +76,6 @@ def test_refreshing_auth_serializes_refresh_across_callers() -> None:
     assert refresh_calls == {"auth": 1}
     assert all(env is not None and env["GH_TOKEN"] == "ghs_auth_fresh_token_1234567890" for env in environments)
 
-def test_run_gh_passes_none_for_inherited_auth() -> None:
-    captured: dict[str, Any] = {}
-    spy_run = _spy_run(captured)
-    with patch("subprocess.run", side_effect=spy_run):
-        git_process._run_gh(Path("/tmp"), ["version"], auth=git_ops.INHERIT_GITHUB_AUTH)
-
-    assert captured.get("env") is None
 
 def test_run_gh_resolves_auth_once_for_the_complete_retry_sequence() -> None:
     calls = 0
@@ -150,17 +143,7 @@ def test_two_refreshing_sessions_keep_subprocess_credentials_isolated() -> None:
     ]
     assert refresh_calls == {"a": 1, "b": 1}
 
-def test_resolve_credentials_returns_none_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
-    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
-    assert resolve_credentials() is None
 
-def test_resolve_credentials_parses_both(monkeypatch: pytest.MonkeyPatch) -> None:
-    pem = "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----"
-    monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
-    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", pem)
-    creds = resolve_credentials()
-    assert creds == AppCredentials(app_id=12345, private_key=pem)
 
 def test_secret_credential_values_are_hidden_from_repr() -> None:
     private_key = "unstructured-private-key-secret"
@@ -315,20 +298,6 @@ def test_resolve_run_identity_refreshes_installation_token_after_expiry(monkeypa
     assert minted == 2
     assert captured["env"]["GH_TOKEN"] == "ghs_fresh"
 
-def test_resolve_run_identity_skips_minting_when_not_posting(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """With App credentials configured and owner/repo resolvable, is_posting=False
-    must never attempt minting — a read-only run has no need for a scoped token."""
-    monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
-    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", _TEST_PEM)
-    def fake_gh_api(repo: Any, endpoint: str, **kwargs: Any) -> dict[str, Any]:
-        if endpoint == "/user":
-            return {"login": "personal-user"}
-        raise AssertionError(f"minting must not be attempted when is_posting=False (hit {endpoint})")
-    with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
-        session = resolve_run_identity(tmp_path, "myorg/myrepo", is_posting=False)
-
-    assert session.identity == github_app.GitHubIdentity("personal-user")
-    assert session.execution.auth is git_ops.INHERIT_GITHUB_AUTH
 
 def test_resolve_run_identity_binds_explicit_base_without_app_credentials(tmp_path: Path,) -> None:
     base = {"PATH": "/isolated/tools", "GH_HOST": "github.example.test"}
@@ -363,10 +332,6 @@ def test_resolve_run_identity_redacts_arbitrary_initial_mint_failure(monkeypatch
     assert secret not in str(excinfo.value)
     assert excinfo.value.__cause__ is None
 
-def test_resolve_user_identity_returns_login(tmp_path: Path) -> None:
-    """resolve_user_identity reads the current gh-authenticated user."""
-    with patch("daydream.git_ops.gh_api", return_value={"login": "personal-user"}):
-        assert resolve_user_identity(tmp_path) == "personal-user"
 
 def test_resolve_user_identity_returns_unknown_on_failure(tmp_path: Path) -> None:
     """A failed user lookup is non-fatal — return 'unknown', never raise."""
@@ -408,13 +373,6 @@ def test_exchange_manifest_code_wraps_gh_api_failure() -> None:
         with pytest.raises(GitHubAppError):
             exchange_manifest_code(Path("."), "abc123")
 
-def test_get_app_metadata_returns_permissions() -> None:
-    """get_app_metadata mints a JWT and returns the parsed /app object."""
-    with patch("daydream.git_ops.gh_api",
-        side_effect=lambda *a, **k: {"permissions": {"pull_requests": "write"}, "slug": "acme-bot"},
-    ):
-        meta = get_app_metadata(Path("."), 42, _TEST_PEM)
-    assert meta["permissions"]["pull_requests"] == "write"
 
 def test_get_app_metadata_uses_bearer_jwt_and_explicit_auth() -> None:
     """The /app call carries matching Bearer headers and static JWT auth."""

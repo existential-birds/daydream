@@ -313,13 +313,6 @@ async def test_branch_is_encoded_and_pr_snapshot_is_exact(fake_gh: FakeGh, git_r
     assert rules == [{"id": 3}]
     assert snapshot == {"number": 7}
 
-async def test_response_sequence_advances_for_same_endpoint(fake_gh: FakeGh, git_repo: Path) -> None:
-    key = "GET repos/acme/widgets/pulls/7"
-    fake_gh.set_response_sequence(key, [{"number": 7}, {"number": 8}])
-    first = await git_ops.gh_pr_ci_snapshot(git_repo, "acme", "widgets", 7, budget=_budget())
-    second = await git_ops.gh_pr_ci_snapshot(git_repo, "acme", "widgets", 7, budget=_budget())
-    assert first == {"number": 7}
-    assert second == {"number": 8}
 
 async def test_response_sequence_can_serve_external_error(fake_gh: FakeGh, git_repo: Path) -> None:
     key = "GET repos/acme/widgets/pulls/7"

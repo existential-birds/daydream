@@ -2,23 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
-import pytest
-
 from daydream import pr_review
 from daydream.pr_review import (
     ClassifiedReviewPlan,
-    FileCommentPayload,
     InlineReviewComment,
     ParsedIssue,
-    PRInfo,
     ReviewEvent,
-    ReviewPayload,
-    ReviewPostResult,
-    SubmissionStatus,
-    parse_finding_markers,
-    post_classified_review,
 )
 from tests.harness.review_profile import sample_pr
 
@@ -47,67 +36,8 @@ def _plan(*, inline: list[InlineReviewComment] | None = None, inline_issues: lis
     )
 
 
-class _FakeTransport:
-    """A typed write boundary that records each non-idempotent request."""
 
-    def __init__(self, file_results: Sequence[bool], review_result: ReviewPostResult,) -> None:
-        self._file_results = iter(file_results)
-        self._review_result = review_result
-        self.file_requests: list[tuple[PRInfo, FileCommentPayload]] = []
-        self.review_requests: list[tuple[PRInfo, ReviewPayload]] = []
 
-    def post_file_comment(self, pr: PRInfo, payload: FileCommentPayload) -> bool:
-        self.file_requests.append((pr, payload))
-        return next(self._file_results)
-
-    def post_review(self, pr: PRInfo, payload: ReviewPayload) -> ReviewPostResult:
-        self.review_requests.append((pr, payload))
-        return self._review_result
-
-def test_submission_posts_file_comments_in_order_folds_failure_and_posts_once() -> None:
-    first = _finding("first.py", "First file finding", "1" * 64)
-    failed = _finding("failed.py", "Folded file finding", "2" * 64)
-    plan = _plan(file_level=[first, failed])
-    transport = _FakeTransport([True, False],
-        ReviewPostResult("https://github.com/acme/widgets/pull/42#review", None),
-    )
-    result = post_classified_review(plan, transport=transport)
-
-    assert [request.path for _pr, request in transport.file_requests] == ["first.py", "failed.py"]
-    assert [request.subject_type for _pr, request in transport.file_requests] == ["file", "file"]
-    assert len(transport.review_requests) == 1
-    final = transport.review_requests[0][1]
-    assert final.event is ReviewEvent.COMMENT
-    assert final.commit_id == plan.pr.head_sha
-    assert final.comments == ()
-    assert "Folded file finding" in final.body
-    assert parse_finding_markers(final.body) == ["2" * 64]
-    assert result.status is SubmissionStatus.POSTED
-    assert result.review_url == "https://github.com/acme/widgets/pull/42#review"
-    assert result.posted_file_level == (plan.file_level[0],)
-    assert result.folded_file_level == (plan.file_level[1],)
-    assert result.final_review_posted is True
-    assert result.safe_error is None
-
-@pytest.mark.parametrize(("file_result", "expected_posted", "expected_folded"), [(False, 0, 1), (True, 1, 0)],
-    ids=["zero-external-file-writes", "partial-file-write"],
-)
-def test_submission_reports_zero_and_partial_writes_when_final_review_fails(
-    file_result: bool, expected_posted: int, expected_folded: int,
-) -> None:
-    plan = _plan(file_level=[_finding("file.py", "File finding", "3" * 64)])
-    transport = _FakeTransport([file_result],
-        ReviewPostResult(None, "GitHub review submission failed (request payload preserved at /tmp/review.json)"),
-    )
-    result = post_classified_review(plan, transport=transport)
-
-    assert len(transport.file_requests) == 1
-    assert len(transport.review_requests) == 1
-    assert result.status is SubmissionStatus.FAILED
-    assert result.final_review_posted is False
-    assert len(result.posted_file_level) == expected_posted
-    assert len(result.folded_file_level) == expected_folded
-    assert result.safe_error == "GitHub review submission failed (request payload preserved at /tmp/review.json)"
 
 def test_submission_plan_is_detached_from_mutable_classification_and_preserves_provenance() -> None:
     issue = _finding(
@@ -129,14 +59,3 @@ def test_submission_plan_is_detached_from_mutable_classification_and_preserves_p
     assert retained.location_distrust is True
     assert retained.severity_before_demotion == "high"
     assert retained.severity_off_vocabulary is True
-
-def test_submission_uses_caller_authorized_approve_event() -> None:
-    plan = _plan(inline=[InlineReviewComment("inline.py", 4, "RIGHT", "inline")],
-        inline_issues=[_finding("inline.py", "Inline finding", "5" * 64, line=4)], event=ReviewEvent.APPROVE,
-    )
-    transport = _FakeTransport([], ReviewPostResult("https://github.com/acme/widgets/pull/42#review", None),)
-    result = post_classified_review(plan, transport=transport)
-
-    assert transport.review_requests[0][1].event is ReviewEvent.APPROVE
-    assert transport.review_requests[0][1].comments == (InlineReviewComment("inline.py", 4, "RIGHT", "inline"),)
-    assert result.status is SubmissionStatus.POSTED

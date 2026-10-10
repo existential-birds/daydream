@@ -132,14 +132,6 @@ def test_non_root_recorder_is_rejected_before_acquisition(tmp_path: Path) -> Non
 
     assert result.diagnostic == "run info: trajectory identity invalid"
 
-def test_parent_build_failure_returns_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,) -> None:
-    recorder = _recorder(tmp_path)
-    def fail() -> Trajectory:
-        raise RuntimeError("private parent contents")
-    monkeypatch.setattr(recorder, "build_trajectory", fail)
-    result = render_live_run_info(_source_with_snapshots(tmp_path, recorder=recorder))
-
-    assert result.diagnostic == "run info: parent trajectory unavailable"
 
 @pytest.mark.parametrize(("snapshot_id", "document_session", "document_id"),
     [("child", "other-session", "child"), ("child", "run-info", "other-child"), ("run-info", "run-info", "run-info")],

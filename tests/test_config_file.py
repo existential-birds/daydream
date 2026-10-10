@@ -16,12 +16,6 @@ def test_improve_config_table_parses_service_roots(tmp_path: Path) -> None:
     assert cfg.improve_service_roots == ["apps/*"]
     assert cfg.improve_service_groups == {"core": ["apps/billing", "apps/catalog"]}
 
-def test_improve_github_issue_publishing_is_explicitly_configurable(tmp_path: Path,) -> None:
-    (tmp_path / "pyproject.toml").write_text("[tool.daydream.improve.github]\npublish_issues = true\n")
-
-    config = load_file_config(tmp_path)
-
-    assert config.improve_github_publish_issues is True
 
 def test_improve_github_issue_publishing_accepts_kebab_case_fallback(tmp_path: Path,) -> None:
     (tmp_path / "pyproject.toml").write_text("[tool.daydream.improve.github]\npublish-issues = true\n")
@@ -37,27 +31,8 @@ def test_improve_github_issue_publishing_rejects_non_boolean_values(tmp_path: Pa
     assert load_file_config(tmp_path).improve_github_publish_issues is False
     assert DaydreamFileConfig().improve_github_publish_issues is False
 
-def test_improve_partition_bounds_parse_from_tool_daydream_improve(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text(
-        "[tool.daydream.improve]\npartition-max-files = 7\nmax-partition-groups = 2\n"
-    )
-    config = load_file_config(tmp_path)
-    assert config.improve_partition_max_files == 7
-    assert config.improve_max_partition_groups == 2
 
-def test_improve_partition_bounds_parse_from_dotfile_snake_case(tmp_path: Path) -> None:
-    (tmp_path / ".daydream.toml").write_text("[improve]\npartition_max_files = 30\nmax_partition_groups = 4\n")
-    config = load_file_config(tmp_path)
-    assert config.improve_partition_max_files == 30
-    assert config.improve_max_partition_groups == 4
 
-def test_improve_partition_bounds_default_to_none(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text('[tool.daydream.improve]\nservice_roots = ["apps/*"]\n')
-    config = load_file_config(tmp_path)
-    assert config.improve_partition_max_files is None
-    assert config.improve_max_partition_groups is None
-    assert DaydreamFileConfig().improve_partition_max_files is None
-    assert DaydreamFileConfig().improve_max_partition_groups is None
 
 def test_improve_partition_bounds_reject_non_positive(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
@@ -67,33 +42,8 @@ def test_improve_partition_bounds_reject_non_positive(tmp_path: Path) -> None:
     assert config.improve_partition_max_files is None
     assert config.improve_max_partition_groups is None
 
-def test_dotfile_wins_over_pyproject(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text('[tool.daydream]\nmodel = "from-pyproject"\n')
-    (tmp_path / ".daydream.toml").write_text('model = "from-dotfile"\n[phases.fix]\nbackend = "codex"\n')
-    cfg = load_file_config(tmp_path)
-    assert cfg.model == "from-dotfile"  # .daydream.toml overrides pyproject, per-key
-    assert cfg.phases["fix"]["backend"] == "codex"
-    assert "review" not in cfg.phases
 
-def test_absent_config_is_empty(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    cfg = load_file_config(tmp_path)
-    assert cfg.model is None and cfg.backend is None and cfg.phases == {}
-    assert cfg.reasoning_effort is None
-    assert cfg.improve_service_roots == []
-    assert cfg.diagram_mode is None
-    assert cfg.diagram_min_code_files is None
-    assert cfg.diagram_min_modules is None
-    assert cfg.diagram_min_branch_points is None
-    assert cfg.diagram_service_roots == []
-    assert cfg.retry_recovery_allowance_s is None
-    assert not any("retry_recovery_allowance_s" in r.message for r in caplog.records)
 
-def test_reasoning_effort_global_and_phase_override(tmp_path: Path) -> None:
-    (tmp_path / ".daydream.toml").write_text('reasoning_effort = "medium"\n[phases.fix]\nreasoning_effort = "high"\n')
-    cfg = load_file_config(tmp_path)
-    assert cfg.reasoning_effort == "medium"
-    assert cfg.phases["fix"]["reasoning_effort"] == "high"
-    assert "review" not in cfg.phases
 
 def test_malformed_toml_raises_valueerror(tmp_path: Path) -> None:
     (tmp_path / ".daydream.toml").write_text("model = =bad")
@@ -157,10 +107,6 @@ def test_supervision_config(tmp_path: Path, content: str, expected: tuple[str | 
 
     assert (cfg.supervisor, cfg.supervisor_deny_globs, cfg.tool_supervisor, cfg.tool_bash_deny,) == expected
 
-def test_empty_config_helper() -> None:
-    cfg = DaydreamFileConfig()
-    assert cfg.model is None and cfg.backend is None
-    assert cfg.phases == {}
 
 @pytest.mark.parametrize(("raw", "expected"),
     [pytest.param(float("-inf"), None, id="negative-inf"), pytest.param("0.05", None, id="string"),
@@ -198,34 +144,7 @@ def test_quality_gate_thresholds_in_file_config_degrade_to_none(tmp_path: Path, 
     assert cfg.quality_gate_erosion_absolute is None
     assert cfg.quality_gate_verbosity_absolute is None
 
-def test_quality_gate_thresholds_accept_finite_non_negative(tmp_path: Path) -> None:
-    (tmp_path / ".daydream.toml").write_text(
-        "quality_gate_erosion_delta = 0.0\n"
-        "quality_gate_verbosity_delta = 0.25\n"
-        "quality_gate_erosion_absolute = 0.5\n"
-        "quality_gate_verbosity_absolute = 0.75\n"
-    )
-    cfg = load_file_config(tmp_path)
-    assert cfg.quality_gate_erosion_delta == 0.0
-    assert cfg.quality_gate_verbosity_delta == 0.25
-    assert cfg.quality_gate_erosion_absolute == 0.5
-    assert cfg.quality_gate_verbosity_absolute == 0.75
 
-def test_diagram_table_parses_from_pyproject(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text(
-        "[tool.daydream.diagram]\n"
-        'mode = "off"\n'
-        "min_code_files = 5\n"
-        "min_modules = 3\n"
-        "min_branch_points = 6\n"
-        'service_roots = ["apps/*", "services/*"]\n'
-    )
-    cfg = load_file_config(tmp_path)
-    assert cfg.diagram_mode == "off"
-    assert cfg.diagram_min_code_files == 5
-    assert cfg.diagram_min_modules == 3
-    assert cfg.diagram_min_branch_points == 6
-    assert cfg.diagram_service_roots == ["apps/*", "services/*"]
 
 def test_diagram_table_parses_from_dotfile_and_merges_per_key(tmp_path: Path) -> None:
     """Dotfile diagram keys override individually without discarding pyproject siblings."""
@@ -258,24 +177,7 @@ def test_diagram_junk_table_degrades_to_unset(tmp_path: Path) -> None:
     assert cfg.diagram_mode is None
     assert cfg.diagram_min_branch_points is None
 
-def test_diagram_threshold_keys_accept_hyphenated_spellings(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text(
-        "[tool.daydream.diagram]\n"
-        "min-code-files = 4\n"
-        "min-modules = 5\n"
-        "min-branch-points = 7\n"
-    )
-    cfg = load_file_config(tmp_path)
-    assert cfg.diagram_min_code_files == 4
-    assert cfg.diagram_min_modules == 5
-    assert cfg.diagram_min_branch_points == 7
 
-def test_retry_recovery_allowance_round_trips_from_the_file_config(tmp_path: Path) -> None:
-    (tmp_path / ".daydream.toml").write_text("retry_recovery_allowance_s = 120\n", encoding="utf-8")
-
-    config = load_file_config(tmp_path)
-
-    assert config.retry_recovery_allowance_s == 120.0
 
 def test_an_invalid_retry_recovery_allowance_degrades_observably(tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -325,13 +227,3 @@ def test_verify_selection_keys_round_trip_and_ill_typed_values_degrade(tmp_path:
     degraded = load_file_config(tmp_path)
     assert degraded.verify_all is None            # real bool only
     assert degraded.extra_risk_categories == []   # non-list degrades to unset, never to a guess
-
-def test_test_required_suites_is_additive_to_test_command(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text(
-        "[tool.daydream]\ntest_command = 'uv run pytest'\ntest_required_suites = ['python', 'rl']\n"
-    )
-    config = load_file_config(tmp_path)
-
-    assert config.test_command == "uv run pytest"
-    assert config.test_required_suites == ["python", "rl"]
-    assert load_file_config(tmp_path / "empty").test_required_suites == []

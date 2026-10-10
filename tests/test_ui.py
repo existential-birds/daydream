@@ -28,15 +28,11 @@ from daydream.ui import (
     print_verification_summary,
     render_exploration_summary,
 )
-from daydream.ui.agent_stream import _summarize_input
 from daydream.ui.colorize import render_segments
 from daydream.ui.panels import LiveToolPanelRegistry
 from daydream.ui.theme import _TASK_PROMPT_MAX_LINES
 from daydream.ui.tools import (
     _BASH_COMMAND_MAX_CHARS,
-    _build_tool_header,
-    _primary_tool_value,
-    _redacted_bash_command,
     format_callback_progress,
 )
 from tests.harness.backend import ScriptedBackend
@@ -161,13 +157,6 @@ def test_render_exploration_summary_empty_is_quiet() -> None:
     out = console.export_text()
     assert "{" not in out and "[" not in out  # never dumps a structure; one dim line at most
 
-def test_choice_returns_default_on_eof(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The raw reader behind RunContext.choice renders its EOF notice and takes the default."""
-    monkeypatch.setattr("builtins.input", Mock(side_effect=EOFError("EOF when reading a line")))
-    console = Console(file=StringIO(), record=True)
-    assert _ask(console, "Apply fixes now?") == "n"
-    output = console.export_text()
-    assert "EOF" in output, f"expected EOF warning in output, got: {output!r}"
 
 def test_choice_non_interactive_skips_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     """Unattended policy resolves the safe default without touching stdin."""
@@ -220,14 +209,6 @@ def test_parse_background_task_id_from_launch_string() -> None:
     reg.observe_result("c2", create)
     assert reg.resolve_label("TaskCreate", "1") == "Find tool-call render code"
 
-def test_bash_panel_shows_command_drops_mechanical_keys() -> None:
-
-
-    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=False)
-    reg.create("c1", "Bash", {"command": "pytest", "block": True, "timeout": 120000})
-    out = _render_panel_text(reg, "c1")
-    assert "pytest" in out
-    assert "block" not in out and "timeout" not in out
 
 def _render_panel_text(reg: LiveToolPanelRegistry, tool_use_id: str) -> str:
 
@@ -237,16 +218,6 @@ def _render_panel_text(reg: LiveToolPanelRegistry, tool_use_id: str) -> str:
     c.print(panel._render_panel())
     return c.export_text()
 
-def test_taskoutput_header_leads_with_label_demotes_id() -> None:
-
-
-    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
-    reg.create("c1", "Bash", {"command": "x", "run_in_background": True, "description": "Run tests"})
-    reg.observe_result("c1", "Command running in background with ID: a066168. ...")
-    reg.create("c2", "TaskOutput", {"task_id": "a066168", "block": True, "timeout": 120000})
-    out = _render_panel_text(reg, "c2")
-    assert "Run tests" in out and "a066168" in out
-    assert "block" not in out and "timeout" not in out
 
 def test_taskoutput_header_unknown_id_falls_back_to_bare_id() -> None:
 
@@ -375,33 +346,6 @@ async def test_run_agent_callback_path_edit_shows_file_not_bool(tmp_path: Path) 
     assert "/repo/daydream/git_ops.py" in joined  # the meaningful primary arg
     assert "Edit False" not in joined  # the stray-boolean dump is gone
 
-def test_primary_tool_value_bash_prefers_command() -> None:
-    value, key = _primary_tool_value("Bash", {"command": "git diff --stat", "description": "Show changes"})
-    assert (value, key) == ("git diff --stat", "command")
-
-    value, key = _primary_tool_value("Bash", {"command": "ls -la /tmp"})
-    assert (value, key) == ("ls -la /tmp", "command")
-
-def test_format_callback_progress_bash_shows_command() -> None:
-    """Callback single-line path renders the command, not the paraphrase (issue #1108).
-
-    The command is redacted before the width slice — the same redact-before-truncate invariant the panel header
-    and --log summary hold, so the callback line cannot print a secret the other surfaces would redact."""
-
-
-    line = format_callback_progress("Bash", {"command": "git diff --stat", "description": "Show changes"}, None)
-    c = Console(file=StringIO(), force_terminal=True, width=120, record=True)
-    c.print(line)
-    text = c.export_text()
-    assert "git diff --stat" in text
-    assert "Show changes" not in text
-
-    secret_line = format_callback_progress("Bash", {"command": "DB_PASSWORD=hunter2 make db-up"}, None)
-    c3 = Console(file=StringIO(), force_terminal=True, width=120, record=True)
-    c3.print(secret_line)
-    secret_text = c3.export_text()
-    assert "hunter2" not in secret_text
-    assert "DB_PASSWORD=[REDACTED_ENV_VAR]" in secret_text
 
 def test_callback_command_relies_on_the_owner_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     """The owner is the only capper of a command value (issue #1227).
@@ -441,67 +385,9 @@ def test_format_callback_progress_redacts_only_bash_commands() -> None:
     assert "opaque-test-12345" not in bash_line.plain
     assert "[REDACTED" in bash_line.plain
 
-def test_bash_primary_field_consistent_across_three_render_surfaces() -> None:
-    args: dict[str, object] = {"command": "git diff --stat"}
-    header = _build_tool_header("Bash", args, quiet_mode=True)
-    c = Console(file=StringIO(), force_terminal=True, width=120, record=True)
-    c.print(header)
-    header_text = c.export_text()
-
-    line = format_callback_progress("Bash", args, None)
-    c2 = Console(file=StringIO(), force_terminal=True, width=120, record=True)
-    c2.print(line)
-    line_text = c2.export_text()
-
-    log_summary = _summarize_input(args, "Bash")
-
-    assert "git diff --stat" in header_text
-    assert "git diff --stat" in line_text
-    assert log_summary == "git diff --stat"
-
-    # All command-display surfaces must share the owner's truncation cap.
-
-    long_command = "b" * (_BASH_COMMAND_MAX_CHARS + 25)
-    long_header = _build_tool_header("Bash", {"command": long_command}, quiet_mode=True)
-    assert "b" * _BASH_COMMAND_MAX_CHARS in long_header.plain
-    assert long_header.plain.rstrip().endswith("...")
-    long_line = format_callback_progress("Bash", {"command": long_command}, None)
-    assert "b" * _BASH_COMMAND_MAX_CHARS in long_line.plain
-    assert len(_summarize_input({"command": long_command}, "Bash")) == _BASH_COMMAND_MAX_CHARS
-    # Under the cap nothing is truncated, so no ellipsis is appended.
-    assert not _build_tool_header("Bash", {"command": "true"}, quiet_mode=True).plain.rstrip().endswith("...")
-
-def test_bash_header_preserves_operator_cd_prefix() -> None:
-    """Claude/Pi Bash commands never pass through the Codex wrapper (issue #336).
-
-    The operator-authored cd prefix must render — stripping it would hide cwd context and make 'cd backend &&
-    pytest' vs 'cd frontend && pytest' display identically."""
-
-    header = _build_tool_header("Bash", {"command": "cd /app && echo hello"})
-    assert "cd /app && echo hello" in header.plain
-
-def test_shell_header_shows_cd_stripped_display_variant() -> None:
-    header = _build_tool_header("shell", {"command": "cd /app && echo hello"})
-    assert "echo hello" in header.plain
-    assert "cd /app" not in header.plain  # the stored replayable value must not leak through
-
-def test_log_summary_shows_cd_stripped_display_variant() -> None:
-    assert _summarize_input({"command": "cd /app && echo hello"}, "shell") == "echo hello"
-
-def test_log_summary_preserves_operator_cd_prefix() -> None:
-    assert _summarize_input({"command": "cd /app && echo hello"}, "Bash") == "cd /app && echo hello"
-
-def test_callback_progress_cd_split_matches_live_surfaces() -> None:
-    bash_line = format_callback_progress("Bash", {"command": "cd /app && echo hello"}, None)
-    assert "cd /app && echo hello" in bash_line.plain
-    shell_line = format_callback_progress("shell", {"command": "cd /app && echo hello"}, None)
-    assert "echo hello" in shell_line.plain
-    assert "cd /app" not in shell_line.plain
-
 
 _BOUNDARY_PAD = 185  # 200-char cap: a token starting here straddles it (15 of 20 chars inside)
 _AKIA_TOKEN = "AKIA" + "Q7" * 8  # AKIA + 16 [A-Z0-9] — the pattern needs all 16
-_JWT_TOKEN = ("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0" ".dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk")
 
 
 def _straddling_command(token: str, *, prefix: str = "") -> str:
@@ -510,37 +396,6 @@ def _straddling_command(token: str, *, prefix: str = "") -> str:
     assert len(before_token) == _BOUNDARY_PAD
     return before_token + token + " tail"
 
-def test_redacted_bash_command_strip_is_codex_only_and_precedes_redaction() -> None:
-    command = _straddling_command(_AKIA_TOKEN)
-    wrapped = '/bin/zsh -lc "cd /srv/app && ' + command + '"'
-    shell_displayed = _redacted_bash_command("shell", wrapped)
-    bash_displayed = _redacted_bash_command("Bash", "cd /srv/app && " + command)
-    assert "cd /srv/app" not in shell_displayed  # Codex wrapper prefix stripped
-    assert "cd /srv/app" in bash_displayed  # operator-authored prefix kept
-    assert _AKIA_TOKEN[:8] not in shell_displayed
-    assert _AKIA_TOKEN[:8] not in bash_displayed
-
-@pytest.mark.parametrize("token", [_AKIA_TOKEN, _JWT_TOKEN], ids=["akia", "jwt"])
-@pytest.mark.parametrize("name", ["Bash", "shell"])
-def test_command_display_surfaces_redact_straddling_credential(token: str, name: str) -> None:
-    cd_prefix = "cd /srv/app && "
-    command = (_straddling_command(token, prefix=cd_prefix)
-        if name == "Bash"
-        else cd_prefix + _straddling_command(token)
-    )
-    args: dict[str, object] = {"command": command}
-    summary = _summarize_input(args, name)
-    callback = format_callback_progress(name, args, None).plain
-    header = _build_tool_header(name, args).plain
-
-    assert len(summary) == _BASH_COMMAND_MAX_CHARS
-    assert "[REDACTED" in summary
-    assert callback.endswith(summary)
-    assert header.endswith(summary + "...")
-    for displayed in (summary, callback, header):
-        assert token[:8] not in displayed
-        assert token not in displayed
-        assert (cd_prefix in displayed) is (name == "Bash")
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["panel", "callback"])

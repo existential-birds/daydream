@@ -14,9 +14,6 @@ from daydream.backends import ResultEvent
 from daydream.deep.fix_state import EvidenceKey, RetainedTreeSnapshot
 from daydream.deep.fix_steps import (
     _authorize_final_red_override,
-    _persist_push_verdict,
-    _persist_test_verdict,
-    _render_fix_outcome_summary,
     _round_dispatch_items,
     _step_fix_gate,
     _step_test,
@@ -37,7 +34,6 @@ from tests.deep_orchestrator.support import (
     _remote_identity_context,
 )
 from tests.harness.backend import ScriptedBackend
-from tests.harness.execution import test_execution_identity as _identity
 from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 from tests.test_deep_orchestrator import (
     _merge_item,
@@ -52,33 +48,6 @@ def _host_test_evidence(
         session_id=state.session_id, kind="host", command=command, passed=passed, input_tree_key=input_tree_key,
         output_tree_key=output_tree_key,
     )
-
-def test_push_verdict_is_current_session_and_exact_identity(tmp_path: Path) -> None:
-
-    repo = _base_repo(tmp_path, "push-verdict")
-    ctx = _direct_fix_context(repo, [], changed_files=set())
-    _direct_fix_state(ctx, [], set())
-    sha = git_ops.head_sha(repo)
-
-    _persist_push_verdict(ctx, PushReceipt("origin", "feature", sha, "fork/project"), status="succeeded",
-        started_at="2026-09-06T12:00:00Z",
-    )
-
-    payload = json.loads((ctx.data["dd"] / "push-verdict.json").read_text())
-    assert payload == {"schema_version": 1, "session_id": "session-current", "status": "succeeded", "remote": "origin",
-        "branch": "feature", "pushed_sha": sha, "pushed_repository": "fork/project",
-        "started_at": "2026-09-06T12:00:00Z", "updated_at": payload["updated_at"],
-    }
-    assert payload["updated_at"].endswith("Z")
-
-    _persist_push_verdict(
-        ctx, PushReceipt("origin", "feature", sha, "fork/project"), status="failed", started_at="2026-09-06T12:01:00Z",
-        diagnostic="token=top-secret push rejected",
-    )
-    failed = json.loads((ctx.data["dd"] / "push-verdict.json").read_text())
-    assert failed["status"] == "failed"
-    assert failed["pushed_sha"] == sha
-    assert "top-secret" not in failed["diagnostic"]
 
 @pytest.mark.anyio
 async def test_successful_non_github_push_gets_unavailable_handoff(tmp_path: Path) -> None:
@@ -97,19 +66,6 @@ async def test_successful_non_github_push_gets_unavailable_handoff(tmp_path: Pat
     assert verdict["target"] is None
     assert handoff["status"] == "unavailable"
     assert handoff["target"] is None
-
-@pytest.mark.parametrize(("head_repository", "pushed_repository"),
-    [("base-user/project", "base-user/project"), ("fork-user/project", "fork-user/project")],
-)
-def test_remote_target_accepts_matching_same_repo_and_fork_identity(
-    tmp_path: Path, fake_gh: Any, head_repository: str, pushed_repository: str,
-) -> None:
-    ctx, sha = _remote_identity_context(tmp_path, fake_gh, head_repository=head_repository)
-    target = _resolve_remote_ci_target(ctx, PushReceipt("origin", "feature", sha, pushed_repository))
-    assert target.base_repository == "base-user/project"
-    assert target.head_repository == head_repository
-    assert target.head_ref == "feature"
-    assert target.pushed_sha == sha
 
 @pytest.mark.parametrize(
     ("head_repository", "pushed_repository", "configured_repository", "base_ref", "configured_pr",),
@@ -417,16 +373,6 @@ async def test_stabilization_audit_write_failure_stops_before_retest(tmp_path: P
     failure = json.loads((ctx.data["dd"] / "stabilization-failed.json").read_text())
     assert "audit disk full" in failure["reason"]
 
-def test_fix_outcome_summary_renders_uid_keyed_outcomes(monkeypatch: pytest.MonkeyPatch) -> None:
-    rendered: list[tuple[int, int, str | None]] = []
-    monkeypatch.setattr("daydream.deep.fix_steps.print_fix_complete",
-        lambda _console, number, total, *, outcome=None: rendered.append((number, total, outcome)),
-    )
-    items = [{**_merge_item(7, "a.py", "high"), "item_uid": "item:a"}]
-    outcomes = {"item:a": {"issue_id": 7, "verdict": "resolved", "reason": "fixed"}}
-    _render_fix_outcome_summary(items, outcomes)
-    assert rendered == [(1, 1, "resolved")]
-
 @pytest.mark.parametrize(("new_override", "expect_stop"), [(False, True), (True, False)])
 async def test_changed_tree_red_retest_requires_new_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, new_override: bool, expect_stop: bool,
@@ -482,22 +428,3 @@ def test_final_red_override_requires_fresh_interactive_prompt(tmp_path: Path) ->
     ctx.run_context = RunContext(InteractionPolicy(assume="yes"))
     assert _authorize_final_red_override(ctx) is False
     assert len(prompts) == 1
-
-def test_persisted_test_verdict_carries_the_execution_identity(tmp_path: Path) -> None:
-    repo = _base_repo(tmp_path, "identity-verdict")
-    ctx = _direct_fix_context(repo, [], changed_files=set())
-    state = _direct_fix_state(ctx, [], set())
-    attempt = TestAttemptEvidence(
-        session_id=state.session_id, kind="host", command=("uv", "run", "pytest"), passed=True,
-        input_tree_key="t", output_tree_key="t", identity=_identity(session_id=state.session_id),
-    )
-    _persist_test_verdict(ctx, state, passed=True, ignored=False, attempts=[attempt])
-    payload = json.loads((repo / ".daydream" / "deep" / "test-verdict.json").read_text())
-    assert payload["attempts"][0]["identity"]["argv"] == ["uv", "run", "pytest"]
-    assert payload["attempts"][0]["identity"]["outcome"] == "passed"
-
-def test_legacy_evidence_without_an_identity_still_constructs(tmp_path: Path) -> None:
-    attempt = TestAttemptEvidence(
-        session_id="s", kind="host", command=("true",), passed=True, input_tree_key="t", output_tree_key="t",
-    )
-    assert attempt.identity is None

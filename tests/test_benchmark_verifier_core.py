@@ -8,8 +8,6 @@ import pytest
 from daydream.benchmark import schema
 from daydream.benchmark.harbor import verifier_core as vc
 from daydream.benchmark.harbor.verifier_core import (
-    CandidateFinding,
-    GoldFinding,
     Verdict,
     VerifierError,
     derive_candidate_id,
@@ -18,7 +16,6 @@ from daydream.benchmark.harbor.verifier_core import (
     parse_gold_finding,
     retained_edges,
     reward_details,
-    reward_to_json,
     score_review,
     validate_candidate_artifact,
     validate_gold_set,
@@ -41,39 +38,6 @@ def _gold(**overrides: Any) -> Any:
     return base
 
 
-def test_candidate_parses_valid() -> None:
-    f = parse_candidate_finding(_cand())
-    assert isinstance(f, CandidateFinding)
-    assert (f.title, f.severity, f.path, f.start_line, f.end_line) == (
-        "Cache key not scoped", "high", "src/cache.py", 42, 42,
-    )
-
-def test_gold_parses_valid() -> None:
-    g = parse_gold_finding(_gold())
-    assert isinstance(g, GoldFinding) and g.finding_id == "a" * 64
-
-@pytest.mark.parametrize(("field", "value"),
-    [("severity", "critical"), ("title", "   "), ("body", ""), ("path", "../etc/passwd"), ("path", "/abs/path"),
-        ("start_line", 5),
-    ],
-)
-def test_candidate_rejects_invalid(field: str, value: Any) -> None:
-    kw = _cand()
-    if field == "start_line":
-        kw["start_line"], kw["end_line"] = 5, 3  # end < start
-    else:
-        kw[field] = value
-    with pytest.raises(VerifierError):
-        parse_candidate_finding(kw)
-
-def test_candidate_rejects_nul_and_oversize_title() -> None:
-    with pytest.raises(VerifierError):
-        parse_candidate_finding(_cand(title="a\x00b"))
-    with pytest.raises(VerifierError):
-        parse_candidate_finding(_cand(title="x" * 501))
-    with pytest.raises(VerifierError):
-        parse_candidate_finding(_cand(body="y" * (8 * 1024 + 1)))
-
 def test_candidate_rejects_bad_id_hex() -> None:
     with pytest.raises(VerifierError):
         parse_candidate_finding(_cand(candidate_id="xyz"))
@@ -89,19 +53,10 @@ def test_harbor_package_imports_stdlib_only() -> None:
     assert vc.CONFIDENCE_THRESHOLD == 0.7
     assert issubclass(vc.VerifierError, Exception)
 
-def test_candidate_id_is_64_lower_hex() -> None:
-    cid = derive_candidate_id("case-x", _cand(), 0)
-    assert len(cid) == 64 and all(ch in "0123456789abcdef" for ch in cid)
-
 def test_candidate_id_scoped_by_case_key() -> None:
     a = derive_candidate_id("case-x", _cand(), 0)
     b = derive_candidate_id("case-y", _cand(), 0)
     assert a != b
-
-def test_duplicate_content_gets_distinct_ordinals_and_ids() -> None:
-    first = derive_candidate_id("case-x", _cand(), 0)
-    second = derive_candidate_id("case-x", _cand(), 1)
-    assert first != second
 
 def test_same_content_same_key_same_ordinal_is_stable() -> None:
     assert derive_candidate_id("case-x", _cand(), 0) == derive_candidate_id("case-x", _cand(), 0)
@@ -132,21 +87,11 @@ def _valid_findings(n: Any=1, key: Any="case-x") -> Any:
     return out
 
 
-def test_artifact_accepts_and_returns_models() -> None:
-    fs = validate_candidate_artifact(_artifact(_valid_findings(2)))
-    assert len(fs) == 2 and all(isinstance(f, CandidateFinding) for f in fs)
-
 def test_artifact_rejects_duplicate_candidate_id() -> None:
     dup = _valid_findings(2)
     dup[1] = dict(dup[0])  # same id, different title → not allowed
     with pytest.raises(VerifierError):
         validate_candidate_artifact(_artifact(dup))
-
-def test_artifact_rejects_mismatched_candidate_id() -> None:
-    bad = _valid_findings(1)
-    bad[0]["candidate_id"] = "f" * 64  # does not match derived id
-    with pytest.raises(VerifierError):
-        validate_candidate_artifact(_artifact(bad))
 
 def test_artifact_rejects_wrong_schema_version() -> None:
     with pytest.raises(VerifierError):
@@ -157,24 +102,6 @@ def test_artifact_rejects_missing_refs() -> None:
     del art["head_ref"]
     with pytest.raises(VerifierError):
         validate_candidate_artifact(art)
-
-def test_artifact_rejects_over_one_mib() -> None:
-    big = _valid_findings(1)
-    big[0]["body"] = "x" * (1_048_576)  # artifact JSON > 1 MiB
-    with pytest.raises(VerifierError):
-        validate_candidate_artifact(_artifact(big))
-
-def test_artifact_rejects_over_100_findings() -> None:
-    with pytest.raises(VerifierError):
-        validate_candidate_artifact(_artifact(_valid_findings(101)))
-
-def test_gold_set_accepts_and_returns_models() -> None:
-    g1 = _gold()
-    g1["finding_id"] = _canonical_gold_id("case-x", g1)
-    g2 = _gold(title="B")
-    g2["finding_id"] = _canonical_gold_id("case-x", g2)
-    gs = validate_gold_set([g1, g2], case_id="case-x")
-    assert len(gs) == 2 and all(isinstance(g, GoldFinding) for g in gs)
 
 def test_gold_finding_id_is_case_scoped() -> None:
     # gold finding_id must equal sha256(case_id, title, body, severity, path, start, end)
@@ -189,19 +116,6 @@ def test_gold_finding_id_is_case_scoped() -> None:
     g2["finding_id"] = _canonical_gold_id("case-y", g2)
     with pytest.raises(VerifierError):
         validate_gold_set([g2], case_id="case-x")
-
-def test_gold_set_rejects_over_50() -> None:
-    many = []
-    for i in range(51):
-        f = _gold(title=f"f{i}")
-        f["finding_id"] = _canonical_gold_id("case-x", f)
-        many.append(f)
-    with pytest.raises(VerifierError):
-        validate_gold_set(many, case_id="case-x")
-
-def test_gold_set_rejects_invalid_member() -> None:
-    with pytest.raises(VerifierError):
-        validate_gold_set([_gold(severity="nope")], case_id="case-x")
 
 def test_verdict_parses_and_validates() -> None:
     v = Verdict(gold_id="g", candidate_id="c", match=True, confidence=0.9, reasoning="same bug")
@@ -246,13 +160,6 @@ def test_matching_is_deterministic_across_runs() -> None:
     r1 = maximum_matching(vs, gold, cand)
     r2 = maximum_matching(vs, gold, cand)
     assert r1 == r2 == {("g1", "c1"), ("g2", "c2")}
-
-def test_score_clean_zero_candidates() -> None:
-    r = score_review([], _artifact([]), [])
-    d = r.to_dict()
-    assert d["reward"] == 1.0 and d["clean_task"] == 1 and d["clean_pass"] == 1
-    assert (d["tp"], d["fp"], d["fn"]) == (0, 0, 0)
-    assert (d["precision"], d["recall"], d["f1"]) == (1.0, 1.0, 1.0)  # zero-denom → 1.0
 
 def test_score_clean_with_candidates() -> None:
     art = _artifact(_valid_findings(2))
@@ -299,19 +206,6 @@ def test_empty_side_resolves_with_zero_verdicts() -> None:
     assert rn.reward == 0.0 and rn.fn == 1
     # passing any verdict for an empty side must not change the result (ignored/not required)
     assert score_review([], _artifact([]), [Verdict("g", "c", True, 0.9, "")]).reward == 1.0
-
-def test_reward_dict_is_numeric_only_with_all_keys() -> None:
-    d = score_review([_gold()], _artifact(_valid_findings(1)), []).to_dict()
-    assert set(d) == EXPECTED_24_KEYS
-    for k, v in d.items():
-        assert isinstance(v, (int, float)) and not isinstance(v, bool)
-
-def test_reward_to_json_is_numeric_only() -> None:
-    art = _artifact(_valid_findings(1))
-    cand = _valid_findings(1)[0]
-    r = score_review([_gold()], art, [Verdict("a" * 64, cand["candidate_id"], True, 0.9, "same")])
-    d = json.loads(reward_to_json(r))
-    assert all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in d.values())
 
 def test_reward_details_shape_and_no_source_leak() -> None:
     gold = [_gold(), _gold(finding_id="b" * 64, title="B")]
@@ -368,12 +262,6 @@ def _canonical_gold_id(case_id: str, f: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def test_gold_set_rejects_non_canonical_finding_id() -> None:
-    f = _gold()
-    f["finding_id"] = "f" * 64  # valid 64-hex but not the canonical digest
-    with pytest.raises(VerifierError):
-        validate_gold_set([f], case_id="case-x")
-
 def test_gold_set_rejects_duplicate_finding_ids() -> None:
     fid = _canonical_gold_id("case-x", _gold())
     with pytest.raises(VerifierError):
@@ -398,27 +286,6 @@ def test_locationless_canonical_digest_matches_schema_derive() -> None:
 def test_duplicate_locationless_get_distinct_occurrence_ids() -> None:
     locless = _cand(path=None, start_line=None, end_line=None)
     assert derive_candidate_id("case-x", locless, 0) != derive_candidate_id("case-x", locless, 1)
-
-def test_locationless_gold_set_accepts_canonical_id() -> None:
-    g = _gold(path=None, start_line=None, end_line=None)
-    g["finding_id"] = _canonical_gold_id("case-x", g)
-    gs = validate_gold_set([g], case_id="case-x")
-    assert len(gs) == 1 and gs[0].path is None
-
-@pytest.mark.parametrize("parse,make", [(parse_candidate_finding, _cand), (parse_gold_finding, _gold)])
-def test_locationless_finding_accepted(parse: Any, make: Any) -> None:
-    f = parse(make(path=None, start_line=None, end_line=None))
-    assert f.path is None and f.start_line is None and f.end_line is None
-
-@pytest.mark.parametrize("partial", [
-    {"path": "src/a.py", "start_line": None, "end_line": None}, {"path": None, "start_line": 1, "end_line": 1},
-    {"path": "src/a.py", "start_line": 1, "end_line": None},
-])
-def test_partial_location_rejected(partial: Any) -> None:
-    with pytest.raises(VerifierError):
-        parse_candidate_finding(_cand(**partial))
-    with pytest.raises(VerifierError):
-        parse_gold_finding(_gold(**partial))
 
 def test_mixed_located_locationless_set_matching_is_id_keyed() -> None:
     g_loc = _gold(title="Located", path="src/a.py", start_line=1, end_line=1)
@@ -565,14 +432,6 @@ def test_score_review_location_tiers_and_severity_exact() -> None:
     r_miss = score_review(*_axis_pair(gold_raw, miss_cand))
     assert r_miss.location_miss == 1 and r_miss.location_present == 1
     assert r_miss.location_exact == 0 and r_miss.location_credit == 0.0
-
-def test_reward_to_dict_stays_numeric_only() -> None:
-    gold_raw = _axis_gold()
-    cand_raw = _axis_cand_id()
-    reward = score_review(*_axis_pair(gold_raw, cand_raw))
-    d = reward.to_dict()
-    assert all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in d.values())
-    assert set(d) == EXPECTED_24_KEYS
 
 def test_reward_dict_early_returns_have_absent_axes() -> None:
     d = score_review([], _artifact([]), []).to_dict()

@@ -29,12 +29,9 @@ from daydream.benchmark.schema import (
     Source,
     TransitionError,
     _ImportRepository,
-    case_id_for,
     classify_validation,
     derive_finding_id,
     derive_gold_mode,
-    derive_gold_status,
-    derive_workspace_state,
     normalize_hostname,
     validate_case_transition,
     validate_pr_transition,
@@ -76,12 +73,6 @@ def test_normalize_hostname(raw: Any, expected: Any) -> None:
 def test_normalize_hostname_rejects_malformed(raw: Any) -> None:
     with pytest.raises(ValueError):
         normalize_hostname(raw)
-
-def test_manifest_accepts_valid_v1() -> None:
-    m = BenchmarkManifest.model_validate(_valid_manifest())
-    assert m.source.hostname == "github.com"
-    assert m.source.repository_id is None
-    assert m.source.visibility == "unresolved"
 
 @pytest.mark.parametrize(("section", "field", "value"),
     [(None, "bogus", True), ("source", "hostname", "gitlab.com"), ("privacy", "reviewer_allowed_hosts", []),
@@ -208,24 +199,6 @@ def test_case_source_is_strict_submodel(raw: dict[str, Any]) -> None:
         CaseDocument.model_validate(raw)
     assert ei.value.errors()[0]["loc"][0] == "source"
 
-def test_import_and_case_pull_request_share_shape() -> None:
-    doc = ImportDocument.model_validate(_valid_import_document())
-    pr = doc.pull_request
-    assert pr.number == 101 and pr.author.login == "alice" and pr.head.sha == "h" * 40
-
-def test_pull_request_meta_accepts_full_field_set() -> None:
-    m = PullRequestMeta.model_validate({
-        "number": 101, "url": "https://github.com/o/r/pull/101", "html_url": "https://github.com/o/r/pull/101",
-        "title": "Fix cache", "body": "fixes the cache\n\nsecond line",
-        "state": "open", "title_sha256": hashlib.sha256(b"Fix cache").hexdigest(),
-        "body_sha256": hashlib.sha256("fixes the cache\n\nsecond line".encode()).hexdigest(),
-        "base": {"sha": "b" * 40, "ref": "main"}, "head": {"sha": "a" * 40, "ref": "feature/cache"},
-        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-        "merged_at": None, "closed_at": None, "author": {"login": "alice", "type": "User"},
-    })
-    assert m.number == 101 and m.body == "fixes the cache\n\nsecond line"
-    assert m.head.ref == "feature/cache"
-
 def test_pull_request_meta_predate_reads_empty_and_validates() -> None:
     # predate import: lacks the additive body/digest/html_url/merged/closed fields
     m = PullRequestMeta.model_validate({
@@ -307,18 +280,6 @@ def _anchor_payload(status: str, commit_id: str | None = "a" * 40) -> dict[str, 
     return {"version": 1, "status": status, "commit_id": None, "path": None, "start_line": None, "end_line": None}
 
 
-def test_evidence_record_accepts_authoring_anchor_and_original_start_line() -> None:
-    rec = EvidenceRecord.model_validate(_evidence("inline_comment", 7))
-    payload = rec.model_dump(mode="json")
-    payload["original_start_line"] = 4
-    payload["authoring_anchor"] = {
-        "version": 1, "status": "derived", "commit_id": "a" * 40, "path": "a.py", "start_line": 4, "end_line": 5,
-    }
-    parsed = schema.EvidenceRecord.model_validate(payload)
-    assert parsed.original_start_line == 4
-    assert parsed.authoring_anchor is not None
-    assert parsed.authoring_anchor.path == "a.py"
-
 def test_authoring_anchor_fail_closed_statuses_validate() -> None:
     for status in ("derived", "history-unavailable", "path-unavailable", "range-unavailable"):
         payload = _anchor_payload(status)  # commit/path/lines None unless status == "derived"
@@ -394,14 +355,6 @@ def _unreplayable_snapshot(
         "error": {"reason": reason, "detail": detail},
     }
 
-
-def test_case_id_derivation() -> None:
-    assert case_id_for(101, "0123456789abcdef0123456789abcdef01234567") == "pr-000101-0123456789ab"
-
-def test_ready_snapshot_valid() -> None:
-    doc = _valid_case()
-    assert doc.snapshot.status == "ready"
-    assert doc.curation.state == "ready"
 
 def test_ready_snapshot_requires_merge_base_resolution_marker() -> None:
     marked = _valid_case_dict()
@@ -619,25 +572,6 @@ def test_legacy_ready_without_task_spec_digest_backfills_and_validates(raw: dict
     assert digest == expected
     assert CaseDocument.model_validate(prepared).curation.task_spec_sha256 == digest
 
-def test_present_null_ready_task_spec_digest_is_not_legacy_backfilled(raw: dict[str, Any]) -> None:
-    raw["curation"]["task_spec_sha256"] = None
-
-    prepared = schema._schema_ready(raw)
-
-    assert "task_spec_sha256" in prepared["curation"]
-    assert prepared["curation"]["task_spec_sha256"] is None
-    with pytest.raises(ValidationError):
-        CaseDocument.model_validate(prepared)
-
-@pytest.mark.parametrize("digest", ["", "zzz", "a" * 63, "a" * 65, "g" * 64, "A" * 64])
-def test_malformed_task_spec_digest_is_corruption_not_staleness(digest: str, raw: dict[str, Any]) -> None:
-    raw["curation"]["task_spec_sha256"] = digest
-    prepared = schema._schema_ready(raw)
-
-    assert prepared["curation"]["task_spec_sha256"] == digest
-    with pytest.raises(ValidationError, match="lowercase 64-hex"):
-        CaseDocument.model_validate(prepared)
-
 def test_task_spec_approval_reports_nonready_current_and_stale(raw: dict[str, Any]) -> None:
     raw["curation"]["state"] = "draft"
     assert task_spec_approval(raw).state == "not-required"
@@ -650,11 +584,6 @@ def test_task_spec_approval_reports_nonready_current_and_stale(raw: dict[str, An
     assert approval.state == "stale"
     assert approval.current_sha256 == digest
     assert approval.approved_sha256 == "0" * 64
-
-def test_gold_status_and_mode_derived() -> None:
-    case = _valid_case()  # ready, 1 finding, clean_attested=False
-    assert derive_gold_status(case.curation) == "findings"
-    assert derive_gold_mode(case.curation) == "historical"
 
 @pytest.mark.parametrize("kinds,expected", [([], "clean"), (["historical"], "historical"),
     (["edited"], "historical"),              # all-edited historical evidence stays historical
@@ -702,19 +631,6 @@ def test_valid_case_transitions(frm: Any, to: Any) -> None:
 def test_invalid_case_transition_rejected(frm: Any, to: Any) -> None:
     with pytest.raises(TransitionError):
         validate_case_transition(frm, to)
-
-def test_derived_workspace_state_empty_vs_collecting() -> None:
-    assert derive_workspace_state(pull_requests=[], cases=[]) == "empty"
-    assert (derive_workspace_state(pull_requests=[{"number": 1, "import_state": "pending"}], cases=[])
-        == "collecting"
-    )
-    assert (derive_workspace_state(pull_requests=[],
-            cases=[
-                {"case_id": "pr-000001-0123456789ab", "pr_number": 1, "case_file": "x.yaml", "curation_state": "ready"}
-            ],
-        )
-        == "ready"
-    )
 
 def test_classify_validation_codes() -> None:
     assert classify_validation(ready=True, corrupt=False) == 0

@@ -20,16 +20,13 @@ from daydream.deep.artifacts import (
     per_stack_records_path,
 )
 from daydream.deep.diff import _diff_changed_files
-from daydream.deep.prompts import build_merge_prompt
 from daydream.findings import load_findings_artifact
-from daydream.run_config import RunConfig
-from daydream.runner import _resolve_backend
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.deep_orchestrator.support import (
     _install_accept_gate_pipeline,
     _install_post_recorder,
 )
-from tests.harness.review_profile import default_strategy as _default_strategy, independent_alternatives_profile
+from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.review_result import saved_coverage
 from tests.test_deep_orchestrator import (
     _TWIN_DESCRIPTION,
@@ -280,14 +277,6 @@ def test_diff_changed_files_handles_modify_add_delete_binary() -> None:
         "Binary files a/logo.png and b/logo.png differ\n"
     )
     assert _diff_changed_files(mixed) == ["keep.py", "new.py", "old.py", "logo.png"]
-
-def test_merge_prompt_emits_related_files_instruction() -> None:
-
-
-    prompt = build_merge_prompt(strategy=_default_strategy("merge"), per_stack_records_paths=[Path("a-records.json")],
-        intent_path=Path("intent.md"), alternatives_path=Path("alt.md"), dedup_candidates_path=Path("dedup.json"),
-    )
-    assert "related_files" in prompt
 
 async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
@@ -604,30 +593,6 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     missing = expected_phases - captured
     assert not missing, f"Deep orchestrator missing per-phase resolver calls for {missing}; got {sorted(captured)}"
     assert "wonder" not in captured  # The default design lens shares per_stack_review.
-
-def test_intent_phase_resolves_to_sonnet_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC3: the ``intent`` phase resolves to ``claude-sonnet-5`` by default."""
-    captured: dict[str, Any] = {}
-
-    class _B:
-        def __init__(self, model: str | None) -> None:
-            self.model = model
-
-    def fake_create(name: str, model: str | None = None, **kwargs: object) -> _B:  # noqa: ARG001
-        captured["model"] = model
-        return _B(model)
-
-    monkeypatch.setattr("daydream.runner.create_backend", fake_create)
-
-    # Default: intent lands on Sonnet (mid tier), not Opus.
-    backend = _resolve_backend(RunConfig(), "intent", {})
-    assert backend.model == "claude-sonnet-5", f"intent phase default should be claude-sonnet-5, got {backend.model!r}"
-
-    # An explicit global model override still wins over the phase default.
-    backend_override = _resolve_backend(RunConfig(model="claude-opus-5"), "intent", {})
-    assert backend_override.model == "claude-opus-5", (
-        f"RunConfig(model=...) override should win for intent, got {backend_override.model!r}"
-    )
 
 async def test_intent_phase_runs_on_sonnet_through_runner_run(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

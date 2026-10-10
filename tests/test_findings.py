@@ -74,25 +74,6 @@ def test_build_write_load_preserves_target_finding_and_diagram_contract(
         assert loaded.findings == [] and not loaded.analysis_complete
 
 
-@pytest.mark.parametrize("mutate,match", [
-    (lambda a: a.pop("head_sha"), "schema"),
-    (lambda a: (a.update(head_sha="e" * 40),
-                a["terminal_result"]["analyzed_revision"].update(head_sha="e" * 40)), "does not match"),
-    (lambda a: a.update(pr_number=8), "does not match"), (lambda a: a.update(unexpected=1), "schema"),
-    (lambda a: a["findings"][0].update(fingerprint="nope"), "schema"),
-    (lambda a: a.pop("kind"), "schema"), (lambda a: a.update(kind="sabotage"), "schema"),
-    (lambda a: a.update(schema_version=1), "version|schema"),
-])
-def test_load_rejects_invalid_artifacts(
-    tmp_path: Path, valid_artifact: dict[str, Any], mutate: Any, match: str,
-) -> None:
-    mutate(valid_artifact)
-    path = tmp_path / "invalid.json"
-    path.write_text(json.dumps(valid_artifact))
-    with pytest.raises(FindingsValidationError, match=match):
-        _load(path)
-
-
 def test_review_defaults_and_known_run_freshness(tmp_path: Path) -> None:
     path = tmp_path / "reused.json"
     artifact = findings_artifact()

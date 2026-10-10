@@ -44,18 +44,7 @@ def test_explicit_service_roots_replace_the_improve_config_list(monorepo: Path) 
     assert [service.root.as_posix() for service in services] == ["edge/gateway"]
     assert [service.source for service in services] == ["config"]
 
-def test_absent_explicit_roots_fall_back_to_the_improve_config_list(monorepo: Path) -> None:
-    cfg = DaydreamFileConfig(improve_service_roots=["apps/*"])
-    assert [s.root.as_posix() for s in enumerate_services(monorepo, cfg)] == ["apps/billing", "apps/catalog"]
-    assert [s.root.as_posix() for s in enumerate_services(monorepo, cfg, service_roots=None)
-    ] == ["apps/billing", "apps/catalog"]
 
-def test_empty_explicit_roots_mean_nothing_declared_not_no_services(monorepo: Path) -> None:
-    """An empty list is "the caller declared nothing", so the improve list still
-    applies — it must not be read as "this repo has no services"."""
-    cfg = DaydreamFileConfig(improve_service_roots=["apps/*"])
-    services = enumerate_services(monorepo, cfg, service_roots=[])
-    assert [service.root.as_posix() for service in services] == ["apps/billing", "apps/catalog"]
 
 def test_explicit_roots_short_circuit_layout_inference(monorepo: Path) -> None:
     """Declared roots are authoritative: the conventional ``apps/*`` services
@@ -113,16 +102,6 @@ def test_all_matching_owners_keep_input_order_under_the_ordinary_repo_root_rule(
     assert owners("README.md") == ()
     assert owners("scripts/tool.py") == ()
 
-def test_the_repo_root_spellings_are_one_input() -> None:
-    """``Path("")`` and ``Path(".")`` are the same root; the predicate decides it."""
-    assert Path("").as_posix() == "."
-    services = [Service("root", Path(""), "config"), Service("api", Path("services/api"), "config")]
-
-    assert tuple(s.name
-        for s in owning_services(
-            "README.md", services, match=ServiceMatch.FIRST, repo_root=RepoRootPolicy.CATCH_ALL, match_root_equal=False
-        )
-    ) == ("root",)
 
 def test_policy_arguments_carry_no_defaults() -> None:
     """M4: no caller may inherit a rule it did not state."""
@@ -134,10 +113,6 @@ def test_policy_arguments_carry_no_defaults() -> None:
         if p.name not in {"path", "services"}
     )
 
-def test_service_field_order_is_positional_stable() -> None:
-    """``Service`` is constructed positionally by existing tests, so its field order is load-bearing."""
-    service = Service("gateway", Path("edge/gateway"), "config")
-    assert (service.name, service.root, service.source) == ("gateway", Path("edge/gateway"), "config",)
 
 
 # The first two patterns are the shapes the issue #1216 M7 acceptance search

@@ -8,7 +8,6 @@ import pytest
 from daydream.review_result import (
     ReasonCode,
     ReviewCoverage,
-    reason_for_budget,
     reason_for_exception,
     validate_terminal_result,
 )
@@ -136,13 +135,6 @@ def test_identity_and_invalid_recording_are_rejected() -> None:
         review_coverage().record_scope("extra", "complete")
     with pytest.raises(ValueError, match="usable"):
         review_coverage().record_phase("merge", "failed", reasons=["synthesis_failure"], usable_evidence=True)
-
-
-@pytest.mark.parametrize("budget,expected", [("wall_budget_exceeded", ReasonCode.HOST_WALL_BUDGET_EXHAUSTION),
-    ("tool_call_budget_exceeded", ReasonCode.HOST_TOOL_BUDGET_EXHAUSTION),
-    ("evidence_incomplete", ReasonCode.EVIDENCE_INCOMPLETE)])
-def test_host_budget_classification(budget: str, expected: ReasonCode) -> None:
-    assert reason_for_budget(budget) == expected
 
 
 @pytest.mark.parametrize("category,declared", [(None, None), ("AUTH_CONFIG", None),

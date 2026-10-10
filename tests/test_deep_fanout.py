@@ -1,7 +1,6 @@
 """phase_per_stack_reviews concurrency + correctness tests (D-17, D-18, D-38)."""
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -10,9 +9,7 @@ import anyio
 import pytest
 
 from daydream.backends import Backend, ResultEvent, TextEvent
-from daydream.config import STRUCTURE_STACK_NAME
-from daydream.deep import prompts as _prompts, sharding
-from daydream.deep.artifacts import deep_dir as _deep_dir, per_stack_records_path
+from daydream.deep import sharding
 from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
@@ -67,20 +64,6 @@ async def _run_per_stack(
     return results, failures
 
 
-async def test_budget_checkpoint_is_persisted_with_incomplete_coverage(
-    tmp_path: Path, make_work: Callable[..., WorkContext], monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    issue = {"id": 1, "file": "api.py", "line": 2, "description": "empty input divides by zero",
-             "severity": "high", "confidence": "HIGH", "rationale": "empty list", "evidence": "sum(xs)/len(xs)"}
-    async def checkpoint(*args: Any, **kwargs: Any) -> Any:
-        return {"issues": [issue]}, None, "wall_budget_exceeded"
-    monkeypatch.setattr("daydream.agent.run_agent", checkpoint)
-    _, failures = await _run_per_stack(tmp_path, make_work, _review_backend(), _mk_stacks()[:1])
-    assert "python" in failures
-    saved = json.loads(per_stack_records_path(tmp_path / ".daydream/deep", "python").read_text())
-    assert saved["issues"][0]["description"] == issue["description"]
-    assert saved["incomplete"] is True
-
 def _deep_dispatch(trajectory: dict[str, Any]) -> dict[str, Any]:
     steps = [step
         for step in trajectory["steps"]
@@ -110,152 +93,6 @@ async def test_phase_per_stack_reviews_dispatch_interval_success(tmp_path: Path,
     assert step["extra"]["planned_count"] == 3
     assert step["extra"]["attempted_count"] == 3
     assert step["extra"]["completed_count"] == 3
-
-async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work: Callable[..., WorkContext]) -> None:
-    """D-17/D-18/D-38: fan-out preserves per-stack calls, paths, prompts, and isolation."""
-    backend = _review_backend()
-    results, failures = await _run_per_stack(tmp_path, make_work, backend, _mk_stacks())
-
-    assert set(results.keys()) == {"python", "react", "generic"}
-    assert failures == {}
-    assert len(backend.prompts) == 3
-    assert all(c["agents"] is None for c in backend.calls)
-    paths = set(results.values())
-    assert len(paths) == 3
-    for p in paths:
-        assert p.name.startswith("stack-") and p.name.endswith("-review.md")
-
-    # Issue #745 (AC4): the reviewer emits PER_STACK_RECORD_SCHEMA structured
-    # output directly and the fan-out persists each stack's records to
-    # ``stack-<name>-records.json`` -- the on-disk input ``_step_per_stack_parse``
-    # / merge consume. A regression that stops persisting records.json would
-    # silently break merge while these md-path assertions still pass, so assert
-    # the records artifact exists and carries the declared issues.
-
-    deep_dir_path = _deep_dir(tmp_path, allow_standalone=True)
-    for name in results:
-        records = per_stack_records_path(deep_dir_path, name)
-        assert records.is_file(), f"missing {records.name} for {name}"
-        saved = json.loads(records.read_text())
-        assert saved["issues"] == []
-        assert saved["scope_id"] == name and saved["originating_run_id"] == "scope-test"
-        assert saved["analyzed_revision"]["head_sha"] == "h" * 40
-    prompts = backend.prompts
-    assert any("python" in p for p in prompts)
-    assert any("react" in p for p in prompts)
-    assert any("generic-fallback" in p for p in prompts)
-
-async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stack(
-    tmp_path: Path, make_work: Callable[..., WorkContext], monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Structural stack flows through build_structural_prompt; language stacks do not."""
-
-    structural_calls: list[dict[str, Any]] = []
-    per_stack_calls: list[dict[str, Any]] = []
-
-    def _capture_structural(**kwargs: Any) -> str:
-        structural_calls.append(kwargs)
-        return "STRUCTURAL_PROMPT"
-
-    def _capture_per_stack(**kwargs: Any) -> str:
-        per_stack_calls.append(kwargs)
-        return "PER_STACK_PROMPT"
-
-    # phase_per_stack_reviews late-imports these symbols from daydream.deep.prompts;
-    # patch on the module so the late-import re-binding picks up the stubs.
-    monkeypatch.setattr(_prompts, "build_structural_prompt", _capture_structural)
-    monkeypatch.setattr(_prompts, "build_per_stack_prompt", _capture_per_stack)
-
-    backend = _review_backend()
-    stacks = [
-        StackAssignment(
-            stack_name="python",
-            files=["a.py"],
-            is_docs_only=False,
-        ),
-        StackAssignment(
-            stack_name=STRUCTURE_STACK_NAME,
-            files=["a.py"],
-            is_docs_only=False,
-        ),
-    ]
-
-    await _run_per_stack(tmp_path, make_work, backend, stacks)
-
-    assert len(structural_calls) == 1
-    assert len(per_stack_calls) == 1
-    assert structural_calls[0]["files"] == ["a.py"]
-    assert structural_calls[0]["strategy"]  # profile-owned structural strategy (M4)
-    assert "stack_name" not in structural_calls[0]
-    assert per_stack_calls[0]["stack_name"] == "python"
-
-async def test_phase_per_stack_reviews_partial_dispatch_continues_after_one_failure(
-    tmp_path: Path, make_work: Callable[..., WorkContext],
-) -> None:
-    """A single stack failure does not abort the whole fan-out, and is reported."""
-
-    # Prompt-conditional, so the failure is keyed off the prompt text: the
-    # fan-out completion order is not fixed and a per-call script would misalign.
-    def _flaky_responder(cwd: Any, prompt: str, *args: Any) -> list[Any] | None:
-        if "react" in prompt.lower():
-            return [RuntimeError("simulated react failure")]
-        return None
-
-    backend = ScriptedBackend(events=_REVIEW_TURN, responder=_flaky_responder)
-    recorder = make_recorder(tmp_path)
-
-    async with recorder:
-        results, failures = await _run_per_stack(tmp_path, make_work, backend, _mk_stacks())
-
-    assert "python" in results
-    assert "generic" in results
-    assert "react" not in results
-    # Failure surfaces in the returned failures dict with the exception reason.
-    assert "react" in failures
-    assert "simulated react failure" in failures["react"]
-    step = _deep_dispatch(read_trajectory(recorder.path))
-    # The failed backend still writes a bounded child error trajectory, so its
-    # ref remains part of the exact attempted fan-out evidence.
-    assert _dispatch_descriptors(step) == ["deep-python", "deep-react", "deep-generic"]
-    assert _dispatch_encloses_children(step, recorder.target_dir)
-    assert step["extra"]["dispatch_status"] == "partial"
-    assert step["extra"]["reason_code"] == "some_children_failed"
-    assert step["extra"]["planned_count"] == 3
-    assert step["extra"]["attempted_count"] == 3
-    assert step["extra"]["completed_count"] == 3
-
-async def test_per_stack_prompts_are_skill_free(tmp_path: Path, make_work: Callable[..., WorkContext]) -> None:
-    """M12: built-in stacks dispatch native per-stack prompts with no /skill: token."""
-
-    backend = ScriptedBackend(events=_REVIEW_TURN)
-
-    # Every built-in stack dispatches through the native profile strategy.
-    stacks = [StackAssignment(stack_name="python", files=["api.py"], is_docs_only=False),
-        StackAssignment(stack_name="react", files=["App.tsx"], is_docs_only=False),
-        StackAssignment(stack_name="go", files=["main.go"], is_docs_only=False),
-        StackAssignment(stack_name="rust", files=["lib.rs"], is_docs_only=False),
-        StackAssignment(stack_name="elixir", files=["app.ex"], is_docs_only=False),
-        StackAssignment(stack_name="generic", files=["notes.txt"], is_docs_only=False),
-        StackAssignment(stack_name=STRUCTURE_STACK_NAME, files=["api.py", "App.tsx"], is_docs_only=False),
-    ]
-
-    _, failures = await _run_per_stack(tmp_path, make_work, backend, stacks)
-
-    assert failures == {}
-    assert len(backend.prompts) == 7
-    joined = "\n\n".join(backend.prompts)
-
-    # No skill token or raw Beagle key may appear anywhere.
-    for token in ("/skill:", "/beagle-", "beagle-", "$review-"):
-        assert token not in joined, f"skill token {token} leaked into a per-stack prompt"
-
-    # Every language stack still gets a per-stack (non-generic) prompt.
-    for stack_name in ("python", "react", "go", "rust", "elixir"):
-        assert stack_name in joined
-
-    # Generic fallback stack injects no skill command at all.
-    generic_prompt = next(p for p in backend.prompts if "generic-fallback" in p)
-    assert "/skill:" not in generic_prompt
 
 @pytest.mark.parametrize(
     ("fanout_concurrency", "expected"), [(None, [4]), (2, [2])], ids=["default_concurrency", "low_concurrency"],

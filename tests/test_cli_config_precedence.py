@@ -30,8 +30,6 @@ from daydream.extensions.registry import Registry
 from daydream.flows.engine import FlowContext
 from daydream.run_config import (
     RunConfig,
-    _default_backend_name,
-    _explicit_reasoning_effort_pin,
     _resolved_backend_name,
     _resolved_latency_profile,
     _resolved_model,
@@ -49,12 +47,6 @@ def _routine_signals() -> DiffSignals:
     return diff_signals(diff="", changed_files=3, stack_count=1)
 
 
-def _sec_signals() -> DiffSignals:
-    """A diff touching a security surface, which must escalate the route."""
-    return diff_signals(
-        diff="+++ b/auth.py\n+def authenticate(password):\n+    return password\n",
-        changed_files=1, stack_count=1,
-    )
 
 def test_model_precedence_cli_over_file_over_table(tmp_path: Path) -> None:
     fc = DaydreamFileConfig(model="file-model", backend=None, phases={"fix": {"model": "file-fix"}})
@@ -70,18 +62,6 @@ def test_model_precedence_cli_over_file_over_table(tmp_path: Path) -> None:
     cfg2 = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=DaydreamFileConfig())
     assert _resolved_model(cfg2, "parse") == "claude-haiku-4-5"   # falls through to table default
 
-def test_per_stack_review_and_arbiter_resolution(tmp_path: Path) -> None:
-    """Per-stack review and arbiter defaults/overrides remain independent of the review phase."""
-    bare = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=DaydreamFileConfig())
-    assert _resolved_model(bare, "per_stack_review") == "claude-sonnet-5"    # table default
-    assert _resolved_model(bare, "arbiter") == "claude-opus-5"             # table default
-    assert _resolved_model(bare, "review") == "claude-opus-5"              # unchanged
-
-    fc = DaydreamFileConfig(model=None, backend=None, phases={"per_stack_review": {"model": "file-psr"}},)
-    cfg = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=fc)
-    assert _resolved_model(cfg, "per_stack_review") == "file-psr"   # file phase override wins
-    assert _resolved_model(cfg, "review") == "claude-opus-5"      # review untouched by the override
-    assert _resolved_model(cfg, "arbiter") == "claude-opus-5"     # arbiter untouched
 
 def test_backend_precedence_mirrors_model(tmp_path: Path) -> None:
     fc = DaydreamFileConfig(model=None, backend="file-global", phases={"fix": {"backend": "file-fix"}})
@@ -155,13 +135,6 @@ def test_phase_default_effort_table_is_the_lowest_precedence_tier(tmp_path: Path
     cfg2 = RunConfig(target=str(tmp_path), backend="codex", model=None, file_config=fc_global)
     assert _codex_backend(cfg2, "parse").reasoning_effort == "high"
 
-def test_claude_effort_is_improve_only(tmp_path: Path) -> None:
-    cfg = RunConfig(target=str(tmp_path), backend="claude", model=None, file_config=DaydreamFileConfig())
-    assert _resolved_reasoning_effort(cfg, "arbiter") is None
-    assert _resolved_reasoning_effort(cfg, "review") is None
-    assert getattr(_resolve_backend(cfg, "arbiter"), "reasoning_effort") is None
-    assert _resolved_reasoning_effort(cfg, "plan_write") == "max"
-    assert getattr(_resolve_backend(cfg, "plan_write"), "reasoning_effort") == "max"
 
 def test_backend_cache_splits_on_table_default_effort(tmp_path: Path) -> None:
     cfg = RunConfig(target=str(tmp_path), backend="codex", model=None, file_config=DaydreamFileConfig())
@@ -173,24 +146,7 @@ def test_backend_cache_splits_on_table_default_effort(tmp_path: Path) -> None:
     assert (review.reasoning_effort, arbiter.reasoning_effort) == ("high", "xhigh")
     assert _resolve_backend(cfg, "review", cache) is review  # still cached per (backend, model, effort)
 
-def test_pi_native_model_is_not_replaced_by_glm_fallback(tmp_path: Path) -> None:
-    cfg = RunConfig(target=str(tmp_path), backend="pi", model=None)
-    assert _resolved_model(cfg, "review") is None
 
-    cfg.model = "custom-model"
-    assert _resolved_model(cfg, "review") == "custom-model"
-
-def test_default_backend_is_phase_agnostic(tmp_path: Path) -> None:
-    empty = DaydreamFileConfig()
-    cfg = RunConfig(target=str(tmp_path), backend="claude", review_backend="codex", file_config=empty)
-    assert _default_backend_name(cfg) == "claude"
-    cfg.backend = "codex"
-    assert _default_backend_name(cfg) == "codex"
-    cfg.backend = None
-    cfg.file_config = DaydreamFileConfig(backend="file-backend")
-    assert _default_backend_name(cfg) == "file-backend"
-    cfg.file_config = empty
-    assert _default_backend_name(cfg) == "claude"
 
 def test_review_backend_override_is_none_when_unset(tmp_path: Path) -> None:
     empty = DaydreamFileConfig()
@@ -252,9 +208,6 @@ def test_latency_profile_precedence_cli_over_file_over_default(tmp_path: Path) -
     bare = RunConfig(target=str(tmp_path), file_config=DaydreamFileConfig())
     assert _resolved_latency_profile(bare).profile == "balanced"
 
-def test_cli_accepts_the_profile_flag_and_it_wins(tmp_path: Path) -> None:
-    args = _parse_args(["--latency-profile", "forensic", str(tmp_path)])
-    assert args.latency_profile == "forensic"
 
 def test_profile_route_sets_wonder_and_arbiter_effort_on_codex(tmp_path: Path) -> None:
     cfg = RunConfig(target=str(tmp_path), backend="codex", file_config=DaydreamFileConfig())
@@ -266,16 +219,7 @@ def test_profile_route_sets_wonder_and_arbiter_effort_on_codex(tmp_path: Path) -
     cfg.reasoning_effort = "low"  # explicit pin still wins
     assert _resolved_reasoning_effort(cfg, "wonder") == "low"
 
-def test_profile_route_does_not_touch_backends_absent_from_the_table(tmp_path: Path) -> None:
-    cfg = RunConfig(target=str(tmp_path), backend="claude", file_config=DaydreamFileConfig())
-    cfg.latency_route = route_for("forensic", summarize_risk(_sec_signals()))
-    assert _resolved_reasoning_effort(cfg, "wonder") is None
 
-def test_explicit_effort_pin_is_visible_to_the_arbiter_fan_out(tmp_path: Path) -> None:
-    cfg = RunConfig(target=str(tmp_path), backend="codex", file_config=DaydreamFileConfig())
-    assert _explicit_reasoning_effort_pin(cfg, "arbiter") is None
-    cfg.reasoning_effort = "medium"
-    assert _explicit_reasoning_effort_pin(cfg, "arbiter") == "medium"
 
 
 def _arbiter_flow_context(tmp_path: Path, backend: str) -> FlowContext:

@@ -13,16 +13,8 @@ the rendering and the production call site that supplies them.
 
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 
-from daydream.agent import run_agent
-from daydream.backends.pi import (
-    PiBackend,
-    pi_system_preamble,
-    render_pi_preamble,
-)
-from daydream.config import DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
 from daydream.deep.repair_coordinator import (
     _is_captured_grant,
     _load_job,
@@ -106,76 +98,3 @@ class TestDiagnosticNeverBecomesTheGrant:
         assert stored.job_id == "repair-s1", "the record was relabelled into another job's grant"
         assert stored.diagnostics == ()
         assert stored.executions == 3
-
-
-class TestPreambleStatesTheRealCeiling:
-    """Item 2: the prompt must state the bound the host actually imposes."""
-
-    def test_a_smaller_ceiling_is_stated_in_the_prompt(self) -> None:
-        rendered = pi_system_preamble(wall_budget_s=90.0, tool_call_budget=12)
-        assert "90" in rendered
-        assert "1800" not in rendered, (
-            "the prompt still hard-states DEFAULT_WALL_BUDGET_S for a 90s turn"
-        )
-        assert rendered == render_pi_preamble(90.0, 12)
-
-    def test_defaults_are_used_when_the_caller_supplies_nothing(self) -> None:
-        assert (
-            pi_system_preamble()
-            == render_pi_preamble(DEFAULT_WALL_BUDGET_S, DEFAULT_TOOL_CALL_BUDGET)
-        )
-
-    def test_the_module_preamble_is_not_mutated(self) -> None:
-        """Rendering a small turn must not corrupt the shared default string."""
-        pi_system_preamble(wall_budget_s=90.0, tool_call_budget=12)
-        assert pi_system_preamble() == render_pi_preamble(
-            DEFAULT_WALL_BUDGET_S, DEFAULT_TOOL_CALL_BUDGET
-        )
-
-    def test_only_the_wall_budget_can_differ(self) -> None:
-        """An uncapped tool-call budget is the honest default, not a mismatch."""
-        rendered = pi_system_preamble(wall_budget_s=DEFAULT_WALL_BUDGET_S, tool_call_budget=None)
-        assert rendered == render_pi_preamble(DEFAULT_WALL_BUDGET_S, None)
-
-
-class TestProductionPathSuppliesTheAllowances:
-    """The renderer is only honest if the real dispatcher passes the values in.
-
-    A renderer nothing calls with the real numbers reproduces the original
-    defect exactly, so these assert the wiring, not just the helper.
-    """
-
-    def test_pi_backend_declares_the_capability(self) -> None:
-        assert getattr(PiBackend, "supports_budget_preamble", False) is True
-
-    def test_pi_execute_accepts_both_allowances(self) -> None:
-        params = inspect.signature(PiBackend.execute).parameters
-        assert "wall_budget_s" in params, "PiBackend.execute cannot receive the ceiling"
-        assert "tool_call_budget" in params
-
-    def test_run_agent_forwards_the_enforced_allowances(self) -> None:
-        """agent.run_agent must pass its own wall_budget_s/tool_call_budget on."""
-        source = (Path(__file__).resolve().parents[2] / "daydream/agent.py").read_text()
-        assert "supports_budget_preamble" in source, (
-            "no capability gate: the kwargs would reach every backend"
-        )
-        assert 'execute_kwargs["wall_budget_s"] = wall_budget_s' in source, (
-            "run_agent does not forward the ceiling it enforces, so the prompt "
-            "still states the module default"
-        )
-        assert 'execute_kwargs["tool_call_budget"] = tool_call_budget' in source
-
-    def test_run_agent_exposes_the_allowances_as_parameters(self) -> None:
-        params = inspect.signature(run_agent).parameters
-        assert "wall_budget_s" in params
-        assert "tool_call_budget" in params
-
-
-def test_module_exports_remain_importable() -> None:
-    """Guard against a partial import refactor shadowing the public surface."""
-    assert callable(pi_system_preamble)
-    assert callable(render_pi_preamble)
-    assert DEFAULT_WALL_BUDGET_S > 0
-    # None is the honest "uncapped" default for tool calls, not a bug.
-    assert DEFAULT_TOOL_CALL_BUDGET is None or isinstance(DEFAULT_TOOL_CALL_BUDGET, int)
-

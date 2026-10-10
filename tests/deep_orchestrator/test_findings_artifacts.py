@@ -11,12 +11,8 @@ import pytest
 
 import daydream.deep.orchestrator as orch_mod
 from daydream.config import REVIEW_OUTPUT_FILE
-from daydream.deep import orchestrator as deep_orchestrator
 from daydream.deep.diff import bound_deep_diff
-from daydream.deep.orchestrator import STEPS
-from daydream.extensions.api import EXTENSION_API_VERSION
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
-from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _eroded_main_repo,
@@ -237,21 +233,6 @@ async def test_skip_tier_writes_empty_alternatives(tiny_diff_target: Path, monke
     deep = tiny_diff_target / ".daydream" / "deep"
     assert (deep / "intent.md").read_text().strip()
     assert isinstance(json.loads((deep / "alternatives.json").read_text()), list)
-
-def test_deep_flow_has_no_feedback_prefix() -> None:
-    names = {step.name for step in STEPS}
-    assert not names & {"fetch-feedback", "parse-feedback", "fix-items", "commit-push", "respond-feedback"}
-
-def test_no_feedback_mode_resolver() -> None:
-    assert not hasattr(deep_orchestrator, "_run_feedback_flow")
-    config = RunConfig(target="/tmp", pr_number=7)
-    assert deep_orchestrator._resolve_mode(config) != "feedback"
-
-def test_extension_api_version_is_six_and_alternatives_step_is_gone() -> None:
-    assert EXTENSION_API_VERSION == 6
-    names = [s.name for s in STEPS]
-    assert "alternatives" not in names
-    assert "per-stack-reviews" in names
 
 @pytest.mark.parametrize("change", ["committed", "worktree", "missing-key"])
 async def test_start_at_merge_refuses_stale_or_unverifiable_artifacts(

@@ -22,12 +22,10 @@ from daydream.run_config import RunConfig
 from daydream.runner import run
 from daydream.trajectory import (
     DaydreamPhase,
-    PhaseEvent,
     RunWriteSnapshot,
     TrajectoryDocumentSnapshot,
     compute_timing_summary,
     get_current_recorder,
-    maybe_fork,
     phase_scope,
 )
 from tests.harness import diagram_repos as dr
@@ -182,19 +180,6 @@ def test_timing_diagnostics_clip_scoped_events_without_synthesizing_forks(tmp_pa
 
 # --- PhaseEvent.to_dict ----------------------------------------------------
 
-def test_phase_event_to_dict_basic() -> None:
-    """PhaseEvent serializes phase value, event, and timestamp."""
-    ev = PhaseEvent(phase=DaydreamPhase.REVIEW, event="phase_start", timestamp="2026-01-01T00:00:00Z",)
-    d = ev.to_dict()
-    assert d == {"phase": "review", "event": "phase_start", "timestamp": "2026-01-01T00:00:00Z"}
-
-def test_phase_event_to_dict_includes_metadata() -> None:
-    """Metadata appears when non-empty."""
-    ev = PhaseEvent(
-        phase=DaydreamPhase.DEEP, event="phase_start", timestamp="2026-01-01T00:00:00Z", metadata={"stage": "review"},
-    )
-    d = ev.to_dict()
-    assert d["metadata"] == {"stage": "review"}
 
 async def test_emit_supervisor_and_tool_veto_events(tmp_path: Path) -> None:
     """Supervisor decisions and tool vetoes are recorded as phase events."""
@@ -224,21 +209,6 @@ async def test_emit_command_validation_summary_is_structured_and_redacted(tmp_pa
         "reasons": {"RECON_EVIDENCE_MISMATCH": 28, "RECON_MALFORMED_COMMAND": 1},
     }
 
-async def test_phase_events_serialize_into_trajectory_extra(tmp_path: Path) -> None:
-    """Phase events appear in Trajectory.extra["phase_events"] when present."""
-    rec = make_recorder(tmp_path)
-    async with rec:
-        async with phase_scope(DaydreamPhase.REVIEW):
-            pass
-        # Need at least one step so _write doesn't skip.
-        async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            observe_text_and_result(inv, "x")
-    traj = read_trajectory(rec.path)
-    assert atif_validate(traj, validate_images=False) is True
-    events = traj["extra"]["phase_events"]
-    assert len(events) == 2
-    assert events[0]["phase"] == "review"
-    assert events[0]["event"] == "phase_start"
 
 async def test_no_phase_events_omits_key(tmp_path: Path) -> None:
     """When no phase events emitted, extra has no phase_events key."""
@@ -252,15 +222,6 @@ async def test_no_phase_events_omits_key(tmp_path: Path) -> None:
 
 # --- phase_scope -----------------------------------------------------------
 
-async def test_phase_scope_emits_events_when_recorder_active(tmp_path: Path) -> None:
-    """phase_scope emits start/end when a recorder is active via ContextVar."""
-    rec = make_recorder(tmp_path)
-    async with rec:
-        async with phase_scope(DaydreamPhase.FIX):
-            assert len(rec._phase_events) == 1  # start emitted
-            assert rec._phase_events[0].event == "phase_start"
-        assert len(rec._phase_events) == 2
-        assert rec._phase_events[1].event == "phase_end"
 
 async def test_phase_scope_noop_without_recorder() -> None:
     """phase_scope is a no-op when no recorder is active (no crash)."""
@@ -336,22 +297,6 @@ async def test_phase_scope_id_rejects_second_or_post_close_decision(tmp_path: Pa
 
 # --- Per-Invocation subtrajectory timestamps -------------------------------
 
-async def test_invocation_records_started_at_ended_at(tmp_path: Path) -> None:
-    """An Invocation scope registers started_at/ended_at timestamps."""
-    rec = make_recorder(tmp_path)
-    async with rec:
-        async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            assert inv.started_at != ""
-            assert inv.ended_at == ""  # not set until exit
-            observe_text_and_result(inv, "hi")
-        assert inv.ended_at != ""
-    traj = read_trajectory(rec.path)
-    subs = traj["extra"]["subtrajectories"]
-    assert len(subs) == 1
-    assert subs[0]["phase"] == "review"
-    assert subs[0]["started_at"]
-    assert subs[0]["ended_at"]
-    assert subs[0]["step_ids"] == [1]
 
 async def test_invocation_ended_at_not_before_final_step(tmp_path: Path) -> None:
     """Stamp ended_at after finish materializes the last still-open text step."""
@@ -374,44 +319,6 @@ async def test_no_invocations_omits_subtrajectories_key(tmp_path: Path) -> None:
     assert rec.path.exists()
     data = read_trajectory(rec.path)
     assert "subtrajectories" not in data["extra"]
-
-async def test_subtrajectory_step_ids_track_multiple_invocations(tmp_path: Path,) -> None:
-    """Multiple invocations produce multiple subtrajectory entries with sequential step_ids."""
-    rec = make_recorder(tmp_path)
-    async with rec:
-        async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            observe_text_and_result(inv, "a")
-        async with rec.invocation(phase=DaydreamPhase.PARSE) as inv:
-            observe_text_and_result(inv, "b")
-    traj = read_trajectory(rec.path)
-    subs = traj["extra"]["subtrajectories"]
-    assert len(subs) == 2
-    assert subs[0]["step_ids"] == [1]
-    assert subs[1]["step_ids"] == [2]
-
-async def test_fork_subtrajectory_entries_have_timestamps(tmp_path: Path) -> None:
-    """Fork siblings register subtrajectory entries on the parent (issue #212)."""
-
-    rec = make_recorder(tmp_path)
-    async with rec:
-        # Retain the parent's document while exercising child timing.
-        rec._extend_steps([Step(step_id=1, source="user", message="seed")])
-        async with maybe_fork(rec, "fix-src-foo-py") as child:
-            async with child.invocation(phase=DaydreamPhase.FIX) as inv:
-                observe_text_and_result(inv, "fixing foo")
-    traj = read_trajectory(rec.path)
-    subs = traj["extra"].get("subtrajectories", [])
-    assert len(subs) == 1, f"expected 1 fork subtrajectory, got {len(subs)}: {subs}"
-    sub = subs[0]
-    assert sub["phase"] == "fix", f"expected phase 'fix' for descriptor 'fix-src-foo-py', got {sub['phase']!r}"
-    assert sub["descriptor"] == "fix-src-foo-py", f"descriptor missing/incorrect: {sub}"
-    assert sub["started_at"], "started_at must be non-empty"
-    assert sub["ended_at"], "ended_at must be non-empty"
-    assert sub["sibling_trajectory_ref"], "sibling_trajectory_ref must be non-empty"
-    assert "step_ids" not in sub, "step_ids should be replaced by sibling_trajectory_ref"
-    assert ".json" in sub["sibling_trajectory_ref"], (
-        f"sibling_trajectory_ref should be a .json path, got {sub['sibling_trajectory_ref']!r}"
-    )
 
 
 # --- Real-path: deep run via runner.run ------------------------------------

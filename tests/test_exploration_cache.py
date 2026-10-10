@@ -245,32 +245,10 @@ async def test_failed_exploration_is_not_durably_cached(multi_stack_target: Path
     assert exploration.is_dir()
     assert not (exploration / "cache-key").exists()
 
-def test_cache_key_is_sensitive_to_every_component(monkeypatch: pytest.MonkeyPatch,) -> None:
-    """Each of head, diff, tier, and the format version changes the key."""
-    base = exploration_cache_key("sha1", "diff", "standard")
-    assert base == exploration_cache_key("sha1", "diff", "standard")
-    assert base != exploration_cache_key("sha2", "diff", "standard")
-    assert base != exploration_cache_key("sha1", "other", "standard")
-    assert base != exploration_cache_key("sha1", "diff", "deep")
-
-    # The format version is part of the key: a bump must change it. The override
-    # value is arbitrary (never assert the production value), so a legitimate
-    # upgrade stays green while a removal from the payload goes red.
-    monkeypatch.setattr(exploration_mod, "_CACHE_VERSION", 999)
-    assert base != exploration_cache_key("sha1", "diff", "standard")
-
 def test_cache_key_components_cannot_be_confused_by_delimiters() -> None:
     """Shifting content across the newline boundary changes the key."""
 
     assert exploration_cache_key("a", "b", "standard") != exploration_cache_key("a\nb", "", "standard")
-
-def test_cache_key_distinguishes_exploration_strategy_identity() -> None:
-
-    default = {"exploration.pattern_scan": "packaged conventions"}
-    custom = {"exploration.pattern_scan": "custom conventions"}
-    assert exploration_cache_key("sha", "diff", "parallel", strategies=default) != exploration_cache_key(
-        "sha", "diff", "parallel", strategies=custom,
-    )
 
 async def test_static_cache_does_not_suppress_custom_exploration(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,

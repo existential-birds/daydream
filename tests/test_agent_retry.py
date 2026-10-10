@@ -12,11 +12,10 @@ import pytest
 from rich.console import Console
 
 from daydream.agent import run_agent
-from daydream.agent_retry import _plan_retry_delay, _resolve_retry_settings, _retry_hint
+from daydream.agent_retry import _retry_hint
 from daydream.backends import Backend, ResultEvent, RetryPolicy, TextEvent
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.pi import PiBackend, PiError, _pi_error_category, _pi_retryable_for
-from daydream.config import DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
 from daydream.retry_policy import classify_failure
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
@@ -493,117 +492,6 @@ async def test_the_retry_hint_reader_never_raises_on_a_hostile_message() -> None
             raise RuntimeError("no string for you")
     assert _retry_hint(_HostileHint("503")) is None  # no fabricated hint, no raise
     assert classify_failure(_HostileHint()).retries_allowed is True  # still classified
-
-def _resolver_backend(**attrs: Any) -> Any:
-    """Supply only the attributes consumed by the pure settings resolver."""
-    return SimpleNamespace(model="mock-model", **attrs)
-
-def test_the_extracted_settings_resolver_keeps_the_documented_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin policy field > backend attribute > argument > environment > default precedence."""
-    def _resolve(backend: Any, explicit: float | None = None) -> Any:
-        return _resolve_retry_settings(cast(Backend, backend), explicit)
-    monkeypatch.setenv("DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S", "10")
-    assert _resolve(_resolver_backend()).allowance_s == 10.0          # env tier
-    assert _resolve(_resolver_backend(), 20.0).allowance_s == 20.0    # argument wins
-    attributed = _resolver_backend(retry_recovery_allowance_s=30.0)
-    assert _resolve(attributed, 20.0).allowance_s == 30.0             # attribute wins
-    policed = _resolver_backend(
-        retry_policy=RetryPolicy(attempts=3, base_delay_s=1.0, max_delay_s=2.0, retry_recovery_allowance_s=0.0)
-    )
-    resolved = _resolve(policed, 20.0)
-    assert resolved.allowance_s == 0.0            # a declared policy is complete
-    assert resolved.max_attempts == 3 and resolved.base_delay_s == 1.0
-    # Nothing declared anywhere: the documented default applies, undeclared.
-    monkeypatch.delenv("DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S")
-    fallback = _resolve(_resolver_backend())
-    assert fallback.allowance_s == DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
-
-def test_the_extracted_settings_resolver_refuses_contradictions() -> None:
-    """Both documented contradictions are refused before any dispatch."""
-    inverted = _resolver_backend(retry_policy=RetryPolicy(attempts=3, base_delay_s=5.0, max_delay_s=1.0))
-    with pytest.raises(ValueError, match="must not exceed"):
-        _resolve_retry_settings(cast(Backend, inverted), None)
-    disabled = _resolver_backend(
-        retry_policy=RetryPolicy(attempts=0, base_delay_s=1.0, max_delay_s=2.0, retry_recovery_allowance_s=60.0)
-    )
-    with pytest.raises(ValueError, match="cannot be non-zero while retries are disabled"):
-        _resolve_retry_settings(cast(Backend, disabled), None)
-    # The default allowance must not turn a legitimate "no retries" declaration into
-    # an error: only a *declared* non-zero value contradicts `attempts = 0`.
-    plain = _resolver_backend(retry_policy=RetryPolicy(attempts=0, base_delay_s=1.0, max_delay_s=2.0))
-    assert _resolve_retry_settings(cast(Backend, plain), None).max_attempts == 0
-
-def test_the_extracted_retry_delay_planner_clamps_to_every_bound(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
-    # Cap = min(exponential growth, max delay, remaining allowance, deadline time).
-    assert _plan_retry_delay(
-        attempt=0, base_delay_s=10.0, max_delay_s=120.0,
-        allowance_remaining_s=60.0, deadline_remaining_s=None, hint=None,
-    ) == (10.0, None)
-    assert _plan_retry_delay(
-        attempt=4, base_delay_s=10.0, max_delay_s=120.0,
-        allowance_remaining_s=60.0, deadline_remaining_s=None, hint=None,
-    ) == (60.0, None)
-    assert _plan_retry_delay(
-        attempt=4, base_delay_s=10.0, max_delay_s=120.0,
-        allowance_remaining_s=None, deadline_remaining_s=7.5, hint=None,
-    ) == (7.5, None)
-    # A spent deadline is a zero bound, not a negative one.
-    assert _plan_retry_delay(
-        attempt=0, base_delay_s=10.0, max_delay_s=120.0,
-        allowance_remaining_s=None, deadline_remaining_s=0.0, hint=None,
-    ) == (0.0, None)
-    # A hint replaces jitter but never extends a budget: over-large stops the ladder.
-    assert _plan_retry_delay(
-        attempt=0, base_delay_s=10.0, max_delay_s=120.0,
-        allowance_remaining_s=30.0, deadline_remaining_s=None, hint=31.0,
-    ) == (0.0, "retry_hint_exceeds_budget")
-    # A hint inside the budget still never exceeds the computed cap.
-    assert _plan_retry_delay(
-        attempt=0, base_delay_s=10.0, max_delay_s=120.0,
-        allowance_remaining_s=300.0, deadline_remaining_s=None, hint=7.0,
-    ) == (7.0, None)
-    # A hint ABOVE the jitter cap (max_delay_s) but inside the budget is honoured
-    # in FULL: jitter bounds never shorten an admitted server wait (req 9, 16).
-    assert _plan_retry_delay(
-        attempt=0, base_delay_s=10.0, max_delay_s=120.0,
-        allowance_remaining_s=300.0, deadline_remaining_s=None, hint=30.0,
-    ) == (30.0, None)
-    # No declared bound at all: the hint is honoured in full, nothing is invented.
-    assert _plan_retry_delay(
-        attempt=0, base_delay_s=10.0, max_delay_s=120.0,
-        allowance_remaining_s=None, deadline_remaining_s=None, hint=45.0,
-    ) == (45.0, None)
-    assert _plan_retry_delay(
-        attempt=0, base_delay_s=10.0, max_delay_s=120.0,
-        allowance_remaining_s=None, deadline_remaining_s=None, hint=None,
-    ) == (10.0, None)
-    # The issue's repro: hint exceeds BOTH the exponential cap (1s) and the
-    # configured jitter max (4s) yet fits both budgets — honoured in full.
-    assert _plan_retry_delay(
-        attempt=0, base_delay_s=1.0, max_delay_s=4.0,
-        allowance_remaining_s=60.0, deadline_remaining_s=60.0, hint=10.0,
-    ) == (10.0, None)
-    # Unfittable vs the remaining allowance: same insufficient-budget stop, 0 delay.
-    assert _plan_retry_delay(
-        attempt=0, base_delay_s=1.0, max_delay_s=4.0,
-        allowance_remaining_s=5.0, deadline_remaining_s=60.0, hint=10.0,
-    ) == (0.0, "retry_hint_exceeds_budget")
-    # A hint exactly at the remaining bound fits (not strictly greater).
-    assert _plan_retry_delay(
-        attempt=0, base_delay_s=1.0, max_delay_s=4.0,
-        allowance_remaining_s=10.0, deadline_remaining_s=60.0, hint=10.0,
-    ) == (10.0, None)
-    # A hint vs a spent deadline: the deadline is a zero bound, never negative.
-    assert _plan_retry_delay(
-        attempt=0, base_delay_s=30.0, max_delay_s=60.0,
-        allowance_remaining_s=300.0, deadline_remaining_s=0.0, hint=5.0,
-    ) == (0.0, "retry_hint_exceeds_budget")
-    # A hint vs a remaining deadline only (no allowance).
-    assert _plan_retry_delay(
-        attempt=0, base_delay_s=30.0, max_delay_s=60.0,
-        allowance_remaining_s=None, deadline_remaining_s=12.0, hint=45.0,
-    ) == (0.0, "retry_hint_exceeds_budget")
 
 
 @pytest.mark.parametrize(

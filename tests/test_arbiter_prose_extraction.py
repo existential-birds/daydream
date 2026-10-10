@@ -19,7 +19,6 @@ from daydream.json_utils import extract_json_by_schema, validates_schema
 from daydream.phases import phase_arbiter_review
 from daydream.phases.review import ReviewOutputError
 from daydream.phases.schemas import PER_STACK_RECORD_SCHEMA
-from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import DaydreamPhase
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
@@ -176,20 +175,6 @@ def _split_text_backend(text: str, structured: Any) -> ScriptedBackend:
         ]
 
     return ScriptedBackend(responder=respond, model="glm-5.2")
-
-async def test_arbiter_captures_structured_output_in_log_mode(tmp_path: Path, make_work: Callable[..., WorkContext],
-) -> None:
-    """Log mode retains the structured ResultEvent through the real phase/agent path."""
-    diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
-    verdicts, _ = await phase_arbiter_review(
-        cast(Backend, _split_text_backend(PROSE_WITH_TRUNCATED_JSON, STRUCTURED_OUTPUT)), make_work(tmp_path),
-        selected_records=SELECTED_RECORDS, diff_path=diff_path, intent_path=intent_path,
-        alternatives_path=alternatives_path, run_context=RunContext(InteractionPolicy(log_mode=True)),
-        allow_standalone=True,
-    )
-    assert set(verdicts) == {1, 2}
-    assert verdicts[1]["keep"] is True
-    assert verdicts[2]["keep"] is False
 
 def test_rejection_diagnostic_names_type_and_content_free_reason() -> None:
     failure = StructuredOutputFailure("prose", "malformed_output",

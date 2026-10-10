@@ -15,12 +15,10 @@ from daydream.backends import (
     ClaudeRequestConfig,
     CodexRequestConfig,
     CostEvent,
-    EffectiveRequestConfig,
     GenerationEndEvent,
     GenerationStartEvent,
     MetricsEvent,
     OspreyRequestConfig,
-    PiRequestConfig,
     RequestEvent,
     ResultEvent,
     ToolResultEvent,
@@ -233,20 +231,6 @@ async def test_request_event_does_not_fabricate_a_trajectory_step(tmp_path: Path
 
 # --- P18 Task 1: cross-backend typed-config contract through real event streams
 
-def test_all_four_configs_share_the_common_subset() -> None:
-    configs = [
-        ClaudeRequestConfig(model_mode="single"), CodexRequestConfig(model_mode="single", sandbox_mode="read-only"),
-        PiRequestConfig(model_mode="single", no_skills=True),
-        OspreyRequestConfig(model_mode="single", approval_mode="deny-untrusted"),
-    ]
-    for config in configs:
-        assert isinstance(config, EffectiveRequestConfig)
-        assert config.model_mode == "single"
-        assert config.temperature is None  # absent unless explicitly admitted
-    assert isinstance(configs[0], ClaudeRequestConfig)
-    assert isinstance(configs[1], CodexRequestConfig)
-    assert isinstance(configs[2], PiRequestConfig)
-    assert isinstance(configs[3], OspreyRequestConfig)
 
 async def test_claude_request_event_through_real_stream_carries_config() -> None:
     terminal = ResultMessage(

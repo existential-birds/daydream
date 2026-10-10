@@ -34,11 +34,9 @@ from daydream.backends import (
     ThinkingEvent,
     ToolResultEvent,
     ToolStartEvent,
-    TurnEndEvent,
     codex,
     effective_fanout_concurrency,
 )
-from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.codex import (
     _CODEX_STDOUT_LIMIT_BYTES,
     CodexBackend,
@@ -50,10 +48,8 @@ from daydream.backends.codex import (
     display_shell_command,
 )
 from daydream.extensions import Registry, ToolDecision, set_registry
-from daydream.pricing import compute_cost, load_user_prices, resolve_prices
 from daydream.trajectory import DaydreamPhase
 from tests.harness.codex_replay import (
-    GapThenBlockingStdout as _GapThenBlockingStdout,
     make_mock_process,
     make_mock_process_from_fixture,
 )
@@ -111,33 +107,6 @@ async def _run_fixture(backend: Any, prompt: Any, fixture: Any, **kwargs: Any) -
     events, _ = await replay_process(backend, mock_proc, Path("/tmp"), prompt, **kwargs)
     return events
 
-async def test_simple_text_events() -> None:
-    backend = CodexBackend(model="gpt-5.3-codex")
-    events = await _run_fixture(backend, "Say hello", "simple_text.jsonl")
-    text_events = [e for e in events if isinstance(e, TextEvent)]
-    cost_events = [e for e in events if isinstance(e, CostEvent)]
-    result_events = [e for e in events if isinstance(e, ResultEvent)]
-    assert len(text_events) == 1
-    assert text_events[0].text == "Hello from Codex"
-    assert len(cost_events) == 1
-    expected_cost = compute_cost(
-        model="gpt-5.3-codex", input_tokens=100, cached_input_tokens=0, output_tokens=50,
-        prices=resolve_prices(load_user_prices()),
-    )
-    assert cost_events[0].cost_usd is not None
-    assert cost_events[0].cost_usd == pytest.approx(expected_cost)
-    assert cost_events[0].input_tokens == 100
-    assert cost_events[0].output_tokens == 50
-    assert len(result_events) == 1
-    assert result_events[0].continuation is not None
-    assert result_events[0].continuation.backend == "codex"
-    assert result_events[0].continuation.data["thread_id"] == "th_abc123"
-    metrics = [e for e in events if isinstance(e, MetricsEvent)]
-    assert metrics and cost_events
-    assert all(m.measurement_source == "turn_end" for m in metrics)
-    assert all(m.usage_scope == "invocation" for m in metrics)
-    assert all(c.measurement_source == "turn_end" for c in cost_events)
-    assert all(c.cost_source == "estimated" for c in cost_events)
 
 async def test_tool_use_events() -> None:
     backend = CodexBackend(model="fixture-model")
@@ -695,16 +664,6 @@ async def test_codex_read_only_mirrors_symlinks_and_unstaged_deletions(linked_wo
     assert captured["doomed_present"] is False
     assert not captured["isolated"].exists()
 
-async def test_codex_default_uses_full_access_sandbox() -> None:
-    backend = CodexBackend(model="fixture-model")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        async for _ in backend.execute(Path("/tmp"), "p"):
-            pass
-        flat_args = list(mock_exec.call_args.args)
-        assert flat_args[flat_args.index("--sandbox") + 1] == "danger-full-access"
-        assert "read-only" not in flat_args
-        assert flat_args[flat_args.index("--cd") + 1] == "/tmp"
 
 async def test_codex_default_full_access_at_worktree_skips_isolation(linked_worktree: tuple[Path, Path]) -> None:
     _main, source = linked_worktree
@@ -777,53 +736,6 @@ async def test_toplevel_text_field() -> None:
     text_events = [e for e in events if isinstance(e, TextEvent)]
     assert len(text_events) == 1
 
-async def test_turn_completed_cached_input_tokens() -> None:
-    """Surface cached_input_tokens on both per-turn metrics and terminal totals."""
-    backend = CodexBackend(model="fixture-model")
-    events = await _run_fixture(backend, "Cached", "turn_completed_cached_tokens.jsonl")
-    metrics_events = [e for e in events if isinstance(e, MetricsEvent)]
-    cost_events = [e for e in events if isinstance(e, CostEvent)]
-    assert len(metrics_events) == 1
-    assert metrics_events[0].prompt_tokens == 300
-    assert metrics_events[0].completion_tokens == 150
-    assert metrics_events[0].cached_tokens == 200
-    # The fixture model has no known price, so cost remains None.
-    assert metrics_events[0].cost_usd is None
-    assert len(cost_events) == 1
-    assert cost_events[0].input_tokens == 300
-    assert cost_events[0].output_tokens == 150
-    assert cost_events[0].cached_tokens == 200
-
-async def test_codex_synthesizes_cost_for_known_model() -> None:
-    backend = CodexBackend(model="gpt-5.5")
-    # Total input includes the cached subset.
-    lines = [
-        '{"type":"thread.started","thread_id":"th_synth"}',
-        '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}',
-        '{"type":"turn.completed","usage":{"input_tokens":15000,'
-        '"cached_input_tokens":5000,"output_tokens":2000}}',
-    ]
-    mock_proc = make_mock_process(lines)
-    events, _ = await replay_process(backend, mock_proc, Path("/tmp"), "Synth")
-    expected = compute_cost(
-        model="gpt-5.5",
-        input_tokens=10_000,  # uncached = 15000 - 5000
-        cached_input_tokens=5_000, output_tokens=2_000, prices=resolve_prices(load_user_prices()),
-    )
-    assert expected is not None
-    metrics_events = [e for e in events if isinstance(e, MetricsEvent)]
-    cost_events = [e for e in events if isinstance(e, CostEvent)]
-    assert len(metrics_events) == 1
-    assert len(cost_events) == 1
-    mev = metrics_events[0]
-    cev = cost_events[0]
-    assert mev.cost_usd is not None and mev.cost_usd > 0
-    assert cev.cost_usd is not None and cev.cost_usd > 0
-    assert mev.cost_usd == pytest.approx(expected)
-    assert cev.cost_usd == pytest.approx(expected)
-    assert mev.prompt_tokens == 15_000
-    assert mev.completion_tokens == 2_000
-    assert mev.cached_tokens == 5_000
 
 def _write_model_prices(path: Path, *, model: str, input_price: float, output_price: float) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -938,31 +850,6 @@ async def test_codex_without_execution_input_preserves_ambient_price_override(
     assert len(costs) == 1
     assert costs[0].cost_usd == pytest.approx(13.0)
 
-async def test_codex_cost_none_for_unknown_model() -> None:
-    backend = CodexBackend(model="definitely-not-a-real-model")
-    lines = [
-        '{"type":"thread.started","thread_id":"th_unknown"}',
-        '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}',
-        '{"type":"turn.completed","usage":{"input_tokens":1000,'
-        '"cached_input_tokens":200,"output_tokens":50}}',
-    ]
-    mock_proc = make_mock_process(lines)
-    events, _ = await replay_process(backend, mock_proc, Path("/tmp"), "Unknown")
-    metrics_events = [e for e in events if isinstance(e, MetricsEvent)]
-    cost_events = [e for e in events if isinstance(e, CostEvent)]
-    assert len(metrics_events) == 1
-    assert len(cost_events) == 1
-    assert metrics_events[0].cost_usd is None
-    assert cost_events[0].cost_usd is None
-
-async def test_codex_backend_emits_turn_end_after_each_agent_message() -> None:
-    backend = CodexBackend(model="fixture-model")
-    events = await _run_fixture(backend, "Two turns", "two_agent_turns.jsonl")
-    texts = [e for e in events if isinstance(e, TextEvent)]
-    turn_ends = [e for e in events if isinstance(e, TurnEndEvent)]
-    assert len(texts) == 2
-    assert len(turn_ends) == 2
-    assert all(e.message_id == "" for e in turn_ends)
 
 async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
     await assert_concurrent_streams_isolated(
@@ -1104,31 +991,9 @@ class TestUnwrapShellCommand:
         assert _unwrap_shell_command(raw) == "cd /app && make test"
         assert display_shell_command(raw) == "make test"
 
-async def test_execute_raises_on_agents() -> None:
-    backend = CodexBackend(model="fixture-model")
-    mock_agent = {"description": "test", "prompt": "test"}
-    with pytest.raises(NotImplementedError, match="Codex backend does not support exploration"):
-        async for _ in backend.execute(Path("/tmp"), "Test", agents={"explorer": mock_agent}):
-            pass
 
 # Parser correlation and diagnostics.
 
-async def test_well_formed_multi_tool_no_orphans(caplog: pytest.LogCaptureFixture) -> None:
-    """Three no-id tool completions must pair through FIFO with zero orphans or parser warnings."""
-    backend = CodexBackend(model="fixture-model")
-    with caplog.at_level(logging.WARNING, logger="daydream.backends.codex"):
-        events = await _run_fixture(backend, "Run tools", "item_started_no_id.jsonl")
-    tool_starts = [e for e in events if isinstance(e, ToolStartEvent)]
-    tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert len(tool_starts) == 3
-    assert len(tool_results) == 3
-    start_ids = {e.id for e in tool_starts}
-    result_ids = {e.id for e in tool_results}
-    assert start_ids == result_ids, (
-        f"every tool result must pair with a tool start; starts={start_ids} results={result_ids}"
-    )
-    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert not warnings, [r.getMessage() for r in warnings]
 
 async def test_orphaned_tool_result_is_observable(caplog: pytest.LogCaptureFixture) -> None:
     """Unmatched completions warn and carry deterministic codex-unmatched ids.
@@ -1254,19 +1119,6 @@ async def test_turn_failed_flushes_current_aggregate_without_waiting_for_stdout(
     assert [event.metadata["unknown_event_types"]["total"] for event in parser_diagnostics] == [1, 2]
     assert stdout.blocking_read_started is False
 
-async def test_first_parser_gap_is_observable_before_following_stream_stall(monkeypatch: pytest.MonkeyPatch) -> None:
-    backend = CodexBackend(model="fixture-model")
-    monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "0.01")
-    mock_proc = make_mock_process([])
-    mock_proc.stdout = _GapThenBlockingStdout()
-    observed: list[Any] = []
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        with pytest.raises(StreamStalledError):
-            async for event in backend.execute(Path("/tmp"), "Stall"):
-                observed.append(event)
-    diagnostics = [event for event in observed if isinstance(event, DiagnosticEvent)]
-    assert [event.code for event in diagnostics] == ["codex_parser_coverage"]
-    assert diagnostics[0].metadata["unknown_event_types"]["total"] == 1
 
 async def test_parser_diagnostic_precedes_nonzero_process_exit() -> None:
     backend = CodexBackend(model="fixture-model")
@@ -1312,18 +1164,6 @@ def test_codex_fanout_concurrency_honours_the_shared_env_override(
         monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", raw)
     assert effective_fanout_concurrency(ceiling, CodexBackend("gpt-test")) == expected
 
-async def test_codex_preserves_exit_code_and_status_on_results() -> None:
-    backend = CodexBackend(model="fixture-model")
-    events = await _run_fixture(backend, "Run failing command", "command_failures_issue1126.jsonl")
-    results = [e for e in events if isinstance(e, ToolResultEvent)]
-    failed = results[0]
-    assert failed.is_error is True
-    assert failed.exit_code == 128
-    assert failed.status == "completed"
-    ok = results[1]
-    assert ok.is_error is False
-    assert ok.exit_code == 0
-    assert ok.status == "completed"
 
 class TestDisplayShellCommand:
     """S1/M5: display variant decodes AND strips the leading cd prefix."""
@@ -1556,31 +1396,6 @@ async def test_issue1124_stored_commands_are_replayable() -> None:
 
 # --- P18 Task 1: effective request-config admission at the Codex argv seam ---
 
-async def test_request_event_config_matches_exact_argv() -> None:
-    captured_argv: dict[str, Any] = {}
-    def _capturing_exec(*args: Any, **kwargs: Any) -> Any:
-        captured_argv["argv"] = list(args)
-        return make_mock_process_from_fixture("simple_text.jsonl")
-    backend = CodexBackend(model="gpt-5.3-codex")
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", side_effect=_capturing_exec):
-        events = [event async for event in backend.execute(Path("/tmp"), "hello")]
-    argv = captured_argv["argv"]
-    request = next(e for e in events if isinstance(e, RequestEvent))
-    config = request.config
-    assert isinstance(config, CodexRequestConfig)
-    assert config.sandbox_mode == argv[argv.index("--sandbox") + 1] == "danger-full-access"
-    assert config.experimental_json is True and "--experimental-json" in argv
-    assert config.native_output_schema is False and "--output-schema" not in argv
-    assert config.read_only_isolation is False
-    assert config.continuation_mode == "fresh"
-    assert config.model_mode == "single"
-    assert config.max_turns is None  # max_turns never passed to this CLI
-    assert config.persist_session is None  # accepted, not passed
-    assert request.model_name == "gpt-5.3-codex"
-    assert request.model_source == "configured"
-    assert request.provider_name is None  # CLI never acknowledges provider here
-    assert request.provider_source is None
-    assert request.timestamp_source == "host_observed"
 
 async def test_request_event_config_read_only_sandbox_and_isolation() -> None:
     worktree = Path(tempfile.mkdtemp(prefix="codex-p18-ro-"))

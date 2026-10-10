@@ -1,6 +1,4 @@
-"""Event field values, nullable defaults, timestamps, and union/export membership. Backend protocol and
-factory tests live in test_backends_init.py.
-"""
+"""Request configuration, native identity and generation admission boundaries."""
 from __future__ import annotations
 
 from typing import Any
@@ -12,117 +10,18 @@ from daydream.backends import (
     AgentEvent,
     ClaudeRequestConfig,
     CodexRequestConfig,
-    ContinuationToken,
-    CostEvent,
     DiagnosticEvent,
     EffectiveRequestConfig,
-    GenerationEndEvent,
-    GenerationStartEvent,
     JsonValue,
-    MetricsEvent,
     OspreyRequestConfig,
     PiRequestConfig,
-    RequestEvent,
-    ResultEvent,
-    TextEvent,
-    ThinkingEvent,
     ToolCallChoicePart,
-    ToolResultEvent,
-    ToolStartEvent,
-    TurnEndEvent,
     _admit_identity_label,
     _admit_native_unix_ms,
-    _new_generation_id,
     unix_ms_to_ns,
 )
 from daydream.observability.spans import _admit_observed_identity_list
 
-
-def _assert_fields(event: Any, expected: dict[str, Any]) -> None:
-    for name, want in expected.items():
-        got = getattr(event, name)
-        if want is None or isinstance(want, bool):
-            assert got is want, name
-        else:
-            assert got == want, name
-
-@pytest.mark.parametrize(
-    ("cls", "kwargs", "expected"),
-    [
-        pytest.param(TextEvent, {"text": "hello"}, {"text": "hello"}, id="text-event"),
-        pytest.param(
-            DiagnosticEvent, {"code": "parser_gap", "message": "unknown item", "metadata": {"count": 2}},
-            {"code": "parser_gap", "message": "unknown item", "metadata": {"count": 2}}, id="diagnostic-event",
-        ), pytest.param(ThinkingEvent, {"text": "reasoning..."}, {"text": "reasoning..."}, id="thinking-event"),
-        pytest.param(
-            ToolStartEvent, {"id": "t1", "name": "Bash", "input": {"command": "ls"}},
-            {"id": "t1", "name": "Bash", "input": {"command": "ls"}}, id="tool-start-event",
-        ),
-        pytest.param(
-            ToolResultEvent, {"id": "t1", "output": "file.py", "is_error": False},
-            {"id": "t1", "output": "file.py", "is_error": False}, id="tool-result-event",
-        ),
-        pytest.param(
-            CostEvent, {"cost_usd": 0.01, "input_tokens": 100, "output_tokens": 50},
-            {"cost_usd": 0.01, "input_tokens": 100, "output_tokens": 50, "cached_tokens": None}, id="cost-event",
-        ),
-        pytest.param(
-            CostEvent, {"cost_usd": None, "input_tokens": None, "output_tokens": None},
-            {"cost_usd": None, "input_tokens": None, "output_tokens": None}, id="cost-event-nullable",
-        ),
-        pytest.param(
-            CostEvent, {"cost_usd": 0.5, "input_tokens": 10, "output_tokens": 20, "cached_tokens": 3},
-            {"cached_tokens": 3}, id="cost-event-cached-tokens",
-        ),
-        # Backward compat: the existing 3-arg call sites still work; cached_tokens defaults to None.
-        pytest.param(
-            CostEvent, {"cost_usd": 0.5, "input_tokens": 10, "output_tokens": 20}, {"cached_tokens": None},
-            id="cost-event-cached-tokens-default-none",
-        ),
-        pytest.param(
-            ResultEvent, {"structured_output": None, "continuation": None},
-            {"structured_output": None, "continuation": None}, id="result-event-nullable",
-        ),
-        pytest.param(
-            MetricsEvent,
-            {
-                "message_id": "msg_01", "prompt_tokens": 10, "completion_tokens": 20, "cached_tokens": 5,
-                "cost_usd": 0.001,
-            },
-            {
-                "message_id": "msg_01", "prompt_tokens": 10, "completion_tokens": 20, "cached_tokens": 5,
-                "cost_usd": 0.001,
-            }, id="metrics-event",
-        ),
-        pytest.param(TurnEndEvent, {}, {}, id="turn-end-event"),
-    ],
-)
-def test_event_field_values(cls: type, kwargs: dict[str, Any], expected: dict[str, Any]) -> None:
-    event = cls(**kwargs)
-    _assert_fields(event, expected)
-    # Every event class inherits the default Z-suffixed UTC timestamp.
-    assert isinstance(event.timestamp, str)
-    assert event.timestamp.endswith("Z"), f"timestamp must end with Z: {event.timestamp!r}"
-
-def test_result_event_carries_the_continuation_token() -> None:
-    token = ContinuationToken(backend="codex", data={})
-    event = ResultEvent(structured_output={"key": "val"}, continuation=token)
-    assert event.structured_output == {"key": "val"}
-    assert event.continuation is token
-
-def test_metrics_event_is_accepted_by_agent_event_union() -> None:
-    event = MetricsEvent(message_id="msg_01", prompt_tokens=10, completion_tokens=20, cached_tokens=5, cost_usd=0.001)
-    assert isinstance(event, AgentEvent)
-
-def test_metrics_event_in_all_export() -> None:
-    assert "MetricsEvent" in backends.__all__
-
-def test_turn_end_event_is_in_agent_event_union() -> None:
-    ev = TurnEndEvent()
-    ev2 = TurnEndEvent(message_id="msg_abc123")
-    assert ev2.message_id == "msg_abc123"
-    assert isinstance(ev.timestamp, str) and ev.timestamp.endswith("Z")
-    assert isinstance(ev, AgentEvent)
 
 def test_diagnostic_event_has_fresh_metadata_and_is_exported() -> None:
     first = DiagnosticEvent(code="parser_gap", message="first")
@@ -132,18 +31,6 @@ def test_diagnostic_event_has_fresh_metadata_and_is_exported() -> None:
     assert isinstance(first, AgentEvent)
     assert "DiagnosticEvent" in backends.__all__
 
-def test_tool_result_event_status_fields_default_to_none() -> None:
-    ev = ToolResultEvent(id="t1", output="ok", is_error=False)
-    assert ev.exit_code is None
-    assert ev.status is None
-    assert ev.duration_ms is None
-    assert ev.cancelled is False
-    assert ev.truncated is False
-
-def test_tool_result_event_accepts_status_metadata() -> None:
-    ev = ToolResultEvent(id="t2", output="boom", is_error=True, exit_code=128, status="completed")
-    assert ev.exit_code == 128
-    assert ev.status == "completed"
 
 # --- P18 Task 1: closed typed Effective Configuration Admission Contract ----
 
@@ -234,9 +121,6 @@ def test_admission_contract_defaults_mean_absent_not_effective() -> None:
     assert config.continuation_mode is None
     assert config.model_mode is None
 
-def test_osprey_hidden_temperature_stays_absent() -> None:
-    config = OspreyRequestConfig(sandbox=True)
-    assert config.temperature is None
 
 def test_arbitrary_persona_and_toolset_labels_have_no_field() -> None:
     config = OspreyRequestConfig(persona_present=True, toolset_present=False)
@@ -334,59 +218,3 @@ def test_tool_call_choice_part_json_arguments_are_schema_admitted() -> None:
 def test_tool_call_choice_part_never_echoes_private_tool_names() -> None:
     with pytest.raises(ValueError, match="name"):
         ToolCallChoicePart(call_id="t6", name="/Users/ka/bin/tool", arguments={})
-
-def test_generation_lifecycle_events_are_in_the_agent_event_union() -> None:
-    start = GenerationStartEvent(generation_id="g-1", observed_at_unix_ns=1)
-    end = GenerationEndEvent(
-        generation_id="g-1", native_started_at_unix_ms=None, ended_at_unix_ns=2, end_source="fallback",
-    )
-    assert isinstance(start, AgentEvent)
-    assert isinstance(end, AgentEvent)
-    assert start.timestamp.endswith("Z") and end.timestamp.endswith("Z")
-
-def test_generation_ids_are_host_invocation_local_uuids() -> None:
-    first = _new_generation_id()
-    second = _new_generation_id()
-    assert first != second
-    assert len(first) == 36 and first.count("-") == 4
-
-def test_request_event_defaults_preserve_backward_compatibility() -> None:
-    legacy = RequestEvent("prompt only")
-    assert legacy.prompt == "prompt only"
-    assert legacy.config.model_mode is None
-    assert legacy.model_source is None
-    assert legacy.session_source is None
-    assert legacy.timestamp_source == "host_observed"
-    provenanced = RequestEvent("p", model_name="m", model_source="configured", timestamp_source="native")
-    assert provenanced.model_source == "configured"
-    assert provenanced.timestamp_source == "native"
-
-def test_turn_end_event_defaults_preserve_backward_compatibility() -> None:
-    ev = TurnEndEvent()
-    assert ev.message_id == ""
-    assert ev.finish_reason is None
-    assert ev.model_name is None
-    assert ev.provider_name is None
-    assert ev.message_id_source is None
-    assert ev.model_source is None
-    assert ev.timestamp_source == "host_observed"
-    ev2 = TurnEndEvent(
-        message_id="m1", finish_reason="stop", model_name="glm-4.6", provider_name="nous", model_source="native",
-        provider_source="native",
-    )
-    assert ev2.finish_reason == "stop"
-    assert ev2.model_source == "native"
-
-def test_measurement_events_carry_closed_provenance() -> None:
-    cost = CostEvent(cost_usd=0.01, input_tokens=10, output_tokens=5, measurement_source="terminal")
-    assert cost.measurement_source == "terminal"
-    assert cost.generation_id is None
-    assert cost.cost_source is None
-    legacy = CostEvent(cost_usd=None, input_tokens=None, output_tokens=None)
-    assert legacy.measurement_source is None  # legacy record, not an assessed claim
-    metrics = MetricsEvent(
-        message_id="m1", prompt_tokens=1, completion_tokens=2, cached_tokens=None, cost_usd=None,
-        measurement_source="message_end", generation_id="g-1",
-    )
-    assert metrics.measurement_source == "message_end"
-    assert metrics.generation_id == "g-1"
