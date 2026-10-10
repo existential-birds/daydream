@@ -4,17 +4,13 @@
 
 - Run `make check`; also run `make rl-check` for changes in `rl/daydream_review/`.
 - Use signed Conventional Commits and stage explicit paths, excluding unrelated changes.
-- **Never bypass Git hooks**, including `--no-verify` or hook-disabling environment variables,
-  even for pre-existing failures. Fix on this branch and retry normally, or report the blocker.
-  Commit/push is complete only when the hook-enabled command succeeds.
+- **Never bypass Git hooks**, including `--no-verify` or hook-disabling env vars, even for pre-existing failures.
+  Fix and retry on this branch or report the blocker; commit/push completes only after hook-enabled success.
 - Dependency changes include `pyproject.toml` and affected `uv.lock`; read Makefile/config for commands, settings, exemptions.
 
 ## Testing
 
-- Changed user-visible behavior needs `runner.run` or CLI tests with real Git worktrees, filesystem, and event loop.
-- Mock only external network/API via `Backend` / `create_backend`; assert exit status, written files, retained fixes,
-  and trajectory state.
-- Unit tests supplement this proof; see `tests/deep_orchestrator/test_fix_gate_cleanup_and_precision.py`.
+- Follow the mandatory [testing policy](CONTRIBUTING.md#testing-policy) and [exemplars](CONTRIBUTING.md#exemplars).
 - Terminal findings retain typed coverage, snapshot binding, and atomic publication per the
   [README contract](README.md#terminal-review-findings-contract); inject faults at actual filesystem operations.
 

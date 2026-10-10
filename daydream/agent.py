@@ -346,8 +346,7 @@ async def run_agent(
 
     Backend retry, supervision, budget and ATIF semantics live in the invocation
     executor. The outer scope owns exactly the result the phase receives.
-    Staged reviewers pass investigation_budget and optionally their own bounded
-    review_evidence; failed/cutoff stages never receive automatic serialization.
+    Stages use investigation_budget and optional bounded review_evidence; failure/cutoff blocks automatic serialization.
     """
     if tools_disabled and not getattr(backend, "supports_tools_disabled", False):
         raise NotImplementedError(f"{type(backend).__name__} does not support tools_disabled")
@@ -754,8 +753,7 @@ async def _run_agent(
                                 # ignores RequestEvent (the one armless member).
                                 if inv is not None:
                                     inv.observe(event)
-                                # Received native starts still reach supervision and
-                                # charging after expiry; no late completion/checkpoint does.
+                                # After expiry, supervise/charge received native starts; reject completions/checkpoints.
                                 deadline_expired = (effective_deadline is not None
                                                     and clock.monotonic() >= effective_deadline)
                                 if deadline_expired and not (native_output and isinstance(event, ToolStartEvent)):
@@ -1058,9 +1056,8 @@ async def _run_agent(
             # above never sees them. Deterministically reap the tracked subprocesses
             # via backend.cancel() before unwinding.
             try:
-                # AnyIO task groups keep cancelled scopes cancelled at every
-                # await. Give teardown its existing bounded grace so reaping
-                # can complete without losing the original cancellation.
+                # AnyIO task groups keep scopes cancelled at each await; existing bounded grace lets teardown reap
+                # without masking the original cancellation.
                 with anyio.move_on_after(BUDGET_CLEANUP_GRACE_S, shield=True) as shutdown_scope:
                     await backend.cancel()
                 if shutdown_scope.cancel_called:
@@ -1112,8 +1109,7 @@ async def _run_agent(
         # callers keep largest-span extraction. Everything else narrows to the
         # last candidate its own gate admits, which never widens what is
         # accepted.
-        # A staged native candidate is authoritative. Rejecting it cannot be
-        # followed by salvaging another text fragment from the same invocation.
+        # Staged native output is authoritative; rejection forbids salvaging text fragments from the same invocation.
         if not native_output and raw.strip() and not text_overflow and not (
             investigation_budget is not None and structured_result is not None):
             selected: Any = None

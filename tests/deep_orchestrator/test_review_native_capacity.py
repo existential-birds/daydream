@@ -9,7 +9,7 @@ import pytest
 
 from daydream.backends import AgentEvent, PiRequestConfig, RequestEvent, ToolResultEvent, ToolStartEvent
 from tests.deep_orchestrator.test_review_completion import scopes
-from tests.deep_orchestrator.test_review_investigation import InvestigationRun, stage_ends
+from tests.deep_orchestrator.test_review_investigation import InvestigationRun, candidate, stage_ends
 from tests.harness.git_helpers import seed_feature_branch
 
 
@@ -67,10 +67,9 @@ async def test_late_cross_file_judgment_fits_cumulative_native_budget(
                        'description': 'Late request builder drops the parsed dry-run flag',
                        'rationale': 'The changed request builder omits the dry-run value.',
                        'evidence': f'{late}:4 omits dry_run required by the changed request contract.'}
-            output['candidates'] = [{'candidate_id': '', 'file': late, 'line': 4,
-                                     'trigger': 'Parse --dry-run and build the request',
-                                     'consequence': 'The request omits dry_run', 'grounds': finding['evidence'],
-                                     'disposition': 'confirmed', 'finding': finding}]
+            output['candidates'] = [candidate(disposition='confirmed', finding=finding, file=late, line=4,
+                                             trigger='Parse --dry-run and build the request',
+                                             consequence='The request omits dry_run', grounds=finding['evidence'])]
         yield ToolStartEvent(id='submit', name='structured_output', input=output)
         yield ToolResultEvent(id='submit', output='Submitted.', is_error=False)
 

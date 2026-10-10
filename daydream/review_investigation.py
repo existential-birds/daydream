@@ -150,9 +150,7 @@ class ReviewInvestigation:
         rejection: SchemaRejection | None = None
         for attempt in (1, 2):
             state = self._stage_state(stage, targets, files, candidate_ids, assignment_parts)
-            self.failure_diagnostic = None
-            self.failed_invocation = False
-            self.failure_class = None
+            self.failure_diagnostic, self.failed_invocation, self.failure_class = None, False, None
             state.update(attempt=attempt, max_attempts=2, schema_rejection=rejection.to_dict() if rejection else None)
             schema = review_stage_schema(targets, candidate_ids, triage=stage == "triage")
             state["response_contract"] = {"schema": schema, "skeleton": {
@@ -330,8 +328,7 @@ class ReviewInvestigation:
                     and (stage != 'triage' or isinstance(item.get('candidate_id'), str)) for item in raw_decisions)
         )
         if not can_prepare:
-            # Shape errors permit only independently proven bounds failures;
-            # never repair a rejected payload to construct a prospective plan.
+            # Shape errors allow only independently proven bounds failures; never repair rejected output to make a plan.
             if 'notes' in output and len(json.dumps(output['notes'], ensure_ascii=False).encode()) > HANDOFF_MAX_BYTES:
                 return None, 'evidence_incomplete'
             if isinstance(raw_decisions, list):

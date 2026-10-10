@@ -105,11 +105,11 @@ def investigation(multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.
 
 
 def candidate(*, disposition: str = 'open', candidate_id: str = '',
-              finding: dict[str, Any] | None = None) -> dict[str, Any]:
+              finding: dict[str, Any] | None = None, **fields: Any) -> dict[str, Any]:
     return {'candidate_id': candidate_id, 'file': 'api.py', 'line': 2,
             'trigger': 'Calling hello()', 'consequence': 'The returned greeting may violate callers.',
             'grounds': "api.py:2 returns 'universe'; current callers accept that greeting.",
-            'disposition': disposition, 'finding': finding}
+            'disposition': disposition, 'finding': finding, **fields}
 
 
 def read_events(repo: Path, path: str, *, event_id: str) -> Iterable[AgentEvent]:
@@ -204,10 +204,10 @@ async def test_useful_completed_reads_borrow_cumulative_capacity_and_allow_later
         if initial:
             line = 3 if scope_id == 'generic' else 2
             finding = dict(record(line), file=path, evidence=f'{path}:{line}')
-            output['candidates'] = [dict(candidate(disposition='confirmed', finding=finding),
-                                         file=path, line=line, grounds=finding['evidence'])]
+            output['candidates'] = [candidate(disposition='confirmed', finding=finding,
+                                             file=path, line=line, grounds=finding['evidence'])]
             if scope_id == 'structure':
-                output['candidates'].append(dict(candidate(), file=path, line=line))
+                output['candidates'].append(candidate(file=path, line=line))
         elif stage['stage'] == 'triage':
             output['candidates'] = [dict(item, disposition='rejected') for item in stage['candidates']]
 
@@ -275,8 +275,8 @@ async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
                 confirmed = candidate(disposition='confirmed', finding=record())
                 if long_grounds:
                     confirmed['grounds'] += ' Additional explanation: ' + 'é' * 400
-                rejected = dict(candidate(disposition='rejected'),
-                                grounds='The greeting is allowed by the updated consumer contract.')
+                rejected = candidate(disposition='rejected',
+                                     grounds='The greeting is allowed by the updated consumer contract.')
                 output['candidates'] = [confirmed, rejected] + [candidate() for _ in range(9)]
             if stage['progress']:
                 later_assignments.append(stage)
@@ -349,8 +349,8 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
                 for event in read_events(review.repo, path, event_id=f'admitted-{path}'):
                     yield event
             assert "return 'world'" in (review.repo / 'api.py').read_text()
-            output['candidates'] = [dict(candidate(disposition='confirmed', finding=record()),
-                                         grounds="api.py:1-2 defines hello() and returns 'world'.")]
+            output['candidates'] = [candidate(disposition='confirmed', finding=record(),
+                                             grounds="api.py:1-2 defines hello() and returns 'world'.")]
             yield ToolStartEvent(id='admitted-submit', name='structured_output', input=output)
             yield ToolResultEvent(id='admitted-submit', output='Submitted.', is_error=False)
             return
@@ -396,9 +396,8 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
         assert stopped['metadata']['submission_starts'] == 0
         assert stopped['metadata']['admitted'] is False
         assert len(dispatch_deadlines) == 2
-        # The prompt allowance precedes provider entry and is therefore an
-        # upper bound on the deadline. Variable dispatch overhead may lower
-        # the second estimate, but must not extend the first absolute bound.
+        # Prompt allowances precede provider entry, so they bound the deadline from above. Variable dispatch overhead
+        # may lower the second estimate, but must not extend the first absolute bound.
         assert dispatch_deadlines[1] <= dispatch_deadlines[0] + 0.5
         assert asyncio.get_running_loop().time() >= dispatch_deadlines[0] - 0.5
 
@@ -423,7 +422,7 @@ async def test_one_triage_round_preserves_closed_decisions_and_rejects_invalid_i
         if stage['stage'] == 'first_pass':
             output['candidates'] = [candidate(disposition='rejected'), candidate()]
             assert validator.is_valid(output)
-            invented = dict(output, candidates=[dict(candidate(), candidate_id='invented-native-id')])
+            invented = dict(output, candidates=[candidate(candidate_id='invented-native-id')])
             assert not validator.is_valid(invented)
         else:
             pending, = stage['candidates']
@@ -500,8 +499,8 @@ async def test_integration_retains_admitted_findings_and_cumulative_spend(
             if stage['stage'] == 'integration':
                 yield ToolResultEvent(id=event.id, output=(review.repo / name).read_text(), is_error=False)
         if stage['stage'] == 'integration' and confirmed:
-            output['candidates'].append(dict(candidate(disposition='confirmed', finding=record()),
-                                             grounds="api.py:2 returns 'world'."))
+            output['candidates'].append(candidate(disposition='confirmed', finding=record(),
+                                                 grounds="api.py:2 returns 'world'."))
         if fault == 'syntax':
             yield TextEvent(text=json.dumps(output) + ', "candidates": []}')
         yield ResultEvent(structured_output=None if fault == 'syntax' else output, continuation=None)

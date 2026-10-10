@@ -555,8 +555,7 @@ async def phase_per_stack_reviews(
                 else:
                     prompt_args["stack_name"] = stack.stack_name
             def build_stage_prompt(stage: dict[str, Any]) -> str:
-                # Invoke the registered builder anew: its kwargs describe this
-                # assignment rather than a terminal whole-stack review.
+                # Reinvoke the registered builder with current assignment kwargs, never terminal whole-stack context.
                 from daydream.review_profile import FOLDED_ALTERNATIVES_INSTRUCTION
                 stage['folded_alternatives'] = (stack.stack_name == STRUCTURE_STACK_NAME
                                                 and builder is build_structural_prompt

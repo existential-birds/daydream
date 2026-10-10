@@ -569,9 +569,8 @@ class PiBackend:
     ) -> AsyncGenerator[AgentEvent, None]:
         """Yield Pi events; a turn error raises PiError and nonempty agents are unsupported.
 
-        Tools-enabled schema requests submit through Pi's exact-schema output tool;
-        excluded modes retain assistant-text serialization. Pi tokens resume via
-        --session-id when persistence is enabled;
+        Tools-enabled schema calls use the exact-schema output tool; excluded modes retain assistant-text serialization.
+        Pi tokens resume via --session-id when persistence is enabled;
         persist_session=False uses --no-session and suppresses continuation.
 
         read_only allows read/find/ls/grep. finalization disables tools, substitutes
@@ -736,8 +735,7 @@ class PiBackend:
         session_id: str | None = None
         last_assistant_text: str | None = None
         structured_result: Any = None
-        # Finalized toolResult messages supply transcript order; this tracks only
-        # association/settlement, never proposal order or completion-time ranking.
+        # Finalized toolResult sets transcript order; track association/settlement, never proposal/completion order.
         submission_calls: dict[str, str] = {}
         incomplete_calls: set[str] = set()
         pending_submission: Any = None
@@ -797,8 +795,7 @@ class PiBackend:
 
         # P18 Task 1: closed typed effective-config admission from the exact
         # argv built above. max_turns is accepted-but-not-enforced by Pi (no
-        # native flag) so it stays None. Native schemas validate tool arguments;
-        # they do not constrain provider decoding.
+        # native flag) so it stays None. Native schemas validate tool arguments, not provider decoding.
         yield RequestEvent(
             prompt=full_prompt,
             system_prompt=system_prompt,

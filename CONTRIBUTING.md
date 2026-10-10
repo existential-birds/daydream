@@ -120,11 +120,11 @@ that enters from the production entrypoint (`runner.run` / the CLI) with real
 dependencies — a real temp git worktree, a real filesystem, a real event loop —
 mocking only the external network/API backend, via the `Backend` protocol /
 `create_backend` seam. Tests must assert observable outcomes (exit code, files
-written, fixes applied or declined, transcript state), never that a function was
+written, fixes applied, retained or declined, trajectory and transcript state), never that a function was
 merely called. Unit tests are supplementary, not a substitute.
 
 This is the standard reviewers hold PRs to, and the one the agent-facing
-[AGENTS.md](AGENTS.md) §Testing standard states as mandatory.
+[AGENTS.md](AGENTS.md) §Testing states as mandatory.
 
 ## Exemplars
 

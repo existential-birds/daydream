@@ -54,12 +54,11 @@ async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
                            rationale='The retained consumer disagrees with the removed source contract.',
                            evidence=('consumer.py:1 expects universe; legacy.py:32 returned world.' if renamed else
                                      'consumer.py:1 imports retired.hello; the supplied before-context defined it.'))
-            output['candidates'] = [dict(candidate(disposition='confirmed', finding=finding),
-                                         file='consumer.py', line=1,
-                                         trigger='Run the retained consumer against the greeting contract',
-                                         consequence=('The greeting contract disagrees' if renamed else
-                                                      'ModuleNotFoundError'),
-                                         grounds=finding['evidence'])]
+            output['candidates'] = [candidate(disposition='confirmed', finding=finding, file='consumer.py', line=1,
+                                             trigger='Run the retained consumer against the greeting contract',
+                                             consequence=('The greeting contract disagrees' if renamed else
+                                                          'ModuleNotFoundError'),
+                                             grounds=finding['evidence'])]
 
     await review.finish('python', findings=(title,) if broken else ())
     assert not (repo / old_path).exists()

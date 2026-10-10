@@ -45,8 +45,7 @@ def _diff_block_path(block: str) -> str | None:
     renamed = _DIFF_RENAME_HEADER.search(block)
     if renamed:
         return _unquote_git_path(renamed.group(1))
-    # Unquoted spaces are valid in Git headers. For unchanged path identities,
-    # the symmetric a/ and b/ halves disambiguate a filename containing " b/".
+    # Unquoted Git paths may contain spaces or " b/"; symmetric a/ and b/ halves resolve unchanged identities.
     header = block.partition("\n")[0].removeprefix("diff --git ")
     midpoint = len(header) // 2
     before, after = header[:midpoint], header[midpoint + 1:]

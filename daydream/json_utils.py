@@ -221,8 +221,7 @@ def schema_rejection(value: Any, schema: dict[str, Any], *, candidate_count: int
     if not errors:
         return None
     first = errors[0]
-    # absolute_schema_path contains only host-authored schema keys and indices;
-    # unlike json_path, it cannot carry arbitrary unknown output property names.
+    # absolute_schema_path has only host schema keys/indices; json_path may contain unknown output property names.
     path = '/'.join(str(part) for part in first.absolute_schema_path)
     return SchemaRejection(str(first.validator), path[:512], min(len(errors), 128), min(candidate_count, 128))
 
@@ -357,8 +356,7 @@ def extract_json_by_schema(
         reason = f"{error.validator} at {error.json_path}"
         break
     rejection = schema_rejection(largest[1], schema, candidate_count=len(candidates))
-    # A nested object decoded from an incomplete outer deliverable is not a
-    # complete structured candidate. Only a whole decoded object qualifies.
+    # Retry requires a complete decoded object, not a nested candidate from an incomplete outer deliverable.
     try:
         whole = json.loads(_strip_json_fences(text))
     except (ValueError, TypeError):

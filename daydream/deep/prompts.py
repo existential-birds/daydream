@@ -243,8 +243,7 @@ def _diff_instruction(
 ) -> str:
     """Inline complete stack hunks or point to the full diff artifact.
 
-    Both forms name the persisted hunk index as changed-line authority. Inline
-    assignments may be judged from supplied hunks when they provide enough context.
+    Both use the persisted hunk index as changed-line authority; inline context can suffice for judgment.
     """
     if inline_diff:
         return (
@@ -296,8 +295,7 @@ def _build_review_stage_prompt(*, strategy: str, stack_name: str, files: list[st
         parts.append(f"You are triaging the {stack_name} review's assigned candidate IDs only: "
             + ", ".join(review_stage["assigned_candidate_ids"])
             + ". Use their relevant admitted notes and grounds in the host stage state.")
-        # Default discovery policy would restart an audit. A custom operator policy
-        # still constrains judgment, but cannot expand triage's assigned work.
+        # Default discovery would restart audits; custom triage policy constrains judgment without expanding work.
         defaults = review_profile.build_default_profile().strategies
         if strategy not in {defaults[name].content for name in (
             "discovery.per_stack", "discovery.structural", "discovery.generic_fallback")}:

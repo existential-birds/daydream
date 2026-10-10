@@ -58,8 +58,7 @@ class StageInputFactory:
         self.shared_paths = shared_paths
         self.bundle_capable = bundle_capable
         self.transport = inputs.sanctioned_transport_for(backend, work.repo, read_only=read_only)
-        # Capture hashes through the existing no-follow, bounded streaming
-        # capture. These identities stay host-only, regardless of transport.
+        # Capture identities with bounded no-follow streaming; keep them host-only on both transports.
         self.canonical = tuple(self._canonical(label, path) for label, path in (
             ("canonical-diff", diff_path), ("canonical-index", hunk_index_path)))
         self.full_diff = diff_path.read_text(encoding="utf-8")
@@ -92,8 +91,7 @@ class StageInputFactory:
 
     def _render(self, parts: list[_Part]) -> dict[str, str]:
         files = {part.assignment["file"] for part in parts}
-        # A part's ranges are authoritative for that assignment; do not expose
-        # the rest of a large file's index as required first-pass work.
+        # Part ranges own the assignment; the rest of a large file's index is not required first-pass work.
         index: dict[str, Any] = {}
         for path in sorted(files):
             assignments = [part.assignment for part in parts if part.assignment["file"] == path]
@@ -115,9 +113,8 @@ class StageInputFactory:
                     if matching is not None:
                         selected.append(matching)
                     elif part['new_count'] == 0:
-                        # The canonical posting index intentionally omits empty
-                        # new-side ranges. Review assignments still retain the
-                        # exact frozen diff's old-side deletion authority.
+                        # Canonical posting omits empty new-side ranges; assignments retain the frozen diff's
+                        # exact old-side deletion authority.
                         selected.append({**dict(zip(keys, bounds, strict=True)),
                                          'added': 0, 'removed': part['old_count'], 'old_only': True})
                     else:
@@ -191,8 +188,7 @@ class StageInputFactory:
                 "old_start": old_start, "old_count": old_count, "new_start": new_start, "new_count": new_count}
         if self._remaining_bytes(self._render([_Part(base, header + body)])) >= 0:
             return [_Part(base, header + body)]
-        # Prefer complete diff lines. Very long single lines use ordered UTF-8
-        # fragments with exact byte offsets; none is called a complete hunk.
+        # Prefer whole diff lines; oversized lines use ordered UTF-8 fragments at exact byte offsets, never whole hunks.
         chunks: list[_Part] = []
         rest = body
         byte_offset = 0
@@ -213,8 +209,7 @@ class StageInputFactory:
             chunk = rest[:take]
             chunks.append(_Part({**meta, "segment_index": len(chunks) + 1, "fragment_bytes": len(chunk.encode())},
                                 notice + header + chunk))
-            # Count only completed lines. Fragment offsets retain exact mapping
-            # for lines split inside a segment; all ranges remain the full hunk.
+            # Count completed lines only; fragment offsets map split lines exactly, while ranges retain the full hunk.
             for line in chunk.splitlines(keepends=True):
                 if line_offset == 0:
                     line_kind = line[:1]
@@ -316,8 +311,7 @@ class StageInputFactory:
         if state['stage'] == 'triage':
             contents = {}
         elif state['stage'] == 'integration':
-            # Structure remains one interaction assignment. Inventory is honest
-            # about all changed files; bounded diff parts are supporting context.
+            # Structure is one interaction assignment: inventory names all changed files; bounded diff parts support it.
             inventory = {path: {"hunks": len(self.index.get(path, {}).get('hunks', [])),
                                 "parts": sum(p.assignment['file'] == path for p in self.parts)}
                          for path in self.stack.files}
@@ -327,8 +321,7 @@ class StageInputFactory:
                 contents['hunk-index'] = _json({"status": "partial", "file_count": len(inventory),
                                                "canonical_sha256": self.canonical[1].sha256})
                 statuses.append({"label": "hunk-index", "status": "partial"})
-            # Expose bounded complete supporting parts under exact confinement;
-            # INLINE selects whole parts fitting the same aggregate allowance.
+            # Expose bounded whole parts under exact confinement; INLINE selects those within its aggregate allowance.
             for index, part in enumerate(self.parts):
                 label = f"diff-part-{index:06d}"
                 if self.bundle_capable and self.transport is inputs.SanctionedInputTransport.EXACT_PATHS:
@@ -370,9 +363,8 @@ class StageInputFactory:
             state['supporting_catalog'] = {'path': str(catalog), 'part_count': len(catalog_entries),
                                            'status': 'complete'}
         compact_structure = state['stage'] == 'integration' and self.bundle_capable
-        # The shared selector preserves required priority and uses the actual
-        # transport allowance. Reuse existing identity-bound artifacts instead
-        # of copying advisory bytes or following an unchecked symlink.
+        # Use the transport allowance with required inputs first. Reuse identity-bound artifacts to avoid
+        # copying advisory bytes or following unchecked symlinks.
         before_files = set(state["assigned_files"])
         for file in self.blocks:
             old_path, new_path = self._diff_paths(file)
@@ -408,10 +400,10 @@ class StageInputFactory:
             paths[label] = path
         paths.update(deferred_paths)
         paths.update(catalog_paths)
+        hidden_labels = deferred_paths.keys() | catalog_paths.keys()
         prepared = inputs.prepare_sanctioned_inputs(self.backend, self.work.repo, paths, read_only=self.read_only)
-        prepared = replace(prepared, inputs=tuple(replace(item, prompt_visible=False)
-                                                  if (item.label in deferred_paths or item.label in catalog_paths)
-                                                  else item for item in prepared.inputs))
+        prepared = replace(prepared, inputs=tuple(
+            replace(item, prompt_visible=False) if item.label in hidden_labels else item for item in prepared.inputs))
         if self.bundle_capable and self.transport is inputs.SanctionedInputTransport.EXACT_PATHS:
             # Required assignments travel as exact pointers. Only shared bytes
             # actually inlined consume the inline allowance, including wrappers.
@@ -440,12 +432,11 @@ class StageInputFactory:
             state['context_availability'] = {
                 'supporting_parts': len(deferred_paths), 'supporting_catalogs': len(catalog_paths)}
             statuses = [status for status in statuses if status['status'] != 'complete' or
-                        not (status['label'] in deferred_paths or status['label'] in catalog_paths)]
+                        status['label'] not in hidden_labels]
         state.update(context_inputs=list(paths), context_transport=prepared.transport.value, context_statuses=statuses,
                      canonical_input_identities=self.binding['canonical_inputs'])
         if deferred_paths:
-            state['context_inputs'] = [label for label in paths if label not in deferred_paths
-                                      and label not in catalog_paths]
+            state['context_inputs'] = [label for label in paths if label not in hidden_labels]
         decided = set(state.get('completed_target_ids', []))
         remaining = [part for part in self.parts if part.assignment['target_id'] not in decided]
         state['remaining_work'] = {

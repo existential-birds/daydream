@@ -329,8 +329,8 @@ async def test_failed_canonical_stage_input_preserves_successful_sibling_review(
         assert '<div>universe</div>' in real_read(review.repo / 'App.tsx')
         finding = dict(record(line=1), file='App.tsx', description='Surviving sibling defect',
                        evidence='App.tsx:1 renders universe instead of the greeting contract')
-        output['candidates'] = [dict(candidate(disposition='confirmed', finding=finding), file='App.tsx', line=1,
-                                     grounds=finding['evidence'])]
+        output['candidates'] = [candidate(disposition='confirmed', finding=finding, file='App.tsx', line=1,
+                                         grounds=finding['evidence'])]
 
     monkeypatch.setattr(Path, 'read_text', read)
     await review.finish('python', reason='malformed_artifact', statuses=('failed',),
@@ -530,8 +530,7 @@ async def test_mixed_schema_and_admission_rejection_never_retries_or_loses_prior
             output['candidates'] = [candidate(disposition='confirmed', finding=record())]
             return
         if stage['attempt'] > 1:
-            # A second valid answer demonstrates the erroneous recovery path;
-            # production must never invoke it for a mixed semantic rejection.
+            # A second valid answer would wrongly recover from mixed semantic rejection; production must not invoke it.
             return
         output['unknown_extra'] = None
         output['notes'] = 'FAILED_MIXED_ATTEMPT_MARKER'
@@ -544,8 +543,7 @@ async def test_mixed_schema_and_admission_rejection_never_retries_or_loses_prior
         else:
             path = stage['assigned_files'][0]
             finding = dict(record(line=1), file=path, evidence=f'{path}:1 changes VALUE from 0 to 1')
-            item = dict(candidate(disposition='confirmed', finding=finding), file=path, line=1,
-                        grounds=finding['evidence'])
+            item = candidate(disposition='confirmed', finding=finding, file=path, line=1, grounds=finding['evidence'])
             if fault == 'unknown-candidate':
                 item['candidate_id'] = 'foreign-candidate'
             elif fault == 'grounds-missing':

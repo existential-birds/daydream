@@ -137,9 +137,8 @@ def review_deadline(*, discovery: bool) -> float | None:
 class ReviewInvestigationBudget:
     """Observed spend and an absolute deadline for one staged reviewer.
 
-    The event stream exposes starts after native execution may have begun. This
-    tracks received observations, including a start that exceeds the allowance;
-    it does not promise prospective tool admission or unseen buffered events.
+    Native execution may precede its start event. Track received starts, including over-limit ones; this ledger
+    promises neither prospective tool admission nor unseen buffered events.
     """
 
     limits: ReviewLimits
