@@ -434,12 +434,9 @@ Operator note: `LANGSMITH_WORKSPACE_ID` must be the LangSmith *workspace*
 id — a project id yields HTTP 403 because it is forwarded as
 `x-tenant-id`.
 
-Staged review evidence reports content-free nonblocking unavailable-read and
-blocking opaque/pending receipt counts (see the field contract). Pi's typed
-`no_extensions` and `source_tool_enabled` request facts support completed source-free
-lookups. Checkout absence requires a frozen complete HEAD inventory; zero-match
-source lookups require an executed packet-bound disposition independently checked
-by evidence. Length-terminated call inputs remain typed incomplete across later turns;
-failed starts stay charged and failed receipts supply no source coverage. A single
-native missing-submission continuation retains the same attempt and original
-allowances, with any additional provider generations recorded normally.
+Staged review traces record submission transitions and sanctioned input counts
+without source-read proof counters. Pi's typed `no_extensions` request fact records
+read-only isolation of the packaged output extension when applied. Length-terminated
+call inputs remain typed incomplete across later turns; failed starts stay charged.
+A single native missing-submission continuation retains the same attempt and
+original allowances, with any additional provider generations recorded normally.

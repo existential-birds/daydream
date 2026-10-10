@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import re
-import shlex
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
@@ -11,14 +10,12 @@ from typing import Any
 import anyio
 import pytest
 
-from daydream import git_ops
 from daydream.backends import (
     AgentEvent,
     ContinuationToken,
     MaxTurnsError,
     ResultEvent,
     TextEvent,
-    ToolResultEvent,
     ToolStartEvent,
 )
 from daydream.deep.records import record_issues_or_empty, record_uid, stack_name_from_uid
@@ -32,38 +29,6 @@ def review_stage_state(prompt: str) -> dict[str, Any] | None:
     _, marker, payload = prompt.partition("Host review stage:\n")
     state: dict[str, Any] | None = json.JSONDecoder().raw_decode(payload)[0] if marker else None
     return state
-
-
-def completed_stage_reads(cwd: Path, stage: dict[str, Any]) -> list[AgentEvent]:
-    """Perform the assigned snapshot source reads at the external provider seam."""
-    events: list[AgentEvent] = []
-    projected: set[str] = set()
-    accesses = stage.get('source_access', [])
-    for index, window in enumerate(accesses):
-        access = window.get('access', {})
-        source_path = access.get('path')
-        preferred = (window['side'] == 'after' or not any(
-            other['file'] == window['file'] and other['side'] == 'after' for other in accesses))
-        if (source_path is None or window['file'] not in stage['assigned_files']
-                or not (window['read_required'] or 'reuse' in window
-                        or stage['stage'] == 'integration' and preferred)):
-            continue
-        call = ToolStartEvent(id=f'source-window-{index}', name='Read', input={'file_path': source_path})
-        events.extend((call, ToolResultEvent(id=call.id, output=Path(source_path).read_text(), is_error=False)))
-        projected.add(window['file'])
-    for path in stage['assigned_files']:
-        if path in projected:
-            continue
-        if (cwd / path).is_file():
-            call = ToolStartEvent(id=f'source-{path}', name='Read', input={'file_path': path})
-            source = (cwd / path).read_text()
-        else:
-            revision = stage['analyzed_revision']['merge_base_sha']
-            call = ToolStartEvent(id=f'source-{path}', name='Bash',
-                                  input={'command': 'git show ' + shlex.quote(f'{revision}:{path}')})
-            source = git_ops.show(cwd, revision, path).decode("utf-8")
-        events.extend((call, ToolResultEvent(id=call.id, output=source, is_error=False)))
-    return events
 
 
 def stage_result(stage: dict[str, Any], *, candidates: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -251,8 +216,6 @@ class StubBackend:
         # Fail exploration specialists: pre_scan must degrade to incomplete
         # artifacts without a cache key.
         self.fail_exploration: bool = False
-        # Paired source reads let recovery tests exercise real review evidence.
-        self.per_stack_emit_reads: bool = False
         # Per-kind author/repair spec queue; repeat its last entry when exhausted.
         # An absent queue returns an empty spec, which grounds to an omission.
         self.diagram_specs: dict[str, list[dict[str, Any]]] = {}
@@ -301,17 +264,6 @@ class StubBackend:
             return "flowchart", False
         return None
 
-
-    @staticmethod
-    def _stack_scope_files(prompt: str) -> list[str]:
-        """Split the comma-separated Assigned files marker in a scope instruction."""
-        state = review_stage_state(prompt)
-        if state is not None:
-            return [str(path) for path in state["assigned_files"]]
-        m = re.search(r"Assigned files:\s*([^\n]+)", prompt)
-        if m is None:
-            return []
-        return [part.strip() for part in m.group(1).split(",") if part.strip()]
 
     def _tick(self) -> None:
         """Charge one configured event step to the injected clock, if present."""
@@ -522,15 +474,6 @@ class StubBackend:
                 issue.update(file=state['assigned_files'][0], evidence=f"{state['assigned_files'][0]}:1")
             issues: list[dict[str, Any]] = self._apply_parse_by_stack_override(prompt, issue)
             payload = review_stage_result(prompt, issues)
-            if state is not None:
-                files = sorted(set(state['assigned_files']) | {item['file'] for item in payload['candidates']})
-                for event in completed_stage_reads(cwd, {**state, 'assigned_files': files}):
-                    yield event
-            elif self.per_stack_emit_reads:
-                for scope_file in self._stack_scope_files(prompt):
-                    yield ToolStartEvent(id=f"read-{scope_file}", name="Read", input={"file_path": scope_file})
-                    yield ToolResultEvent(id=f"read-{scope_file}", output=(cwd / scope_file).read_text(),
-                                          is_error=False)
             yield TextEvent(text="")
             yield ResultEvent(structured_output=payload, continuation=None,)
             return

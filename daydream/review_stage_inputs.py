@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shlex
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -14,7 +13,6 @@ from daydream.backends import Backend
 from daydream.deep.detection import StackAssignment
 from daydream.deep.diff import _DIFF_MINUS_HEADER, _DIFF_PLUS_HEADER, iter_diff_blocks
 from daydream.git_ops.models import GitError
-from daydream.git_ops.queries import ls_tree_files
 from daydream.git_ops.source import frozen_source
 from daydream.hunk_index import _HUNK_HEADER, _unquote_git_path
 from daydream.json_utils import atomic_write_bytes
@@ -25,14 +23,12 @@ from daydream.prompt_budget import (
     PreparedSanctionedInputs,
     SanctionedInputTransport,
     SanctionedInputUnavailable,
-    SourceAccessUnavailable,
     _capture_input,
     inline_section_emitted_bytes,
     prepare_sanctioned_inputs,
     sanctioned_transport_for,
     select_advisory_inputs,
 )
-from daydream.review_source import SourceRecipe, SourceWindow, source_line_bytes
 from daydream.workspace import WorkContext
 
 _EXACT_PATH_ASSIGNMENT_MAX_BYTES = 24 * 1024
@@ -64,6 +60,7 @@ class StageInputFactory:
         bundle_capable: bool = False,
     ) -> None:
         self.backend, self.work, self.stack = backend, work, stack
+        self.revision = revision
         self.session, self.allow_standalone, self.read_only = artifact_session, allow_standalone, read_only
         self.shared_paths = shared_paths
         self.bundle_capable = bundle_capable
@@ -91,10 +88,6 @@ class StageInputFactory:
         self.assignment_batches = self._batches()
         self.current_paths: dict[str, Path] = {}
         self.blocks = dict(iter_diff_blocks(self.full_diff))
-        # Normal source tools already permit repository dependency inspection.
-        # Bind those receipts to this captured tree without expanding the Pi
-        # packet or publishing the repository inventory in every prompt.
-        self.repository_files = tuple(ls_tree_files(work.repo, revision['head_sha'], strict=True))
 
     @staticmethod
     def _canonical(label: str, path: Path) -> PreparedSanctionedInput:
@@ -277,6 +270,42 @@ class StageInputFactory:
         atomic_write_bytes(path, text.encode(), fsync=True, dir_fsync=True, mode=0o600)
         return path
 
+    def _before_context(self, files: set[str], directory: Path,
+                        statuses: list[dict[str, str]]) -> dict[str, Path]:
+        """Offer bounded ordinary file context for old paths file-only tools cannot reach."""
+        if type(self.backend).__name__ not in {"PiBackend", "OspreyBackend"}:
+            return {}
+        candidates: dict[str, Path] = {}
+        for index, file in enumerate(sorted(files)):
+            block = self.blocks.get(file, "")
+            old_header = _DIFF_MINUS_HEADER.search(block)
+            new_header = _DIFF_PLUS_HEADER.search(block)
+            old_path = (_unquote_git_path(old_header[1].rstrip("\t")).removeprefix("a/")
+                        if old_header else file)
+            new_path = (_unquote_git_path(new_header[1].rstrip("\t")).removeprefix("b/")
+                        if new_header else file)
+            rename_from = next((line[len("rename from "):] for line in block.splitlines()
+                                if line.startswith("rename from ")), None)
+            if rename_from is not None:
+                old_path = _unquote_git_path(rename_from)
+            if old_path == "/dev/null" or not (new_path == "/dev/null" or old_path != new_path):
+                continue
+            label = f"before-context-{index:04d}"
+            try:
+                _, raw = frozen_source(self.work.repo, self.revision["merge_base_sha"], old_path)
+                text = raw.decode("utf-8")
+                if len(raw) > 64 * 1024:
+                    raise UnicodeError("optional context exceeds its bound")
+            except (GitError, UnicodeError):
+                statuses.append({"label": label, "status": "omitted", "file": file})
+                continue
+            captured_context = (
+                f"# Captured ordinary context\n# original_path: {old_path}\n# side: before\n"
+                f"# revision: {self.revision['merge_base_sha']}\n\n{text}"
+            )
+            candidates[label] = self._write(directory / f"{label}.txt", captured_context)
+        return candidates
+
     def _supporting_catalog(
         self, directory: Path, entries: list[dict[str, Any]], *, namespace: str = 'supporting',
         entry_key: str = 'parts', count_key: str = 'part_count',
@@ -317,190 +346,18 @@ class StageInputFactory:
         return Path(level[0]['path']), captured
 
     def _access_guide(self, state: dict[str, Any], prepared: PreparedSanctionedInputs) -> str:
-        """Persist only captured exact authority, without clipping required access."""
-        guide: dict[str, Any] = {'stage': state['stage'], 'contexts': []}
-        for key in ('source_catalog', 'supporting_catalog', 'supporting_bundle'):
-            if key in state:
-                guide[key] = state[key]
-        guide['required_source'] = [
-            {key: entry[key] for key in ('file', 'side', 'start_line', 'end_line', 'start_byte', 'end_byte', 'access')}
-            for entry in state['source_access'] if entry['read_required'] and state['stage'] != 'integration'
-        ]
-        if state['stage'] == 'integration' and 'source_catalog' in guide:
-            guide['required_source'] = 'Use catalog windows marked read_required; relevant source still needs receipts.'
-        if len(_json(guide).encode()) > 8192:
-            raise SanctionedInputUnavailable('required persistent source access exceeds its bounded allowance')
-        omitted: list[str] = []
+        """Keep compact pointers to assignment and ordinary context inputs."""
+        contexts = []
         for item in prepared.inputs:
-            if item.source is not None or not item.prompt_visible:
+            if not item.prompt_visible:
                 continue
-            context: dict[str, Any] = {'label': item.label, 'status': 'complete'}
+            context: dict[str, Any] = {"label": item.label}
             if prepared.transport is SanctionedInputTransport.EXACT_PATHS:
-                context['path'] = str(item.path)
-                if item.inline_advisory:
-                    context['initial_context'] = 'complete inline'
+                context["path"] = str(item.path)
             else:
-                context['transport'] = 'complete inline'
-            candidate = {**guide, 'contexts': [*guide['contexts'], context]}
-            # Reserve room to report optional omissions explicitly.
-            if len(_json(candidate).encode()) <= 7168:
-                guide = candidate
-            else:
-                omitted.append(item.label)
-        if omitted:
-            guide['unrepresented_optional_context'] = omitted
-        if state['stage'] == 'integration' and 'source_catalog' not in guide:
-            # Custom builders keep their full initial inventory and transport.
-            # Do not turn an additive guide into a new whole-change input gate,
-            # or invent a catalog grant on an unsupported/inline transport.
-            guide['source_inventory'] = {'transport': 'initial supplied source_access',
-                                          'windows': len(state['source_access']),
-                                          'read_required_windows': sum(entry['read_required']
-                                                                       for entry in state['source_access']),
-                                          'persistent_arguments': 'unrepresented; use supplied source_access'}
-        if len(_json(guide).encode()) > 8192:
-            raise SanctionedInputUnavailable('persistent access guide exceeds its bounded allowance')
-        return _json(guide)
-
-    def _source_windows(self, parts: list[_Part], directory: Path,
-                        statuses: list[dict[str, Any]], *, required_windows: bool | None = None) -> SourceRecipe:
-        """Freeze side-specific source, with bounded enclosing context for large parts."""
-        windows: list[SourceWindow] = []
-        frozen: dict[tuple[str, str], tuple[str, bytes]] = {}
-        for part in parts:
-            assignment = part.assignment
-            path = assignment['file']
-            block = self.blocks.get(path, '')
-            side_paths: dict[str, str | None] = {}
-            for side, pattern, prefix in (('before', _DIFF_MINUS_HEADER, 'a/'),
-                                          ('after', _DIFF_PLUS_HEADER, 'b/')):
-                match = pattern.search(block)
-                selected = _unquote_git_path(match[1].rstrip('\t')) if match else path
-                side_paths[side] = None if selected == '/dev/null' else selected.removeprefix(prefix)
-            # Rename-only blocks have no ---/+++ headers.
-            for side, marker in (('before', 'rename from '), ('after', 'rename to ')):
-                rename = next((line[len(marker):] for line in block.splitlines() if line.startswith(marker)), None)
-                if rename is not None:
-                    side_paths[side] = _unquote_git_path(rename)
-            old_only = assignment.get('new_count') == 0 and assignment.get('old_count', 0) > 0
-            if assignment['kind'] == 'continuation':
-                # _HUNK_HEADER is line-oriented; split to retain byte exact origins.
-                chunks: list[str] = []
-                for line in block.splitlines(keepends=True):
-                    if _HUNK_HEADER.match(line):
-                        chunks.append('')
-                    elif chunks:
-                        chunks[-1] += line
-                ordinal = assignment.get('hunk_index', 0)
-                if ordinal < len(chunks):
-                    hunk_body = chunks[ordinal].encode()
-                    first = assignment.get('fragment_offset', 0)
-                    selected = hunk_body[first:first + assignment.get('fragment_bytes', 0)]
-                    selected_lines = selected.splitlines()
-                    kinds = {line[:1] for line in selected_lines[
-                        1 if assignment.get('fragment_line_offset', 0) else 0:]}
-                    if assignment.get('fragment_line_offset', 0):
-                        origin = hunk_body.rfind(b'\n', 0, first) + 1
-                        kinds.add(hunk_body[origin:origin + 1])
-                    old_only = b'-' in kinds and b'+' not in kinds
-            required_side = 'before' if side_paths['after'] is None or old_only else 'after'
-            for side in ('before', 'after'):
-                source_path = side_paths[side]
-                if source_path is None:
-                    continue
-                revision = self.binding['analyzed_revision']['merge_base_sha' if side == 'before' else 'head_sha']
-                try:
-                    key = (revision, source_path)
-                    if key not in frozen:
-                        frozen[key] = frozen_source(self.work.repo, revision, source_path)
-                    oid, raw = frozen[key]
-                except GitError:
-                    if side == required_side:
-                        raise SourceAccessUnavailable('required frozen source is unavailable') from None
-                    statuses.append({'label': f'source-{side}', 'file': path, 'side': side,
-                                     'status': 'unavailable', 'read_required': False})
-                    continue
-                try:
-                    raw.decode('utf-8')
-                except UnicodeError:
-                    if side == required_side:
-                        raise SourceAccessUnavailable('required frozen source is not UTF-8') from None
-                    continue
-                start, end = self._window_bounds(raw, part, side)
-                body = raw[start:end].decode('utf-8')
-                start_line = raw[:start].count(b'\n') + 1
-                end_line = max(start_line, raw[:end].count(b'\n') + int(end > 0 and raw[end - 1:end] != b'\n'))
-                window = SourceWindow(
-                    target_ids=(assignment['target_id'],), file=path, source_path=source_path,
-                    side='before' if side == 'before' else 'after', revision=revision,
-                    content_sha256=hashlib.sha256(raw).hexdigest(), blob_oid=oid,
-                    start_line=start_line, end_line=end_line, start_byte=start, end_byte=end, body=body,
-                    read_required=side == required_side if required_windows is None else required_windows,
-                )
-                # Reuse one full source projection across multiple units in this invocation.
-                same = next((i for i, prior in enumerate(windows)
-                             if replace(prior, target_ids=window.target_ids, projection=None) == window), None)
-                if same is not None:
-                    windows[same] = replace(windows[same], target_ids=tuple(dict.fromkeys(
-                        (*windows[same].target_ids, *window.target_ids))))
-                    continue
-                if self.transport is SanctionedInputTransport.EXACT_PATHS:
-                    projection = self._write(directory / f'source-{len(windows):06d}.txt', body)
-                    window = replace(window, projection=projection)
-                windows.append(window)
-        if sum(len(window.body.encode()) for window in windows) > 8 * 1024 * 1024:
-            raise SanctionedInputUnavailable('invocation source recipe exceeds retained source bound')
-        recipe = SourceRecipe(tuple(windows), self.work.repo,
-                              tuple(sorted(set(self.stack.files + self.stack.frontier_files))),
-                              self.binding['analyzed_revision']['head_sha'], self.repository_files,
-                              repository_inventory_revision=self.binding['analyzed_revision']['head_sha'])
-        recipe.revalidate()
-        return recipe
-
-    def _source_access(self, window: SourceWindow) -> dict[str, Any]:
-        access: dict[str, Any] = {}
-        if window.projection is not None:
-            access['path'] = str(window.projection)
-        if getattr(self.backend, 'supports_source_recipe', False) is True:
-            access.update(tool='read_source', arguments={'target_id': window.target_ids[0], 'side': window.side})
-        elif not access and getattr(self.backend, 'read_only_disposable_clone', False) is True:
-            access.update(tool='exec_command', arguments={'cmd': 'git show ' + shlex.quote(
-                f'{window.revision}:{window.source_path}')})
-        elif not access and window.side == 'after':
-            access.update(tool='Read', arguments={'file_path': window.source_path, 'offset': window.start_line,
-                                                  'limit': window.end_line - window.start_line + 1})
-        elif not access:
-            access['status'] = 'unavailable'
-        return window.metadata() | {'read_required': window.read_required, 'access': access}
-
-    @staticmethod
-    def _window_bounds(raw: bytes, part: _Part, side: str) -> tuple[int, int]:
-        if len(raw) <= 128 * 1024:
-            return 0, len(raw)
-        lines = source_line_bytes(raw)
-        key = 'old' if side == 'before' else 'new'
-        assignment = part.assignment
-        first = max(1, assignment.get(f'{key}_line', assignment.get(f'{key}_start', 1)))
-        count = assignment.get(f'{key}_count', len(lines))
-        # Ordered continuation payloads keep their own line/fragment origin.
-        if assignment['kind'] == 'continuation':
-            fragment = part.diff.split('\n')
-            header = next((index for index, line in enumerate(fragment) if _HUNK_HEADER.match(line)), -1)
-            count = max(1, len(fragment[header + 1:]))
-        begin_line, end_line = max(1, first - 32), min(len(lines), first + max(1, count) + 32)
-        start = sum(len(line) for line in lines[:begin_line - 1])
-        end = sum(len(line) for line in lines[:end_line])
-        if end - start > 128 * 1024:
-            origin = sum(len(line) for line in lines[:first - 1])
-            offset = max(0, assignment.get('fragment_line_offset', 0) - 1)
-            start = max(start, origin + offset - 4096)
-            end = min(end, origin + offset + max(assignment.get('fragment_bytes', 0), 48 * 1024) + 4096)
-            # Move inward only to valid UTF-8 boundaries.
-            while start < end and raw[start] & 0xC0 == 0x80:
-                start += 1
-            while end < len(raw) and end > start and raw[end] & 0xC0 == 0x80:
-                end -= 1
-        return start, end
+                context["transport"] = "inline"
+            contexts.append(context)
+        return _json({"stage": state["stage"], "contexts": contexts})
 
     def prepare(self, state: dict[str, Any]) -> PreparedSanctionedInputs | None:
         self._revalidate_canonical()
@@ -565,34 +422,37 @@ class StageInputFactory:
                                for index, part in enumerate(self.parts)]
             catalog, catalog_paths = self._supporting_catalog(directory, catalog_entries)
             state['supporting_catalog'] = {'path': str(catalog), 'part_count': len(catalog_entries),
-                                           'status': 'complete', 'read_required': False}
-        assigned_source_files = {part.assignment['file'] for part in parts}
+                                           'status': 'complete'}
         compact_structure = state['stage'] == 'integration' and self.bundle_capable
-        source_parts = [*parts, *self.parts] if compact_structure else parts
-        recipe = self._source_windows(source_parts, directory, statuses,
-                                      required_windows=False if compact_structure else None)
-        source_catalog_paths: dict[str, Path] = {}
-        if (state['stage'] == 'integration' and getattr(self.backend, 'supports_source_recipe', False) is True
-                and self.transport is SanctionedInputTransport.EXACT_PATHS):
-            source_entries = [self._source_access(window) for window in recipe.windows]
-            for entry in source_entries:
-                entry['access'].pop('path', None)
-            source_catalog, source_catalog_paths = self._supporting_catalog(
-                directory, source_entries, namespace='source', entry_key='windows', count_key='window_count')
-            state['source_catalog'] = {'path': str(source_catalog), 'window_count': len(source_entries),
-                                       'status': 'complete', 'read_required': False}
         # The shared selector preserves required priority and uses the actual
         # transport allowance. Reuse existing identity-bound artifacts instead
         # of copying advisory bytes or following an unchecked symlink.
+        before_files = set(state["assigned_files"])
+        for file, block in self.blocks.items():
+            old_header = _DIFF_MINUS_HEADER.search(block)
+            new_header = _DIFF_PLUS_HEADER.search(block)
+            old_path = (_unquote_git_path(old_header[1].rstrip("\t")).removeprefix("a/")
+                        if old_header else file)
+            new_path = (_unquote_git_path(new_header[1].rstrip("\t")).removeprefix("b/")
+                        if new_header else file)
+            if new_path == "/dev/null" and old_path != "/dev/null":
+                before_files.add(file)
+        before_context = self._before_context(before_files, directory, statuses)
         selection = select_advisory_inputs(
             self.backend, self.work.repo,
             [AdvisoryCandidate(label, path) for label, path in paths.items()]
-            + [AdvisoryCandidate(label, path) for label, path in shared_paths.items() if path is not None],
+            + [AdvisoryCandidate(label, path) for label, path in shared_paths.items() if path is not None]
+            + [AdvisoryCandidate(label, path) for label, path in before_context.items()],
             read_only=self.read_only,
         )
         admitted = selection.selected_paths()
         if not paths.keys() <= admitted.keys():
             raise SanctionedInputUnavailable("required stage inputs exceed the transport allowance")
+        for label, before_path in before_context.items():
+            if label in admitted:
+                paths[label] = before_path
+            else:
+                statuses.append({"label": label, "status": "omitted", "reason": "exceeds-transport-allowance"})
         aggregate = sum(len(text.encode()) for text in contents.values())
         for label, path in shared_paths.items():
             if path is None:
@@ -609,14 +469,9 @@ class StageInputFactory:
             paths[label] = path
         paths.update(deferred_paths)
         paths.update(catalog_paths)
-        paths.update(source_catalog_paths)
-        paths.update({f'source-{index:06d}': window.projection for index, window in enumerate(recipe.windows)
-                      if window.projection is not None})
-        prepared = prepare_sanctioned_inputs(self.backend, self.work.repo, paths, read_only=self.read_only,
-                                             source_recipe=recipe)
+        prepared = prepare_sanctioned_inputs(self.backend, self.work.repo, paths, read_only=self.read_only)
         prepared = replace(prepared, inputs=tuple(replace(item, prompt_visible=False)
-                                                  if (item.label in deferred_paths or item.label in catalog_paths
-                                                      or item.label in source_catalog_paths)
+                                                  if (item.label in deferred_paths or item.label in catalog_paths)
                                                   else item
                                                   for item in prepared.inputs))
         if self.bundle_capable and self.transport is SanctionedInputTransport.EXACT_PATHS:
@@ -644,34 +499,15 @@ class StageInputFactory:
         statuses.extend({"label": label, "status": "complete"} for label in paths if label not in declared_status)
         if compact_structure:
             state['context_availability'] = {
-                'source_windows': len(recipe.windows), 'supporting_parts': len(deferred_paths),
-                'supporting_catalogs': len(catalog_paths),
-                'source_catalogs': len(source_catalog_paths),
+                'supporting_parts': len(deferred_paths), 'supporting_catalogs': len(catalog_paths),
             }
             statuses = [status for status in statuses if status['status'] != 'complete' or
-                        not (status['label'].startswith('source-') or status['label'] in deferred_paths
-                             or status['label'] in catalog_paths)]
+                        not (status['label'] in deferred_paths or status['label'] in catalog_paths)]
         state.update(context_inputs=list(paths), context_transport=prepared.transport.value, context_statuses=statuses,
                      canonical_input_identities=self.binding['canonical_inputs'])
         if deferred_paths:
             state['context_inputs'] = [label for label in paths if label not in deferred_paths
-                                      and label not in catalog_paths and label not in source_catalog_paths
-                                      and not label.startswith('source-')]
-        state['source_access'] = [self._source_access(window) for window in recipe.windows
-                                  if window.file in assigned_source_files]
-        state['available_source_files'] = {
-            'files': sorted(set(recipe.allowed_files) - assigned_source_files),
-            'side': 'after', 'revision': recipe.head_revision,
-            'access': 'normal repository reads; frozen before windows use source_access only',
-        }
-        if state['stage'] == 'integration' and self.bundle_capable:
-            state['source_access'] = [{key: value for key, value in entry.items()
-                                       if key in {'target_ids', 'file', 'source_path', 'side', 'start_line', 'end_line',
-                                                  'start_byte', 'end_byte', 'access'}} | {'read_required': False}
-                                      for entry in state['source_access']]
-            if getattr(self.backend, 'supports_source_recipe', False) is True:
-                for entry in state['source_access']:
-                    entry['access'].pop('path', None)
+                                      and label not in catalog_paths]
         units = sum(len(batch) for batch in self.assignment_batches)
         decided = set(state.get('completed_target_ids', []))
         remaining = [part for part in self.parts if part.assignment['target_id'] not in decided]
@@ -680,11 +516,6 @@ class StageInputFactory:
             'files': len({part.assignment['file'] for part in remaining}),
             'stages': 1 if state['stage'] == 'integration' else sum(
                 any(part['target_id'] not in decided for part in batch) for batch in self.assignment_batches),
-            'current_stage_source_windows': sum(window.read_required for window in recipe.windows),
-            'current_stage_mandatory_read_estimate': (0 if self.transport is SanctionedInputTransport.INLINE else
-                                         1 if self.bundle_capable else 3) + sum(
-                                             window.read_required for window in recipe.windows),
-            'transport_floor_only': True,
         }
         state['access_guide'] = self._access_guide(state, prepared)
         return prepared

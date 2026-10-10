@@ -18,7 +18,7 @@ from daydream.severity import SEVERITY_RUBRIC
 
 
 def build_review_stage_system_instruction(review_stage: dict[str, Any]) -> str:
-    """Persist the stage's source and output duties through native compaction."""
+    """Persist assignment identities and output duties through native compaction."""
     access_guide = review_stage.get('access_guide', '{}')
     if not isinstance(access_guide, str):
         access_guide = '{}'
@@ -30,7 +30,6 @@ def build_review_stage_system_instruction(review_stage: dict[str, Any]) -> str:
             'candidate_ids': review_stage.get('assigned_candidate_ids', []),
             'closed_candidate_ids': review_stage.get('closed_candidate_ids', []),
             'closed_decisions': review_stage.get('closed_decisions', []),
-            'admitted_source_windows': review_stage.get('admitted_source_windows', []),
         }, ensure_ascii=False) + '.\nPersistent exact access guide (supporting metadata): '
         + access_guide
     )
@@ -40,9 +39,9 @@ def _confidence_and_convention_instructions(*, stage_scoped: bool = False) -> st
     """Shared confidence, convention, and error-handling rules, appended after Exploration Context."""
     confidence = (
         "For a confirmed candidate's finding, set `confidence` and `rationale`:\n"
-        "- HIGH: directly verified by completed source evidence in this review or relevant admitted "
-        "evidence. Name the precise source location and applicable convention or dependency.\n"
-        "- MEDIUM: supported by concrete source evidence with remaining uncertainty about impact.\n\n"
+        "- HIGH: directly supported by the supplied change or ordinary investigation. Name the precise code location "
+        "and applicable convention or dependency.\n"
+        "- MEDIUM: supported by concrete code with remaining uncertainty about impact.\n\n"
         if stage_scoped else
         "For every issue you report, you MUST set `confidence` and `rationale`:\n"
         "- HIGH: directly verified by a specific entry in the Exploration Context above. "
@@ -51,7 +50,7 @@ def _confidence_and_convention_instructions(*, stage_scoped: bool = False) -> st
         "- MEDIUM: consistent with the Exploration Context but not pinned to a specific entry.\n\n"
     )
     grounding = (
-        "Use the staged contract's complete associated source evidence for both findings and clean claims. "
+        "Use the supplied change and useful ordinary investigation for both findings and clean decisions. "
         if stage_scoped else
         "You are reviewing AI-generated code. Be strict. Only report an issue you can ground "
         "in evidence — the diff itself or a specific Exploration Context entry. "
@@ -151,7 +150,8 @@ def _exploration_pointer(exploration_dir: Path | None, *, fixer: bool = False) -
             f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
             "Shared exploration context (complete captured artifacts; do not re-read these files):\n"
             + json.dumps({"summary": summary, "affected_files": affected}, ensure_ascii=False)
-            + "\nAssigned source files still require same-review reads; this context does not establish clean coverage."
+            + "\nMake explicit decisions for every assigned target; optional investigation "
+            "does not substitute for them."
         )
     return (
         f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
@@ -159,9 +159,8 @@ def _exploration_pointer(exploration_dir: Path | None, *, fixer: bool = False) -
         f"deterministic structural/import map at {exploration_dir / 'affected_files.md'} "
         "as bounded context for this review. For host artifacts: Do not infer or enumerate sibling "
         "artifact files.\n"
-        "Assigned source files are different: read the changed hunks in all assigned source files "
-        "with the full enclosing symbol or configuration section; expand only as needed "
-        "to resolve concrete candidates.\n"
+        "Use the supplied changed hunks as the starting context. Inspect enclosing symbols or "
+        "other sections when useful to resolve concrete candidates.\n"
     )
 
 

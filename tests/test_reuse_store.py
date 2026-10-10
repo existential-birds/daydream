@@ -8,6 +8,7 @@ completion marker written last. A lookup is a hit only when all three agree.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from daydream.deep import reuse_store
@@ -57,6 +58,20 @@ def test_entry_is_a_hit_only_when_payload_and_marker_agree(tmp_path: Path) -> No
     miss = store.lookup("a" * 64)
     assert isinstance(miss, reuse_store.ReuseMiss) and "marker" in miss.reason
     assert isinstance(store.lookup("b" * 64), reuse_store.ReuseMiss)  # unknown key
+
+def test_obsolete_manifest_format_is_a_cache_miss(tmp_path: Path) -> None:
+    store = _cache(tmp_path)
+    key = "c" * 64
+    _seed_entry(store, key, last_used_at=1_000)
+    manifest_path = reuse_store.entry_manifest_path(store.store_dir, key)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["format"] = 1
+    manifest_path.write_text(json.dumps(manifest))
+
+    miss = store.lookup(key)
+
+    assert isinstance(miss, reuse_store.ReuseMiss)
+    assert miss.reason == "manifest format mismatch"
 
 def test_prune_evicts_oldest_last_used_and_spares_the_fresh_entry(tmp_path: Path) -> None:
     store = _cache(tmp_path, budget=reuse_store.ReuseBudget(max_entries=2, max_bytes=10**9, max_age_seconds=3600))

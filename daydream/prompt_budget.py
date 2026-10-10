@@ -13,7 +13,6 @@ from typing import Mapping, Sequence
 
 from daydream.artifact_visibility import ArtifactVisibilityError
 from daydream.backends import AUDIT_ROOT_ISOLATION
-from daydream.review_source import SourceRecipe, SourceWindow
 
 # Upper bound for inlined diff text. Above this bound, prompts retain an
 # on-disk diff pointer rather than embedding the diff.
@@ -32,10 +31,6 @@ _SANCTIONED_INLINE_CLOSE_TAG = "</sanctioned-input>"
 
 class SanctionedInputUnavailable(ArtifactVisibilityError):
     """A declared model input could not be captured without widening access."""
-
-
-class SourceAccessUnavailable(SanctionedInputUnavailable):
-    """Frozen source could not be served or independently revalidated."""
 
 
 class SanctionedInputTransport(str, Enum):
@@ -58,7 +53,6 @@ class PreparedSanctionedInput:
     size: int
     mtime_ns: int
     pointer_only: bool = False
-    source: SourceWindow | None = None
     prompt_visible: bool = True
     inline_advisory: bool = False
 
@@ -72,21 +66,15 @@ class PreparedSanctionedInputs:
     backend_identity: object
     cwd: Path
     read_only: bool
-    source_recipe: SourceRecipe | None = None
 
     def render(self) -> str:
         """Render deterministic path pointers or captured inline bytes."""
         if not self.inputs:
             return ""
         if self.transport is SanctionedInputTransport.EXACT_PATHS:
-            lines = [
-                "The exact-file restriction below applies to host phase artifacts only. "
-                "It does not restrict repository source reads permitted by the assigned task; "
-                "do not browse other host artifacts.",
-                "Sanctioned phase inputs (read only these exact files):",
-            ]
+            lines = ["Sanctioned phase inputs (read only these exact files):"]
             lines.extend(f"- {item.label}: {item.path}" for item in self.inputs
-                         if item.source is None and item.prompt_visible and not item.inline_advisory)
+                         if item.prompt_visible and not item.inline_advisory)
             for item in self.inputs:
                 if item.inline_advisory:
                     lines.extend([_sanctioned_inline_open_tag(item.label), item.text or "",
@@ -146,7 +134,7 @@ class PreparedSanctionedInputs:
             limit = min(remaining, 12000)
             current = _capture_input(item.label, item.path, self.transport, aggregate, text_budget=limit)
             aggregate += current.size
-            if replace(current, text=item.text, source=item.source, prompt_visible=item.prompt_visible,
+            if replace(current, text=item.text, prompt_visible=item.prompt_visible,
                        inline_advisory=item.inline_advisory) != item:
                 raise SanctionedInputUnavailable(f"sanctioned input {item.label!r} changed before finalization")
             text = current.text or ""
@@ -164,8 +152,6 @@ class PreparedSanctionedInputs:
         """Fail closed if call identity or any captured file changed."""
         if backend is not self.backend_identity:
             raise SanctionedInputUnavailable("sanctioned input backend changed")
-        if self.source_recipe is not None:
-            self.source_recipe.revalidate()
         canonical_cwd = _canonical_cwd(cwd)
         if canonical_cwd != self.cwd or read_only is not self.read_only:
             raise SanctionedInputUnavailable("sanctioned input call mode changed")
@@ -190,7 +176,7 @@ class PreparedSanctionedInputs:
             )
             if not item.pointer_only:
                 aggregate += current.size
-            if replace(current, source=item.source, prompt_visible=item.prompt_visible,
+            if replace(current, prompt_visible=item.prompt_visible,
                        inline_advisory=item.inline_advisory) != item:
                 raise SanctionedInputUnavailable(f"sanctioned input {item.label!r} changed before model execution")
 
@@ -439,7 +425,6 @@ def prepare_sanctioned_inputs(
     inputs: Mapping[str, Path],
     *,
     read_only: bool,
-    source_recipe: SourceRecipe | None = None,
 ) -> PreparedSanctionedInputs:
     """Capture a closed logical-label mapping for one backend call."""
     canonical_cwd = _canonical_cwd(cwd)
@@ -455,16 +440,13 @@ def prepare_sanctioned_inputs(
         item = _capture_input(label, path, transport, aggregate, pointer_only=pointer_only)
         if not pointer_only:
             aggregate += item.size
-        source = next((window for window in source_recipe.windows if window.projection == item.path), None) if (
-            source_recipe is not None) else None
-        prepared.append(replace(item, source=source))
+        prepared.append(item)
     return PreparedSanctionedInputs(
         transport=transport,
         inputs=tuple(prepared),
         backend_identity=backend,
         cwd=canonical_cwd,
         read_only=read_only,
-        source_recipe=source_recipe,
     )
 
 
@@ -490,7 +472,7 @@ def inline_section_emitted_bytes(entries: Sequence[tuple[str, int]]) -> int:
 
 
 def inline_context_file(path: Path, budget_bytes: int = 4096) -> str | None:
-    """Inline a whole bounded host-context artifact, else use its pointer; never a source receipt."""
+    """Inline a whole bounded host-context artifact, else use its pointer."""
     try:
         with path.open("rb") as stream:
             raw = stream.read(budget_bytes + 1)

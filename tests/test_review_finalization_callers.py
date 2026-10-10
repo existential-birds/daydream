@@ -12,7 +12,6 @@ from daydream.backends import ResultEvent, ToolStartEvent
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import StackAssignment
 from daydream.hunk_index import write_hunk_index
-from daydream.review_budget import ReviewLimits
 from daydream.workspace import WorkContext
 from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
 from tests.harness.backend import ScriptedBackend

@@ -11,38 +11,24 @@ import pytest
 
 from daydream.config import (
     DEFAULT_DEEP_SHARD_ENABLED,
-    DEFAULT_DEEP_SHARD_MAX_BYTES,
     DEFAULT_DEEP_SHARD_MAX_FILES,
 )
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.orchestrator import (
-    DIAGRAM_STEPS,
-    STEPS,
-    _config_pipeline,
     _deep_shard_enabled,
     _deep_shard_max_files,
-    _flow_kind_for_mode,
-    _flow_name_for_mode,
-    _resolve_mode,
 )
-from daydream.extensions import Registry
-from daydream.extensions.builtins import register_builtins
-from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 from daydream.run_config import RunConfig
 from daydream.runner import run
-from daydream.trajectory import DaydreamRunFlow
 from tests.harness.stub_backend import install_stub_backend, review_stage_state
 from tests.test_deep_orchestrator import (
     _install_model_capturing_stubs,
-    _profile_with_pipeline,
     _run_deep,
     _silence,
 )
 
 if TYPE_CHECKING:
     pass
-
-
 
 
 def test_deep_shard_enabled_default_off(tmp_path: Path) -> None:
@@ -165,7 +151,6 @@ async def test_no_parse_phase_and_records_from_output_schema(multi_stack_target:
         supporting = supporting_contents(prompt)
         assert set(json.loads(supporting['hunk-index'])) == set(state['assigned_files'])
         assert all(f'diff --git a/{path} b/{path}' in supporting['diff'] for path in state['assigned_files'])
-
 
 
 async def test_default_cap_coarsens_only_enough_and_preserves_scope_qualified_work(

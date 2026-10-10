@@ -1,4 +1,4 @@
-"""Frozen, regular-file source retrieval for invocation-local review recipes."""
+"""Bounded retrieval of regular-file content from a captured Git revision."""
 
 from __future__ import annotations
 
@@ -30,5 +30,5 @@ def frozen_source(repo: Path, revision: str, path: str) -> tuple[str, bytes]:
         raise GitError('frozen source is not a regular blob')
     body = queries.show(repo, revision, path)
     if len(body) > 8 * 1024 * 1024:
-        raise GitError('frozen source exceeds the bounded recipe resource limit')
+        raise GitError('captured revision file exceeds the bounded retrieval limit')
     return oid.decode(), body

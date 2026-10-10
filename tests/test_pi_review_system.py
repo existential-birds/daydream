@@ -64,6 +64,5 @@ async def test_pi_review_system_is_scoped_and_preserves_retry_and_stage_spend(tm
     for instructions in (initial, retry, integration):
         assert REVIEW_STOPPING_GUIDANCE not in instructions
         assert "Closed decisions stay closed" in instructions
-        assert "by closed_candidate_ids" in instructions
         assert "Return exactly assigned target or triage candidate IDs" in instructions
         assert "host publishes terminal findings" in instructions

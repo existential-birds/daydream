@@ -69,9 +69,7 @@ from tests.harness.review_profile import independent_exploration_profile
 from tests.harness.review_result import terminal_result
 from tests.harness.stub_backend import (
     StubBackend,
-    completed_stage_reads,
     review_stage_result,
-    review_stage_state,
     silence,
 )
 from tests.harness.trajectory import make_recorder
@@ -1591,10 +1589,6 @@ async def test_overlapping_posting_runs_keep_their_own_github_auth(
             structured: dict[str, Any] = review_stage_result(prompt, [])
             if "verdicts" in (kwargs.get("output_schema") or {}).get("properties", {}):
                 structured["verdicts"] = []
-            state = review_stage_state(prompt)
-            if state is not None:
-                for event in completed_stage_reads(cwd, state):
-                    yield event
             yield TextEvent(text="No issues found.")
             yield ResultEvent(structured_output=structured, continuation=None)
     monkeypatch.setattr("daydream.github_app._mint_installation_token", mint)

@@ -37,18 +37,12 @@ _VALID = {"issues": [{"id": 1, "description": "Fix type hints", "file": "app.py"
     pytest.param(_FILE, {"line": 3}, '{"file": "src/a.py"}', "REVIEW",
                  {"require_full_schema": True}, {"file": "src/a.py"}, None,
                  id="strict-fallback"),
-    pytest.param(_FILE, {"file": "src/a.py"}, None, "REVIEW",
-                 {"require_full_schema": True}, {"file": "src/a.py"}, "evidence_incomplete",
-                 id="transport-incomplete"),
 ])
 async def test_primary_validation_and_host_witness(
     tmp_path: Path, schema: dict[str, Any], payload: Any, text: str | None, phase: str,
     options: dict[str, Any], expected: Any, reason: str | None,
 ) -> None:
     events: list[Any] = []
-    if reason:
-        events.append(DiagnosticEvent(code="codex_transport_coverage", message="tool unavailable",
-                                      metadata={"coverage": "incomplete"}))
     if text is not None:
         events.append(TextEvent(text=text))
     events.append(ResultEvent(structured_output=payload, continuation=None))
@@ -59,3 +53,16 @@ async def test_primary_validation_and_host_witness(
     else:
         assert result == expected and isinstance(result, type(expected))
     assert budget_reason == reason
+
+
+async def test_uncorrelated_codex_tool_error_diagnostic_does_not_veto_valid_output(tmp_path: Path) -> None:
+    events: list[Any] = [
+        DiagnosticEvent(code="codex_transport_coverage", message="tool unavailable",
+                        metadata={"coverage": "incomplete"}),
+        ResultEvent(structured_output=_VALID, continuation=None),
+    ]
+    result, _, reason = await run_agent(ScriptedBackend(events=events, model="mock-model"), tmp_path,
+                                        "review", phase=DaydreamPhase.DEEP,
+                                        output_schema=_ISSUES, require_full_schema=True)
+    assert result == _VALID
+    assert reason is None

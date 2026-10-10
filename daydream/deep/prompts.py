@@ -83,16 +83,14 @@ VERIFICATION_PROTOCOL_INSTRUCTION = (
     "Before writing findings, apply the verification gates "
     "(stated inline here — no skill file read is required):\n"
     "  Gate-0 anti-confabulation (before ANY finding): echo the exact artifact "
-    "you are judging — file:line plus the cited code from completed source reads "
-    "in this logical review. The source is the only truth; never infer a finding from the "
-    "branch name, cwd, or memory. A finding without completed source evidence of its "
-    "target is INVALID. Completed source excerpts supplied to finalization satisfy "
-    "this gate; paths and speculative notes do not.\n"
-    "  Gate 1 (anchor): read the full enclosing symbol or configuration section, not just the diff "
-    "hunk; state the file path and line range you are judging.\n"
-    "  Gate 2 (evidence): produce an artifact for the finding's type — pasted "
-    'tool output, a file:line citation, or an explicit "none" / "N matches" '
-    'after a repo search. Never claim you "looked" without an artifact.\n'
+    "you are judging — file:line plus the relevant changed code or investigation result. "
+    "Never infer a finding from the branch name, cwd, or memory. A finding needs a concrete "
+    "code basis; a path or speculative note alone is not enough.\n"
+    "  Gate 1 (context): use the supplied diff and context first. Inspect the full enclosing "
+    "symbol or configuration section when more context would resolve the concern; state the "
+    "file path and line range you are judging.\n"
+    "  Gate 2 (grounding): identify the concrete code basis for the finding from supplied "
+    "context or ordinary investigation, and explain its trigger and consequence.\n"
     "  Gate 3 (severity): calibrate severity to impact; a request for net-new "
     "code that did not exist in scope is at most low.\n"
     "Do NOT report a finding that fails any gate."
@@ -245,7 +243,7 @@ def _diff_instruction(
     """Inline complete stack hunks or point to the full diff artifact.
 
     Both forms name the persisted hunk index as changed-line authority. Inline
-    hunks do not replace the source reads required to substantiate findings.
+    assignments may be judged from supplied hunks when they provide enough context.
     """
     if inline_diff:
         return (
@@ -253,9 +251,8 @@ def _diff_instruction(
             "diff.patch for these — the hunks are already here):\n\n"
             f"{inline_diff.rstrip()}\n\n"
             f"{_hunk_index_authority(diff_path)}\n\n"
-            "Focus on hunks that touch your stack's files. Read the source file "
-            "FIRST; you may only comment on hunks you have read. The inlined "
-            "hunks are not a substitute for reading the file."
+            "Focus on hunks that touch your stack's files. Use ordinary repository tools "
+            "when additional context helps resolve a concrete concern."
         )
     joined = ", ".join(files)
     return (
@@ -286,16 +283,16 @@ def _review_stage_context(review_stage: dict[str, Any], *, intent_authoritative:
     )
     if not labels:
         return (
-            "No shared artifact context is assigned to this stage. Use its admitted evidence and "
-            "targeted repository reads. Missing advisory context never establishes coverage."
+            "No shared artifact context is assigned to this stage. Use the supplied assignment and "
+            "ordinary repository tools when additional context helps."
             + status_text
         )
     transport = (
         "For host artifacts, use the captured sanctioned bytes; do not read their private storage paths."
         if review_stage.get("context_transport") == "inline" else
         "For host artifacts, use only the exact sanctioned pointers supplied by the host; do not "
-        "infer sibling paths or enumerate host storage. Necessary pointer reads "
-        "consume the same remaining hard tool allowance as source reads."
+        "infer sibling paths or enumerate host storage. Observed tool starts count toward "
+        "the remaining hard tool allowance."
     )
     bundle = ""
     if review_stage.get('supporting_bundle'):
@@ -319,8 +316,7 @@ def _review_stage_context(review_stage: dict[str, Any], *, intent_authoritative:
             'for deferred bounded diff parts. Read its supplied exact pointer and bounded child catalogs '
             'only when relevant supporting parts are needed. Use their explicitly listed pointers; '
             'do not infer siblings or enumerate host storage. Catalogs and diff parts remain supporting, '
-            'never source receipts. Source selectors in source_access also expose existing canonical '
-            'part IDs for bounded before/after context beyond a large file prefix.'
+            'remain optional navigation aids for the assigned change, not a reading checklist.'
         )
     authority = (
         "\n" + AUTHORITATIVE_INTENT_BLOCK
@@ -330,35 +326,20 @@ def _review_stage_context(review_stage: dict[str, Any], *, intent_authoritative:
         "Sanctioned inputs available for this assignment: " + ", ".join(labels) + ". " + transport + bundle
         + status_text
         + "\nDiff, hunk-index, input-binding, intent and exploration inputs are supporting context, "
-        "not additional assigned targets or completed source evidence. Source projections identified "
-        "by source_access are separately typed genuine source; use their bound access methods. "
-        "Repository source reads for "
-        "concrete assigned concerns remain permitted. Omitted inputs are unavailable; "
+        "not additional assigned targets. Ordinary repository tools remain available for concrete "
+        "assigned concerns. Omitted inputs are unavailable; "
         "never assume a partial context contains the complete repository map."
         + authority
     )
 
 
 def _stage_source_instruction() -> str:
-    """Explain typed access and reuse without repeating the host's window inventory."""
+    """State that supplied context and useful ordinary investigation both support decisions."""
     return (
-        "Frozen source windows: the host state's source_access inventory identifies the original "
-        "file, side-specific source_path, before/after side and revision, content identity, line/byte "
-        "range, associated target_ids, exact access method and read_required obligation. "
-        "A before window can belong to a deleted file absent at HEAD or a renamed old path. "
-        "Read it through the supplied projection or read_source arguments; do not try the missing "
-        "HEAD path or infer host artifact paths. Source projections contain actual source, not diff "
-        "text. Prefer the invocation's read_source tool with the supplied target_id and side. "
-        "Claude/Codex expose it in the invocation's Daydream MCP namespace, which may have a unique suffix. "
-        "For a concrete dependency concern, a tracked repository-relative path can select its "
-        "frozen after source. Shell investigations are context; they do not replace required "
-        "read_source receipts. When a backend supplies a file-read fallback, preserve its exact "
-        "arguments and issue separate bound reads. "
-        "admitted_source_windows records complete host-retained receipt authority, distinct from "
-        "your current source knowledge. Omitted bodies, partial excerpts and compaction do not erase "
-        "those receipts. Reuse verified ranges and closed_decisions; reread only when needed to "
-        "understand a concrete concern or cover source outside those ranges. "
-        "The persistent staged contract governs required reads and reuse."
+        "Use the supplied diff, assignment context and retained semantic notes to make explicit decisions. "
+        "Ordinary repository tools are available when more context helps resolve a concrete concern; "
+        "tool calls are optional and do not replace target or candidate decisions. Keep investigation within "
+        "the assigned work and preserve the captured revision when consulting repository content."
     )
 
 
@@ -416,16 +397,14 @@ def _build_review_stage_prompt(
             "The host stage state's assignment_parts inventory contains the ordered required work "
             "with old/new range mapping. Continuations are incomplete "
             "pieces of the same hunk; no individual segment represents the complete hunk or file. "
-            "Supporting reads can resolve the assigned behavior but do not expand the assignment."
+            "Optional context can resolve the assigned behavior but does not expand the assignment."
         )
     if triage:
         parts.append(
             f"You are triaging the {stack_name} review's assigned candidate IDs only: "
             + ", ".join(review_stage["assigned_candidate_ids"])
-            + ". Use only their relevant admitted notes and compact evidence in the host stage state. "
-            "Evidence excerpts marked partial omit retained receipt content; obtain targeted source "
-            "rereads when the excerpt is insufficient to decide a candidate. "
-            "Read additional source only to decide those candidates. Do not start a fresh audit, "
+            + ". Use their relevant admitted notes and grounds in the host stage state; ordinary investigation "
+            "may help decide a candidate. Do not start a fresh audit, "
             "discover new candidates, revisit unrelated findings, or reopen closed decisions. "
             "Decide each assigned candidate once: confirmed, rejected, or unresolved."
         )
@@ -498,7 +477,7 @@ def _build_review_stage_prompt(
         if "hunk-index" in review_stage.get("context_inputs", []):
             parts.append(
                 "The sanctioned hunk-index input is changed-line authority. It establishes anchors, "
-                "not completed source evidence or reviewed coverage."
+                "not completed target decisions."
             )
         parts.append(
             "Operator judgment policy for the assigned work:\n" + strategy
@@ -532,17 +511,15 @@ def _build_review_stage_prompt(
     parts.append(
         f"Advisory stage tool-call target: {review_stage['advisory_tool_call_target']}. "
         f"Remaining hard cumulative tool allowance: {review_stage['remaining_tool_calls']}. "
-        "Plan around required source windows, verified reuse, the supporting bundle and combined "
-        "targeted searches. Preserve capacity for structured submission and any remaining assignments "
+        "Use the supplied assignment and optional focused investigation. Preserve capacity for structured "
+        "submission and any remaining assignments "
         "or open-candidate triage; finish resolved work promptly. The advisory target guides pace; "
         "the cumulative allowance is the hard limit."
     )
     if review_stage.get('remaining_work'):
         parts.append(
             "Remaining planned work estimate: " + json.dumps(review_stage['remaining_work'], ensure_ascii=False)
-            + ". The mandatory-read estimate covers known required transport and source starts; "
-            "it does not prove that the allowance suffices for meaningful review, dependency "
-            "investigation, extra source windows or candidate triage. Unfinished work remains "
+            + ". Unfinished work remains "
             "explicitly incomplete."
         )
     parts.append(_stage_output_instruction(review_stage))

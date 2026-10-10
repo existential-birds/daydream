@@ -1,23 +1,12 @@
 """Stack ownership, sharding bounds, and import-graph routing."""
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from daydream.config import (
-    DEFAULT_DEEP_SHARD_MAX_BYTES,
-    DEFAULT_DEEP_SHARD_MAX_FILES,
-    STRUCTURE_STACK_NAME,
-)
 from daydream.deep.dependency import build_import_graph
-from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
-from daydream.deep.diff import _diff_blocks_for_files
+from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.deep.sharding import shard_stacks
 from daydream.extensions import Registry, StackRule
-
-
-
-
 
 
 @pytest.mark.parametrize(("files", "stack_name", "member", "docs_only"),
@@ -72,7 +61,6 @@ def test_infrastructure_defaults_preserve_explicit_and_nested_ownership() -> Non
     assert stacks["build"] == ["scripts/custom.cjs"]
 
 
-
 @pytest.mark.parametrize(("files", "expected"),
     [pytest.param(["config.yaml"], {"generic"}, id="D-13a-config-default-generic"),
         pytest.param(["pyproject.toml"], {"generic"}, id="D-13c-no-static-promotion"),
@@ -86,21 +74,11 @@ def test_language_classification(files: list[str], expected: set[str]) -> None:
     assert language_names == expected
 
 
-
 def test_no_files_dropped() -> None:
     files = ["src/main.py", "README.md", "config.yaml", "Dockerfile", "src/App.tsx"]
     result = detect_stacks(files)
     routed = {f for a in result for f in a.files}
     assert routed == set(files)
-
-
-
-
-
-
-
-
-
 
 
 def test_shard_stacks_fanout_cap_limits_total_tasks() -> None:
@@ -195,8 +173,6 @@ def test_build_import_graph_resolves_multilanguage_edges(tmp_path: Path) -> None
     assert "b.ts" in graph["a.ts"]          # './b' resolves to sibling b.ts
     assert "b.go" in graph["a.go"]          # go import path -> b.go
     assert "b.rs" in graph["a.rs"]          # rust 'use b::c' -> module file b.rs
-
-
 
 
 @pytest.mark.parametrize('cap', [0, 1, 3, 4])

@@ -11,12 +11,10 @@ import pytest
 
 import daydream.deep.orchestrator as orch_mod
 from daydream.config import REVIEW_OUTPUT_FILE
-from daydream.deep import orchestrator as deep_orchestrator
 from daydream.deep.diff import bound_deep_diff
 from daydream.deep.orchestrator import STEPS
 from daydream.extensions.api import EXTENSION_API_VERSION
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
-from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _eroded_main_repo,
@@ -153,7 +151,6 @@ async def test_test_verdict_persists_actual_suite_outcome_and_operator_override(
         assert stub.test_suite_calls == 1
 
 
-
 async def test_deep_run_inlines_small_diff_into_intent_and_wonder(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -224,13 +221,10 @@ async def test_over_budget_diff_preserves_full_disk_evidence_and_uses_safe_promp
         assert all(f'diff --git a/{path} b/{path}' in scoped_diff for path in stage['assigned_files'])
         assert 'Read the supporting_bundle once' in python_prompt
         assert "diff --git" not in python_prompt
-        # Source-body history stays with host receipts rather than being repeated
-        # alongside each bounded supporting assignment.
-        assert stage['evidence'] == []
+        # Bounded assignment inputs contain no duplicated source-body history.
     if not oversize:
         react = _matching_prompt(stub.calls, "you are reviewing the react stack")
         assert 'diff --git a/App.tsx b/App.tsx' in supporting_contents(react)['diff']
-
 
 
 async def test_intent_artifact_survives_wonder_failure(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
@@ -255,9 +249,8 @@ async def test_skip_tier_writes_empty_alternatives(tiny_diff_target: Path, monke
     assert isinstance(json.loads((deep / "alternatives.json").read_text()), list)
 
 
-
 def test_extension_api_version_and_alternatives_step_removal() -> None:
-    assert EXTENSION_API_VERSION == 7
+    assert EXTENSION_API_VERSION == 8
     names = [s.name for s in STEPS]
     assert "alternatives" not in names
     assert "per-stack-reviews" in names

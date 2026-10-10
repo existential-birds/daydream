@@ -13,19 +13,8 @@ the rendering and the production call site that supplies them.
 
 from __future__ import annotations
 
-import inspect
-from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any
 
-from daydream.agent import run_agent
-from daydream.backends import AgentEvent, ResultEvent, TextEvent
-from daydream.backends.pi import (
-    PiBackend,
-    pi_system_preamble,
-    render_pi_preamble,
-)
-from daydream.config import DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
 from daydream.deep.repair_coordinator import (
     _is_captured_grant,
     _load_job,
@@ -39,9 +28,6 @@ from daydream.deep.repair_job import (
     write_repair_job_record,
 )
 from daydream.fix_footprint import AuthorizedFixFootprint
-from daydream.trajectory import DaydreamPhase
-from tests.harness.backend import ScriptedBackend
-from tests.harness.git_helpers import init_repo
 
 
 def _footprint() -> AuthorizedFixFootprint:
@@ -112,7 +98,3 @@ class TestDiagnosticNeverBecomesTheGrant:
         assert stored.job_id == "repair-s1", "the record was relabelled into another job's grant"
         assert stored.diagnostics == ()
         assert stored.executions == 3
-
-
-
-

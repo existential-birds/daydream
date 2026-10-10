@@ -9,7 +9,6 @@ and auth files under ~/.pi/agent; Daydream never writes a models.json override.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -18,11 +17,11 @@ import tempfile
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from contextlib import AsyncExitStack, ExitStack
+from contextlib import ExitStack
 from functools import partial
 from importlib.resources import as_file, files
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from daydream.backends import (
     AgentEvent,
@@ -65,11 +64,9 @@ from daydream.backends._transport import (
     reap,
     teardown,
 )
-from daydream.backends.source_reader import SourceReader
 from daydream.config import DEFAULT_PI_MODEL, DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
 from daydream.json_utils import extract_json, extract_json_by_schema, validates_schema
 from daydream.retry_policy import classify_failure, parse_message_retry_hint
-from daydream.review_source import SourceRecipe
 
 # Mirror Codex's generous stdout cap so large JSONL events (big file reads,
 # patch payloads) do not trip asyncio's "chunk is longer than limit" guard.
@@ -164,8 +161,8 @@ WORK STRATEGY:
 {starting_method}
 - Don't re-read what you've already read. If a file's content is already in
   your context, reuse it for understanding. For staged reviews, diff or prompt
-  contents do not satisfy required source reads. Only explicitly host-admitted
-  complete source windows can be reused as receipts; obtain required fresh reads.
+  contents are enough when they support a decision; use ordinary file tools or
+  supplied captured context when another source is useful.
 - Answer directly when you can. If the existing context (commit log, diff,
   prior tool results) already answers the question, respond without additional
   tool calls.
@@ -176,8 +173,9 @@ WORK STRATEGY:
 GIT CONTEXT:
 You are operating in a git repository. When a Git execution tool is enabled,
 use `git diff`, `git log`, and `git show` to understand changes efficiently.
-Read-only Pi has no Git execution tool: use the supplied frozen-source access
-instead for before/after revisions. Never infer missing old-source contents.
+Read-only Pi has no Git execution tool. Captured before-side context for deleted
+or renamed files is supplied as an ordinary file when available; never infer
+missing old-source contents.
 
 Be concise in your responses. Do not narrate exploration step by step; report
 findings and conclusions."""
@@ -499,7 +497,6 @@ def _write_prompt_attachment(text: str, attachments: ExitStack) -> Path:
 class PiBackend:
     """Translate the Pi JSONL event stream into normalized AgentEvent records."""
 
-    supports_source_recipe = True
     supports_complete_output = True
     supports_finalization = True
     supports_tools_disabled = True
@@ -570,7 +567,6 @@ class PiBackend:
         validate_structured_output: bool = True,
         wall_budget_s: float | None = None,
         tool_call_budget: int | None = None,
-        source_recipe: SourceRecipe | None = None,
         require_complete_root: bool = False,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Yield Pi events; a turn error raises PiError and nonempty agents are unsupported.
@@ -597,7 +593,6 @@ class PiBackend:
         args: list[str] = ["pi", "--mode", "json"]
         native_output = (output_schema is not None and validate_structured_output
                          and not (finalization or tools_disabled))
-        source_enabled = source_recipe is not None and not (finalization or tools_disabled)
 
         configured_model = None
         if self._model_override is None:
@@ -714,8 +709,7 @@ class PiBackend:
         if finalization or tools_disabled:
             args.append("--no-tools")
         elif read_only:
-            args.extend(["--tools", _PI_READ_ONLY_TOOLS + (",read_source" if source_enabled else "")
-                         + (",structured_output" if native_output else "")])
+            args.extend(["--tools", _PI_READ_ONLY_TOOLS + (",structured_output" if native_output else "")])
 
         resume_id: str | None = None
         if persist_session and continuation and continuation.backend == "pi":
@@ -749,8 +743,6 @@ class PiBackend:
         # association/settlement, never proposal order or completion-time ranking.
         submission_calls: dict[str, str] = {}
         incomplete_calls: set[str] = set()
-        source_calls: set[str] = set()
-        packet_digest: str | None = None
         pending_submission: Any = None
         # Non-JSON lines (stderr merged into stdout, pi diagnostic output, etc.)
         # captured for error reporting when the process exits non-zero.
@@ -826,15 +818,14 @@ class PiBackend:
                 model_mode="single",
                 selected_tools_count=(
                     0 if finalization or tools_disabled else
-                    len(_PI_READ_ONLY_TOOLS.split(",")) + int(source_enabled) + int(native_output)
+                    len(_PI_READ_ONLY_TOOLS.split(",")) + int(native_output)
                     if read_only else None
                 ),
                 selected_tools_present=read_only and not (finalization or tools_disabled),
                 no_tools=finalization or tools_disabled,
                 no_skills=True,
                 schema_emulated=output_schema is not None and not native_output,
-                no_extensions=source_enabled,
-                source_tool_enabled=source_enabled,
+                no_extensions=read_only and native_output,
             ),
             model_source="configured",
             provider_source="configured" if provider is not None else None,
@@ -842,27 +833,20 @@ class PiBackend:
         )
 
         attachments = ExitStack()
-        source_context = AsyncExitStack()
         try:
-            if source_enabled or native_output:
-                packet: dict[str, Any] = {}
-                if source_enabled:
-                    assert source_recipe is not None
-                    packet = {'windows': [{'source': window.metadata()} for window in source_recipe.windows]}
-                    reader = await source_context.enter_async_context(SourceReader(source_recipe))
-                    packet['reader'] = {'url': reader.url, 'token': reader.token}
-                if native_output:
-                    packet["output_schema"] = output_schema
+            if native_output:
+                packet = {"output_schema": output_schema}
                 packet_text = json.dumps(packet, ensure_ascii=False)
-                packet_digest = hashlib.sha256(packet_text.encode()).hexdigest()
                 packet_path = _write_prompt_attachment(packet_text, attachments)
-                child_env["DAYDREAM_PI_SOURCE_PACKET"] = str(packet_path)
-                extension = attachments.enter_context(as_file(files("daydream.backends").joinpath("pi_read_source.ts")))
-                if source_enabled:
+                child_env["DAYDREAM_PI_OUTPUT_PACKET"] = str(packet_path)
+                extension = attachments.enter_context(
+                    as_file(files("daydream.backends").joinpath("pi_structured_output.ts"))
+                )
+                if read_only:
                     args.append("--no-extensions")
                 args.extend(["--extension", str(extension)])
             else:
-                child_env.pop("DAYDREAM_PI_SOURCE_PACKET", None)
+                child_env.pop("DAYDREAM_PI_OUTPUT_PACKET", None)
             if not tools_disabled:
                 args.append(f"@{_write_prompt_attachment(full_prompt, attachments)}")
             if review_instructions and not finalization:
@@ -1067,12 +1051,6 @@ class PiBackend:
                 elif event_type == "tool_execution_start":
                     active_tool_calls += 1
                     call_id = event.get("toolCallId")
-                    if source_enabled and event.get("toolName") == "read_source":
-                        if (not isinstance(call_id, str) or not call_id or len(call_id.encode()) > 2048
-                                or call_id in source_calls or len(source_calls) >= 4096):
-                            raise PiError("Invalid source tool association", retryable=False,
-                                          category="STREAM_TRUNCATION")
-                        source_calls.add(call_id)
                     yield ToolStartEvent(
                         id=call_id or str(uuid.uuid4()),
                         name=event.get("toolName", "unknown"),
@@ -1087,27 +1065,17 @@ class PiBackend:
                 elif event_type == "tool_execution_end":
                     active_tool_calls = max(0, active_tool_calls - 1)
                     call_id = event.get("toolCallId")
-                    owned_source = (isinstance(call_id, str) and call_id in source_calls
-                                    and event.get("toolName") == "read_source")
                     result = event.get("result")
                     details = result.get("details") if isinstance(result, dict) else None
-                    disposition: Literal["zero_match"] | None = None
-                    if (owned_source and event.get("isError") is True and isinstance(details, dict)
-                            and set(details) == {"source_free_disposition", "packet_sha256"}
-                            and details.get("source_free_disposition") == "zero_match"
-                            and packet_digest is not None and details.get("packet_sha256") == packet_digest):
-                        disposition = "zero_match"
                     yield ToolResultEvent(
                         id=call_id or str(uuid.uuid4()),
                         output=_render_tool_result(result),
                         is_error=bool(event.get("isError", False)),
-                        source_free_disposition=disposition,
                         **_tool_completion_metadata(event,
                             output_control=native_output and event.get("toolName") == "structured_output"),
                     )
                     if isinstance(call_id, str):
                         incomplete_calls.discard(call_id)
-                        source_calls.discard(call_id)
                     if native_output and event.get("toolName") == "structured_output":
                         if type(event.get("isError")) is not bool:
                             raise PiError("Invalid output status", retryable=False, category="STREAM_TRUNCATION")
@@ -1194,7 +1162,7 @@ class PiBackend:
 
             native_unsettled = native_output and (
                 active_tool_calls != 0 or open_generation_id is not None
-                or bool(incomplete_calls) or bool(source_calls)
+                or bool(incomplete_calls)
                 or any(state != "finalized" for state in submission_calls.values())
                 or finish_reason in {"aborted", "length", "error"}
                 or not (saw_turn_start and saw_finish_reason and saw_native_settlement)
@@ -1243,10 +1211,7 @@ class PiBackend:
                 if transport is not None:
                     await teardown(transport, self._transports)
             finally:
-                try:
-                    await source_context.aclose()
-                finally:
-                    attachments.close()
+                attachments.close()
 
     async def cancel(self) -> None:
         """Terminate and reap every active Pi transport."""

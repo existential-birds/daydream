@@ -25,7 +25,7 @@ from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
 from tests.deep_orchestrator.test_review_completion import ReviewRun, record, scopes
 from tests.harness.git_helpers import seed_feature_branch
-from tests.harness.stub_backend import completed_stage_reads, review_stage_state, stage_result
+from tests.harness.stub_backend import review_stage_state, stage_result
 from tests.test_deep_orchestrator import _profile_with_pipeline, _sanctioned_inputs
 
 
@@ -42,7 +42,6 @@ class StagedBackend(EmptyReviewBackend):
             Callable[[dict[str, Any], dict[str, Any]], Iterable[AgentEvent] | None] | None
         ) = None
         self.stage_delay: Callable[[dict[str, Any]], float] | None = None
-        self.default_source_reads = True
 
     async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         stage = review_stage_state(prompt)
@@ -54,13 +53,8 @@ class StagedBackend(EmptyReviewBackend):
             if self.stage_delay is not None:
                 await asyncio.sleep(self.stage_delay(stage))
             output = stage_result(stage)
-            emitted = False
             if self.stage_response is not None:
                 for event in self.stage_response(stage, output) or ():
-                    emitted = True
-                    yield event
-            if not emitted and self.default_source_reads:
-                for event in completed_stage_reads(cwd, stage):
                     yield event
             yield ResultEvent(structured_output=output, continuation=None)
             return
@@ -82,7 +76,7 @@ class InvestigationRun(ReviewRun):
         data = self.load()
         assert [finding['title'] for finding in data['findings']] == list(findings)
         scope = scopes(data)[scope_id]
-        assert scope['status'] in (statuses or ('incomplete' if reason else 'complete',))
+        assert scope['status'] in (statuses or ('incomplete' if reason else 'complete',)), scope['reason_codes']
         assert scope['reason_codes'] == ([reason] if reason else [])
         assert not any(call.get('no_tools') for call in self.backend.calls)
         return data
@@ -102,13 +96,14 @@ def candidate(*, disposition: str = 'open', candidate_id: str = '',
 
 
 @pytest.mark.parametrize(('fault', 'reason'), [
+    ('no-tool-read', None),
     ('unknown', 'malformed_output'), ('duplicate', 'malformed_output'),
     ('omitted', 'malformed_output'), ('read-all', 'malformed_output'),
     ('handoff-bytes', 'evidence_incomplete'), ('handoff-items', 'evidence_incomplete'),
-    ('missing-grounds', 'evidence_incomplete'), ('truncated-grounds', 'evidence_incomplete'),
-    ('unmatched-output', 'evidence_incomplete'),
+    ('missing-grounds', 'evidence_incomplete'), ('truncated-tool-output', None),
+    ('unmatched-tool-result', None),
 ])
-async def test_invalid_stage_declarations_and_evidence_do_not_establish_coverage(
+async def test_invalid_decisions_fail_but_optional_tool_events_do_not_veto_valid_output(
     investigation: InvestigationRun, fault: str, reason: str,
 ) -> None:
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
@@ -127,19 +122,25 @@ async def test_invalid_stage_declarations_and_evidence_do_not_establish_coverage
             output['candidates'] = [concrete] * (129 if fault == 'handoff-items' else 1)
             if fault == 'missing-grounds':
                 concrete['grounds'] = ''
-        if fault in {'read-all', 'truncated-grounds'}:
+        if fault in {'read-all', 'truncated-tool-output'}:
             yield ToolStartEvent(id='read', name='Read', input={'file_path': 'api.py'})
             yield ToolResultEvent(id='read', output=(investigation.repo / 'api.py').read_text(), is_error=False,
-                                  truncated=fault == 'truncated-grounds')
-        elif fault == 'unmatched-output':
+                                  truncated=fault == 'truncated-tool-output')
+        elif fault == 'unmatched-tool-result':
             yield ToolResultEvent(id='unmatched-source', is_error=False,
                                   output=(investigation.repo / 'api.py').read_text())
 
     investigation.backend.stage_response = response
-    data = await investigation.finish('python', reason=reason, statuses=('incomplete', 'failed'))
+    data = await investigation.finish('python', reason=reason,
+                                      findings=('Grounded defect',) if reason is None else (),
+                                      statuses=('complete',) if reason is None else ('incomplete', 'failed'))
     assert scopes(data)['react']['status'] == scopes(data)['structure']['status'] == 'complete'
     terminal = stage_ends(investigation, 'python')[-1]
-    assert (terminal['status'], terminal.get('reason_code')) == ('failed', 'domain_failure')
+    assert (terminal['status'], terminal.get('reason_code')) == (
+        ('succeeded', None) if reason is None else ('failed', 'domain_failure'))
+    if fault == 'no-tool-read':
+        assert data['terminal_result']['analysis_state'] == 'complete'
+        assert terminal['metadata']['observed_tool_starts'] == 0
 
 
 def stage_ends(review: ReviewRun, scope_id: str) -> list[dict[str, Any]]:
@@ -326,8 +327,7 @@ async def test_each_stage_builder_receives_current_assignment_and_bounded_triage
                 assert 'Sanctioned phase inputs (captured verbatim):' in call['prompt']
             else:
                 pointers = _sanctioned_inputs(call['prompt'])
-                assert set(pointers) == {label for label in stage['context_inputs']
-                                         if not label.startswith('source-')}
+                assert set(pointers) == set(stage['context_inputs'])
                 for label in ('diff', 'hunk-index'):
                     path = pointers[label]
                     yield ToolStartEvent(id=f'context-{label}', name='Read', input={'file_path': str(path)})
@@ -347,8 +347,8 @@ async def test_each_stage_builder_receives_current_assignment_and_bounded_triage
             assert all(item['disposition'] == 'open' for item in stage['candidates'])
             assert 'Assigned files:' not in prose
             assert 'api.py' in stage['assigned_files']
-            assert all(label.startswith('source-') for label in stage['context_inputs'])
-            assert ('Sanctioned phase inputs (read only these exact files):' not in call['prompt']) is sandbox
+            assert not any(label.startswith('source-') for label in stage['context_inputs'])
+            assert 'Sanctioned phase inputs (read only these exact files):' not in call['prompt']
             output['candidates'] = [dict(item, disposition='rejected') for item in stage['candidates']]
 
     review.backend.stage_response = response
@@ -470,7 +470,7 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
     if stop == 'deadline':
         assert no_tool_turns > 1
         assert stopped['metadata']['native_output'] is True
-        assert stopped['metadata']['submission_starts'] == stopped['metadata']['fresh_source_reads'] == 0
+        assert stopped['metadata']['submission_starts'] == 0
         assert stopped['metadata']['admitted'] is False
         assert len(dispatch_deadlines) == 2
         # The prompt allowance precedes provider entry and is therefore an
@@ -542,7 +542,6 @@ async def test_later_assignments_carry_closed_decisions_without_reopening_retain
             if long_grounds:
                 output['candidates'][0]['grounds'] += ' Additional explanation: ' + 'é' * 400
             output['candidates'][1]['grounds'] = 'The greeting is allowed by the updated consumer contract.'
-            yield from completed_stage_reads(review.repo, stage)
             for index, line in enumerate((1, 2, 2)):
                 call = ToolStartEvent(id=f'precise-source-{index}', name='Read',
                                       input={'file_path': 'api.py', 'offset': line, 'limit': 1})
@@ -559,16 +558,11 @@ async def test_later_assignments_carry_closed_decisions_without_reopening_retain
         assert len(decisions[0]['conclusion'].encode()) <= 512
         assert decisions[0]['conclusion'].endswith('[conclusion clipped]') is long_grounds
         assert decisions[1]['conclusion'] == 'The greeting is allowed by the updated consumer contract.'
-        for decision in decisions:
-            reference, = decision['evidence_references']
-            assert reference['file'] == 'api.py' and reference['side'] == 'after'
-            assert reference['revision'] == review.pr.head_sha
-            assert reference['start_line'] == reference['end_line'] == decision['line']
-            assert reference['content_sha256'] and reference['blob_oid']
-        assert stage['candidates'] == [] and stage['evidence'] == []
+        assert all('evidence_references' not in decision for decision in decisions)
+        assert stage['candidates'] == []
         instruction = review.backend.calls[-1]['review_instructions']
         assert 'The greeting is allowed by the updated consumer contract.' in instruction
-        assert 'Host-retained receipt authority' in instruction
+        assert 'Host-retained receipt authority' not in instruction
 
     review.backend.stage_response = response
     data = await review.finish('python', findings=('Grounded defect',))
@@ -627,8 +621,8 @@ async def test_cross_file_integration_preserves_cumulative_spend_and_flag_eviden
     assert set(scopes(data)) == {'python', 'generic', 'structure'}
     assert len(observations) == (97 if cutoff else 18)
     metadata = [event['metadata'] for event in stage_ends(review, 'structure')]
-    assert metadata[-1]['observed_tool_starts'] == (97 if cutoff else 19)
-    assert metadata[-1]['remaining_tool_calls'] == (0 if cutoff else 77)
+    assert metadata[-1]['observed_tool_starts'] == (97 if cutoff else 18)
+    assert metadata[-1]['remaining_tool_calls'] == (0 if cutoff else 78)
     stages = [stage for stage in backend.stages if stage['scope_id'] == 'structure']
     assert [stage['stage'] for stage in stages] == ['integration', 'triage']
     assert all(stage['advisory_tool_call_target'] <= stage['remaining_tool_calls'] for stage in stages)
@@ -677,8 +671,8 @@ async def test_failed_retry_discards_poisoned_progress_but_charges_every_observe
     data = await review.finish('python')
     assert attempts == 2
     assert stage_ends(review, 'python')[0]['metadata']['observed_tool_starts'] == 6
-    assert stage_ends(review, 'python')[-1]['metadata']['observed_tool_starts'] == 19
-    assert stage_ends(review, 'python')[-1]['metadata']['remaining_tool_calls'] == 77
+    assert stage_ends(review, 'python')[-1]['metadata']['observed_tool_starts'] == 6
+    assert stage_ends(review, 'python')[-1]['metadata']['remaining_tool_calls'] == 90
     assert all(scope['status'] == 'complete' for scope in scopes(data).values())
     python_stages = [stage for stage in backend.stages if stage['scope_id'] == 'python']
     assert all(stage['stage'] == 'first_pass' for stage in python_stages)

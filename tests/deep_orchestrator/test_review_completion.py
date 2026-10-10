@@ -21,7 +21,7 @@ from tests.harness.console import collapse_panel_text
 from tests.harness.dataset import read_records
 from tests.harness.fake_clock import FakeClock
 from tests.harness.git_helpers import git
-from tests.harness.stub_backend import completed_stage_reads, review_stage_result, review_stage_state
+from tests.harness.stub_backend import review_stage_result, review_stage_state
 from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipeline, _record
 
 
@@ -140,8 +140,7 @@ async def test_schema_output(review: ReviewRun, mode: str, reason: str | None, p
         state = review_stage_state(prompt)
         if state is None or state['scope_id'] != 'python':
             return None
-        return [*completed_stage_reads(review.repo, state),
-                TextEvent(text=json.dumps(review_stage_result(prompt, []))
+        return [TextEvent(text=json.dumps(review_stage_result(prompt, []))
                           if mode in {'text-only', 'rejected-native'} else ''),
                 ResultEvent(structured_output=payload, continuation=None)]
 

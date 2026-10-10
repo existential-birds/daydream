@@ -426,7 +426,7 @@ There is no environment-variable tier. `DAYDREAM_MODEL` and `DAYDREAM_BACKEND` a
 
 ### Extensions
 
-A fork can extend daydream. A top-level `daydream_ext` package exposes a `register(registry)` function. The function can add phases, reorder flow steps, override prompts, and register stack rules. The extension API is version 7. Verify an extension with `daydream ext validate`. See [docs/extensions.md](docs/extensions.md).
+A fork can extend daydream. A top-level `daydream_ext` package exposes a `register(registry)` function. The function can add phases, reorder flow steps, override prompts, and register stack rules. The extension API is version 8. Verify an extension with `daydream ext validate`. See [docs/extensions.md](docs/extensions.md).
 
 ## Configuration
 
@@ -671,128 +671,19 @@ One fresh full-stage attempt is permitted after a normally completed invocation
 fails typed strict schema validation. Its prompt contains only safe validator
 metadata; rejected output is never repaired, stripped or continued. Required
 capture loss, aborts, unknown IDs and other admission failures are terminal.
-Retries consume the same allowances and obtain source evidence anew; the host
-publishes findings from successful stages, retaining typed incomplete coverage
-when a later invocation fails.
-Reads alone never establish reviewed coverage, including empty-candidate claims.
-Completed associated source receipts are retained separately from compact views:
-2 MiB per result and 8 MiB across a reviewer's live and admitted captures,
-including bounded receipt metadata. These bounds cover the investigated captured
-workload's largest result (159,126 bytes) and 3,561,955 bytes of observed outputs
-across the entire run with substantial room; they are host
-resource limits, not new model allowances. Compact output/handoff views keep their
-12,000/48,000-byte limits and explicitly mark partial excerpts. Native truncation,
-missing association, failed required reads and full-retention overflow remain
-incomplete evidence. Supporting diff, index, intent and exploration inputs never
-establish source coverage; their compact clipping does not invalidate complete
-source receipts. A completed failed Pi built-in `read` of one absent, unambiguous operand is nonblocking only
-with a frozen recipe, disabled ambient extensions, and no granted projection or
-supporting identity. Checkout-local/current-side absence also requires a complete
-strict inventory bound to the full captured HEAD. This includes an ordinary probe
-of a deleted current path after mandatory frozen-before source was read. Default
-empty inventories, Git failures, case/Unicode/prefix/file-URL aliases and broken symlinks
-cannot prove absence. A native zero-match `read_source` lookup is nonblocking only
-when the executed owned tool returns a failed disposition bound to the exact
-invocation packet digest, and the host independently verifies zero authorized
-matches. Markerless, unknown-tool and initialization errors remain blocking.
-Failed lookup receipts and starts remain charged, failed and nonreusable; they
-supply no coverage. Call-input incompleteness from native length termination is
-retained across subsequent turns separately from output truncation. Pending,
-unmatched, truncated, cancelled, overflowing, ambiguous and actual-source errors
-remain incomplete, even after a good reread. Failures of exact furnished supporting
-pointers remain blocking; supporting clipping alone does not invalidate source.
-Frozen source windows carry the original repository path, rename
-side, full revision/blob identity and exact line/byte range. Exact projections are
-written and revalidated through the owning artifact session. Claude, Codex and Pi
-share a host-owned `read_source(target_id, side)` reader. Invocation-local MCP
-transport carries frozen windows and tracked current-side dependencies; Pi's
-native tool delegates to the same reader. The reader grants no private directory
-or shell access. Paths containing shell metacharacters are literal selectors.
-Codex retains its independent read-only checkout. Osprey retains frozen-file reads
-pending [headless MCP trust support](https://github.com/existential-birds/osprey/issues/1195).
-Inline source text and host requests alone are not native receipts: observed,
-associated tool starts/results, completion flags and independently verified frozen
-bytes/ranges still govern coverage. Required failed reads remain incomplete.
-When the owned reader is active, shell commands support investigation but cannot
-establish source coverage, so compound commands and mixed stdout/stderr no longer
-affect the mandatory source-read codec. Existing verified file-read fallbacks and
-current-side dependency reads remain available; preserve their supplied arguments.
-Pi's exact bounded-read representation is decoded against independently frozen
-LF ranges, including its continuation footer. Original native results remain
-intact; forged footers and actual truncation do not establish source evidence.
+Retries consume the same cumulative allowances and deadline. Failed attempts
+contribute no semantic state; findings from successful stages remain admitted
+if a later invocation fails, while unfinished decisions and phases remain
+typed as incomplete.
+Review stages are admitted from their assigned identities and strict semantic output. A completed stage may make valid decisions from the supplied diff and context without reading source files. Ordinary backend file and Git tools remain available when more context helps; their results are recorded and charged but do not authenticate citations or determine completion.
 
-Built-in staged builders combine diff/index/binding into one bounded supporting
-assignment input. API-7 custom builders retain real legacy diff/index files unless
-they explicitly opt in. Structure receives a compact whole-change inventory and
-targeted bounded supporting parts; its interaction and default design duties
-remain whole-change reviews. Supporting reads remain distinct from source reads.
-Exact-path input capture permits 8 MiB combined, 1 MiB per item and 512 items;
-the inline allowance remains 12,288 bytes. The aggregate increase admits the
-measured 452-input, 4,670,624-byte Structure workload without dropping diff parts,
-source projections or catalogs. The independent count limit still applies.
-An optional catalog exposes those exact part pointers on demand through bounded
-12,000-byte files, with complete file/target inventory and no directory grant.
-Recipe-capable Structure uses native source selectors instead of duplicating
-projection paths in its initial prompt, including canonical part selectors for
-late before-side context. A separate source catalog preserves every permitted
-alias, side, exact argument and frozen line/byte range in bounded 12,000-byte
-metadata files. Source and diff catalogs have disjoint names and remain captured
-by the same artifact owner under the existing byte/count bounds. A persistent
-exact access guide (at most 8 KiB) survives Pi compaction with captured catalog,
-assignment and shared-context pointers. Output IDs such as `integration:structure`
-identify decisions; they are source selectors only when listed in the catalog.
-Structure starts with concrete changed-boundary concerns and searches their
-relevant owners; diff/docs support those concerns. Its integration bundle contains
-the compact whole-change inventory and binding with deferred-part navigation,
-while first-pass bundles contain the bounded assignment diff/index/binding.
-Catalogs are navigation aids, not an exhaustive reading checklist. Settled
-contract checks stay settled unless new contradictory evidence appears. Once
-concrete concerns are resolved, reviewers submit, preserving capacity for
-submission, remaining assignments and open-candidate triage under the existing
-allowance. Catalogs and inline context provide no reviewed-source coverage or
-additional directory access. Full host source state remains available, and
-partial/unavailable context remains explicit.
-Complete verified windows from successful clean stages are retained and can cover
-later work in the same reviewer/snapshot, including an exact union of read ranges.
-Failed attempts and opaque or uncovered ranges cannot supply reuse. Every new
-assignment still requires its own review decision. First-pass handoffs carry
-receipt metadata rather than repeated source bodies. Compact `closed_decisions`
-identify admitted candidate IDs, locations, dispositions, brief conclusions and
-relevant frozen evidence references; the same summaries persist through Pi
-compaction. They support decision reuse, never new coverage or reopening.
-Complete host-retained receipt authority is distinct from the agent's current
-source knowledge: omitted bodies and compaction do not erase receipts. Targeted
-rereads remain appropriate for understanding concrete concerns or uncovered
-source. Triage receives only relevant admitted compact evidence and may
-make targeted rereads within the existing allowance. Other roles retain
-bounded finalization. The existing 60-minute review ceilings remain outer
-safeguards; fix turns retain their separate 30-minute limit.
+The host still validates captured revision and input hashes, complete assignment transport, exact target/candidate IDs, dispositions, meaningful grounds, findings, and explicit reasons for unreviewed work. Backend errors, cancellation, budget exhaustion, malformed or truncated output, corrupted required inputs, semantic handoff overflow, and unfinished decisions remain incomplete or failed. Successful earlier stages retain their admitted findings if a later stage fails.
 
-Staged contract 7 invalidates older cached reviews. Each invocation has a
-strict assignment-specific schema and explicit four-key skeleton: triage targets
-are exactly empty; discovery may introduce candidates with an empty candidate ID.
-Tools-enabled Pi calls with a schema and validation use the invocation's exact
-schema as a native `structured_output` tool. Pi parses, normalizes, validates and
-corrects tool arguments within the same cumulative allowance and deadline. Every
-submission, including failed and replaced calls, counts as a tool start. The last
-successful normalized result in transcript order is host-validated only after
-clean process/stream settlement; later failed calls do not replace it. Assistant
-prose cannot supply native output, and host rejection never revives an older
-proposal. If a completed native invocation omitted submission, Pi adds one hidden
-native reminder and may continue under the original deadline and cumulative
-allowance. A second prose-only completion remains `missing_output`; errors,
-aborts and successful submissions do not trigger this reminder. Native submission results supply no source coverage. Pi owns correction
-in this mode; no host schema-only fresh stage attempt is added. Other backends
-and Pi's no-schema, no-tools, finalization and validation-opt-out paths preserve
-legacy behavior, including the eligible schema-only fresh attempt. Identity/source
-failures remain terminal. Diagnostics distinguish syntax, schema,
-assignment identity, source access/receipts, capture loss and quantitative
-exhaustion without exposing rejected values. Folded alternatives inherit
-Structure's actual failure reason and diagnostic, with no independent model call.
-Read estimates remain read estimates; native stages add a separate submission
-and total start floor. These transport floors are not proof of meaningful
-native review capacity. Numeric call, deadline and token policies are unchanged;
-their adequacy requires repeated matched cold production measurements.
+Triage receives bounded admitted notes, candidate grounds, triggers, consequences, dispositions, findings, and closed decisions. It may continue from those facts or investigate with ordinary tools under the same cumulative budget and deadline. Findings and typed scope/phase coverage remain bound to the analyzed revision and are atomically published together. `complete` means all planned scopes and required phases finished successfully or had an explicit host no-op; it does not certify exhaustive understanding or defect discovery.
+
+Built-in staged builders combine assignment diff, index, and binding into bounded supporting inputs. Required assignment bytes take priority over shared context, which remains separately bounded. Structure receives a compact whole-change inventory and targeted diff parts. Pi keeps its read-only `read`, `find`, `ls`, and `grep` tools and receives materialized ordinary files for useful before-side deleted or renamed source. Codex keeps its disposable read-only checkout, and Claude/Codex may inspect captured revisions with ordinary Git commands. Pi's `structured_output` remains the native output contract.
+
+Stage contract 8 invalidates older cached reviews. Extension API 8 accepts only the new staged builder contract. Pi's output-control extension remains isolated for read-only invocations when that packaged extension is requested; other invocation policies are unchanged.
 
 When a review agent exhausts its time or tool-call budget, Daydream continues with
 completed reviewers' findings and validated partial checkpoints, and marks the

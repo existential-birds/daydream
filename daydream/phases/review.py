@@ -445,8 +445,7 @@ async def phase_per_stack_reviews(
         effective_fanout_concurrency(10, backend)
     )
     prior_commits = git_ops.daydream_commits(work.repo, work.base_branch)
-    read_only = (getattr(backend, 'supports_source_recipe', False) is True
-                 or getattr(backend, 'read_only_disposable_clone', False) is True
+    read_only = (getattr(backend, 'read_only_disposable_clone', False) is True
                  or uses_diff_reference(backend, work.repo, read_only=True))
 
     hunk_index = load_hunk_index(deep_dir_path.parent)

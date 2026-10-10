@@ -20,7 +20,7 @@ from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_gh import block_real_gh
-from tests.harness.stub_backend import completed_stage_reads, review_stage_result, review_stage_state
+from tests.harness.stub_backend import review_stage_result
 
 
 @pytest.fixture(autouse=True)
@@ -35,9 +35,7 @@ def _minimal_backend() -> ScriptedBackend:
         # Alternative-review structured call → emit empty issue list so the
         # review-only flow reports "no issues" and exits 0 fast.
         if output_schema is not None:
-            state = review_stage_state(prompt)
-            reads = completed_stage_reads(Path(cwd), state) if state is not None else []
-            return [*reads, TextEvent(text="Review complete."),
+            return [TextEvent(text="Review complete."),
                 ResultEvent(structured_output=review_stage_result(prompt, []), continuation=None),
             ]
         return [TextEvent(text="No issues found."), ResultEvent(structured_output=None, continuation=None)]

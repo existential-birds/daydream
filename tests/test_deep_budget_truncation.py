@@ -185,7 +185,6 @@ async def test_admitted_interaction_findings_survive_triage_cutoff_and_merge_res
     silence(monkeypatch)
     backend = CheckpointBackend(multi_stack_target)
     backend.parse_severity = "high"
-    backend.per_stack_emit_reads = True
     backend.merge_echo_records = True
     monkeypatch.setattr("daydream.runner.create_backend", lambda *a, **kw: backend)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)

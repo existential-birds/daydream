@@ -16,7 +16,7 @@ from daydream.flows.engine import FlowContext
 from daydream.hunk_index import write_hunk_index
 from daydream.run_context import InteractionPolicy, RunContext
 from tests.harness.review_result import records_artifact, review_coverage
-from tests.harness.stub_backend import completed_stage_reads, review_stage_result
+from tests.harness.stub_backend import review_stage_result
 
 
 @pytest.mark.parametrize("start_at", [None, "merge", "fix"])
@@ -74,11 +74,6 @@ async def test_per_stack_rerun_clears_stale_structural_outputs_before_review(
         assert not artifacts[0].exists()
         assert "STALE" not in prompt
         attempted.append("structure" if "repository-wide interactions" in prompt else "primary")
-        from tests.harness.stub_backend import review_stage_state
-        state = review_stage_state(prompt)
-        assert state is not None
-        for event in completed_stage_reads(cwd, state):
-            yield event
         yield ResultEvent(structured_output=review_stage_result(prompt, []), continuation=None)
 
     monkeypatch.setattr(PiBackend, "execute", review)

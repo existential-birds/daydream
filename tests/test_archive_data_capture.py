@@ -45,7 +45,6 @@ from tests.harness.git_helpers import bare_remote, git
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.stub_backend import (
     StubBackend,
-    completed_stage_reads,
     force_interactive,
     install_stub_backend,
     review_stage_result,
@@ -515,7 +514,7 @@ def _fix_editing_backend(repo: Path) -> ScriptedBackend:
         ):
             state = review_stage_state(prompt)
             assert state is not None
-            return [*completed_stage_reads(Path(cwd), state), TextEvent(text="Review complete."),
+            return [TextEvent(text="Review complete."),
                 ResultEvent(structured_output=review_stage_result(prompt, [{
                                 "id": 1, "description": "Add a guard", "file": "main.py", "line": 1,
                                 "severity": "medium", "confidence": "HIGH", "rationale": "guard missing",
@@ -726,12 +725,12 @@ async def test_codex_evidence_integrity_archives_semantic_counts_and_review_flag
     child = json.loads(_deep_python_trajectory(run_dir).read_text(encoding="utf-8"))
     evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
     child_calls = [call for step in child["steps"] for call in step.get("tool_calls") or []]
-    assert len(child_calls) == 17
+    assert len(child_calls) == 16
     assert child_calls[0]["arguments"]["command"] == "printf 'shell 0\\n'"
-    assert sum(evaluation["tools"]["by_agent"]["deep-python"].values()) == 17
-    assert evaluation["tools"]["total_calls"] == 24
-    assert evaluation["tools"]["by_type"] == {"shell": 15, "patch": 1, "Read": 8}
-    assert evaluation["tools"]["write_ratio"] == 0.0417
+    assert sum(evaluation["tools"]["by_agent"]["deep-python"].values()) == 16
+    assert evaluation["tools"]["total_calls"] == 16
+    assert evaluation["tools"]["by_type"] == {"shell": 15, "patch": 1}
+    assert evaluation["tools"]["write_ratio"] == 0.0625
 
     agent_steps = [step for step in child["steps"] if step["source"] == "agent"]
     result_extras = [result.get("extra", {})
@@ -763,8 +762,8 @@ async def test_codex_evidence_integrity_clean_archive_stays_clean(
     assert all(not step.get("extra", {}).get("backend_diagnostics") for step in child["steps"])
     evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
     training = next(row for row in evaluation["training_signals"]["trajectories"] if row["trajectory"] == "deep-python")
-    assert evaluation["tools"]["total_calls"] == 9
-    assert evaluation["tools"]["by_type"] == {"read": 1, "Read": 8}
+    assert evaluation["tools"]["total_calls"] == 1
+    assert evaluation["tools"]["by_type"] == {"read": 1}
     assert training["noise_flags"] == []
     assert training["training_quality"] == "clean"
 
@@ -883,7 +882,6 @@ async def test_real_deep_archive_preserves_sanctioned_artifacts_and_findings(
     silence(monkeypatch)
     force_interactive(monkeypatch)
     backend = _JoinedArtifactEvidenceBackend(multi_stack_target)
-    backend.per_stack_emit_reads = True
     backend.parse_by_stack = {"python": {"severity": "medium", "confidence": "MEDIUM", "file": "api.py", "line": 1,
             "description": "Python private-artifact rationale control",
         },
@@ -944,13 +942,6 @@ async def test_real_deep_archive_preserves_sanctioned_artifacts_and_findings(
         if call["tool_call_id"] in python_completed_ids
         and call["function_name"].casefold() == "read"
     }
-    from tests.harness.stub_backend import review_stage_state
-    python_stage = review_stage_state(backend.python_prompts[0])
-    assert python_stage is not None
-    python_source = next(window for window in python_stage['source_access']
-                         if window['file'] == 'api.py' and window['side'] == 'after')
-    assert python_source['access']['path'] in python_reads
-    assert Path(python_source['access']['path']).read_bytes() == (multi_stack_target / 'api.py').read_bytes()
     assert str(private_intent) in python_reads
 
     generic_candidates = sorted((run_dir / "trajectories").glob("deep-generic*.json"))
@@ -971,14 +962,6 @@ async def test_real_deep_archive_preserves_sanctioned_artifacts_and_findings(
         if call["tool_call_id"] in generic_completed_ids
         and call["function_name"].casefold() == "read"
     }
-    generic_prompt = next(call['prompt'] for call in backend.calls
-                          if 'you are reviewing the generic-fallback stack' in call['prompt'].lower())
-    generic_stage = review_stage_state(generic_prompt)
-    assert generic_stage is not None
-    generic_source = next(window for window in generic_stage['source_access']
-                          if window['file'] == 'README.md' and window['side'] == 'after')
-    assert generic_source['access']['path'] in generic_reads
-    assert Path(generic_source['access']['path']).read_bytes() == (multi_stack_target / 'README.md').read_bytes()
     assert ".daydream/deep/intent.md" in generic_reads
 
     controlled_records: list[dict[str, Any]] = []

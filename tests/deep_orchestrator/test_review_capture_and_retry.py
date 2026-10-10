@@ -1,8 +1,7 @@
-"""Large, source-grounded staged reviews through the production runner."""
+"""Large staged-review transport and retry scenarios through the production runner."""
 from __future__ import annotations
 
 import json
-import os
 import re
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
@@ -12,8 +11,6 @@ import pytest
 
 from daydream.backends import (
     AgentEvent,
-    PiRequestConfig,
-    RequestEvent,
     ResultEvent,
     TextEvent,
     ToolResultEvent,
@@ -28,7 +25,7 @@ from tests.harness.git_helpers import seed_feature_branch
 from tests.test_deep_orchestrator import _sanctioned_inputs
 
 
-def source_review(tmp: Path, patch: pytest.MonkeyPatch, *, source_bytes: int,
+def staged_review(tmp: Path, patch: pytest.MonkeyPatch, *, source_bytes: int,
                   files: int = 8) -> InvestigationRun:
     before = {f'module_{index:02}.py': 'VALUE = 0\n' for index in range(files - 1)}
     before['api.py'] = "def hello():\n    return 'world'\n"
@@ -44,36 +41,10 @@ def source_review(tmp: Path, patch: pytest.MonkeyPatch, *, source_bytes: int,
     return InvestigationRun(repo, tmp, patch)
 
 
-def read_source(review: InvestigationRun, path: str, call_id: str, *,
-                stage: dict[str, Any] | None = None) -> Iterable[AgentEvent]:
-    if stage is not None:
-        from daydream import git_ops
-
-        windows = [window for window in stage['source_access'] if window['file'] == path and window['read_required']]
-        if windows:
-            for index, window in enumerate(windows):
-                projection = window['access'].get('path')
-                if projection is not None:
-                    source = Path(projection).read_text()
-                    call = ToolStartEvent(id=f'{call_id}-{index}', name='Read', input={'file_path': projection})
-                elif window['side'] == 'before':
-                    source = git_ops.show(review.repo, window['revision'], window['source_path']).decode('utf-8')
-                    call = ToolStartEvent(id=f'{call_id}-{index}', name='Bash',
-                                         input={'command': f'git show {window["revision"]}:{window["source_path"]}'})
-                else:
-                    source = (review.repo / path).read_text()
-                    call = ToolStartEvent(id=f'{call_id}-{index}', name='Read', input={'file_path': path})
-                yield call
-                yield ToolResultEvent(id=call.id, output=source, is_error=False)
-            return
-    source = (review.repo / path).read_text()
-    yield ToolStartEvent(id=call_id, name='Read', input={'file_path': path})
-    yield ToolResultEvent(id=call_id, output=source, is_error=False)
 
 
 def supporting_contents(prompt: str) -> dict[str, str]:
     """The scripted provider consumes whole bounded supporting sections on either transport."""
-    from tests.test_deep_orchestrator import _sanctioned_inputs
 
     captured = dict(re.findall(r'<sanctioned-input label="([^"]+)">\n(.*?)\n</sanctioned-input>', prompt, re.S))
     if 'Sanctioned phase inputs (read only these exact files):' in prompt:
@@ -88,176 +59,41 @@ def supporting_contents(prompt: str) -> dict[str, str]:
     return captured
 
 
-@pytest.mark.parametrize('workload_bytes', [53_000, 89_000])
-async def test_large_complete_source_receipts_retain_findings_and_allow_later_stages(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workload_bytes: int,
-) -> None:
-    review = source_review(tmp_path, monkeypatch, source_bytes=workload_bytes // 4)
-    source_totals: list[int] = []
-
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
-        if stage['scope_id'] != 'python':
-            return
-        assert stage['stage'] == 'first_pass'
-        total = 0
-        for path in stage['assigned_files']:
-            source = (review.repo / path).read_text()
-            assert len(source.encode()) > 12_000
-            total += len(source.encode())
-            yield from read_source(review, path, f'source-{path}')
-        source_totals.append(total)
-        if len(source_totals) > 1:
-            yield RequestEvent(prompt=review.backend.calls[-1]['prompt'],
-                               config=PiRequestConfig(no_extensions=True, no_tools=False))
-            yield ToolStartEvent(id='later-optional', name='read', input={'path': 'fixtures/unavailable.json'})
-            yield ToolResultEvent(id='later-optional', output='missing optional fixture', is_error=True)
-        if 'api.py' in stage['assigned_files']:
-            assert "return 'universe'" in (review.repo / 'api.py').read_text()
-            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
-
-    review.backend.stage_response = response
-    data = await review.finish('python', findings=('Grounded defect',))
-    assert scopes(data)['structure']['status'] == 'complete'
-    assert len(source_totals) == 2 and source_totals[0] > workload_bytes
-    metadata = [event['metadata'] for event in stage_ends(review, 'python')]
-    assert all(item['admitted'] for item in metadata)
-    assert metadata[0]['full_retained_bytes'] > workload_bytes
-    assert metadata[0]['compact_view_clipped'] is True
-    assert metadata[-1]['observed_tool_starts'] == 9
-    assert metadata[-1]['remaining_tool_calls'] == 39
-    assert metadata[-1]['nonblocking_unavailable_reads'] == 1
-
-
-@pytest.mark.parametrize('nonempty', [False, True], ids=['empty-reviewed', 'grounded-candidate'])
-@pytest.mark.parametrize('fault', ['native', 'unmatched', 'overflow', 'failed'])
-async def test_incomplete_required_source_cannot_establish_reviewed_coverage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str, nonempty: bool,
-) -> None:
-    review = source_review(tmp_path, monkeypatch,
-                           source_bytes=2 * 1024 * 1024 + 1024 if fault == 'overflow' else 400, files=2)
-
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
-        if stage['scope_id'] != 'python':
-            return
-        for path in stage['assigned_files']:
-            if fault != 'unmatched':
-                yield ToolStartEvent(id=f'fault-{path}', name='Read', input={'file_path': path})
-            yield ToolResultEvent(id=f'fault-{path}', output=(review.repo / path).read_text(),
-                                  is_error=fault == 'failed', truncated=fault == 'native')
-        if nonempty:
-            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
-
-    review.backend.stage_response = response
-    data = await review.finish('python', reason='evidence_incomplete')
-    assert scopes(data)['python']['partial_evidence'] is False
-    metadata = stage_ends(review, 'python')[0]['metadata']
-    assert metadata['admitted'] is False
-    if fault == 'native':
-        assert metadata['native_truncated_results'] > 0 and metadata['retention_overflow_results'] == 0
-    elif fault == 'overflow':
-        assert metadata['retention_overflow_results'] > 0 and metadata['native_truncated_results'] == 0
-    elif fault == 'unmatched':
-        assert metadata['unmatched_results'] > 0
-
-
 @pytest.mark.parametrize('fault', [
-    'search', 'optional', 'offset', 'checkout-relative', 'checkout-absolute', 'broken-symlink', 'existing',
-    'custom', 'ambient', 'support-pointer', 'support-status', 'support-pending', 'support-overflow',
-    'file-url-current', 'file-url-projection', 'file-url-support',
-    'ambiguous', 'unsupported', 'source',
-    'truncated', 'cancelled', 'pending', 'overflow', 'normalized-source', 'prefixed-source', 'parent-source',
+    'zero-match-search', 'failed-read', 'clipped-read', 'unmatched-result', 'oversized-read',
 ])
-async def test_failed_unrelated_search_does_not_poison_complete_source_review(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str, artifact_runtime_root: Path,
+async def test_optional_tool_results_do_not_poison_a_valid_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
 ) -> None:
-    if fault == 'normalized-source':
-        # Reuse the harness's private-storage configuration seam with a real
-        # spaced artifact root; all ownership and source operations remain real.
-        private_base = tmp_path.parent / f'{tmp_path.name}-source alias'
-        monkeypatch.setattr('daydream.artifacts.ownership._default_private_base', lambda: private_base)
-    review = source_review(tmp_path, monkeypatch, source_bytes=400, files=2)
-    nonblocking = fault in {'search', 'optional', 'offset', 'checkout-relative', 'checkout-absolute'}
+    review = staged_review(tmp_path, monkeypatch, source_bytes=400, files=1)
 
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         if stage['scope_id'] != 'python':
             return
-        if fault not in {'search', 'custom'}:
-            yield RequestEvent(prompt=review.backend.calls[-1]['prompt'],
-                               output_schema=review.backend.calls[-1]['output_schema'],
-                               config=PiRequestConfig(no_extensions=fault != 'ambient', no_tools=False,
-                                                      schema_emulated=False))
-        for path in stage['assigned_files']:
-            yield from read_source(review, path, f'complete-{path}', stage=stage)
-        operands: dict[str, Any] = {'path': str(tmp_path / 'unavailable-optional.txt')}
-        if fault in {'checkout-relative', 'checkout-absolute', 'broken-symlink', 'existing'}:
-            operand = review.backend.calls[-1]['cwd'] / 'unavailable-fixture.json'
-            if fault == 'broken-symlink':
-                operand.symlink_to('missing-target.json')
-            elif fault == 'existing':
-                operand.write_text('{}')
-            operands['path'] = operand.name if fault == 'checkout-relative' else str(operand)
-        if fault == 'offset':
-            operands.update(offset=2, limit=3)
-        elif fault == 'ambiguous':
-            operands['file_path'] = 'api.py'
-        elif fault == 'unsupported':
-            operands['encoding'] = 'utf8'
-        elif fault == 'file-url-current':
-            operands['path'] = (review.backend.calls[-1]['cwd'] / 'api.py').as_uri()
-        elif fault == 'file-url-projection':
-            projection = next(window['access']['path'] for window in stage['source_access']
-                              if window['access'].get('path') is not None)
-            operands['path'] = Path(projection).as_uri()
-        elif fault == 'file-url-support':
-            operands['path'] = Path(stage['supporting_bundle']['path']).as_uri()
-        elif fault in {'support-pointer', 'support-status', 'support-pending', 'support-overflow'}:
-            operands['path'] = stage['supporting_bundle']['path']
-        elif fault == 'source':
-            operands['path'] = 'api.py'
-        elif fault in {'normalized-source', 'prefixed-source', 'parent-source'}:
-            projection = next(window['access']['path'] for window in stage['source_access']
-                              if window['access'].get('path') is not None)
-            if fault == 'normalized-source':
-                assert 'source alias' in projection
-                operand = projection.replace('source alias', 'source\u00a0alias')
-            elif fault == 'parent-source':
-                target = tmp_path / 'alias' / 'deep'
-                target.mkdir(parents=True)
-                base = artifact_runtime_root.parent
-                link = base / 'source-link'
-                link.symlink_to(target, target_is_directory=True)
-                operand = str(link / '..' / Path(projection).relative_to(base))
-            else:
-                cwd = review.backend.calls[-1]['cwd']
-                operand = '@../../../' + os.path.relpath(projection, cwd.parents[2])
-                assert '..' in Path(operand).parts
-            operands.update(path=operand, offset=999999)
-        call = ToolStartEvent(id='optional-read', name='read', input=operands)
-        if fault == 'search':
-            call = ToolStartEvent(id='optional-read', name='Bash', input={'command': 'rg absent_optional_hook .'})
-        yield call
-        if fault not in {'pending', 'support-pending'}:
-            yield ToolResultEvent(id=call.id, output='x' * (2 * 1024 * 1024 + 1)
-                                  if fault in {'overflow', 'support-overflow'} else '',
-                                  is_error=fault not in {'support-status', 'support-overflow'},
-                                  exit_code=None if fault in {'support-status', 'support-overflow'} else 1,
-                                  status='failed' if fault == 'support-status' else None,
-                                  truncated=fault == 'truncated',
-                                  cancelled=fault == 'cancelled')
+        tool_name = 'Bash' if fault == 'zero-match-search' else 'Read'
+        arguments = (
+            {'command': 'rg definitely_absent .'}
+            if fault == 'zero-match-search' else {'file_path': 'optional.py'}
+        )
+        yield ToolStartEvent(id='optional', name=tool_name, input=arguments)
+        yield ToolResultEvent(id='optional', output='x' * (2 * 1024 * 1024 + 1) if fault == 'oversized-read'
+                              else 'optional context', is_error=fault in {'zero-match-search', 'failed-read'},
+                              exit_code=1 if fault == 'zero-match-search' else None,
+                              truncated=fault == 'clipped-read')
+        if fault == 'unmatched-result':
+            yield ToolResultEvent(id='unassociated', output='failed optional lookup', is_error=True)
         output['candidates'] = [candidate(disposition='confirmed', finding=record())]
 
     review.backend.stage_response = response
-    await review.finish('python', findings=('Grounded defect',) if nonblocking else (),
-                        reason=None if nonblocking else 'evidence_incomplete')
-    metadata = stage_ends(review, 'python')[0]['metadata']
-    assert metadata['observed_tool_starts'] == 3
-    assert metadata['admitted'] is nonblocking
-    assert metadata['nonblocking_unavailable_reads'] == int(fault in {
-        'optional', 'offset', 'checkout-relative', 'checkout-absolute'})
-    assert metadata['blocking_pending_receipts'] == int(fault in {'pending', 'support-pending'})
+    data = await review.finish('python', findings=('Grounded defect',))
+    assert scopes(data)['python']['status'] == 'complete'
+    assert [finding['title'] for finding in data['findings']] == ['Grounded defect']
+    metadata, = [item['metadata'] for item in stage_ends(review, 'python')]
+    assert metadata['admitted'] is True
+    assert metadata['observed_tool_starts'] == 1
 
 
-@pytest.mark.parametrize('outcome', ['success', 'second-rejection', 'capture-loss'])
+@pytest.mark.parametrize('outcome', ['success', 'second-rejection'])
 async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_starts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, ext_dir: ExtDir,
 ) -> None:
@@ -265,9 +101,9 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
         'from daydream.deep.prompts import build_per_stack_prompt\n'
         'def staged(**kw):\n'
         '    return build_per_stack_prompt(**kw) + \"\\nCUSTOM_ATTEMPT=\" + str(kw[\"review_stage\"][\"attempt\"])\n'
-        'def register(r): r.override_prompt(\"per-stack\", staged)\n', api_version=7,
+        'def register(r): r.override_prompt(\"per-stack\", staged)\n', api_version=8,
     )
-    review = source_review(tmp_path, monkeypatch, source_bytes=400)
+    review = staged_review(tmp_path, monkeypatch, source_bytes=400)
     attempts = 0
 
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
@@ -282,9 +118,9 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
         for path in stage['assigned_files']:
             yield ToolStartEvent(id=f'attempt-{attempts}-{path}', name='Read', input={'file_path': path})
             yield ToolResultEvent(id=f'attempt-{attempts}-{path}', output=(review.repo / path).read_text(),
-                                  is_error=False, truncated=outcome == 'capture-loss' and attempts == 1)
+                                  is_error=False, truncated=False)
         if not initial_assignment:
-            assert all('FAILED_ATTEMPT_MARKER' not in str(item) for item in stage['evidence'] + stage['notes'])
+            assert all('FAILED_ATTEMPT_MARKER' not in str(item) for item in stage['notes'])
             return
         if attempts == 1 or outcome == 'second-rejection':
             output['targets'][0]['PRIVATE_UNKNOWN_PROPERTY_MARKER'] = None
@@ -292,7 +128,7 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
             output['candidates'] = [candidate(disposition='confirmed', finding=dict(
                 record(), description='FAILED_ATTEMPT_MARKER'))]
         else:
-            assert stage['progress'] == stage['candidates'] == stage['evidence'] == []
+            assert stage['progress'] == stage['candidates'] == []
             assert stage['observed_tool_starts'] == 4 and stage['remaining_tool_calls'] == 44
             prompt = review.backend.calls[-1]['prompt']
             assert 'PRIVATE_UNKNOWN_PROPERTY_MARKER' not in prompt and 'FAILED_ATTEMPT_MARKER' not in prompt
@@ -304,14 +140,13 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
     review.backend.stage_response = response
     await review.finish('python', findings=('Grounded defect',) if outcome == 'success' else (),
                         reason=None if outcome == 'success' else 'malformed_output')
-    assert attempts == (1 if outcome == 'capture-loss' else 2)
+    assert attempts == 2
     metadata = [event['metadata'] for event in stage_ends(review, 'python')]
     assert metadata[0]['admitted'] is False and metadata[0]['attempt_tool_starts'] == 4
     assert metadata[0]['schema_rejection']['error_count'] > 0
-    if outcome != 'capture-loss':
-        assert metadata[1]['attempt'] == 2 and metadata[1]['observed_tool_starts'] == 8
-        assert metadata[1]['remaining_tool_calls'] == 40
-        assert metadata[1]['admitted'] is (outcome == 'success')
+    assert metadata[1]['attempt'] == 2 and metadata[1]['observed_tool_starts'] == 8
+    assert metadata[1]['remaining_tool_calls'] == 40
+    assert metadata[1]['admitted'] is (outcome == 'success')
     if outcome == 'success':
         assert metadata[-1]['observed_tool_starts'] == 12 and metadata[-1]['remaining_tool_calls'] == 36
 
@@ -333,7 +168,7 @@ async def test_transport_cap_keeps_a_medium_changed_file_whole_without_enlarging
     review.backend.sandbox = sandbox
     diffs: list[str] = []
 
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         if stage['scope_id'] != 'python':
             return
         prompt = review.backend.calls[-1]['prompt']
@@ -351,7 +186,6 @@ async def test_transport_cap_keeps_a_medium_changed_file_whole_without_enlarging
             assert '<sanctioned-input label="intent">' in prompt
             assert 'The PR updates greetings across stacks.' in prompt
             output['candidates'] = [candidate(disposition='confirmed', finding=record())]
-        yield from read_source(review, 'api.py', f'medium-{len(diffs)}', stage=stage)
 
     review.backend.stage_response = response
     await review.finish('python', findings=() if sandbox else ('Grounded defect',))
@@ -363,12 +197,11 @@ async def test_transport_cap_keeps_a_medium_changed_file_whole_without_enlarging
 
 @pytest.mark.parametrize('sandbox', [False, True], ids=['exact-paths', 'inline'])
 @pytest.mark.parametrize('omit_final', [False, True], ids=['all-parts', 'missing-final-part'])
-async def test_oversized_hunk_continuations_cover_every_byte_before_file_is_complete(
+async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool, omit_final: bool,
 ) -> None:
     from daydream import git_ops
     from daydream.prompt_budget import SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
-    from tests.test_deep_orchestrator import _sanctioned_inputs
 
     required = ''.join(f'# continuation payload {index:04}: ' + 'x' * 90 + '\n' for index in range(540))
     repo = tmp_path / 'oversized_hunk'
@@ -381,7 +214,7 @@ async def test_oversized_hunk_continuations_cover_every_byte_before_file_is_comp
     fragments: list[bytes] = []
     assignments: list[dict[str, Any]] = []
 
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         if stage['scope_id'] != 'python':
             return
         assert stage['stage'] == 'first_pass' and stage['assigned_files'] == ['api.py']
@@ -399,14 +232,7 @@ async def test_oversized_hunk_continuations_cover_every_byte_before_file_is_comp
             captured = dict(re.findall(r'<sanctioned-input label="([^"]+)">\n(.*?)\n</sanctioned-input>',
                                        rendered, flags=re.S))
         else:
-            pointers = _sanctioned_inputs(prompt)
-            visible = {label for label in stage['context_inputs'] if not label.startswith('source-')}
-            assert set(pointers) == visible - set(stage.get('context_inline_labels', []))
-            captured = {label: path.read_text() for label, path in pointers.items()}
             assert len(Path(stage['supporting_bundle']['path']).read_bytes()) <= 24 * 1024
-            for index, (label, path) in enumerate(pointers.items()):
-                yield ToolStartEvent(id=f'input-{index}', name='Read', input={'file_path': str(path)})
-                yield ToolResultEvent(id=f'input-{index}', output=captured[label], is_error=False)
         captured = supporting_contents(prompt)
         diff = captured['diff']
         index = json.loads(captured['hunk-index'])
@@ -418,7 +244,6 @@ async def test_oversized_hunk_continuations_cover_every_byte_before_file_is_comp
         fragments.append(body)
         if omit_final and part['part_index'] == part['part_count']:
             output['targets'][0].update(status='not_reviewed', reason='Final continuation remains unexamined.')
-        yield from read_source(review, 'api.py', 'grounded-continuation')
 
     review.backend.stage_response = response
     data = await review.finish('python', reason='evidence_incomplete' if omit_final else None)
@@ -429,7 +254,7 @@ async def test_oversized_hunk_continuations_cover_every_byte_before_file_is_comp
     assert all(event['metadata']['admitted'] for event in stage_ends(review, 'python'))
 
 
-async def test_api_seven_exact_builder_signatures_route_generic_and_rust_shards(
+async def test_current_exact_builder_signatures_route_generic_and_rust_shards(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir,
 ) -> None:
     ext_dir.write_module(
@@ -450,7 +275,7 @@ async def test_api_seven_exact_builder_signatures_route_generic_and_rust_shards(
         'def register(r):\n'
         '    r.override_prompt("generic-fallback", generic)\n'
         '    r.override_prompt("per-stack", language)\n'
-        '    r.override_prompt("structural", structure)\n', api_version=7,
+        '    r.override_prompt("structural", structure)\n', api_version=8,
     )
     before = {f'guide_{index}.md': '# Guide\nold contract\n' for index in range(4)}
     before.update({f'component_{index}.rs': 'pub fn capacity() -> usize { 1 }\n' for index in range(4)})
@@ -479,36 +304,32 @@ async def test_api_seven_exact_builder_signatures_route_generic_and_rust_shards(
     assert {stage['scope_id'] for stage in review.backend.stages} == expected
 
 
-async def test_triage_carries_only_relevant_partial_views_and_rereads_candidate_source(
+async def test_triage_carries_only_relevant_admitted_semantic_views(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    review = source_review(tmp_path, monkeypatch, source_bytes=16_000, files=4)
+    review = staged_review(tmp_path, monkeypatch, source_bytes=16_000, files=4)
 
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         if stage['scope_id'] != 'python':
             return
         if stage['stage'] == 'first_pass':
-            for path in stage['assigned_files']:
-                yield from read_source(review, path, f'discovery-{path}')
             output['candidates'] = [candidate(), dict(candidate(disposition='rejected'), file='module_00.py')]
             return
         pending, = stage['candidates']
         assert stage['assigned_files'] == ['api.py']
         assert stage['assigned_candidate_ids'] == [pending['candidate_id']]
-        assert stage['evidence'] and all(block['files'] == ['api.py'] for block in stage['evidence'])
-        assert all(block['partial'] for block in stage['evidence'])
-        assert all(label.startswith('source-') for label in stage['context_inputs'])
-        yield from read_source(review, 'api.py', 'triage-reread')
+        assert pending['file'] == 'api.py'
+        assert pending['grounds'] and pending['trigger'] and pending['consequence']
         output['candidates'] = [dict(pending, disposition='confirmed', finding=record())]
 
     review.backend.stage_response = response
     await review.finish('python', findings=('Grounded defect',))
     metadata = [event['metadata'] for event in stage_ends(review, 'python')]
     assert [item['logical_stage'] for item in metadata] == ['first_pass', 'triage']
-    assert metadata[-1]['observed_tool_starts'] == 5 and metadata[-1]['attempt_tool_starts'] == 1
+    assert metadata[-1]['admitted'] is True
 
 
-async def test_realistic_diff_and_index_are_scoped_and_cannot_poison_source_evidence(
+async def test_realistic_diff_and_index_are_scoped_to_assigned_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
 
@@ -528,22 +349,15 @@ async def test_realistic_diff_and_index_are_scoped_and_cannot_poison_source_evid
     review = InvestigationRun(repo, tmp_path, monkeypatch)
     exposed: list[str] = []
 
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         if stage['scope_id'] != 'python':
             return
-        pointers = _sanctioned_inputs(review.backend.calls[-1]['prompt'])
         captured = supporting_contents(review.backend.calls[-1]['prompt'])
         diff, index = captured['diff'], json.loads(captured['hunk-index'])
         assert set(index) == set(stage['assigned_files'])
         assert set(path for path in after if f'diff --git a/{path} b/{path}' in diff) == set(stage['assigned_files'])
         assert len(Path(stage['supporting_bundle']['path']).read_bytes()) <= 24 * 1024
         exposed.append(diff)
-        if len(exposed) == 1:
-            for label in ('review-assignment',) if 'review-assignment' in pointers else ('diff', 'hunk-index'):
-                yield ToolStartEvent(id=f'support-{label}', name='Read', input={'file_path': str(pointers[label])})
-                yield ToolResultEvent(id=f'support-{label}', output=pointers[label].read_text(), is_error=False)
-        for path in stage['assigned_files']:
-            yield from read_source(review, path, f'source-{path}')
         if 'api.py' in stage['assigned_files'] and not stage['progress']:
             assert 'BOUNDARY_00 = 1' in (repo / 'api.py').read_text()
             output['candidates'] = [candidate(disposition='confirmed', finding=record(line=6))]
@@ -563,7 +377,7 @@ async def test_strict_stage_selection_never_salvages_rejected_or_incomplete_outp
 ) -> None:
     from tests.harness.stub_backend import review_stage_state, stage_result
 
-    review = source_review(tmp_path, monkeypatch, source_bytes=400, files=2)
+    review = staged_review(tmp_path, monkeypatch, source_bytes=400, files=2)
 
     class IncompleteBackend(StagedBackend):
         async def execute(self, cwd: Path, prompt: str, *args: Any,
@@ -572,9 +386,6 @@ async def test_strict_stage_selection_never_salvages_rejected_or_incomplete_outp
             if stage is not None and stage['scope_id'] == 'python':
                 self.stages.append(stage)
                 self.calls.append({'prompt': prompt, **kwargs})
-                for path in stage['assigned_files']:
-                    for event in read_source(review, path, f'incomplete-{path}'):
-                        yield event
                 valid = stage_result(stage)
                 invalid = {'unknown_outer_key': valid}
                 text = (json.dumps(valid) if case == 'invalid-native-valid-text' else json.dumps(invalid)
@@ -617,7 +428,7 @@ async def test_long_unicode_line_continuations_reassemble_complete_diff_with_byt
     canonical = git_ops.diff(repo, 'main')
     expected_body = canonical.split('\n@@', 1)[1].split('\n', 1)[1].encode()
 
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         if stage['scope_id'] != 'python':
             return
         part, = stage['assignment_parts']
@@ -629,7 +440,6 @@ async def test_long_unicode_line_continuations_reassemble_complete_diff_with_byt
         assert part['fragment_bytes'] == len(body)
         assert (part['old_start'], part['old_count'], part['new_start'], part['new_count']) == (1, 1, 1, 1)
         chunks.append(body)
-        yield from read_source(review, 'api.py', f'unicode-{part["part_index"]}', stage=stage)
 
     review.backend.stage_response = response
     await review.finish('python')
@@ -638,27 +448,6 @@ async def test_long_unicode_line_continuations_reassemble_complete_diff_with_byt
     assert any(part['fragment_line_offset'] > 0 for part in mappings)
 
 
-async def test_reviewer_total_retention_overflow_rejects_otherwise_complete_source_reads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    review = source_review(tmp_path, monkeypatch, source_bytes=1_750_000, files=1)
-
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
-        if stage['scope_id'] != 'python':
-            return
-        source = (review.repo / 'api.py').read_text()
-        assert 1_700_000 < len(source.encode()) < 2 * 1024 * 1024
-        for index in range(5):
-            yield ToolStartEvent(id=f'aggregate-{index}', name='Read', input={'file_path': 'api.py'})
-            yield ToolResultEvent(id=f'aggregate-{index}', output=source, is_error=False)
-
-    review.backend.stage_response = response
-    await review.finish('python', reason='evidence_incomplete')
-    metadata = stage_ends(review, 'python')[0]['metadata']
-    assert metadata['failure_class'] == 'capture_loss'
-    assert metadata['retention_overflow_results'] > 0 and metadata['native_truncated_results'] == 0
-    assert 7_000_000 <= metadata['full_retained_bytes'] <= 8 * 1024 * 1024
-    assert metadata['observed_tool_starts'] == 5
 
 
 @pytest.mark.parametrize('path', ['component_雪.py', 'nested/component_"quote".py', 'component_\t.py'])
@@ -672,7 +461,7 @@ async def test_quoted_git_paths_keep_complete_required_stage_inputs(
     review = InvestigationRun(repo, tmp_path, monkeypatch)
     required: list[str] = []
 
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         if stage['scope_id'] != 'python':
             return
         assert stage['assigned_files'] == [path]
@@ -681,53 +470,11 @@ async def test_quoted_git_paths_keep_complete_required_stage_inputs(
         assert 'QUOTED_REQUIRED_CHANGE' in diff
         assert path in json.loads(captured['hunk-index'])
         required.append(diff)
-        yield from read_source(review, path, 'quoted-source')
 
     review.backend.stage_response = response
     data = await review.finish('python')
     assert scopes(data)['python']['files'] == [path]
     assert len(required) == 1
-
-
-@pytest.mark.parametrize('frozen', [False, True], ids=['symbolic-unbound-ref', 'frozen-merge-base'])
-@pytest.mark.parametrize('probe', [False, True], ids=['before-only', 'absent-current-probe'])
-async def test_deleted_assignments_require_source_receipts_from_frozen_revision(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frozen: bool, probe: bool,
-) -> None:
-    from daydream import git_ops
-    from tests.harness.git_helpers import git
-
-    repo = tmp_path / 'deleted_source'
-    seed_feature_branch(repo, base={'api.py': "def hello():\n    return 'world'\n", 'module.py': 'VALUE = 0\n'},
-                        feature={'module.py': 'VALUE = 1\n'})
-    git(repo, 'rm', 'api.py')
-    git(repo, 'commit', '-m', 'delete api')
-    review = InvestigationRun(repo, tmp_path, monkeypatch)
-
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
-        if stage['scope_id'] != 'python':
-            return
-        if probe:
-            yield RequestEvent(prompt=review.backend.calls[-1]['prompt'],
-                               config=PiRequestConfig(no_extensions=True, no_tools=False))
-        for path in stage['assigned_files']:
-            if path != 'api.py':
-                yield from read_source(review, path, f'current-{path}')
-                continue
-            revision = stage['analyzed_revision']['merge_base_sha'] if frozen else 'main'
-            source = git_ops.show(repo, revision, path).decode("utf-8")
-            assert "return 'world'" in source and not (repo / path).exists()
-            yield ToolStartEvent(id='before-deletion', name='Bash', input={'command': f'git show {revision}:{path}'})
-            yield ToolResultEvent(id='before-deletion', output=source, is_error=False)
-            if probe:
-                yield ToolStartEvent(id='deleted-current', name='read', input={'path': path})
-                yield ToolResultEvent(id='deleted-current', output='absent', is_error=True)
-
-    review.backend.stage_response = response
-    data = await review.finish('python', reason=None if frozen else 'evidence_incomplete')
-    assert set(scopes(data)['python']['files']) == {'api.py', 'module.py'}
-    metadata = stage_ends(review, 'python')[0]['metadata']
-    assert metadata['admitted'] is frozen
 
 
 async def test_failed_canonical_stage_input_preserves_successful_sibling_review(
@@ -763,75 +510,33 @@ async def test_failed_canonical_stage_input_preserves_successful_sibling_review(
     assert 'PRIVATE_DIAGNOSTIC_PATH_SENTINEL' not in capsys.readouterr().out
 
 
-async def test_native_result_metadata_overflow_is_capture_loss_without_schema_retry(
+
+
+
+
+async def test_changed_prepared_input_identity_blocks_admission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    review = source_review(tmp_path, monkeypatch, source_bytes=400, files=1)
 
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
-        if stage['scope_id'] != 'python':
-            return
-        yield ToolStartEvent(id='oversized-status', name='Read', input={'file_path': 'api.py'})
-        yield ToolResultEvent(id='oversized-status', output=(review.repo / 'api.py').read_text(),
-                              is_error=False, status='s' * (9 * 1024 * 1024))
+    review = staged_review(tmp_path, monkeypatch, source_bytes=400, files=1)
 
-    review.backend.stage_response = response
-    await review.finish('python', reason='evidence_incomplete')
-    event, = stage_ends(review, 'python')
-    metadata = event['metadata']
-    assert metadata['failure_class'] == 'capture_loss'
-    assert metadata['retention_overflow_results'] > 0
-    assert metadata['full_retained_bytes'] <= 8 * 1024 * 1024
-    assert metadata['attempt'] == 1 and metadata['schema_rejection'] is None
-
-
-async def test_failed_mixed_search_and_source_call_cannot_be_cleared_by_a_later_complete_read(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    review = source_review(tmp_path, monkeypatch, source_bytes=400, files=1)
-
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
-        if stage['scope_id'] != 'python':
-            return
-        yield ToolStartEvent(id='mixed-failed-source', name='Bash', input={'command': 'rg missing .; cat api.py'})
-        yield ToolResultEvent(id='mixed-failed-source', output=(review.repo / 'api.py').read_text(), is_error=True,
-                              exit_code=1)
-        yield from read_source(review, 'api.py', 'later-complete-source')
-
-    review.backend.stage_response = response
-    await review.finish('python', reason='evidence_incomplete')
-    event, = stage_ends(review, 'python')
-    assert event['metadata']['failure_class'] == 'capture_loss'
-    assert event['metadata']['observed_tool_starts'] == 2 and event['metadata']['admitted'] is False
-
-
-async def test_changed_prepared_input_identity_blocks_admission_and_schema_retry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from tests.test_deep_orchestrator import _sanctioned_inputs
-
-    review = source_review(tmp_path, monkeypatch, source_bytes=400, files=1)
-
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         if stage['scope_id'] != 'python':
             return
         pointers = _sanctioned_inputs(review.backend.calls[-1]['prompt'])
         diff = pointers['review-assignment'] if 'review-assignment' in pointers else pointers['diff']
-        yield ToolStartEvent(id='captured-support', name='Read', input={'file_path': str(diff)})
-        yield ToolResultEvent(id='captured-support', output=diff.read_text(), is_error=False)
-        yield from read_source(review, 'api.py', 'complete-source')
         diff.write_text('Changed after the prepared exact-path input was read.\n')
         output['targets'][0]['unknown_duplicate_id'] = None
 
     review.backend.stage_response = response
     await review.finish('python', reason='evidence_incomplete')
     event, = stage_ends(review, 'python')
-    assert event['metadata']['failure_class'] == 'capture_loss'
+    assert event['metadata']['failure_class'] == 'admission_failure'
     assert event['metadata']['admitted'] is False and event['metadata']['attempt'] == 1
-    assert event['metadata']['observed_tool_starts'] == 2
+    assert event['metadata']['observed_tool_starts'] == 0
 
 
-async def test_mixed_source_receipt_does_not_expose_other_file_in_candidate_triage(
+async def test_candidate_triage_receives_only_relevant_admitted_semantics(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = tmp_path / 'mixed_source'
@@ -842,39 +547,32 @@ async def test_mixed_source_receipt_does_not_expose_other_file_in_candidate_tria
                                  'module.py': before['module.py'].replace('VALUE = 0', 'VALUE = 1')})
     review = InvestigationRun(repo, tmp_path, monkeypatch)
 
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         if stage['scope_id'] != 'python':
             return
         if stage['stage'] == 'first_pass':
             assert set(stage['assigned_files']) == {'api.py', 'module.py'}
-            yield ToolStartEvent(id='mixed-source', name='Bash', input={'command': 'cat api.py module.py'})
-            yield ToolResultEvent(id='mixed-source', output=''.join((repo / path).read_text()
-                                                                  for path in stage['assigned_files']), is_error=False)
-            for path in stage['assigned_files']:
-                yield from read_source(review, path, f'verified-{path}')
             output['candidates'] = [candidate()]
             return
         pending, = stage['candidates']
         assert stage['assigned_files'] == ['api.py']
-        assert stage['evidence'] and all(item['partial'] and item['files'] == ['api.py']
-                                         for item in stage['evidence'])
-        assert all('OTHER_FILE_SENSITIVE_MARKER' not in item['excerpt'] for item in stage['evidence'])
+        assert pending['file'] == 'api.py'
+        assert 'OTHER_FILE_SENSITIVE_MARKER' not in pending['grounds']
+        assert pending['grounds'] and pending['trigger'] and pending['consequence']
         assert "return 'universe'" in (repo / 'api.py').read_text()
-        yield from read_source(review, 'api.py', 'targeted-reread')
         output['candidates'] = [dict(pending, disposition='confirmed', finding=record())]
 
     review.backend.stage_response = response
     await review.finish('python', findings=('Grounded defect',))
-    assert stage_ends(review, 'python')[-1]['metadata']['observed_tool_starts'] == 4
+    assert stage_ends(review, 'python')[-1]['metadata']['admitted'] is True
 
 
 @pytest.mark.parametrize('sandbox', [False, True], ids=['exact-whole-context', 'inline-context-unavailable'])
 async def test_shared_intent_uses_actual_transport_allowance_after_required_assignment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool,
 ) -> None:
-    from tests.test_deep_orchestrator import _sanctioned_inputs
 
-    review = source_review(tmp_path, monkeypatch, source_bytes=400, files=2)
+    review = staged_review(tmp_path, monkeypatch, source_bytes=400, files=2)
     shared_intent = 'The greeting API promises world and this change must preserve callers.\n' * 600
     assert 40_000 < len(shared_intent.encode()) < 48_000
 
@@ -895,6 +593,7 @@ async def test_shared_intent_uses_actual_transport_allowance_after_required_assi
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         if stage['scope_id'] != 'python':
             return
+        from tests.test_deep_orchestrator import _sanctioned_inputs
         statuses = {item['label']: item['status'] for item in stage['context_statuses']}
         if sandbox:
             assert 'intent' not in stage['context_inputs'] and statuses['intent'] == 'unavailable'
@@ -904,8 +603,6 @@ async def test_shared_intent_uses_actual_transport_allowance_after_required_assi
             assert pointers['intent'].read_text() == shared_intent
             yield ToolStartEvent(id='shared-context', name='Read', input={'file_path': str(pointers['intent'])})
             yield ToolResultEvent(id='shared-context', output=pointers['intent'].read_text(), is_error=False)
-        for path in stage['assigned_files']:
-            yield from read_source(review, path, f'assigned-source-{path}')
         output['candidates'] = [candidate(disposition='confirmed', finding=record())]
 
     review.backend.stage_response = response
@@ -918,19 +615,18 @@ async def test_shared_intent_uses_actual_transport_allowance_after_required_assi
     else:
         await review.finish('python', findings=('Grounded defect',), file_config=DaydreamFileConfig(supervisor='off'))
     event, = stage_ends(review, 'python')
-    # Full supporting intent is separate from the small, complete source compact view.
-    assert event['metadata']['compact_view_clipped'] is False
     if not sandbox:
-        assert event['metadata']['full_retained_bytes'] > len(shared_intent.encode())
-    assert event['metadata']['observed_tool_starts'] == (2 if sandbox else 3)
+        assert event['metadata']['observed_tool_starts'] == 1
+    else:
+        assert event['metadata']['observed_tool_starts'] == 0
 
 
-async def test_pi_style_final_turn_schema_retry_ignores_prior_planning_text_and_reads_fresh_source(
+async def test_pi_style_final_turn_schema_retry_ignores_prior_planning_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from tests.harness.stub_backend import review_stage_state, stage_result
 
-    review = source_review(tmp_path, monkeypatch, source_bytes=400, files=2)
+    review = staged_review(tmp_path, monkeypatch, source_bytes=400, files=2)
 
     class TurnBackend(StagedBackend):
         async def execute(self, cwd: Path, prompt: str, *args: Any,
@@ -942,17 +638,13 @@ async def test_pi_style_final_turn_schema_retry_ignores_prior_planning_text_and_
                 attempt = len([item for item in self.stages if item['scope_id'] == 'python'])
                 assert stage['attempt'] == attempt
                 yield TextEvent(text='I will inspect the assigned symbols before making a judgment.')
-                for path in stage['assigned_files']:
-                    for event in read_source(review, path, f'fresh-{attempt}-{path}'):
-                        yield event
                 yield TurnEndEvent()
                 finding = dict(record(), description='FAILED_PI_ATTEMPT_MARKER') if attempt == 1 else record()
                 output = stage_result(stage, candidates=[candidate(disposition='confirmed', finding=finding)])
                 if attempt == 1:
                     output['targets'][0]['unknown_duplicate_target'] = None
                 else:
-                    assert stage['candidates'] == stage['notes'] == stage['evidence'] == stage['progress'] == []
-                    assert stage['observed_tool_starts'] == 2 and stage['remaining_tool_calls'] == 46
+                    assert stage['candidates'] == stage['notes'] == stage['progress'] == []
                     assert 'FAILED_PI_ATTEMPT_MARKER' not in prompt
                 yield TextEvent(text=json.dumps(output))
                 yield TurnEndEvent()
@@ -968,8 +660,8 @@ async def test_pi_style_final_turn_schema_retry_ignores_prior_planning_text_and_
     assert [event['metadata']['attempt'] for event in events] == [1, 2]
     assert [event['metadata']['admitted'] for event in events] == [False, True]
     assert events[0]['metadata']['schema_rejection']['error_count'] > 0
-    assert events[-1]['metadata']['observed_tool_starts'] == 4
-    assert events[-1]['metadata']['remaining_tool_calls'] == 44
+    assert events[-1]['metadata']['observed_tool_starts'] == 0
+    assert events[-1]['metadata']['remaining_tool_calls'] == 48
 
 
 @pytest.mark.parametrize('selection', ['text-origin-nested', 'empty-final-turn', 'native-prose'])
@@ -978,7 +670,7 @@ async def test_final_turn_selection_distinguishes_inferred_text_from_native_stru
 ) -> None:
     from tests.harness.stub_backend import review_stage_state, stage_result
 
-    review = source_review(tmp_path, monkeypatch, source_bytes=400, files=2)
+    review = staged_review(tmp_path, monkeypatch, source_bytes=400, files=2)
 
     class SelectionBackend(StagedBackend):
         async def execute(self, cwd: Path, prompt: str, *args: Any,
@@ -988,9 +680,6 @@ async def test_final_turn_selection_distinguishes_inferred_text_from_native_stru
                 self.calls.append({'prompt': prompt, **kwargs})
                 self.stages.append(stage)
                 yield TextEvent(text='Planning the assigned source investigation.')
-                for path in stage['assigned_files']:
-                    for event in read_source(review, path, f'read-{path}'):
-                        yield event
                 yield TurnEndEvent()
                 output = stage_result(stage, candidates=[candidate(disposition='confirmed', finding=record())])
                 if selection == 'empty-final-turn':
@@ -1016,7 +705,7 @@ async def test_final_turn_selection_distinguishes_inferred_text_from_native_stru
     assert events[-1]['metadata']['admitted'] is (selection == 'native-prose')
     if selection == 'text-origin-nested':
         metadata = events[-1]['metadata']
-        assert metadata['observed_tool_starts'] == 4 and metadata['remaining_tool_calls'] == 44
+        assert metadata['observed_tool_starts'] == 0 and metadata['remaining_tool_calls'] == 48
         assert metadata['schema_rejection']['error_count'] > 0
 
 
@@ -1033,7 +722,7 @@ async def test_opaque_assignment_handles_cannot_alias_real_changed_filenames(
     targets: list[str] = []
     diffs: list[str] = []
 
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         if stage['scope_id'] != 'generic':
             return
         target_ids = stage['assigned_target_ids']
@@ -1048,9 +737,6 @@ async def test_opaque_assignment_handles_cannot_alias_real_changed_filenames(
         if 'part:000001' in stage['assigned_files']:
             assert 'REAL_FILE_REQUIRED_CHANGE' in scoped_diff
         diffs.append(scoped_diff)
-        for path in stage['assigned_files']:
-            yield from read_source(review, path, f'source-{path}')
-
     review.backend.stage_response = response
     data = await review.finish('generic')
     assert set(scopes(data)['generic']['files']) == {'00_oversize.md', 'part:000001'}
@@ -1060,74 +746,17 @@ async def test_opaque_assignment_handles_cannot_alias_real_changed_filenames(
         assert combined.count(f'REQUIRED_LARGE_CHANGE_{index:04}') == 1
 
 
-@pytest.mark.parametrize('buffered', [False, True], ids=['sequential-results', 'buffered-starts'])
-async def test_production_sized_receipt_counts_preserve_complete_structure_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, buffered: bool,
-) -> None:
-    sections = ['def hello():\n    return node_000()\n'] + [
-        f'def node_{index:03}():\n    return ' + (f'node_{index + 1:03}()\n' if index < 127 else "'world'\n")
-        for index in range(128)
-    ]
-    api_before = '\n'.join(sections)
-    documentation = '# Greeting contract: hello() returns world.\n' + ''.join(
-        f'Contract context section {index:04}: ' + 'x' * 110 + '\n' for index in range(2_300)
-    )
-    repo = tmp_path / 'production_receipt_count'
-    seed_feature_branch(repo, base={'api.py': api_before, 'README.md': '# Greeting contract: hello() returns world.\n'},
-                        feature={'api.py': api_before.replace("return 'world'", "return 'universe'"),
-                                 'README.md': documentation})
-    review = InvestigationRun(repo, tmp_path, monkeypatch)
-
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
-        if stage['scope_id'] != 'structure':
-            return
-        assert stage['stage'] == 'integration' and stage['remaining_tool_calls'] == 192
-        lines = (repo / 'api.py').read_text().splitlines(keepends=True)
-        events: list[tuple[ToolStartEvent, ToolResultEvent]] = []
-        for index in range(129):
-            offset = index * 3
-            source = ''.join(lines[offset:offset + 2])
-            assert source.startswith('def ') and 'return ' in source
-            call = ToolStartEvent(id=f'enclosing-symbol-{index}', name='Read',
-                                  input={'file_path': 'api.py', 'offset': offset + 1, 'limit': 2})
-            events.append((call, ToolResultEvent(id=call.id, output=source, is_error=False)))
-        assert "return 'universe'" in events[-1][1].output
-        if buffered:
-            yield from (call for call, _ in events)
-            yield from (result for _, result in events)
-        else:
-            for call, result in events:
-                yield call
-                yield result
-        finding = dict(record(line=386), description='Greeting no longer satisfies its documented world contract',
-                       evidence='api.py:2 calls node_000, whose call chain ends at api.py:386 returning universe')
-        output['candidates'] = [dict(candidate(disposition='confirmed', finding=finding), line=386,
-                                     grounds=finding['evidence'])]
-
-    review.backend.stage_response = response
-    await review.finish('structure', findings=('Greeting no longer satisfies its documented world contract',))
-    assert len((repo / '.daydream/diff.patch').read_bytes()) > 256 * 1024
-    event, = stage_ends(review, 'structure')
-    metadata = event['metadata']
-    assert metadata['observed_tool_starts'] == 129 and metadata['remaining_tool_calls'] == 63
-    assert metadata['full_retained_bytes'] < 8 * 1024 * 1024
-    assert metadata['compact_view_clipped'] is True and metadata['admitted'] is True
-    assert metadata['retention_overflow_results'] == metadata['unmatched_results'] == 0
-
-
 @pytest.mark.parametrize('fault', ['unknown-target', 'unknown-candidate', 'contradiction', 'grounds',
                                   'grounds-missing', 'grounds-null', 'grounds-number', 'handoff'])
 async def test_mixed_schema_and_admission_rejection_never_retries_or_loses_prior_findings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
 ) -> None:
-    review = source_review(tmp_path, monkeypatch, source_bytes=400)
+    review = staged_review(tmp_path, monkeypatch, source_bytes=400)
     rejected_assignments: list[tuple[str, ...]] = []
 
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         if stage['scope_id'] != 'python':
             return
-        for path in stage['assigned_files']:
-            yield from read_source(review, path, f'read-{path}')
         if not stage['progress']:
             output['candidates'] = [candidate(disposition='confirmed', finding=record())]
             return
@@ -1164,18 +793,17 @@ async def test_mixed_schema_and_admission_rejection_never_retries_or_loses_prior
     events = stage_ends(review, 'python')
     assert [event['metadata']['admitted'] for event in events] == [True, False]
     assert [event['metadata']['attempt'] for event in events] == [1, 1]
-    assert events[-1]['metadata']['observed_tool_starts'] == 8
-    assert events[-1]['metadata']['remaining_tool_calls'] == 40
+    assert events[-1]['metadata']['observed_tool_starts'] == 0
+    assert events[-1]['metadata']['remaining_tool_calls'] == 48
     assert events[-1]['metadata']['schema_rejection']['error_count'] > 0
     assert all('FAILED_MIXED_ATTEMPT_MARKER' not in call['prompt'] for call in review.backend.calls)
 
 
 @pytest.mark.parametrize('sandbox', [False, True], ids=['exact-paths', 'inline'])
-async def test_old_only_hunk_and_later_continuations_keep_their_own_canonical_ranges(
+async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool,
 ) -> None:
 
-    from daydream import git_ops
     from tests.harness.git_helpers import git
 
     prefix = ''.join(f'# stable boundary {index:03}\n' for index in range(98))
@@ -1189,7 +817,7 @@ async def test_old_only_hunk_and_later_continuations_keep_their_own_canonical_ra
     assignments: list[dict[str, Any]] = []
     fragments: list[str] = []
 
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         if stage['scope_id'] != 'python':
             return
         prompt = review.backend.calls[-1]['prompt']
@@ -1202,16 +830,8 @@ async def test_old_only_hunk_and_later_continuations_keep_their_own_canonical_ra
                         part['new_start'], part['new_start'] + part['new_count'] - 1)
             assert any((hunk['old_start'], hunk['old_end'], hunk['new_start'], hunk['new_end']) == expected
                        for hunk in scoped['hunks'])
-            if part['new_count'] == 0:
-                revision = stage['analyzed_revision']['merge_base_sha']
-                old_source = git_ops.show(repo, revision, 'api.py').decode('utf-8')
-                assert old_source.splitlines()[0] == 'DELETED_FIRST_LINE = True'
-                yield ToolStartEvent(id=f'old-{part["target_id"]}', name='Bash',
-                                    input={'command': f'git show {revision}:api.py'})
-                yield ToolResultEvent(id=f'old-{part["target_id"]}', output=old_source, is_error=False)
-            else:
+            if part['new_count'] != 0:
                 assert (part['old_start'], part['old_count'], part['new_start'], part['new_count']) == (100, 1, 99, 501)
-                yield from read_source(review, 'api.py', f'new-{part["target_id"]}')
 
     review.backend.stage_response = response
     assert await review.run(findings_out=None) == 0
@@ -1228,7 +848,7 @@ async def test_old_only_hunk_and_later_continuations_keep_their_own_canonical_ra
 async def test_schema_only_field_shape_rejection_uses_backend_correction_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
 ) -> None:
-    review = source_review(tmp_path, monkeypatch, source_bytes=400, files=2)
+    review = staged_review(tmp_path, monkeypatch, source_bytes=400, files=2)
     attempts = 0
 
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
@@ -1241,8 +861,6 @@ async def test_schema_only_field_shape_rejection_uses_backend_correction_policy(
                                output_schema=stage['response_contract']['schema'],
                                config=PiRequestConfig(schema_emulated=False, no_tools=False))
         attempts += 1
-        for path in stage['assigned_files']:
-            yield from read_source(review, path, f'fresh-{attempts}-{path}')
         if attempts == 1:
             output['candidates'] = [candidate(disposition='confirmed', finding=dict(
                 record(), description='FAILED_SCHEMA_ONLY_ATTEMPT'))]
@@ -1251,9 +869,9 @@ async def test_schema_only_field_shape_rejection_uses_backend_correction_policy(
             else:
                 output['notes'] = 3
         else:
-            assert stage['attempt'] == 2 and stage['observed_tool_starts'] == 2
-            assert stage['remaining_tool_calls'] == 46
-            assert stage['evidence'] == stage['notes'] == stage['candidates'] == []
+            assert stage['attempt'] == 2 and stage['observed_tool_starts'] == 0
+            assert stage['remaining_tool_calls'] == 48
+            assert stage['notes'] == stage['candidates'] == []
             assert 'FAILED_SCHEMA_ONLY_ATTEMPT' not in review.backend.calls[-1]['prompt']
             output['candidates'] = [candidate(disposition='confirmed', finding=record())]
 
@@ -1264,71 +882,10 @@ async def test_schema_only_field_shape_rejection_uses_backend_correction_policy(
     assert attempts == (1 if native else 2)
     events = stage_ends(review, 'python')
     assert [event['metadata']['admitted'] for event in events] == ([False] if native else [False, True])
-    assert events[-1]['metadata']['observed_tool_starts'] == (2 if native else 4)
-
-
-@pytest.mark.parametrize('nonempty', [False, True], ids=['clean-interaction', 'unread-candidate'])
-async def test_structure_candidate_requires_its_own_source_receipt_not_only_interaction_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nonempty: bool,
-) -> None:
-    review = source_review(tmp_path, monkeypatch, source_bytes=400, files=2)
-
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
-        if stage['scope_id'] == 'python':
-            for path in stage['assigned_files']:
-                yield from read_source(review, path, f'python-{path}')
-            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
-        elif stage['scope_id'] == 'structure':
-            assert stage['stage'] == 'integration' and stage['assigned_target_ids'] == ['integration:structure']
-            yield from read_source(review, 'module_00.py', 'unrelated-module')
-            if nonempty:
-                output['candidates'] = [candidate(disposition='confirmed', finding=dict(
-                    record(), description='Unread structure candidate'))]
-
-    review.backend.stage_response = response
-    data = await review.finish('structure', reason='evidence_incomplete' if nonempty else None,
-                               findings=('Grounded defect',))
-    assert scopes(data)['python']['status'] == 'complete'
-    event, = stage_ends(review, 'structure')
-    assert event['metadata']['admitted'] is (not nonempty)
-    assert event['metadata']['observed_tool_starts'] == 1
-    assert event['metadata']['schema_rejection'] is None
-
-
-@pytest.mark.parametrize('read_finding', [False, True], ids=['unread-finding', 'grounded-retargeting'])
-async def test_retargeted_finding_requires_its_actual_file_source_as_well_as_candidate_source(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_finding: bool,
-) -> None:
-    review = source_review(tmp_path, monkeypatch, source_bytes=400, files=2)
-    description = 'Retargeted greeting defect'
-
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
-        if stage['scope_id'] == 'python':
-            for path in stage['assigned_files']:
-                yield from read_source(review, path, f'python-{path}')
-            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
-        elif stage['scope_id'] == 'structure':
-            yield from read_source(review, 'module_00.py', 'candidate-source')
-            if read_finding:
-                yield from read_source(review, 'api.py', 'actual-finding-source')
-            finding = dict(record(), description=description)
-            output['candidates'] = [dict(candidate(disposition='confirmed', finding=finding),
-                                         file='module_00.py', line=1,
-                                         grounds='module_00.py:1 changes VALUE; api.py:2 changes the greeting')]
-
-    review.backend.stage_response = response
-    findings = ('Grounded defect', description) if read_finding else ('Grounded defect',)
-    data = await review.finish('structure', reason=None if read_finding else 'evidence_incomplete',
-                               findings=findings)
-    assert scopes(data)['python']['status'] == 'complete'
-    event, = stage_ends(review, 'structure')
-    assert event['metadata']['admitted'] is read_finding
-    assert event['metadata']['observed_tool_starts'] == (2 if read_finding else 1)
-    assert event['metadata']['schema_rejection'] is None
 
 
 @pytest.mark.parametrize('bundle_capable', [False, True], ids=['legacy-files', 'explicit-bundle'])
-async def test_api_seven_unhashable_callable_override_runs_each_real_stage(
+async def test_current_unhashable_callable_override_runs_each_real_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, bundle_capable: bool,
 ) -> None:
     ext_dir.write_module(
@@ -1341,17 +898,17 @@ async def test_api_seven_unhashable_callable_override_runs_each_real_stage(
         'output_path, cwd, exploration_dir=None, prior_commits=None, inline_diff=None, '
         'intent_authoritative=False, include_alternatives=True, frontier_files=None, review_stage=None):\n'
         '        args = dict(locals()); del args["self"]\n'
-        '        return build_per_stack_prompt(**args) + "\\nUNHASHABLE_API7_OVERRIDE"\n'
-        'def register(r): r.override_prompt("per-stack", Builder())\n', api_version=7,
+        '        return build_per_stack_prompt(**args) + "\\nUNHASHABLE_CURRENT_CONTRACT_OVERRIDE"\n'
+        'def register(r): r.override_prompt("per-stack", Builder())\n', api_version=8,
     )
-    review = source_review(tmp_path, monkeypatch, source_bytes=400, files=5)
+    review = staged_review(tmp_path, monkeypatch, source_bytes=400, files=5)
     invocations: list[list[str]] = []
 
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         if stage['scope_id'] != 'python':
             return
         prompt = review.backend.calls[-1]['prompt']
-        assert 'UNHASHABLE_API7_OVERRIDE' in prompt
+        assert 'UNHASHABLE_CURRENT_CONTRACT_OVERRIDE' in prompt
         supporting = supporting_contents(prompt)
         assert supporting['diff'].startswith('diff --git ')
         assert isinstance(json.loads(supporting['hunk-index']), dict)
@@ -1360,7 +917,6 @@ async def test_api_seven_unhashable_callable_override_runs_each_real_stage(
         for path in stage['assigned_files']:
             body = (review.repo / path).read_text()
             assert ("return 'universe'" in body) if path == 'api.py' else 'VALUE = 1' in body
-            yield from read_source(review, path, f'callable-source-{path}')
         output['notes'] = 'The changed source declarations preserve their assigned value contract.'
 
     review.backend.stage_response = response

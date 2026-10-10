@@ -38,7 +38,7 @@ def test_templates_and_native_tools_present_in_built_wheel() -> None:
         assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
         expected_paths = {f"daydream/templates/workflows/{name}" for name in _EXPECTED_TEMPLATES}
         expected_paths.add(_SINGLE_TEMPLATE_PATH)  # optional variant ships too
-        expected_paths.add('daydream/backends/pi_read_source.ts')
+        expected_paths.add('daydream/backends/pi_structured_output.ts')
         with zipfile.ZipFile(wheels[0]) as zf:
             names_in_wheel = set(zf.namelist())
         assert expected_paths <= names_in_wheel, (f"Built wheel is missing packaged runtime resources. "

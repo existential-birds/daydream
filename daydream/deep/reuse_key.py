@@ -20,7 +20,7 @@ from typing import Any, overload
 from daydream.trajectory import RUNS_DIRNAME
 
 #: Bump whenever a payload shape changes so a stale entry can never be served.
-REUSE_KEY_FORMAT: int = 1
+REUSE_KEY_FORMAT: int = 2
 
 #: A run-scoped artifact segment (``/runs/<id>/...``) inside any digest input.
 #: The directory name comes from the layout surface, never a bare literal, so

@@ -20,7 +20,6 @@ import threading
 import uuid
 from collections import Counter
 from collections.abc import AsyncGenerator, Iterator, Mapping
-from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any, Literal
 
@@ -53,9 +52,7 @@ from daydream.backends._transport import (
     teardown,
     write_temp_json_schema,
 )
-from daydream.backends.source_reader import SourceReader, source_tool_output
 from daydream.pricing import ModelPrice, compute_cost_from_totals, load_user_prices, resolve_prices
-from daydream.review_source import SourceRecipe
 from daydream.trajectory import redact_structured_text
 
 _CODEX_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
@@ -480,7 +477,6 @@ class CodexBackend:
     """
 
     supports_finalization = True
-    supports_source_recipe = True
 
     # Codex operates in a disposable read-only clone of the workspace, so it
     # can safely have over-budget diffs inlined (truncated) and exploration
@@ -521,7 +517,6 @@ class CodexBackend:
         read_only: bool = False,
         persist_session: bool = True,
         finalization: bool = False,
-        source_recipe: SourceRecipe | None = None,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Yield Codex events, rejecting unsupported agents with NotImplementedError.
 
@@ -643,9 +638,6 @@ class CodexBackend:
             return item_id
 
         transport: CliTransport | None = None
-        source_resources = AsyncExitStack()
-        source_enabled = source_recipe is not None and not finalization
-        source_server_name: str | None = None
         execution_cwd = cwd
         shared_checkout: _SharedCheckout | None = None
 
@@ -719,21 +711,6 @@ class CodexBackend:
                 execution_cwd,
                 base_environment=base_environment,
             )
-            if child_env is None and (source_recipe is not None or "DAYDREAM_SOURCE_TOKEN" in os.environ):
-                child_env = os.environ.copy()
-            if child_env is not None:
-                child_env.pop("DAYDREAM_SOURCE_TOKEN", None)
-            if source_enabled:
-                assert source_recipe is not None
-                assert child_env is not None
-                reader = await source_resources.enter_async_context(SourceReader(source_recipe))
-                source_server_name = reader.server_name
-                args.extend([
-                    "-c", f"mcp_servers.{source_server_name}.url={json.dumps(reader.url)}",
-                    "-c", f'mcp_servers.{source_server_name}.bearer_token_env_var="DAYDREAM_SOURCE_TOKEN"',
-                    "-c", f"mcp_servers.{source_server_name}.enabled=true",
-                ])
-                child_env["DAYDREAM_SOURCE_TOKEN"] = reader.token
 
             if execution_cwd != cwd:
                 # Rebind the prompt so no rendering of the caller's source
@@ -765,7 +742,6 @@ class CodexBackend:
                     read_only_isolation=read_only and execution_cwd != cwd,
                     continuation_mode="resume" if codex_resume_applied else "fresh",
                     model_mode="single",
-                    source_tool_enabled=source_enabled,
                 ),
                 model_source="configured",
                 session_source="configured" if codex_resume_applied else None,
@@ -859,12 +835,6 @@ class CodexBackend:
                             tool_name = "unknown"
                             for diagnostic in _take_early_diagnostics():
                                 yield diagnostic
-                        server = item.get("server")
-                        if tool_name == "read_source" and not (
-                            source_server_name is not None and server == source_server_name
-                        ):
-                            # A foreign MCP server cannot impersonate this invocation's owned tool.
-                            tool_name = f"mcp__{server}__read_source" if isinstance(server, str) else "unknown"
                         arguments = item.get("arguments", {})
                         if not isinstance(arguments, dict):
                             _warn("tool_arguments_not_object")
@@ -952,15 +922,13 @@ class CodexBackend:
                             yield patch_event
 
                     elif item_type == "mcp_tool_call":
-                        owned_source = (source_server_name is not None and item.get("server") == source_server_name
-                                        and item.get("tool") == "read_source")
                         result_content = ""
                         result_error = False
                         if "result" in item:
                             result = item["result"]
                             if isinstance(result, dict):
                                 content = result.get("content", "")
-                                result_content = source_tool_output(content) if owned_source else str(content)
+                                result_content = str(content)
                                 result_error = result.get("isError") is True
                             else:
                                 _warn("tool_result_not_object")
@@ -971,7 +939,7 @@ class CodexBackend:
                         yield ToolResultEvent(
                             id=item_id,
                             output=result_content,
-                            is_error=bool(error) or result_error or owned_source and status != "completed",
+                            is_error=bool(error) or result_error,
                             status=status if isinstance(status, str) else None,
                         )
 
@@ -1126,11 +1094,8 @@ class CodexBackend:
                 yield _pending_result
 
         finally:
-            try:
-                if transport is not None:
-                    await teardown(transport, self._transports)
-            finally:
-                await source_resources.aclose()
+            if transport is not None:
+                await teardown(transport, self._transports)
             if schema_path:
                 Path(schema_path).unlink(missing_ok=True)
             if shared_checkout is not None:

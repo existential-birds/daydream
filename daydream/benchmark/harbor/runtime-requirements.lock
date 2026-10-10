@@ -1,6 +1,6 @@
 # Daydream Harbor runtime requirements (generated; do not edit)
 # daydream_version: 0.29.0
-# source_uv_lock_sha256: a751517d3a5d0dda78afb2811e17a5dd7a722c13337dc83282658c61bbb5be1e
+# source_uv_lock_sha256: e035f70c23015967fb6d69d5f09dac7d77081e8cf943e60e0c41bd58680da5e1
 # generation_command: uv export --frozen --no-dev --no-emit-project --format requirements-txt
 # template_version: 4
 
@@ -336,7 +336,7 @@ claude-agent-sdk==0.2.159 \
     --hash=sha256:d3ba57c187b07c87702b94e2b62dd7c61ed874899defcbb35bb5cef4cb94ace1 \
     --hash=sha256:e1905e2637b27971bb561bb6ad317aeb3d50619be5261bfa7ff2e9c2be0f0fd1
     # via daydream
-click==8.5.0 \
+click==8.5.0 ; sys_platform != 'emscripten' \
     --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360 \
     --hash=sha256:ba0d2089de75ea0310e2dde03160e6ca10009947fb95a182f9b54021bb272e34
     # via uvicorn
@@ -640,9 +640,7 @@ markupsafe==3.0.3 \
 mcp==1.28.1 \
     --hash=sha256:2726bca5e7193f61c5dde8b12500a6de2d9acf6d1a1c0be9e8c2e706437991df \
     --hash=sha256:d51e36a5f5644faea4f85ea649bfffa6bc6c26770d42798ad6a3de3d2ba69683
-    # via
-    #   claude-agent-sdk
-    #   daydream
+    # via claude-agent-sdk
 mdurl==0.1.2 \
     --hash=sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8 \
     --hash=sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba
@@ -1640,12 +1638,10 @@ urllib3==2.8.0 \
     --hash=sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3 \
     --hash=sha256:63bf2ead4c879426ebf22ef2a781eeb4aa3b4ae798a0435506f8687fd5bb9b63
     # via requests
-uvicorn==0.52.4 \
+uvicorn==0.52.4 ; sys_platform != 'emscripten' \
     --hash=sha256:73acfee47a0b133c5de13d219492d62d8a31e935f4fe6e41a232451a15379f86 \
     --hash=sha256:f86e41a149d7d05a9969337e3946a9c171c06a5d42680896daaba624aeac8da1
-    # via
-    #   daydream
-    #   mcp
+    # via mcp
 wrapt==2.4.1 \
     --hash=sha256:03b5598edd435373278731d0d53449ce7a9626bc48d5548e4a71124ee3e526a1 \
     --hash=sha256:094a606d0bf1c4b847b3a743d22fc69cb164015b8c70cf6f20a534d30889ed47 \

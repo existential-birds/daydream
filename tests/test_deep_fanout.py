@@ -1,7 +1,6 @@
 """phase_per_stack_reviews concurrency + correctness tests (D-17, D-18, D-38)."""
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
@@ -10,9 +9,7 @@ import anyio
 import pytest
 
 from daydream.backends import AgentEvent, Backend, ResultEvent
-from daydream.config import STRUCTURE_STACK_NAME
-from daydream.deep import prompts as _prompts, sharding
-from daydream.deep.artifacts import deep_dir as _deep_dir, per_stack_records_path
+from daydream.deep import sharding
 from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.hunk_index import write_hunk_index
 from daydream.workspace import WorkContext
@@ -20,7 +17,7 @@ from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, 
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import commit, git, seed_feature_branch, write_and_stage
 from tests.harness.review_result import review_scopes, saved_coverage
-from tests.harness.stub_backend import completed_stage_reads, review_stage_result, review_stage_state
+from tests.harness.stub_backend import review_stage_result
 from tests.harness.trajectory import (
     dispatch_descriptors as _dispatch_descriptors,
     dispatch_encloses_children as _dispatch_encloses_children,
@@ -31,10 +28,7 @@ from tests.harness.trajectory import (
 
 def _review_backend(**attrs: Any) -> ScriptedBackend:
     def respond(cwd: Any, prompt: str, *args: Any) -> list[Any]:
-        state = review_stage_state(prompt)
-        assert state is not None
-        return [*completed_stage_reads(Path(cwd), state),
-                ResultEvent(structured_output=review_stage_result(prompt, []), continuation=None)]
+        return [ResultEvent(structured_output=review_stage_result(prompt, []), continuation=None)]
     return ScriptedBackend(responder=respond, model="mock-model", **attrs)
 
 def _mk_stacks() -> list[StackAssignment]:
@@ -107,9 +101,6 @@ async def test_phase_per_stack_reviews_dispatch_interval_success(tmp_path: Path,
     assert step["extra"]["planned_count"] == 3
     assert step["extra"]["attempted_count"] == 3
     assert step["extra"]["completed_count"] == 3
-
-
-
 
 
 @pytest.mark.parametrize(

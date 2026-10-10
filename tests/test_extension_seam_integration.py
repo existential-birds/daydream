@@ -302,11 +302,11 @@ async def test_fork_filter_controls_fix_prompts(
     assert KEEP_ME in fix_prompts
     assert DROP_ME not in fix_prompts
 
-async def test_api_v7_stable_keys_share_state_and_reparse_filtered_items(
+async def test_current_api_stable_keys_share_state_and_reparse_filtered_items(
     ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: Any, make_config: MakeConfig,
     tmp_path: Path,
 ) -> None:
-    """The real deep flow preserves API v7 state by reference across extensions."""
+    """The real deep flow preserves current API state by reference across extensions."""
 
     backend = _install_filtered_surface(
         ext_dir, multi_stack_target, monkeypatch, extension_source=STABLE_KEYS_FILTER_EXT,
@@ -765,7 +765,7 @@ def test_ext_dir_renderer_override_reaches_pr_review(tmp_path: Path, monkeypatch
     ext = tmp_path / "ext"
     ext.mkdir()
     (ext / "__init__.py").write_text(
-        "DAYDREAM_EXT_API = 7\n"
+        "DAYDREAM_EXT_API = 8\n"
         "def register(r):\n"
         "    r.override_renderer('finding', lambda finding, ctx: f'EXT::{ctx.placement}::{finding.title}')\n"
     )

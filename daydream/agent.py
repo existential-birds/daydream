@@ -24,7 +24,6 @@ from daydream.backends import (
     AgentEventStream,
     Backend,
     ContinuationToken,
-    DiagnosticEvent,
     PiRequestConfig,
     RequestEvent,
     ResultEvent,
@@ -55,7 +54,6 @@ from daydream.retry_policy import (
 )
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits, review_deadline, review_limits_for_scope
 from daydream.review_evidence import FinalizationContext, ReviewEvidence
-from daydream.review_source import SourceRecipe
 from daydream.run_context import (
     RunContext,
     bind_run_context,
@@ -338,7 +336,6 @@ async def run_agent(
     validate_structured_output: bool = True,
     require_full_schema: bool = False,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
-    source_recipe: SourceRecipe | None = None,
     run_context: RunContext | None = None,
     review_limits: ReviewLimits | None = None,
     investigation_budget: ReviewInvestigationBudget | None = None,
@@ -441,7 +438,6 @@ async def run_agent(
                 validate_structured_output=validate_structured_output,
                 require_full_schema=require_full_schema,
                 sanctioned_inputs=sanctioned_inputs,
-                source_recipe=source_recipe,
                 run_context=context,
                 review_evidence=evidence,
                 schema_rejection_guard=schema_rejection_guard,
@@ -526,7 +522,6 @@ async def _run_agent(
     validate_structured_output: bool = True,
     require_full_schema: bool = False,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
-    source_recipe: SourceRecipe | None = None,
     run_context: RunContext,
     review_evidence: ReviewEvidence | None = None,
     schema_rejection_guard: Callable[[Any], bool] | None = None,
@@ -555,7 +550,6 @@ async def _run_agent(
     structured_result: Any = None
     result_continuation: ContinuationToken | None = None
     aborted_reason: str | None = None
-    evidence_incomplete = False
     tool_supervisor = get_registry().tool_supervisor_if_registered()
 
     with run_context.backend_registration(backend):
@@ -649,7 +643,6 @@ async def _run_agent(
                 structured_result = None
                 native_output = False
                 result_continuation = None
-                evidence_incomplete = False
                 if investigation_budget is None:
                     tool_calls = 0
                 remaining_calls = tool_call_budget - tool_calls if tool_call_budget is not None else None
@@ -694,9 +687,6 @@ async def _run_agent(
                         "max_turns": max_turns,
                         "read_only": read_only,
                     }
-                    if source_recipe is not None and getattr(backend, "supports_source_recipe", False):
-                        source_recipe.revalidate()
-                        execute_kwargs["source_recipe"] = source_recipe
                     if investigation_budget is not None and getattr(backend, "supports_complete_output", False):
                         execute_kwargs["require_complete_root"] = True
                     if finalization and getattr(backend, "supports_finalization", False):
@@ -784,10 +774,6 @@ async def _run_agent(
                                     break
                                 if review_evidence is not None:
                                     review_evidence.observe(event)
-                                if (isinstance(event, DiagnosticEvent)
-                                        and event.code == "codex_transport_coverage"
-                                        and event.metadata.get("coverage") == "incomplete"):
-                                    evidence_incomplete = True
                                 if isinstance(event, RequestEvent):
                                     native_output = (isinstance(event.config, PiRequestConfig)
                                                      and event.output_schema is not None
@@ -1098,8 +1084,6 @@ async def _run_agent(
                 _logger.exception("backend.cancel() failed during shutdown")
             raise
 
-    if evidence_incomplete and aborted_reason is None and require_full_schema:
-        aborted_reason = "evidence_incomplete"
 
     if investigation_budget is not None:
         raw = (''.join(assistant_turn_parts) if assistant_turn_parts or assistant_turn_overflow

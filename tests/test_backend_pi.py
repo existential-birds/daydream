@@ -19,21 +19,16 @@ from daydream.backends import (
     BackendExecutionInput,
     ContinuationToken,
     CostEvent,
-    GenerationEndEvent,
-    GenerationStartEvent,
     MetricsEvent,
     PiRequestConfig,
     RequestEvent,
     ResultEvent,
     RetryPolicy,
     TextEvent,
-    ThinkingEvent,
-    ToolCallChoicePart,
     ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
     create_backend,
-    unix_ms_to_ns,
 )
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.pi import (
@@ -53,7 +48,6 @@ from daydream.backends.pi import (
     _render_tool_result,
     _schema_instruction,
 )
-from daydream.config import DEFAULT_PI_MODEL
 from daydream.phases.schemas import PER_STACK_RECORD_SCHEMA
 from daydream.retry_policy import parse_message_retry_hint
 from daydream.runner import run
@@ -191,7 +185,6 @@ async def test_pi_execution_input_controls_native_argv_environment_and_policy(
     assert backend.retry_policy == RetryPolicy(1, 0.0, 4.0)
 
 
-
 async def test_structured_output() -> None:
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("structured_output.jsonl")
@@ -285,7 +278,6 @@ async def test_native_output_uses_finalized_transcript_order_and_requires_comple
     else:
         with pytest.raises(PiError):
             await replay_process(PiBackend(model='fixture'), process, Path('/tmp'), 'Answer', output_schema=schema)
-
 
 
 async def test_error_turn_raises_pi_error() -> None:
@@ -507,7 +499,6 @@ def test_schema_instruction_contains_schema_json() -> None:
     instruction = _schema_instruction(schema)
     assert "JSON schema" in instruction
     assert json.dumps(schema) in instruction
-
 
 
 def test_create_backend_invalid_includes_pi_in_message() -> None:
@@ -1008,7 +999,6 @@ async def test_pi_reasoning_effort_precedes_ambient_thinking(
         assert flat_args[flat_args.index("--thinking") + 1] == expected
     if effort and ambient and effort != ambient:
         assert ambient not in flat_args
-
 
 
 # --- P18 Task 1: generation lifecycle + config at the Pi argv/JSONL seam -----

@@ -7,7 +7,7 @@ from a top-level `daydream_ext` package, without editing any file under
 contract: the module shape daydream loads, the exact name inventories a fork
 programs against, and the policy for when those names may change.
 
-Current contract version: **`EXTENSION_API_VERSION = 7`** (supported: `7..7`).
+Current contract version: **`EXTENSION_API_VERSION = 8`** (supported: `8..8`).
 
 ## Extension module contract
 
@@ -21,7 +21,7 @@ daydream_ext/
 `__init__.py` must export exactly two things:
 
 ```python
-DAYDREAM_EXT_API = 7          # must be within daydream's supported range
+DAYDREAM_EXT_API = 8          # must be within daydream's supported range
 
 def register(registry):       # receives a daydream.extensions.Registry
     ...                       # mutate flows / prompts / stacks here
@@ -215,7 +215,7 @@ from opentelemetry.sdk.trace.export import SpanExporter
 
 from daydream.extensions import ObservabilityConfig, Registry
 
-DAYDREAM_EXT_API = 7
+DAYDREAM_EXT_API = 8
 
 def company_exporter(config: ObservabilityConfig) -> SpanExporter:
     return OTLPSpanExporter(
@@ -528,272 +528,73 @@ kwargs are keyword-only except where noted.
 | `vet` | `strategy`, `findings`, `cwd` |
 | `plan-writer` | `finding`, `recon_summary`, `verification_commands`, `cwd` |
 
-#### Stage-aware review builders (API 7)
+#### Stage-aware review builders (API 8)
 
 The registered `per-stack`, `structural`, and `generic-fallback` names are
-unchanged. The host invokes the selected builder anew for **every** stage with
-`review_stage`, a mapping of host-owned assignment and admitted state. API 6
-extensions are incompatible and fail at load time with the declared and
-supported versions; migrate the callable to accept this kwarg and declare
-`DAYDREAM_EXT_API = 7`. Overrides are invoked, never silently replaced.
+unchanged. The host invokes the selected builder anew for every stage with
+`review_stage`, a mapping of host-owned assignment and admitted semantic state.
+API 7 extensions are incompatible and fail at load time; declare
+`DAYDREAM_EXT_API = 8`. Overrides are invoked, never silently replaced.
 
 - `stage` is `first_pass`, `integration`, or `triage`; `scope_id` and
   `analyzed_revision` bind the work to the public reviewer and frozen snapshot.
-- `assigned_files` and the builder's `files` are the current assignment. Language
-  and generic batches group nearby directories within four files and the actual
-  24,576-byte rendered assignment cap for exact paths or the 12,288-byte inline
-  input allowance, including wrappers, scoped index and snapshot bindings.
-  Complete files are preferred when they fit; required assignment bytes take
-  priority over shared context. The stage factory
-  keeps exact assignment references outside the separate inline shared-context
-  allowance; only the shared bytes actually inlined and their wrappers consume it.
-  It reads complete frozen canonical diff/index artifacts and writes bounded inputs
-  atomically through the owning `ArtifactSession`; it never uses a truncated
-  in-memory diff. `diff_path` points at the current stage projection, with its
-  scoped `hunk-index.json`. Sanctioned inline bytes carry that same content;
-  `inline_diff` remains optional. Other paths are
-  supporting context for concrete candidates, not additional audit targets.
-  Structure begins with a whole-change interaction assignment and the synthetic
-  target `integration:structure`. Its honest compact inventory and bounded
-  supporting diff parts orient boundary traces, rather than alphabetical file
-  batches. Omitted supporting parts are explicitly unavailable.
-- Contract **4** adds fields under `review_stage` without changing any API-7
-  callable signature. `source_access` describes frozen before/after source
-  windows, original and rename-side paths, revisions, ranges and permitted read
-  methods. `read_required` indicates mandatory fresh work; false alone does not
-  prove reuse (the before side may be optional). `admitted_source_windows` binds
-  verified complete receipts from successful stages in this reviewer/snapshot.
-  Clean stages retain useful source and notes. First-pass handoffs carry receipt
-  metadata without repeating source bodies; triage retains relevant compact
-  excerpts. Host receipt authority is distinct from current agent knowledge:
-  omitted bodies and compaction do not erase retained receipts. Targeted rereads
-  remain appropriate for understanding a concrete concern or uncovered source.
-  Exact interval unions may cover
-  later windows; unknown/opaque ranges and failed attempts never authorize reuse.
-  Every assigned unit still requires a fresh review decision. Schema retries
-  obtain new evidence under the same absolute allowance/deadline.
-- `supporting_bundle` is available to built-in builders. A custom builder can
-  opt in by declaring `review_input_bundle = True` on its callable. Without this
-  explicit capability its `diff_path` remains a real diff file and adjacent
-  `hunk-index.json` remains a real index, with their original semantics. They are
-  never aliases for a bundle. First-pass bundles contain the bounded assignment
-  diff, index and binding; integration bundles contain the compact whole-change
-  inventory and binding with navigation instructions for deferred diff parts.
-  Bundle reading supplies supporting context only.
-  `supporting_catalog` exposes targeted bounded Structure diff projections where
-  exact transport permits them. Its exact pointer leads to bounded 12,000-byte
-  JSON catalogs containing `parts` (`file`, existing `target_id`, exact `path`)
-  or `catalogs` (exact child `path`, `part_count`). The full part inventory remains
-  available without repeating every pointer in the initial prompt. Every catalog
-  and part is captured supporting input through `ArtifactSession`; no directory
-  access is granted. Catalogs guide navigation, never an exhaustive reading
-  checklist. Structure resolves concrete changed-boundary concerns at their
-  relevant owners and submits; settled contract checks stay settled unless new
-  contradictory evidence appears. Inline omissions remain honestly unavailable.
-  Recipe-capable Structure omits duplicate source projection paths, retaining
-  concrete before/after ranges and native selectors for file and canonical part
-  IDs. `context_availability` summarizes complete source/part/catalog counts;
-  explicit partial and unavailable statuses remain in `context_statuses`.
-- Additive API-7 `source_catalog` names the exact captured Structure source
-  catalog root (`path`, `window_count`, `status`, `read_required:false`). Leaves
-  contain `windows` preserving frozen metadata, all target aliases and exact
-  source-tool arguments; index nodes contain exact child paths/window counts.
-  The separate `source-catalog-*` namespace cannot overwrite diff catalogs.
-  Each file remains <=12,000 bytes and participates in the existing owning
-  session, count/aggregate capture, confinement and post-invocation revalidation.
-  Catalog metadata grants no source evidence or directory access.
-- Additive `access_guide` is a JSON string <=8 KiB assembled after input capture.
-  It persists in stage system guidance through Pi compaction, retaining exact
-  catalog/assignment/shared-context pointers and required source arguments.
-  Complete inline context is labeled honestly; optional omissions are explicit.
-  Persistent stage identities also retain `admitted_source_windows`; their
-  verified covered ranges govern fresh-read obligations when an access guide
-  was prepared before receipt reuse. The guide preserves navigation arguments.
-  Custom integration builders keep their full initial `source_access` and do not
-  acquire a new guide-size admission gate; unsupported persistent access remains
-  explicitly unrepresented. Recipe-capable exact integration also receives its
-  source catalog with the original required-window flags.
-  Output target IDs and readable source selectors remain distinct. Full host
-  `source_access` and legacy custom-builder transport contracts are preserved.
-- `response_contract` carries the strict invocation schema and explicit
-  four-key skeleton. Triage targets are exactly `[]`; discovery candidates may
-  be nonempty with `candidate_id: ""`. Independent identity, snapshot, grounds
-  and contradiction admission remains authoritative. Syntax/identity failures
-  are terminal, with no repair or semantic retry. `remaining_work` estimates
-  residual assignments/files/stages and separately labels current-stage fresh
-  source/read costs. These estimates prove transport feasibility only; native
-  quality/capacity needs matched cold measurements under unchanged numeric limits.
-- Claude, Codex and Pi expose the same invocation-owned
-  `read_source(target_id, side)` reader. The host serves bounded frozen windows
-  through authenticated loopback MCP; Pi's packaged native tool delegates to it.
-  The server starts before provider execution and joins requests after provider
-  teardown, including cancellation. It serves no private directory or shell access.
-  Source projections are atomically owned/revalidated by `ArtifactSession` and
-  typed in `PreparedSanctionedInputs`; legacy prepared inputs default to
-  supporting. Source bytes/ranges are independently verified, including rename
-  sides and bounded enclosing context. Inline prompt bytes alone are not native
-  receipts. Codex's independent read-only snapshot is preserved; its required
-  source reads no longer depend on shell syntax or merged stderr. Owned MCP names
-  and associated single-text frames normalize through existing AgentEvents.
-  Foreign MCP tools receive no reader identity. Shell commands cannot establish
-  source authority while the owned reader is active. Tracked repository-relative
-  paths can select after-side dependencies at captured HEAD. Existing independently
-  verified file reads remain supported. Osprey retains frozen-file transport pending
-  existential-birds/osprey#1195. Pi's native
-  bounded-read LF representation, including its exact continuation footer, is
-  verified against frozen bytes; native results and completion flags remain
-  unchanged. Unknown wrappers, forged footers and truncation supply no coverage.
-  Complete older cache entries miss staged contract 7.
-- `assignment_parts` describes each required target: `target_id`, `file`,
-  one-based `part_index`, `part_count`, and `kind` (`file`, `hunk`, or
-  `continuation`). Split hunks include zero-based `hunk_index`, `old_start`,
-  `old_count`, `new_start`, and `new_count`. Continuations also carry ordered
-  `segment_index`/`segment_count`, UTF-8 `fragment_offset`/`fragment_bytes`,
-  and `old_line`/`new_line`/`fragment_line_offset` mapping. The ranges identify
-  the parent hunk; a continuation never claims to contain it whole. Every
-  required target must succeed before host file coverage is complete.
-  Stage indexes match canonical hunks by old/new ranges, including explicit
-  `old_only` entries for pure deletions omitted from the posting index; a
-  deletion never shifts the authority of subsequent hunk assignments.
-- `assigned_target_ids` must be acknowledged exactly. `assigned_candidate_ids`
-  scopes triage; only those candidates and their relevant admitted notes and
-  evidence are supplied. `closed_candidate_ids` are handles for reporting
-  contradictions, not permission to reopen decisions. Additive `closed_decisions`
-  carries each admitted closed candidate's host ID, file/line, disposition,
-  bounded conclusion and relevant frozen evidence references. These summaries
-  also persist in stage system guidance through Pi compaction. They reuse settled
-  decisions without substituting for receipt admission or granting source access.
-  No new discovery occurs during triage.
-- `remaining_work` keeps source/read estimates separate from native submission
-  and total start floors. These are optimistic transport hints, not quality proof.
-- `advisory_tool_call_target` suggests a compact stage workload;
-  `remaining_tool_calls` is the hard remaining cumulative allowance.
-  `observed_tool_starts` includes retries and the received start exceeding the
-  hard allowance. Native parallel or buffered execution can precede observation.
-  Each supplied bound source read uses its own tool call/result and preserves
-  the host's quoted arguments. Parallel reads remain separate calls; compound
-  shell commands and concatenated multi-file output supply no bound receipts.
-  The reviewer deadline and total allowance remain unchanged across stages.
-  Reviewers use the existing remaining-work estimates and allowance to preserve
-  capacity for submission, remaining assignments and open-candidate triage.
-- `context_inputs` lists only admitted sanctioned labels; `context_transport`
-  describes inline bytes or exact paths. `context_statuses` records complete,
-  partial or unavailable supporting context. `canonical_input_identities`
-  binds generated inputs to the original artifact hashes and analyzed revision.
-  Shared intent and exploration are
-  admitted whole within the transport budget. Missing context is advisory and
-  cannot establish evidence; any necessary pointer reads consume tool calls.
-  Triage receives admitted candidate context rather than whole-review inputs.
-- `attempt` is 1 or 2, with `max_attempts=2` on legacy paths and 1 for native Pi.
-  Only a normally completed,
-  complete object on a legacy output path rejected at the strict schema selection boundary may receive
-  one fresh stage attempt. `schema_rejection` contains bounded validator
-  `category`, host `schema_path`, `error_count`, and `candidate_count`, never
-  rejected values or arbitrary unknown property names. The selected registered
-  builder runs anew for every stage and attempt. Rejected evidence, notes and
-  candidates are discarded; necessary source grounding must be obtained anew.
-  There is no serializer recovery, conversation continuation, reserve, extra
-  calls, deadline reset or `max_turns`. Native tools-enabled Pi instead owns
-  schema correction within its invocation; its errors consume the same allowance
-  and deadline and never trigger this host fresh attempt. Backend transport
-  retries remain separate.
-  Retry eligibility also checks the untouched rejected candidate for independent
-  terminal identity, contradiction, grounding and handoff failures. A schema
-  error combined with one of these failures does not permit a fresh attempt.
+- `assigned_files` and the builder's `files` are the current assignment. The
+  stage factory uses the canonical frozen diff and index, writes bounded inputs
+  through the owning `ArtifactSession`, and validates captured input identity.
+  Required assignment bytes take priority over separately bounded shared context.
+  Structure begins with a whole-change interaction assignment and a compact
+  inventory; targeted diff parts and other captured inputs provide useful context.
+  Omitted supporting parts remain explicitly unavailable.
+- `supporting_bundle` is available to built-in builders. A custom builder opts in
+  by declaring `review_input_bundle = True`; otherwise `diff_path` and its
+  adjacent `hunk-index.json` retain their real file semantics. Bundles contain
+  bounded assignment or integration context captured through the artifact session.
+  `supporting_catalog` exposes targeted Structure diff projections where exact
+  transport permits. Catalogs are navigation aids and grant no directory access.
+- Stages are admitted from exact assigned target or candidate IDs, valid
+  dispositions, meaningful claim fields, valid findings, and explicit
+  `not_reviewed` reasons where required. Sufficient supplied diff/context can
+  support a completed decision without source reads. Ordinary backend file and
+  Git tools remain available for investigation when useful; tool results are
+  recorded and charged, but do not authenticate claims or gate otherwise valid
+  semantic output.
+- The host validates captured revision and input hashes, complete assignment
+  transport, backend/cwd/mode, confined artifacts, and unchanged input identity.
+  Backend failure, cancellation, budget exhaustion, malformed or truncated
+  output, invalid identities, required-input corruption, handoff overflow, and
+  unfinished decisions remain unsuccessful or incomplete. Failed attempts donate
+  no semantic state; successful earlier stages and findings survive later failure.
+- Triage receives bounded admitted notes, candidate grounds, triggers,
+  consequences, dispositions, findings, and closed decisions. It may finish from
+  those facts or investigate further within the same cumulative allowance and
+  deadline. Contradictions among known closed candidates mark affected work
+  incomplete without reopening decisions or discarding prior admitted findings.
+- `remaining_work` estimates residual assignments, files, and stages;
+  `advisory_tool_call_target` is a suggestion and `remaining_tool_calls` is the
+  hard cumulative allowance. Neither implies a mandatory investigation count.
+- `context_inputs`, `context_transport`, `context_statuses`, and
+  `canonical_input_identities` describe admitted supporting inputs and bind
+  generated files to the original artifacts and analyzed revision. Missing
+  optional context is advisory; corruption of required assignment inputs remains
+  blocking.
+- Strict stage output uses the declared assignment schema. The host owns candidate
+  and finding identities and validates the complete final result. Failed or
+  cancelled invocations admit no output. Typed scope and phase completion remain
+  independently bound to the analyzed revision, and final findings/coverage are
+  atomically published.
 
-These fields are additive within API 7; exact callable signatures need no new
-kwargs. Builder/strategy selection uses the canonical base stack (`generic#0`
-routes to `generic-fallback`, `rust#0` retains Rust policy), while public shard
-identity remains intact in coverage, artifacts and UIDs.
-
-`ResultEvent.structured_output_origin` is an additive optional backend field:
-`native` (the default) means an authoritative structured payload; `text` means
-the backend inferred a candidate from assistant text. Staged callers validate
-the complete final assistant turn for text-derived candidates, excluding earlier
-planning/tool-turn prose. Native structured results remain authoritative despite
-prose. The final-turn text buffer is bounded to 128 KiB; overflow is terminal,
-never a truncated candidate or a schema-retry witness. Pi activates native output from existing schema/validation/tools arguments;
-`RequestEvent` with typed `PiRequestConfig.schema_emulated=False` and a schema
-identifies native tool validation, not provider-constrained decoding. Native mode
-accepts only the last successful finalized `structured_output` details in
-transcript order after EOF/reap and clean settlement, bounded to 128 KiB. Failed
-submissions do not replace prior successes; a selected host-invalid success
-cannot fall back to earlier output. Both assistant-text fallback and prose
-checkpoints are disabled. Mixed batches and native corrections remain ordinary
-charged work. Invocation-authorized submission tools are output control, excluded
-from source receipts and compact source retention; their recoverable errors do
-not invalidate source evidence. No-schema, no-tools/finalization and explicit
-validation opt-out preserve their text behavior. API remains 7. Pi forwards typed native tool truncation,
-exit, status and cancellation metadata; printed notices are not capture authority.
-
-Build the stage prompt from its assignment and semantic policy. Do not append a
-narrow stage to a conflicting terminal-review prompt. Scope dependency tracing,
-test-quality review, configuration tracing, and verification to current targets
-or assigned candidates. Operator judgment policy still applies within this
-scope. Custom structural builders and custom alternatives retain their separate
-alternatives behavior.
-
-Stage output must match `daydream.phases.schemas.REVIEW_STAGE_SCHEMA` exactly:
-`targets`, `notes`, `candidates`, and `contradictions`. The host assigns discovery
-candidate IDs and serializes terminal findings; do not request an `issues`
-serializer. Read complete enclosing symbols in targeted segments. Invocation-local
-complete associated native receipts govern admission independently of compact
-presentation. Full retention is bounded to 2 MiB per result and 8 MiB across live
-and admitted reviewer captures, including bounded metadata; overflow stays typed
-incomplete evidence. Native metadata is bounded to 2 KiB, with a completion
-metadata reservation charged at each start. Full receipt/pending counts are
-bounded to 4,096 (8 MiB / 2 KiB), independently of the compact view's 64 pending
-calls and 128 blocks. These are host memory bounds, not model call allowances.
-Compact views retain the 12,000-byte per-output and
-48,000-byte aggregate caps, with explicit partial/omitted markers. Supporting
-inputs are classified only from revalidated prepared identities, never basenames;
-mixed/opaque calls are treated conservatively. Supporting reads cannot establish
-source coverage. Irrelevant failed searches alone do not invalidate complete source.
-A completed unavailable Pi built-in `read` requires the supplied frozen recipe,
-typed `no_extensions=True`, one unambiguous supported operand with positive integer
-offset/limit, no furnished source/supporting identity, and no-follow absence.
-Checkout-local operands additionally require a host-only complete strict HEAD
-inventory bound to the recipe's full revision; default empty inventories and Git
-errors never establish absence. Frozen-before identity does not imply current
-source availability. Case/Unicode/prefix/file-URL aliases and broken symlinks stay blocking.
-For `read_source`, the owned executed zero-match branch returns `isError:true`
-with bounded disposition and packet digest details. The Pi adapter checks the
-exact invocation bytes and owned-tool association; evidence independently counts
-zero recipe matches and checks original arguments and native completion flags.
-`source_tool_enabled` records the invocation-local packaged-tool request fact.
-Unknown, initialization, markerless/wrong-digest, ambiguous and valid-source errors
-cannot recover. Native assistant length termination binds bounded actual call IDs
-to typed `ToolStartEvent.input_incomplete` before synthetic tool events; later
-finish reasons cannot erase this fact. Incomplete calls supply no coverage/reuse.
-Recovery is stored at matched completion before fatal source counters increment.
-Failed receipts/starts remain charged; required source, furnished-pointer failures,
-cancellation, truncation, capture overflow and unmatched/pending calls remain
-blocking. A later good read never clears an actual source failure.
-Every reviewed assertion, including an empty-candidate claim, needs complete
-source evidence and explicit valid host-assigned coverage. Free-form citations
-are not authenticated by receipts. Triage sees only relevant admitted partial
-views and may obtain targeted rereads under the same cumulative budget.
-Structure's whole-change interaction assignment may use relevant source evidence
-without a file-by-file audit, but every candidate still needs complete evidence
-for its own file and any terminal finding file. Retargeting requires meaningful
-source reads for the published location. Missing or non-string candidate grounds are insufficient
-evidence and cannot qualify for a schema-only retry.
-Native capture loss, schema, identity, snapshot, grounds, and contradiction checks
-remain strict. Failed or cancelled invocations admit no
-output, even if they emitted valid JSON before failing; earlier successful-stage
-findings survive with incomplete coverage. Every actual attempt records logical
-stage, attempt, observed starts, remaining hard allowance, advisory target,
-admission, safe schema rejection, retained bytes and compact clipping separately
-from native truncation and host retention overflow. Diagnostics distinguish
-quantitative exhaustion, schema rejection, capture loss and admission failure.
-Tools-enabled native Pi may add one hidden missing-submission reminder at its
-public settlement boundary after completed prose, preserving existing boundary
-entries. Reminder state spans native continuations; successful finalized serializer
-calls suppress it. Repeated prose remains missing output. Native validation
-correction stays Pi-owned, with no host attempt or allowance reset.
-Stage contract **7** invalidates older complete cache entries. ATIF is
-optional recording, never the admission authority; other evidence finalization
-consumers preserve their existing behavior.
+Extension API 8 and staged-review contract 8 reject old extensions and invalidate
+old complete review cache entries. Pi's native `structured_output` validation,
+reminder, submission identity, and last finalized successful result remain part
+of its output contract. Native mode accepts only the last successfully finalized
+submission after clean EOF/reaping and settlement; failed calls do not replace a
+prior success, and a selected host-invalid success cannot fall back to an older
+one. When a completed invocation omits submission, Pi may add one hidden reminder
+under the original deadline and cumulative allowance. Assistant prose cannot
+supply native output. The packaged output extension is isolated from ambient
+extensions for read-only invocations when explicitly loaded; Pi's read-only tool
+allowlist remains unchanged. No-schema and validation-opt-out paths retain their
+existing text behavior.
 
 #### `plan-writer` compatibility and output contract
 
@@ -961,7 +762,7 @@ from daydream.flows.engine import FlowContext
 from daydream.prompt_budget import prepare_sanctioned_inputs
 from daydream.trajectory import DaydreamPhase, run_directory
 
-DAYDREAM_EXT_API = 7
+DAYDREAM_EXT_API = 8
 
 async def explain_note(ctx: FlowContext) -> None:
     assert ctx.artifacts is not None
@@ -1176,7 +977,7 @@ import json
 
 from daydream.extensions import FlowStep, ToolDecision
 
-DAYDREAM_EXT_API = 7
+DAYDREAM_EXT_API = 8
 
 async def _filter_items(ctx):
     items_file = ctx.data["items_file"]
@@ -1290,7 +1091,7 @@ builders' outputs and are replaced along with them).
 ```python
 from daydream.extensions import FlowStep, get_registry
 
-DAYDREAM_EXT_API = 7
+DAYDREAM_EXT_API = 8
 
 def _ro_prompt(*, policy):
     return f"RO-GATE {policy}"

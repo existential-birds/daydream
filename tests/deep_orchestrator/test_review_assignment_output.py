@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +10,7 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from daydream.backends import AgentEvent, ResultEvent, TextEvent
-from tests.deep_orchestrator.test_review_capture_and_retry import read_source, source_review
+from tests.deep_orchestrator.test_review_capture_and_retry import staged_review
 from tests.deep_orchestrator.test_review_investigation import StagedBackend, candidate, stage_ends
 from tests.harness.stub_backend import review_stage_state, stage_result
 
@@ -19,15 +19,13 @@ from tests.harness.stub_backend import review_stage_state, stage_result
 async def test_discovery_candidates_reach_exact_empty_target_triage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra_target: bool,
 ) -> None:
-    review = source_review(tmp_path, monkeypatch, source_bytes=400, files=2)
+    review = staged_review(tmp_path, monkeypatch, source_bytes=400, files=2)
     schema_results: list[bool] = []
     contracts: list[dict[str, Any]] = []
 
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         if stage['scope_id'] != 'python':
             return
-        for path in stage['assigned_files']:
-            yield from read_source(review, path, f'{stage["stage"]}-{path}')
         body = (review.repo / 'api.py').read_text()
         assert "return 'universe'" in body
         schema = review.backend.calls[-1]['output_schema']
@@ -60,7 +58,7 @@ async def test_discovery_candidates_reach_exact_empty_target_triage(
 async def test_misplaced_closing_brace_is_terminal_syntax_failure_without_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, malformed: bool,
 ) -> None:
-    review = source_review(tmp_path, monkeypatch, source_bytes=400, files=2)
+    review = staged_review(tmp_path, monkeypatch, source_bytes=400, files=2)
 
     class TextBackend(StagedBackend):
         async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
@@ -71,9 +69,6 @@ async def test_misplaced_closing_brace_is_terminal_syntax_failure_without_recove
                 return
             self.stages.append(stage)
             self.calls.append({'prompt': prompt, **kwargs})
-            for path in stage['assigned_files']:
-                for event in read_source(review, path, f'grounded-{path}'):
-                    yield event
             output = stage_result(stage)
             text = (json.dumps({'targets': output['targets'], 'notes': 'Reviewed real source'})
                     + ', "candidates": [], "contradictions": []}' if malformed else json.dumps(output))
