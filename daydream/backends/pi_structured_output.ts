@@ -20,6 +20,30 @@ export default function (pi: ExtensionAPI) {
     if (!packet.output_schema || typeof packet.output_schema !== "object" || Array.isArray(packet.output_schema)) {
       throw new Error("Output schema unavailable");
     }
+    if ("tool_call_budget" in packet) {
+      if (!Number.isSafeInteger(packet.tool_call_budget) || packet.tool_call_budget < 0) {
+        throw new Error("Tool allowance unavailable");
+      }
+      const allowance = packet.tool_call_budget;
+      const noteType = "daydream_native_tool_budget";
+      let starts = 0;
+      // Native starts include failed/invalid calls and every member of a parallel batch.
+      // The Python host receives these asynchronously and remains the hard-limit authority.
+      pi.on("tool_execution_start", () => { starts += 1; });
+      pi.on("context", (event) => ({
+        messages: [...event.messages.filter((message) => message.role !== "custom" || message.customType !== noteType), {
+          role: "custom" as const,
+          customType: noteType,
+          content: `Live native Pi invocation budget: ${Math.max(0, allowance - starts)} tool starts remain from ${allowance}; `
+            + `${starts} local native starts observed. This dispatch counter may lead the host's received-start ledger; `
+            + "the host still enforces hard limits. structured_output costs 1 tool start. Every parallel batch member counts, "
+            + "including failed calls. Preserve the submission start. Once concrete checks are settled, submit the assigned "
+            + "decisions; honestly mark unfinished work instead of continuing exploration.",
+          display: false,
+          timestamp: Date.now(),
+        }],
+      }));
+    }
     let submitted = false;
     let reminded = false;
     pi.on("tool_execution_end", (event) => {

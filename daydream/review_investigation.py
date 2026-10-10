@@ -17,7 +17,12 @@ from daydream.deep.sharding import file_change_bytes
 from daydream.json_utils import SchemaRejection, validates_schema
 from daydream.phases.review_prompts import build_review_stage_system_instruction
 from daydream.phases.schemas import review_stage_schema
-from daydream.prompt_budget import PreparedSanctionedInputs, SanctionedInputUnavailable, truncate_utf8_to_budget
+from daydream.prompt_budget import (
+    PreparedSanctionedInputs,
+    SanctionedInputTransport,
+    SanctionedInputUnavailable,
+    truncate_utf8_to_budget,
+)
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.review_evidence import ReviewEvidence
 from daydream.review_result import reason_for_exception
@@ -78,19 +83,21 @@ class ReviewInvestigation:
             await self._stage(backend, cwd, prompt_builder, 'integration', [f'integration:{self.scope_id}'],
                               self.files, agent_kwargs, stage_inputs=stage_inputs)
         else:
-            for batch in self.assignment_batches:
+            for index, batch in enumerate(self.assignment_batches):
                 targets = [part['target_id'] for part in batch]
                 files = sorted({part['file'] for part in batch})
                 if not await self._stage(backend, cwd, prompt_builder, 'first_pass', targets, files,
-                                         agent_kwargs, stage_inputs=stage_inputs, assignment_parts=batch):
+                                         agent_kwargs, stage_inputs=stage_inputs, assignment_parts=batch,
+                                         future_batches=len(self.assignment_batches) - index - 1):
                     break
-        open_ids = [candidate['candidate_id'] for candidate in self.handoff['candidates']
-                    if candidate['disposition'] == 'open']
-        for index in range(0, len(open_ids), 8):
+        unsettled_ids = [candidate['candidate_id'] for candidate in self.handoff['candidates']
+                         if candidate['disposition'] in {'open', 'unresolved'}]
+        for index in range(0, len(unsettled_ids), 8):
             if self.reason is not None:
                 break
             await self._stage(backend, cwd, prompt_builder, 'triage', [], [], agent_kwargs,
-                              stage_inputs=stage_inputs, candidate_ids=open_ids[index:index + 8])
+                              stage_inputs=stage_inputs, candidate_ids=unsettled_ids[index:index + 8],
+                              future_triage_stages=(len(unsettled_ids) - index - 1) // 8)
         if self.reason is None and (any(target['status'] != 'reviewed' for target in self.handoff['progress'])
                                     or any(candidate['disposition'] in {'open', 'unresolved'}
                                            for candidate in self.handoff['candidates'])):
@@ -134,12 +141,14 @@ class ReviewInvestigation:
             'target_diff_bytes': {path: self.diff_weights.get(path, 1) for path in files},
             'observed_tool_starts': self.budget.observed_tool_starts,
             'remaining_tool_calls': self.budget.remaining_tool_calls,
+            'hard_tool_call_allowance': self.budget.remaining_tool_calls,
             'advisory_tool_call_target': min(target, self.budget.remaining_tool_calls)}
 
     async def _stage(self, backend: Backend, cwd: Path, prompt_builder: Callable[[dict[str, Any]], str],
         stage: str, targets: list[str], files: list[str], agent_kwargs: dict[str, Any], *,
         stage_inputs: Callable[[dict[str, Any]], PreparedSanctionedInputs],
-        candidate_ids: list[str] | None = None, assignment_parts: list[dict[str, Any]] | None = None) -> bool:
+        candidate_ids: list[str] | None = None, assignment_parts: list[dict[str, Any]] | None = None,
+        future_batches: int = 0, future_triage_stages: int | None = None) -> bool:
         if self.budget.remaining_tool_calls <= 0:
             self.reason = 'tool_call_budget_exceeded'
             self.failure_class = 'quantitative_exhaustion'
@@ -173,26 +182,46 @@ class ReviewInvestigation:
                     prepared = stage_inputs(state)
                     kwargs = {**agent_kwargs, 'sanctioned_inputs': prepared}
                     prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
-                    # Planning floor only; actual output authority comes from RequestEvent.
+                    # Submission transport is a prospective Pi planning hint; RequestEvent owns output authority.
                     if isinstance(backend, PiBackend) and not (
                         kwargs.get("tools_disabled") or kwargs.get("finalization")
                         or kwargs.get("validate_structured_output") is False):
                         state["max_attempts"] = 1
                         remaining = state.setdefault("remaining_work", {})
                         remaining["current_stage_submission_start_floor"] = 1
-                        triage_stages = (sum(candidate['disposition'] == 'open'
-                                             for candidate in self.handoff['candidates']) + 7) // 8
-                        remaining["remaining_submission_start_floor"] = max(
-                            1, remaining.get("stages", 1) + triage_stages)
-                        remaining["current_stage_total_start_floor"] = 1
-                    stage_prompt = prompt_builder(state)
-                    output, _, self.reason = await agent.run_agent(
-                        backend, cwd, stage_prompt, phase=DaydreamPhase.DEEP, output_schema=schema,
-                        review_system_instructions=build_review_stage_system_instruction(state),
-                        require_full_schema=True, investigation_budget=self.budget, review_evidence=evidence,
-                        schema_rejection_guard=lambda value: isinstance(value, dict) and self._assessment(
-                            value, stage, targets, candidate_ids, files=files or state['assigned_files'])[1] is None,
-                        advisory_tool_call_target=state['advisory_tool_call_target'], **kwargs)
+                        triage_stages = future_triage_stages if future_triage_stages is not None else (
+                            sum(candidate['disposition'] in {'open', 'unresolved'}
+                                for candidate in self.handoff['candidates']) + 7) // 8
+                        exact = prepared.transport is SanctionedInputTransport.EXACT_PATHS
+                        read_floor = (1 if state.get('supporting_bundle') else sum(
+                            item.label in {'diff', 'hunk-index'} for item in prepared.inputs)) if exact else 0
+                        floor = 1 + read_floor
+                        reserve = future_batches * floor + triage_stages
+                        remaining.update(remaining_submission_start_floor=1 + future_batches + triage_stages,
+                                         current_stage_total_start_floor=floor,
+                                         reserved_future_tool_starts=reserve)
+                        state['hard_tool_call_allowance'] = max(0, self.budget.remaining_tool_calls - reserve)
+                        caller_bound = kwargs.get('tool_call_budget')
+                        kwargs['tool_call_budget'] = (min(caller_bound, state['hard_tool_call_allowance'])
+                            if caller_bound is not None else state['hard_tool_call_allowance'])
+                        state['hard_tool_call_allowance'] = kwargs['tool_call_budget']
+                        kwargs['tool_call_start_floor'] = floor
+                        state['advisory_tool_call_target'] = min(state['advisory_tool_call_target'],
+                                                               state['hard_tool_call_allowance'])
+                        if state['hard_tool_call_allowance'] < floor:
+                            self.reason = 'tool_call_budget_exceeded'
+                    if self.reason is None:
+                        stage_prompt = prompt_builder(state)
+                        output, _, self.reason = await agent.run_agent(
+                            backend, cwd, stage_prompt, phase=DaydreamPhase.DEEP, output_schema=schema,
+                            review_system_instructions=build_review_stage_system_instruction(state),
+                            require_full_schema=True, investigation_budget=self.budget, review_evidence=evidence,
+                            schema_rejection_guard=lambda value: isinstance(value, dict) and self._assessment(
+                                value, stage, targets, candidate_ids,
+                                files=files or state['assigned_files'])[1] is None,
+                            advisory_tool_call_target=state['advisory_tool_call_target'], **kwargs)
+                    else:
+                        output = None
                     prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
                 except SanctionedInputUnavailable:
                     self.reason = 'evidence_incomplete'
@@ -242,7 +271,7 @@ class ReviewInvestigation:
                     transition.extra.update(
                         review_scope_id=self.scope_id, observed_tool_starts=self.budget.observed_tool_starts,
                         remaining_tool_calls=self.budget.remaining_tool_calls,
-                        hard_tool_call_allowance=state['remaining_tool_calls'],
+                        hard_tool_call_allowance=state['hard_tool_call_allowance'],
                         advisory_tool_call_target=state['advisory_tool_call_target'],
                         assigned_target_ids=targets, assigned_candidate_ids=candidate_ids or [],
                         admitted=self.admitted_stages > prior_admitted, stop_reason=self.reason,

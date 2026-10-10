@@ -541,8 +541,8 @@ review cache entries.
 | Assignment: `assigned_files` | Current assignment, also passed as the builder's `files`. |
 | Bundle: `supporting_bundle` | Bounded diff/index/binding or integration context. Built-ins use it; custom builders opt in with `review_input_bundle = True`. Otherwise `diff_path` and adjacent `hunk-index.json` retain their real file semantics. |
 | Navigation: `supporting_catalog` | Exact pointers to admitted Structure diff projections; `status` and `omitted_part_count` declare partial availability. Navigation grants no directory access. |
-| Residual work: `remaining_work` | Estimated residual assignments, files and stages. |
-| Budget: `advisory_tool_call_target`, `remaining_tool_calls` | Suggested pace and hard cumulative allowance, respectively; neither requires investigation calls. |
+| Residual work: `remaining_work` | Estimated residual assignments, files and stages; native Pi also exposes current submission/total start floors, remaining submission floor and reserved future starts. |
+| Budget: `advisory_tool_call_target`, `remaining_tool_calls`, `hard_tool_call_allowance` | Suggested pace, remaining cumulative allowance and the current invocation's hard allowance. Native Pi limits preserve minimum capacity for known later work. |
 | Context: `context_inputs`, `context_transport`, `context_statuses`, `canonical_input_identities` | Admitted supporting inputs, transport/availability and original artifact identities. Omitted optional context is advisory; corrupted required inputs block admission. |
 
 The stage factory projects canonical frozen diff/index inputs through the owning `ArtifactSession`. Required assignment
@@ -557,11 +557,25 @@ backend/cwd/mode, confinement and unchanged capture identity. Backend failure, c
 malformed/truncated output, invalid IDs, required-input corruption, handoff overflow and unfinished decisions remain
 unsuccessful or incomplete. The [review budgets](../README.md#review-budgets) define admission/retry and source-read policy.
 
-Triage receives bounded admitted notes, candidate grounds/triggers/consequences, dispositions/findings and closed
-decisions. It can decide from those facts or investigate within the same cumulative allowance/deadline. Contradictions
-among known closed candidates mark affected work incomplete without reopening decisions or discarding retained findings.
+Discovery may leave candidates `open` or `unresolved`; both receive one triage round. Triage receives bounded admitted
+notes, candidate grounds/triggers/consequences, dispositions/findings and closed decisions. It can decide from those
+facts or investigate within the same cumulative allowance/deadline. Candidates still unresolved after triage keep
+coverage incomplete. Contradictions among known closed candidates mark affected work incomplete without reopening
+decisions or discarding retained findings.
 The host owns candidate/finding identities and validates the final result; snapshot-bound typed coverage and findings
 are [atomically published](../README.md#terminal-review-findings-contract).
+
+For native Pi stages, the host reserves minimum assignment-input reads and structured submissions for undispatched
+batches, plus submissions for known later triage chunks. The current invocation's hard allowance excludes that reserve;
+the host does not dispatch a stage or transport retry whose minimum input-read and submission needs cannot fit.
+Advisory targets allow borrowing only within that invocation allowance. This bounds observed starts, rather than prospectively admitting
+tools, and does not force submission within a dispatched stage. Budget stops preserve prior admitted findings and
+truthful incomplete coverage.
+
+For bounded native Pi invocations, the packaged output extension refreshes one live budget note before each model
+request. It counts invocation-local tool starts, including failed tools, parallel batch members and structured
+submissions. The feedback cannot change a batch already proposed by the model; raw provider proposals and host
+accounting retain their existing authority.
 
 Pi keeps read-only `read`, `find`, `ls` and `grep`, with materialized ordinary files for useful before-side
 deleted/renamed source. Codex keeps its disposable read-only checkout; Claude/Codex may inspect captured revisions with

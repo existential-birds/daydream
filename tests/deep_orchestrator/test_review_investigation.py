@@ -406,6 +406,44 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
         assert timer.monotonic() >= dispatch_deadlines[0]
 
 
+@pytest.mark.parametrize('decision', ['rejected', 'confirmed', 'unresolved'])
+async def test_unresolved_discovery_reaches_triage_with_spare_capacity_and_retains_confirmed_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decision: str) -> None:
+    review = many_file_review(tmp_path, monkeypatch, count=9)
+
+    @review.backend.script('python')
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        if stage['stage'] == 'first_pass':
+            if not stage['progress']:
+                output['candidates'] = [candidate(disposition='confirmed', finding=record()),
+                    candidate(disposition='unresolved', file='module_00.py', line=1,
+                              grounds='module_00.py:1 defines VALUE, but its consumer contract remains unverified.')]
+            yield from read_events(review.repo, stage['assigned_files'][0],
+                                   event_id=f"discovery-{len(stage['progress'])}")
+            return
+        pending, = stage['candidates']
+        assert pending['disposition'] == 'unresolved'
+        assert stage['assigned_candidate_ids'] == [pending['candidate_id']]
+        assert len(stage['completed_target_ids']) == 9
+        assert stage['remaining_tool_calls'] > 0
+        assert [item['disposition'] for item in stage['closed_decisions']] == ['confirmed']
+        finding = dict(record(1), file='module_00.py', description='Resolved concern',
+                       evidence='module_00.py:1') if decision == 'confirmed' else None
+        output['candidates'] = [dict(pending, disposition=decision, finding=finding)]
+
+    data = await review.finish('python', reason='evidence_incomplete' if decision == 'unresolved' else None,
+                              findings=('Grounded defect', 'Resolved concern') if decision == 'confirmed'
+                              else ('Grounded defect',))
+    stages = [stage for stage in review.backend.stages if stage['scope_id'] == 'python']
+    assert [stage['stage'] for stage in stages] == ['first_pass'] * 3 + ['triage']
+    events = stage_ends(review, 'python')
+    assert all(event['metadata']['admitted'] for event in events)
+    assert events[-1]['metadata']['remaining_tool_calls'] > 0
+    assert events[-1]['metadata']['retained_findings'] == (2 if decision == 'confirmed' else 1)
+    assert data['terminal_result']['analysis_state'] == ('incomplete' if decision == 'unresolved' else 'complete')
+    assert scopes(data)['python']['partial_evidence'] is (decision == 'unresolved')
+
+
 @pytest.mark.parametrize(('decision', 'reason'), [
     ('rejected', None), ('confirmed', None), ('missing-finding', 'malformed_output'),
     ('unresolved', 'evidence_incomplete'), ('unknown-contradiction', 'malformed_output'),

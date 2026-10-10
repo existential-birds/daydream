@@ -656,8 +656,17 @@ continuations with old/new ranges and exact fragment offsets; every required par
 complete. Required assignments take priority over separately bounded context.
 
 Each stage gets a fresh prompt. Structure reviews whole-change interactions using a compact inventory, bounded diff
-parts and supporting documentation; open candidates receive finite triage. Call targets guide pace, while the cumulative
-allowance and absolute deadline remain hard limits. One fresh full-stage retry is permitted after a normally completed
+parts and supporting documentation; discovery candidates marked `open` or `unresolved` receive one finite triage round.
+A candidate still `unresolved` after triage keeps coverage incomplete. Call targets guide pace, while the cumulative
+allowance and absolute deadline remain hard limits. For native Pi stages, the host withholds minimum input-read and
+submission capacity for undispatched assignments and submission capacity for known pending triage. Each invocation
+has a hard allowance within that reservation and may borrow above its advisory target only within that allowance.
+The host stops before dispatch if the current stage's minimum input-read and submission needs cannot fit. Reservations
+do not guarantee model completion: observed tool starts can arrive after execution, and a stage that spends its own
+allowance without submitting remains incomplete. Native Pi supplies bounded live feedback on invocation-local tool
+starts before each model request, including failed tools and submissions; every member of a parallel batch counts.
+This improves pacing without changing tool admission or the recorded provider proposals. One fresh full-stage retry
+is permitted after a normally completed
 invocation fails strict schema validation; only safe validator metadata carries over, never rejected output. Other
 admission failures are terminal. Failed attempts admit no semantic state, and later failure preserves findings from
 successful stages while marking unfinished work incomplete.

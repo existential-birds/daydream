@@ -55,10 +55,12 @@ async def test_pi_review_system_is_scoped_and_preserves_retry_and_stage_spend(tm
     assert REVIEW_STOPPING_GUIDANCE not in fix_system
     assert "Investigation allowance" not in fix_system
     assert budget.observed_tool_starts == 2 and budget.remaining_tool_calls == 2
-    assert "4 remaining cumulative tool starts" in initial
-    assert "Hard remaining cumulative reviewer allowance: 2 tool calls" in retry
+    assert "4 tool starts for this invocation" in initial
+    assert "The reviewer scope has 4 remaining cumulative tool starts" in initial
+    assert "Hard remaining invocation allowance: 2 tool starts" in retry
     assert "2 remain for this reviewer after 2 observed starts" in retry
     assert "2 remaining cumulative tool starts" in integration
+    assert "2 tool starts for this invocation" in integration
     for instructions in (initial, retry, integration):
         assert REVIEW_STOPPING_GUIDANCE not in instructions
         assert "Closed decisions stay closed" in instructions

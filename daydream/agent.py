@@ -337,6 +337,7 @@ async def run_agent(
     run_context: RunContext | None = None,
     review_limits: ReviewLimits | None = None,
     investigation_budget: ReviewInvestigationBudget | None = None, advisory_tool_call_target: int | None = None,
+    tool_call_start_floor: int = 0,
     review_evidence: ReviewEvidence | None = None, schema_rejection_guard: Callable[[Any], bool] | None = None,
     finalization_context: FinalizationContext | None = None,
     tools_disabled: bool = False,
@@ -347,6 +348,7 @@ async def run_agent(
     Backend retry, supervision, budget and ATIF semantics live in the invocation
     executor. The outer scope owns exactly the result the phase receives.
     Stages use investigation_budget and optional bounded review_evidence; failure/cutoff blocks automatic serialization.
+    tool_call_start_floor prevents fresh attempts whose allocation cannot fit the stage's minimum work.
     """
     if tools_disabled and not getattr(backend, "supports_tools_disabled", False):
         raise NotImplementedError(f"{type(backend).__name__} does not support tools_disabled")
@@ -381,10 +383,11 @@ async def run_agent(
         tool_call_budget = min(tool_call_budget, remaining_calls) if tool_call_budget is not None else remaining_calls
         budget_instructions = (
             f"Hard reviewer allowance: at most {max(0.0, deadline - clock.monotonic()):g} seconds until "
-            f"the absolute deadline and {tool_call_budget} remaining cumulative tool starts. "
+            f"the absolute deadline and {tool_call_budget} tool starts for this invocation. "
+            f"The reviewer scope has {remaining_calls} remaining cumulative tool starts. "
             f"Cumulative observed starts: {investigation_budget.observed_tool_starts}. "
             + (f"Advisory stage call target: {advisory_tool_call_target}; this is a planning hint, "
-               "not a ceiling. Useful assigned work may borrow available cumulative capacity. "
+               "not a ceiling. Useful assigned work may borrow within this invocation allocation. "
                if advisory_tool_call_target is not None else "")
             + ("\n\n" + review_budget.STAGED_REVIEW_GUIDANCE if not review_system_instructions else "")
         )
@@ -436,6 +439,7 @@ async def run_agent(
                 run_context=context,
                 review_evidence=evidence,
                 schema_rejection_guard=schema_rejection_guard, investigation_budget=investigation_budget,
+                tool_call_start_floor=tool_call_start_floor,
                 review_instructions=review_instructions,
                 tools_disabled=tools_disabled,
             )
@@ -520,6 +524,7 @@ async def _run_agent(
     review_evidence: ReviewEvidence | None = None,
     schema_rejection_guard: Callable[[Any], bool] | None = None,
     investigation_budget: ReviewInvestigationBudget | None = None,
+    tool_call_start_floor: int = 0,
     review_instructions: str | None = None,
     finalization: bool = False,
     tools_disabled: bool = False,
@@ -653,7 +658,7 @@ async def _run_agent(
                         stop_recorded = True
                     break
                 if investigation_budget is not None and (investigation_budget.remaining_tool_calls == 0
-                    or remaining_calls == 0):
+                    or (remaining_calls is not None and remaining_calls < max(1, tool_call_start_floor))):
                     aborted_reason = "tool_call_budget_exceeded"
                     break
                 # Dispatch bookkeeping: the opening attempt is useful work, every
@@ -699,7 +704,7 @@ async def _run_agent(
                     if investigation_budget is not None and attempt > 0:
                         retry_budget_update = (
                             "\n\nHost retry budget update: failed-attempt starts remain charged. "
-                            f"Hard remaining cumulative reviewer allowance: {remaining_calls} tool calls; "
+                            f"Hard remaining invocation allowance: {remaining_calls} tool starts; "
                             f"{investigation_budget.remaining_tool_calls} remain for this reviewer "
                             f"after {investigation_budget.observed_tool_starts} observed starts."
                         )

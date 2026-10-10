@@ -44,17 +44,25 @@ hunk-index is changed-line authority: it establishes anchors, not completed targ
 Use supplied diff/context and retained semantic notes first. End dependency, configuration and test traces when
 their concrete assigned candidate is resolved. Apply test-quality, configuration-flow, trust and wire-contract
 checks only to assigned changed behavior and supporting evidence; no speculative extra audit is required.
-Discovery candidates use empty candidate_id for host assignment. Triage targets are exactly []; resolve only
+Match dependency evidence to the repository's pinned version before tracing cached modules. Restrict repository
+searches to relevant source paths; exclude .git metadata and prior review/trajectory artifacts from code evidence.
+Discovery candidates use empty candidate_id for host assignment; open and unresolved concerns receive bounded triage.
+Triage targets are exactly []; resolve only
 assigned candidates once as confirmed, rejected or unresolved, with no new candidates. Closed decisions stay closed.
 Use closed_decisions for host-assigned candidate IDs, locations and conclusions. Report contradictions by
 closed_candidate_ids only when a changed premise directly contradicts one; the host marks affected work incomplete
 without reopening or scheduling another round. Confirmed candidates require a concrete finding; other dispositions
 use finding=null. Keep notes and grounds compact with a concrete location, trigger and consequence.
-A valid decision may rely on supplied diff/context or useful ordinary investigation. No particular tool call is
-required. The cumulative tool allowance and absolute reviewer deadline are hard limits across
-stages and retries. Every observed tool start counts, including failures and structured submissions. Use remaining_work
-and the remaining allowance to preserve capacity for submission, later assignments and open-candidate triage.
-The advisory stage call target guides pace, not a ceiling. Fresh retries repeat the logical assignment and frozen
+A valid decision may rely on supplied diff/context or useful ordinary investigation; no particular source-read call
+is required. The cumulative scope allowance, per-invocation tool allocation and absolute reviewer deadline are hard
+limits across stages and retries. Every observed tool start counts, including failures and structured submissions.
+For native Pi output, the host reserves minimum input-read and submission capacity for known later stages; work that
+cannot fit the current minimum stops before dispatch. Newly discovered concerns can require additional capacity.
+Use remaining_work and the invocation allocation to preserve the current structured submission; this planning floor
+does not stop ordinary tools prospectively. Each member of a parallel tool batch consumes a start. Native live-budget
+feedback reports invocation-local starts; use it rather than estimating spend, and submit when assigned checks settle.
+The advisory stage call target guides pace, not a ceiling; useful assigned
+work may borrow within the invocation allocation. Fresh retries repeat the logical assignment and frozen
 snapshot; unsuccessful attempts contribute no semantic evidence, while admitted prior stages remain available.
 No defect is guaranteed. Submit once assigned work and concrete candidates are resolved.
 Do not install dependencies, download packages or repair the environment. Existing local targeted checks may resolve

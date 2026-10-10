@@ -829,7 +829,9 @@ class PiBackend:
         attachments = ExitStack()
         try:
             if native_output:
-                packet = {"output_schema": output_schema}
+                packet: dict[str, Any] = {"output_schema": output_schema}
+                if tool_call_budget is not None:
+                    packet["tool_call_budget"] = tool_call_budget
                 packet_text = json.dumps(packet, ensure_ascii=False)
                 packet_path = _write_prompt_attachment(packet_text, attachments)
                 child_env["DAYDREAM_PI_OUTPUT_PACKET"] = str(packet_path)
