@@ -13,8 +13,8 @@ Default flow is the deep multi-stack pipeline; `--shallow` is a single-stack, si
 are review-only. Four backends — Claude
 (in-process SDK), Codex, Pi, and Osprey (subprocess CLIs) — all emit the same `AgentEvent` stream.
 
-Before editing, read and update changed contracts in README.md and CONTRIBUTING.md#where-to-look-deeper;
-corpus work also requires docs/calibration.md; follow docs/coverage.md's ratchet without lowering its floor.
+First read Makefile/config (current commands/settings/exemptions) and README.md/CONTRIBUTING.md#where-to-look-deeper;
+update changed contracts. Corpus requires docs/calibration.md; follow docs/coverage.md's ratchet without lowering it.
 Review exports follow the [terminal findings contract](README.md#terminal-review-findings-contract); preserve typed coverage, snapshot binding and atomic publication.
 
 ## Commands
@@ -326,8 +326,8 @@ Full contract: `docs/extensions.md`.
   The local diagnostic archive uses runs-only schema version 9. Unsupported indexes are preserved and rejected; use a fresh archive directory instead of migrating. Annotation history lives only in LocalRecordStore observations.
   Evaluation consumes the immutable write snapshot and leaves unavailable lifecycle timing unmeasured.
 - **Conventional Commits** (`feat(backends): ...`). Stage explicitly (`git add <path>`), never `git add -A`.
-- Never bypass hooks (`--no-verify` or disabling env vars), even for pre-existing failures; fix/retry on this branch
-  or report the blocker. Sign commits; commit/push completes only after normal hook-enabled success; never skip tests.
+- Never bypass hooks (`--no-verify` or disabling env vars), even for pre-existing failures. Stage only related paths explicitly.
+  Fix/retry on this branch or report the blocker. Sign commits; commit/push completes only after hook-enabled success.
 - Own your own bugs in plain language. Never describe your defect as the tool being buggy.
 - Never claim success that isn't verified-working.
 
