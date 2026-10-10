@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import runpy
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable
 from contextlib import aclosing
 from pathlib import Path
@@ -90,7 +89,9 @@ class InvestigationRun(ReviewRun):
         assert await self.run(**overrides) == 0
         data = self.load()
         assert [finding['title'] for finding in data['findings']] == list(findings)
-        scope = scopes(data)[scope_id]
+        inventory = scopes(data)
+        scope = inventory[scope_id]
+        assert all(s['status'] == 'complete' for name, s in inventory.items() if name != scope_id)
         assert scope['status'] in (statuses or ('incomplete' if reason else 'complete',)), scope['reason_codes']
         assert scope['reason_codes'] == ([reason] if reason else [])
         assert not any(call.get('no_tools') for call in self.backend.calls)
@@ -156,7 +157,6 @@ async def test_invalid_decisions_fail_but_optional_tool_events_do_not_veto_valid
 
     data = await investigation.finish('python', reason=reason, findings=('Grounded defect',) if reason is None else (),
                                       statuses=('complete',) if reason is None else ('incomplete', 'failed'))
-    assert scopes(data)['react']['status'] == scopes(data)['structure']['status'] == 'complete'
     terminal = stage_ends(investigation, 'python')[-1]
     assert (terminal['status'], terminal.get('reason_code')) == (
         ('succeeded', None) if reason is None else ('failed', 'domain_failure'))
@@ -174,17 +174,11 @@ def stage_ends(review: ReviewRun, scope_id: str) -> list[dict[str, Any]]:
 
 
 def many_file_review(tmp_path: Path, patch: pytest.MonkeyPatch, *, count: int = 17,
-                     lines: int = 1, wired: bool = True, docs_count: int = 4,
-                     feature_message: str = 'feature') -> InvestigationRun:
-    before = {'api.py': "def hello():\n    return 'world'\n",
-              'a_flags.py': 'def parse_flags(args):\n    return {}\n',
-              'z_request.py': "def build_request(options):\n    return {'legacy': False}\n"}
-    before.update({f'module_{i:02}.py': 'VALUE = 0\n' for i in range(count - 3)})
+                     lines: int = 1, docs_count: int = 4, feature_message: str = 'feature') -> InvestigationRun:
+    before = {'api.py': "def hello():\n    return 'world'\n"}
+    before.update({f'module_{i:02}.py': 'VALUE = 0\n' for i in range(count - 1)})
     before.update({f'00_guide_{i}.md': '# Guide\nExisting behavior\n' for i in range(docs_count)})
     after = {name: content + ''.join(f'# changed {i}\n' for i in range(lines)) for name, content in before.items()}
-    after['a_flags.py'] = "def parse_flags(args):\n    return {'dry_run': '--dry-run' in args}\n"
-    after['z_request.py'] = ('def build_request(options):\n'
-                             + ("    return {'dry_run': options['dry_run']}\n" if wired else '    return {}\n'))
     repo = tmp_path / 'many_files'
     seed_feature_branch(repo, base=before, feature=after, feature_message=feature_message)
     return InvestigationRun(repo, tmp_path, patch)
@@ -259,6 +253,7 @@ async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
         assert 'Advisory' in prose or 'advisory' in prose
         assert 'Error Handling Semantics (QUAL-04)' in prose
         assert 'Confidence and Convention Rules' in prose
+        assert 'HIGH: directly verified by the supplied change, ordinary investigation, or Exploration Context' in prose
         if stage['stage'] == 'first_pass':
             assert 'SETTLED_UNRELATED_HISTORY' in prose
             assert len(stage['assigned_files']) <= 4
@@ -309,10 +304,9 @@ async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
             assert 'Sanctioned phase inputs (read only these exact files):' not in call['prompt']
             output['candidates'] = [dict(item, disposition='rejected') for item in stage['candidates']]
 
-    data = await review.finish('python', findings=('Grounded defect',))
+    await review.finish('python', findings=('Grounded defect',))
     assert len(later_assignments) == 2
     assert all(event['metadata']['admitted'] for event in stage_ends(review, 'python'))
-    assert all(scope['status'] == 'complete' for scope in scopes(data).values())
     stages = [stage for stage in review.backend.stages if stage['scope_id'] == 'python']
     assert len([stage for stage in stages if stage['stage'] == 'first_pass']) > 1
     assert [stage['stage'] for stage in stages].count('triage') == 2
@@ -384,7 +378,6 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
         if stop == 'deadline' else {}
     )
     data = await review.finish('python', reason=reason, findings=('Grounded defect',), **overrides)
-    assert scopes(data)['structure']['status'] == 'complete'
     admitted, stopped = stage_ends(review, 'python')
     assert admitted['status'] == 'succeeded'
     assert admitted['metadata']['observed_tool_starts'] > 0
@@ -469,13 +462,12 @@ async def test_one_triage_round_preserves_closed_decisions_and_rejects_invalid_i
             'assignment_mismatch' if decision == 'extra-target' else None)
 
 
-@pytest.mark.parametrize(('defect', 'fault'), [
+@pytest.mark.parametrize(('confirmed', 'fault'), [
     (False, None), (True, None), (False, 'cutoff'), (True, 'cutoff'), (False, 'syntax')])
-async def test_cross_file_integration_preserves_cumulative_spend_and_flag_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defect: bool, fault: str | None) -> None:
-    review = many_file_review(tmp_path, monkeypatch, count=41, lines=35, wired=not defect)
+async def test_integration_retains_admitted_findings_and_cumulative_spend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, confirmed: bool, fault: str | None) -> None:
+    review = many_file_review(tmp_path, monkeypatch, count=41, lines=35)
     cutoff = fault == 'cutoff'
-    title = 'Parsed dry-run flag is dropped during request construction'
     backend = review.backend
     observations: list[ToolStartEvent] = []
 
@@ -488,12 +480,9 @@ async def test_cross_file_integration_preserves_cumulative_spend_and_flag_eviden
             assert stage['assigned_target_ids'] == ['integration:structure']
             assert stage['progress'] == [] and stage['folded_alternatives'] is True
             assert stage['assigned_files'][0].startswith('00_guide_')
-            assert {'a_flags.py', 'z_request.py'} <= set(stage['assigned_files'])
+            assert {'api.py', 'module_00.py'} <= set(stage['assigned_files'])
             assert stage['remaining_work']['assignment_units'] == stage['remaining_work']['stages'] == 1
             output['candidates'] = [candidate(disposition='rejected'), candidate()]
-            parse = runpy.run_path(str(review.repo / 'a_flags.py'))['parse_flags']
-            build = runpy.run_path(str(review.repo / 'z_request.py'))['build_request']
-            assert ('dry_run' not in build(parse(['--dry-run']))) is defect
         else:
             starts = stage['remaining_tool_calls'] + 1 if cutoff else 0
             assert stage['observed_tool_starts'] == 18
@@ -503,24 +492,21 @@ async def test_cross_file_integration_preserves_cumulative_spend_and_flag_eviden
             assert stage['assigned_candidate_ids'] == [pending['candidate_id']]
             output['candidates'] = [candidate(disposition='rejected', candidate_id=pending['candidate_id'])]
         for i in range(starts):
-            name = ('a_flags.py', 'z_request.py')[i] if stage['stage'] == 'integration' and i < 2 else 'api.py'
+            name = ('api.py', 'module_00.py')[i] if stage['stage'] == 'integration' and i < 2 else 'api.py'
             event = ToolStartEvent(id=f'observed-{len(observations)}', name='Read', input={'file_path': name})
             observations.append(event)
             yield event
             if stage['stage'] == 'integration':
                 yield ToolResultEvent(id=event.id, output=(review.repo / name).read_text(), is_error=False)
-        if stage['stage'] == 'integration' and defect:
-            finding = dict(record(), file='z_request.py', line=2, description=title,
-                           evidence='a_flags.py:2 parses dry_run; z_request.py:2 returns an empty request')
-            output['candidates'].append(dict(candidate(disposition='confirmed', finding=finding),
-                file='z_request.py', trigger='Pass --dry-run through parse_flags and build_request',
-                consequence='Request omits dry_run and performs a live operation', grounds=finding['evidence']))
+        if stage['stage'] == 'integration' and confirmed:
+            output['candidates'].append(dict(candidate(disposition='confirmed', finding=record()),
+                                             grounds="api.py:2 returns 'world'."))
         if fault == 'syntax':
             yield TextEvent(text=json.dumps(output) + ', "candidates": []}')
         yield ResultEvent(structured_output=None if fault == 'syntax' else output, continuation=None)
 
     reason = None if fault is None else {'cutoff': 'host_tool_budget_exhaustion', 'syntax': 'malformed_output'}[fault]
-    data = await review.finish('structure', reason=reason, findings=(title,) if defect else ())
+    data = await review.finish('structure', reason=reason, findings=('Grounded defect',) if confirmed else ())
     assert set(scopes(data)) == {'python', 'generic', 'structure'}
     assert not any('evaluate the implementation' in call['prompt'].lower() for call in backend.calls)
     phases = {phase['phase']: phase for phase in data['terminal_result']['phase_outcomes']}
@@ -582,12 +568,11 @@ async def test_failed_retry_discards_poisoned_progress_but_charges_every_observe
             assert stage['candidates'] == []
 
     backend.stage_response = response
-    data = await review.finish('python')
+    await review.finish('python')
     assert attempts == 2
     assert stage_ends(review, 'python')[0]['metadata']['observed_tool_starts'] == 6
     assert stage_ends(review, 'python')[-1]['metadata']['observed_tool_starts'] == 6
     assert stage_ends(review, 'python')[-1]['metadata']['remaining_tool_calls'] == 90
-    assert all(scope['status'] == 'complete' for scope in scopes(data).values())
     python_stages = [stage for stage in backend.stages if stage['scope_id'] == 'python']
     assert all(stage['stage'] == 'first_pass' for stage in python_stages)
     assert len(python_stages) > 2

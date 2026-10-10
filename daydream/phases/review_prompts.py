@@ -32,38 +32,28 @@ def build_review_stage_system_instruction(review_stage: dict[str, Any]) -> str:
     )
 
 
-def _confidence_and_convention_instructions(*, stage_scoped: bool = False) -> str:
+def _confidence_and_convention_instructions() -> str:
     """Shared confidence, convention, and error-handling rules, appended after Exploration Context."""
-    confidence = (
-        "For a confirmed candidate's finding, set `confidence` and `rationale`:\n"
-        "- HIGH: directly supported by the supplied change or ordinary investigation. Name the precise code location "
-        "and applicable convention or dependency.\n"
-        "- MEDIUM: supported by concrete code with remaining uncertainty about impact.\n\n"
-        if stage_scoped else
+    return (
+        "Apply the following judgment rules only to the assigned changed behavior or candidates. "
+        "Convention and canonical-helper checks are bounded support for those concrete concerns; "
+        "they do not assign a new audit.\n\n"
+        "## Confidence and Convention Rules\n\n"
         "For every issue you report, you MUST set `confidence` and `rationale`:\n"
-        "- HIGH: directly verified by a specific entry in the Exploration Context above. "
+        "- HIGH: directly verified by the supplied change, ordinary investigation, or Exploration Context. "
+        "Name the precise code location and applicable convention or dependency. "
         "Your rationale MUST name the specific Dependency edge, Convention entry, or "
         "affected file that supports the issue.\n"
-        "- MEDIUM: consistent with the Exploration Context but not pinned to a specific entry.\n\n"
-    )
-    grounding = (
-        "Use the supplied change and useful ordinary investigation for both findings and clean decisions. "
-        if stage_scoped else "You are reviewing AI-generated code. Be strict. Only report an issue you can ground "
-        "in evidence — the diff itself or a specific Exploration Context entry. "
-    )
-    scope = (
-        "Apply the following judgment rules only to this stage's assigned targets or candidates. "
-        "Convention and canonical-helper checks are bounded support for those concrete concerns; "
-        "they do not assign a new audit.\n\n" if stage_scoped else ""
-    )
-    return (
-        scope + "## Confidence and Convention Rules\n\n" + confidence +
+        "- MEDIUM: supported by concrete code with remaining uncertainty about impact, "
+        "including Exploration Context support not pinned to a specific entry.\n\n"
         "Convention handling has TWO distinct cases — do not conflate them:\n"
         "1. Before proposing a fix, check it against the Codebase Conventions section. "
         "If your fix would violate a convention, DROP IT — do not include it.\n"
         "2. If the reviewed code itself violates a convention, that IS the issue. "
         "flag it as HIGH confidence and cite the convention by name in `rationale`.\n\n"
-        + grounding + "If you cannot "
+        "You are reviewing AI-generated code. Be strict. Use the supplied change and useful ordinary "
+        "investigation for both findings and clean decisions. Ground issues in evidence — the diff itself, "
+        "a specific Exploration Context entry, or ordinary investigation. If you cannot "
         "point to what proves the issue is real, do not emit it. Do not pad the review with "
         "speculative or 'might-be' findings.\n\n"
         "## Error Handling Semantics (QUAL-04)\n\n"
@@ -96,7 +86,7 @@ def _confidence_and_convention_instructions(*, stage_scoped: bool = False) -> st
     )
 
 
-def _dependency_impact_instructions(*, stage_scoped: bool = False) -> str:
+def _dependency_impact_instructions() -> str:
     """Prompt language for QUAL-01 cross-file dependency surfacing during review.
 
     This is an investigation method, not an output section: asking the model to
@@ -104,16 +94,11 @@ def _dependency_impact_instructions(*, stage_scoped: bool = False) -> str:
     object and was directly implicated in the empty-result extraction defect
     (issue #1445). The heading is kept only as a stable capability label.
     """
-    scope = (
-        "Apply dependency-impact analysis only to changed symbols in the current assigned file/hunk "
-        "parts, including ordered continuation segments where present. "
-        "Other paths are supporting context only for concrete candidates in that assigned work:\n"
-        if stage_scoped else "Apply dependency-impact analysis to every changed symbol listed in the Exploration "
-        "Context dependencies above:\n"
-    )
     return (
         "## Dependency Impact\n\n"
-        + scope +
+        "Apply dependency-impact analysis to each changed symbol in the assigned work, including supplied "
+        "file/hunk parts and ordered continuation segments. Use Exploration Context dependencies as support; "
+        "other paths are supporting context only for concrete candidates in that assigned work:\n"
         "  1. Trace the call chain from each changed symbol through its dependents, so a "
         "defect is judged by what it actually breaks downstream rather than by how its own "
         "body reads.\n"

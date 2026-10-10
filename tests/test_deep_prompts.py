@@ -137,8 +137,6 @@ def test_diff_instruction_allows_useful_source_investigation(tmp_path: Path, nam
 def test_exploration_pointer_keeps_artifacts_bounded_and_source_work_optional(tmp_path: Path) -> None:
     """Exploration pointers stay bounded while useful source inspection remains optional."""
     out = _review_prompt("per_stack", tmp_path, exploration_dir=tmp_path / ".daydream" / "exploration")
-    # Exploration artifacts are pointed at as bounded context only: two named
-    # files, sibling artifacts explicitly out of scope.
     assert "Read the pre-scan summary at" in out
     assert str(tmp_path / ".daydream" / "exploration" / "summary.md") in out
     assert "Do not infer or enumerate sibling artifact files" in out

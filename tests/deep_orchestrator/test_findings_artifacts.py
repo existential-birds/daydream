@@ -221,7 +221,6 @@ async def test_over_budget_diff_preserves_full_disk_evidence_and_uses_safe_promp
         assert all(f'diff --git a/{path} b/{path}' in scoped_diff for path in stage['assigned_files'])
         assert 'Read the supporting_bundle once' in python_prompt
         assert "diff --git" not in python_prompt
-        # Bounded assignment inputs contain no duplicated source-body history.
     if not oversize:
         react = _matching_prompt(stub.calls, "you are reviewing the react stack")
         assert 'diff --git a/App.tsx b/App.tsx' in supporting_contents(react)['diff']

@@ -335,9 +335,8 @@ async def test_failed_canonical_stage_input_preserves_successful_sibling_review(
                                      grounds=finding['evidence'])]
 
     monkeypatch.setattr(Path, 'read_text', read)
-    data = await review.finish('python', reason='malformed_artifact', statuses=('failed',),
+    await review.finish('python', reason='malformed_artifact', statuses=('failed',),
                                findings=('Surviving sibling defect',))
-    assert scopes(data)['react']['status'] == 'complete'
     assert canonical_reads >= 2
     assert 'PRIVATE_DIAGNOSTIC_PATH_SENTINEL' not in capsys.readouterr().out
 

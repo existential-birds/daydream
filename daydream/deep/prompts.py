@@ -317,7 +317,7 @@ def _build_review_stage_prompt(*, strategy: str, stack_name: str, files: list[st
     settled = _settled_decisions_block(prior_commits) if not triage else ""
     if settled:
         parts.append(settled)
-    parts.append(_confidence_and_convention_instructions(stage_scoped=True))
+    parts.append(_confidence_and_convention_instructions())
     rejection = review_stage.get("schema_rejection")
     if rejection is not None:
         parts.append("The previous completed attempt was rejected by strict schema validation. "
@@ -353,7 +353,7 @@ def _build_review_stage_prompt(*, strategy: str, stack_name: str, files: list[st
             if is_docs_only:
                 parts.append(DOC_REVIEW_NOTICE)
             parts.append(_stack_scope_instruction(stack_name, files))
-            parts.append(_dependency_impact_instructions(stage_scoped=True))
+            parts.append(_dependency_impact_instructions())
             if frontier_files:
                 parts.append(_frontier_read_instruction(frontier_files))
         if inline_diff is not None:

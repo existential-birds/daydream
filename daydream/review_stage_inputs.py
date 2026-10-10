@@ -209,18 +209,18 @@ class StageInputFactory:
             return [_Part(base, header + body)]
         # Prefer complete diff lines. Very long single lines use ordered UTF-8
         # fragments with exact byte offsets; none is called a complete hunk.
-        chunks: list[tuple[str, int, int, int, int, int]] = []
+        chunks: list[_Part] = []
         rest = body
         byte_offset = 0
         old_line, new_line = old_start, new_start
         line_offset = 0
         line_kind = body[:1]
+        notice = "[Ordered continuation: this is a partial hunk; see assignment mapping.]\n"
         while rest:
             low, high = 0, len(rest)
             meta = {**base, "kind": "continuation", "segment_index": 999999, "segment_count": 999999,
-                    "fragment_offset": byte_offset, "old_line": old_line, "new_line": new_line,
-                    "fragment_line_offset": line_offset, "fragment_bytes": 999999999}
-            notice = "[Ordered continuation: this is a partial hunk; see assignment mapping.]\n"
+                    "fragment_offset": byte_offset, "fragment_bytes": 999999999,
+                    "old_line": old_line, "new_line": new_line, "fragment_line_offset": line_offset}
             while low < high:
                 mid = (low + high + 1) // 2
                 if self._fits(self._render([_Part(meta, notice + header + rest[:mid])])):
@@ -232,7 +232,8 @@ class StageInputFactory:
             boundary = rest.rfind("\n", 0, low)
             take = boundary + 1 if boundary >= 0 else low
             chunk = rest[:take]
-            chunks.append((chunk, byte_offset, old_line, new_line, len(chunk.encode()), line_offset))
+            chunks.append(_Part({**meta, "segment_index": len(chunks) + 1, "fragment_bytes": len(chunk.encode())},
+                                notice + header + chunk))
             # Count only completed lines. Fragment offsets retain exact mapping
             # for lines split inside a segment; all ranges remain the full hunk.
             for line in chunk.splitlines(keepends=True):
@@ -246,11 +247,9 @@ class StageInputFactory:
                     line_offset += len(line.encode())
             byte_offset += len(chunk.encode())
             rest = rest[take:]
-        return [_Part({**base, "kind": "continuation", "segment_index": index, "segment_count": len(chunks),
-                       "fragment_offset": offset, "fragment_bytes": size, "old_line": old, "new_line": new,
-                       "fragment_line_offset": line_offset},
-                      "[Ordered continuation: this is a partial hunk; see assignment mapping.]\n" + header + chunk)
-                for index, (chunk, offset, old, new, size, line_offset) in enumerate(chunks, 1)]
+        for part in chunks:
+            part.assignment['segment_count'] = len(chunks)
+        return chunks
 
     def _batches(self) -> list[list[dict[str, Any]]]:
         batches = _bounded_groups(self.parts,
