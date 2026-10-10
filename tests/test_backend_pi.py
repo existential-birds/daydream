@@ -222,10 +222,11 @@ async def test_structured_output_selects_schema_valid_empty_result() -> None:
     assert len(result_events) == 1
     assert result_events[0].structured_output == {"issues": []}
 
-@pytest.mark.parametrize('fault', ['none', 'domain-truncation', 'null-details', 'oversized-details',
+@pytest.mark.parametrize('fault', ['none', 'domain-truncation', 'failed-last', 'mixed-read', 'mixed-read-first',
+                                  'null-details', 'oversized-details',
                                   'wrong-id', 'unsettled', 'late-exit'])
 async def test_native_output_uses_finalized_transcript_order_and_requires_complete_settlement(fault: str) -> None:
-    """Decoder proof only; the installed-Pi runner matrix owns native validation/recovery."""
+    """Daydream selects settled successful submissions independently of execution completion order."""
     calls: list[dict[str, Any]] = [
         {'type': 'toolCall', 'id': call_id, 'name': 'structured_output', 'arguments': {'answer': value}}
              for call_id, value in [('first', 'first'), ('last', 'last')]]
@@ -246,7 +247,17 @@ async def test_native_output_uses_finalized_transcript_order_and_requires_comple
         {'type': 'turn_end', 'message': {'role': 'assistant', 'content': calls, 'stopReason': 'toolUse'}},
         {'type': 'agent_end', 'messages': []}, {'type': 'agent_settled'},
     ]
-    if fault == 'null-details':
+    if fault == 'failed-last':
+        rows[5]['isError'] = True
+        rows[-4]['message']['isError'] = True
+    elif fault in {'mixed-read', 'mixed-read-first'}:
+        read_call = {'type': 'toolCall', 'id': 'read', 'name': 'read', 'arguments': {'path': 'api.py'}}
+        calls.insert(0 if fault == 'mixed-read-first' else len(calls), read_call)
+        rows[3:3] = [{'type': 'tool_execution_start', 'toolCallId': 'read', 'toolName': 'read',
+                     'args': read_call['arguments']},
+                    {'type': 'tool_execution_end', 'toolCallId': 'read', 'toolName': 'read',
+                     'isError': False, 'result': {'content': [{'type': 'text', 'text': 'VALUE = 1'}]}}]
+    elif fault == 'null-details':
         rows[-4]['message']['details'] = None
     elif fault == 'oversized-details':
         rows[-4]['message']['details'] = {'answer': 'x' * (129 * 1024)}
@@ -260,15 +271,17 @@ async def test_native_output_uses_finalized_transcript_order_and_requires_comple
     schema = {'type': 'object', 'properties': {'answer': {'type': 'string'}, 'truncation': {
         'type': 'object', 'properties': {'truncated': {'type': 'boolean'},
                                           'firstLineExceedsLimit': {'type': 'boolean'}}}}, 'required': ['answer']}
-    if fault in {'none', 'domain-truncation'}:
+    if fault in {'none', 'domain-truncation', 'failed-last', 'mixed-read', 'mixed-read-first'}:
         events, _ = await replay_process(PiBackend(model='fixture'), process, Path('/tmp'), 'Answer',
                                          output_schema=schema)
         result = next(event for event in events if isinstance(event, ResultEvent))
-        expected = {'answer': 'last', **({'truncation': {'truncated': True, 'firstLineExceedsLimit': True}}
+        expected = {'answer': 'first' if fault == 'failed-last' else 'last',
+                    **({'truncation': {'truncated': True, 'firstLineExceedsLimit': True}}
                                        if fault == 'domain-truncation' else {})}
         assert result.structured_output == expected and result.structured_output_origin == 'native'
         assert all(not event.truncated for event in events if isinstance(event, ToolResultEvent))
-        assert [event.id for event in events if isinstance(event, ToolStartEvent)] == ['first', 'last']
+        assert [event.id for event in events if isinstance(event, ToolStartEvent)] == (
+            ['read', 'first', 'last'] if fault in {'mixed-read', 'mixed-read-first'} else ['first', 'last'])
     else:
         with pytest.raises(PiError):
             await replay_process(PiBackend(model='fixture'), process, Path('/tmp'), 'Answer', output_schema=schema)

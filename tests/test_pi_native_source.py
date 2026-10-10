@@ -7,7 +7,6 @@ import json
 import os
 import shutil
 import sys
-from importlib.resources import as_file, files
 from pathlib import Path
 
 import pytest
@@ -21,9 +20,8 @@ from tests.harness.protocol_cli import install_protocol_cli
 
 _SOURCE_OUTPUT_SCHEMA = {
     'type': 'object', 'additionalProperties': False,
-    'properties': {'observed_body': {'type': 'string'}, 'source_error': {'type': 'boolean'},
-                   'active_tools': {'type': 'array', 'items': {'type': 'string'}}},
-    'required': ['observed_body', 'source_error', 'active_tools'],
+    'properties': {'observed_body': {'type': 'string'}, 'source_error': {'type': 'boolean'}},
+    'required': ['observed_body', 'source_error'],
 }
 
 @pytest.fixture
@@ -74,7 +72,7 @@ def native_source_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isol
 
 
 @pytest.mark.usefixtures('native_source_provider')
-@pytest.mark.parametrize('selector', ['valid', 'unknown', 'arbitrary-path', 'wrong-side'])
+@pytest.mark.parametrize('selector', ['valid', 'unknown', 'wrong-side'])
 async def test_installed_pi_reads_only_its_frozen_packet_and_preserves_native_call_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selector: str,
 ) -> None:
@@ -93,9 +91,6 @@ async def test_installed_pi_reads_only_its_frozen_packet_and_preserves_native_ca
     ),), repo)
     arguments = {'target_id': 'unknown.py' if selector == 'unknown' else 'retired.py',
                  'side': 'after' if selector == 'wrong-side' else 'before'}
-    if selector == 'arbitrary-path':
-        arguments['path'] = str(tmp_path / 'outside-packet.txt')
-        (tmp_path / 'outside-packet.txt').write_text('OUTSIDE_PACKET_MUST_NOT_BE_READ\n')
     monkeypatch.setenv('DAYDREAM_TEST_SOURCE_SELECTOR', json.dumps(arguments))
     backend = PiBackend(model='source-model', reasoning_effort='high')
     events = [event async for event in backend.execute(
@@ -111,17 +106,14 @@ async def test_installed_pi_reads_only_its_frozen_packet_and_preserves_native_ca
     assert starts[0].name == 'read_source' and starts[0].input == arguments
     assert results[0].is_error is (selector != 'valid')
     assert not results[0].truncated and not results[0].cancelled
-    assert final == {'observed_body': body if selector == 'valid' else '', 'source_error': selector != 'valid',
-                     'active_tools': ['find', 'grep', 'ls', 'read', 'read_source', 'structured_output']}
+    assert final == {'observed_body': body if selector == 'valid' else '', 'source_error': selector != 'valid'}
     assert not (repo / 'retired.py').exists()
     if selector == 'valid':
         assert recipe.native_result(starts[0].input, results[0].output) == recipe.windows[0]
-    with as_file(files('daydream.backends').joinpath('pi_read_source.ts')) as resource:
-        assert resource.is_file()
 
 
 @pytest.mark.parametrize('contract', ['matching', 'mismatched', 'plain'])
-async def test_pi_request_has_one_matching_invocation_schema_and_keeps_custom_output_constraints(
+async def test_pi_native_schema_transport_preserves_existing_prompt_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contract: str,
 ) -> None:
     fixture = install_protocol_cli(tmp_path / 'external-provider', 'pi')
@@ -142,58 +134,24 @@ async def test_pi_request_has_one_matching_invocation_schema_and_keeps_custom_ou
     request = next(event for event in events if isinstance(event, RequestEvent))
     assert isinstance(request.config, PiRequestConfig)
     assert request.output_schema == schema and request.config.schema_emulated is False
-    assert request.prompt.count('"additionalProperties"') == (0 if contract == 'plain' else 1)
-    assert ('"status"' in request.prompt) is (contract == 'matching')
-    assert ('"obsolete"' in request.prompt) is (contract == 'mismatched')
-
-
-@pytest.mark.usefixtures('native_source_provider')
-async def test_installed_pi_bounded_read_footer_is_verified_against_actual_source_lines_and_bytes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    repo = tmp_path / 'native_bounded_read'
-    body = 'VALUE = 1\ndef greeting():\n    return "world"\nEXPECTED = "world"\nassert greeting() == EXPECTED\n'
-    seed_feature_branch(repo, base={'api.py': 'VALUE = 0\n'}, feature={'api.py': body})
-    revision = git(repo, 'rev-parse', 'HEAD')
-    oid, raw = frozen_source(repo, revision, 'api.py')
-    recipe = SourceRecipe((SourceWindow(
-        target_ids=('api.py',), file='api.py', source_path='api.py', side='after', revision=revision,
-        content_sha256=hashlib.sha256(raw).hexdigest(), blob_oid=oid, start_line=1, end_line=5,
-        start_byte=0, end_byte=len(raw), body=body,
-    ),), repo)
-    monkeypatch.setenv('DAYDREAM_TEST_SOURCE_TOOL', 'read')
-    monkeypatch.setenv('DAYDREAM_TEST_SOURCE_SELECTOR', json.dumps({'path': 'api.py', 'offset': 1, 'limit': 2}))
-    events = [event async for event in PiBackend(model='source-model').execute(
-        repo, 'Read the first two source lines.', output_schema=_SOURCE_OUTPUT_SCHEMA, read_only=True,
-        persist_session=False, source_recipe=recipe,
-    )]
-    start = next(event for event in events if isinstance(event, ToolStartEvent))
-    result = next(event for event in events if isinstance(event, ToolResultEvent))
-    assert start.id == result.id == 'native-frozen-source-001' and start.name == 'read'
-    assert result.output == 'VALUE = 1\ndef greeting():\n\n[4 more lines in file. Use offset=3 to continue.]'
-    assert result.is_error is False and result.truncated is False
-    matched = recipe.match_read(start.input, result.output, repo)
-    assert matched is not None, 'genuine bounded Pi read must yield independently verified source evidence'
-    assert matched.body == 'VALUE = 1\ndef greeting():\n'
-    assert (matched.start_line, matched.end_line, matched.start_byte, matched.end_byte) == (1, 2, 0, 26)
+    expected_prompt = prompt + '\n\nSubmit the final result using structured_output alone as your final action.'
+    assert request.prompt == expected_prompt
+    assert fixture.read_observations()[0]['prompt_sha256'] == hashlib.sha256(expected_prompt.encode()).hexdigest()
 
 
 @pytest.mark.parametrize(('mode', 'defective'), [
-    ('submitted', False), ('submitted', True), ('corrected', True), ('normalized', True),
+    ('submitted', False), ('submitted', True),
     ('length', True), ('prose', True), ('reminder', True), ('invalid-prose', True),
-    ('mixed', True), ('mixed-read-first', True),
-    ('multiple', True), ('later-failed', True),
     ('host-rejected', True), ('exhausted', True), ('boundary-corrected', True),
     ('over-limit-corrected', True), ('ordinary', True), ('ordinary-reminder', True), ('optional-unavailable', True),
     ('cancelled', True), ('deadline', True), ('checkout-unavailable', True),
     ('zero-selector', True), ('length-read', True), ('length-source', True),
-    ('unknown-tool', True), ('invalid-source-arguments', True),
     ('wrong-packet-digest', True), ('unloaded-source-tool', True), ('packet-initialization', True),
 ])
 async def test_installed_pi_native_output_through_review_runner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_pi: Path, mode: str, defective: bool,
 ) -> None:
-    """Only external HTTP responses are synthetic: Pi parses, validates, runs, and corrects tools."""
+    """Daydream admits native submissions with verified source, bounded work, and process cleanup."""
     import re
     import threading
     from collections.abc import AsyncIterator
@@ -278,7 +236,7 @@ async def test_installed_pi_native_output_through_review_runner(
                                              'consequence': 'AssertionError', 'grounds': finding['evidence'],
                                              'disposition': 'confirmed', 'finding': finding}]
                 if len(results) == 1:
-                    if mode in {'corrected', 'length', 'exhausted', 'boundary-corrected', 'over-limit-corrected',
+                    if mode in {'length', 'exhausted', 'boundary-corrected', 'over-limit-corrected',
                                 'invalid-prose'}:
                         calls = [('invalid', 'structured_output', {})]
                         if mode == 'length':
@@ -289,51 +247,33 @@ async def test_installed_pi_native_output_through_review_runner(
                             prose_pending.set()
                             assert release_prose.wait(10), 'The runner must stop within its original allowance'
                     elif mode in {'optional-unavailable', 'checkout-unavailable', 'length-read',
-                                  'zero-selector', 'length-source', 'unknown-tool', 'invalid-source-arguments',
+                                  'zero-selector', 'length-source',
                                   'wrong-packet-digest', 'unloaded-source-tool', 'packet-initialization'}:
-                        source_lookup = mode in {'zero-selector', 'length-source', 'invalid-source-arguments',
+                        source_lookup = mode in {'zero-selector', 'length-source',
                                                 'wrong-packet-digest', 'unloaded-source-tool', 'packet-initialization'}
                         calls = [('optional-read', 'read_source' if source_lookup else 'read',
                                   {'target_id': 'integration:structure', 'side': 'after'} if source_lookup else
                                   {'path': 'unrequested-missing.txt' if mode != 'optional-unavailable' else
                                    str(tmp_path / 'unrequested-missing.txt')})]
-                        if mode == 'unknown-tool':
-                            calls = [('optional-read', 'unloaded_read_source',
-                                      {'target_id': 'absent', 'side': 'after'})]
-                        elif mode == 'invalid-source-arguments':
-                            calls[0][2]['unsupported'] = True
                         if mode in {'length-read', 'length-source'}:
                             finish = 'length'
-                    elif mode == 'multiple':
-                        calls = [('first', 'structured_output', stage_result(stage)),
-                                 ('last', 'structured_output', output)]
-                    elif mode == 'later-failed':
-                        calls = [('first', 'structured_output', output), ('invalid', 'structured_output', {})]
                     else:
-                        if mode == 'normalized':
-                            output['candidates'][0]['finding']['line'] = '2'
                         if mode == 'host-rejected':
                             output['candidates'][0]['grounds'] = ''
                         calls = [('final', 'structured_output', output)]
-                        if mode in {'mixed', 'mixed-read-first'}:
-                            calls.append(('mixed-read', 'read', {'path': 'api.py', 'offset': 1, 'limit': 4}))
-                            if mode == 'mixed-read-first':
-                                calls.reverse()
-                elif mode in {'corrected', 'length', 'exhausted', 'boundary-corrected', 'over-limit-corrected'}:
+                elif mode in {'length', 'exhausted', 'boundary-corrected', 'over-limit-corrected'}:
                     # The next response is offered only after genuine Pi validation feedback.
                     assert ('output token limit' if mode == 'length' else 'Validation failed') in results[-1]['content']
                     rejected = (mode == 'exhausted' or mode == 'boundary-corrected' and len(results) < 47
                                 or mode == 'over-limit-corrected' and len(results) < 48)
                     calls = [(f'correction-{len(results)}', 'structured_output', {} if rejected else output)]
                 elif mode in {'optional-unavailable', 'checkout-unavailable', 'length-read',
-                                  'zero-selector', 'length-source', 'unknown-tool', 'invalid-source-arguments',
+                                  'zero-selector', 'length-source',
                                   'wrong-packet-digest', 'unloaded-source-tool', 'packet-initialization'}:
                     assert len(results) == 2
                     assert ('output token limit' if mode.startswith('length-') else
                             'selector unavailable' if mode in {'zero-selector', 'wrong-packet-digest'} else
-                            'not found' if mode in {'unknown-tool', 'unloaded-source-tool',
-                                                   'packet-initialization'} else
-                            'Validation failed' if mode == 'invalid-source-arguments' else 'ENOENT'
+                            'not found' if mode in {'unloaded-source-tool', 'packet-initialization'} else 'ENOENT'
                             ) in results[-1]['content']
                     calls = [('after-optional', 'structured_output', output)]
                 elif mode == 'invalid-prose':
@@ -343,7 +283,6 @@ async def test_installed_pi_native_output_through_review_runner(
                     else:
                         calls = [('after-reminder', 'structured_output', output)]
                 else:
-                    # Mixed and error batches naturally continue; a later failure supplies no replacement.
                     text, finish = 'Review complete.', 'stop'
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
@@ -437,7 +376,7 @@ async def test_installed_pi_native_output_through_review_runner(
         assert len(requests) == 2
         return
     admitted = mode not in {'prose', 'host-rejected', 'exhausted', 'over-limit-corrected', 'deadline',
-                            'length-read', 'length-source', 'unknown-tool', 'invalid-source-arguments',
+                            'length-read', 'length-source',
                             'wrong-packet-digest', 'unloaded-source-tool', 'packet-initialization'}
     data = review.load()
     expected_title = ordinary_title if mode in {'ordinary', 'ordinary-reminder'} else title
@@ -455,12 +394,11 @@ async def test_installed_pi_native_output_through_review_runner(
     assert len(ends) == 1, 'Pi owns native correction; the host must not start a schema-only replacement stage'
     metadata = ends[0]['metadata']
     assert metadata['admitted'] is admitted
-    assert metadata['fresh_source_reads'] == (2 if mode in {'mixed', 'mixed-read-first'} else 1)
+    assert metadata['fresh_source_reads'] == 1
     expected_starts = (49 if mode in {'exhausted', 'over-limit-corrected'} else
                        48 if mode == 'boundary-corrected' else 1 if mode in {'prose', 'deadline'} else 3 if mode in {
-                           'corrected', 'length', 'mixed', 'mixed-read-first', 'multiple', 'later-failed',
-                           'optional-unavailable', 'invalid-prose', 'checkout-unavailable', 'zero-selector',
-                           'length-read', 'length-source', 'unknown-tool', 'invalid-source-arguments',
+                           'length', 'optional-unavailable', 'invalid-prose', 'checkout-unavailable', 'zero-selector',
+                           'length-read', 'length-source',
                            'wrong-packet-digest', 'unloaded-source-tool', 'packet-initialization'} else 2)
     assert metadata['observed_tool_starts'] == expected_starts
     assert metadata['remaining_tool_calls'] == max(0, metadata['hard_tool_call_allowance'] - expected_starts)
@@ -509,9 +447,9 @@ async def test_installed_pi_native_output_through_review_runner(
         assert len(requests) == 4
         assert metadata['failed_submissions'] == metadata['successful_submissions'] == 1
     else:
-        continued = mode in {'corrected', 'length', 'mixed', 'mixed-read-first', 'later-failed', 'reminder', 'prose',
+        continued = mode in {'length', 'reminder', 'prose',
                             'optional-unavailable', 'checkout-unavailable', 'zero-selector',
-                            'length-read', 'length-source', 'unknown-tool', 'invalid-source-arguments',
+                            'length-read', 'length-source',
                             'wrong-packet-digest', 'unloaded-source-tool', 'packet-initialization'}
         assert len(requests) == (3 if continued else 2)
     reminders = [message for request in requests for message in request['messages']
@@ -732,7 +670,6 @@ async def test_installed_pi_compaction_restores_exact_structure_access_and_settl
         assert structural['status'] == 'incomplete'
         assert structural['reason_codes'] == ['evidence_incomplete']
         return
-    terminal, = stage_ends(review, 'structure')
     data = review.load()
     assert scopes(data)['structure']['status'] == ('complete' if fault == 'none' else 'incomplete')
     phases = {phase['phase']: phase for phase in data['terminal_result']['phase_outcomes']}

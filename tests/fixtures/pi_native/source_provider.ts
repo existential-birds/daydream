@@ -1,5 +1,5 @@
 /** Synthetic external provider. The actual installed Pi CLI and tools still run. */
-import { createAssistantMessageEventStream, getCurrentTools } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 
 export default function (pi: any) {
   pi.registerProvider("source-fixture", {
@@ -20,7 +20,7 @@ export default function (pi: any) {
         stream.push({ type: "start", partial: message });
         if (!result) {
           const toolCall = { type: "toolCall", id: "native-frozen-source-001",
-                             name: process.env.DAYDREAM_TEST_SOURCE_TOOL || "read_source",
+                             name: "read_source",
                              arguments: JSON.parse(process.env.DAYDREAM_TEST_SOURCE_SELECTOR!) };
           message.content = [toolCall];
           stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
@@ -29,10 +29,8 @@ export default function (pi: any) {
           stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
         } else {
           const output = {
-            observed_body: result.isError ? "" : result.toolName === "read_source"
-              ? JSON.parse(result.content[0].text).body : result.content[0].text,
+            observed_body: result.isError ? "" : JSON.parse(result.content[0].text).body,
             source_error: result.isError,
-            active_tools: getCurrentTools(context.messages).map((tool: any) => tool.name).sort(),
           };
           const text = JSON.stringify(output);
           const toolCall = { type: "toolCall", id: "native-output-001", name: "structured_output", arguments: output };

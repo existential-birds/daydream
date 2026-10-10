@@ -72,7 +72,6 @@ from daydream.phases.findings import (
     _write_single_stack_merged_items,
 )
 from daydream.phases.fix import (
-    _FIX_GUARDRAILS,
     _parse_test_map,
 )
 from daydream.phases.handoff import (
@@ -158,6 +157,20 @@ def _structured_turn(structured: object) -> tuple[AgentEvent, ...]:
 def _verdict(verdict: str, suggested_command: str | None, reason: str) -> dict[str, str | None]:
     return {"verdict": verdict, "suggested_command": suggested_command, "reason": reason}
 
+@pytest.mark.asyncio
+async def test_phase_fix_prompt_forbids_worktree_and_index_git_mutation(
+    tmp_path: Path, make_work: Callable[..., WorkContext],
+) -> None:
+    """The fix agent is told not to mutate the shared worktree or index."""
+    backend = ScriptedBackend()
+    item = {"id": 1, "description": "Off-by-one", "file": "src/handler.py", "line": 42}
+
+    await phases.phase_fix(backend, make_work(tmp_path), item, 1, 1)
+
+    prompt = backend.last_prompt
+    assert "Forbid working-tree or index git mutation" in prompt
+    for forbidden in ("`git add`", "`git stash`", "`git checkout`", "`git reset`", "`git commit`"):
+        assert forbidden in prompt
 
 def _record_host_runs(monkeypatch: pytest.MonkeyPatch, *, exit_status: int = 0, output: str = "ok",
 ) -> list[dict[str, Any]]:
