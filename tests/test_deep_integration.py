@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import inspect
+import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +51,7 @@ class _DeepMockBackend(ScriptedBackend):
         self.raise_on_agents = raise_on_agents
         self.language_finding = language_finding
         self.stages: list[str] = []
+        self.merge_records: list[dict[str, Any]] = []
 
     def _dispatch(
         self, cwd: Any, prompt: str, _output_schema: Any = None, _continuation: Any = None, agents: Any = None,
@@ -83,11 +86,17 @@ class _DeepMockBackend(ScriptedBackend):
         # structural-only fixtures retain the host's deterministic merge path.
         if "cross-stack merge agent" in pl:
             self.stages.append("merge")
-            items = [{"id": 1, "lens": "per-stack", "description": "Language review finding", "file": "api.py",
-                      "line": 2, "severity": "medium", "confidence": "MEDIUM",
-                      "rationale": "The changed hello() return is verified in api.py:2.",
-                      "evidence": "api.py:2 return 'universe'", "source_uids": ["python:1"]}
-                     ] if self.language_finding else []
+            record_paths = re.findall(r"^- stack-records-\d+: (.+)$", prompt, re.MULTILINE)
+            assert record_paths, "merge did not receive sanctioned stack records"
+            for path in record_paths:
+                self.merge_records.extend(json.loads(Path(path).read_text())["issues"])
+            items = [
+                {"id": index, "lens": "per-stack", "source_uids": [finding["uid"]],
+                 **{key: finding[key] for key in (
+                     "description", "file", "line", "severity", "confidence", "rationale", "evidence",
+                 )}}
+                for index, finding in enumerate(self.merge_records, 1)
+            ]
             events += [TextEvent(text=""), ResultEvent(structured_output=merge_result(items), continuation=None),]
             return events
 
@@ -106,7 +115,7 @@ class _DeepMockBackend(ScriptedBackend):
         if ("api.py" in stage["assigned_files"]
                 and (structural or self.language_finding and stage["scope_id"] == "python")):
             assert "return 'universe'" in (cwd / "api.py").read_text()
-            description = "Greeting contract changed across modules" if structural else "Language review finding"
+            description = "Greeting contract changed across modules" if structural else "Python greeting return changed"
             finding = dict(record(), description=description,
                            rationale="The changed hello() return is verified in api.py:2.",
                            evidence="api.py:2 return 'universe'")
@@ -152,7 +161,15 @@ async def test_claude_shape_backend(multi_stack_target: Path, monkeypatch: pytes
     assert required.issubset(set(backend.stages)), (f"missing stages; saw only: {sorted(set(backend.stages))}")
     assert "alternatives" not in backend.stages
     report = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
-    assert "Language review finding" in report
+    assert [(finding["uid"], finding["description"]) for finding in backend.merge_records] == [
+        ("python:1", "Python greeting return changed"),
+    ]
+    items = json.loads((multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text())
+    language_items = [item for item in items["items"] if item["lens"] == "per-stack"]
+    assert [(item["source_uids"], item["description"]) for item in language_items] == [
+        (["python:1"], "Python greeting return changed"),
+    ]
+    assert "Python greeting return changed" in report
     assert "Greeting contract changed across modules" in report
 
 async def test_codex_shape_backend(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -163,7 +180,15 @@ async def test_codex_shape_backend(multi_stack_target: Path, monkeypatch: pytest
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).exists(), ("merged report missing after Codex-shape run")
     assert {"intent", "structure", "per-stack", "merge"}.issubset(backend.stages)
     report = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
-    assert "Language review finding" in report
+    assert [(finding["uid"], finding["description"]) for finding in backend.merge_records] == [
+        ("python:1", "Python greeting return changed"),
+    ]
+    items = json.loads((multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text())
+    language_items = [item for item in items["items"] if item["lens"] == "per-stack"]
+    assert [(item["source_uids"], item["description"]) for item in language_items] == [
+        (["python:1"], "Python greeting return changed"),
+    ]
+    assert "Python greeting return changed" in report
     assert "Greeting contract changed across modules" in report
     # Parity guarantee: any stage passing agents= would have raised
     # NotImplementedError above; this asserts it directly too.

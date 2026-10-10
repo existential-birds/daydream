@@ -393,7 +393,7 @@ class ReviewInvestigation:
             }],
             'candidates': candidates,
         }
-        if (sum(map(len, handoff.values())) > HANDOFF_MAX_ITEMS
+        if (len(handoff['notes']) + len(handoff['candidates']) > HANDOFF_MAX_ITEMS
                 or len(json.dumps(handoff, ensure_ascii=False).encode('utf-8')) > HANDOFF_MAX_BYTES):
             self.assertion_failure_class = 'admission_failure'
             return None, 'evidence_incomplete'

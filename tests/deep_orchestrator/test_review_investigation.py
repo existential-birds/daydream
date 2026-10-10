@@ -187,6 +187,30 @@ def many_file_review(tmp_path: Path, patch: pytest.MonkeyPatch, *, count: int = 
     return InvestigationRun(repo, tmp_path, patch)
 
 
+@pytest.mark.parametrize('unfinished_target', [False, True], ids=['complete', 'unfinished-first-target'])
+async def test_large_unsharded_scope_retains_coverage_without_spending_semantic_handoff_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unfinished_target: bool) -> None:
+    review = many_file_review(tmp_path, monkeypatch, count=129)
+
+    @review.backend.script('python')
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        if unfinished_target and 'api.py' in stage['assigned_files']:
+            target = next(target for target in output['targets'] if target['target_id'] == 'api.py')
+            target.update(status='not_reviewed', reason='The changed greeting contract remains unverified.')
+
+    data = await review.finish('python', reason='evidence_incomplete' if unfinished_target else None,
+                               deep_shard_enabled=False)
+    stages = [stage for stage in review.backend.stages if stage['scope_id'] == 'python']
+    assigned = [target for stage in stages for target in stage['assigned_target_ids']]
+    scope = scopes(data)['python']
+    assert len(scope['files']) == 129
+    assert set(scope['files']) == {path.name for path in review.repo.glob('*.py')}
+    assert set(assigned) == set(scope['files']) and len(assigned) == len(set(assigned))
+    assert all(event['metadata']['admitted'] for event in stage_ends(review, 'python'))
+    assert data['terminal_result']['analysis_state'] == ('incomplete' if unfinished_target else 'complete')
+    assert scope['partial_evidence'] is unfinished_target
+
+
 @pytest.mark.parametrize('scope_id', ['python', 'generic', 'structure'])
 async def test_useful_completed_reads_borrow_cumulative_capacity_and_allow_later_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope_id: str) -> None:
