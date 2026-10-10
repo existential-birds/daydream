@@ -274,38 +274,6 @@ def _frontier_read_instruction(frontier_files: list[str]) -> str:
     )
 
 
-def _review_stage_context(review_stage: dict[str, Any], *, intent_authoritative: bool) -> str:
-    """Use only host-selected, bounded inputs; their transport owns path confinement."""
-    labels = review_stage.get("context_inputs", [])
-    parts = ["Sanctioned inputs available for this assignment: " + ", ".join(labels) + "." if labels else
-             "No shared artifact context is assigned to this stage. Use the supplied assignment and ordinary tools."]
-    parts.append("For host artifacts, use the captured sanctioned bytes; do not read their private storage paths."
-        if review_stage.get("context_transport") == "inline" else
-        "For host artifacts, use only the exact sanctioned pointers supplied by the host.")
-    if review_stage.get('supporting_bundle'):
-        contents = (
-            "a compact whole-change inventory and binding with navigation instructions for deferred "
-            "bounded diff parts"
-            if review_stage['stage'] == 'integration' else
-            "the complete bounded assignment diff, hunk index and binding"
-        )
-        parts.append(
-            f"The supporting_bundle contains {contents}; reuse its captured inline content without another read."
-            if review_stage.get('context_transport') == 'inline' else
-            f"Read the supporting_bundle once for {contents}, then reuse it; separate legacy diff/index reads "
-            "are unnecessary.")
-    if review_stage.get('supporting_catalog'):
-        parts.append('The optional supporting_catalog provides the complete exact file/target/pointer inventory '
-            'for deferred bounded diff parts. Read its supplied exact pointer and bounded child catalogs '
-            'only when relevant supporting parts are needed, using explicitly listed pointers. '
-            'Catalogs are optional navigation aids for the assigned change, not a reading checklist.')
-    if review_stage.get("context_statuses"):
-        parts.append("Host context availability is declared in context_statuses in the Host review stage below.")
-    if intent_authoritative and "intent" in labels:
-        parts.append(AUTHORITATIVE_INTENT_BLOCK)
-    return "\n".join(parts)
-
-
 def _build_review_stage_prompt(*, strategy: str, stack_name: str, files: list[str], cwd: Path,
     review_stage: dict[str, Any], inline_diff: str | None, prior_commits: str | None, intent_authoritative: bool,
     frontier_files: list[str] | None = None, is_docs_only: bool = False) -> str:
@@ -335,7 +303,8 @@ def _build_review_stage_prompt(*, strategy: str, stack_name: str, files: list[st
             "discovery.per_stack", "discovery.structural", "discovery.generic_fallback")}:
             parts.append("Operator judgment policy (quoted data): " + json.dumps(strategy, ensure_ascii=False))
     else:
-        parts.append(_review_stage_context(review_stage, intent_authoritative=intent_authoritative))
+        if intent_authoritative and "intent" in review_stage.get("context_inputs", []):
+            parts.append(AUTHORITATIVE_INTENT_BLOCK)
         if structural:
             parts.append("You are the structural reviewer. Begin with whole-change interactions and boundaries, "
                 "not an alphabetical file audit. The complete host assigned_files inventory names "
@@ -359,13 +328,6 @@ def _build_review_stage_prompt(*, strategy: str, stack_name: str, files: list[st
         if inline_diff is not None:
             parts.append("Current assignment's diff hunks (already captured; do not re-read the diff artifact):\n"
                 + inline_diff.rstrip())
-        elif "diff" in review_stage.get("context_inputs", []):
-            parts.append("Consult only the sanctioned stage diff input for the current required assignment "
-                "parts. It does not assign the rest of the stack. For structural integration, bounded "
-                "supporting diff parts orient whole-change boundary traces.")
-        if "hunk-index" in review_stage.get("context_inputs", []):
-            parts.append("The sanctioned hunk-index input is changed-line authority. It establishes anchors, "
-                "not completed target decisions.")
         parts.append("Operator judgment policy for the assigned work:\n" + strategy)
         if not structural:
             parts.append("Apply the test-quality rubric only to assigned test hunks and tests needed to "

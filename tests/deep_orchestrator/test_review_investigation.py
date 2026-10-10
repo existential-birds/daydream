@@ -85,8 +85,9 @@ class InvestigationRun(ReviewRun):
         self.backend = StagedBackend(repo)
 
     async def finish(self, scope_id: str, *, reason: str | None = None, findings: tuple[str, ...] = (),
-                     statuses: tuple[str, ...] | None = None, **overrides: Any) -> dict[str, Any]:
-        assert await self.run(**overrides) == 0
+                     statuses: tuple[str, ...] | None = None, expected_exit: int = 0,
+                     **overrides: Any) -> dict[str, Any]:
+        assert await self.run(**overrides) == expected_exit
         data = self.load()
         assert [finding['title'] for finding in data['findings']] == list(findings)
         inventory = scopes(data)

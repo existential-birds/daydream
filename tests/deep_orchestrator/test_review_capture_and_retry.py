@@ -244,11 +244,9 @@ async def test_current_exact_builder_signatures_route_generic_and_rust_shards(
             assert stage['scope_id'] == 'structure' and 'EXACT_STRUCTURE_OVERRIDE' in prompt
 
     review.backend.stage_response = response
-    assert await review.run(deep_shard_enabled=True, deep_shard_max_files=1) == 0
-    data = review.load()
+    data = await review.finish('structure', deep_shard_enabled=True, deep_shard_max_files=1)
     expected = {f'{stack}#{index}' for stack in ('generic', 'rust') for index in range(4)} | {'structure'}
     assert set(scopes(data)) == expected
-    assert all(scope['status'] == 'complete' for scope in scopes(data).values())
     assert {stage['scope_id'] for stage in review.backend.stages} == expected
     assert len(language_invocations) == 4
     assert {path for files in language_invocations for path in files} == {f'component_{i}.rs' for i in range(4)}
@@ -386,19 +384,12 @@ async def test_shared_intent_uses_actual_transport_allowance_after_required_assi
             yield ToolResultEvent(id='shared-context', output=pointers['intent'].read_text(), is_error=False)
         output['candidates'] = [candidate(disposition='confirmed', finding=record())]
 
+    data = await review.finish('python', findings=('Grounded defect',), expected_exit=1 if sandbox else 0,
+                               file_config=DaydreamFileConfig(supervisor='off'))
     if sandbox:
-        assert await review.run(file_config=DaydreamFileConfig(supervisor='off')) == 1
-        data = review.load()
-        assert scopes(data)['python']['status'] == 'complete'
-        assert [finding['title'] for finding in data['findings']] == ['Grounded defect']
         assert data['terminal_result']['pipeline_state'] == 'failed'
-    else:
-        await review.finish('python', findings=('Grounded defect',), file_config=DaydreamFileConfig(supervisor='off'))
     event, = stage_ends(review, 'python')
-    if not sandbox:
-        assert event['metadata']['observed_tool_starts'] == 1
-    else:
-        assert event['metadata']['observed_tool_starts'] == 0
+    assert event['metadata']['observed_tool_starts'] == (0 if sandbox else 1)
 
 
 @pytest.mark.parametrize(('case', 'reason', 'attempts'), [
@@ -458,17 +449,13 @@ async def test_strict_stage_selection_never_salvages_rejected_or_incomplete_outp
         text = {
             'unparseable': '{"targets": [{"target_id": "api.py", "status": "reviewed", "reason": ""}], '
                           '"notes": "unfinished',
-            'invalid-native-valid-text': json.dumps(valid),
             'nested-invalid-root': json.dumps(invalid),
             'incomplete-nested-stage': '{"outer": ' + json.dumps(valid),
             'text-origin-nested': json.dumps({'invalid_outer': valid}),
-            'empty-final-turn': json.dumps(valid),
             'native-prose': 'The investigation is finished.',
-            'pi-schema-retry': json.dumps(valid),
-            'compliant-json': json.dumps(valid),
             'misplaced-closing-brace': json.dumps({'targets': valid['targets'], 'notes': 'Reviewed real source'})
                                      + ', "candidates": [], "contradictions": []}',
-        }[case]
+        }.get(case, json.dumps(valid))
         yield TextEvent(text=text)
         if final_turn:
             yield TurnEndEvent()

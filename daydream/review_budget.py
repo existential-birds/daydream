@@ -27,8 +27,19 @@ complete repository map. Preserve the captured revision when consulting reposito
 First pass investigates assigned work, with other files supporting concrete candidates. Integration checks
 whole-change interactions and boundaries. Structure begins with whole-change interactions; documentation and
 diff parts support concrete concerns. Output assignment IDs identify decisions, not file selectors.
-Use only exact sanctioned pointers or captured bytes for host artifacts. Never infer private siblings or enumerate
-storage. Complete inline context is identified honestly; optional omitted context does not invalidate a decision.
+Host context_inputs names assigned artifacts; context_transport and context_statuses declare transport/availability.
+If none are listed, no shared artifact context is assigned; use the supplied assignment and ordinary tools.
+For inline host artifacts, reuse complete captured bytes; do not read their private storage paths. Otherwise use
+only supplied exact sanctioned pointers. Never infer private siblings or enumerate storage. Optional omitted context
+does not invalidate a decision. When supplied, supporting_bundle contains the complete bounded assignment diff,
+hunk index and binding, or integration's compact whole-change inventory/binding and navigation for deferred diff parts.
+Read the supporting_bundle once via its exact pointer when exact transport is used and a bundle is supplied;
+for inline transport, reuse its captured bytes. Separate legacy diff/index reads are unnecessary.
+The optional supporting_catalog lists the complete file/target/pointer inventory for deferred bounded diff parts.
+Read its supplied exact pointer and bounded child catalogs only when relevant parts are needed, using listed pointers;
+catalogs are navigation aids, not a reading checklist. Sanctioned diff inputs assign only current required parts,
+not the rest of the stack; integration's bounded supporting parts orient whole-change boundary traces. A sanctioned
+hunk-index is changed-line authority: it establishes anchors, not completed target decisions.
 Use supplied diff/context and retained semantic notes first. End dependency, configuration and test traces when
 their concrete assigned candidate is resolved. Apply test-quality, configuration-flow, trust and wire-contract
 checks only to assigned changed behavior and supporting evidence; no speculative extra audit is required.
