@@ -691,7 +691,7 @@ class _CodexEvidenceBackend(StubBackend):
                 yield ToolResultEvent(id="unmatched-result", output="orphan", is_error=True)
                 yield DiagnosticEvent(
                     code="codex_transport_coverage", message="current public stream has incomplete tool coverage",
-                    metadata={"occurrences": 1},
+                    metadata={"occurrences": 1, "coverage": "incomplete"},
                 )
                 yield DiagnosticEvent(
                     code="codex_parser_coverage", message="bounded parser gap evidence", metadata={"unknown_items": 1},
@@ -723,6 +723,10 @@ async def test_codex_evidence_integrity_archives_semantic_counts_and_review_flag
 
     run_dir = _only_archived_run(archive_dir)
     child = json.loads(_deep_python_trajectory(run_dir).read_text(encoding="utf-8"))
+    saved = json.loads((run_dir / "deep" / "stack-python-records.json").read_text())
+    assert saved["issues"] and saved.get("incomplete", False) is False
+    coverage = json.loads((run_dir / "deep" / "review-coverage.json").read_text())
+    assert next(scope for scope in coverage["stack_outcomes"] if scope["scope_id"] == "python")["status"] == "complete"
     evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
     child_calls = [call for step in child["steps"] for call in step.get("tool_calls") or []]
     assert len(child_calls) == 16

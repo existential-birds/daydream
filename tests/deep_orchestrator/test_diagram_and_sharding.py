@@ -78,7 +78,6 @@ def test_deep_shard_max_files_resolves_and_coerces(tmp_path: Path) -> None:
     cfg = RunConfig(target=str(tmp_path), file_config=fc)
     assert _deep_shard_max_files(cfg) == 7
 
-
 async def test_deep_large_diff_produces_review_and_record_shards(
     shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, install_backend: Callable[[object], object],
 ) -> None:

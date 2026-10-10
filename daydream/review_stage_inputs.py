@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,22 @@ def _json(value: Any) -> str:
 class _Part:
     assignment: dict[str, Any]
     diff: str
+
+
+def _bounded_groups[T](values: list[T], fits: Callable[[list[T]], bool], error: str) -> list[list[T]]:
+    """Pack whole values in order, rejecting any value that cannot fit alone."""
+    groups: list[list[T]] = []
+    current: list[T] = []
+    for value in values:
+        if not fits([value]):
+            raise SanctionedInputUnavailable(error)
+        if current and not fits([*current, value]):
+            groups.append(current)
+            current = []
+        current.append(value)
+    if current:
+        groups.append(current)
+    return groups
 
 
 class StageInputFactory:
@@ -247,18 +264,11 @@ class StageInputFactory:
                 for index, (chunk, offset, old, new, size, line_offset) in enumerate(chunks, 1)]
 
     def _batches(self) -> list[list[dict[str, Any]]]:
-        batches: list[list[_Part]] = []
-        current: list[_Part] = []
-        for part in self.parts:
-            if current and (len({p.assignment['file'] for p in [*current, part]}) > 4
-                            or not self._fits(self._render([*current, part]))):
-                batches.append(current)
-                current = []
-            if not self._fits(self._render([part])):
-                raise SanctionedInputUnavailable("required assignment exceeds the assignment allowance")
-            current.append(part)
-        if current:
-            batches.append(current)
+        batches = _bounded_groups(
+            self.parts,
+            lambda parts: len({p.assignment['file'] for p in parts}) <= 4 and self._fits(self._render(parts)),
+            "required assignment exceeds the assignment allowance",
+        )
         return [[part.assignment for part in batch] for batch in batches]
 
     def _write(self, relative: Path, text: str) -> Path:
@@ -270,6 +280,16 @@ class StageInputFactory:
         atomic_write_bytes(path, text.encode(), fsync=True, dir_fsync=True, mode=0o600)
         return path
 
+    def _diff_paths(self, file: str) -> tuple[str, str]:
+        block = self.blocks.get(file, "")
+        paths = []
+        for pattern, prefix in ((_DIFF_MINUS_HEADER, "a/"), (_DIFF_PLUS_HEADER, "b/")):
+            header = pattern.search(block)
+            paths.append(_unquote_git_path(header[1].rstrip("\t")).removeprefix(prefix) if header else file)
+        rename_from = next((line.removeprefix("rename from ") for line in block.splitlines()
+                            if line.startswith("rename from ")), None)
+        return (_unquote_git_path(rename_from) if rename_from is not None else paths[0]), paths[1]
+
     def _before_context(self, files: set[str], directory: Path,
                         statuses: list[dict[str, str]]) -> dict[str, Path]:
         """Offer bounded ordinary file context for old paths file-only tools cannot reach."""
@@ -277,17 +297,7 @@ class StageInputFactory:
             return {}
         candidates: dict[str, Path] = {}
         for index, file in enumerate(sorted(files)):
-            block = self.blocks.get(file, "")
-            old_header = _DIFF_MINUS_HEADER.search(block)
-            new_header = _DIFF_PLUS_HEADER.search(block)
-            old_path = (_unquote_git_path(old_header[1].rstrip("\t")).removeprefix("a/")
-                        if old_header else file)
-            new_path = (_unquote_git_path(new_header[1].rstrip("\t")).removeprefix("b/")
-                        if new_header else file)
-            rename_from = next((line[len("rename from "):] for line in block.splitlines()
-                                if line.startswith("rename from ")), None)
-            if rename_from is not None:
-                old_path = _unquote_git_path(rename_from)
+            old_path, new_path = self._diff_paths(file)
             if old_path == "/dev/null" or not (new_path == "/dev/null" or old_path != new_path):
                 continue
             label = f"before-context-{index:04d}"
@@ -306,38 +316,26 @@ class StageInputFactory:
             candidates[label] = self._write(directory / f"{label}.txt", captured_context)
         return candidates
 
-    def _supporting_catalog(
-        self, directory: Path, entries: list[dict[str, Any]], *, namespace: str = 'supporting',
-        entry_key: str = 'parts', count_key: str = 'part_count',
-    ) -> tuple[Path, dict[str, Path]]:
+    def _supporting_catalog(self, directory: Path, entries: list[dict[str, Any]]) -> tuple[Path, dict[str, Path]]:
         """Publish a bounded exact-pointer catalog without exposing a directory grant."""
         captured: dict[str, Path] = {}
         ordinal = 0
 
         def write_groups(key: str, values: list[dict[str, Any]]) -> list[dict[str, Any]]:
             nonlocal ordinal
-            groups: list[list[dict[str, Any]]] = []
-            current: list[dict[str, Any]] = []
-            for value in values:
-                if len(_json({key: [value]}).encode()) > 12_000:
-                    raise SanctionedInputUnavailable('supporting catalog entry exceeds its bounded allowance')
-                if current and len(_json({key: [*current, value]}).encode()) > 12_000:
-                    groups.append(current)
-                    current = []
-                current.append(value)
-            if current or not groups:
-                groups.append(current)
+            groups = _bounded_groups(values, lambda group: len(_json({key: group}).encode()) <= 12_000,
+                                     'supporting catalog entry exceeds its bounded allowance') or [[]]
             result: list[dict[str, Any]] = []
             for group in groups:
-                label = f'{namespace}-catalog-{ordinal:06d}'
+                label = f'supporting-catalog-{ordinal:06d}'
                 ordinal += 1
                 path = self._write(directory / f'{label}.json', _json({key: group}))
                 captured[label] = path
-                result.append({'path': str(path), count_key: (
-                    len(group) if key == entry_key else sum(child[count_key] for child in group))})
+                result.append({'path': str(path), 'part_count': (
+                    len(group) if key == 'parts' else sum(child['part_count'] for child in group))})
             return result
 
-        level = write_groups(entry_key, entries)
+        level = write_groups('parts', entries)
         while len(level) > 1:
             following = write_groups('catalogs', level)
             if len(following) >= len(level):
@@ -347,26 +345,14 @@ class StageInputFactory:
 
     def _access_guide(self, state: dict[str, Any], prepared: PreparedSanctionedInputs) -> str:
         """Keep compact pointers to assignment and ordinary context inputs."""
-        contexts = []
-        for item in prepared.inputs:
-            if not item.prompt_visible:
-                continue
-            context: dict[str, Any] = {"label": item.label}
-            if prepared.transport is SanctionedInputTransport.EXACT_PATHS:
-                context["path"] = str(item.path)
-            else:
-                context["transport"] = "inline"
-            contexts.append(context)
+        exact_paths = prepared.transport is SanctionedInputTransport.EXACT_PATHS
+        contexts = [{"label": item.label, **({"path": str(item.path)} if exact_paths else {"transport": "inline"})}
+                    for item in prepared.inputs if item.prompt_visible]
         return _json({"stage": state["stage"], "contexts": contexts})
 
     def prepare(self, state: dict[str, Any]) -> PreparedSanctionedInputs | None:
         self._revalidate_canonical()
         shared_paths = {} if state['stage'] == 'triage' else self.shared_paths
-        parts = [self.by_id[target] for target in state['assigned_target_ids'] if target in self.by_id]
-        if state['stage'] in {'triage', 'integration'}:
-            # The existing file selectors are the source inventory for these duties.
-            parts = [_Part({'target_id': path, 'file': path, 'kind': 'file'}, self.blocks.get(path, ''))
-                     for path in state['assigned_files']]
         statuses: list[dict[str, str]] = []
         deferred_contents: dict[str, str] = {}
         if state['stage'] == 'triage':
@@ -398,7 +384,8 @@ class StageInputFactory:
                 else:
                     statuses.append({"label": label, "status": "unavailable"})
         else:
-            contents = self._render(parts)
+            contents = self._render([self.by_id[target] for target in state['assigned_target_ids']
+                                     if target in self.by_id])
         identity = hashlib.sha256(_json([state['stage'], state['assigned_target_ids'],
                                         state.get('attempt', 1)]).encode()).hexdigest()[:20]
         directory = Path(self.scope_name) / identity
@@ -428,13 +415,8 @@ class StageInputFactory:
         # transport allowance. Reuse existing identity-bound artifacts instead
         # of copying advisory bytes or following an unchecked symlink.
         before_files = set(state["assigned_files"])
-        for file, block in self.blocks.items():
-            old_header = _DIFF_MINUS_HEADER.search(block)
-            new_header = _DIFF_PLUS_HEADER.search(block)
-            old_path = (_unquote_git_path(old_header[1].rstrip("\t")).removeprefix("a/")
-                        if old_header else file)
-            new_path = (_unquote_git_path(new_header[1].rstrip("\t")).removeprefix("b/")
-                        if new_header else file)
+        for file in self.blocks:
+            old_path, new_path = self._diff_paths(file)
             if new_path == "/dev/null" and old_path != "/dev/null":
                 before_files.add(file)
         before_context = self._before_context(before_files, directory, statuses)
@@ -508,11 +490,10 @@ class StageInputFactory:
         if deferred_paths:
             state['context_inputs'] = [label for label in paths if label not in deferred_paths
                                       and label not in catalog_paths]
-        units = sum(len(batch) for batch in self.assignment_batches)
         decided = set(state.get('completed_target_ids', []))
         remaining = [part for part in self.parts if part.assignment['target_id'] not in decided]
         state['remaining_work'] = {
-            'assignment_units': 1 if state['stage'] == 'integration' else units - len(decided),
+            'assignment_units': 1 if state['stage'] == 'integration' else len(self.parts) - len(decided),
             'files': len({part.assignment['file'] for part in remaining}),
             'stages': 1 if state['stage'] == 'integration' else sum(
                 any(part['target_id'] not in decided for part in batch) for batch in self.assignment_batches),

@@ -14,16 +14,24 @@ from daydream import clock
 
 STAGED_REVIEW_GUIDANCE = """Staged review contract:
 Return exactly REVIEW_STAGE_SCHEMA: targets, notes, candidates, contradictions. The host publishes terminal findings.
+The Host review stage's response_contract.schema specializes identities and counts; start with its four-key
+skeleton, filling required judgments rather than copying placeholder decisions. Otherwise use REVIEW_STAGE_SCHEMA.
 The host assignment and invocation schema govern scope and output over generic operator instructions.
 Use the backend-selected structured-result transport; do not write artifacts or a separate markdown report.
 Return exactly assigned target or triage candidate IDs. Declare each decision explicitly; tool traffic never
 substitutes for decisions. Echo each assigned ID once. Judge only the assigned file, hunk or ordered continuation
 part; a prefix cannot finish a hunk or file. The host folds file coverage only after every required part succeeds.
+assignment_parts records the ordered required work and old/new range mapping. Supporting paths, shared context
+and other batches are not additional assigned targets. Omitted inputs are unavailable; partial context is not a
+complete repository map. Preserve the captured revision when consulting repository content.
 First pass investigates assigned work, with other files supporting concrete candidates. Integration checks
 whole-change interactions and boundaries. Structure begins with whole-change interactions; documentation and
 diff parts support concrete concerns. Output assignment IDs identify decisions, not file selectors.
 Use only exact sanctioned pointers or captured bytes for host artifacts. Never infer private siblings or enumerate
 storage. Complete inline context is identified honestly; optional omitted context does not invalidate a decision.
+Use supplied diff/context and retained semantic notes first. End dependency, configuration and test traces when
+their concrete assigned candidate is resolved. Apply test-quality, configuration-flow, trust and wire-contract
+checks only to assigned changed behavior and supporting evidence; no speculative extra audit is required.
 Discovery candidates use empty candidate_id for host assignment. Triage targets are exactly []; resolve only
 assigned candidates once as confirmed, rejected or unresolved, with no new candidates. Closed decisions stay closed.
 Use closed_decisions for host-assigned candidate IDs, locations and conclusions. Report contradictions by
@@ -34,6 +42,8 @@ A valid decision may rely on supplied diff/context or useful ordinary investigat
 required. The cumulative tool allowance and absolute reviewer deadline are hard limits across
 stages and retries. Every observed tool start counts, including failures and structured submissions. Use remaining_work
 and the remaining allowance to preserve capacity for submission, later assignments and open-candidate triage.
+The advisory stage call target guides pace, not a ceiling. Fresh retries repeat the logical assignment and frozen
+snapshot; unsuccessful attempts contribute no semantic evidence, while admitted prior stages remain available.
 No defect is guaranteed. Submit once assigned work and concrete candidates are resolved.
 Do not install dependencies, download packages or repair the environment. Existing local targeted checks may resolve
 concrete candidates; record blocked checks rather than retry setup or run broad suites. Declare not_reviewed with an

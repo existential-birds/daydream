@@ -26,9 +26,7 @@ from daydream.backends import (
 from daydream.backends.codex import CodexBackend
 from daydream.config import TEST_WALL_BUDGET_S
 from daydream.config_file import DaydreamFileConfig
-from daydream.deep.artifacts import (
-    DeepArtifact,
-)
+from daydream.deep.artifacts import DeepArtifact
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.git_ops import GitError, IndexSnapshot, WorktreeRollbackSnapshot
 from daydream.hunk_index import write_hunk_index
@@ -68,9 +66,7 @@ from daydream.phases.repair_outcome import (
     RepairOutcome,
     classify_repair_outcome,
 )
-from daydream.phases.review_prompts import (
-    _exploration_pointer,
-)
+from daydream.phases.review_prompts import _exploration_pointer
 from daydream.phases.test_evidence import (
     TestAndHealResult,
     _test_command_wall_budget,
@@ -317,7 +313,6 @@ def _reject_violations(tmp_path: Path, snapshot: str | None) -> list[str] | None
     return _reject_test_healing_generated_file_edits(
         tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(), allow_standalone=True,
     )
-
 
 def test_test_healing_guard_uses_snapshot_bytes_to_detect_marker_generated_file(
     tmp_path: Path, _quiet_phase_ui: None,
@@ -793,7 +788,6 @@ def test_test_command_wall_budget_resolves_file_config_override() -> None:
         == 1234.0
     )
 
-
 def _footprint(repo: Path) -> AuthorizedFixFootprint:
     """A no-edit-authority footprint: the repair record, not the prompt, carries scope."""
     return AuthorizedFixFootprint(run_allowed_paths=frozenset(), policy_revision=1)
@@ -887,7 +881,6 @@ async def test_failing_confinement_blocks_the_repair_and_records_the_failure(
     assert any("GitError" in diagnostic and "restore failed" in diagnostic
         for r in result.repairs for diagnostic in r.diagnostics)
 
-
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_aborts_when_generated_restore_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
@@ -906,7 +899,6 @@ async def test_phase_test_and_heal_aborts_when_generated_restore_fails(
     assert backend.call_count == 3
     assert "failure-summarizer" in backend.prompts[-1].lower()
 
-
 @pytest.mark.parametrize(("abort_reason", "output", "expected"), [
     ("wall_budget_exceeded", "PARTIAL-DIAGNOSIS-abc", RepairOutcome.BUDGET_INTERRUPTED),
     (None, "", RepairOutcome.DIAGNOSIS_UNRESOLVED),
@@ -923,7 +915,6 @@ def test_test_and_heal_result_repairs_field_defaults_for_existing_callers() -> N
     """The defaulted field keeps all eight existing positional constructions valid."""
     result = TestAndHealResult(True, 0, True, False, ())
     assert result.repairs == ()
-
 
 @pytest.mark.asyncio
 async def test_phase_fix_prompt_enumerates_explicit_edit_scope(
@@ -1090,7 +1081,6 @@ async def test_phase_fix_batched_prompt_lists_all_findings(
     assert "Anchor the change" in prompt
     assert "the contract wins" in prompt
 
-
 @pytest.mark.asyncio
 async def test_phase_fix_batched_includes_verifier_verdicts(
     tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None,
@@ -1118,7 +1108,6 @@ async def test_phase_fix_batched_includes_verifier_verdicts(
     assert "could not reproduce" in prompt
     assert "assumes single-threaded" in prompt
 
-
 @pytest.mark.asyncio
 async def test_phase_fix_batched_adds_test_map_source_hint(
     tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None,
@@ -1135,7 +1124,6 @@ async def test_phase_fix_batched_adds_test_map_source_hint(
     await phases.phase_fix_batched(backend, make_work(tmp_path), items, [1], 1, test_map=test_map)
     assert any("daydream/app.py" in prompt for prompt in backend.prompts)
 
-
 @pytest.mark.asyncio
 async def test_phase_fix_parallel_drops_pointer_when_index_missing(
     tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None,
@@ -1149,7 +1137,6 @@ async def test_phase_fix_parallel_drops_pointer_when_index_missing(
     assert backend.prompts
     assert not any("affected_files.md" in prompt for prompt in backend.prompts)
 
-
 @pytest.mark.asyncio
 async def test_phase_fix_batched_prompt_includes_evidence(
     tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None,
@@ -1162,7 +1149,6 @@ async def test_phase_fix_batched_prompt_includes_evidence(
 class TestBuildFixPrompt:
     """Tests for _build_fix_prompt helper."""
 
-
     def test_long_output_truncated(self) -> None:
         lines = [f"line {i}" for i in range(200)]
         output = "\n".join(lines)
@@ -1174,14 +1160,12 @@ class TestBuildFixPrompt:
         assert "line 0\n" not in result
         assert f"line {200 - TEST_OUTPUT_TAIL_LINES - 1}\n" not in result
 
-
     def test_repo_leaves_missing_file_relative(self, tmp_path: Path) -> None:
         items = [{"id": 1, "description": "Bug", "file": "src/ghost.py", "line": 1}]
         result = _build_fix_prompt("test failed", items, repo=tmp_path)
         # File does not exist under repo → left as-is, not fabricated absolute.
         assert "- src/ghost.py" in result
         assert str(tmp_path / "src" / "ghost.py") not in result
-
 
 def test_build_intent_prompt_truncates_body_over_8000_chars() -> None:
     prefix = "A" * _PR_BODY_MAX_CHARS
@@ -1211,7 +1195,6 @@ def test_build_intent_prompt_escapes_closing_delimiter_in_body() -> None:
     # Both delimiters are neutralized to HTML entities so they cannot break framing.
     assert "&lt;/pr_description>" in prompt
     assert "&lt;pr_description>" in prompt
-
 
 @pytest.mark.asyncio
 async def test_phase_understand_intent_rejects_budget_truncated_summary(
@@ -1357,7 +1340,6 @@ async def test_phase_understand_intent_clone_inline_diff_is_byte_bounded(
     # Character-index slicing would have emitted this 2×-the-cap prefix verbatim.
     char_sliced_prefix = diff_text[:INLINE_DIFF_BUDGET_BYTES].encode("utf-8")[:INLINE_DIFF_BUDGET_BYTES]
     assert char_sliced_prefix not in prompt.encode("utf-8")
-
 
 def test_is_evidenced_gate_branches() -> None:
     """Issue #227: _is_evidenced grounds on evidence content and confidence tier."""
@@ -1718,7 +1700,6 @@ async def test_phase_test_and_heal_option4_no_clipboard_skip_message(
     assert user_prompts == ["Choice"]
     assert copy_called is False
 
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("turn", "expected_substrings"),
     [((RuntimeError("scripted summarizer failure"),),
@@ -1805,31 +1786,8 @@ async def test_recorderless_handoff_rejects_a_bound_session_without_explicit_own
             _resolve_handoff_paths(None, work, allow_standalone=True)
 
 
-@pytest.mark.asyncio
-async def test_resolve_handoff_paths_roots_at_the_layout_run_directory(
-    tmp_path: Path, make_work: Callable[..., WorkContext],
-) -> None:
-    """Resolve the live owner run directory through the layout API, without reconstructing paths."""
-    repo = tmp_path / "repo"
-    init_repo(repo)
-    work = make_work(repo)
-    live_daydream = artifact_dir_for(repo, allow_standalone=True)
-    session_id = "handoff-layout"
-    run_dir = run_directory(live_daydream, session_id)
-    recorder = TrajectoryRecorder(
-        path=run_document_path(run_dir), run_flow=DaydreamRunFlow.NORMAL, target_dir=repo, artifact_run_dir=run_dir,
-        agent_model_name="fake-external", session_id=session_id,
-    )
-    async with recorder:
-        handoff, artifacts = _resolve_handoff_paths(recorder, work, allow_standalone=True)
-
-    assert artifacts.trajectory == run_document_path(run_dir)
-    assert artifacts.trajectories == siblings_directory(run_dir)
-    assert handoff == run_dir / "handoff.md"
-    assert artifacts.trajectory.parent == run_dir
 
 # _write_handoff — must report write failure so the caller can fall back
-
 
 def test_write_handoff_returns_false_on_oserror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Return False on write failure so callers cannot announce a nonexistent file."""
@@ -1866,7 +1824,6 @@ async def test_phase_test_and_heal_option4_inlines_body_when_write_fails(
     assert any("FULL_BODY_LINE_1" in line for line in printed), printed
 
 # phase_test_and_heal — non-interactive short-circuit (Task 3)
-
 
 # phase_test_and_heal — --yes bounded auto fix-and-retry (Task assume="yes")
 
@@ -1913,7 +1870,6 @@ def test_sanitize_suggested_command_strips_backticks_and_collapses_whitespace() 
     assert _sanitize_suggested_command("echo `whoami`") == "echo whoami"
     # Whitespace runs collapse to single space:
     assert _sanitize_suggested_command("a\t\tb\n c") == "a b c"
-
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_option1_strips_backticks_from_host_command(
@@ -2097,13 +2053,11 @@ async def test_failure_summarizer_falls_back_for_non_live_private_runtime_paths(
     assert "private runtime path" not in body
     assert "output contained a private runtime path" in caplog.text
 
-
 # The host renders review-output.md from validated merge items.
 _MERGE_ITEMS = merge_result([{
     "id": 1, "lens": "per-stack", "file": "a.py", "line": 1, "severity": "low", "description": "bug",
     "confidence": "HIGH", "rationale": "r", "evidence": "a.py:1",
 }])
-
 
 @pytest.mark.parametrize("inline", [False, True])
 async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
@@ -2282,7 +2236,6 @@ async def test_phase_fix_parallel_restores_whole_group_worktree_before_batch_fal
     assert (tmp_path / "a.py").read_text() == "successful fallback fix\n"
     assert (tmp_path / "shared.py").read_text() == "successful fallback fix\n"
     assert (tmp_path / "test_a.py").read_text() == "original group content\n"
-
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_records_each_agent_attempt_and_heal_scope(
@@ -2567,9 +2520,7 @@ async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failu
     assert sorted(fix_calls) == ["b.py"]
     assert set(failures) == {"boom.py"} and "RuntimeError" in failures["boom.py"]
 
-
 # --- Issue #172 Fix B extended: inline small diffs into intent / wonder ------
-
 
 def test_inlineable_diff_budget_boundaries() -> None:
     assert _inlineable_diff(None) is None
@@ -2607,7 +2558,6 @@ def test_merge_demotion_preserves_original_severity_and_marks_distrust(tmp_path:
     assert items[0]["severity"] == "low"  # demoted value (report-facing)
     assert items[0]["severity_before_demotion"] == "high"  # original preserved (R2.1)
     assert items[0]["location_distrust"] is True  # machine-readable demotion mark
-
 
 @pytest.mark.asyncio
 async def test_first_targeted_call_runs_in_the_resolved_package_cwd(
@@ -2875,3 +2825,26 @@ async def test_a_mismatch_record_names_the_component(
     assert gate["result"] == "identity-mismatch"
     assert gate["mismatched_components"] == ["tree_key"]
     assert any("tree_key" in line for line in reported), reported
+
+@pytest.mark.asyncio
+async def test_resolve_handoff_paths_roots_at_the_layout_run_directory(
+    tmp_path: Path, make_work: Callable[..., WorkContext],
+) -> None:
+    """Resolve the live owner run directory through the layout API, without reconstructing paths."""
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    work = make_work(repo)
+    live_daydream = artifact_dir_for(repo, allow_standalone=True)
+    session_id = "handoff-layout"
+    run_dir = run_directory(live_daydream, session_id)
+    recorder = TrajectoryRecorder(
+        path=run_document_path(run_dir), run_flow=DaydreamRunFlow.NORMAL, target_dir=repo, artifact_run_dir=run_dir,
+        agent_model_name="fake-external", session_id=session_id,
+    )
+    async with recorder:
+        handoff, artifacts = _resolve_handoff_paths(recorder, work, allow_standalone=True)
+
+    assert artifacts.trajectory == run_document_path(run_dir)
+    assert artifacts.trajectories == siblings_directory(run_dir)
+    assert handoff == run_dir / "handoff.md"
+    assert artifacts.trajectory.parent == run_dir

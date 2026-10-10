@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 import daydream.phases as phases_mod
-from daydream.backends import CostEvent, ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
+from daydream.backends import CostEvent, ResultEvent, TextEvent
 from daydream.config import REVIEW_OUTPUT_FILE, STRUCTURE_STACK_NAME
 from daydream.deep import detection as _detection
 from daydream.deep.detection import StackAssignment
@@ -29,13 +29,15 @@ from daydream.prompts.wire_contract import WIRE_CONTRACT_GENERIC_INSTRUCTION, WI
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.conftest import silence_module_console
+from tests.deep_orchestrator.test_review_completion import record
+from tests.deep_orchestrator.test_review_investigation import candidate
 from tests.harness.backend import ScriptedBackend
 from tests.harness.review_result import merge_result
 from tests.harness.stub_backend import review_stage_state, stage_result
 
 
 class _DeepMockBackend(ScriptedBackend):
-    """Review schema dispatch with completed fixture reads; retain downstream parity.
+    """Review schema dispatch over real fixture source; retain downstream parity.
 
     Stage labels live in stages to avoid colliding with the harness's calls.
     """
@@ -96,47 +98,26 @@ class _DeepMockBackend(ScriptedBackend):
         return events
 
     def _review_stage(self, cwd: Path, stage: dict[str, Any]) -> list[Any]:
-        """Judge only known fixture changes after reading their complete source."""
+        """Supply provider findings for the parity runner's assigned scopes."""
         structural = stage["scope_id"] == STRUCTURE_STACK_NAME
         assert stage["stage"] == ("integration" if structural else "first_pass")
         self.stages.append("structure" if structural else "per-stack")
-        expected_sources = {
-            "api.py": "def hello():\n    return 'universe'\n",
-            "App.tsx": "export const App = () => <div>universe</div>;\n",
-            "README.md": "# Project\n\nUpdated.\n",
-            "src/main.rs": 'fn main() {\n    println!("hello from wire");\n}\n',
-        }
-        sources: dict[str, str] = {}
-        events: list[Any] = []
-        for index, path in enumerate(stage["assigned_files"]):
-            assert path in expected_sources, f"unknown fixture work: {path}"
-            source = (cwd / path).read_text()
-            assert source == expected_sources[path], f"unexpected changed behavior in {path}"
-            sources[path] = source
-            call_id = f"source-{index}"
-            events.extend([
-                ToolStartEvent(id=call_id, name="Read", input={"file_path": path}),
-                ToolResultEvent(id=call_id, output=source, is_error=False),
-            ])
         assert stage["assigned_target_ids"] == (
             ["integration:structure"] if structural else stage["assigned_files"]
         )
         findings = []
-        if "api.py" in sources and (structural or self.language_finding and stage["scope_id"] == "python"):
+        if ("api.py" in stage["assigned_files"]
+                and (structural or self.language_finding and stage["scope_id"] == "python")):
+            assert "return 'universe'" in (cwd / "api.py").read_text()
             description = "Greeting contract changed across modules" if structural else "Language review finding"
-            findings.append({
-                "candidate_id": "", "file": "api.py", "line": 2,
-                "trigger": "Calling hello() after the changed greeting contract",
-                "consequence": "The returned greeting changes from world to universe.",
-                "grounds": "api.py:2 return 'universe' in the complete hello() symbol",
-                "disposition": "confirmed",
-                "finding": {"id": 1, "description": description, "file": "api.py", "line": 2,
-                            "severity": "medium", "confidence": "MEDIUM",
-                            "rationale": "The changed hello() return is verified in api.py:2.",
-                            "evidence": "api.py:2 return 'universe'"},
-            })
-        events.append(ResultEvent(structured_output=stage_result(stage, candidates=findings), continuation=None))
-        return events
+            finding = dict(record(), description=description,
+                           rationale="The changed hello() return is verified in api.py:2.",
+                           evidence="api.py:2 return 'universe'")
+            findings.append(dict(candidate(disposition='confirmed', finding=finding),
+                                 trigger="Calling hello() after the changed greeting contract",
+                                 consequence="The returned greeting changes from world to universe.",
+                                 grounds="api.py:2 return 'universe' in the complete hello() symbol"))
+        return [ResultEvent(structured_output=stage_result(stage, candidates=findings), continuation=None)]
 
 def _silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
     """Silence noisy UI helpers at their current production owners."""

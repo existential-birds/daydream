@@ -13,15 +13,11 @@ from daydream.backends import Backend
 from daydream.backends.pi import PiBackend
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import StackAssignment
-from daydream.deep.sharding import file_change_bytes, pack_file_batches
+from daydream.deep.sharding import file_change_bytes
 from daydream.json_utils import SchemaRejection, validates_schema
 from daydream.phases.review_prompts import build_review_stage_system_instruction
 from daydream.phases.schemas import review_stage_schema
-from daydream.prompt_budget import (
-    PreparedSanctionedInputs,
-    SanctionedInputUnavailable,
-    truncate_utf8_to_budget,
-)
+from daydream.prompt_budget import PreparedSanctionedInputs, SanctionedInputUnavailable, truncate_utf8_to_budget
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.review_evidence import ReviewEvidence
 from daydream.review_result import reason_for_exception
@@ -55,23 +51,12 @@ class ReviewInvestigation:
     """Admit successful stage assertions; observed spend belongs to the host."""
 
     def __init__(self, stack: StackAssignment, full_diff: str, revision: dict[str, Any], *,
-                 assignment_batches: list[list[dict[str, Any]]] | None = None) -> None:
+                 assignment_batches: list[list[dict[str, Any]]]) -> None:
         self.scope_id = stack.stack_name
         self.files = sorted(stack.files)
         self.revision = revision
         self.diff_weights = file_change_bytes(full_diff)
-        # Keep nearby changed paths together without another dependency-planning
-        # pass. Smaller hunks leave evidence room for their enclosing symbols.
-        directories: dict[str, list[str]] = {}
-        for path in self.files:
-            directories.setdefault(str(Path(path).parent), []).append(path)
-        self.batches = ([] if self.scope_id == STRUCTURE_STACK_NAME else
-                        pack_file_batches(stack, self.diff_weights, 4, 16 * 1024, list(directories.values())))
-        self.assignment_batches: list[list[dict[str, Any]]] = (
-            assignment_batches if assignment_batches is not None else
-            [[{'target_id': path, 'file': path, 'part_index': 1, 'part_count': 1, 'kind': 'file'}
-              for path in batch.files] for batch in self.batches]
-        )
+        self.assignment_batches = assignment_batches
         self.required_targets: dict[str, list[str]] = {path: [] for path in self.files}
         for batch in self.assignment_batches:
             for part in batch:
@@ -149,8 +134,7 @@ class ReviewInvestigation:
             'progress': self.handoff['progress'] if stage != 'triage' else [],
             'notes': notes, 'candidates': candidates,
             'closed_decisions': closed_decisions,
-            'closed_candidate_ids': [candidate['candidate_id'] for candidate in self.handoff['candidates']
-                                     if candidate['disposition'] in {'confirmed', 'rejected'}],
+            'closed_candidate_ids': [decision['candidate_id'] for decision in closed_decisions],
             'assigned_candidate_ids': candidate_ids,
             'target_diff_bytes': {path: self.diff_weights.get(path, 1) for path in files},
             'observed_tool_starts': self.budget.observed_tool_starts,
@@ -170,162 +154,151 @@ class ReviewInvestigation:
             self.failure_class = 'quantitative_exhaustion'
             self.failure_diagnostic = 'Review limit exhausted: tool_call_budget_exceeded'
             return False
+        candidate_ids = candidate_ids or []
+        assignment_parts = assignment_parts or []
         rejection: SchemaRejection | None = None
         for attempt in (1, 2):
-            accepted, retry_rejection = await self._attempt(
-                backend, cwd, prompt_builder, stage, targets, files, agent_kwargs,
-                stage_inputs=stage_inputs, candidate_ids=candidate_ids or [],
-                assignment_parts=assignment_parts or [], attempt=attempt, rejection=rejection,
-            )
+            state = self._stage_state(stage, targets, files, candidate_ids, assignment_parts)
+            self.failure_diagnostic = None
+            self.failed_invocation = False
+            self.failure_class = None
+            state.update(attempt=attempt, max_attempts=2,
+                         schema_rejection=rejection.to_dict() if rejection else None)
+            schema = review_stage_schema(targets, candidate_ids, triage=stage == "triage")
+            state["response_contract"] = {"schema": schema, "skeleton": {
+                "targets": [{"target_id": target, "status": "reviewed", "reason": ""} for target in targets],
+                "notes": "", "candidates": [{
+                    "candidate_id": candidate["candidate_id"], "file": candidate["file"], "line": candidate["line"],
+                    "trigger": "", "consequence": "", "grounds": "", "disposition": "unresolved", "finding": None,
+                } for candidate in state["candidates"]] if stage == "triage" else [], "contradictions": [],
+            }}
+            evidence = ReviewEvidence(schema)
+            self.assertion_failure_class: str | None = None
+            syntax_error: dict[str, int] | None = None
+            retry_rejection: SchemaRejection | None = None
+            actual_rejection: SchemaRejection | None = None
+            accepted = False
+            starts_before = self.budget.observed_tool_starts
+            candidate_count = 0
+            prepared: PreparedSanctionedInputs | None = None
+            async with phase_scope(DaydreamPhase.DEEP, stage=f'review-{stage.replace('_', '-')}') as transition:
+                prior_admitted = self.admitted_stages
+                try:
+                    kwargs = dict(agent_kwargs)
+                    if stage_inputs is not None:
+                        kwargs['sanctioned_inputs'] = stage_inputs(state)
+                    prepared = kwargs.get('sanctioned_inputs')
+                    if prepared is not None:
+                        prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
+                    # Planning floor only; actual output authority comes from RequestEvent.
+                    if isinstance(backend, PiBackend) and not (
+                        kwargs.get("tools_disabled") or kwargs.get("finalization")
+                        or kwargs.get("validate_structured_output") is False
+                    ):
+                        state["max_attempts"] = 1
+                        remaining = state.setdefault("remaining_work", {})
+                        remaining["current_stage_submission_start_floor"] = 1
+                        triage_stages = (sum(candidate['disposition'] == 'open'
+                                             for candidate in self.handoff['candidates']) + 7) // 8
+                        remaining["remaining_submission_start_floor"] = max(
+                            1, remaining.get("stages", 1) + triage_stages)
+                        remaining["current_stage_total_start_floor"] = 1
+                    stage_prompt = prompt_builder(state)
+                    output, _, self.reason = await agent.run_agent(
+                        backend, cwd, stage_prompt, phase=DaydreamPhase.DEEP, output_schema=schema,
+                        review_system_instructions=build_review_stage_system_instruction(state),
+                        require_full_schema=True, investigation_budget=self.budget, review_evidence=evidence,
+                        schema_rejection_guard=lambda value: isinstance(value, dict) and self._assessment(
+                            value, stage, targets, candidate_ids, files=files or state['assigned_files'])[1] is None,
+                        advisory_tool_call_target=state['advisory_tool_call_target'], **kwargs,
+                    )
+                    if prepared is not None:
+                        prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
+                except SanctionedInputUnavailable:
+                    self.reason = 'evidence_incomplete'
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    self.reason = 'interruption'
+                    self.failure_class = 'cancellation'
+                    raise
+                except Exception as exc:  # noqa: BLE001 -- retain successful-stage progress after ordinary failures
+                    self.reason = reason_for_exception(exc).value
+                    self.failed_invocation = True
+                    self.failure_diagnostic = f"{type(exc).__name__}: review invocation failed ({self.reason})."
+                else:
+                    actual_rejection = output.rejection if isinstance(output, agent.StructuredOutputFailure) else None
+                    syntax_error = output.syntax_error if isinstance(output, agent.StructuredOutputFailure) else None
+                    candidate_count = len(output.get('candidates', [])) if isinstance(output, dict) else 0
+                    if self.reason is None:
+                        if (actual_rejection is not None and isinstance(output, agent.StructuredOutputFailure)
+                                and output.schema_retry_eligible and not evidence.native_output):
+                            retry_rejection = actual_rejection
+                        self.reason = self._admit(output, stage, targets, candidate_ids or [], evidence,
+                                                  files=files or state['assigned_files'])
+                    accepted = self.reason is None
+                finally:
+                    if self.reason in {'tool_call_budget_exceeded', 'wall_budget_exceeded', 'pipeline_budget_exceeded',
+                                       'model_budget_exhaustion'}:
+                        self.failure_class = 'quantitative_exhaustion'
+                    elif self.assertion_failure_class is not None:
+                        self.failure_class = self.assertion_failure_class
+                    elif syntax_error is not None:
+                        self.failure_class = "syntax_failure"
+                    elif actual_rejection is not None:
+                        self.failure_class = 'schema_rejection'
+                    elif self.reason == 'evidence_incomplete':
+                        self.failure_class = 'admission_failure'
+                    elif self.reason == 'interruption':
+                        self.failure_class = 'cancellation'
+                    else:
+                        self.failure_class = self.reason
+                    if self.reason is not None and not self.failed_invocation:
+                        labels = {'schema_rejection': 'Strict stage schema rejected',
+                                  'syntax_failure': 'Invalid JSON syntax',
+                                  'assignment_mismatch': 'Stage assignment identities rejected',
+                                  'admission_failure': 'Stage evidence admission failed',
+                                  'quantitative_exhaustion': 'Review limit exhausted'}
+                        label = labels.get(self.failure_class or '', 'Review stopped')
+                        self.failure_diagnostic = f"{label}: {self.reason}"
+                    transition.extra.update(
+                        review_scope_id=self.scope_id, observed_tool_starts=self.budget.observed_tool_starts,
+                        remaining_tool_calls=self.budget.remaining_tool_calls,
+                        hard_tool_call_allowance=state['remaining_tool_calls'],
+                        advisory_tool_call_target=state['advisory_tool_call_target'],
+                        assigned_target_ids=targets, assigned_candidate_ids=candidate_ids or [],
+                        admitted=self.admitted_stages > prior_admitted, stop_reason=self.reason,
+                        logical_stage=stage, attempt=attempt,
+                        attempt_tool_starts=self.budget.observed_tool_starts - starts_before,
+                        schema_rejection=actual_rejection.to_dict() if actual_rejection else None,
+                        schema_retry_eligible=retry_rejection is not None,
+                        retry_feedback=rejection.to_dict() if rejection else None,
+                        native_output=evidence.native_output,
+                        submission_starts=evidence.output_starts,
+                        successful_submissions=evidence.output_successes,
+                        failed_submissions=evidence.output_failures,
+                        replaced_submissions=max(0, evidence.output_successes - 1),
+                        failure_class=self.failure_class,
+                        syntax_error=syntax_error,
+                        stage_candidate_count=candidate_count,
+                        admitted_candidate_count=len(self.handoff['candidates']),
+                        retained_findings=sum(item['disposition'] == 'confirmed'
+                                              for item in self.handoff['candidates']),
+                    )
+                if self.reason in {'wall_budget_exceeded', 'pipeline_budget_exceeded'}:
+                    transition.finish(LifecycleStatus.TIMED_OUT, LifecycleReasonCode.TIMED_OUT)
+                elif not accepted:
+                    transition.finish(LifecycleStatus.FAILED, LifecycleReasonCode.DOMAIN_FAILURE)
+                else:
+                    transition.finish(LifecycleStatus.SUCCEEDED)
             if accepted or attempt == 2 or retry_rejection is None:
                 return accepted
             rejection = retry_rejection
             self.reason = None
         return False
 
-    async def _attempt(
-        self, backend: Backend, cwd: Path, prompt_builder: Callable[[dict[str, Any]], str],
-        stage: str, targets: list[str], files: list[str], agent_kwargs: dict[str, Any], *,
-        stage_inputs: Callable[[dict[str, Any]], PreparedSanctionedInputs | None] | None,
-        candidate_ids: list[str], assignment_parts: list[dict[str, Any]],
-        attempt: int, rejection: SchemaRejection | None,
-    ) -> tuple[bool, SchemaRejection | None]:
-        state = self._stage_state(stage, targets, files, candidate_ids, assignment_parts)
-        self.failure_diagnostic = None
-        self.failed_invocation = False
-        self.failure_class = None
-        state.update(attempt=attempt, max_attempts=2,
-                     schema_rejection=rejection.to_dict() if rejection else None)
-        schema = review_stage_schema(targets, candidate_ids, triage=stage == "triage")
-        state["response_contract"] = {"schema": schema, "skeleton": {
-            "targets": [{"target_id": target, "status": "reviewed", "reason": ""} for target in targets],
-            "notes": "", "candidates": [{
-                "candidate_id": candidate["candidate_id"], "file": candidate["file"], "line": candidate["line"],
-                "trigger": "", "consequence": "", "grounds": "", "disposition": "unresolved", "finding": None,
-            } for candidate in state["candidates"]] if stage == "triage" else [], "contradictions": [],
-        }}
-        evidence = ReviewEvidence(schema)
-        self.assertion_failure_class: str | None = None
-        syntax_error: dict[str, int] | None = None
-        retry_rejection: SchemaRejection | None = None
-        actual_rejection: SchemaRejection | None = None
-        accepted = False
-        starts_before = self.budget.observed_tool_starts
-        candidate_count = 0
-        prepared: PreparedSanctionedInputs | None = None
-        async with phase_scope(DaydreamPhase.DEEP, stage=f'review-{stage.replace('_', '-')}') as transition:
-            prior_admitted = self.admitted_stages
-            try:
-                kwargs = dict(agent_kwargs)
-                if stage_inputs is not None:
-                    kwargs['sanctioned_inputs'] = stage_inputs(state)
-                prepared = kwargs.get('sanctioned_inputs')
-                if prepared is not None:
-                    prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
-                # Planning floor only; actual output authority comes from RequestEvent.
-                if isinstance(backend, PiBackend) and not (
-                    kwargs.get("tools_disabled") or kwargs.get("finalization")
-                    or kwargs.get("validate_structured_output") is False
-                ):
-                    state["max_attempts"] = 1
-                    remaining = state.setdefault("remaining_work", {})
-                    remaining["current_stage_submission_start_floor"] = 1
-                    triage_stages = (sum(candidate['disposition'] == 'open'
-                                         for candidate in self.handoff['candidates']) + 7) // 8
-                    remaining["remaining_submission_start_floor"] = max(
-                        1, remaining.get("stages", 1) + triage_stages)
-                    remaining["current_stage_total_start_floor"] = 1
-                stage_prompt = prompt_builder(state)
-                output, _, self.reason = await agent.run_agent(
-                    backend, cwd, stage_prompt, phase=DaydreamPhase.DEEP, output_schema=schema,
-                    review_system_instructions=build_review_stage_system_instruction(state),
-                    require_full_schema=True, investigation_budget=self.budget, review_evidence=evidence,
-                    schema_rejection_guard=lambda value: self._schema_retry_eligible(
-                        value, stage, targets, candidate_ids, evidence, files=files or state['assigned_files']),
-                    advisory_tool_call_target=state['advisory_tool_call_target'], **kwargs,
-                )
-                if prepared is not None:
-                    prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
-            except SanctionedInputUnavailable:
-                self.reason = 'evidence_incomplete'
-                accepted = False
-            except (asyncio.CancelledError, KeyboardInterrupt):
-                self.reason = 'interruption'
-                self.failure_class = 'cancellation'
-                raise
-            except Exception as exc:  # noqa: BLE001 -- retain successful-stage progress after ordinary failures
-                self.reason = reason_for_exception(exc).value
-                self.failed_invocation = True
-                self.failure_diagnostic = f"{type(exc).__name__}: review invocation failed ({self.reason})."
-                accepted = False
-            else:
-                actual_rejection = output.rejection if isinstance(output, agent.StructuredOutputFailure) else None
-                syntax_error = output.syntax_error if isinstance(output, agent.StructuredOutputFailure) else None
-                candidate_count = len(output.get('candidates', [])) if isinstance(output, dict) else 0
-                if self.reason is None:
-                    if (actual_rejection is not None and isinstance(output, agent.StructuredOutputFailure)
-                            and output.schema_retry_eligible and not evidence.native_output):
-                        retry_rejection = actual_rejection
-                    self.reason = self._admit(output, stage, targets, candidate_ids or [], evidence,
-                                              files=files or state['assigned_files'])
-                accepted = self.reason is None
-            finally:
-                if self.reason in {'tool_call_budget_exceeded', 'wall_budget_exceeded', 'pipeline_budget_exceeded',
-                                   'model_budget_exhaustion'}:
-                    self.failure_class = 'quantitative_exhaustion'
-                elif self.assertion_failure_class is not None:
-                    self.failure_class = self.assertion_failure_class
-                elif syntax_error is not None:
-                    self.failure_class = "syntax_failure"
-                elif actual_rejection is not None:
-                    self.failure_class = 'schema_rejection'
-                elif self.reason == 'evidence_incomplete':
-                    self.failure_class = 'admission_failure'
-                elif self.reason == 'interruption':
-                    self.failure_class = 'cancellation'
-                else:
-                    self.failure_class = self.reason
-                if self.reason is not None and not self.failed_invocation:
-                    labels = {'schema_rejection': 'Strict stage schema rejected',
-                              'syntax_failure': 'Invalid JSON syntax',
-                              'assignment_mismatch': 'Stage assignment identities rejected',
-                              'admission_failure': 'Stage evidence admission failed',
-                              'quantitative_exhaustion': 'Review limit exhausted'}
-                    self.failure_diagnostic = f"{labels.get(self.failure_class or '', 'Review stopped')}: {self.reason}"
-                transition.extra.update(
-                    review_scope_id=self.scope_id, observed_tool_starts=self.budget.observed_tool_starts,
-                    remaining_tool_calls=self.budget.remaining_tool_calls,
-                    hard_tool_call_allowance=state['remaining_tool_calls'],
-                    advisory_tool_call_target=state['advisory_tool_call_target'],
-                    assigned_target_ids=targets, assigned_candidate_ids=candidate_ids or [],
-                    admitted=self.admitted_stages > prior_admitted, stop_reason=self.reason,
-                    logical_stage=stage, attempt=attempt,
-                    attempt_tool_starts=self.budget.observed_tool_starts - starts_before,
-                    schema_rejection=actual_rejection.to_dict() if actual_rejection else None,
-                    schema_retry_eligible=retry_rejection is not None,
-                    retry_feedback=rejection.to_dict() if rejection else None,
-                    native_output=evidence.native_output,
-                    submission_starts=evidence.output_starts,
-                    successful_submissions=evidence.output_successes,
-                    failed_submissions=evidence.output_failures,
-                    replaced_submissions=max(0, evidence.output_successes - 1),
-                    failure_class=self.failure_class,
-                    syntax_error=syntax_error,
-                    stage_candidate_count=candidate_count,
-                    admitted_candidate_count=len(self.handoff['candidates']),
-                    retained_findings=sum(item['disposition'] == 'confirmed' for item in self.handoff['candidates']),
-                )
-            if self.reason in {'wall_budget_exceeded', 'pipeline_budget_exceeded'}:
-                transition.finish(LifecycleStatus.TIMED_OUT, LifecycleReasonCode.TIMED_OUT)
-            elif not accepted:
-                transition.finish(LifecycleStatus.FAILED, LifecycleReasonCode.DOMAIN_FAILURE)
-            else:
-                transition.finish(LifecycleStatus.SUCCEEDED)
-            return accepted, retry_rejection
-
-    def _assertion_failure(self, output: dict[str, Any], stage: str, targets: list[str], candidate_ids: list[str],
-                           evidence: ReviewEvidence, *, files: list[str]) -> str | None:
-        """Check proven domain failures without widening the independent strict schema gate.
+    def _assessment(self, output: dict[str, Any], stage: str, targets: list[str],
+                    candidate_ids: list[str], *, files: list[str],
+                    admitting: bool = False) -> tuple[_AdmissionPlan | None, str | None]:
+        """Assess proven assertions and prospective bounds without admitting output.
 
         Schema-rejected objects may lack a known field or carry the wrong type.
         Unassessable fields alone are schema errors; available assertions still
@@ -367,50 +340,39 @@ class ReviewInvestigation:
                    for candidate in decisions)
         ):
             self.assertion_failure_class = 'assignment_mismatch'
-            return 'malformed_output'
+            return None, 'malformed_output'
         if decisions and any(
             not isinstance(candidate.get(field), str) or not candidate[field].strip()
             for candidate in decisions for field in ('grounds', 'trigger', 'consequence')
         ):
             self.assertion_failure_class = 'admission_failure'
-            return 'evidence_incomplete'
-        return None
-
-    def _schema_retry_eligible(self, output: Any, stage: str, targets: list[str], candidate_ids: list[str],
-                               evidence: ReviewEvidence, *, files: list[str]) -> bool:
-        """Inspect the original rejected object; never repair, publish, or retain it."""
-        if not isinstance(output, dict) or self._assertion_failure(
-            output, stage, targets, candidate_ids, evidence, files=files
-        ) is not None:
-            return False
-        contradictions = output.get('contradictions')
-        if isinstance(contradictions, list) and any(isinstance(item, str) for item in contradictions):
-            return False
-        raw_targets = output.get('targets')
-        raw_candidates = output.get('candidates')
+            return None, 'evidence_incomplete'
+        if contradictions:
+            if admitting:
+                self.assertion_failure_class = 'admission_failure'
+            return None, 'evidence_incomplete'
         can_prepare = (
-            'notes' in output and isinstance(raw_targets, list) and isinstance(raw_candidates, list)
+            'notes' in output and isinstance(raw_targets, list) and isinstance(raw_decisions, list)
             and all(isinstance(item, dict) and isinstance(item.get('target_id'), str)
                     and isinstance(item.get('status'), str) for item in raw_targets)
             and all(isinstance(item, dict) and isinstance(item.get('file'), str)
-                    and (stage != 'triage' or isinstance(item.get('candidate_id'), str)) for item in raw_candidates)
+                    and (stage != 'triage' or isinstance(item.get('candidate_id'), str)) for item in raw_decisions)
         )
         if can_prepare:
-            _, reason = self._prepare_handoff(output, stage, targets, evidence, files=files)
-            return reason is None
+            return self._prepare_handoff(output, stage, files=files)
         # When schema-only shape errors prevent a prospective plan, block only
         # independently proven bounds failures, rather than inventing another
         # shape validator or repairing the rejected payload into a usable result.
         if 'notes' in output and len(json.dumps(output['notes'], ensure_ascii=False).encode()) > HANDOFF_MAX_BYTES:
-            return False
-        if isinstance(raw_candidates, list):
+            return None, 'evidence_incomplete'
+        if isinstance(raw_decisions, list):
             prior = len(self.handoff['candidates']) if stage != 'triage' else 0
-            if len(raw_candidates) + prior > HANDOFF_MAX_ITEMS:
-                return False
-        return True
+            if len(raw_decisions) + prior > HANDOFF_MAX_ITEMS:
+                return None, 'evidence_incomplete'
+        return None, None
 
-    def _prepare_handoff(self, output: dict[str, Any], stage: str, targets: list[str],
-                         evidence: ReviewEvidence, *, files: list[str]) -> tuple[_AdmissionPlan | None, str | None]:
+    def _prepare_handoff(self, output: dict[str, Any], stage: str, *,
+                         files: list[str]) -> tuple[_AdmissionPlan | None, str | None]:
         """Construct prospective state for bounds checks without changing admitted state."""
         decisions = output['candidates']
         prior_candidates = self.handoff['candidates']
@@ -437,11 +399,10 @@ class ReviewInvestigation:
                                for target in required)
                 progress.append({'target_id': path, 'status': 'reviewed' if complete else 'not_reviewed',
                                  'reason': '' if complete else 'Required assignment parts remain incomplete.'})
-        relevant_files = _candidate_source_files(decisions) | set(files)
         handoff = {
             'progress': progress,
             'notes': self.handoff['notes'] + [{
-                'files': sorted(set(files) | relevant_files), 'text': output['notes'],
+                'files': sorted(set(files) | _candidate_source_files(decisions)), 'text': output['notes'],
             }],
             'candidates': candidates,
         }
@@ -457,15 +418,9 @@ class ReviewInvestigation:
         if not isinstance(output, dict) or not validates_schema(output, evidence.schema or {}):
             return (output.reason if isinstance(output, agent.StructuredOutputFailure)
                     else 'malformed_output' if output else 'missing_output')
-        reason = self._assertion_failure(output, stage, targets, candidate_ids, evidence, files=files)
-        if reason is not None:
-            return reason
-        plan, reason = self._prepare_handoff(output, stage, targets, evidence, files=files)
+        plan, reason = self._assessment(output, stage, targets, candidate_ids, files=files, admitting=True)
         if plan is None:
             return reason
-        if output['contradictions']:
-            self.assertion_failure_class = 'admission_failure'
-            return 'evidence_incomplete'
         self.admitted_stages += 1
         self.handoff = plan.handoff
         self.target_progress = plan.target_progress

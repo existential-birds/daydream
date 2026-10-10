@@ -45,12 +45,7 @@ from tests.harness.remote_ci import (
     seed_pr_identity,
     start_remote_ci_fake,
 )
-from tests.harness.stub_backend import (
-    force_interactive,
-    install_stub_backend,
-    review_stage_result,
-    silence,
-)
+from tests.harness.stub_backend import force_interactive, install_stub_backend, review_stage_result, silence
 from tests.test_deep_orchestrator import _install_stub_backend, _silence
 from tests.test_runner import _fix_item, _seed_fix_resume
 

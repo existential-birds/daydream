@@ -33,18 +33,14 @@ def test_ext_validate_without_supervisor_reports_none(ext_dir: ExtDir, capsys: p
     assert "supported: 8..8" in out
 
 
-def test_ext_validate_rejects_pre_stage_builder_api(ext_dir: ExtDir, capsys: pytest.CaptureFixture[str]) -> None:
-    ext_dir.write_module("def register(r): ...\n", api_version=6)
+@pytest.mark.parametrize('api_version', [6, 7])
+def test_ext_validate_rejects_previous_api(
+    ext_dir: ExtDir, capsys: pytest.CaptureFixture[str], api_version: int,
+) -> None:
+    ext_dir.write_module("def register(r): ...\n", api_version=api_version)
     assert _run_main(["ext", "validate"]) == 1
     out = strip_ansi(capsys.readouterr().out)
-    assert "DAYDREAM_EXT_API = 6" in out
-    assert "supports 8..8" in out
-
-def test_ext_validate_rejects_previous_stage_builder_api(ext_dir: ExtDir, capsys: pytest.CaptureFixture[str]) -> None:
-    ext_dir.write_module("def register(r): ...\n", api_version=7)
-    assert _run_main(["ext", "validate"]) == 1
-    out = strip_ansi(capsys.readouterr().out)
-    assert "DAYDREAM_EXT_API = 7" in out
+    assert f"DAYDREAM_EXT_API = {api_version}" in out
     assert "supports 8..8" in out
 
 def test_ext_validate_rejects_invalid_supervisor_registration(ext_dir: ExtDir, capsys: pytest.CaptureFixture[str],

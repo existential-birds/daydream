@@ -434,9 +434,5 @@ Operator note: `LANGSMITH_WORKSPACE_ID` must be the LangSmith *workspace*
 id — a project id yields HTTP 403 because it is forwarded as
 `x-tenant-id`.
 
-Staged review traces record submission transitions and sanctioned input counts
-without source-read proof counters. Pi's typed `no_extensions` request fact records
-read-only isolation of the packaged output extension when applied. Length-terminated
-call inputs remain typed incomplete across later turns; failed starts stay charged.
-A single native missing-submission continuation retains the same attempt and
-original allowances, with any additional provider generations recorded normally.
+The [request field matrix](observability-fields.md#effective-request-configuration)
+defines staged submission counters, native reminder generations and Pi extension isolation.

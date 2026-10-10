@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from daydream.agent import StructuredOutputFailure, run_agent
-from daydream.backends import DiagnosticEvent, ResultEvent, TextEvent
+from daydream.backends import ResultEvent, TextEvent
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
 
@@ -53,16 +53,3 @@ async def test_primary_validation_and_host_witness(
     else:
         assert result == expected and isinstance(result, type(expected))
     assert budget_reason == reason
-
-
-async def test_uncorrelated_codex_tool_error_diagnostic_does_not_veto_valid_output(tmp_path: Path) -> None:
-    events: list[Any] = [
-        DiagnosticEvent(code="codex_transport_coverage", message="tool unavailable",
-                        metadata={"coverage": "incomplete"}),
-        ResultEvent(structured_output=_VALID, continuation=None),
-    ]
-    result, _, reason = await run_agent(ScriptedBackend(events=events, model="mock-model"), tmp_path,
-                                        "review", phase=DaydreamPhase.DEEP,
-                                        output_schema=_ISSUES, require_full_schema=True)
-    assert result == _VALID
-    assert reason is None

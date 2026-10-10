@@ -9,7 +9,7 @@ import pytest
 
 from daydream.backends import AgentEvent, PiRequestConfig, RequestEvent, ToolResultEvent, ToolStartEvent
 from tests.deep_orchestrator.test_review_completion import scopes
-from tests.deep_orchestrator.test_review_investigation import InvestigationRun, StagedBackend, stage_ends
+from tests.deep_orchestrator.test_review_investigation import InvestigationRun, stage_ends
 from tests.harness.git_helpers import seed_feature_branch
 
 
@@ -50,7 +50,6 @@ async def test_late_cross_file_judgment_fits_cumulative_native_budget(
     before, after = _workload(wired)
     seed_feature_branch(repo, base=before, feature=after)
     review = InvestigationRun(repo, tmp_path, monkeypatch)
-    review.backend = StagedBackend(repo)
     late = 'package_8/module_40.py'
     assigned_files: set[str] = set()
     assignment_units = 0

@@ -27,6 +27,7 @@ from daydream.prompts.wire_contract import (
     WIRE_CONTRACT_GENERIC_INSTRUCTION,
     WIRE_CONTRACT_RUST_INSTRUCTION,
 )
+from daydream.review_budget import STAGED_REVIEW_GUIDANCE
 from daydream.severity import SEVERITY_RUBRIC
 
 DOC_REVIEW_NOTICE = (
@@ -276,25 +277,13 @@ def _frontier_read_instruction(frontier_files: list[str]) -> str:
 def _review_stage_context(review_stage: dict[str, Any], *, intent_authoritative: bool) -> str:
     """Use only host-selected, bounded inputs; their transport owns path confinement."""
     labels = review_stage.get("context_inputs", [])
-    statuses = review_stage.get("context_statuses", [])
-    status_text = (
-        "\nHost context availability: " + json.dumps(statuses, ensure_ascii=False)
-        if statuses else ""
-    )
-    if not labels:
-        return (
-            "No shared artifact context is assigned to this stage. Use the supplied assignment and "
-            "ordinary repository tools when additional context helps."
-            + status_text
-        )
-    transport = (
+    parts = ["Sanctioned inputs available for this assignment: " + ", ".join(labels) + "." if labels else
+             "No shared artifact context is assigned to this stage. Use the supplied assignment and ordinary tools."]
+    parts.append(
         "For host artifacts, use the captured sanctioned bytes; do not read their private storage paths."
         if review_stage.get("context_transport") == "inline" else
-        "For host artifacts, use only the exact sanctioned pointers supplied by the host; do not "
-        "infer sibling paths or enumerate host storage. Observed tool starts count toward "
-        "the remaining hard tool allowance."
+        "For host artifacts, use only the exact sanctioned pointers supplied by the host."
     )
-    bundle = ""
     if review_stage.get('supporting_bundle'):
         contents = (
             "a compact whole-change inventory and binding with navigation instructions for deferred "
@@ -302,64 +291,24 @@ def _review_stage_context(review_stage: dict[str, Any], *, intent_authoritative:
             if review_stage['stage'] == 'integration' else
             "the complete bounded assignment diff, hunk index and binding"
         )
-        bundle = (
-            f" The supporting_bundle contains {contents}. "
-            "Reuse its captured inline content; no supporting artifact read is needed."
+        parts.append(
+            f"The supporting_bundle contains {contents}; reuse its captured inline content without another read."
             if review_stage.get('context_transport') == 'inline' else
-            f" Read the supporting_bundle once for {contents}, then reuse that supporting content; "
-            "separate legacy diff/index reads are "
-            "unnecessary for this bundle-capable builder."
+            f"Read the supporting_bundle once for {contents}, then reuse it; separate legacy diff/index reads "
+            "are unnecessary."
         )
     if review_stage.get('supporting_catalog'):
-        bundle += (
-            ' The optional supporting_catalog provides the complete exact file/target/pointer inventory '
+        parts.append(
+            'The optional supporting_catalog provides the complete exact file/target/pointer inventory '
             'for deferred bounded diff parts. Read its supplied exact pointer and bounded child catalogs '
-            'only when relevant supporting parts are needed. Use their explicitly listed pointers; '
-            'do not infer siblings or enumerate host storage. Catalogs and diff parts remain supporting, '
-            'remain optional navigation aids for the assigned change, not a reading checklist.'
+            'only when relevant supporting parts are needed, using explicitly listed pointers. '
+            'Catalogs are optional navigation aids for the assigned change, not a reading checklist.'
         )
-    authority = (
-        "\n" + AUTHORITATIVE_INTENT_BLOCK
-        if intent_authoritative and "intent" in labels else ""
-    )
-    return (
-        "Sanctioned inputs available for this assignment: " + ", ".join(labels) + ". " + transport + bundle
-        + status_text
-        + "\nDiff, hunk-index, input-binding, intent and exploration inputs are supporting context, "
-        "not additional assigned targets. Ordinary repository tools remain available for concrete "
-        "assigned concerns. Omitted inputs are unavailable; "
-        "never assume a partial context contains the complete repository map."
-        + authority
-    )
-
-
-def _stage_source_instruction() -> str:
-    """State that supplied context and useful ordinary investigation both support decisions."""
-    return (
-        "Use the supplied diff, assignment context and retained semantic notes to make explicit decisions. "
-        "Ordinary repository tools are available when more context helps resolve a concrete concern; "
-        "tool calls are optional and do not replace target or candidate decisions. Keep investigation within "
-        "the assigned work and preserve the captured revision when consulting repository content."
-    )
-
-
-def _stage_output_instruction(review_stage: dict[str, Any]) -> str:
-    """The progress handoff has exactly the host's schema, never terminal findings."""
-    contract = review_stage.get('response_contract')
-    output_contract = (
-        "The authoritative invocation REVIEW_STAGE_SCHEMA is response_contract.schema in the "
-        "Host review stage below; it specializes identities and counts for this assignment. "
-        "Start with this explicit four-key output skeleton, filling required judgments rather "
-        "than copying placeholder decisions:\n"
-        + json.dumps(contract['skeleton'], ensure_ascii=False)
-        if contract else
-        "REVIEW_STAGE_SCHEMA:\n" + json.dumps(REVIEW_STAGE_SCHEMA, ensure_ascii=False)
-    )
-    return (
-        "Provide one complete structured result conforming exactly to the invocation REVIEW_STAGE_SCHEMA. "
-        "Use the backend-selected output transport; the host persists terminal findings. "
-        "Fill all four members: targets, notes, candidates, contradictions.\n" + output_contract
-    )
+    if review_stage.get("context_statuses"):
+        parts.append("Host context availability is declared in context_statuses in the Host review stage below.")
+    if intent_authoritative and "intent" in labels:
+        parts.append(AUTHORITATIVE_INTENT_BLOCK)
+    return "\n".join(parts)
 
 
 def _build_review_stage_prompt(
@@ -372,18 +321,12 @@ def _build_review_stage_prompt(
     stage = review_stage["stage"]
     triage = stage == "triage"
     structural = stage == "integration"
-    parts = [UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY, CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)]
+    parts = [UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY, CWD_GROUNDING_INSTRUCTION.format(cwd=cwd),
+             STAGED_REVIEW_GUIDANCE]
     settled = _settled_decisions_block(prior_commits) if not triage else ""
     if settled:
         parts.append(settled)
     parts.append(_confidence_and_convention_instructions(stage_scoped=True))
-    attempt = review_stage.get("attempt", 1)
-    parts.append(
-        f"Stage attempt: {attempt} of {review_stage.get('max_attempts', 2)}. "
-        "This fresh invocation has the same logical assignment and frozen snapshot; unsuccessful "
-        "attempts contribute no evidence. Admitted prior stages remain available within verified scope."
-    )
-    parts.append(_stage_source_instruction())
     rejection = review_stage.get("schema_rejection")
     if rejection is not None:
         parts.append(
@@ -391,13 +334,6 @@ def _build_review_stage_prompt(
             "Safe validator feedback: " + json.dumps(rejection, ensure_ascii=False)
             + "\nReturn a new object matching REVIEW_STAGE_SCHEMA exactly, including its "
             "additionalProperties:false rules. Do not repair, recover, or continue previous output."
-        )
-    if review_stage.get("assignment_parts"):
-        parts.append(
-            "The host stage state's assignment_parts inventory contains the ordered required work "
-            "with old/new range mapping. Continuations are incomplete "
-            "pieces of the same hunk; no individual segment represents the complete hunk or file. "
-            "Optional context can resolve the assigned behavior but does not expand the assignment."
         )
     if triage:
         parts.append(
@@ -440,26 +376,10 @@ def _build_review_stage_prompt(
                 "Once concrete concerns are resolved, submit the integration decision; a clean "
                 "interaction review can finish without candidates."
             )
-            if review_stage.get('folded_alternatives'):
-                parts.append(
-                    "This Structure invocation also owns the folded default design-alternatives "
-                    "duty. Within the same whole-change boundary review, judge whether design "
-                    "choices conflict with confirmed intent, an existing canonical implementation "
-                    "or an applicable repository convention. Retain a concrete design downside "
-                    "only with a real trigger, consequence and completed source grounds; a clean "
-                    "design can finish without a candidate. Do not launch a separate alternatives "
-                    "audit or invent hypothetical replacements."
-                )
         else:
             if is_docs_only:
                 parts.append(DOC_REVIEW_NOTICE)
             parts.append(_stack_scope_instruction(stack_name, files))
-            parts.append(
-                "First pass assignment: only the current target IDs and their assigned file/hunk parts. "
-                "Supporting paths, shared exploration, and other batches are not assigned work. "
-                "End dependency, configuration, and test traces as soon as the concrete candidate "
-                "in this assignment is resolved. No speculative extra pass is required."
-            )
             parts.append(_dependency_impact_instructions(stage_scoped=True))
             if frontier_files:
                 parts.append(_frontier_read_instruction(frontier_files))
@@ -484,11 +404,6 @@ def _build_review_stage_prompt(
             + "\nThe host stage assignment and REVIEW_STAGE_SCHEMA govern scope and output. "
             "Apply this policy only to that work; supporting context does not expand the assignment."
         )
-        parts.append(
-            "Apply test-quality, configuration-flow, trust, and wire-contract checks only to changed "
-            "behavior in this assignment and supporting evidence for its concrete candidates. "
-            "Do not audit every dependency or test in the repository."
-        )
         if not structural:
             parts.append(
                 "Apply the test-quality rubric only to assigned test hunks and tests needed to "
@@ -510,19 +425,10 @@ def _build_review_stage_prompt(
     parts.append(SEVERITY_RUBRIC)
     parts.append(
         f"Advisory stage tool-call target: {review_stage['advisory_tool_call_target']}. "
-        f"Remaining hard cumulative tool allowance: {review_stage['remaining_tool_calls']}. "
-        "Use the supplied assignment and optional focused investigation. Preserve capacity for structured "
-        "submission and any remaining assignments "
-        "or open-candidate triage; finish resolved work promptly. The advisory target guides pace; "
-        "the cumulative allowance is the hard limit."
+        f"Remaining hard cumulative tool allowance: {review_stage['remaining_tool_calls']}."
     )
-    if review_stage.get('remaining_work'):
-        parts.append(
-            "Remaining planned work estimate: " + json.dumps(review_stage['remaining_work'], ensure_ascii=False)
-            + ". Unfinished work remains "
-            "explicitly incomplete."
-        )
-    parts.append(_stage_output_instruction(review_stage))
+    if not review_stage.get('response_contract'):
+        parts.append("REVIEW_STAGE_SCHEMA:\n" + json.dumps(REVIEW_STAGE_SCHEMA, ensure_ascii=False))
     return "\n\n".join(parts)
 
 

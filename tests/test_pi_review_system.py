@@ -16,7 +16,6 @@ from tests.harness.pi_replay import make_mock_process, make_mock_process_from_fi
 async def test_pi_review_system_is_scoped_and_preserves_retry_and_stage_spend(tmp_path: Path) -> None:
     commands: list[tuple[str, ...]] = []
     system_prompts: list[str] = []
-
     async def spawn(*args: str, **kwargs: Any) -> Any:
         commands.append(args)
         value = args[args.index("--append-system-prompt") + 1]
@@ -30,7 +29,6 @@ async def test_pi_review_system_is_scoped_and_preserves_retry_and_stage_spend(tm
                  "stopReason": "error", "errorMessage": "503 Service Unavailable"}},
             ]])
         return make_mock_process_from_fixture("simple_text.jsonl")
-
     backend = PiBackend(model="fixture-model", reasoning_effort="high")
     backend.retry_attempts = 1
     backend.retry_base_delay_s = backend.retry_max_delay_s = 0

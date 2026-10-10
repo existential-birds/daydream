@@ -536,11 +536,6 @@ async def phase_per_stack_reviews(
                     ui.print_warning(agent.console,
                                      f"Cached records for {stack.stack_name} are invalid; rerunning review")
             per_stack_records_path(deep_dir_path, stack.stack_name).unlink(missing_ok=True)
-            base_stack = base_stack_name(stack.stack_name)
-            prompt_name, strategy_name = {
-                STRUCTURE_STACK_NAME: ("structural", "discovery.structural"),
-                GENERIC_STACK: ("generic-fallback", "discovery.generic_fallback"),
-            }.get(base_stack, ("per-stack", "discovery.per_stack"))
             prompt_args: dict[str, Any] = {
                 "strategy": strategies[strategy_name],
                 "files": stack.files,

@@ -92,27 +92,16 @@ Emitted by `SpanScope`/`TraceSession` common attributes
 
 Emitted from closed typed `EffectiveRequestConfig` facts only; every admitted
 parameter has exact bounds (`daydream/backends/*.py`, request events).
-Pi's `schema_emulated=False` with a supplied schema means invocation-native tool
-schema validation; it does not claim server-constrained decoding. Selected-tool
-counts include the registered submission tool where an explicit allowlist is used.
-Native provider generations retain their own timing/token/cost records; additional
-correction generations are not host fresh attempts or additional tool starts.
-Staged transitions separately report submission starts, successes, failures and
-replaced successes. `daydream.request.config.no_extensions` is Pi's boolean argv
-fact when read-only execution explicitly isolates the packaged output extension
-from ambient extensions; it is false without that restriction and unavailable on
-other backends.
-`sanctioned_input_count` counts all prepared exact/inline input slots;
-`sanctioned_input_bytes` sums validated captured UTF-8 payload bytes, excluding
-pointer-only references. These content-free stage integers describe host input
-resource use independently of tool allowances. Runner owners
-`test_pi_review_runner_preserves_native_submission` and
-`test_installed_pi_native_output_through_review_runner` cover these fields.
-The general capture-loss diagnostic is “Review evidence capture incomplete.”
-One native missing-submission reminder may add provider generations under the
-same attempt and original deadline; their native usage/cost is recorded as usual.
-Reminder occurrences are observable in the native session's hidden custom messages,
-not inferred from provider prose or counted as tool starts.
+Pi's `schema_emulated=False` with a schema means native tool validation, not
+server-constrained decoding. Explicit selected-tool counts include the submission
+tool. Real provider generations retain timing/tokens/cost; corrections and the
+single hidden missing-submission reminder are not fresh host attempts or tool starts.
+The reminder shares the original deadline/allowance and is evidenced by native
+session hidden custom messages, not provider prose. Staged transitions count
+submission starts, successes, failures and replaced successes without source-read
+proof counters; failed starts stay charged and length-terminated call inputs remain
+incomplete across later turns. The matrix row below defines
+Pi's content-free `daydream.request.config.no_extensions` argv fact and applicability.
 
 | field name | source backend/event | source authority/provenance | owning span | type | unit | cardinality | derivation | completeness | capture/redaction | generic OTLP disposition | HoneyHive canonical destination | LangSmith native destination | offline test node | live evidence status | applicability and omission reason |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -121,7 +110,7 @@ not inferred from provider prose or counted as tool starts.
 | `daydream.request.timestamp` | All, RequestEvent | exact request timestamp | attempt | string | – | 0..1 | RequestEvent.timestamp | When supplied | – | Span attribute | metadata | metadata | T5 | verified | Conditional |
 | `daydream.output_mode` | All | output mode constant | attempt | string | – | 0..1 | Request event | When known | – | Span attribute | metadata | metadata | T1 | verified | Conditional |
 | `daydream.backend.config.*` (bounded) | Per-backend effective config | exact argv/option facts per backend admission contract | attempt | bool/int/string/enum | – | 0..N | Effective config table (Task 1) | per admission table | Secret/path-free | Span attributes | metadata | `invocation_params` | `test_observability_config.py` + backend protocol suites | verified | Conditional; unsupported identities omitted with fixed diagnostics, never truncated aliases |
-| `daydream.request.config.no_extensions` | Pi RequestEvent | exact `--no-extensions` argv fact | attempt | bool | – | 0..1 | read-only invocation isolates explicitly loaded output extension from ambient discovery | When the restriction applies | Content-free | Span attribute | metadata | invocation_params | `test_installed_pi_native_output_through_review_runner` | offline verified; live pending | Other backends omit; false without that restriction |
+| `daydream.request.config.no_extensions` | Pi RequestEvent | exact `--no-extensions` argv fact | attempt | bool | – | 0..1 | read-only invocation isolates explicitly loaded output extension from ambient discovery | When the restriction applies | Content-free | Span attribute | metadata | invocation_params | `test_installed_pi_submits_native_structured_output` | offline verified; live pending | Other backends omit; false without that restriction |
 
 ## Generation lifecycle (pi native interval; only real generation model spans)
 

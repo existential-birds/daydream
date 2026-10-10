@@ -80,7 +80,6 @@ def test_no_files_dropped() -> None:
     routed = {f for a in result for f in a.files}
     assert routed == set(files)
 
-
 def test_shard_stacks_fanout_cap_limits_total_tasks() -> None:
     """The fan-out cap includes shards and unsplit stacks; all files remain assigned once."""
     # Two oversized stacks would each yield 6 shards = 12 tasks; cap=4.
@@ -144,7 +143,6 @@ def test_shard_stacks_fail_open_without_graph() -> None:
     assert sorted(union) == sorted(stack.files)   # no graph -> every file still assigned once
     # A file with no resolvable edge still gets exactly one assignment (fallback).
     assert len(set(union)) == len(union)  # no duplicate primary assignment
-
 
 def test_build_import_graph_resolves_python_edges(tmp_path: Path) -> None:
     """Resolve absolute and relative Python imports; unknown grammars remain singleton nodes."""

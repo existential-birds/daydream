@@ -54,7 +54,6 @@ def _review_prompt(name: str, tmp_path: Path, **overrides: Any) -> str:
         kwargs["stack_name"] = "python"
     return _REVIEW_BUILDERS[name](**(kwargs | overrides))
 
-
 # Issue #172 — Fix B: read-once inline diff hunks in per-stack / generic prompts
 
 _DIFF_TWO_FILES = (
@@ -72,14 +71,11 @@ _DIFF_TWO_FILES = (
 
 # Issue #644 — bound the deep-flow diff at gather time (whole-block retention)
 
-
 def test_diff_blocks_for_files_returns_none_when_no_blocks_match() -> None:
     out = _diff_blocks_for_files(_DIFF_TWO_FILES, ["nonexistent.py"])
     assert out is None
 
-
 # Issue #221 — cwd grounding injected into every deep prompt builder
-
 
 # Issue #279 — Authoritative-intent rule gate in the deep prompt builders
 
@@ -107,9 +103,7 @@ def test_authoritative_intent_rule_is_gated(name: str, tmp_path: Path) -> None:
     assert PR_DESCRIPTION_UNTRUSTED_FRAMING not in _build_gated(name, tmp_path, intent_authoritative=False)
     assert PR_DESCRIPTION_UNTRUSTED_FRAMING in _build_gated(name, tmp_path, intent_authoritative=True)
 
-
 # --- Task 12a: the per-stack prompt path can omit the alternatives pointer ----
-
 
 def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -> None:
     p = _paths(tmp_path)
@@ -121,18 +115,14 @@ def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -
     assert AUTHORITATIVE_INTENT_RULE in without
     assert PR_DESCRIPTION_UNTRUSTED_FRAMING in without  # NEW #579
 
-
 # Issue #308 — test-quality rubric in the per-stack review prompt
 
-
 # Issue #314 — anti-slop review rubric (structural erosion + verbosity patterns)
-
 
 # =============================================================================
 # Issue #310 — cross-file verification instruction (symbol existence,
 # config-flow traces, trust-model checks)
 # =============================================================================
-
 
 # --- Issue #731: coverage-evidence grounding + frontier-read instruction ---
 
@@ -167,9 +157,7 @@ def test_exploration_pointer_keeps_artifacts_bounded_and_source_work_optional(tm
 
 # Issue #972 R1 — host-owned severity rubric reaches every assigning prompt
 
-
 # Issue #972 R1.3 — adjudication restatements cite the severity rubric
-
 
 # Issue #1113 — grounded diagram prompts
 
@@ -198,7 +186,6 @@ def _flowchart_prompt(tmp_path: Path, **overrides: object) -> str:
     kwargs.update(overrides)
     return build_flowchart_prompt(**kwargs)  # type: ignore[arg-type]
 
-
 def test_sequence_prompt_clone_mode_inlines_exploration_under_boundary(tmp_path: Path) -> None:
     """Issue #1123: clone mode renders inline exploration + dependency content
     inside the untrusted-content boundary and never a .daydream pointer."""
@@ -215,7 +202,6 @@ def test_sequence_prompt_clone_mode_inlines_exploration_under_boundary(tmp_path:
     assert "affected_files.md" not in prompt  # no pointer names
     assert "diff.patch" not in prompt  # inline_diff=None + clone_mode → no pointer degrade
 
-
 def test_diagram_prompts_clone_mode_truncation_is_byte_accurate(tmp_path: Path) -> None:
     """The clone-mode truncation slices UTF-8 bytes, not characters, so a
     multibyte over-budget diff cannot exceed INLINE_DIFF_BUDGET_BYTES."""
@@ -227,7 +213,6 @@ def test_diagram_prompts_clone_mode_truncation_is_byte_accurate(tmp_path: Path) 
         assert "diff.patch" not in prompt
         body = prompt.split("is inlined below:\n\n", 1)[1].split("\n[diff truncated", 1)[0]
         assert len(body.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
-
 
 def _resolved_recipe(tmp_path: Path, *, cli: str | None = None) -> TestRecipe:
     api = tmp_path / "services" / "api"

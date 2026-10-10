@@ -202,7 +202,6 @@ async def test_store_directory_survives_a_fresh_run_and_is_readable_by_the_next(
     assert await run(make_config(multi_stack_target)) == 0
     assert (store / "entries" / ("a" * 64)).is_dir(), "a fresh run must not wipe the store"
 
-
 async def test_identical_rerun_reviews_no_stack_and_a_leaf_edit_invalidates_bound_coverage(
     shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:

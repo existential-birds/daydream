@@ -17,13 +17,7 @@ from daydream.runner import run
 from tests.deep_orchestrator.support import _scan_trajectory_extra
 from tests.harness.fake_clock import FakeClock
 from tests.harness.review_profile import independent_alternatives_profile
-from tests.harness.stub_backend import (
-    StubBackend,
-    install_stub_backend,
-    review_stage_state,
-    silence,
-    stage_result,
-)
+from tests.harness.stub_backend import StubBackend, install_stub_backend, review_stage_state, silence, stage_result
 from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipeline
 
 

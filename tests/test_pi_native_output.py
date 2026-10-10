@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +10,7 @@ import pytest
 
 from daydream.backends import PiRequestConfig, RequestEvent, ResultEvent, ToolStartEvent
 from daydream.backends.pi import PiBackend
+from tests.harness.otlp import _loopback_http_server, _QuietHTTPHandler
 
 _SCHEMA = {
     "type": "object", "additionalProperties": False,
@@ -33,10 +32,7 @@ async def test_installed_pi_submits_native_structured_output(
     for name in ("PI_API_KEY", "NOUS_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
         monkeypatch.delenv(name, raising=False)
 
-    class Provider(BaseHTTPRequestHandler):
-        def log_message(self, *_args: Any) -> None:
-            pass
-
+    class Provider(_QuietHTTPHandler):
         def do_POST(self) -> None:
             self.rfile.read(int(self.headers["Content-Length"]))
             output = {"verdict": "complete", "findings": []}
@@ -59,12 +55,9 @@ async def test_installed_pi_submits_native_structured_output(
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
+    with _loopback_http_server(Provider) as base_url:
         (config / "models.json").write_text(json.dumps({"providers": {"output-fixture": {
-            "baseUrl": f"http://127.0.0.1:{server.server_port}/v1", "api": "openai-completions",
+            "baseUrl": f"{base_url}/v1", "api": "openai-completions",
             "apiKey": "synthetic-loopback-only", "models": [{"id": "output-model", "reasoning": False,
                 "input": ["text"], "contextWindow": 32768, "maxTokens": 8192}],
         }}}))
@@ -73,10 +66,6 @@ async def test_installed_pi_submits_native_structured_output(
             tmp_path, "Return the requested result.", output_schema=_SCHEMA,
             read_only=True, persist_session=False,
         )]
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
 
     request = next(event for event in events if isinstance(event, RequestEvent))
     assert isinstance(request.config, PiRequestConfig)

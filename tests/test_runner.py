@@ -67,11 +67,7 @@ from tests.harness.git_helpers import bare_remote, commit as _commit, git as _gi
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.review_profile import independent_exploration_profile
 from tests.harness.review_result import terminal_result
-from tests.harness.stub_backend import (
-    StubBackend,
-    review_stage_result,
-    silence,
-)
+from tests.harness.stub_backend import StubBackend, review_stage_result, silence
 from tests.harness.trajectory import make_recorder
 from tests.test_deep_pr_comment_integration import (
     _answer_prompts,

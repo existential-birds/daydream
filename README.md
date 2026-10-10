@@ -641,49 +641,42 @@ and 6× review time and per-role tool-call allowances respectively. The 4× and
 6× tiers also enable deep-review sharding unless explicitly disabled. An explicit review
 profile keeps its configured whole-review deadline. Set
 `pipeline.review_wall_budget_s` in a `--review-profile` TOML file to change it.
-The nonstructural role cap coarsens the largest packed stack groups only enough
-to fit: repeatedly merge adjacent groups with the smallest combined diff-byte
-weight, breaking ties at the left index. Final shard names are contiguous and
-frontiers are recomputed. File/byte targets are soft when the cap conflicts;
-files stay indivisible and distinct stacks retain their one-role minimum.
-Structure remains whole-change and outside the cap. More resulting roles increase
-aggregate model opportunity despite unchanged per-role limits. For the captured
-81-file Python workload, eight groups replace one, increasing maximum Python
-starts from 288 to 2,304 and nominal role-time opportunity from 48 to 384 minutes.
-The shared pipeline clock, queue time and concurrency still bound execution;
-this is neither a billing estimate nor a guarantee of cold review completion.
-Per-stack reviewers share eight minutes and 48 observed tool starts across stages.
-Language and generic reviewers receive locality-preferred batches of at most four
-files, sized to a 24,576-byte assignment cap for exact-path transport or the
-12,288-byte inline input allowance, including wrappers, scoped diff/index and
-snapshot bindings. Complete files are preferred when they fit the transport cap.
-Exact assignment pointers do not consume the separate inline allowance for small
-shared context; only inlined shared bytes and their wrappers do.
-Oversized files split into hunks; oversized hunks split into ordered continuations
-with old/new ranges and exact fragment offsets. Every required part must succeed
-before its file is complete. Structure
-starts with whole-change interaction and boundary review, with documentation as
-supporting context. Each invocation receives a fresh prompt for its assigned work,
-followed by a finite triage round for open candidates. Stage call targets are
-advisory: useful work may borrow the reviewer's remaining cumulative allowance.
-The hard allowance and absolute deadline do not reset between stages or retries.
-One fresh full-stage attempt is permitted after a normally completed invocation
-fails typed strict schema validation. Its prompt contains only safe validator
-metadata; rejected output is never repaired, stripped or continued. Required
-capture loss, aborts, unknown IDs and other admission failures are terminal.
-Retries consume the same cumulative allowances and deadline. Failed attempts
-contribute no semantic state; findings from successful stages remain admitted
-if a later invocation fails, while unfinished decisions and phases remain
-typed as incomplete.
-Review stages are admitted from their assigned identities and strict semantic output. A completed stage may make valid decisions from the supplied diff and context without reading source files. Ordinary backend file and Git tools remain available when more context helps; their results are recorded and charged but do not authenticate citations or determine completion.
+The nonstructural role cap coarsens the largest packed stacks by repeatedly
+merging adjacent groups with the smallest combined diff-byte weight (leftmost
+on ties). Final shard names are contiguous and frontiers are recomputed. File/byte
+targets are soft under the cap; files stay indivisible, each stack retains at least
+one role, and whole-change Structure is outside the cap. More groups increase
+aggregate model opportunity: the captured 81-file Python workload grows from one
+to eight groups, 288 to 2,304 maximum starts, and 48 to 384 nominal role-minutes.
+Shared pipeline time, queueing and concurrency still limit execution; these are
+neither billing estimates nor guarantees of cold review completion.
 
-The host still validates captured revision and input hashes, complete assignment transport, exact target/candidate IDs, dispositions, meaningful grounds, findings, and explicit reasons for unreviewed work. Backend errors, cancellation, budget exhaustion, malformed or truncated output, corrupted required inputs, semantic handoff overflow, and unfinished decisions remain incomplete or failed. Successful earlier stages retain their admitted findings if a later stage fails.
+Per-stack reviewers share eight minutes and 48 observed tool starts across stages
+and retries. Language/generic assignments prefer nearby complete files, at most
+four per batch, within 24,576 bytes for exact paths or 12,288 bytes inline,
+including wrappers, scoped diff/index and snapshot bindings. Exact assignment
+pointers do not consume the separate inline allowance for shared bytes and their
+wrappers. Oversized files split into hunks and ordered continuations with old/new
+ranges and exact fragment offsets; every required part must succeed for its file
+to be complete. Required assignments take priority over separately bounded context.
 
-Triage receives bounded admitted notes, candidate grounds, triggers, consequences, dispositions, findings, and closed decisions. It may continue from those facts or investigate with ordinary tools under the same cumulative budget and deadline. Findings and typed scope/phase coverage remain bound to the analyzed revision and are atomically published together. `complete` means all planned scopes and required phases finished successfully or had an explicit host no-op; it does not certify exhaustive understanding or defect discovery.
+Each stage gets a fresh prompt. Structure reviews whole-change interactions using
+a compact inventory, bounded diff parts and supporting documentation; open
+candidates receive finite triage. Call targets guide pace, while the cumulative
+allowance and absolute deadline remain hard limits. One fresh full-stage retry is
+permitted after a normally completed invocation fails strict schema validation;
+only safe validator metadata carries over, never rejected output. Other admission
+failures are terminal. Failed attempts admit no semantic state, and later failure
+preserves findings from successful stages while marking unfinished work incomplete.
 
-Built-in staged builders combine assignment diff, index, and binding into bounded supporting inputs. Required assignment bytes take priority over shared context, which remains separately bounded. Structure receives a compact whole-change inventory and targeted diff parts. Pi keeps its read-only `read`, `find`, `ls`, and `grep` tools and receives materialized ordinary files for useful before-side deleted or renamed source. Codex keeps its disposable read-only checkout, and Claude/Codex may inspect captured revisions with ordinary Git commands. Pi's `structured_output` remains the native output contract.
-
-Stage contract 8 invalidates older cached reviews. Extension API 8 accepts only the new staged builder contract. Pi's output-control extension remains isolated for read-only invocations when that packaged extension is requested; other invocation policies are unchanged.
+Valid decisions can rely on supplied diff/context without source reads; ordinary
+file/Git tools remain available, recorded and charged, but do not authenticate
+claims or establish completion. Findings and typed coverage are snapshot-bound and
+atomically published. `complete` requires success or explicit host no-op for every
+planned scope and required phase; it does not guarantee exhaustive defect discovery.
+The [stage contract](docs/extensions.md#stage-aware-review-builders-api-8) specifies
+identity/capture checks, triage state, backend transports and native output rules.
+Stage contract 8 invalidates older cached reviews; extension API 8 requires staged builders.
 
 When a review agent exhausts its time or tool-call budget, Daydream continues with
 completed reviewers' findings and validated partial checkpoints, and marks the

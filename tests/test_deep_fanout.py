@@ -102,7 +102,6 @@ async def test_phase_per_stack_reviews_dispatch_interval_success(tmp_path: Path,
     assert step["extra"]["attempted_count"] == 3
     assert step["extra"]["completed_count"] == 3
 
-
 @pytest.mark.parametrize(
     ("fanout_concurrency", "expected"), [(None, 4), (2, 2)], ids=["default_concurrency", "low_concurrency"],
 )

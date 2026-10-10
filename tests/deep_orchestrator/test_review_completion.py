@@ -251,26 +251,42 @@ async def test_snapshot_boundaries(review: ReviewRun, request: pytest.FixtureReq
 
 
 @pytest.mark.parametrize('budget', ['tool', 'wall', 'model'])
-@pytest.mark.parametrize('nonempty', [False, True])
+@pytest.mark.parametrize('nonempty', [False, True, None])
 async def test_unsuccessful_stage_discards_checkpoints(
-    review: ReviewRun, budget: str, nonempty: bool,
+    review: ReviewRun, budget: str, nonempty: bool | None,
 ) -> None:
+    from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
+
     fake = FakeClock().install(review.patch)
+    intent = 'PRESERVE_AUTHOR_INTENT'
+    review.patch.setattr(git_ops, 'gh_pr_view', lambda *_a, **_k: {
+        'body': intent, 'state': 'OPEN', 'headRefOid': review.pr.head_sha})
     def response(prompt: str) -> Any:
+        if 'understand the intent of these changes' in prompt.lower():
+            yield TextEvent(text=intent)
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
         if reviewer(prompt):
-            yield ResultEvent(structured_output=review_stage_result(prompt, [record()] if nonempty else []),
-                              continuation=None)
+            state = review_stage_state(prompt)
+            assert state is not None
+            if state['scope_id'] == 'structure':
+                supporting = supporting_contents(prompt)
+                assert state['stage'] == 'integration' and 'review-assignment' in supporting
+                assert supporting['intent'] == intent and intent in prompt and 'AUTHORITATIVE' in prompt
+                assert 'api.py' in prompt and 'Hard reviewer allowance' in prompt
+                assert str(review.repo / '.daydream/diff.patch') not in prompt
+            if nonempty is not None:
+                yield ResultEvent(structured_output=review_stage_result(prompt, [record()] if nonempty else []),
+                                  continuation=None)
             if budget == 'model':
                 yield MaxTurnsError('spent turns')
             else:
-                state = review_stage_state(prompt)
-                assert state is not None
                 for index in range(state['remaining_tool_calls'] + 1):
                     if budget == 'wall':
                         fake.advance(601)
                     yield ToolStartEvent(id=f'budget-{index}', name='Read', input={'file_path': 'api.py'})
     review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
-                                       responder=lambda p: response(p) if reviewer(p) else None)
+        responder=lambda p: response(p) if reviewer(p) or 'understand the intent' in p.lower() else None)
     review.backend.merge_echo_records = True
     assert await review.run(review_profile=_profile_with_pipeline(review_wall_budget_s=99999)) == 0
     data = review.load()
@@ -278,9 +294,12 @@ async def test_unsuccessful_stage_discards_checkpoints(
     reason = 'model_budget_exhaustion' if budget == 'model' else f'host_{budget}_budget_exhaustion'
     assert result['analysis_state'] == 'failed' and result['completed_stacks'] == []
     assert reason in result['reason_codes'] and data['findings'] == []
-    saved = json.loads((review.repo / '.daydream/deep/stack-python-records.json').read_text())
-    assert saved['issues'] == [] and saved['incomplete'] is True
-    for scope in scopes(data).values():
+    stages = [state for call in review.backend.calls if (state := review_stage_state(call['prompt'])) is not None]
+    assert [stage['stage'] for stage in stages if stage['scope_id'] == 'structure'] == ['integration']
+    assert not any(call['prompt'].startswith('INVESTIGATION HAS ENDED.') for call in review.backend.calls)
+    for name, scope in scopes(data).items():
+        saved = json.loads((review.repo / f'.daydream/deep/stack-{name}-records.json').read_text())
+        assert saved['issues'] == [] and saved['incomplete'] is True
         assert (scope['status'], scope['partial_evidence']) == ('incomplete', False)
         assert scope['reason_codes'] == [reason]
 
@@ -340,15 +359,19 @@ async def test_loaded_artifact_faults(review: ReviewRun, fault: str) -> None:
     assert not any('cross-stack merge agent' in c['prompt'].lower() for c in review.backend.calls)
 
 
-@pytest.mark.parametrize(('phase', 'reason'), [('intent', 'backend_failure'), ('alternatives', 'backend_failure'),
+@pytest.mark.parametrize(('phase', 'reason'), [('intent', 'backend_failure'), ('intent-empty', 'missing_output'),
+    ('alternatives', 'backend_failure'),
     ('merge', 'synthesis_failure'), ('merge-low', 'synthesis_failure'),
     ('missing', 'missing_output'), ('malformed', 'malformed_output'),
     ('omitted', 'evidence_incomplete')])
 async def test_required_phase_faults(review: ReviewRun, phase: str, reason: str) -> None:
     from tests.harness.review_profile import independent_alternatives_profile
     from tests.harness.review_result import merge_result
+    intent_fault = phase.startswith('intent')
     def response(prompt: str) -> Any:
         lower = prompt.lower()
+        if phase == 'intent-empty' and 'present your understanding concisely' in lower:
+            return [ResultEvent(structured_output=None, continuation=None)]
         if (phase == 'intent' and 'present your understanding concisely' in lower) or (
                 phase == 'alternatives' and 'evaluate the implementation' in lower):
             return [RuntimeError(f'{phase} unavailable')]
@@ -363,25 +386,28 @@ async def test_required_phase_faults(review: ReviewRun, phase: str, reason: str)
         review_by_stack={'python' if phase in {'merge', 'merge-low'} else 'structure': [record()]}, responder=response)
     review.backend.merge_echo_records = True
     review.backend.merge_emit_str = 'invalid merge output' if phase == 'merge' else None
-    if phase in {'intent', 'alternatives', 'merge', 'merge-low'}:
+    if intent_fault or phase in {'alternatives', 'merge', 'merge-low'}:
         review.config = replace(review.config, review_profile=independent_alternatives_profile())
     if phase in {'merge', 'merge-low', 'omitted'}:
         assert await review.run() == (1 if phase in {'merge', 'merge-low'} else 0)
     else:
-        error_type = ReviewOutputError if phase in {'missing', 'malformed'} else RuntimeError
-        with pytest.raises(error_type, match=None if error_type is ReviewOutputError else f'{phase} unavailable'):
+        error_type = ReviewOutputError if phase in {'intent-empty', 'missing', 'malformed'} else RuntimeError
+        with pytest.raises(error_type, match=None if error_type is ReviewOutputError else
+                           f'{phase} unavailable') as raised:
             await review.run()
+        if phase == 'intent-empty':
+            assert cast(ReviewOutputError, raised.value).reason_code == 'missing_output'
     data = review.load()
     result = data['terminal_result']
     assert (result['pipeline_state'], result['analysis_state']) == (
         'completed' if phase == 'omitted' else 'failed',
-        'failed' if phase in {'intent', 'alternatives'} else 'incomplete')
+        'failed' if intent_fault or phase == 'alternatives' else 'incomplete')
     assert reason in result['reason_codes']
     if phase in {'merge', 'merge-low'}:
         outcome = next(p for p in result['phase_outcomes'] if p['phase'] == 'merge')
         assert outcome['status'] == 'failed'
         assert 'synthesis_failure' in outcome['reason_codes']
-    expected_titles = [] if phase in {'intent', 'alternatives'} else ['Grounded defect']
+    expected_titles = [] if intent_fault or phase == 'alternatives' else ['Grounded defect']
     assert [f['title'] for f in data['findings']] == expected_titles
     if phase in {'missing', 'malformed', 'omitted'}:
         outcome = next(p for p in result['phase_outcomes'] if p['phase'] == 'supervision')

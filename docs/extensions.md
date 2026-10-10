@@ -530,71 +530,58 @@ kwargs are keyword-only except where noted.
 
 #### Stage-aware review builders (API 8)
 
-The registered `per-stack`, `structural`, and `generic-fallback` names are
-unchanged. The host invokes the selected builder anew for every stage with
-`review_stage`, a mapping of host-owned assignment and admitted semantic state.
-API 7 extensions are incompatible and fail at load time; declare
-`DAYDREAM_EXT_API = 8`. Overrides are invoked, never silently replaced.
+The host invokes the selected `per-stack`, `structural`, or `generic-fallback`
+builder anew for each stage with `review_stage`, a mapping of host-owned assignment
+and admitted state. Declare `DAYDREAM_EXT_API = 8`; older extensions fail at load
+time. Overrides are invoked, never silently replaced. Stage contract 8 also
+invalidates older complete review cache entries.
 
-- `stage` is `first_pass`, `integration`, or `triage`; `scope_id` and
-  `analyzed_revision` bind the work to the public reviewer and frozen snapshot.
-- `assigned_files` and the builder's `files` are the current assignment. The
-  stage factory uses the canonical frozen diff and index, writes bounded inputs
-  through the owning `ArtifactSession`, and validates captured input identity.
-  Required assignment bytes take priority over separately bounded shared context.
-  Structure begins with a whole-change interaction assignment and a compact
-  inventory; targeted diff parts and other captured inputs provide useful context.
-  Omitted supporting parts remain explicitly unavailable.
-- `supporting_bundle` is available to built-in builders. A custom builder opts in
-  by declaring `review_input_bundle = True`; otherwise `diff_path` and its
-  adjacent `hunk-index.json` retain their real file semantics. Bundles contain
-  bounded assignment or integration context captured through the artifact session.
-  `supporting_catalog` exposes targeted Structure diff projections where exact
-  transport permits. Catalogs are navigation aids and grant no directory access.
-- Stages are admitted from exact assigned target or candidate IDs, valid
-  dispositions, meaningful claim fields, valid findings, and explicit
-  `not_reviewed` reasons where required. Sufficient supplied diff/context can
-  support a completed decision without source reads. Ordinary backend file and
-  Git tools remain available for investigation when useful; tool results are
-  recorded and charged, but do not authenticate claims or gate otherwise valid
-  semantic output.
-- The host validates captured revision and input hashes, complete assignment
-  transport, backend/cwd/mode, confined artifacts, and unchanged input identity.
-  Backend failure, cancellation, budget exhaustion, malformed or truncated
-  output, invalid identities, required-input corruption, handoff overflow, and
-  unfinished decisions remain unsuccessful or incomplete. Failed attempts donate
-  no semantic state; successful earlier stages and findings survive later failure.
-- Triage receives bounded admitted notes, candidate grounds, triggers,
-  consequences, dispositions, findings, and closed decisions. It may finish from
-  those facts or investigate further within the same cumulative allowance and
-  deadline. Contradictions among known closed candidates mark affected work
-  incomplete without reopening decisions or discarding prior admitted findings.
-- `remaining_work` estimates residual assignments, files, and stages;
-  `advisory_tool_call_target` is a suggestion and `remaining_tool_calls` is the
-  hard cumulative allowance. Neither implies a mandatory investigation count.
-- `context_inputs`, `context_transport`, `context_statuses`, and
-  `canonical_input_identities` describe admitted supporting inputs and bind
-  generated files to the original artifacts and analyzed revision. Missing
-  optional context is advisory; corruption of required assignment inputs remains
-  blocking.
-- Strict stage output uses the declared assignment schema. The host owns candidate
-  and finding identities and validates the complete final result. Failed or
-  cancelled invocations admit no output. Typed scope and phase completion remain
-  independently bound to the analyzed revision, and final findings/coverage are
-  atomically published.
+| Host field group | Contract |
+| --- | --- |
+| Identity: `stage`, `scope_id`, `analyzed_revision` | `first_pass`, `integration`, or `triage`, bound to the public reviewer and frozen snapshot. |
+| Assignment: `assigned_files` | Current assignment, also passed as the builder's `files`. |
+| Bundle: `supporting_bundle` | Bounded diff/index/binding or integration context. Built-ins use it; custom builders opt in with `review_input_bundle = True`. Otherwise `diff_path` and adjacent `hunk-index.json` retain their real file semantics. |
+| Navigation: `supporting_catalog` | Exact pointers to targeted Structure diff projections; navigation grants no directory access. |
+| Residual work: `remaining_work` | Estimated residual assignments, files and stages. |
+| Budget: `advisory_tool_call_target`, `remaining_tool_calls` | Suggested pace and hard cumulative allowance, respectively; neither requires investigation calls. |
+| Context: `context_inputs`, `context_transport`, `context_statuses`, `canonical_input_identities` | Admitted supporting inputs, transport/availability and original artifact identities. Omitted optional context is advisory; corrupted required inputs block admission. |
 
-Extension API 8 and staged-review contract 8 reject old extensions and invalidate
-old complete review cache entries. Pi's native `structured_output` validation,
-reminder, submission identity, and last finalized successful result remain part
-of its output contract. Native mode accepts only the last successfully finalized
-submission after clean EOF/reaping and settlement; failed calls do not replace a
-prior success, and a selected host-invalid success cannot fall back to an older
-one. When a completed invocation omits submission, Pi may add one hidden reminder
-under the original deadline and cumulative allowance. Assistant prose cannot
-supply native output. The packaged output extension is isolated from ambient
-extensions for read-only invocations when explicitly loaded; Pi's read-only tool
-allowlist remains unchanged. No-schema and validation-opt-out paths retain their
-existing text behavior.
+The stage factory projects canonical frozen diff/index inputs through the owning
+`ArtifactSession`. Required assignment bytes take priority over separately bounded
+shared context. Structure receives a whole-change interaction assignment, compact
+inventory and targeted diff parts; omitted supporting parts remain unavailable.
+The [review budgets](../README.md#review-budgets) specify transport and assignment caps.
+
+Admission requires the strict invocation schema, exact target/candidate IDs, valid
+dispositions and findings, meaningful claim fields, and nonempty `not_reviewed`
+reasons. The host validates revision/input hashes, complete transport, backend/cwd/mode,
+confinement and unchanged capture identity. Supplied diff/context can support valid
+decisions without source reads; ordinary file/Git tools are recorded and charged,
+but do not authenticate claims or gate semantic output. Backend failure, cancellation,
+exhausted bounds, malformed/truncated output, invalid IDs, required-input corruption,
+handoff overflow and unfinished decisions remain unsuccessful or incomplete.
+Failed attempts admit nothing; successful earlier stages retain their findings.
+
+Triage receives bounded admitted notes, candidate grounds/triggers/consequences,
+dispositions/findings and closed decisions. It can decide from those facts or
+investigate within the same cumulative allowance/deadline. Contradictions among
+known closed candidates mark affected work incomplete without reopening decisions
+or discarding retained findings. The host owns candidate/finding identities and
+validates the final result; snapshot-bound typed coverage and findings are
+[atomically published](../README.md#terminal-review-findings-contract).
+
+Pi keeps read-only `read`, `find`, `ls` and `grep`, with materialized ordinary files
+for useful before-side deleted/renamed source. Codex keeps its disposable read-only
+checkout; Claude/Codex may inspect captured revisions with ordinary Git commands.
+Pi's native `structured_output` accepts only the last successfully finalized
+submission after clean EOF/reaping and settlement. Failed submissions do not replace
+an earlier success; a selected host-invalid success cannot fall back to an older one.
+Assistant prose cannot supply native output. One hidden missing-submission reminder
+may run under the original deadline/cumulative allowance. Read-only invocations
+explicitly loading the packaged output extension isolate it from ambient extensions;
+other invocation policies, the read-only tool allowlist, no-schema and validation-opt-out
+text behavior remain unchanged. [Trace semantics](observability-fields.md#effective-request-configuration)
+distinguish native generations, submissions and host attempts.
 
 #### `plan-writer` compatibility and output contract
 

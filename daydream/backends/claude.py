@@ -1016,7 +1016,6 @@ class ClaudeBackend:
         skipped_tool_ids: set[str] = set()
         terminal_result: ResultEvent | None = None
 
-
         yield RequestEvent(
             prompt=prompt,
             model_name=self.model,
