@@ -409,9 +409,7 @@ class StageInputFactory:
             # actually inlined consume the inline allowance, including wrappers.
             entries: list[tuple[str, int]] = []
             inline_shared: dict[str, str] = {}
-            for item in prepared.inputs:
-                if item.label not in shared_paths:
-                    continue
+            for item in (item for item in prepared.inputs if item.label in shared_paths):
                 inline_entries = [*entries, (item.label, item.size)]
                 if (inputs.inline_section_emitted_bytes(inline_entries)
                         > inputs.SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES):
@@ -433,10 +431,9 @@ class StageInputFactory:
                 'supporting_parts': len(deferred_paths), 'supporting_catalogs': len(catalog_paths)}
             statuses = [status for status in statuses if status['status'] != 'complete' or
                         status['label'] not in hidden_labels]
-        state.update(context_inputs=list(paths), context_transport=prepared.transport.value, context_statuses=statuses,
+        state.update(context_inputs=[label for label in paths if not deferred_paths or label not in hidden_labels],
+                     context_transport=prepared.transport.value, context_statuses=statuses,
                      canonical_input_identities=self.binding['canonical_inputs'])
-        if deferred_paths:
-            state['context_inputs'] = [label for label in paths if label not in hidden_labels]
         decided = set(state.get('completed_target_ids', []))
         remaining = [part for part in self.parts if part.assignment['target_id'] not in decided]
         state['remaining_work'] = {

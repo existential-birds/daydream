@@ -4,10 +4,10 @@ Thanks for contributing! This guide walks you from a fresh clone to a signed,
 gate-green pull request: prerequisites, one-time setup, the commands that make
 up the local quality gate, and the conventions reviewers will hold your change
 to. Daydream is developed with coding agents in the loop, so
-[AGENTS.md](AGENTS.md) is the agent-facing counterpart of this document — it
+[CLAUDE.md](CLAUDE.md) is the agent-facing counterpart of this document — it
 carries the architecture and testing rules the agent must follow. This guide
 links to it rather than duplicating it: if you are changing behavior that
-AGENTS.md describes, update both.
+CLAUDE.md describes, update both.
 
 ## Prerequisites
 
@@ -120,11 +120,11 @@ that enters from the production entrypoint (`runner.run` / the CLI) with real
 dependencies — a real temp git worktree, a real filesystem, a real event loop —
 mocking only the external network/API backend, via the `Backend` protocol /
 `create_backend` seam. Tests must assert observable outcomes (exit code, files
-written, fixes applied, retained or declined, trajectory and transcript state), never that a function was
+written, fixes applied or declined, transcript state), never that a function was
 merely called. Unit tests are supplementary, not a substitute.
 
 This is the standard reviewers hold PRs to, and the one the agent-facing
-[AGENTS.md](AGENTS.md) §Testing states as mandatory.
+[CLAUDE.md](CLAUDE.md) §Testing standard states as mandatory.
 
 ## Exemplars
 
@@ -153,7 +153,7 @@ implementations of the real-path standard:
 - **Commit messages** — Conventional Commits, e.g. `feat(backends): ...`.
 - **Staging** — stage explicitly (`git add <path>`), never `git add -A`.
 - **Documentation** — update it when your change makes it stale, including
-  [AGENTS.md](AGENTS.md) when the agent-facing contract changes.
+  [CLAUDE.md](CLAUDE.md) when the agent-facing contract changes.
 - **Pull requests** — must include a **Test Plan** section per the
   [PR template](.github/PULL_REQUEST_TEMPLATE.md).
 - **Never** bypass the pre-push hook, skip tests, or push with
@@ -166,8 +166,8 @@ implementations of the real-path standard:
 
 This guide links rather than duplicates; these documents carry the detail:
 
-- [AGENTS.md](AGENTS.md) §Architecture — the shared ownership boundaries and
-  subsystem references.
+- [CLAUDE.md](CLAUDE.md) §Architecture — the module responsibility map and
+  pipeline walkthrough.
 - [docs/extensions.md](docs/extensions.md) — the versioned extension API for
   forks (`daydream_ext`).
 - [docs/coverage.md](docs/coverage.md) — the coverage gate and ratchet
@@ -206,8 +206,8 @@ A compact walkthrough; each step links back to the section that explains it:
 ## Where the agent guidance lives
 
 Daydream is developed with coding agents in the loop. Everything agent-facing —
-architecture invariants, testing rules, artifact boundaries — lives
-in [AGENTS.md](AGENTS.md), which this guide deliberately links instead of
+architecture invariants, backend protocol, budgets, artifact boundaries — lives
+in [CLAUDE.md](CLAUDE.md), which this guide deliberately links instead of
 duplicating. If your PR changes any contract described there, update it in the
 same PR. Before opening the PR, run through the checklist at the bottom of the
 [PR template](.github/PULL_REQUEST_TEMPLATE.md).
