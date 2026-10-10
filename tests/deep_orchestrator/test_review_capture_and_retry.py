@@ -159,7 +159,7 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
     review = staged_review(tmp_path, monkeypatch)
     attempts = 0
 
-    @review.backend.script('python')
+    @review.backend.script('python', terminal=False)
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         nonlocal attempts
         initial_assignment = 'api.py' in stage['assigned_files']
@@ -171,8 +171,7 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
             yield from read_events(review.repo, path, event_id=f'attempt-{attempts}-{path}')
         if not initial_assignment:
             assert all('FAILED_ATTEMPT_MARKER' not in str(item) for item in stage['notes'])
-            return
-        if attempts == 1 or outcome == 'second-rejection':
+        elif attempts == 1 or outcome == 'second-rejection':
             output['targets'][0]['PRIVATE_UNKNOWN_PROPERTY_MARKER'] = None
             output['notes'] = 'FAILED_ATTEMPT_MARKER'
             output['candidates'] = [candidate(disposition='confirmed', finding=dict(
@@ -186,6 +185,9 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
             assert rejection['error_count'] > 0 and rejection['candidate_count'] > 0
             assert set(rejection) == {'category', 'schema_path', 'error_count', 'candidate_count'}
             output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+        yield TextEvent(text=json.dumps(output))
+        yield TurnEndEvent()
+        yield ResultEvent(structured_output=None, continuation=None)
 
     await review.finish('python', findings=('Grounded defect',) if outcome == 'success' else (),
                         reason=None if outcome == 'success' else 'malformed_output')
@@ -478,17 +480,35 @@ async def test_shared_intent_uses_actual_transport_allowance_after_required_assi
 
 @pytest.mark.parametrize(('case', 'reason', 'attempts'), [
     ('unparseable', 'malformed_output', 1),
-    ('invalid-native-valid-text', 'malformed_output', 2),
-    ('nested-invalid-root', 'malformed_output', 2),
+    ('invalid-native-valid-text', 'malformed_output', 1),
+    ('nested-invalid-root', None, 1),
     ('incomplete-nested-stage', 'malformed_output', 1),
-    ('text-origin-nested', 'malformed_output', 2),
+    ('text-origin-nested', None, 1),
     ('empty-final-turn', 'missing_output', 1),
     ('native-prose', None, 1),
     ('pi-schema-retry', None, 2),
     ('missing-notes', None, 2),
+    ('empty-object', None, 2),
+    ('scalar-only-object', None, 2),
     ('wrong-type-notes', None, 2),
     ('native-missing-notes', 'malformed_output', 1),
     ('compliant-json', None, 1),
+    ('prose-json', None, 1),
+    ('fenced-json', None, 1),
+    ('incidental-json', None, 1),
+    ('ambiguous-json', 'malformed_output', 1),
+    ('wrapper-siblings', 'malformed_output', 1),
+    ('result-list', 'malformed_output', 1),
+    ('recursive-wrapper', 'malformed_output', 1),
+    ('partial-second-object', 'malformed_output', 1),
+    ('partial-second-array', 'malformed_output', 1),
+    ('malformed-tail', 'malformed_output', 1),
+    ('unfinished-fence', 'malformed_output', 1),
+    ('orphan-close', 'malformed_output', 1),
+    ('unmatched-prose', 'malformed_output', 1),
+    ('oversized-final', 'malformed_output', 1),
+    ('output-shaped-invalid', 'malformed_output', 1),
+    ('output-shaped-before-valid', 'malformed_output', 1),
     ('misplaced-closing-brace', 'malformed_output', 1),
 ])
 async def test_strict_stage_selection_never_salvages_rejected_or_incomplete_output(
@@ -503,6 +523,12 @@ async def test_strict_stage_selection_never_salvages_rejected_or_incomplete_outp
         valid['candidates'] = ([] if case in {'compliant-json', 'misplaced-closing-brace'} else
                                [candidate(disposition='confirmed', finding=record())])
         invalid = {'unknown_outer_key': valid}
+        if case in {'empty-object', 'scalar-only-object'}:
+            assert stage['notes'] == stage['candidates'] == []
+            text = json.dumps(({} if case == 'empty-object' else {'incidental': 1}) if attempt == 1 else valid)
+            yield TextEvent(text=text)
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
         if case.endswith('notes'):
             if case == 'native-missing-notes':
                 yield RequestEvent(prompt=prompt, output_schema=stage['response_contract']['schema'],
@@ -517,7 +543,9 @@ async def test_strict_stage_selection_never_salvages_rejected_or_incomplete_outp
                 assert stage['notes'] == stage['candidates'] == []
                 assert stage['observed_tool_starts'] == 0 and stage['remaining_tool_calls'] == 48
                 assert 'FAILED_SCHEMA_ONLY_ATTEMPT' not in prompt
-            yield ResultEvent(structured_output=valid, continuation=None)
+            if case != "native-missing-notes":
+                yield TextEvent(text=json.dumps(valid))
+            yield ResultEvent(structured_output=valid if case == "native-missing-notes" else None, continuation=None)
             return
         final_turn = case in {'text-origin-nested', 'empty-final-turn', 'native-prose', 'pi-schema-retry'}
         if final_turn:
@@ -537,6 +565,23 @@ async def test_strict_stage_selection_never_salvages_rejected_or_incomplete_outp
             'incomplete-nested-stage': '{"outer": ' + json.dumps(valid),
             'text-origin-nested': json.dumps({'invalid_outer': valid}),
             'native-prose': 'The investigation is finished.',
+            'fenced-json': 'Done.\n```json\n' + json.dumps(valid) + '\n```\nFinished.',
+            'incidental-json': 'Inspected metadata["sender"]["login"] and ' + json.dumps(['large' * 100] * 10)
+                              + ' then ' + json.dumps(valid),
+            'ambiguous-json': json.dumps(valid) + '\nExample: ' + json.dumps({'result': valid}),
+            'wrapper-siblings': json.dumps({'result': valid, 'comment': 'finished'}),
+            'result-list': json.dumps([valid]),
+            'recursive-wrapper': json.dumps({'outer': {'inner': valid}}),
+            'partial-second-object': json.dumps(valid) + '\n{',
+            'partial-second-array': json.dumps(valid) + '\n[',
+            'malformed-tail': json.dumps(valid) + '\n{broken}',
+            'unfinished-fence': '```json\n' + json.dumps(valid),
+            'orphan-close': json.dumps(valid) + '\n]',
+            'unmatched-prose': 'Here is { the result ' + json.dumps(valid),
+            'oversized-final': json.dumps(valid) + 'x' * (128 * 1024),
+            'output-shaped-invalid': json.dumps({'targets': 'invalid', 'result': valid}),
+            'output-shaped-before-valid': json.dumps({'targets': 'invalid', 'result': valid}) + json.dumps(valid),
+            'prose-json': 'Here is the result:\n' + json.dumps(valid) + '\nInvestigation finished.',
             'misplaced-closing-brace': json.dumps({'targets': valid['targets'], 'notes': 'Reviewed real source'})
                                      + ', "candidates": [], "contradictions": []}',
         }.get(case, json.dumps(valid))
@@ -546,11 +591,8 @@ async def test_strict_stage_selection_never_salvages_rejected_or_incomplete_outp
         if case == 'empty-final-turn':
             yield TextEvent(text='')
             yield TurnEndEvent()
-        native = (invalid if case == 'invalid-native-valid-text' else valid if final_turn
-                  and (case != 'pi-schema-retry' or attempt > 1) else None)
-        yield ResultEvent(structured_output=native, continuation=None,
-                          structured_output_origin='text' if case in {'text-origin-nested', 'empty-final-turn'}
-                          else 'native')
+        native = invalid if case == 'invalid-native-valid-text' else valid if case == 'native-prose' else None
+        yield ResultEvent(structured_output=native, continuation=None)
 
     await review.finish('python', reason=reason,
                         findings=('Grounded defect',) if reason is None and case != 'compliant-json' else ())
@@ -558,17 +600,61 @@ async def test_strict_stage_selection_never_salvages_rejected_or_incomplete_outp
     assert len(events) == attempts
     assert [event['metadata']['attempt'] for event in events] == list(range(1, attempts + 1))
     assert [event['metadata']['admitted'] for event in events] == (
-        [False, True] if case in {'pi-schema-retry', 'missing-notes', 'wrong-type-notes'}
+        [False, True] if case in {'pi-schema-retry', 'missing-notes', 'wrong-type-notes',
+                                 'empty-object', 'scalar-only-object'}
         else [reason is None] * attempts)
     if attempts == 2:
         assert events[0]['metadata']['schema_rejection']['error_count'] > 0
-    elif case in {'unparseable', 'incomplete-nested-stage', 'empty-final-turn',
-                  'compliant-json', 'misplaced-closing-brace'}:
+    elif case in {'fenced-json', 'incidental-json', 'ambiguous-json', 'wrapper-siblings', 'result-list',
+                  'recursive-wrapper', 'partial-second-object', 'partial-second-array', 'malformed-tail',
+                  'unfinished-fence', 'orphan-close', 'unmatched-prose', 'oversized-final', 'unparseable',
+                  'incomplete-nested-stage', 'empty-final-turn', 'compliant-json', 'misplaced-closing-brace'}:
         assert events[0]['metadata']['schema_rejection'] is None
     metadata = events[-1]['metadata']
     assert metadata['observed_tool_starts'] == 0 and metadata['remaining_tool_calls'] == 48
     if case in {'compliant-json', 'misplaced-closing-brace'}:
         assert metadata['failure_class'] == ('syntax_failure' if case == 'misplaced-closing-brace' else None)
+
+
+@pytest.mark.parametrize('packaging', ['prose', 'wrapper', 'native', 'domain-invalid'])
+async def test_staged_results_present_only_after_admission_and_preserve_raw_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], packaging: str,
+) -> None:
+    review = staged_review(tmp_path, monkeypatch, files=2)
+    marker = 'HOST_PRESENTATION_MARKER'
+    sentinel = 'ghp_' + 'x' * 16
+    raw_text: list[str] = []
+
+    @review.backend.script(terminal=False)
+    def stream(stage: dict[str, Any], valid: dict[str, Any]) -> Iterable[AgentEvent]:
+        valid['notes'] = marker + ' ' + sentinel
+        valid['candidates'] = [candidate(disposition='confirmed', finding=record())]
+        if packaging == 'domain-invalid':
+            valid['candidates'][0]['grounds'] = ''
+        if packaging == 'native':
+            yield ResultEvent(structured_output=valid, continuation=None)
+        else:
+            text = (json.dumps({'result': valid}) if packaging == 'wrapper' else
+                    'Here is the completed investigation:\n' + json.dumps(valid))
+            raw_text.append(text)
+            yield TextEvent(text=text)
+            yield TurnEndEvent()
+            yield ResultEvent(structured_output=None, continuation=None)
+
+    rejected = packaging == 'domain-invalid'
+    await review.finish('python', reason='evidence_incomplete' if rejected else None,
+                        findings=() if rejected else ('Grounded defect',), log_mode=True)
+    output = capsys.readouterr().out
+    assert sentinel not in output
+    lines = [line for line in output.splitlines() if line.startswith('[result]')]
+    assert sum(marker in line for line in lines) == (0 if rejected else 1)
+    if not rejected:
+        assert any(marker in line and '[REDACTED_API_KEY]' in line for line in lines)
+    if raw_text:
+        trajectories = [json.loads(path.read_text()) for path in (review.repo / '.daydream').rglob('*.json')
+                        if path.name == 'trajectory.json' or '--' in path.name]
+        messages = [step.get('message') for document in trajectories for step in document.get('steps', [])]
+        assert raw_text[0].replace(sentinel, '[REDACTED_API_KEY]') in messages
 
 
 async def test_opaque_assignment_handles_cannot_alias_real_changed_filenames(

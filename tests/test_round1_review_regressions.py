@@ -12,6 +12,7 @@ finding it closes:
 
 import json
 import pathlib
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +20,8 @@ import daydream.agent as agent_module
 import daydream.review_evidence as review_evidence_module
 from daydream.backends import TextEvent, TurnEndEvent
 from daydream.review_evidence import ReviewEvidence
+from daydream.trajectory import DaydreamPhase
+from tests.harness.backend import ScriptedBackend
 
 REVIEW_STRICT_SCHEMA = {
     "type": "object",
@@ -84,8 +87,8 @@ def test_review_evidence_without_a_schema_never_checkpoints() -> None:
 
 
 @pytest.mark.parametrize("require_full_schema", [True, False])
-def test_agent_prefers_a_fully_valid_candidate_over_a_later_salvageable_one(
-    require_full_schema: bool,
+async def test_agent_prefers_a_fully_valid_candidate_over_a_later_salvageable_one(
+    tmp_path: Path, require_full_schema: bool,
 ) -> None:
     """item:5 -- strict-first ordering under the salvage-tolerant gate."""
     authoritative = json.dumps({"findings": ["real finding"]})
@@ -94,19 +97,21 @@ def test_agent_prefers_a_fully_valid_candidate_over_a_later_salvageable_one(
     incidental = json.dumps({"findings": [], "evidence_digest": "incidental"})
     raw = f"{authoritative}\n\nAlso, quoting a snippet: {incidental}"
 
-    selection = agent_module._select_by_schema(
-        raw, REVIEW_STRICT_SCHEMA, require_full_schema=require_full_schema
+    result, _, _ = await agent_module.run_agent(
+        ScriptedBackend(events=[TextEvent(text=raw)]), tmp_path, "review", phase=DaydreamPhase.REVIEW,
+        output_schema=REVIEW_STRICT_SCHEMA, require_full_schema=require_full_schema,
     )
-    assert selection.value == {"findings": ["real finding"]}
+    assert result == {"findings": ["real finding"]}
 
 
-def test_agent_salvage_gate_still_admits_a_shape_when_nothing_is_fully_valid() -> None:
+async def test_agent_salvage_gate_still_admits_a_shape_when_nothing_is_fully_valid(tmp_path: Path) -> None:
     """item:5 -- the strict-first scan must not narrow the salvage path."""
     salvageable = json.dumps({"findings": ["a"], "evidence_digest": "d"})
-    selection = agent_module._select_by_schema(
-        salvageable, REVIEW_STRICT_SCHEMA, require_full_schema=False
+    result, _, _ = await agent_module.run_agent(
+        ScriptedBackend(events=[TextEvent(text=salvageable)]), tmp_path, "review", phase=DaydreamPhase.REVIEW,
+        output_schema=REVIEW_STRICT_SCHEMA,
     )
-    assert selection.value == {"findings": ["a"], "evidence_digest": "d"}
+    assert result == {"findings": ["a"], "evidence_digest": "d"}
 
 
 def test_extract_json_and_schema_selection_enumerate_the_same_candidates() -> None:

@@ -107,7 +107,7 @@ deep FlowSteps -> phases/ -> agent.py -> Backend.execute()
 | `improve/assemble.py`, `plan_contract.py`, `plan_normalization.py` | Author-content expansion, schema/path/command validation, and safe projection/repair |
 | `improve/issue_publication.py`, `reporting.py`, `plan_diagnostics.py` | Validated-plan publication, summaries, and safe diagnostics |
 | `phases/` | Review, findings, fixing, testing, and publication operations; `inputs.py` and `schemas.py` own shared preparation/contracts |
-| `agent.py`, `agent_retry.py`, `ui/agent_stream.py` | Backend lifecycle and budgets, retry decisions, and per-attempt event presentation |
+| `agent.py`, `agent_output.py`, `agent_retry.py`, `ui/agent_stream.py` | Backend lifecycle/budgets, host output resolution, retry decisions, and event/accepted-result presentation |
 | `trajectory/` | `recorder.py` owns persistence, `scopes.py` owns fork/invocation lifetimes, `invocation.py` handles backend events, and `lifecycle.py` tracks phase/dispatch metadata; timing, layout, and billing stay independent |
 | `redaction.py` | Shared credential redaction for backend events, logging, archives, and trajectory text |
 | `artifact_visibility.py`, `artifacts/` | Session routing over owned filesystem, ledger, transfer, publication, and recovery modules; conflicts preserve competing bytes |
@@ -154,6 +154,11 @@ transformations. Adding a backend means producing that stream correctly — phas
 recorder are backend-agnostic. `Diagnostic` is recorder-only parser/transport evidence: the recorder
 normalizes and redacts it into JSON-safe `Step.extra.backend_diagnostics`, while observability exports
 only scrubbed diagnostic codes and counts on the enclosing attempt span.
+Adapters emit assistant text and genuine transport/native payloads; `agent_output.py` owns final-turn selection
+and validation. Staged contract 9 accepts bounded, complete, unambiguous prose/fence/single-wrapper packaging;
+`ReviewInvestigation._admit` owns domain admission before result presentation. Native lifecycle stays in adapters,
+Improve opt-out keeps text transport, and raw events remain trajectory evidence. See the staged output contract in
+`docs/extensions.md` for rejection and retry rules.
 Codex transport coverage is necessarily evidence-driven: a recognized public `item.type == "error"`
 sentinel produces an incomplete-coverage diagnostic, but if a transport omits a tool and emits no public
 marker, Daydream cannot infer the invisible call. Never synthesize a hidden tool pair or emit an

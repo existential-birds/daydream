@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import threading
 from contextlib import suppress
@@ -327,19 +328,7 @@ def extract_json_by_schema(
     that parses but is rejected falls through to the scan.
     """
     if require_complete_root:
-        try:
-            root = json.loads(_strip_json_fences(text))
-        except json.JSONDecodeError as exc:
-            return SchemaAwareSelection(None, 0, None, None,
-                                        syntax_error={'position': exc.pos, 'line': exc.lineno, 'column': exc.colno})
-        except (ValueError, TypeError):
-            return SchemaAwareSelection(None, 0, None, None)
-        if accept(root, schema):
-            return SchemaAwareSelection(root, 1, None, None)
-        rejection = schema_rejection(root, schema)
-        reason = f'{rejection.category} at {rejection.schema_path}' if rejection else None
-        eligible = rejection is not None and (rejection_guard is None or rejection_guard(root))
-        return SchemaAwareSelection(None, 1, type(root).__name__, reason, rejection, eligible)
+        return _complete_envelope(text, schema, accept, rejection_guard)
     candidates = _json_candidates(text)
     if not candidates:
         return SchemaAwareSelection(None, 0, None, None)
@@ -348,15 +337,13 @@ def extract_json_by_schema(
         if accept(value, schema):
             return SchemaAwareSelection(value, len(candidates), None, None)
 
-    # Nothing accepted: trace the largest span (extract_json's own tie-break) with
-    # content-free rejection evidence so the caller can report a bounded reason.
+    # Nothing accepted: trace the largest span with content-free rejection evidence.
     largest = _largest_span(candidates)
     reason = None
     for error in Draft202012Validator(schema).iter_errors(largest[1]):
         reason = f"{error.validator} at {error.json_path}"
         break
     rejection = schema_rejection(largest[1], schema, candidate_count=len(candidates))
-    # Retry requires a complete decoded object, not a nested candidate from an incomplete outer deliverable.
     try:
         whole = json.loads(_strip_json_fences(text))
     except (ValueError, TypeError):
@@ -365,3 +352,65 @@ def extract_json_by_schema(
         if not isinstance(whole, dict):
             rejection = None
     return SchemaAwareSelection(None, len(candidates), type(largest[1]).__name__, reason, rejection)
+
+
+def _complete_envelope(
+    text: str, schema: dict[str, Any], accept: Callable[[Any, dict[str, Any]], bool],
+    rejection_guard: Callable[[Any], bool] | None,
+) -> SchemaAwareSelection:
+    """Consume complete outer spans; malformed packaging never exposes descendants."""
+    decoder = json.JSONDecoder()
+    opening_fence = re.compile(r'```(?:json)?[ \t]*\r?\n')
+    closing_fence = re.compile(r'```[ \t]*(?:\r?\n|$)')
+    roots: list[Any] = []
+    cursor, fenced = 0, False
+    while cursor < len(text):
+        if text.startswith('```', cursor):
+            fence = (closing_fence if fenced else opening_fence).match(text, cursor)
+            if fence is None:
+                break
+            fenced = not fenced
+            cursor = fence.end()
+        elif text[cursor] in '{[':
+            if len(roots) >= 128:
+                break
+            try:
+                root, end = decoder.raw_decode(text, cursor)
+            except (ValueError, RecursionError):
+                break
+            roots.append(root)
+            cursor = end
+        elif text[cursor] in '}]':
+            break
+        else:
+            cursor += 1
+    if cursor < len(text) or fenced:
+        return SchemaAwareSelection(None, len(roots), None, None, syntax_error={
+            'position': cursor, 'line': text.count('\n', 0, cursor) + 1,
+            'column': cursor - text.rfind('\n', 0, cursor),
+        })
+    accepted = []
+    invalid_outputs = []
+    fields = set(schema.get('properties', {})) | set(schema.get('required', []))
+    for root in roots:
+        if accept(root, schema):
+            accepted.append(root)
+        elif isinstance(root, dict) and fields.intersection(root):
+            invalid_outputs.append(root)
+        elif isinstance(root, dict) and not fields.intersection(root) and len(root) == 1:
+            child = next(iter(root.values()))
+            if accept(child, schema):
+                accepted.append(child)
+    if len(accepted) == 1 and not invalid_outputs:
+        return SchemaAwareSelection(accepted[0], len(roots), None, None)
+    if len(roots) == 1 and not accepted and isinstance(roots[0], dict) and (
+        invalid_outputs or not any(isinstance(child, (dict, list)) for child in roots[0].values())
+    ):
+        # Missing-field objects retain schema retry; unrelated container envelopes cannot qualify.
+        root = roots[0]
+        rejection = schema_rejection(root, schema)
+        reason = f'{rejection.category} at {rejection.schema_path}' if rejection else None
+        eligible = (rejection is not None and not any(accept(child, schema) for child in root.values())
+                    and (rejection_guard is None or rejection_guard(root)))
+        return SchemaAwareSelection(None, 1, type(root).__name__, reason, rejection, eligible)
+    return SchemaAwareSelection(None, len(roots), None, None)

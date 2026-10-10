@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from daydream.backends import PiRequestConfig, RequestEvent, ResultEvent, ToolResultEvent, ToolStartEvent
+from daydream.backends import PiRequestConfig, RequestEvent, ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
 from daydream.backends.pi import PiBackend
 from tests.harness.otlp import _loopback_http_server, _QuietHTTPHandler
 
@@ -74,8 +74,10 @@ async def test_installed_pi_submits_native_structured_output(
     assert [(event.id, event.name) for event in starts] == (
         [("native-output-001", "structured_output")] if native else [])
     result = next(event for event in reversed(events) if isinstance(event, ResultEvent))
-    assert result.structured_output == {"verdict": "complete", "findings": []}
-    assert result.structured_output_origin == ("native" if native else "text")
+    assert result.structured_output == ({"verdict": "complete", "findings": []} if native else None)
+    if not native:
+        assert [event.text for event in events if isinstance(event, TextEvent)] == [
+            '{"verdict": "complete", "findings": []}']
 
 
 @pytest.mark.parametrize('allowance', [8, None], ids=['bounded', 'unbounded'])
@@ -146,4 +148,4 @@ async def test_native_pi_live_budget_counts_batch_failures_and_replaces_generati
     failures = [event.id for event in events if isinstance(event, ToolResultEvent) and event.is_error]
     assert failures == ['read-missing', 'failed-submit']
     result = next(event for event in reversed(events) if isinstance(event, ResultEvent))
-    assert result.structured_output == output and result.structured_output_origin == 'native'
+    assert result.structured_output == output

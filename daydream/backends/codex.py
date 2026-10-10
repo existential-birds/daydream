@@ -21,7 +21,7 @@ import uuid
 from collections import Counter
 from collections.abc import AsyncGenerator, Iterator, Mapping
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from daydream import git_ops
 from daydream.backends import (
@@ -548,9 +548,7 @@ class CodexBackend:
         thread_id: str | None = None
         provider_name: str | None = None
         model_name = self.model
-        last_agent_text: str | None = None
         structured_result: Any = None
-        structured_output_origin: Literal["native", "text"] = "native"
 
         # Pair idless starts/completions by FIFO; misses get
         # observable orphan ids. Accumulate item.updated text because completion
@@ -885,14 +883,13 @@ class CodexBackend:
                             item_id = item.get("id", "")
                             parts = updated_text.pop(item_id, [])
                             text = "".join(parts)
-                        if text:
-                            if item_type == "agent_message":
-                                last_agent_text = text
+                        if item_type == "agent_message":
+                            if text:
                                 yield TextEvent(text=text)
-                                # Codex has no per-message id; message_id stays empty (D-04).
-                                yield TurnEndEvent(message_id="")
-                            else:
-                                yield ThinkingEvent(text=text)
+                            # Empty completed assistant messages also delimit the final answer.
+                            yield TurnEndEvent(message_id="")
+                        elif text:
+                            yield ThinkingEvent(text=text)
 
                     elif item_type == "command_execution":
                         exit_code = item.get("exit_code", -1)
@@ -1002,20 +999,8 @@ class CodexBackend:
                         cost_source="estimated",
                     )
 
-                    if output_schema and last_agent_text:
-                        try:
-                            structured_result = json.loads(last_agent_text)
-                            structured_output_origin = "text"
-                        except json.JSONDecodeError:
-                            # Observable failure path — surface the bad payload
-                            # instead of silently degrading to None.
-                            _warn("structured_output_parse_failed")
-                            for diagnostic in _take_early_diagnostics():
-                                yield diagnostic
-
-                    # Fallback: result/output field directly on turn.completed.
-                    if output_schema and structured_result is None:
-                        structured_output_origin = "native"
+                    # Genuine structured fields from the transport; the host resolves assistant text.
+                    if output_schema:
                         for key in ("result", "output"):
                             raw = event.get(key)
                             if raw is not None:
@@ -1047,7 +1032,6 @@ class CodexBackend:
                         provider_name=provider_name,
                         session_id=thread_id,
                         finish_reason=event.get("finish_reason"),
-                        structured_output_origin=structured_output_origin,
                     )
 
                 elif event_type == "turn.failed":

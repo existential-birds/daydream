@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from daydream import git_ops
-from daydream.agent import run_agent
+from daydream.agent import StructuredOutputFailure, run_agent
 from daydream.backends import (
     BackendExecutionInput,
     CodexRequestConfig,
@@ -34,6 +34,7 @@ from daydream.backends import (
     ThinkingEvent,
     ToolResultEvent,
     ToolStartEvent,
+    TurnEndEvent,
     codex,
     effective_fanout_concurrency,
 )
@@ -48,6 +49,7 @@ from daydream.backends.codex import (
     display_shell_command,
 )
 from daydream.extensions import Registry, ToolDecision, set_registry
+from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.trajectory import DaydreamPhase
 from tests.harness.codex_replay import (
     make_mock_process,
@@ -307,9 +309,35 @@ async def test_structured_output(fixture: Any, expected_output: Any, expected_te
     events = await _run_fixture(backend, "Parse", fixture, output_schema=schema)
     result_events = [e for e in events if isinstance(e, ResultEvent)]
     assert len(result_events) == 1
-    assert result_events[0].structured_output == expected_output
+    native = fixture == "turn_completed_result.jsonl"
+    assert result_events[0].structured_output == (expected_output if native else None)
+    if not native:
+        text = [event.text for event in events if isinstance(event, TextEvent)]
+        assert json.loads(text[-1]) == expected_output
+        assert sum(isinstance(event, TurnEndEvent) for event in events) == len(text)
     if expected_text_count is not None:
         assert len([e for e in events if isinstance(e, TextEvent)]) == expected_text_count
+
+@pytest.mark.parametrize('staged', [False, True])
+async def test_empty_final_codex_message_cannot_reuse_planning_json(tmp_path: Path, staged: bool) -> None:
+    schema = {"type": "object", "properties": {"issues": {"type": "array"}}, "required": ["issues"]}
+    lines = [json.dumps(event) for event in [
+        {"type": "thread.started", "thread_id": "empty-final"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": '{"issues": []}'}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": ""}},
+        {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}},
+    ]]
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec",
+               return_value=make_mock_process(lines)):
+        result, token, reason = await run_agent(
+            CodexBackend(model="fixture-model"), tmp_path, "review", phase=DaydreamPhase.REVIEW,
+            output_schema=schema, require_full_schema=True,
+            investigation_budget=ReviewInvestigationBudget.from_limits(ReviewLimits()) if staged else None,
+        )
+    assert isinstance(result, StructuredOutputFailure) and result.reason == "missing_output"
+    assert token is not None and token.data == {"thread_id": "empty-final"}
+    assert reason is None
+
 
 async def test_turn_failed_raises() -> None:
     backend = CodexBackend(model="fixture-model")
@@ -728,13 +756,11 @@ async def test_toplevel_text_field() -> None:
     assert "read the review" in thinking[0].text
     result_events = [e for e in events if isinstance(e, ResultEvent)]
     assert len(result_events) == 1
-    assert result_events[0].structured_output == {
-        "issues": [
-            {"id": 1, "description": "Missing yield for non-result events", "file": "agents/architect.py", "line": 134}
-        ]
-    }
+    assert result_events[0].structured_output is None
     text_events = [e for e in events if isinstance(e, TextEvent)]
     assert len(text_events) == 1
+    assert json.loads(text_events[0].text) == {"issues": [{"id": 1,
+        "description": "Missing yield for non-result events", "file": "agents/architect.py", "line": 134}]}
 
 
 def _write_model_prices(path: Path, *, model: str, input_price: float, output_price: float) -> Path:
@@ -1013,7 +1039,7 @@ async def test_orphaned_tool_result_is_observable(caplog: pytest.LogCaptureFixtu
         f"expected an 'unmatched tool result' WARNING; got {warnings}"
     )
 
-async def test_malformed_structured_output_warns(caplog: pytest.LogCaptureFixture) -> None:
+async def test_malformed_assistant_json_is_forwarded_as_text(caplog: pytest.LogCaptureFixture) -> None:
     backend = CodexBackend(model="fixture-model")
     schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
     with caplog.at_level(logging.WARNING, logger="daydream.backends.codex"):
@@ -1022,9 +1048,9 @@ async def test_malformed_structured_output_warns(caplog: pytest.LogCaptureFixtur
     assert len(result_events) == 1
     assert result_events[0].structured_output is None
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("structured output parse failed" in w for w in warnings), (
-        f"expected a 'structured output parse failed' WARNING; got {warnings}"
-    )
+    assert not any("structured output parse failed" in w for w in warnings)
+    assert [event.text for event in events if isinstance(event, TextEvent)] == [
+        "this is not valid JSON"]
 
 async def test_parser_coverage_is_bounded_redacted_and_precedes_result(caplog: pytest.LogCaptureFixture) -> None:
     backend = CodexBackend(model="fixture-model")
@@ -1054,7 +1080,7 @@ async def test_parser_coverage_is_bounded_redacted_and_precedes_result(caplog: p
     assert parser["malformed_shapes"] == {"event_not_object": 2, "event_type_not_scalar": 1, "item_not_object": 1}
     assert parser["non_json_lines"] == 1
     assert parser["warnings"] == {
-        "total": 2, "reasons": {"structured_output_parse_failed": 1, "unmatched_tool_result": 1},
+        "total": 1, "reasons": {"unmatched_tool_result": 1},
     }
     combined = json.dumps([event.metadata for event in diagnostics]) + "\n" + caplog.text
     assert "opaque-parser-secret" not in combined

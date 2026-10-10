@@ -186,3 +186,23 @@ async def test_structured_fallback_requires_merge_envelope(rec: Console, tmp_pat
     result, _, _ = await run_agent(backend, tmp_path, "merge", phase=DaydreamPhase.DEEP, output_schema=schema)
     assert result == (payload if envelope else json.dumps(items))
     assert isinstance(result, dict if envelope else str)
+
+
+@pytest.mark.parametrize("primary", [None, {"issues": "invalid", "description": "REJECTED_RESULT"}])
+async def test_log_presents_only_resolved_result_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], primary: Any,
+) -> None:
+    sentinel = "ghp_" + "x" * 16
+    payload = {"issues": [{"id": 1, "description": "Accepted " + sentinel}]}
+    backend = ScriptedBackend(events=[TextEvent(text=json.dumps(payload)),
+                                      ResultEvent(structured_output=primary, continuation=None)])
+    result, _, _ = await run_agent(
+        backend, tmp_path, "review", phase=DaydreamPhase.REVIEW,
+        output_schema={"type": "object", "required": ["issues"], "properties": {"issues": {"type": "array"}}},
+        run_context=RunContext(InteractionPolicy(log_mode=True)),
+    )
+    assert result == payload
+    output = capsys.readouterr().out
+    assert output.count("[result]") == 1 and "[result] {\"issues\": [" in output
+    assert "REJECTED_RESULT" not in output and sentinel not in output
+    assert "[REDACTED_API_KEY]" in output

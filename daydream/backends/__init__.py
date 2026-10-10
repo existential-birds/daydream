@@ -842,8 +842,9 @@ class ContinuationToken:
 class ResultEvent:
     """Terminal metadata; a failed backend may emit it before raising.
 
-    run_agent validates or salvage-checks structured_output when enabled; callers
-    opting out validate downstream. session_id is independent of continuation requests.
+    structured_output carries only transport/native payloads, never JSON selected from assistant prose.
+    The host resolves final assistant text and validates output; opt-out callers validate downstream.
+    session_id is independent of continuation requests.
     """
 
     structured_output: Any | None
@@ -856,8 +857,6 @@ class ResultEvent:
     finish_reason: str | None = None
     duration_ms: float | None = None
     duration_api_ms: float | None = None
-    # Emulated schemas may select text fragments; staged callers validate the original final turn.
-    structured_output_origin: Literal["native", "text"] = "native"
 
 
 AgentEvent = (
@@ -907,8 +906,6 @@ class Backend(Protocol):
     - supports_budget_preamble: accepts wall_budget_s/tool_call_budget so the
       backend's own system prompt can state this turn's real allowances rather
       than its module defaults. The host enforces the bound either way.
-    - supports_complete_output: accepts optional require_complete_root for strict
-      staged JSON syntax; malformed roots remain terminal.
     - reasoning_effort: native level fixed at construction; None defers to the driver.
       Backend instances are cached by kind, model, effort, and audit root.
     """

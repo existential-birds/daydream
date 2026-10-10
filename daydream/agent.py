@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from rich.text import Text
 
 from daydream import clock, review_budget
+from daydream.agent_output import StructuredOutputFailure as StructuredOutputFailure, resolve_output
 from daydream.agent_retry import _plan_retry_delay, _resolve_retry_settings, _retry_hint, _RetryTelemetry
 from daydream.artifact_visibility import ArtifactVisibilityError, artifact_session_active, assert_model_cwd_clean
 from daydream.backends import (
@@ -35,14 +36,6 @@ from daydream.backends.codex import supervisor_shell_command
 from daydream.config import BUDGET_CLEANUP_GRACE_S
 from daydream.diagnostics import exception_text, sanitize_verbose_message
 from daydream.extensions import get_registry
-from daydream.json_utils import (
-    SchemaAwareSelection,
-    SchemaRejection,
-    extract_json,
-    extract_json_by_schema,
-    schema_rejection,
-    validates_schema,
-)
 from daydream.observability.spans import agent_scope, attempt_scope
 from daydream.outage_circuit import CIRCUIT_CLOSED, CIRCUIT_HALF_OPEN
 from daydream.prompt_budget import PreparedSanctionedInputs
@@ -63,7 +56,7 @@ from daydream.run_context import (
 )
 from daydream.trajectory import DaydreamPhase, get_current_recorder, redact_text
 from daydream.ui import NEON_THEME, print_error
-from daydream.ui.agent_stream import AgentDisplay
+from daydream.ui.agent_stream import AgentDisplay, present_result
 
 _logger = logging.getLogger(__name__)
 
@@ -247,73 +240,6 @@ def is_environmental_failure(test_output: str) -> bool:
     return any(signature in output_lower for signature in infra_signatures)
 
 
-class StructuredOutputFailure(str):
-    """Text fallback carrying the host's rejected structured-output witness.
-
-    ``detail`` is an optional, already content-free diagnostic fragment: the
-    selected candidate's Python type name and its first schema error as
-    ``"<validator> at <json_path>"``. It never carries candidate content, so it
-    stays safe through the redaction/bounding path that surfaces it.
-    """
-
-    reason: str
-    detail: str | None
-    rejection: SchemaRejection | None
-    schema_retry_eligible: bool
-    syntax_error: dict[str, int] | None
-
-    def __new__(cls, text: str, reason: str, detail: str | None = None, *,
-        rejection: SchemaRejection | None = None, schema_retry_eligible: bool = False,
-        syntax_error: dict[str, int] | None = None) -> "StructuredOutputFailure":
-        value = super().__new__(cls, text)
-        value.reason = reason
-        value.detail = detail
-        value.rejection = rejection
-        value.schema_retry_eligible = schema_retry_eligible
-        value.syntax_error = syntax_error
-        return value
-
-
-def _select_by_schema(text: str, schema: dict[str, Any], *, require_full_schema: bool) -> SchemaAwareSelection:
-    """Select one candidate with the run's own gate, strictly preferring full validity.
-
-    ``_salvageable`` is deliberately loose — any object carrying the schema's
-    required keys qualifies — so under a "last admitted candidate wins" rule it
-    would let a later incidental object (e.g. an evidence digest that merely
-    lists issues) displace the real answer. Scanning with the strict gate first
-    keeps a fully valid candidate authoritative; the salvage scan only runs when
-    nothing validates, so this never widens what is accepted, only reorders it.
-    """
-    strict = extract_json_by_schema(text, schema=schema, accept=validates_schema)
-    if require_full_schema or strict.value is not None:
-        return strict
-    return extract_json_by_schema(text, schema=schema, accept=_salvageable)
-
-
-def _salvageable(value: Any, schema: dict[str, Any]) -> bool:
-    """Accept full schema validity or a shape downstream consumers can salvage.
-
-    Objects must contain required keys, with lists in required array slots;
-    nested records are validated downstream by callers using this capability.
-    """
-    if validates_schema(value, schema):
-        return True
-    if not isinstance(value, dict):
-        return False
-    required = schema.get("required")
-    if not isinstance(required, list):
-        return False
-    properties = schema.get("properties", {})
-    for key in required:
-        if key not in value:
-            return False
-        prop = properties.get(key)
-        if isinstance(prop, dict) and prop.get("type") == "array":
-            if not isinstance(value[key], list):
-                return False
-    return True
-
-
 async def run_agent(
     backend: Backend,
     cwd: Path,
@@ -495,6 +421,8 @@ async def run_agent(
         if (result[2] == "wall_budget_exceeded" and shared is not None
                 and hard_deadline == shared and clock.monotonic() >= shared):
             result = (result[0], result[1], "pipeline_budget_exceeded")
+        if output_schema is not None and investigation_budget is None and not isinstance(result[0], str):
+            present_result(console, context.policy, progress_callback, result[0])
         observed.output(result[0])
         observed.finish(1 if result[2] else 0, reason=result[2])
         return result
@@ -680,8 +608,6 @@ async def _run_agent(
                         "max_turns": max_turns,
                         "read_only": read_only,
                     }
-                    if investigation_budget is not None and getattr(backend, "supports_complete_output", False):
-                        execute_kwargs["require_complete_root"] = True
                     if finalization and getattr(backend, "supports_finalization", False):
                         execute_kwargs["finalization"] = True
                     if tools_disabled and getattr(backend, "supports_tools_disabled", False):
@@ -780,15 +706,13 @@ async def _run_agent(
                                         else:
                                             output_parts.append(event.text)
                                             assistant_turn_bytes += size
-                                elif isinstance(event, TurnEndEvent) and investigation_budget is not None:
+                                elif isinstance(event, TurnEndEvent) and output_schema is not None:
                                     completed_assistant_text = ''.join(output_parts)
                                     completed_assistant_overflow = assistant_turn_overflow
                                     output_parts = []
                                     assistant_turn_bytes, assistant_turn_overflow = 0, False
                                 elif isinstance(event, ResultEvent):
-                                    structured_result = (None if investigation_budget is not None
-                                                         and event.structured_output_origin == 'text'
-                                                         else event.structured_output)
+                                    structured_result = event.structured_output
                                     result_continuation = event.continuation
                                 if isinstance(event, ToolStartEvent):
                                     if tool_supervisor is not None:
@@ -820,13 +744,7 @@ async def _run_agent(
                                         budget_reason = "tool_call_budget_exceeded"
                                         break
 
-                                if not (
-                                    require_full_schema and output_schema is not None and isinstance(event, ResultEvent)
-                                    and (not validates_schema(event.structured_output, output_schema)
-                                         or (investigation_budget is not None
-                                             and event.structured_output_origin == 'text'))
-                                ):
-                                    await display.observe(event)
+                                await display.observe(event)
 
                             await display.flush()
 
@@ -1072,7 +990,7 @@ async def _run_agent(
             raise
 
 
-    if investigation_budget is not None:
+    if output_schema is not None:
         raw = (''.join(output_parts) if output_parts or assistant_turn_overflow
                else completed_assistant_text or '')
         text_overflow = (assistant_turn_overflow if output_parts or assistant_turn_overflow
@@ -1080,76 +998,14 @@ async def _run_agent(
     else:
         raw, text_overflow = ''.join(output_parts), False
 
-    def _usable(value: Any) -> bool:
-        """Accept explicit validation opt-out or a downstream-salvageable value."""
-        return not validate_structured_output or (
-            output_schema is not None and (
-                validates_schema(value, output_schema) if require_full_schema or native_output
-                else _salvageable(value, output_schema)
-            )
-        )
-
     if native_output and aborted_reason is not None:
         structured_result = None
         if review_evidence is not None:
             review_evidence.checkpoint = None
-    if output_schema is not None and structured_result is not None and _usable(structured_result):
-        return structured_result, result_continuation, aborted_reason
-    selection: SchemaAwareSelection | None = None
-    if output_schema is not None:
-        # Fallback: robust extraction (prose-wrapped JSON, markdown fences) when
-        # structured output failed. Selection is schema-driven rather than
-        # size-driven — the last candidate this same gate admits wins — so
-        # incidental prose JSON ahead of a real answer (e.g. a trailing
-        # `{"issues": []}` after a bracket list) resolves to the answer, never to
-        # the largest span. The selected value must still pass the same
-        # salvage-tolerant gate as the success path (see _salvageable) — and, under
-        # the last-admitted-wins rule, a fully schema-valid candidate outranks any
-        # merely salvageable one (see _select_by_schema).
-        #
-        # The selector discriminates only when that gate discriminates. A caller
-        # that opts out via validate_structured_output=False has a vacuous gate,
-        # where "last admitted candidate" degenerates to the innermost span and
-        # would hand back a nested record instead of the intended object; those
-        # callers keep largest-span extraction. Everything else narrows to the
-        # last candidate its own gate admits, which never widens what is
-        # accepted.
-        # Staged native output is authoritative; rejection forbids salvaging text fragments from the same invocation.
-        if not native_output and raw.strip() and not text_overflow and not (
-            investigation_budget is not None and structured_result is not None):
-            selected: Any = None
-            if validate_structured_output:
-                selection = (extract_json_by_schema(raw, schema=output_schema, accept=validates_schema,
-                                                    require_complete_root=True, rejection_guard=schema_rejection_guard)
-                             if investigation_budget is not None else
-                             _select_by_schema(raw, output_schema, require_full_schema=require_full_schema))
-                selected = selection.value
-            else:
-                selected = extract_json(raw)
-            if selected is not None and _usable(selected):
-                return selected, result_continuation, aborted_reason
-    if output_schema is not None and (require_full_schema or native_output):
-        reason = ("malformed_output" if structured_result is not None or raw.strip() or text_overflow
-                  else "missing_output")
-        # Content-free rejection trace: the selected candidate's Python type name,
-        # its first schema error as "<validator> at <json_path>" (never the
-        # jsonschema message, which embeds candidate content), and how many spans
-        # the scan enumerated. Nothing here can inject model-authored text.
-        reject_detail: str | None = None
-        if reason == "malformed_output" and selection is not None and selection.rejected_type is not None:
-            reject_detail = (f"candidate type {selection.rejected_type} failed {selection.rejected_reason}"
-                             f"; {selection.candidate_count} candidate(s)")
-        rejection = (schema_rejection(structured_result, output_schema) if structured_result is not None else
-                     selection.rejection if selection is not None else None)
-        if rejection is not None:
-            reject_detail = (f"schema {rejection.category} at {rejection.schema_path}; "
-                             f"{rejection.error_count} error(s); {rejection.candidate_count} candidate(s)")
-        eligible = not native_output and (rejection is not None and (schema_rejection_guard is None
-                                              or schema_rejection_guard(structured_result))
-                    if structured_result is not None else
-                    selection.schema_retry_eligible if selection is not None else False)
-        failure = StructuredOutputFailure(raw, reason, reject_detail, rejection=rejection,
-                                          schema_retry_eligible=eligible,
-                                          syntax_error=selection.syntax_error if selection is not None else None)
-        return failure, result_continuation, aborted_reason
-    return raw, result_continuation, aborted_reason
+    output = resolve_output(
+        structured_result, raw, native_output=native_output, text_overflow=text_overflow,
+        output_schema=output_schema, validate_structured_output=validate_structured_output,
+        require_full_schema=require_full_schema, staged=investigation_budget is not None,
+        schema_rejection_guard=schema_rejection_guard,
+    )
+    return output, result_continuation, aborted_reason

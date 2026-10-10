@@ -193,9 +193,9 @@ async def test_structured_output() -> None:
                                              output_schema=schema, finalization=True)
     result_events = [e for e in events if isinstance(e, ResultEvent)]
     assert len(result_events) == 1
-    assert result_events[0].structured_output == {
-        "issues": [{"id": 1, "description": "Fix type hints", "file": "app.py", "line": 5}]
-    }
+    assert result_events[0].structured_output is None
+    assert json.loads(next(event.text for event in events if isinstance(event, TextEvent))) == {
+        "issues": [{"id": 1, "description": "Fix type hints", "file": "app.py", "line": 5}]}
     # Request records preserve the logical prompt; argv carries only an attachment.
     flat_args = list(mock_exec.call_args.args)
     positional = flat_args[-1]
@@ -205,15 +205,17 @@ async def test_structured_output() -> None:
     assert "JSON schema" in request.prompt
     assert json.dumps(schema) in request.prompt
 
-async def test_structured_output_selects_schema_valid_empty_result() -> None:
-    """A schema-valid empty result wins over an incidental larger array (issue #1445)."""
+async def test_text_transport_forwards_incidental_json_and_empty_result() -> None:
+    """The host receives the entire final text, including incidental JSON (issue #1445)."""
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("issue1445_empty_results.jsonl")
     events, _ = await replay_process(backend, mock_proc, Path("/tmp"), "Parse",
                                      output_schema=PER_STACK_RECORD_SCHEMA, finalization=True)
     result_events = [e for e in events if isinstance(e, ResultEvent)]
     assert len(result_events) == 1
-    assert result_events[0].structured_output == {"issues": []}
+    assert result_events[0].structured_output is None
+    text = next(event.text for event in events if isinstance(event, TextEvent))
+    assert '["module", "moduleVersion", "surface"]' in text and '{"issues": []}' in text
 
 @pytest.mark.parametrize('fault', ['none', 'domain-truncation', 'failed-last', 'mixed-read', 'mixed-read-first',
                                   'null-details', 'oversized-details', 'wrong-id', 'unsettled', 'late-exit'])
@@ -268,7 +270,7 @@ async def test_native_output_uses_finalized_transcript_order_and_requires_comple
         expected = {'answer': 'first' if fault == 'failed-last' else 'last',
                     **({'truncation': {'truncated': True, 'firstLineExceedsLimit': True}}
                                        if fault == 'domain-truncation' else {})}
-        assert result.structured_output == expected and result.structured_output_origin == 'native'
+        assert result.structured_output == expected
         assert all(not event.truncated for event in events if isinstance(event, ToolResultEvent))
         assert [event.id for event in events if isinstance(event, ToolStartEvent)] == (
             ['read', 'first', 'last'] if fault in {'mixed-read', 'mixed-read-first'} else ['first', 'last'])
