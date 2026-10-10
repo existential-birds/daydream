@@ -99,8 +99,8 @@ def _capture_stdout_and_run(config: RunConfig, monkeypatch: pytest.MonkeyPatch) 
         ),
         pytest.param([
                 ResultEvent(structured_output={"status": "complete", "token": REDACTION_SENTINEL}, continuation=None,)
-            ], {"log_mode": True, "quiet": True, "output_mode": "review"}, ("[result]", "[REDACTED_CREDENTIAL]"), (),
-            id="result-event",
+            ], {"log_mode": True, "quiet": True, "output_mode": "review"}, (), ("[result]", REDACTION_SENTINEL),
+            id="rejected-result-event",
         ),
         pytest.param([ToolStartEvent(
                     id="test-id", name="bash", input={"command": "false", "description": "failing command"},

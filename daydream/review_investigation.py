@@ -26,9 +26,11 @@ from daydream.prompt_budget import (
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.review_evidence import ReviewEvidence
 from daydream.review_result import reason_for_exception
+from daydream.run_context import resolve_run_context
 from daydream.trajectory import DaydreamPhase, LifecycleReasonCode, LifecycleStatus, phase_scope
+from daydream.ui.agent_stream import present_result
 
-STAGED_REVIEW_CONTRACT = 8
+STAGED_REVIEW_CONTRACT = 9
 HANDOFF_MAX_BYTES = 64 * 1024
 HANDOFF_MAX_ITEMS = 128
 
@@ -244,6 +246,9 @@ class ReviewInvestigation:
                         self.reason = self._admit(output, stage, targets, candidate_ids or [], evidence,
                                                   files=files or state['assigned_files'])
                     accepted = self.reason is None
+                    if accepted:
+                        context = resolve_run_context(agent_kwargs.get("run_context"))
+                        present_result(agent.console, context.policy, agent_kwargs.get("progress_callback"), output)
                 finally:
                     if self.reason in {'tool_call_budget_exceeded', 'wall_budget_exceeded', 'pipeline_budget_exceeded',
                                        'model_budget_exhaustion'}:

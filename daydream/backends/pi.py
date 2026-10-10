@@ -65,7 +65,6 @@ from daydream.backends._transport import (
     teardown,
 )
 from daydream.config import DEFAULT_PI_MODEL, DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
-from daydream.json_utils import extract_json, extract_json_by_schema, validates_schema
 from daydream.retry_policy import classify_failure, parse_message_retry_hint
 
 # Mirror Codex's generous stdout cap so large JSONL events (big file reads,
@@ -495,14 +494,11 @@ def _write_prompt_attachment(text: str, attachments: ExitStack) -> Path:
 class PiBackend:
     """Translate the Pi JSONL event stream into normalized AgentEvent records."""
 
-    supports_complete_output = True
     supports_finalization = True
     supports_tools_disabled = True
     supports_review_instructions = True
     supports_budget_preamble = True
-    # Honors a caller's validate_structured_output=False by keeping largest-span
-    # extraction instead of applying schema-aware selection, matching the host
-    # fallback in agent.py.
+    # Validation opt-out selects text transport for downstream partial-object validation.
     supports_structured_output_opt_out = True
     concise_fix_prompts = True  # DeepSeek produces verbose reasoning in fix prompts
 
@@ -565,7 +561,6 @@ class PiBackend:
         validate_structured_output: bool = True,
         wall_budget_s: float | None = None,
         tool_call_budget: int | None = None,
-        require_complete_root: bool = False,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Yield Pi events; a turn error raises PiError and nonempty agents are unsupported.
 
@@ -722,7 +717,7 @@ class PiBackend:
         full_prompt = prompt
         if native_output:
             full_prompt += "\n\nSubmit the final result using structured_output alone as your final action."
-        elif output_schema and not (require_complete_root and _stage_supplies_schema(prompt, output_schema)):
+        elif output_schema and not _stage_supplies_schema(prompt, output_schema):
             full_prompt = prompt + _schema_instruction(output_schema)
 
         # P18 Task 1: generation lifecycle correlation state (Pi only —
@@ -733,7 +728,6 @@ class PiBackend:
         generation_start_ns: int | None = None
 
         session_id: str | None = None
-        last_assistant_text: str | None = None
         structured_result: Any = None
         # Finalized toolResult sets transcript order; track association/settlement, never proposal/completion order.
         submission_calls: dict[str, str] = {}
@@ -789,7 +783,6 @@ class PiBackend:
                     provider_name=last_provider,
                     session_id=native_session,
                     finish_reason=finish_reason,
-                    structured_output_origin="native" if native_output else "text",
                 ),
             )
 
@@ -941,7 +934,6 @@ class PiBackend:
                     if msg.get("role") == "assistant":
                         last_model = msg.get("responseModel") or msg.get("model") or last_model
                         last_provider = msg.get("provider") or last_provider
-                        text_parts: list[str] = []
                         choice_parts: list[Any] = []
                         for block in msg.get("content") or []:
                             if not isinstance(block, dict):
@@ -951,7 +943,6 @@ class PiBackend:
                                 text = block.get("text", "")
                                 if text:
                                     yield TextEvent(text=text)
-                                    text_parts.append(text)
                                     choice_parts.append(TextChoicePart(text=text))
                             elif btype == "thinking":
                                 thinking_text = block.get("thinking", "")
@@ -991,8 +982,6 @@ class PiBackend:
                                             # Unsafe tool identity never enters the
                                             # provider choice (fixed admission policy).
                                             pass
-                        if text_parts:
-                            last_assistant_text = "".join(text_parts)
                         # P18: seal the generation exactly once at the matching
                         # assistant message_end, before any tool execution.
                         if open_generation_id is not None:
@@ -1162,21 +1151,6 @@ class PiBackend:
             )
             if native_output and returncode == 0 and not native_unsettled:
                 structured_result = pending_submission
-            elif not native_output and output_schema and last_assistant_text:
-                if validate_structured_output:
-                    # Schema-aware selection: the last candidate the per-stack schema
-                    # admits wins, so an incidental larger span cannot displace a valid
-                    # (possibly empty) result.
-                    structured_result = extract_json_by_schema(
-                        last_assistant_text, schema=output_schema, accept=validates_schema,
-                        require_complete_root=require_complete_root,
-                    ).value
-                else:
-                    # A caller that opts out of validation owns fail-closed checking
-                    # itself, so schema-aware selection would only narrow the value it
-                    # receives ("last admitted" degenerates to the innermost span).
-                    # Keep largest-span extraction, as the host fallback does.
-                    structured_result = extract_json(last_assistant_text)
             for terminal in terminal_events():
                 yield terminal
 

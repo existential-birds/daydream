@@ -666,8 +666,9 @@ do not guarantee model completion: observed tool starts can arrive after executi
 allowance without submitting remains incomplete. Native Pi supplies bounded live feedback on invocation-local tool
 starts before each model request, including failed tools and submissions; every member of a parallel batch counts.
 This improves pacing without changing tool admission or the recorded provider proposals. One fresh full-stage retry
-is permitted after a normally completed
-invocation fails strict schema validation; only safe validator metadata carries over, never rejected output. Other
+is permitted after a normally completed text-mode
+invocation fails strict schema validation and passes the domain rejection guard; only safe validator metadata
+carries over, never rejected output. Syntax, envelope, ambiguity and native-output failures are terminal. Other
 admission failures are terminal. Failed attempts admit no semantic state, and later failure preserves findings from
 successful stages while marking unfinished work incomplete.
 
@@ -680,8 +681,14 @@ recorded and charged, but do not authenticate claims or establish completion. Fi
 snapshot-bound and atomically published. `complete` requires success or explicit host no-op for every planned scope and
 required phase; it does not guarantee exhaustive defect discovery. The
 [stage contract](docs/extensions.md#stage-aware-review-builders-api-8) specifies identity/capture checks, triage state,
-backend transports and native output rules. Stage contract 8 invalidates older cached reviews; extension API 8 requires
+backend transports and native output rules. Stage contract 9 invalidates older cached reviews; extension API 8 requires
 staged builders.
+
+The host resolves only the final assistant turn. Staged text accepts one complete schema-valid result with ordinary
+prose, a closed JSON Markdown fence, or one transparent object wrapper (one property, no expected schema root fields).
+Complete unrelated JSON is ignored. Competing results, malformed or truncated envelopes/tails and unfinished fences
+are rejected without recovering nested fragments. Payload and assignment/domain validation still govern admission;
+accepted host results are presented once, while raw provider events remain trajectory evidence.
 
 When a review agent exhausts its time or tool-call budget, Daydream continues with
 completed reviewers' findings and validated partial checkpoints, and marks the

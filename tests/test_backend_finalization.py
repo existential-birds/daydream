@@ -19,6 +19,7 @@ from daydream.backends import (
     PiRequestConfig,
     RequestEvent,
     ResultEvent,
+    TextEvent,
     ToolStartEvent,
 )
 from daydream.backends.claude import ClaudeBackend
@@ -95,8 +96,8 @@ async def test_cli_finalization_controls_are_local_to_overlapping_calls(
         assert final.config.selected_tools_count == 0
         assert final.config.schema_emulated is True
         assert isinstance(normal.config, PiRequestConfig) and normal.config.schema_emulated is False
-        assert next(event for event in final_events if isinstance(event, ResultEvent)).structured_output == {
-            'findings': []}
+        assert next(event for event in final_events if isinstance(event, ResultEvent)).structured_output is None
+        assert [event.text for event in final_events if isinstance(event, TextEvent)] == ['{"findings":[]}']
         assert next(event for event in normal_events if isinstance(event, ResultEvent)).structured_output is None
     else:
         assert any(f'model_reasoning_effort="{expected}"' in args for args in commands)

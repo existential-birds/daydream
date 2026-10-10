@@ -149,6 +149,27 @@ class TestExtractJsonBySchema:
         assert offered == [value for _start, value, _span_len in scan]
         assert (selection.candidate_count, selection.value) == (len(scan), None)
 
+@pytest.mark.parametrize(("text", "expected", "syntax"), [
+    ('```\n{"issues": []}\n```', {"issues": []}, False),
+    (json.dumps({"result": {"issues": ['braces } ] and escaped " quotes \\']}}),
+     {"issues": ['braces } ] and escaped " quotes \\']}, False),
+    ('[{"issues": []}] followed by {"issues": []}', {"issues": []}, False),
+    ('{"result": {"issues": []} tail', None, True),
+    ('{"issues": []} "literal [ unfinished"', None, True),
+    ('[] ' * 128 + '{"issues": []}', None, True),
+])
+def test_staged_decoder_consumes_outer_spans_and_bounds_packaging(
+    text: str, expected: Any, syntax: bool,
+) -> None:
+    schema = {"type": "object", "required": ["issues"], "properties": {"issues": {"type": "array"}},
+              "additionalProperties": False}
+    selection = extract_json_by_schema(text, schema=schema, accept=validates_schema, require_complete_root=True)
+    assert selection.value == expected
+    assert (selection.syntax_error is not None) is syntax
+    assert not selection.schema_retry_eligible and selection.rejection is None
+    assert selection.candidate_count <= 128
+
+
 class TestAtomicWritePrimitives:
     def test_bytes_roundtrip_and_replaces_prior_content(self, tmp_path: Path) -> None:
         target = tmp_path / "nested" / "data.bin"

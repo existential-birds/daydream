@@ -15,7 +15,6 @@ from daydream.backends import (
     CostEvent,
     DiagnosticEvent,
     MetricsEvent,
-    ResultEvent,
     TextEvent,
     ThinkingEvent,
     ToolResultEvent,
@@ -150,8 +149,6 @@ class AgentDisplay:
         elif isinstance(event, CostEvent):
             cost = f"${event.cost_usd:.4f}" if event.cost_usd is not None else "unknown"
             _print_log(f"[cost] {cost}")
-        elif isinstance(event, ResultEvent) and event.structured_output is not None:
-            _print_log(f"[result] {json.dumps(redact_value(event.structured_output))[:500]}")
 
     def _live(self, event: AgentEvent) -> None:
         if isinstance(event, TextEvent):
@@ -173,10 +170,6 @@ class AgentDisplay:
             self._finish_text()
             self.console.print()
             print_cost(self.console, event.cost_usd)
-        elif isinstance(event, ResultEvent) and isinstance(event.structured_output, dict):
-            issues = event.structured_output.get("issues", [])
-            if issues:
-                self.text.append("\n".join(_issue_line(issue) for issue in issues))
 
     async def _status(self, log: str, callback: str, live: str) -> None:
         if self.log_mode:
@@ -204,3 +197,16 @@ def _issue_line(issue: dict[str, Any]) -> str:
     if "file" in issue and "line" in issue:
         return f"[{issue_id}] {issue['file']}:{issue['line']} - {issue.get('description', '')}"
     return f"[{issue_id}] {issue.get('title', issue.get('description', ''))}"
+
+
+def present_result(console: Console, policy: InteractionPolicy, callback: Callable[[Text], Any] | None,
+                   value: Any) -> None:
+    """Present the host-resolved result after validation and any staged admission."""
+    if policy.log_mode:
+        _print_log(f"[result] {json.dumps(redact_value(value))[:500]}")
+    elif callback is None and isinstance(value, dict):
+        issues = value.get("issues", [])
+        if issues:
+            renderer = AgentTextRenderer(console)
+            renderer.append(redact_structured_text("\n".join(_issue_line(issue) for issue in issues)))
+            renderer.finish()

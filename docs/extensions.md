@@ -564,6 +564,20 @@ coverage incomplete. Contradictions among known closed candidates mark affected 
 decisions or discarding retained findings.
 The host owns candidate/finding identities and validates the final result; snapshot-bound typed coverage and findings
 are [atomically published](../README.md#terminal-review-findings-contract).
+Internal stage contract 9 invalidates contract-8 review caches; extension API remains 8.
+
+The host owns text resolution from the final assistant turn, including explicit empty turns and bounded overflow.
+Staged text permits ordinary prose, closed JSON Markdown fences and one transparent object wrapper with exactly one
+property whose value validates, provided the wrapper has no expected schema root fields. It consumes complete outer
+JSON spans, ignores unrelated complete roots and requires one unambiguous result. Competing results, output-shaped
+invalid roots, wrapper siblings, result lists, recursive wrappers, truncation, malformed tails and unfinished fences
+cannot recover descendants. A single complete schema-invalid text payload retains one fresh retry only when the
+existing domain rejection guard passes; syntax, envelope, ambiguity, domain and native failures do not qualify.
+Stage/domain admission precedes result presentation. Backend events remain raw trajectory evidence.
+
+Adapters emit assistant text and genuine transport/native structured payloads; host validation and nonstaged
+schema-aware selection/salvage remain separate from transport. Improve recon/authoring keep validation-opt-out text
+transport and downstream partial-object repair.
 
 For native Pi stages, the host reserves minimum assignment-input reads and structured submissions for undispatched
 batches, plus submissions for known later triage chunks. The current invocation's hard allowance excludes that reserve;

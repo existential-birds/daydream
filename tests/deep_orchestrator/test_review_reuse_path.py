@@ -354,7 +354,7 @@ async def test_no_review_cache_disables_the_store_and_bypasses_the_exploration_c
 
 @pytest.mark.parametrize("damage", ["legacy", "corrupt", "incomplete", "head", "diff", "scope", "origin",
                                      "partial_payload", "malformed_payload", "unstaged", "prior-staged",
-                                     "contract-3", "contract-4", "contract-5", "contract-6"])
+                                     "contract-3", "contract-4", "contract-5", "contract-6", "contract-8"])
 async def test_legacy_cache_without_coverage_proof_recomputes_review(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     damage: str,
@@ -364,7 +364,8 @@ async def test_legacy_cache_without_coverage_proof_recomputes_review(
     config = make_config(multi_stack_target)
     assert await run(config) == 0
     entries = multi_stack_target / ".daydream" / "review-cache" / "entries"
-    staged_damage = damage in {"unstaged", "prior-staged", "contract-3", "contract-4", "contract-5", "contract-6"}
+    staged_damage = damage in {"unstaged", "prior-staged", "contract-3", "contract-4", "contract-5", "contract-6",
+                               "contract-8"}
     downgraded = 0
     for manifest_path in entries.glob("*/manifest.json"):
         manifest = json.loads(manifest_path.read_text())
