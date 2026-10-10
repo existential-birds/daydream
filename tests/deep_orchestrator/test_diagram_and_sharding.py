@@ -153,8 +153,7 @@ async def test_no_parse_phase_and_records_from_output_schema(multi_stack_target:
 
 
 async def test_default_cap_coarsens_only_enough_and_preserves_scope_qualified_work(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from collections import Counter
 
     from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents

@@ -64,8 +64,7 @@ async def test_cli_finalization_controls_are_local_to_overlapping_calls(
             return pi_process([json.dumps(event) for event in [
                 {"type": "turn_start"}, {"type": "message_end", "message": message},
                 {"type": "turn_end", "message": message}, {"type": "agent_end", "messages": []},
-                {"type": "agent_settled"},
-            ]])
+                {"type": "agent_settled"}]])
         return codex_process([json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}})])
     async def run(finalization: bool) -> list[Any]:
         return [event async for event in backend.execute(

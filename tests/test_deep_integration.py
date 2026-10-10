@@ -30,10 +30,9 @@ from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.conftest import silence_module_console
 from tests.deep_orchestrator.test_review_completion import record
-from tests.deep_orchestrator.test_review_investigation import candidate
 from tests.harness.backend import ScriptedBackend
 from tests.harness.review_result import merge_result
-from tests.harness.stub_backend import review_stage_state, stage_result
+from tests.harness.stub_backend import review_stage_result, review_stage_state
 
 
 class _DeepMockBackend(ScriptedBackend):
@@ -65,7 +64,7 @@ class _DeepMockBackend(ScriptedBackend):
 
         stage = review_stage_state(prompt)
         if stage is not None:
-            events.extend(self._review_stage(Path(cwd), stage))
+            events.extend(self._review_stage(Path(cwd), stage, prompt))
             return events
 
         # Checked before the alt branch: the alt-review prompt also contains "intent".
@@ -97,14 +96,12 @@ class _DeepMockBackend(ScriptedBackend):
         events += [TextEvent(text=""), ResultEvent(structured_output=None, continuation=None)]
         return events
 
-    def _review_stage(self, cwd: Path, stage: dict[str, Any]) -> list[Any]:
+    def _review_stage(self, cwd: Path, stage: dict[str, Any], prompt: str) -> list[Any]:
         """Supply provider findings for the parity runner's assigned scopes."""
         structural = stage["scope_id"] == STRUCTURE_STACK_NAME
         assert stage["stage"] == ("integration" if structural else "first_pass")
         self.stages.append("structure" if structural else "per-stack")
-        assert stage["assigned_target_ids"] == (
-            ["integration:structure"] if structural else stage["assigned_files"]
-        )
+        assert stage["assigned_target_ids"] == (["integration:structure"] if structural else stage["assigned_files"])
         findings = []
         if ("api.py" in stage["assigned_files"]
                 and (structural or self.language_finding and stage["scope_id"] == "python")):
@@ -113,11 +110,8 @@ class _DeepMockBackend(ScriptedBackend):
             finding = dict(record(), description=description,
                            rationale="The changed hello() return is verified in api.py:2.",
                            evidence="api.py:2 return 'universe'")
-            findings.append(dict(candidate(disposition='confirmed', finding=finding),
-                                 trigger="Calling hello() after the changed greeting contract",
-                                 consequence="The returned greeting changes from world to universe.",
-                                 grounds="api.py:2 return 'universe' in the complete hello() symbol"))
-        return [ResultEvent(structured_output=stage_result(stage, candidates=findings), continuation=None)]
+            findings.append(finding)
+        return [ResultEvent(structured_output=review_stage_result(prompt, findings), continuation=None)]
 
 def _silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
     """Silence noisy UI helpers at their current production owners."""

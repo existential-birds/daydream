@@ -24,14 +24,11 @@ def build_review_stage_system_instruction(review_stage: dict[str, Any]) -> str:
         access_guide = '{}'
     return (
         STAGED_REVIEW_GUIDANCE + '\nPersistent assignment identities: '
-        + json.dumps({
-            'stage': review_stage['stage'],
-            'targets': review_stage['assigned_target_ids'],
+        + json.dumps({'stage': review_stage['stage'], 'targets': review_stage['assigned_target_ids'],
             'candidate_ids': review_stage.get('assigned_candidate_ids', []),
             'closed_candidate_ids': review_stage.get('closed_candidate_ids', []),
             'closed_decisions': review_stage.get('closed_decisions', []),
-        }, ensure_ascii=False) + '.\nPersistent exact access guide (supporting metadata): '
-        + access_guide
+        }, ensure_ascii=False) + '.\nPersistent exact access guide (supporting metadata): ' + access_guide
     )
 
 
@@ -51,8 +48,7 @@ def _confidence_and_convention_instructions(*, stage_scoped: bool = False) -> st
     )
     grounding = (
         "Use the supplied change and useful ordinary investigation for both findings and clean decisions. "
-        if stage_scoped else
-        "You are reviewing AI-generated code. Be strict. Only report an issue you can ground "
+        if stage_scoped else "You are reviewing AI-generated code. Be strict. Only report an issue you can ground "
         "in evidence — the diff itself or a specific Exploration Context entry. "
     )
     scope = (
@@ -112,8 +108,7 @@ def _dependency_impact_instructions(*, stage_scoped: bool = False) -> str:
         "Apply dependency-impact analysis only to changed symbols in the current assigned file/hunk "
         "parts, including ordered continuation segments where present. "
         "Other paths are supporting context only for concrete candidates in that assigned work:\n"
-        if stage_scoped else
-        "Apply dependency-impact analysis to every changed symbol listed in the Exploration "
+        if stage_scoped else "Apply dependency-impact analysis to every changed symbol listed in the Exploration "
         "Context dependencies above:\n"
     )
     return (

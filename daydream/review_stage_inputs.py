@@ -16,7 +16,7 @@ from daydream.deep.diff import _DIFF_MINUS_HEADER, _DIFF_PLUS_HEADER, iter_diff_
 from daydream.git_ops.models import GitError
 from daydream.git_ops.source import frozen_source
 from daydream.hunk_index import _HUNK_HEADER, _unquote_git_path
-from daydream.json_utils import atomic_write_bytes
+from daydream.json_utils import atomic_write_bytes, canonical_json as _json
 from daydream.prompt_budget import (
     SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES,
     AdvisoryCandidate,
@@ -33,10 +33,6 @@ from daydream.prompt_budget import (
 from daydream.workspace import WorkContext
 
 _EXACT_PATH_ASSIGNMENT_MAX_BYTES = 24 * 1024
-
-
-def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 @dataclass
@@ -69,13 +65,10 @@ class StageInputFactory:
     inline transport, never whole-change artifacts as first-pass inputs.
     """
 
-    def __init__(
-        self, backend: Backend, work: WorkContext, stack: StackAssignment, *,
+    def __init__(self, backend: Backend, work: WorkContext, stack: StackAssignment, *,
         diff_path: Path, hunk_index_path: Path, shared_paths: dict[str, Path | None],
-        revision: dict[str, Any], artifact_session: ArtifactSession | None,
-        allow_standalone: bool, read_only: bool,
-        bundle_capable: bool = False,
-    ) -> None:
+        revision: dict[str, Any], artifact_session: ArtifactSession | None, allow_standalone: bool, read_only: bool,
+        bundle_capable: bool = False) -> None:
         self.backend, self.work, self.stack = backend, work, stack
         self.revision = revision
         self.session, self.allow_standalone, self.read_only = artifact_session, allow_standalone, read_only
@@ -85,8 +78,7 @@ class StageInputFactory:
         # Capture hashes through the existing no-follow, bounded streaming
         # capture. These identities stay host-only, regardless of transport.
         self.canonical = tuple(self._canonical(label, path) for label, path in (
-            ("canonical-diff", diff_path), ("canonical-index", hunk_index_path),
-        ))
+            ("canonical-diff", diff_path), ("canonical-index", hunk_index_path)))
         self.full_diff = diff_path.read_text(encoding="utf-8")
         index_text = hunk_index_path.read_text(encoding="utf-8")
         self.index = json.loads(index_text)
@@ -136,8 +128,7 @@ class StageInputFactory:
                         continue
                     seen_ranges.add(bounds)
                     keys = ('old_start', 'old_end', 'new_start', 'new_end')
-                    matching = next((hunk for hunk in hunks
-                                     if tuple(hunk[key] for key in keys) == bounds), None)
+                    matching = next((hunk for hunk in hunks if tuple(hunk[key] for key in keys) == bounds), None)
                     if matching is not None:
                         selected.append(matching)
                     elif part['new_count'] == 0:
@@ -186,8 +177,7 @@ class StageInputFactory:
                     if target_id not in reserved_targets:
                         break
                 reserved_targets.add(target_id)
-                part.assignment.update(target_id=target_id,
-                                       part_index=index, part_count=len(pieces))
+                part.assignment.update(target_id=target_id, part_index=index, part_count=len(pieces))
             result.extend(pieces)
         return result
 
@@ -209,8 +199,7 @@ class StageInputFactory:
             parts.extend(self._segments(path, header, body, ordinal, bounds))
         return parts
 
-    def _segments(
-        self, path: str, header: str, body: str, hunk_index: int, bounds: tuple[int, int, int, int],
+    def _segments(self, path: str, header: str, body: str, hunk_index: int, bounds: tuple[int, int, int, int],
     ) -> list[_Part]:
         old_start, old_count, new_start, new_count = bounds
         base = {"target_id": "part:000000", "file": path, "part_index": 999999, "part_count": 999999,
@@ -264,11 +253,9 @@ class StageInputFactory:
                 for index, (chunk, offset, old, new, size, line_offset) in enumerate(chunks, 1)]
 
     def _batches(self) -> list[list[dict[str, Any]]]:
-        batches = _bounded_groups(
-            self.parts,
+        batches = _bounded_groups(self.parts,
             lambda parts: len({p.assignment['file'] for p in parts}) <= 4 and self._fits(self._render(parts)),
-            "required assignment exceeds the assignment allowance",
-        )
+            "required assignment exceeds the assignment allowance")
         return [[part.assignment for part in batch] for batch in batches]
 
     def _write(self, relative: Path, text: str) -> Path:
@@ -290,8 +277,7 @@ class StageInputFactory:
                             if line.startswith("rename from ")), None)
         return (_unquote_git_path(rename_from) if rename_from is not None else paths[0]), paths[1]
 
-    def _before_context(self, files: set[str], directory: Path,
-                        statuses: list[dict[str, str]]) -> dict[str, Path]:
+    def _before_context(self, files: set[str], directory: Path, statuses: list[dict[str, str]]) -> dict[str, Path]:
         """Offer bounded ordinary file context for old paths file-only tools cannot reach."""
         if type(self.backend).__name__ not in {"PiBackend", "OspreyBackend"}:
             return {}
@@ -350,7 +336,7 @@ class StageInputFactory:
                     for item in prepared.inputs if item.prompt_visible]
         return _json({"stage": state["stage"], "contexts": contexts})
 
-    def prepare(self, state: dict[str, Any]) -> PreparedSanctionedInputs | None:
+    def prepare(self, state: dict[str, Any]) -> PreparedSanctionedInputs:
         self._revalidate_canonical()
         shared_paths = {} if state['stage'] == 'triage' else self.shared_paths
         statuses: list[dict[str, str]] = []
@@ -420,13 +406,10 @@ class StageInputFactory:
             if new_path == "/dev/null" and old_path != "/dev/null":
                 before_files.add(file)
         before_context = self._before_context(before_files, directory, statuses)
-        selection = select_advisory_inputs(
-            self.backend, self.work.repo,
+        selection = select_advisory_inputs(self.backend, self.work.repo,
             [AdvisoryCandidate(label, path) for label, path in paths.items()]
             + [AdvisoryCandidate(label, path) for label, path in shared_paths.items() if path is not None]
-            + [AdvisoryCandidate(label, path) for label, path in before_context.items()],
-            read_only=self.read_only,
-        )
+            + [AdvisoryCandidate(label, path) for label, path in before_context.items()], read_only=self.read_only)
         admitted = selection.selected_paths()
         if not paths.keys() <= admitted.keys():
             raise SanctionedInputUnavailable("required stage inputs exceed the transport allowance")
@@ -454,8 +437,7 @@ class StageInputFactory:
         prepared = prepare_sanctioned_inputs(self.backend, self.work.repo, paths, read_only=self.read_only)
         prepared = replace(prepared, inputs=tuple(replace(item, prompt_visible=False)
                                                   if (item.label in deferred_paths or item.label in catalog_paths)
-                                                  else item
-                                                  for item in prepared.inputs))
+                                                  else item for item in prepared.inputs))
         if self.bundle_capable and self.transport is SanctionedInputTransport.EXACT_PATHS:
             # Required assignments travel as exact pointers. Only shared bytes
             # actually inlined consume the inline allowance, including wrappers.
@@ -481,8 +463,7 @@ class StageInputFactory:
         statuses.extend({"label": label, "status": "complete"} for label in paths if label not in declared_status)
         if compact_structure:
             state['context_availability'] = {
-                'supporting_parts': len(deferred_paths), 'supporting_catalogs': len(catalog_paths),
-            }
+                'supporting_parts': len(deferred_paths), 'supporting_catalogs': len(catalog_paths)}
             statuses = [status for status in statuses if status['status'] != 'complete' or
                         not (status['label'] in deferred_paths or status['label'] in catalog_paths)]
         state.update(context_inputs=list(paths), context_transport=prepared.transport.value, context_statuses=statuses,
@@ -496,7 +477,6 @@ class StageInputFactory:
             'assignment_units': 1 if state['stage'] == 'integration' else len(self.parts) - len(decided),
             'files': len({part.assignment['file'] for part in remaining}),
             'stages': 1 if state['stage'] == 'integration' else sum(
-                any(part['target_id'] not in decided for part in batch) for batch in self.assignment_batches),
-        }
+                any(part['target_id'] not in decided for part in batch) for batch in self.assignment_batches)}
         state['access_guide'] = self._access_guide(state, prepared)
         return prepared

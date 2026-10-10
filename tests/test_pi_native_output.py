@@ -12,17 +12,12 @@ from daydream.backends import PiRequestConfig, RequestEvent, ResultEvent, ToolSt
 from daydream.backends.pi import PiBackend
 from tests.harness.otlp import _loopback_http_server, _QuietHTTPHandler
 
-_SCHEMA = {
-    "type": "object", "additionalProperties": False,
-    "properties": {"verdict": {"type": "string"}, "findings": {"type": "array"}},
-    "required": ["verdict", "findings"],
-}
+_SCHEMA = {"type": "object", "additionalProperties": False,
+    "properties": {"verdict": {"type": "string"}, "findings": {"type": "array"}}, "required": ["verdict", "findings"]}
 
 
 @pytest.mark.asyncio
-async def test_installed_pi_submits_native_structured_output(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_installed_pi_submits_native_structured_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     native_pi = shutil.which("pi")
     if native_pi is None or shutil.which("node") is None:
         pytest.skip("The installed official Pi CLI and Node are required for native tool loading.")
@@ -50,8 +45,7 @@ async def test_installed_pi_submits_native_structured_output(
             for payload in deltas:
                 self.wfile.write(("data: " + json.dumps({
                     "id": "native-output", "object": "chat.completion.chunk", "created": 1,
-                    "model": "output-model", **payload,
-                }) + "\n\n").encode())
+                    "model": "output-model", **payload}) + "\n\n").encode())
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
 
@@ -59,13 +53,10 @@ async def test_installed_pi_submits_native_structured_output(
         (config / "models.json").write_text(json.dumps({"providers": {"output-fixture": {
             "baseUrl": f"{base_url}/v1", "api": "openai-completions",
             "apiKey": "synthetic-loopback-only", "models": [{"id": "output-model", "reasoning": False,
-                "input": ["text"], "contextWindow": 32768, "maxTokens": 8192}],
-        }}}))
+                "input": ["text"], "contextWindow": 32768, "maxTokens": 8192}]}}}))
         monkeypatch.setenv("PI_PROVIDER", "output-fixture")
         events = [event async for event in PiBackend(model="output-model").execute(
-            tmp_path, "Return the requested result.", output_schema=_SCHEMA,
-            read_only=True, persist_session=False,
-        )]
+            tmp_path, "Return the requested result.", output_schema=_SCHEMA, read_only=True, persist_session=False)]
 
     request = next(event for event in events if isinstance(event, RequestEvent))
     assert isinstance(request.config, PiRequestConfig)

@@ -48,7 +48,6 @@ from tests.harness.stub_backend import (
     force_interactive,
     install_stub_backend,
     review_stage_result,
-    review_stage_state,
     silence,
 )
 from tests.harness.trajectory import diff_adding
@@ -512,8 +511,6 @@ def _fix_editing_backend(repo: Path) -> ScriptedBackend:
             or "assigned to this stack" in pl
             or "repository-wide interactions" in pl
         ):
-            state = review_stage_state(prompt)
-            assert state is not None
             return [TextEvent(text="Review complete."),
                 ResultEvent(structured_output=review_stage_result(prompt, [{
                                 "id": 1, "description": "Add a guard", "file": "main.py", "line": 1,

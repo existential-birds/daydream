@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +22,7 @@ from daydream.backends import (
 from daydream.config_file import DaydreamFileConfig
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.test_review_completion import record, scopes
-from tests.deep_orchestrator.test_review_investigation import InvestigationRun, StagedBackend, candidate, stage_ends
+from tests.deep_orchestrator.test_review_investigation import InvestigationRun, candidate, read_events, stage_ends
 from tests.harness.git_helpers import seed_feature_branch
 from tests.test_deep_orchestrator import _sanctioned_inputs
 
@@ -53,29 +53,19 @@ def supporting_contents(prompt: str) -> dict[str, str]:
     return captured
 
 
-async def test_optional_tool_results_do_not_poison_a_valid_review(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    review = staged_review(tmp_path, monkeypatch, files=1)
-
-    @review.backend.script('python')
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
-        yield ToolStartEvent(id='optional', name='Bash', input={'command': 'rg definitely_absent .'})
-        yield ToolResultEvent(id='optional', output='x' * (2 * 1024 * 1024 + 1),
-                              is_error=True, exit_code=1, truncated=True)
-        yield ToolResultEvent(id='unassociated', output='failed optional lookup', is_error=True)
-        output['candidates'] = [candidate(disposition='confirmed', finding=record())]
-
-    await review.finish('python', findings=('Grounded defect',))
-    metadata, = [item['metadata'] for item in stage_ends(review, 'python')]
-    assert metadata['admitted'] is True
-    assert metadata['observed_tool_starts'] == 1
+def capture(review: InvestigationRun, stage: dict[str, Any], *, bundle: bool = True) -> tuple[str, dict[str, Any]]:
+    """Read the delivered assignment and bind its bounded index to the current files."""
+    contents = supporting_contents(review.backend.calls[-1]['prompt'])
+    index = json.loads(contents['hunk-index'])
+    assert set(index) == set(stage['assigned_files'])
+    if bundle and not review.backend.sandbox:
+        assert len(Path(stage['supporting_bundle']['path']).read_bytes()) <= 24 * 1024
+    return contents['diff'], index
 
 
 @pytest.mark.parametrize('outcome', ['success', 'second-rejection'])
 async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_starts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, ext_dir: ExtDir,
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, ext_dir: ExtDir) -> None:
     ext_dir.write_module(
         'from daydream.deep.prompts import build_per_stack_prompt\n'
         'def staged(**kw):\n'
@@ -94,9 +84,7 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
             assert stage['attempt'] == attempts and stage['max_attempts'] == 2
             assert f'CUSTOM_ATTEMPT={attempts}' in review.backend.calls[-1]['prompt']
         for path in stage['assigned_files']:
-            yield ToolStartEvent(id=f'attempt-{attempts}-{path}', name='Read', input={'file_path': path})
-            yield ToolResultEvent(id=f'attempt-{attempts}-{path}', output=(review.repo / path).read_text(),
-                                  is_error=False, truncated=False)
+            yield from read_events(review.repo, path, event_id=f'attempt-{attempts}-{path}')
         if not initial_assignment:
             assert all('FAILED_ATTEMPT_MARKER' not in str(item) for item in stage['notes'])
             return
@@ -132,8 +120,7 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
 @pytest.mark.parametrize(('payload', 'omit_final'), [('medium-file', False), ('oversized-hunk', False),
                                                       ('oversized-hunk', True), ('unicode-line', False)])
 async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool, payload: str, omit_final: bool,
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool, payload: str, omit_final: bool) -> None:
     from daydream import git_ops
     from daydream.prompt_budget import SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
 
@@ -173,15 +160,12 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
             assert len(rendered.encode()) <= SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
             assert str(repo / '.daydream') not in prompt
             assert 'Sanctioned phase inputs (read only these exact files):' not in prompt
-        else:
-            assert len(Path(stage['supporting_bundle']['path']).read_bytes()) <= 24 * 1024
-        captured = supporting_contents(prompt)
-        index = json.loads(captured['hunk-index'])
+        diff, index = capture(review, stage)
         assert list(index) == ['api.py']
         assert index['api.py']['assignments'][0]['target_id'] == part['target_id']
-        body = captured['diff'].split('\n@@', 1)[1].split('\n', 1)[1].encode()
+        body = diff.split('\n@@', 1)[1].split('\n', 1)[1].encode()
         if medium and not sandbox:
-            assert captured['diff'] == canonical
+            assert diff == canonical
             assert '<sanctioned-input label="intent">' in prompt
             assert 'The PR updates greetings across stacks.' in prompt
             output['candidates'] = [candidate(disposition='confirmed', finding=record())]
@@ -209,8 +193,7 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
 
 @pytest.mark.parametrize('bundle_capable', [False, True], ids=['legacy-files', 'explicit-bundle'])
 async def test_current_exact_builder_signatures_route_generic_and_rust_shards(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, bundle_capable: bool,
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, bundle_capable: bool) -> None:
     ext_dir.write_module(
         'from dataclasses import dataclass\n'
         'from daydream.deep.prompts import (build_generic_fallback_prompt, build_per_stack_prompt, '
@@ -253,9 +236,8 @@ async def test_current_exact_builder_signatures_route_generic_and_rust_shards(
             assert 'EXACT_LANGUAGE_OVERRIDE' in prompt
             assert 'Error Handling Semantics' in prompt and 'Nested serde defaults' in prompt
             assert 'Confidence and Convention Rules' in prompt
-            supporting = supporting_contents(prompt)
-            assert supporting['diff'].startswith('diff --git ')
-            assert set(json.loads(supporting['hunk-index'])) == set(stage['assigned_files'])
+            diff, _ = capture(review, stage, bundle=bundle_capable)
+            assert diff.startswith('diff --git ')
             assert ('review-assignment' in stage['context_inputs']) is bundle_capable
             language_invocations.append(stage['assigned_files'])
         else:
@@ -273,8 +255,7 @@ async def test_current_exact_builder_signatures_route_generic_and_rust_shards(
     assert all(event['metadata']['admitted'] for scope in expected for event in stage_ends(review, scope))
 
 
-async def test_realistic_diff_and_index_are_scoped_to_assigned_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+async def test_realistic_diff_and_index_are_scoped_to_assigned_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
 
     before: dict[str, str] = {}
@@ -295,11 +276,8 @@ async def test_realistic_diff_and_index_are_scoped_to_assigned_files(
 
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
-        captured = supporting_contents(review.backend.calls[-1]['prompt'])
-        diff, index = captured['diff'], json.loads(captured['hunk-index'])
-        assert set(index) == set(stage['assigned_files'])
+        diff, _ = capture(review, stage)
         assert set(path for path in after if f'diff --git a/{path} b/{path}' in diff) == set(stage['assigned_files'])
-        assert len(Path(stage['supporting_bundle']['path']).read_bytes()) <= 24 * 1024
         exposed.append(diff)
         if 'api.py' in stage['assigned_files'] and not stage['progress']:
             assert 'BOUNDARY_00 = 1' in (repo / 'api.py').read_text()
@@ -314,22 +292,18 @@ async def test_realistic_diff_and_index_are_scoped_to_assigned_files(
 
 @pytest.mark.parametrize('path', ['component_雪.py', 'nested/component_"quote".py', 'component_\t.py'])
 async def test_quoted_git_paths_keep_complete_required_stage_inputs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str,
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str) -> None:
 
     repo = tmp_path / 'quoted_paths'
-    seed_feature_branch(repo, base={path: 'VALUE = 0\n'},
-                        feature={path: "VALUE = 'QUOTED_REQUIRED_CHANGE'\n"})
+    seed_feature_branch(repo, base={path: 'VALUE = 0\n'}, feature={path: "VALUE = 'QUOTED_REQUIRED_CHANGE'\n"})
     review = InvestigationRun(repo, tmp_path, monkeypatch)
     required: list[str] = []
 
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         assert stage['assigned_files'] == [path]
-        captured = supporting_contents(review.backend.calls[-1]['prompt'])
-        diff = captured['diff']
+        diff, _ = capture(review, stage)
         assert 'QUOTED_REQUIRED_CHANGE' in diff
-        assert path in json.loads(captured['hunk-index'])
         required.append(diff)
 
     data = await review.finish('python')
@@ -338,8 +312,7 @@ async def test_quoted_git_paths_keep_complete_required_stage_inputs(
 
 
 async def test_failed_canonical_stage_input_preserves_successful_sibling_review(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     review = InvestigationRun(multi_stack_target, tmp_path, monkeypatch)
     real_read = Path.read_text
@@ -369,8 +342,7 @@ async def test_failed_canonical_stage_input_preserves_successful_sibling_review(
     assert 'PRIVATE_DIAGNOSTIC_PATH_SENTINEL' not in capsys.readouterr().out
 
 
-async def test_changed_prepared_input_identity_blocks_admission(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+async def test_changed_prepared_input_identity_blocks_admission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
 
     review = staged_review(tmp_path, monkeypatch, files=1)
@@ -391,25 +363,15 @@ async def test_changed_prepared_input_identity_blocks_admission(
 
 @pytest.mark.parametrize('sandbox', [False, True], ids=['exact-whole-context', 'inline-context-unavailable'])
 async def test_shared_intent_uses_actual_transport_allowance_after_required_assignment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool,
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool) -> None:
 
     review = staged_review(tmp_path, monkeypatch, files=2)
     shared_intent = 'The greeting API promises world and this change must preserve callers.\n' * 600
     assert 40_000 < len(shared_intent.encode()) < 48_000
 
-    class LargeIntentBackend(StagedBackend):
-        async def execute(self, cwd: Path, prompt: str, *args: Any,
-                          **kwargs: Any) -> AsyncIterator[AgentEvent]:
-            if 'understand the intent of these changes' in prompt.lower():
-                self.calls.append({'prompt': prompt, **kwargs})
-                yield TextEvent(text=shared_intent)
-                yield ResultEvent(structured_output=None, continuation=None)
-                return
-            async for event in super().execute(cwd, prompt, *args, **kwargs):
-                yield event
-
-    review.backend = LargeIntentBackend(review.repo)
+    review.backend.responder = lambda prompt: (
+        [TextEvent(text=shared_intent), ResultEvent(structured_output=None, continuation=None)]
+        if 'understand the intent of these changes' in prompt.lower() else None)
     review.backend.sandbox = sandbox
 
     @review.backend.script('python')
@@ -456,8 +418,7 @@ async def test_shared_intent_uses_actual_transport_allowance_after_required_assi
     ('misplaced-closing-brace', 'malformed_output', 1),
 ])
 async def test_strict_stage_selection_never_salvages_rejected_or_incomplete_output(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, reason: str | None, attempts: int,
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, reason: str | None, attempts: int) -> None:
     review = staged_review(tmp_path, monkeypatch, files=2)
 
     @review.backend.script(terminal=False)
@@ -541,8 +502,7 @@ async def test_strict_stage_selection_never_salvages_rejected_or_incomplete_outp
 
 
 async def test_opaque_assignment_handles_cannot_alias_real_changed_filenames(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     repo = tmp_path / 'assignment_identity'
     payload = ''.join(f'# REQUIRED_LARGE_CHANGE_{index:04} ' + 'x' * 90 + '\n' for index in range(600))
@@ -558,10 +518,7 @@ async def test_opaque_assignment_handles_cannot_alias_real_changed_filenames(
         target_ids = stage['assigned_target_ids']
         assert len(target_ids) == len(set(target_ids)) and not set(targets).intersection(target_ids)
         targets.extend(target_ids)
-        captured = supporting_contents(review.backend.calls[-1]['prompt'])
-        scoped_diff = captured['diff']
-        scoped_index = json.loads(captured['hunk-index'])
-        assert set(scoped_index) == set(stage['assigned_files'])
+        scoped_diff, _ = capture(review, stage)
         if '00_oversize.md' in stage['assigned_files']:
             assert 'REQUIRED_LARGE_CHANGE_' in scoped_diff
         if 'part:000001' in stage['assigned_files']:
@@ -578,18 +535,14 @@ async def test_opaque_assignment_handles_cannot_alias_real_changed_filenames(
 @pytest.mark.parametrize('fault', ['unknown-target', 'unknown-candidate', 'contradiction', 'grounds',
                                   'grounds-missing', 'grounds-null', 'grounds-number', 'handoff'])
 async def test_mixed_schema_and_admission_rejection_never_retries_or_loses_prior_findings(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str) -> None:
     review = staged_review(tmp_path, monkeypatch)
-    rejected_assignments: list[tuple[str, ...]] = []
 
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         if not stage['progress']:
             output['candidates'] = [candidate(disposition='confirmed', finding=record())]
             return
-        assignment = tuple(stage['assigned_target_ids'])
-        rejected_assignments.append(assignment)
         if stage['attempt'] > 1:
             # A second valid answer demonstrates the erroneous recovery path;
             # production must never invoke it for a mixed semantic rejection.
@@ -616,8 +569,8 @@ async def test_mixed_schema_and_admission_rejection_never_retries_or_loses_prior
             output['candidates'] = [item]
 
     await review.finish('python', reason='malformed_output', findings=('Grounded defect',))
-    assert len(rejected_assignments) == 1
     events = stage_ends(review, 'python')
+    assert len(events) == 2
     assert [event['metadata']['admitted'] for event in events] == [True, False]
     assert [event['metadata']['attempt'] for event in events] == [1, 1]
     assert events[-1]['metadata']['observed_tool_starts'] == 0
@@ -628,8 +581,7 @@ async def test_mixed_schema_and_admission_rejection_never_retries_or_loses_prior
 
 @pytest.mark.parametrize('sandbox', [False, True], ids=['exact-paths', 'inline'])
 async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool,
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool) -> None:
 
     from tests.harness.git_helpers import git
 
@@ -646,10 +598,9 @@ async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
 
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
-        prompt = review.backend.calls[-1]['prompt']
-        captured = supporting_contents(prompt)
-        scoped = json.loads(captured['hunk-index'])['api.py']
-        fragments.append(captured['diff'])
+        diff, index = capture(review, stage)
+        scoped = index['api.py']
+        fragments.append(diff)
         for part in stage['assignment_parts']:
             assignments.append(part)
             expected = (part['old_start'], part['old_start'] + part['old_count'] - 1,

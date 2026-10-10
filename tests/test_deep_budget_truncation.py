@@ -160,20 +160,16 @@ async def test_admitted_interaction_findings_survive_triage_cutoff_and_merge_res
             state = review_stage_state(prompt)
             if state is not None and state['scope_id'] == 'structure' and state['stage'] == 'triage':
                 yield ResultEvent(structured_output=stage_result(state, candidates=[
-                    dict(item, disposition='rejected') for item in state['candidates']
-                ]), continuation=None)
+                    dict(item, disposition='rejected') for item in state['candidates']]), continuation=None)
                 for n in range(state['remaining_tool_calls'] + 1):
                     yield ToolStartEvent(id=f"extra-{n}", name="Read", input={"file_path": "api.py"})
                 return
             async for event in super().execute(cwd, prompt, *args, **kwargs):
-                if (state is not None and state['scope_id'] == 'structure'
-                        and isinstance(event, ResultEvent)):
+                if (state is not None and state['scope_id'] == 'structure' and isinstance(event, ResultEvent)):
                     assert isinstance(event.structured_output, dict)
-                    event.structured_output['candidates'].append({
-                        'candidate_id': '', 'file': 'api.py', 'line': 2,
+                    event.structured_output['candidates'].append({'candidate_id': '', 'file': 'api.py', 'line': 2,
                         'trigger': 'hello is called', 'consequence': 'Greeting may conflict with callers',
-                        'grounds': 'api.py:2 returns universe', 'disposition': 'open', 'finding': None,
-                    })
+                        'grounds': 'api.py:2 returns universe', 'disposition': 'open', 'finding': None})
                 yield event
 
     silence(monkeypatch)

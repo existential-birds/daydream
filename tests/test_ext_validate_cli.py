@@ -34,8 +34,7 @@ def test_ext_validate_without_supervisor_reports_none(ext_dir: ExtDir, capsys: p
 
 
 @pytest.mark.parametrize('api_version', [6, 7])
-def test_ext_validate_rejects_previous_api(
-    ext_dir: ExtDir, capsys: pytest.CaptureFixture[str], api_version: int,
+def test_ext_validate_rejects_previous_api(ext_dir: ExtDir, capsys: pytest.CaptureFixture[str], api_version: int,
 ) -> None:
     ext_dir.write_module("def register(r): ...\n", api_version=api_version)
     assert _run_main(["ext", "validate"]) == 1

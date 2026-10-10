@@ -67,8 +67,7 @@ async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge_tiny_host_merge_ph
         f"tiny-diff review fan-out did not collapse: tiny={tiny_reviews}, multi={multi_reviews}"
     )
     # Structure begins with interactions once; it does not repeat the file audit.
-    for calls, expected_languages in ((tiny_calls, {"generic"}),
-                                      (multi_calls, {"python", "react", "generic"})):
+    for calls, expected_languages in ((tiny_calls, {"generic"}), (multi_calls, {"python", "react", "generic"})):
         stages = [review_stage_state(call["prompt"]) for call in calls]
         assert {stage["scope_id"] for stage in stages if stage is not None
                 and stage["stage"] == "first_pass"} == expected_languages

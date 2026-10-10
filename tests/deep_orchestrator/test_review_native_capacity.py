@@ -32,8 +32,7 @@ def _workload(wired: bool) -> tuple[dict[str, str], dict[str, str]]:
             new += 'def parse_flags(args):\n    return {"dry_run": "--dry-run" in args}\n'
         if index == 40:
             old += 'def build_request(options):\n    return {}\n'
-            new += ('from package_0.module_00 import parse_flags\n'
-                    'def build_request(options):\n'
+            new += ("from package_0.module_00 import parse_flags\ndef build_request(options):\n"
                     + ('    return {"dry_run": options["dry_run"]}\n' if wired else '    return {}\n'))
         before[path], after[path] = old, new
     before['00_change-guide.md'] = '# Request contract\nDry-run must propagate to the request.\n'
@@ -44,8 +43,7 @@ def _workload(wired: bool) -> tuple[dict[str, str], dict[str, str]]:
 
 @pytest.mark.parametrize('wired', [False, True], ids=['late-cross-file-defect', 'correctly-wired-clean'])
 async def test_late_cross_file_judgment_fits_cumulative_native_budget(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wired: bool,
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wired: bool) -> None:
     repo = tmp_path / 'production_sized_work'
     before, after = _workload(wired)
     seed_feature_branch(repo, base=before, feature=after)

@@ -70,10 +70,8 @@ class ReviewInvestigation:
         self.failure_diagnostic: str | None = None
         self.failure_class: str | None = None
 
-    async def run(
-        self, backend: Backend, cwd: Path, prompt_builder: Callable[[dict[str, Any]], str], *,
-        stage_inputs: Callable[[dict[str, Any]], PreparedSanctionedInputs | None] | None = None,
-        **agent_kwargs: Any,
+    async def run(self, backend: Backend, cwd: Path, prompt_builder: Callable[[dict[str, Any]], str], *,
+        stage_inputs: Callable[[dict[str, Any]], PreparedSanctionedInputs], **agent_kwargs: Any,
     ) -> tuple[dict[str, Any], str | None]:
         """Fresh calls share hard bounds; advisory targets cannot abort useful work."""
         if self.scope_id == STRUCTURE_STACK_NAME:
@@ -120,35 +118,28 @@ class ReviewInvestigation:
             closed_decisions.append({
                 'candidate_id': candidate['candidate_id'], 'file': candidate['file'], 'line': candidate['line'],
                 'disposition': candidate['disposition'],
-                'conclusion': truncate_utf8_to_budget(conclusion, 512, '[conclusion clipped]'),
-            })
+                'conclusion': truncate_utf8_to_budget(conclusion, 512, '[conclusion clipped]')})
         target = (max(4, 3 * len(candidate_ids)) if stage == 'triage' else
                   max(8, len(files)) if stage == 'integration' else max(4, 2 * len(files)))
-        return {
-            'contract_version': STAGED_REVIEW_CONTRACT, 'scope_id': self.scope_id,
+        return {'contract_version': STAGED_REVIEW_CONTRACT, 'scope_id': self.scope_id,
             'analyzed_revision': self.revision, 'stage': stage, 'assigned_target_ids': targets,
             'assignment_parts': assignment_parts,
             'completed_target_ids': [target for target, progress in self.target_progress.items()
                                      if progress['status'] == 'reviewed'],
             'assigned_files': sorted(candidate_files) if stage == 'triage' else files,
-            'progress': self.handoff['progress'] if stage != 'triage' else [],
-            'notes': notes, 'candidates': candidates,
+            'progress': self.handoff['progress'] if stage != 'triage' else [], 'notes': notes, 'candidates': candidates,
             'closed_decisions': closed_decisions,
             'closed_candidate_ids': [decision['candidate_id'] for decision in closed_decisions],
             'assigned_candidate_ids': candidate_ids,
             'target_diff_bytes': {path: self.diff_weights.get(path, 1) for path in files},
             'observed_tool_starts': self.budget.observed_tool_starts,
             'remaining_tool_calls': self.budget.remaining_tool_calls,
-            'advisory_tool_call_target': min(target, self.budget.remaining_tool_calls),
-        }
+            'advisory_tool_call_target': min(target, self.budget.remaining_tool_calls)}
 
-    async def _stage(
-        self, backend: Backend, cwd: Path, prompt_builder: Callable[[dict[str, Any]], str],
+    async def _stage(self, backend: Backend, cwd: Path, prompt_builder: Callable[[dict[str, Any]], str],
         stage: str, targets: list[str], files: list[str], agent_kwargs: dict[str, Any], *,
-        stage_inputs: Callable[[dict[str, Any]], PreparedSanctionedInputs | None] | None,
-        candidate_ids: list[str] | None = None,
-        assignment_parts: list[dict[str, Any]] | None = None,
-    ) -> bool:
+        stage_inputs: Callable[[dict[str, Any]], PreparedSanctionedInputs],
+        candidate_ids: list[str] | None = None, assignment_parts: list[dict[str, Any]] | None = None) -> bool:
         if self.budget.remaining_tool_calls <= 0:
             self.reason = 'tool_call_budget_exceeded'
             self.failure_class = 'quantitative_exhaustion'
@@ -162,16 +153,14 @@ class ReviewInvestigation:
             self.failure_diagnostic = None
             self.failed_invocation = False
             self.failure_class = None
-            state.update(attempt=attempt, max_attempts=2,
-                         schema_rejection=rejection.to_dict() if rejection else None)
+            state.update(attempt=attempt, max_attempts=2, schema_rejection=rejection.to_dict() if rejection else None)
             schema = review_stage_schema(targets, candidate_ids, triage=stage == "triage")
             state["response_contract"] = {"schema": schema, "skeleton": {
                 "targets": [{"target_id": target, "status": "reviewed", "reason": ""} for target in targets],
                 "notes": "", "candidates": [{
                     "candidate_id": candidate["candidate_id"], "file": candidate["file"], "line": candidate["line"],
                     "trigger": "", "consequence": "", "grounds": "", "disposition": "unresolved", "finding": None,
-                } for candidate in state["candidates"]] if stage == "triage" else [], "contradictions": [],
-            }}
+                } for candidate in state["candidates"]] if stage == "triage" else [], "contradictions": []}}
             evidence = ReviewEvidence(schema)
             self.assertion_failure_class: str | None = None
             syntax_error: dict[str, int] | None = None
@@ -180,21 +169,16 @@ class ReviewInvestigation:
             accepted = False
             starts_before = self.budget.observed_tool_starts
             candidate_count = 0
-            prepared: PreparedSanctionedInputs | None = None
             async with phase_scope(DaydreamPhase.DEEP, stage=f'review-{stage.replace('_', '-')}') as transition:
                 prior_admitted = self.admitted_stages
                 try:
-                    kwargs = dict(agent_kwargs)
-                    if stage_inputs is not None:
-                        kwargs['sanctioned_inputs'] = stage_inputs(state)
-                    prepared = kwargs.get('sanctioned_inputs')
-                    if prepared is not None:
-                        prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
+                    prepared = stage_inputs(state)
+                    kwargs = {**agent_kwargs, 'sanctioned_inputs': prepared}
+                    prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
                     # Planning floor only; actual output authority comes from RequestEvent.
                     if isinstance(backend, PiBackend) and not (
                         kwargs.get("tools_disabled") or kwargs.get("finalization")
-                        or kwargs.get("validate_structured_output") is False
-                    ):
+                        or kwargs.get("validate_structured_output") is False):
                         state["max_attempts"] = 1
                         remaining = state.setdefault("remaining_work", {})
                         remaining["current_stage_submission_start_floor"] = 1
@@ -210,10 +194,8 @@ class ReviewInvestigation:
                         require_full_schema=True, investigation_budget=self.budget, review_evidence=evidence,
                         schema_rejection_guard=lambda value: isinstance(value, dict) and self._assessment(
                             value, stage, targets, candidate_ids, files=files or state['assigned_files'])[1] is None,
-                        advisory_tool_call_target=state['advisory_tool_call_target'], **kwargs,
-                    )
-                    if prepared is not None:
-                        prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
+                        advisory_tool_call_target=state['advisory_tool_call_target'], **kwargs)
+                    prepared.revalidate(backend, cwd, kwargs.get('read_only', False))
                 except SanctionedInputUnavailable:
                     self.reason = 'evidence_incomplete'
                 except (asyncio.CancelledError, KeyboardInterrupt):
@@ -270,19 +252,14 @@ class ReviewInvestigation:
                         attempt_tool_starts=self.budget.observed_tool_starts - starts_before,
                         schema_rejection=actual_rejection.to_dict() if actual_rejection else None,
                         schema_retry_eligible=retry_rejection is not None,
-                        retry_feedback=rejection.to_dict() if rejection else None,
-                        native_output=evidence.native_output,
-                        submission_starts=evidence.output_starts,
-                        successful_submissions=evidence.output_successes,
+                        retry_feedback=rejection.to_dict() if rejection else None, native_output=evidence.native_output,
+                        submission_starts=evidence.output_starts, successful_submissions=evidence.output_successes,
                         failed_submissions=evidence.output_failures,
-                        replaced_submissions=max(0, evidence.output_successes - 1),
-                        failure_class=self.failure_class,
-                        syntax_error=syntax_error,
-                        stage_candidate_count=candidate_count,
+                        replaced_submissions=max(0, evidence.output_successes - 1), failure_class=self.failure_class,
+                        syntax_error=syntax_error, stage_candidate_count=candidate_count,
                         admitted_candidate_count=len(self.handoff['candidates']),
                         retained_findings=sum(item['disposition'] == 'confirmed'
-                                              for item in self.handoff['candidates']),
-                    )
+                                              for item in self.handoff['candidates']))
                 if self.reason in {'wall_budget_exceeded', 'pipeline_budget_exceeded'}:
                     transition.finish(LifecycleStatus.TIMED_OUT, LifecycleReasonCode.TIMED_OUT)
                 elif not accepted:
@@ -336,8 +313,7 @@ class ReviewInvestigation:
                                       or any(candidate.get('disposition') == 'open' for candidate in decisions)))
             or (stage != 'triage' and any(known_decision_ids))
             or any(candidate.get('disposition') == 'confirmed' and 'finding' in candidate
-                   and candidate['finding'] is None
-                   for candidate in decisions)
+                   and candidate['finding'] is None for candidate in decisions)
         ):
             self.assertion_failure_class = 'assignment_mismatch'
             return None, 'malformed_output'
@@ -358,34 +334,24 @@ class ReviewInvestigation:
             and all(isinstance(item, dict) and isinstance(item.get('file'), str)
                     and (stage != 'triage' or isinstance(item.get('candidate_id'), str)) for item in raw_decisions)
         )
-        if can_prepare:
-            return self._prepare_handoff(output, stage, files=files)
-        # When schema-only shape errors prevent a prospective plan, block only
-        # independently proven bounds failures, rather than inventing another
-        # shape validator or repairing the rejected payload into a usable result.
-        if 'notes' in output and len(json.dumps(output['notes'], ensure_ascii=False).encode()) > HANDOFF_MAX_BYTES:
-            return None, 'evidence_incomplete'
-        if isinstance(raw_decisions, list):
-            prior = len(self.handoff['candidates']) if stage != 'triage' else 0
-            if len(raw_decisions) + prior > HANDOFF_MAX_ITEMS:
+        if not can_prepare:
+            # Shape errors permit only independently proven bounds failures;
+            # never repair a rejected payload to construct a prospective plan.
+            if 'notes' in output and len(json.dumps(output['notes'], ensure_ascii=False).encode()) > HANDOFF_MAX_BYTES:
                 return None, 'evidence_incomplete'
-        return None, None
-
-    def _prepare_handoff(self, output: dict[str, Any], stage: str, *,
-                         files: list[str]) -> tuple[_AdmissionPlan | None, str | None]:
-        """Construct prospective state for bounds checks without changing admitted state."""
-        decisions = output['candidates']
-        prior_candidates = self.handoff['candidates']
+            if isinstance(raw_decisions, list):
+                prior = len(prior_candidates) if stage != 'triage' else 0
+                if len(raw_decisions) + prior > HANDOFF_MAX_ITEMS:
+                    return None, 'evidence_incomplete'
+            return None, None
         if stage == 'triage':
             by_id = {candidate['candidate_id']: candidate for candidate in decisions}
             candidates = [by_id.get(candidate['candidate_id'], candidate) for candidate in prior_candidates]
         else:
             candidates = prior_candidates + [
                 {**candidate, 'candidate_id': f'{self.scope_id}:candidate:{len(prior_candidates) + index + 1}'}
-                for index, candidate in enumerate(decisions)
-            ]
-        target_progress = {**self.target_progress,
-                           **{target['target_id']: target for target in output['targets']}}
+                for index, candidate in enumerate(decisions)]
+        target_progress = {**self.target_progress, **{target['target_id']: target for target in output['targets']}}
         if stage == 'triage':
             progress = self.handoff['progress']
         elif stage == 'integration':

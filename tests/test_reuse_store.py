@@ -54,24 +54,16 @@ def test_entry_is_a_hit_only_when_payload_and_marker_agree(tmp_path: Path) -> No
     miss = store.lookup("a" * 64)
     assert isinstance(miss, reuse_store.ReuseMiss) and "payload" in miss.reason
     payload_file.write_bytes(b"{}")
+    manifest_path = reuse_store.entry_manifest_path(store.store_dir, hit.key)
+    original_manifest = manifest_path.read_bytes()
+    manifest_path.write_text(json.dumps({**hit.manifest, "format": 1}))
+    miss = store.lookup(hit.key)
+    assert isinstance(miss, reuse_store.ReuseMiss) and miss.reason == "manifest format mismatch"
+    manifest_path.write_bytes(original_manifest)
     reuse_store.entry_marker_path(tmp_path / "review-cache", "a" * 64).unlink()
     miss = store.lookup("a" * 64)
     assert isinstance(miss, reuse_store.ReuseMiss) and "marker" in miss.reason
     assert isinstance(store.lookup("b" * 64), reuse_store.ReuseMiss)  # unknown key
-
-def test_obsolete_manifest_format_is_a_cache_miss(tmp_path: Path) -> None:
-    store = _cache(tmp_path)
-    key = "c" * 64
-    _seed_entry(store, key, last_used_at=1_000)
-    manifest_path = reuse_store.entry_manifest_path(store.store_dir, key)
-    manifest = json.loads(manifest_path.read_text())
-    manifest["format"] = 1
-    manifest_path.write_text(json.dumps(manifest))
-
-    miss = store.lookup(key)
-
-    assert isinstance(miss, reuse_store.ReuseMiss)
-    assert miss.reason == "manifest format mismatch"
 
 def test_prune_evicts_oldest_last_used_and_spares_the_fresh_entry(tmp_path: Path) -> None:
     store = _cache(tmp_path, budget=reuse_store.ReuseBudget(max_entries=2, max_bytes=10**9, max_age_seconds=3600))

@@ -95,8 +95,7 @@ class PhaseDispatchBackend:
                 first_discovery = state is None or (state["stage"] == "first_pass" and not state["progress"])
                 issues = []
                 if first_discovery:
-                    issues = (self._parse_results[self._review_call]
-                        if self._review_call < len(self._parse_results)
+                    issues = (self._parse_results[self._review_call] if self._review_call < len(self._parse_results)
                         else []
                     )
                     self._review_call += 1

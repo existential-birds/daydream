@@ -32,11 +32,9 @@ def review_stage_state(prompt: str) -> dict[str, Any] | None:
 
 
 def stage_result(stage: dict[str, Any], *, candidates: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    return {
-        "targets": [{"target_id": target, "status": "reviewed", "reason": ""}
+    return {"targets": [{"target_id": target, "status": "reviewed", "reason": ""}
                     for target in stage["assigned_target_ids"]],
-        "notes": "Assigned changed behavior reviewed", "candidates": candidates or [], "contradictions": [],
-    }
+        "notes": "Assigned changed behavior reviewed", "candidates": candidates or [], "contradictions": []}
 
 
 def review_stage_result(prompt: str, issues: list[dict[str, Any]]) -> dict[str, Any]:
@@ -46,11 +44,9 @@ def review_stage_result(prompt: str, issues: list[dict[str, Any]]) -> dict[str, 
         return {"issues": issues}
     candidates = []
     if state["stage"] in {"first_pass", "integration"} and not state["progress"]:
-        candidates = [{
-            "candidate_id": "", "file": issue["file"], "line": issue["line"],
+        candidates = [{"candidate_id": "", "file": issue["file"], "line": issue["line"],
             "trigger": "The changed path is exercised", "consequence": issue["description"],
-            "grounds": issue["evidence"], "disposition": "confirmed", "finding": issue,
-        } for issue in issues]
+            "grounds": issue["evidence"], "disposition": "confirmed", "finding": issue} for issue in issues]
     elif state["stage"] == "triage":
         candidates = [dict(candidate, disposition="confirmed") for candidate in state["candidates"]
                       if candidate["candidate_id"] in state["assigned_candidate_ids"]]

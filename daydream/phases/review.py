@@ -465,8 +465,7 @@ async def phase_per_stack_reviews(
         async def _review_stack_impl(stack: "StackAssignment") -> None:
             output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
             base_stack = base_stack_name(stack.stack_name)
-            prompt_name, strategy_name = {
-                STRUCTURE_STACK_NAME: ("structural", "discovery.structural"),
+            prompt_name, strategy_name = {STRUCTURE_STACK_NAME: ("structural", "discovery.structural"),
                 GENERIC_STACK: ("generic-fallback", "discovery.generic_fallback"),
             }.get(base_stack, ("per-stack", "discovery.per_stack"))
             from daydream.deep.prompts import (
@@ -482,12 +481,10 @@ async def phase_per_stack_reviews(
             if exploration_dir is not None:
                 shared_paths.update({"exploration-summary": exploration_dir / "summary.md",
                                      "exploration-affected-files": exploration_dir / "affected_files.md"})
-            input_factory = StageInputFactory(
-                backend, work, stack, diff_path=diff_path,
+            input_factory = StageInputFactory(backend, work, stack, diff_path=diff_path,
                 hunk_index_path=diff_path.parent / "hunk-index.json", shared_paths=shared_paths,
                 revision=coverage.revision.to_dict(), artifact_session=artifact_session,
-                allow_standalone=allow_standalone, read_only=read_only,
-                bundle_capable=bundle_capable,
+                allow_standalone=allow_standalone, read_only=read_only, bundle_capable=bundle_capable,
             )
             reuse_unit: ReviewReuseUnit | None = None
             if reuse_cache is not None and phase_identity is not None:
@@ -568,19 +565,15 @@ async def phase_per_stack_reviews(
                 stage_args["files"] = stage["assigned_files"]
                 stage_args["review_stage"] = stage
                 paths = input_factory.current_paths
-                stage_args.update(
-                    diff_path=paths.get("diff", Path("unavailable-stage-diff")),
+                stage_args.update(diff_path=paths.get("diff", Path("unavailable-stage-diff")),
                     intent_path=paths.get("intent", Path("unavailable-intent")),
                     alternatives_path=paths.get("alternatives", Path("unavailable-alternatives")),
-                    output_path=Path("host-owned-review-output"),
-                )
+                    output_path=Path("host-owned-review-output"))
                 if stack.stack_name != STRUCTURE_STACK_NAME and stage["stage"] == "triage":
                     stage_args["frontier_files"] = []
                 prompt = active_registry.prompt(prompt_name)(**stage_args)
                 prompt = append_extended_facts(prompt, recipe_for_prompts)
-                return prompt + "\n\nHost review stage:\n" + json.dumps(
-                    stage_args["review_stage"], ensure_ascii=False,
-                )
+                return prompt + "\n\nHost review stage:\n" + json.dumps(stage_args["review_stage"], ensure_ascii=False)
 
             stack_name = stack.stack_name
             structured: Any = None
@@ -590,12 +583,9 @@ async def phase_per_stack_reviews(
                     async with maybe_fork(
                         recorder, f"deep-{stack_name}", dispatch=dispatch,
                     ):
-                        investigation = ReviewInvestigation(
-                            stack, input_factory.full_diff, coverage.revision.to_dict(),
-                            assignment_batches=input_factory.assignment_batches,
-                        )
-                        structured, budget_reason = await investigation.run(
-                            backend, work.repo, build_stage_prompt,
+                        investigation = ReviewInvestigation(stack, input_factory.full_diff, coverage.revision.to_dict(),
+                            assignment_batches=input_factory.assignment_batches)
+                        structured, budget_reason = await investigation.run(backend, work.repo, build_stage_prompt,
                             stage_inputs=input_factory.prepare,
                             wall_budget_s=phase_config.REVIEW_WALL_BUDGET_S,
                             read_only=read_only,

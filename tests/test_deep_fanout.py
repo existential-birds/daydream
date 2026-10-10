@@ -8,16 +8,15 @@ from typing import Any
 import anyio
 import pytest
 
-from daydream.backends import AgentEvent, Backend, ResultEvent
+from daydream.backends import AgentEvent, Backend
 from daydream.deep import sharding
 from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.hunk_index import write_hunk_index
 from daydream.workspace import WorkContext
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
-from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import commit, git, seed_feature_branch, write_and_stage
+from tests.harness.phase_backend import PhaseDispatchBackend
 from tests.harness.review_result import review_scopes, saved_coverage
-from tests.harness.stub_backend import review_stage_result
 from tests.harness.trajectory import (
     dispatch_descriptors as _dispatch_descriptors,
     dispatch_encloses_children as _dispatch_encloses_children,
@@ -25,11 +24,6 @@ from tests.harness.trajectory import (
     read_trajectory,
 )
 
-
-def _review_backend(**attrs: Any) -> ScriptedBackend:
-    def respond(cwd: Any, prompt: str, *args: Any) -> list[Any]:
-        return [ResultEvent(structured_output=review_stage_result(prompt, []), continuation=None)]
-    return ScriptedBackend(responder=respond, model="mock-model", **attrs)
 
 def _mk_stacks() -> list[StackAssignment]:
     return [StackAssignment(stack_name="python", files=["api.py"], is_docs_only=False,),
@@ -42,8 +36,7 @@ def _mk_context_files(tmp_path: Path) -> tuple[Path, Path, Path]:
     sources = {name: 'VALUE = 1\n' for name in
                ('api.py', 'a.py', 'App.tsx', 'README.md', 'main.go', 'lib.rs', 'app.ex', 'notes.txt')}
     seed_feature_branch(tmp_path, base={name: 'VALUE = 0\n' for name in sources}, feature=sources)
-    diff.write_text(''.join(f'diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n'
-                            '@@ -1 +1 @@\n-VALUE = 0\n+VALUE = 1\n' for name in sources))
+    diff.write_text(git(tmp_path, 'diff', 'main', 'HEAD') + '\n')
     write_hunk_index(tmp_path, diff.read_text())
     intent = tmp_path / "intent.md"
     intent.write_text("x")
@@ -90,7 +83,7 @@ async def test_phase_per_stack_reviews_dispatch_interval_success(tmp_path: Path,
     recorder = make_recorder(tmp_path)
 
     async with recorder:
-        results, failures = await _run_per_stack(tmp_path, make_work, _review_backend(), _mk_stacks())
+        results, failures = await _run_per_stack(tmp_path, make_work, PhaseDispatchBackend(), _mk_stacks())
 
     assert set(results) == {"python", "react", "generic"}
     assert failures == {}

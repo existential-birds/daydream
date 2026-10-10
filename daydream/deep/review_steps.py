@@ -605,10 +605,8 @@ async def _step_wonder_and_per_stack(ctx: FlowContext) -> None:
         else:
             reasons = structural['reason_codes'] if structural is not None else [ReasonCode.EVIDENCE_INCOMPLETE]
             cause = deep_state.review_coverage.diagnostics['scopes'].get(STRUCTURE_STACK_NAME, '')
-            deep_state.review_coverage.record_phase(
-                "alternatives", "failed", reasons=reasons,
-                diagnostic=f"Default design duty folded into Structure; {cause or 'Structure did not complete.'}",
-            )
+            deep_state.review_coverage.record_phase("alternatives", "failed", reasons=reasons,
+                diagnostic=f"Default design duty folded into Structure; {cause or 'Structure did not complete.'}")
     from daydream.deep.artifacts import persist_review_coverage
     persist_review_coverage(deep_state.dd, deep_state.review_coverage)
     if holder["exc"] is not None:

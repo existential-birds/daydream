@@ -132,8 +132,7 @@ async def test_outcomes(review: ReviewRun, archive_dir: Path, case: str, state: 
     ('invalid', 'malformed_output', {'issues': [{'id': 1}, 'invalid']}),
     ('rejected-native', 'malformed_output', {'unexpected': []}), ('text-only', None, None),
     *[('invalid-envelope', 'malformed_output', payload) for payload in
-      ({}, {'issues': 'bad'}, {'issues': [{'description': 'unfinished'}]})],
-])
+      ({}, {'issues': 'bad'}, {'issues': [{'description': 'unfinished'}]})]])
 async def test_schema_output(review: ReviewRun, mode: str, reason: str | None, payload: Any) -> None:
 
     def response(prompt: str) -> list[AgentEvent] | None:
@@ -252,9 +251,7 @@ async def test_snapshot_boundaries(review: ReviewRun, request: pytest.FixtureReq
 
 @pytest.mark.parametrize('budget', ['tool', 'wall', 'model'])
 @pytest.mark.parametrize('nonempty', [False, True, None])
-async def test_unsuccessful_stage_discards_checkpoints(
-    review: ReviewRun, budget: str, nonempty: bool | None,
-) -> None:
+async def test_unsuccessful_stage_discards_checkpoints(review: ReviewRun, budget: str, nonempty: bool | None) -> None:
     from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
 
     fake = FakeClock().install(review.patch)
@@ -360,8 +357,7 @@ async def test_loaded_artifact_faults(review: ReviewRun, fault: str) -> None:
 
 
 @pytest.mark.parametrize(('phase', 'reason'), [('intent', 'backend_failure'), ('intent-empty', 'missing_output'),
-    ('alternatives', 'backend_failure'),
-    ('merge', 'synthesis_failure'), ('merge-low', 'synthesis_failure'),
+    ('alternatives', 'backend_failure'), ('merge', 'synthesis_failure'), ('merge-low', 'synthesis_failure'),
     ('missing', 'missing_output'), ('malformed', 'malformed_output'),
     ('omitted', 'evidence_incomplete')])
 async def test_required_phase_faults(review: ReviewRun, phase: str, reason: str) -> None:
@@ -379,8 +375,7 @@ async def test_required_phase_faults(review: ReviewRun, phase: str, reason: str)
             payload = None if phase == 'missing' else {'verdicts': [None] if phase == 'malformed' else []}
             return [ResultEvent(structured_output=payload, continuation=None)]
         if phase == 'merge-low' and 'cross-stack merge agent' in lower:
-            return [ResultEvent(structured_output=merge_result([
-                dict(record(), confidence='LOW', lens='per-stack'),
+            return [ResultEvent(structured_output=merge_result([dict(record(), confidence='LOW', lens='per-stack'),
             ]), continuation=None)]
     review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
         review_by_stack={'python' if phase in {'merge', 'merge-low'} else 'structure': [record()]}, responder=response)
@@ -419,8 +414,7 @@ async def test_required_phase_faults(review: ReviewRun, phase: str, reason: str)
 @pytest.mark.parametrize('late_event', ['legacy-result', 'native-start'])
 @pytest.mark.parametrize('offset', [0, 1], ids=['at-deadline', 'after-deadline'])
 async def test_late_supervision_events_cannot_supply_reserved_finalization_or_replace_prior_findings(
-    review: ReviewRun, ext_dir: ExtDir, late_event: str, offset: int,
-) -> None:
+    review: ReviewRun, ext_dir: ExtDir, late_event: str, offset: int) -> None:
     import re
 
     from daydream.backends import PiRequestConfig, RequestEvent

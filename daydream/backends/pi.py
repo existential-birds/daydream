@@ -434,13 +434,11 @@ def _tool_completion_metadata(event: dict[str, Any], *, output_control: bool = F
     structured = structured if isinstance(structured, dict) else {}
     exit_code = structured.get('exit_code', result.get('exit_code', event.get('exit_code')))
     status = event.get('status', result.get('status'))
-    return {
-        'exit_code': exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) else None,
+    return {'exit_code': exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) else None,
         'status': status if isinstance(status, str) else None,
         'cancelled': event.get('cancelled') is True or result.get('cancelled') is True,
         'truncated': (truncation.get('truncated') is True or truncation.get('firstLineExceedsLimit') is True
-                      or structured.get('truncated') is True or result.get('truncated') is True),
-    }
+                      or structured.get('truncated') is True or result.get('truncated') is True)}
 
 
 def _extract_usage(message: dict[str, Any]) -> dict[str, Any]:
@@ -684,8 +682,7 @@ class PiBackend:
         system_prompt = (
             _PI_FINALIZATION_PREAMBLE
             if finalization
-            else pi_system_preamble(wall_budget_s, tool_call_budget,
-                                    staged=bool(review_instructions
+            else pi_system_preamble(wall_budget_s, tool_call_budget, staged=bool(review_instructions
                                                 and "Staged review contract:" in review_instructions))
         )
         if review_instructions and not finalization:
@@ -840,8 +837,7 @@ class PiBackend:
                 packet_path = _write_prompt_attachment(packet_text, attachments)
                 child_env["DAYDREAM_PI_OUTPUT_PACKET"] = str(packet_path)
                 extension = attachments.enter_context(
-                    as_file(files("daydream.backends").joinpath("pi_structured_output.ts"))
-                )
+                    as_file(files("daydream.backends").joinpath("pi_structured_output.ts")))
                 if read_only:
                     args.append("--no-extensions")
                 args.extend(["--extension", str(extension)])
@@ -1068,8 +1064,7 @@ class PiBackend:
                     result = event.get("result")
                     details = result.get("details") if isinstance(result, dict) else None
                     yield ToolResultEvent(
-                        id=call_id or str(uuid.uuid4()),
-                        output=_render_tool_result(result),
+                        id=call_id or str(uuid.uuid4()), output=_render_tool_result(result),
                         is_error=bool(event.get("isError", False)),
                         **_tool_completion_metadata(event,
                             output_control=native_output and event.get("toolName") == "structured_output"),

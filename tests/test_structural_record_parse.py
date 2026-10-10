@@ -69,8 +69,7 @@ async def test_per_stack_rerun_clears_stale_structural_outputs_before_review(
     alternatives.write_text("[]")
     attempted: list[str] = []
 
-    async def review(self: PiBackend, cwd: Path, prompt: str, *args: Any,
-                     **kwargs: Any) -> AsyncIterator[AgentEvent]:
+    async def review(self: PiBackend, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         assert not artifacts[0].exists()
         assert "STALE" not in prompt
         attempted.append("structure" if "repository-wide interactions" in prompt else "primary")

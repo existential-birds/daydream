@@ -262,11 +262,9 @@ class StructuredOutputFailure(str):
     schema_retry_eligible: bool
     syntax_error: dict[str, int] | None
 
-    def __new__(
-        cls, text: str, reason: str, detail: str | None = None, *,
+    def __new__(cls, text: str, reason: str, detail: str | None = None, *,
         rejection: SchemaRejection | None = None, schema_retry_eligible: bool = False,
-        syntax_error: dict[str, int] | None = None,
-    ) -> "StructuredOutputFailure":
+        syntax_error: dict[str, int] | None = None) -> "StructuredOutputFailure":
         value = super().__new__(cls, text)
         value.reason = reason
         value.detail = detail
@@ -338,10 +336,8 @@ async def run_agent(
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     run_context: RunContext | None = None,
     review_limits: ReviewLimits | None = None,
-    investigation_budget: ReviewInvestigationBudget | None = None,
-    advisory_tool_call_target: int | None = None,
-    review_evidence: ReviewEvidence | None = None,
-    schema_rejection_guard: Callable[[Any], bool] | None = None,
+    investigation_budget: ReviewInvestigationBudget | None = None, advisory_tool_call_target: int | None = None,
+    review_evidence: ReviewEvidence | None = None, schema_rejection_guard: Callable[[Any], bool] | None = None,
     finalization_context: FinalizationContext | None = None,
     tools_disabled: bool = False,
     review_system_instructions: str | None = None,
@@ -440,8 +436,7 @@ async def run_agent(
                 sanctioned_inputs=sanctioned_inputs,
                 run_context=context,
                 review_evidence=evidence,
-                schema_rejection_guard=schema_rejection_guard,
-                investigation_budget=investigation_budget,
+                schema_rejection_guard=schema_rejection_guard, investigation_budget=investigation_budget,
                 review_instructions=review_instructions,
                 tools_disabled=tools_disabled,
             )
@@ -662,10 +657,8 @@ async def _run_agent(
                         )
                         stop_recorded = True
                     break
-                if investigation_budget is not None and (
-                    investigation_budget.remaining_tool_calls == 0
-                    or remaining_calls == 0
-                ):
+                if investigation_budget is not None and (investigation_budget.remaining_tool_calls == 0
+                    or remaining_calls == 0):
                     aborted_reason = "tool_call_budget_exceeded"
                     break
                 # Dispatch bookkeeping: the opening attempt is useful work, every
@@ -830,8 +823,7 @@ async def _run_agent(
                                         break
 
                                 if not (
-                                    require_full_schema and output_schema is not None
-                                    and isinstance(event, ResultEvent)
+                                    require_full_schema and output_schema is not None and isinstance(event, ResultEvent)
                                     and (not validates_schema(event.structured_output, output_schema)
                                          or (investigation_budget is not None
                                              and event.structured_output_origin == 'text'))
@@ -1130,13 +1122,11 @@ async def _run_agent(
         # A staged native candidate is authoritative. Rejecting it cannot be
         # followed by salvaging another text fragment from the same invocation.
         if not native_output and raw.strip() and not text_overflow and not (
-            investigation_budget is not None and structured_result is not None
-        ):
+            investigation_budget is not None and structured_result is not None):
             selected: Any = None
             if validate_structured_output:
                 selection = (extract_json_by_schema(raw, schema=output_schema, accept=validates_schema,
-                                                    require_complete_root=True,
-                                                    rejection_guard=schema_rejection_guard)
+                                                    require_complete_root=True, rejection_guard=schema_rejection_guard)
                              if investigation_budget is not None else
                              _select_by_schema(raw, output_schema, require_full_schema=require_full_schema))
                 selected = selection.value

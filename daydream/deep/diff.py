@@ -17,9 +17,7 @@ from daydream.ui import print_warning
 _DIFF_BLOCK_SPLIT = re.compile(r"^(?=diff --git )", re.MULTILINE)
 _DIFF_PLUS_HEADER = re.compile(r"^\+\+\+ (.+)$", re.MULTILINE)
 _DIFF_MINUS_HEADER = re.compile(r"^--- (.+)$", re.MULTILINE)
-_DIFF_GIT_HEADER = re.compile(
-    r'^diff --git ("(?:[^"\\]|\\.)*"|a/.+?) ("(?:[^"\\]|\\.)*"|b/.+)$', re.MULTILINE,
-)
+_DIFF_GIT_HEADER = re.compile(r'^diff --git ("(?:[^"\\]|\\.)*"|a/.+?) ("(?:[^"\\]|\\.)*"|b/.+)$', re.MULTILINE)
 _DIFF_RENAME_HEADER = re.compile(r"^rename to (.+)$", re.MULTILINE)
 # Markers carry dropped paths without matching any diff header, so all block
 # consumers skip the marker while file selection can reject partial input.

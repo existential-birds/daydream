@@ -137,9 +137,7 @@ class ReviewInvestigationBudget:
     shared_deadline: float | None = None
 
     @classmethod
-    def from_limits(
-        cls, limits: ReviewLimits, *, deadline: float | None = None,
-    ) -> ReviewInvestigationBudget:
+    def from_limits(cls, limits: ReviewLimits, *, deadline: float | None = None) -> ReviewInvestigationBudget:
         """Resolve scaling once; serialization time is never investigation time."""
         scaled = review_limits_for_scope(limits)
         shared = review_deadline(discovery=scaled.discovery)

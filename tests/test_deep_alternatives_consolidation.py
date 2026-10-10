@@ -64,8 +64,7 @@ async def test_folded_structural_budget_failure_remains_incomplete(
     assert DeepArtifact.REVIEW_COVERAGE.at(ctx.data["dd"]).exists()
     assert review_warnings(ctx.data["dd"]) == (
         "alternatives: Default design duty folded into Structure; budget exhausted: wall_budget_exceeded",
-        "structure: budget exhausted: wall_budget_exceeded",
-    )
+        "structure: budget exhausted: wall_budget_exceeded")
 
 def _context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
     *, start_at: str = "review", custom_structure: bool = False,

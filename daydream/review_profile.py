@@ -300,8 +300,7 @@ def build_default_profile() -> ReviewProfile:
             content=(
                 "Review these files for correctness, clarity, and consistency with the "
                 "author's intent. Start from the supplied hunks and context; inspect "
-                "an enclosing symbol or other sections when useful to resolve a "
-                "concrete candidate. Apply "
+                "an enclosing symbol or other sections when useful to resolve a concrete candidate. Apply "
                 "language-agnostic review practices."
             ),
             source="copied: daydream.deep.prompts.build_generic_fallback_prompt",

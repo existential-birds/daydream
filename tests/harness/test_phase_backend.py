@@ -43,5 +43,4 @@ async def test_shared_phase_backend_drives_shallow_pass(feature_branch_repo: Pat
     stages = [json.JSONDecoder().raw_decode(prompt.split("Host review stage:\n", 1)[1])[0]
               for prompt in backend.review_prompts]
     assert sorted((stage["scope_id"], stage["stage"]) for stage in stages) == [
-        ("python", "first_pass"), ("structure", "integration"),
-    ]
+        ("python", "first_pass"), ("structure", "integration")]

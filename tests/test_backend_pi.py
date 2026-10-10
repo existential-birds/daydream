@@ -216,8 +216,7 @@ async def test_structured_output_selects_schema_valid_empty_result() -> None:
     assert result_events[0].structured_output == {"issues": []}
 
 @pytest.mark.parametrize('fault', ['none', 'domain-truncation', 'failed-last', 'mixed-read', 'mixed-read-first',
-                                  'null-details', 'oversized-details',
-                                  'wrong-id', 'unsettled', 'late-exit'])
+                                  'null-details', 'oversized-details', 'wrong-id', 'unsettled', 'late-exit'])
 async def test_native_output_uses_finalized_transcript_order_and_requires_complete_settlement(fault: str) -> None:
     """Daydream selects settled successful submissions independently of execution completion order."""
     calls: list[dict[str, Any]] = [
@@ -225,8 +224,7 @@ async def test_native_output_uses_finalized_transcript_order_and_requires_comple
              for call_id, value in [('first', 'first'), ('last', 'last')]]
     if fault == 'domain-truncation':
         calls[-1]['arguments']['truncation'] = {'truncated': True, 'firstLineExceedsLimit': True}
-    rows: list[dict[str, Any]] = [
-        {'type': 'agent_start'}, {'type': 'turn_start'},
+    rows: list[dict[str, Any]] = [{'type': 'agent_start'}, {'type': 'turn_start'},
         {'type': 'message_end', 'message': {'role': 'assistant', 'content': calls, 'stopReason': 'toolUse'}},
         *[{'type': 'tool_execution_start', 'toolCallId': call['id'], 'toolName': 'structured_output',
            'args': call['arguments']} for call in calls],
@@ -238,8 +236,7 @@ async def test_native_output_uses_finalized_transcript_order_and_requires_comple
            'toolName': 'structured_output', 'isError': False,
            'content': [{'type': 'text', 'text': 'Submitted.'}], 'details': call['arguments']}} for call in calls],
         {'type': 'turn_end', 'message': {'role': 'assistant', 'content': calls, 'stopReason': 'toolUse'}},
-        {'type': 'agent_end', 'messages': []}, {'type': 'agent_settled'},
-    ]
+        {'type': 'agent_end', 'messages': []}, {'type': 'agent_settled'}]
     if fault == 'failed-last':
         rows[5]['isError'] = True
         rows[-4]['message']['isError'] = True

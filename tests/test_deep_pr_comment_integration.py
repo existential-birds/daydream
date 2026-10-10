@@ -203,8 +203,7 @@ class _FakeSDKClient:
             review_issues: list[Any] = []
         else:
             review_issues = [dict(_REVIEW_FINDING)]
-        return [
-            MockAssistantMessage(content=[MockTextBlock(text="ok, wrote the review")], model=FIXTURE_MODEL_ID,),
+        return [MockAssistantMessage(content=[MockTextBlock(text="ok, wrote the review")], model=FIXTURE_MODEL_ID),
             MockResultMessage(structured_output=review_stage_result(prompt, review_issues), total_cost_usd=0.20,
                 usage={"input_tokens": 4000, "output_tokens": 600, "cache_read_input_tokens": 1500,},
             ),

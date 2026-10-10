@@ -45,7 +45,6 @@ class StagedBackend(EmptyReviewBackend):
         self.stages: list[dict[str, Any]] = []
         self.stage_response: StageResponse | None = None
         self.scripts: dict[str, tuple[StageResponse, bool]] = {}
-        self.stage_text: Callable[[dict[str, Any], dict[str, Any]], str | None] | None = None
 
     def script(self, scope_id: str = 'python', *, terminal: bool = True) -> Callable[[StageResponse], StageResponse]:
         """Register only provider behavior; the real runner owns admission and lifecycle."""
@@ -59,8 +58,7 @@ class StagedBackend(EmptyReviewBackend):
         if stage is not None:
             self.stages.append(stage)
             self.calls.append({'cwd': cwd, 'prompt': prompt,
-                               'output_schema': args[0] if args else kwargs.get('output_schema'),
-                               **kwargs})
+                               'output_schema': args[0] if args else kwargs.get('output_schema'), **kwargs})
             output = stage_result(stage)
             response, terminal = self.scripts.get(stage['scope_id'], (self.stage_response, True))
             events = response(stage, output) if response else None
@@ -73,10 +71,7 @@ class StagedBackend(EmptyReviewBackend):
                     yield event
             if not terminal:
                 return
-            text = self.stage_text(stage, output) if self.stage_text else None
-            if text is not None:
-                yield TextEvent(text=text)
-            yield ResultEvent(structured_output=output if text is None else None, continuation=None)
+            yield ResultEvent(structured_output=output, continuation=None)
             return
         kwargs.pop('review_instructions', None)
         async for event in super().execute(cwd, prompt, *args, **kwargs):
@@ -115,28 +110,22 @@ def candidate(*, disposition: str = 'open', candidate_id: str = '',
             'disposition': disposition, 'finding': finding}
 
 
-def read_events(repo: Path, path: str, *, event_id: str | None = None,
-                offset: int = 1, limit: int | None = None) -> Iterable[AgentEvent]:
+def read_events(repo: Path, path: str, *, event_id: str) -> Iterable[AgentEvent]:
     """Read real source, retaining the provider's start/result event boundary."""
-    lines = (repo / path).read_text().splitlines(keepends=True)
-    excerpt = lines[offset - 1:] if limit is None else lines[offset - 1:offset - 1 + limit]
-    identity = event_id or path
-    yield ToolStartEvent(id=identity, name='Read', input={'file_path': path, 'offset': offset,
-                                                       'limit': len(excerpt)})
-    yield ToolResultEvent(id=identity, output=''.join(excerpt), is_error=False)
+    source = (repo / path).read_text()
+    yield ToolStartEvent(id=event_id, name='Read', input={'file_path': path, 'offset': 1,
+                                                       'limit': len(source.splitlines())})
+    yield ToolResultEvent(id=event_id, output=source, is_error=False)
 
 
-@pytest.mark.parametrize(('fault', 'reason'), [
-    ('no-tool-read', None),
+@pytest.mark.parametrize(('fault', 'reason'), [('no-tool-read', None),
     ('unknown', 'malformed_output'), ('duplicate', 'malformed_output'),
     ('omitted', 'malformed_output'), ('read-all', 'malformed_output'),
     ('handoff-bytes', 'evidence_incomplete'), ('handoff-items', 'evidence_incomplete'),
     ('missing-grounds', 'evidence_incomplete'), ('truncated-tool-output', None),
-    ('unmatched-tool-result', None),
-])
+    ('unmatched-tool-result', None), ('optional-failures', None)])
 async def test_invalid_decisions_fail_but_optional_tool_events_do_not_veto_valid_output(
-    investigation: InvestigationRun, fault: str, reason: str,
-) -> None:
+    investigation: InvestigationRun, fault: str, reason: str) -> None:
     @investigation.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         concrete = candidate(disposition='confirmed', finding=record())
@@ -159,9 +148,13 @@ async def test_invalid_decisions_fail_but_optional_tool_events_do_not_veto_valid
         elif fault == 'unmatched-tool-result':
             yield ToolResultEvent(id='unmatched-source', is_error=False,
                                   output=(investigation.repo / 'api.py').read_text())
+        elif fault == 'optional-failures':
+            yield ToolStartEvent(id='optional', name='Bash', input={'command': 'rg definitely_absent .'})
+            yield ToolResultEvent(id='optional', output='x' * (2 * 1024 * 1024 + 1),
+                                  is_error=True, exit_code=1, truncated=True)
+            yield ToolResultEvent(id='unassociated', output='failed optional lookup', is_error=True)
 
-    data = await investigation.finish('python', reason=reason,
-                                      findings=('Grounded defect',) if reason is None else (),
+    data = await investigation.finish('python', reason=reason, findings=('Grounded defect',) if reason is None else (),
                                       statuses=('complete',) if reason is None else ('incomplete', 'failed'))
     assert scopes(data)['react']['status'] == scopes(data)['structure']['status'] == 'complete'
     terminal = stage_ends(investigation, 'python')[-1]
@@ -170,6 +163,8 @@ async def test_invalid_decisions_fail_but_optional_tool_events_do_not_veto_valid
     if fault == 'no-tool-read':
         assert data['terminal_result']['analysis_state'] == 'complete'
         assert terminal['metadata']['observed_tool_starts'] == 0
+    if fault == 'optional-failures':
+        assert terminal['metadata']['admitted'] is True and terminal['metadata']['observed_tool_starts'] == 1
 
 
 def stage_ends(review: ReviewRun, scope_id: str) -> list[dict[str, Any]]:
@@ -197,8 +192,7 @@ def many_file_review(tmp_path: Path, patch: pytest.MonkeyPatch, *, count: int = 
 
 @pytest.mark.parametrize('scope_id', ['python', 'generic', 'structure'])
 async def test_useful_completed_reads_borrow_cumulative_capacity_and_allow_later_work(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope_id: str,
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope_id: str) -> None:
     review = many_file_review(tmp_path, monkeypatch, docs_count=9)
     stage_spend: list[int] = []
 
@@ -232,10 +226,10 @@ async def test_useful_completed_reads_borrow_cumulative_capacity_and_allow_later
     assert all(item['admitted'] for item in metadata)
 
 
-@pytest.mark.parametrize('sandbox', [False, True], ids=['exact-path-inputs', 'inline-inputs'])
-async def test_each_stage_builder_receives_current_assignment_and_bounded_triage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, sandbox: bool,
-) -> None:
+@pytest.mark.parametrize(('sandbox', 'long_grounds'), [(False, False), (True, False), (False, True)],
+                         ids=['exact-path-inputs', 'inline-inputs', 'clipped-closed-conclusion'])
+async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, sandbox: bool, long_grounds: bool) -> None:
     ext_dir.write_module(
         "import json\n"
         "from daydream.deep.prompts import build_per_stack_prompt, build_structural_prompt\n"
@@ -248,9 +242,13 @@ async def test_each_stage_builder_receives_current_assignment_and_bounded_triage
         "    r.override_prompt('per-stack', lambda **kw: wrap(build_per_stack_prompt, kw))\n"
         "    r.override_prompt('structural', lambda **kw: wrap(build_structural_prompt, kw))\n"
     )
-    review = many_file_review(tmp_path, monkeypatch,
+    review = many_file_review(tmp_path, monkeypatch, count=9,
                              feature_message='fix: SETTLED_UNRELATED_HISTORY\n\nDaydream-Run: previous-fixture')
     review.backend.sandbox = sandbox
+    if sandbox:
+        review.backend.merge_echo_records = False
+        review.backend.merge_items = [dict(record(), lens='per-stack', source_uids=['python:1'])]
+    later_assignments: list[dict[str, Any]] = []
 
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
@@ -278,7 +276,27 @@ async def test_each_stage_builder_receives_current_assignment_and_bounded_triage
             assert assigned_line.split('Assigned files:', 1)[1].strip() == ', '.join(stage['assigned_files'])
             assert stage['candidates'] == []
             if 'api.py' in stage['assigned_files']:
-                output['candidates'] = [candidate(disposition='rejected')] + [candidate() for _ in range(9)]
+                confirmed = candidate(disposition='confirmed', finding=record())
+                if long_grounds:
+                    confirmed['grounds'] += ' Additional explanation: ' + 'é' * 400
+                rejected = dict(candidate(disposition='rejected'),
+                                grounds='The greeting is allowed by the updated consumer contract.')
+                output['candidates'] = [confirmed, rejected] + [candidate() for _ in range(9)]
+            if stage['progress']:
+                later_assignments.append(stage)
+                decisions = stage['closed_decisions']
+                assert [(decision['candidate_id'], decision['file'], decision['line'], decision['disposition'])
+                        for decision in decisions] == [('python:candidate:1', 'api.py', 2, 'confirmed'),
+                                                      ('python:candidate:2', 'api.py', 2, 'rejected')]
+                assert decisions[0]['conclusion'].startswith('Grounded defect: ' + candidate()['grounds'])
+                assert len(decisions[0]['conclusion'].encode()) <= 512
+                assert decisions[0]['conclusion'].endswith('[conclusion clipped]') is long_grounds
+                assert decisions[1]['conclusion'] == 'The greeting is allowed by the updated consumer contract.'
+                assert all('evidence_references' not in decision for decision in decisions)
+                assert stage['candidates'] == []
+                instruction = review.backend.calls[-1]['review_instructions']
+                assert 'The greeting is allowed by the updated consumer contract.' in instruction
+                assert 'Host-retained receipt authority' not in instruction
         else:
             assert stage['stage'] == 'triage'
             assert 'SETTLED_UNRELATED_HISTORY' not in prose
@@ -291,7 +309,9 @@ async def test_each_stage_builder_receives_current_assignment_and_bounded_triage
             assert 'Sanctioned phase inputs (read only these exact files):' not in call['prompt']
             output['candidates'] = [dict(item, disposition='rejected') for item in stage['candidates']]
 
-    data = await review.finish('python')
+    data = await review.finish('python', findings=('Grounded defect',))
+    assert len(later_assignments) == 2
+    assert all(event['metadata']['admitted'] for event in stage_ends(review, 'python'))
     assert all(scope['status'] == 'complete' for scope in scopes(data).values())
     stages = [stage for stage in review.backend.stages if stage['scope_id'] == 'python']
     assert len([stage for stage in stages if stage['stage'] == 'first_pass']) > 1
@@ -300,12 +320,10 @@ async def test_each_stage_builder_receives_current_assignment_and_bounded_triage
 
 
 @pytest.mark.parametrize(('stop', 'reason'), [('tool', 'host_tool_budget_exhaustion'),
-    ('model', 'model_budget_exhaustion'), ('backend', 'backend_failure'),
-    ('builder', 'backend_failure'),
+    ('model', 'model_budget_exhaustion'), ('backend', 'backend_failure'), ('builder', 'backend_failure'),
     ('deadline', 'host_pipeline_budget_exhaustion')])
 async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, stop: str, reason: str,
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, stop: str, reason: str) -> None:
     if stop == 'builder':
         ext_dir.write_module(
             "from daydream.deep.prompts import build_per_stack_prompt\n"
@@ -395,11 +413,9 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
     ('rejected', None), ('confirmed', None), ('missing-finding', 'malformed_output'),
     ('unresolved', 'evidence_incomplete'), ('unknown-contradiction', 'malformed_output'),
     ('contradiction', 'evidence_incomplete'), ('unknown', 'malformed_output'),
-    ('duplicate', 'malformed_output'), ('omitted', 'malformed_output'),
-    ('extra-target', 'malformed_output')])
+    ('duplicate', 'malformed_output'), ('omitted', 'malformed_output'), ('extra-target', 'malformed_output')])
 async def test_one_triage_round_preserves_closed_decisions_and_rejects_invalid_ids(
-    investigation: InvestigationRun, decision: str, reason: str | None,
-) -> None:
+    investigation: InvestigationRun, decision: str, reason: str | None) -> None:
     backend = investigation.backend
     contracts: list[dict[str, Any]] = []
 
@@ -453,57 +469,17 @@ async def test_one_triage_round_preserves_closed_decisions_and_rejects_invalid_i
             'assignment_mismatch' if decision == 'extra-target' else None)
 
 
-@pytest.mark.parametrize('long_grounds', [False, True])
-async def test_later_assignments_carry_closed_decisions_without_reopening_retained_findings(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, long_grounds: bool,
-) -> None:
-    review = many_file_review(tmp_path, monkeypatch, count=9)
-    later_assignments: list[dict[str, Any]] = []
-
-    @review.backend.script('python')
-    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
-        if not stage['progress']:
-            assert 'api.py' in stage['assigned_files']
-            output['candidates'] = [candidate(disposition='confirmed', finding=record()),
-                                    candidate(disposition='rejected')]
-            if long_grounds:
-                output['candidates'][0]['grounds'] += ' Additional explanation: ' + 'é' * 400
-            output['candidates'][1]['grounds'] = 'The greeting is allowed by the updated consumer contract.'
-            return
-        later_assignments.append(stage)
-        decisions = stage['closed_decisions']
-        assert [(decision['candidate_id'], decision['file'], decision['line'], decision['disposition'])
-                for decision in decisions] == [('python:candidate:1', 'api.py', 2, 'confirmed'),
-                                              ('python:candidate:2', 'api.py', 2, 'rejected')]
-        assert decisions[0]['conclusion'].startswith('Grounded defect: ' + candidate()['grounds'])
-        assert len(decisions[0]['conclusion'].encode()) <= 512
-        assert decisions[0]['conclusion'].endswith('[conclusion clipped]') is long_grounds
-        assert decisions[1]['conclusion'] == 'The greeting is allowed by the updated consumer contract.'
-        assert all('evidence_references' not in decision for decision in decisions)
-        assert stage['candidates'] == []
-        instruction = review.backend.calls[-1]['review_instructions']
-        assert 'The greeting is allowed by the updated consumer contract.' in instruction
-        assert 'Host-retained receipt authority' not in instruction
-
-    data = await review.finish('python', findings=('Grounded defect',))
-    assert len(later_assignments) == 2
-    assert all(scope['status'] == 'complete' for scope in scopes(data).values())
-    assert all(event['metadata']['admitted'] for event in stage_ends(review, 'python'))
-
-
 @pytest.mark.parametrize(('defect', 'fault'), [
-    (False, None), (True, None), (False, 'cutoff'), (True, 'cutoff'), (False, 'syntax'),
-])
+    (False, None), (True, None), (False, 'cutoff'), (True, 'cutoff'), (False, 'syntax')])
 async def test_cross_file_integration_preserves_cumulative_spend_and_flag_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defect: bool, fault: str | None,
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defect: bool, fault: str | None) -> None:
     review = many_file_review(tmp_path, monkeypatch, count=41, lines=35, wired=not defect)
     cutoff = fault == 'cutoff'
     title = 'Parsed dry-run flag is dropped during request construction'
     backend = review.backend
     observations: list[ToolStartEvent] = []
 
-    @backend.script('structure')
+    @backend.script('structure', terminal=False)
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         if stage['stage'] == 'integration':
             starts = 0 if fault == 'syntax' else 18
@@ -539,10 +515,10 @@ async def test_cross_file_integration_preserves_cumulative_spend_and_flag_eviden
             output['candidates'].append(dict(candidate(disposition='confirmed', finding=finding),
                 file='z_request.py', trigger='Pass --dry-run through parse_flags and build_request',
                 consequence='Request omits dry_run and performs a live operation', grounds=finding['evidence']))
+        if fault == 'syntax':
+            yield TextEvent(text=json.dumps(output) + ', "candidates": []}')
+        yield ResultEvent(structured_output=None if fault == 'syntax' else output, continuation=None)
 
-    if fault == 'syntax':
-        backend.stage_text = lambda stage, output: (
-            json.dumps(output) + ', "candidates": []}' if stage['scope_id'] == 'structure' else None)
     reason = None if fault is None else {'cutoff': 'host_tool_budget_exhaustion', 'syntax': 'malformed_output'}[fault]
     data = await review.finish('structure', reason=reason, findings=(title,) if defect else ())
     assert set(scopes(data)) == {'python', 'generic', 'structure'}
@@ -568,8 +544,7 @@ async def test_cross_file_integration_preserves_cumulative_spend_and_flag_eviden
 
 
 async def test_failed_retry_discards_poisoned_progress_but_charges_every_observed_start(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     review = many_file_review(tmp_path, monkeypatch, lines=70)
     backend = review.backend
     monkeypatch.setenv('DAYDREAM_PI_RETRY_ATTEMPTS', '1')
@@ -620,8 +595,7 @@ async def test_failed_retry_discards_poisoned_progress_but_charges_every_observe
 
 
 async def test_runner_cancellation_closes_stream_and_does_not_admit_an_aborted_checkpoint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     review = many_file_review(tmp_path, monkeypatch)
     checkpoint_emitted = asyncio.Event()
 

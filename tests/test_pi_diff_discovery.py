@@ -23,8 +23,7 @@ async def test_small_pi_review_keeps_structural_dispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Any,
 ) -> None:
     (tmp_path / "app.py").write_text("value = 'DIFF_SENTINEL'\n")
-    seed_feature_branch(tmp_path, base={'app.py': 'value = 0\n'},
-                        feature={'app.py': "value = 'DIFF_SENTINEL'\n"})
+    seed_feature_branch(tmp_path, base={'app.py': 'value = 0\n'}, feature={'app.py': "value = 'DIFF_SENTINEL'\n"})
     diff = tmp_path / "diff.patch"
     diff.write_text("diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
                     "@@ -1 +1 @@\n-value = 0\n+value = 'DIFF_SENTINEL'\n")
@@ -33,9 +32,7 @@ async def test_small_pi_review_keeps_structural_dispatch(
     intent.write_text("Change the value")
     calls: list[str] = []
 
-    async def review(
-        self: PiBackend, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
-    ) -> AsyncIterator[AgentEvent]:
+    async def review(self: PiBackend, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         assert str(diff) not in prompt
         assert "review-assignment" in _sanctioned_inputs(prompt)
         state = review_stage_state(prompt)
@@ -74,5 +71,4 @@ async def test_small_pi_review_keeps_structural_dispatch(
     stages = [review_stage_state(prompt) for prompt in calls]
     assert sorted((stage["scope_id"], stage["stage"], stage["assigned_files"])
                   for stage in stages if stage is not None) == [
-        ("python", "first_pass", ["app.py"]), ("structure", "integration", ["app.py"]),
-    ]
+        ("python", "first_pass", ["app.py"]), ("structure", "integration", ["app.py"])]

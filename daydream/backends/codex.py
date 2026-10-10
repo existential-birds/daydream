@@ -939,8 +939,7 @@ class CodexBackend:
                         yield ToolResultEvent(
                             id=item_id,
                             output=result_content,
-                            is_error=bool(error) or result_error,
-                            status=status if isinstance(status, str) else None,
+                            is_error=bool(error) or result_error, status=status if isinstance(status, str) else None,
                         )
 
                     elif item_type == "error":

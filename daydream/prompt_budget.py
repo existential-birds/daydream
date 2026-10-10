@@ -176,8 +176,7 @@ class PreparedSanctionedInputs:
             )
             if not item.pointer_only:
                 aggregate += current.size
-            if replace(current, prompt_visible=item.prompt_visible,
-                       inline_advisory=item.inline_advisory) != item:
+            if replace(current, prompt_visible=item.prompt_visible, inline_advisory=item.inline_advisory) != item:
                 raise SanctionedInputUnavailable(f"sanctioned input {item.label!r} changed before model execution")
 
 

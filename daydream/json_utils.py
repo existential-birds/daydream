@@ -318,8 +318,7 @@ def extract_json_by_schema(
     *,
     schema: dict[str, Any],
     accept: Callable[[Any, dict[str, Any]], bool],
-    require_complete_root: bool = False,
-    rejection_guard: Callable[[Any], bool] | None = None,
+    require_complete_root: bool = False, rejection_guard: Callable[[Any], bool] | None = None,
 ) -> SchemaAwareSelection:
     """Return the *last* candidate in document order that ``accept`` admits.
 

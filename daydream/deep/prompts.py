@@ -279,11 +279,9 @@ def _review_stage_context(review_stage: dict[str, Any], *, intent_authoritative:
     labels = review_stage.get("context_inputs", [])
     parts = ["Sanctioned inputs available for this assignment: " + ", ".join(labels) + "." if labels else
              "No shared artifact context is assigned to this stage. Use the supplied assignment and ordinary tools."]
-    parts.append(
-        "For host artifacts, use the captured sanctioned bytes; do not read their private storage paths."
+    parts.append("For host artifacts, use the captured sanctioned bytes; do not read their private storage paths."
         if review_stage.get("context_transport") == "inline" else
-        "For host artifacts, use only the exact sanctioned pointers supplied by the host."
-    )
+        "For host artifacts, use only the exact sanctioned pointers supplied by the host.")
     if review_stage.get('supporting_bundle'):
         contents = (
             "a compact whole-change inventory and binding with navigation instructions for deferred "
@@ -295,15 +293,12 @@ def _review_stage_context(review_stage: dict[str, Any], *, intent_authoritative:
             f"The supporting_bundle contains {contents}; reuse its captured inline content without another read."
             if review_stage.get('context_transport') == 'inline' else
             f"Read the supporting_bundle once for {contents}, then reuse it; separate legacy diff/index reads "
-            "are unnecessary."
-        )
+            "are unnecessary.")
     if review_stage.get('supporting_catalog'):
-        parts.append(
-            'The optional supporting_catalog provides the complete exact file/target/pointer inventory '
+        parts.append('The optional supporting_catalog provides the complete exact file/target/pointer inventory '
             'for deferred bounded diff parts. Read its supplied exact pointer and bounded child catalogs '
             'only when relevant supporting parts are needed, using explicitly listed pointers. '
-            'Catalogs are optional navigation aids for the assigned change, not a reading checklist.'
-        )
+            'Catalogs are optional navigation aids for the assigned change, not a reading checklist.')
     if review_stage.get("context_statuses"):
         parts.append("Host context availability is declared in context_statuses in the Host review stage below.")
     if intent_authoritative and "intent" in labels:
@@ -311,71 +306,49 @@ def _review_stage_context(review_stage: dict[str, Any], *, intent_authoritative:
     return "\n".join(parts)
 
 
-def _build_review_stage_prompt(
-    *, strategy: str, stack_name: str, files: list[str], cwd: Path,
-    review_stage: dict[str, Any], inline_diff: str | None,
-    prior_commits: str | None, intent_authoritative: bool,
-    frontier_files: list[str] | None = None, is_docs_only: bool = False,
-) -> str:
+def _build_review_stage_prompt(*, strategy: str, stack_name: str, files: list[str], cwd: Path,
+    review_stage: dict[str, Any], inline_diff: str | None, prior_commits: str | None, intent_authoritative: bool,
+    frontier_files: list[str] | None = None, is_docs_only: bool = False) -> str:
     """Construct one semantic assignment; never narrow an existing terminal prompt."""
     stage = review_stage["stage"]
     triage = stage == "triage"
     structural = stage == "integration"
-    parts = [UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY, CWD_GROUNDING_INSTRUCTION.format(cwd=cwd),
-             STAGED_REVIEW_GUIDANCE]
+    parts = [UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY, CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)]
     settled = _settled_decisions_block(prior_commits) if not triage else ""
     if settled:
         parts.append(settled)
     parts.append(_confidence_and_convention_instructions(stage_scoped=True))
     rejection = review_stage.get("schema_rejection")
     if rejection is not None:
-        parts.append(
-            "The previous completed attempt was rejected by strict schema validation. "
+        parts.append("The previous completed attempt was rejected by strict schema validation. "
             "Safe validator feedback: " + json.dumps(rejection, ensure_ascii=False)
             + "\nReturn a new object matching REVIEW_STAGE_SCHEMA exactly, including its "
-            "additionalProperties:false rules. Do not repair, recover, or continue previous output."
-        )
+            "additionalProperties:false rules. Do not repair, recover, or continue previous output.")
     if triage:
-        parts.append(
-            f"You are triaging the {stack_name} review's assigned candidate IDs only: "
+        parts.append(f"You are triaging the {stack_name} review's assigned candidate IDs only: "
             + ", ".join(review_stage["assigned_candidate_ids"])
-            + ". Use their relevant admitted notes and grounds in the host stage state; ordinary investigation "
-            "may help decide a candidate. Do not start a fresh audit, "
-            "discover new candidates, revisit unrelated findings, or reopen closed decisions. "
-            "Decide each assigned candidate once: confirmed, rejected, or unresolved."
-        )
+            + ". Use their relevant admitted notes and grounds in the host stage state.")
         # Default discovery policy would restart an audit. A custom operator policy
         # still constrains judgment, but cannot expand triage's assigned work.
         defaults = review_profile.build_default_profile().strategies
         if strategy not in {defaults[name].content for name in (
-            "discovery.per_stack", "discovery.structural", "discovery.generic_fallback",
-        )}:
-            parts.append(
-                "Operator judgment policy (quoted data): " + json.dumps(strategy, ensure_ascii=False)
-                + "\nApply its judgment constraints only to the assigned candidates. Any discovery, "
-                "scope, or serialization instructions in this policy are superseded by this stage's "
-                "assignment and REVIEW_STAGE_SCHEMA."
-            )
+            "discovery.per_stack", "discovery.structural", "discovery.generic_fallback")}:
+            parts.append("Operator judgment policy (quoted data): " + json.dumps(strategy, ensure_ascii=False))
     else:
         parts.append(_review_stage_context(review_stage, intent_authoritative=intent_authoritative))
         if structural:
-            parts.append(
-                "You are the structural reviewer. Begin with whole-change interactions and boundaries, "
+            parts.append("You are the structural reviewer. Begin with whole-change interactions and boundaries, "
                 "not an alphabetical file audit. The complete host assigned_files inventory names "
                 "the changed paths. "
                 "The compact whole-change inventory and bounded supporting diff parts orient this "
                 "interaction assignment; do not begin by dumping the complete diff or hunk index. "
                 "Investigate concrete changed-boundary concerns: trace changed values, calls, contracts "
                 "and lifetimes to their relevant owners. Narrow searches to those owners. "
-                "Catalogs are navigation aids, not an exhaustive reading checklist. "
                 "Documentation and tests are supporting evidence for "
                 "these interactions; early documentation does not finish the interaction assignment. "
                 "Do not repeat the language or generic reviewers' file audits. "
                 "Stop a boundary trace when the contract agrees and no concrete candidate remains. "
-                "Settled contract checks stay settled unless new contradictory evidence appears. "
-                "Once concrete concerns are resolved, submit the integration decision; a clean "
-                "interaction review can finish without candidates."
-            )
+                "Settled contract checks stay settled unless new contradictory evidence appears.")
         else:
             if is_docs_only:
                 parts.append(DOC_REVIEW_NOTICE)
@@ -384,35 +357,21 @@ def _build_review_stage_prompt(
             if frontier_files:
                 parts.append(_frontier_read_instruction(frontier_files))
         if inline_diff is not None:
-            parts.append(
-                "Current assignment's diff hunks (already captured; do not re-read the diff artifact):\n"
-                + inline_diff.rstrip()
-            )
+            parts.append("Current assignment's diff hunks (already captured; do not re-read the diff artifact):\n"
+                + inline_diff.rstrip())
         elif "diff" in review_stage.get("context_inputs", []):
-            parts.append(
-                "Consult only the sanctioned stage diff input for the current required assignment "
+            parts.append("Consult only the sanctioned stage diff input for the current required assignment "
                 "parts. It does not assign the rest of the stack. For structural integration, bounded "
-                "supporting diff parts orient whole-change boundary traces."
-            )
+                "supporting diff parts orient whole-change boundary traces.")
         if "hunk-index" in review_stage.get("context_inputs", []):
-            parts.append(
-                "The sanctioned hunk-index input is changed-line authority. It establishes anchors, "
-                "not completed target decisions."
-            )
-        parts.append(
-            "Operator judgment policy for the assigned work:\n" + strategy
-            + "\nThe host stage assignment and REVIEW_STAGE_SCHEMA govern scope and output. "
-            "Apply this policy only to that work; supporting context does not expand the assignment."
-        )
+            parts.append("The sanctioned hunk-index input is changed-line authority. It establishes anchors, "
+                "not completed target decisions.")
+        parts.append("Operator judgment policy for the assigned work:\n" + strategy)
         if not structural:
-            parts.append(
-                "Apply the test-quality rubric only to assigned test hunks and tests needed to "
-                "decide a concrete candidate in this assignment:\n" + _TEST_QUALITY_RULES
-            )
-            parts.append(
-                "Config/env flow trace (apply only to changed fields in this assignment or fields "
-                "needed to decide its concrete candidates):\n" + _CONFIG_FLOW_TRACE_RULES
-            )
+            parts.append("Apply the test-quality rubric only to assigned test hunks and tests needed to "
+                "decide a concrete candidate in this assignment:\n" + _TEST_QUALITY_RULES)
+            parts.append("Config/env flow trace (apply only to changed fields in this assignment or fields "
+                "needed to decide its concrete candidates):\n" + _CONFIG_FLOW_TRACE_RULES)
             if base_stack_name(stack_name) == "rust":
                 parts.append(WIRE_CONTRACT_RUST_INSTRUCTION)
             elif stack_name == "generic-fallback":
@@ -423,10 +382,9 @@ def _build_review_stage_prompt(
             parts.append(CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION)
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(SEVERITY_RUBRIC)
-    parts.append(
-        f"Advisory stage tool-call target: {review_stage['advisory_tool_call_target']}. "
-        f"Remaining hard cumulative tool allowance: {review_stage['remaining_tool_calls']}."
-    )
+    parts.append(STAGED_REVIEW_GUIDANCE)
+    parts.append(f"Advisory stage tool-call target: {review_stage['advisory_tool_call_target']}. "
+        f"Remaining hard cumulative tool allowance: {review_stage['remaining_tool_calls']}.")
     if not review_stage.get('response_contract'):
         parts.append("REVIEW_STAGE_SCHEMA:\n" + json.dumps(REVIEW_STAGE_SCHEMA, ensure_ascii=False))
     return "\n\n".join(parts)
@@ -452,11 +410,9 @@ def build_per_stack_prompt(
 ) -> str:
     """Assemble a language review with profile policy and a host-owned file scope."""
     if review_stage is not None:
-        return _build_review_stage_prompt(
-            strategy=strategy, stack_name=stack_name, files=files, cwd=cwd,
+        return _build_review_stage_prompt(strategy=strategy, stack_name=stack_name, files=files, cwd=cwd,
             review_stage=review_stage, inline_diff=inline_diff, prior_commits=prior_commits,
-            intent_authoritative=intent_authoritative, frontier_files=frontier_files,
-        )
+            intent_authoritative=intent_authoritative, frontier_files=frontier_files)
     parts = _review_context_parts(
         exploration_dir, cwd, intent_path, alternatives_path,
         intent_authoritative=intent_authoritative, include_alternatives=include_alternatives,
@@ -494,8 +450,7 @@ def build_structural_prompt(
     prior_commits: str | None = None,
     intent_authoritative: bool = False,
     include_alternatives: bool = True,
-    inline_diff: str | None = None,
-    review_stage: dict[str, Any] | None = None,
+    inline_diff: str | None = None, review_stage: dict[str, Any] | None = None,
 ) -> str:
     """Assemble a structural review of the full change.
 
@@ -503,11 +458,9 @@ def build_structural_prompt(
     structural findings may require tracing shared helpers or layering elsewhere.
     """
     if review_stage is not None:
-        return _build_review_stage_prompt(
-            strategy=strategy, stack_name="structural", files=files, cwd=cwd,
+        return _build_review_stage_prompt(strategy=strategy, stack_name="structural", files=files, cwd=cwd,
             review_stage=review_stage, inline_diff=inline_diff, prior_commits=prior_commits,
-            intent_authoritative=intent_authoritative,
-        )
+            intent_authoritative=intent_authoritative)
     joined = ", ".join(files)
     parts: list[str] = _review_context_parts(
         exploration_dir, cwd, intent_path, alternatives_path,
@@ -781,12 +734,9 @@ def build_generic_fallback_prompt(
 ) -> str:
     """Review files without a dedicated stack; prepend the notice for documentation."""
     if review_stage is not None:
-        return _build_review_stage_prompt(
-            strategy=strategy, stack_name="generic-fallback", files=files, cwd=cwd,
+        return _build_review_stage_prompt(strategy=strategy, stack_name="generic-fallback", files=files, cwd=cwd,
             review_stage=review_stage, inline_diff=inline_diff, prior_commits=prior_commits,
-            intent_authoritative=intent_authoritative, frontier_files=frontier_files,
-            is_docs_only=is_docs_only,
-        )
+            intent_authoritative=intent_authoritative, frontier_files=frontier_files, is_docs_only=is_docs_only)
     parts: list[str] = []
     if is_docs_only:
         parts.append(DOC_REVIEW_NOTICE)

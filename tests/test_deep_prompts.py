@@ -127,25 +127,16 @@ def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -
 # --- Issue #731: coverage-evidence grounding + frontier-read instruction ---
 
 
-def test_diff_instruction_allows_useful_source_investigation(tmp_path: Path) -> None:
+@pytest.mark.parametrize('name', ['per_stack', 'generic_fallback'])
+def test_diff_instruction_allows_useful_source_investigation(tmp_path: Path, name: str) -> None:
     """Supplied hunks come first and reviewers can inspect more context when useful."""
-    p = _paths(tmp_path)
-    per_stack = build_per_stack_prompt(strategy=_default_strategy("discovery.per_stack"), stack_name="python",
-        files=["api.py"], inline_diff="@@ -1 +1 @@\n-'x'\n+'y'\n", **p,
-    )
-    fallback = build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"),
-        files=["config.yaml"], inline_diff="@@ -1 +1 @@\n-'x'\n+'y'\n", **p,
-    )
-    for prompt in (per_stack, fallback):
-        assert "supplied hunks and context" in prompt or "supplied changed hunks" in prompt
-        assert "when more context" in prompt or "when useful" in prompt
+    prompt = _review_prompt(name, tmp_path, inline_diff="@@ -1 +1 @@\n-'x'\n+'y'\n")
+    assert "supplied hunks and context" in prompt or "supplied changed hunks" in prompt
+    assert "when more context" in prompt or "when useful" in prompt
 
 def test_exploration_pointer_keeps_artifacts_bounded_and_source_work_optional(tmp_path: Path) -> None:
     """Exploration pointers stay bounded while useful source inspection remains optional."""
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(strategy=_default_strategy("discovery.per_stack"), stack_name="python",
-        files=["api.py"], exploration_dir=tmp_path / ".daydream" / "exploration", **p,
-    )
+    out = _review_prompt("per_stack", tmp_path, exploration_dir=tmp_path / ".daydream" / "exploration")
     # Exploration artifacts are pointed at as bounded context only: two named
     # files, sibling artifacts explicitly out of scope.
     assert "Read the pre-scan summary at" in out

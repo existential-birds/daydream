@@ -70,8 +70,7 @@ class ReviewEvidence:
 
     def observe(self, event: AgentEvent) -> None:
         if isinstance(event, RequestEvent):
-            self.native_output = (isinstance(event.config, PiRequestConfig)
-                                  and event.output_schema is not None
+            self.native_output = (isinstance(event.config, PiRequestConfig) and event.output_schema is not None
                                   and event.config.schema_emulated is False)
         if self.native_output and isinstance(event, ToolStartEvent) and event.name == "structured_output":
             self.output_starts += 1

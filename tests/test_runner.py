@@ -1437,8 +1437,7 @@ async def test_fix_cycle_clipboard_timeout_keeps_event_loop_responsive_and_shows
     ticker_task = asyncio.create_task(_ticker())
     try:
         exit_code = await runner.run(
-            make_config(feature_branch_repo, start_at="fix", shallow=True, non_interactive=False),
-        )
+            make_config(feature_branch_repo, start_at="fix", shallow=True, non_interactive=False))
     finally:
         stop_tick.set()
         await ticker_task
