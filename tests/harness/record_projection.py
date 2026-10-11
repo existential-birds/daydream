@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from pathlib import Path
 from typing import Any
 
@@ -57,16 +56,10 @@ def projection_run(
 def append_projection_evidence(
     store: LocalRecordStore, run: dict[str, Any], *,
     dispositions: tuple[str, ...] = ("accepted", "rejected", "ambiguous"),
-    spdx_id: str | None = "MIT", role: str = "rater", evidence_valid_at: str = VALID_AT,
+    role: str = "rater", evidence_valid_at: str = VALID_AT,
 ) -> None:
-    """Append license and per-host-item judgments to an already committed run."""
+    """Append per-host-item judgments to an already committed run."""
     run_id = run["run_id"]
-    if spdx_id is not None:
-        license_evidence = {"spdx_id": spdx_id, "source": "fixture"}
-        store.append_observation(observation(f"{run_id}:license", run_id=run_id, item_uid=None,
-            semantic_evidence=license_evidence, evidence_digest=semantic_evidence_digest(license_evidence),
-            payload={"type": "enrichment", "kind": "license", "evidence": {
-                "status": "available", "value": license_evidence}}))
     for item, disposition in zip(run["findings"]["value"]["items"], dispositions):
         evidence = [{"reply_id": item["item_uid"], "classifier_label": disposition,
                      "valid_at": evidence_valid_at, "created_at": evidence_valid_at,
@@ -83,25 +76,15 @@ def seed_projection_store(root: Path, **kwargs: Any) -> LocalRecordStore:
     return store
 
 
-def add_projection_run(store: LocalRecordStore, *, spdx_id: str | None = "MIT", **kwargs: Any) -> dict[str, Any]:
+def add_projection_run(store: LocalRecordStore, **kwargs: Any) -> dict[str, Any]:
     run = projection_run(**kwargs)
     store.commit_run(run)
-    append_projection_evidence(store, run, spdx_id=spdx_id,
+    append_projection_evidence(store, run,
                                dispositions=kwargs.get("dispositions", ("accepted", "rejected", "ambiguous")))
     return run
 
 
-def policy_file(root: Path, decisions: dict[str, str] | None = None) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / "license-policy.json"
-    path.write_text(json.dumps({"policy_version": "1", "spdx_decisions": decisions or {"MIT": "accepted"}}))
-    return path
-
-
 def projection_config(store: LocalRecordStore, root: Path, **kwargs: Any) -> BuildFrozenCorpusConfig:
     snapshot = store.select_snapshot(observed_before=AS_OF, valid_before=AS_OF)
-    policy = kwargs.pop("license_policy_path", None)
-    if policy is None:
-        policy = policy_file(root)
     return BuildFrozenCorpusConfig(store_dir=store.root, snapshot_id=snapshot["snapshot_id"],
-        out_dir=kwargs.pop("out_dir", root / "out"), license_policy_path=policy, **kwargs)
+        out_dir=kwargs.pop("out_dir", root / "out"), **kwargs)

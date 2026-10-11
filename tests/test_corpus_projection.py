@@ -7,7 +7,7 @@ from typing import Any
 import jsonschema
 import pytest
 
-from daydream.dataset import LocalRecordStore, semantic_evidence_digest
+from daydream.dataset import LocalRecordStore, StoreError, semantic_evidence_digest
 from daydream.training.corpus_projection.projector import BuildFrozenCorpusConfig, build_frozen_corpus
 from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.corpus_projection.segments import segment
@@ -21,7 +21,6 @@ from tests.harness.dataset import observation
 from tests.harness.record_projection import (
     add_projection_run,
     append_projection_evidence,
-    policy_file,
     projection_config,
     projection_run,
     seed_projection_store,
@@ -129,7 +128,7 @@ def test_cli_reply_existence_never_constitutes_acceptance(tmp_path: Path) -> Non
 
 def _cli_args(config: BuildFrozenCorpusConfig) -> list[str]:
     return ["corpus", "build", "--store", str(config.store_dir), "--snapshot-id", config.snapshot_id,
-            "--license-policy", str(config.license_policy_path), "--out", str(config.out_dir / "corpus.jsonl")]
+            "--out", str(config.out_dir / "corpus.jsonl")]
 
 
 def test_cli_build_records_keeps_finding_population_task_reward_and_lineage(tmp_path: Path) -> None:
@@ -152,7 +151,7 @@ def test_cli_build_records_keeps_finding_population_task_reward_and_lineage(tmp_
         assert row["task_identity"]["head_sha"] == "2" * 40
         assert row["task_identity"]["diff_ref"]["run_id"] == "sess-a"
         assert row["lineage"]["snapshot_id"] == config.snapshot_id
-        assert row["lineage"]["source_identity_version"] == "record-snapshot-v1"
+        assert row["lineage"]["source_identity_version"] == "record-snapshot-v2"
         assert row["profile"]["profile_name"] == "deep-review"
         assert row["stack"] == "python"
         assert row["intrinsic_reward"] == run["scoring"]["value"]["persisted_breakdown"]
@@ -161,55 +160,58 @@ def test_cli_build_records_keeps_finding_population_task_reward_and_lineage(tmp_
     lineage = json.loads((config.out_dir / "lineage.json").read_text())
     assert lineage["adjudication_count"] == 1
     assert lineage["exclusions_by_reason"] == {"non-decisive-adjudication": 1}
-    assert config.license_policy_path is not None
-    assert lineage["license_policy"]["path_digest"] == hashlib.sha256(
-        config.license_policy_path.read_bytes()).hexdigest()
     assert lineage["exclusion_list_digest"] == hashlib.sha256(EXCLUSION_PATH.read_bytes()).hexdigest()
     assert lineage["snapshot"]["snapshot_id"] == config.snapshot_id
-    assert len(lineage["content_digests"]) == 5
+    assert len(lineage["content_digests"]) == 4
     assert (config.out_dir / "SHA256SUMS").is_file()
     assert (config.out_dir / "_SUCCESS").is_file()
     assert len(load_dataset_v2(config.out_dir)) == 2
 
 
-@pytest.mark.parametrize(("slug", "spdx", "allowed", "reason"), [
-    ("getsentry/sentry", "MIT", frozenset(), "c5_excluded_repo"),
-    (None, "MIT", frozenset(), "repo_identity_missing"),
-    ("owner/repo", None, frozenset(), "license_evidence_missing"),
-    ("owner/repo", "NOASSERTION", frozenset(), "license_evidence_missing"),
-    ("owner/gpl-repo", "GPL-3.0-only", frozenset(), "c8_copyleft_unopted"),
-    ("owner/gpl-repo", "GPL-3.0-only", frozenset({"owner/other"}), "c8_copyleft_unopted"),
+@pytest.mark.parametrize(("slug", "reason"), [
+    *((slug, "c5_excluded_repo") for slug in (
+        "getsentry/sentry", "GETSENTRY/SENTRY", "https://github.com/getsentry/sentry.git",
+        "git@github.com:getsentry/sentry.git", "git@host:getsentry/sentry", "getsentry/sentry.git",
+        "  getsentry/sentry  ")),
+    *((slug, "repo_identity_missing") for slug in (None, "", "  ", "owner/repo/extra")),
 ])
-def test_cli_license_refusal_writes_no_projection(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], slug: str | None, spdx: str | None,
-    allowed: frozenset[str], reason: str,
+def test_cli_identity_and_benchmark_refusal_writes_no_projection(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], slug: Any, reason: str,
 ) -> None:
-    store = seed_projection_store(tmp_path, repo_slug=slug, spdx_id=spdx)
-    policy = policy_file(tmp_path, {"MIT": "accepted", "GPL-3.0-only": "rejected"})
-    config = projection_config(store, tmp_path, license_policy_path=policy, allow_copyleft=allowed)
-    args = _cli_args(config)
-    if allowed:
-        args += ["--allow-copyleft", *allowed]
-    assert cli_main(args) == 1
+    store = seed_projection_store(tmp_path, repo_slug=slug)
+    config = projection_config(store, tmp_path)
+    assert cli_main(_cli_args(config)) == 1
     captured = capsys.readouterr()
     assert reason in captured.out + captured.err
     assert not config.out_dir.exists()
 
 
-def test_copyleft_opt_in_and_mixed_repo_license_decisions_are_pinned(tmp_path: Path) -> None:
+@pytest.mark.parametrize("slug", ["OWNER/Repo", " https://github.com/OWNER/Repo.git ",
+                                  "git@github.com:OWNER/Repo.git", "OWNER/Repo.git"])
+def test_cli_canonical_source_identity_is_preserved(tmp_path: Path, slug: str) -> None:
+    store = seed_projection_store(tmp_path, repo_slug=slug)
+    config = projection_config(store, tmp_path)
+    assert cli_main(_cli_args(config)) == 0
+    for row in _read_jsonl(config.out_dir / "corpus.jsonl"):
+        assert row["lineage"]["repo_slug"] == row["task_identity"]["repo_slug"] == "OWNER/Repo"
+
+
+def test_mixed_repositories_build_without_permission_evidence(tmp_path: Path) -> None:
     store = seed_projection_store(tmp_path)
-    add_projection_run(store, run_id="sess-b", repo_slug="owner/gpl-repo", spdx_id="GPL-3.0-only")
-    policy = policy_file(tmp_path, {"MIT": "accepted", "GPL-3.0-only": "rejected"})
-    config = projection_config(store, tmp_path, license_policy_path=policy,
-                               allow_copyleft=frozenset({"OWNER/GPL-REPO"}))
-    result = build_frozen_corpus(config)
-    assert result["license_distribution"] == {"admitted": 2}
+    add_projection_run(store, run_id="sess-b", repo_slug="gnu/coreutils")
+    add_projection_run(store, run_id="sess-c", repo_slug="owner/unrecognized-license")
+    config = projection_config(store, tmp_path)
+    assert cli_main(_cli_args(config)) == 0
+    rows = _read_jsonl(config.out_dir / "corpus.jsonl")
+    assert {r["lineage"]["repo_slug"] for r in rows} == {
+        "owner/repo-a", "gnu/coreutils", "owner/unrecognized-license"}
+    assert len(load_dataset_v2(config.out_dir)) == 6
+    assert all("license_decision" not in r["lineage"] for r in rows)
+    assert not (config.out_dir / "license-report.json").exists()
     lineage = json.loads((config.out_dir / "lineage.json").read_text())
-    assert set(lineage["license_decisions"]) == {"sess-a", "sess-b"}
-    assert lineage["copyleft_opt_ins"] == ["OWNER/GPL-REPO"]
-    report = json.loads((config.out_dir / "license-report.json").read_text())
-    assert report["decisions"] == lineage["license_decisions"]
-    assert report["distribution"] == result["license_distribution"]
+    assert not {
+        "license_policy", "copyleft_opt_ins", "license_decisions", "license_decision_distribution",
+    } & lineage.keys()
 
 
 def test_missing_judgments_remain_in_complete_adjudication_population(tmp_path: Path) -> None:
@@ -224,15 +226,12 @@ def test_missing_judgments_remain_in_complete_adjudication_population(tmp_path: 
     assert {entry["disposition"] for entry in report} == {"unanswered"}
 
 
-@pytest.mark.parametrize("failure", ["snapshot", "license-policy", "trajectory"])
+@pytest.mark.parametrize("failure", ["snapshot", "trajectory"])
 def test_required_frozen_inputs_fail_before_output(tmp_path: Path, failure: str) -> None:
     store = seed_projection_store(tmp_path)
     config = projection_config(store, tmp_path)
     if failure == "snapshot":
         (store.root / "snapshots" / f"{config.snapshot_id}.jsonl").unlink()
-    elif failure == "license-policy":
-        assert config.license_policy_path is not None
-        config.license_policy_path.unlink()
     else:
         fresh = LocalRecordStore(tmp_path / "absent-trace")
         run = projection_run(trajectories={"status": "unproduced"})
@@ -262,10 +261,8 @@ def test_v2_loader_rejects_incomplete_wrong_version_and_malformed_outputs(tmp_pa
         load_dataset_v2(config.out_dir)
 
 
-def test_configuration_requires_policy_and_matching_temporal_pin(tmp_path: Path) -> None:
+def test_configuration_requires_matching_temporal_pin(tmp_path: Path) -> None:
     store = seed_projection_store(tmp_path)
-    with pytest.raises(ValueError, match="license_policy_path"):
-        BuildFrozenCorpusConfig(out_dir=tmp_path, store_dir=store.root, snapshot_id="f" * 64)
     config = projection_config(store, tmp_path, as_of="2026-10-04T00:00:00Z")
     with pytest.raises(ValueError, match="valid_before"):
         build_frozen_corpus(config)
@@ -314,7 +311,7 @@ def test_cli_posterior_annotation_preserves_captured_native_profile_with_claim_s
         "fingerprint": run["findings"]["value"]["items"][0]["fingerprint"], "disposition": "accepted",
         "evidence": [semantic], "evidence_digest": reply_evidence_digest([semantic]), "reply_captures": [capture],
     }]})
-    store.append_observation(observation("harvest", schema_version="daydream.observation.v2", run_id="sess-a",
+    store.append_observation(observation("harvest", schema_version="daydream.observation.v3", run_id="sess-a",
         item_uid=None, role="automatic", semantic_evidence=[], evidence_digest=semantic_evidence_digest([]),
         payload={"type": "harvest-annotation", "annotation": annotation, "labeler_policy_version": "980-policy-r1"}))
     config = projection_config(store, tmp_path)
@@ -344,11 +341,6 @@ def test_equivalent_records_preserve_normalized_pre_cutover_training_examples(tm
                                        ("exact localized finding body", "rejected finding body")):
         item.update(fingerprint=fingerprint, body=text)
     store.commit_run(run)
-    license_evidence = {"spdx_id": "MIT", "source": "manifest"}
-    store.append_observation(observation("license", run_id="sess-a", item_uid=None,
-        semantic_evidence=license_evidence, evidence_digest=semantic_evidence_digest(license_evidence),
-        payload={"type": "enrichment", "kind": "license", "evidence": {
-            "status": "available", "value": license_evidence}}))
     for index, item in enumerate(items):
         disposition = ("accepted", "rejected")[index]
         evidence = [{"comment_id": index + 1, "classifier_label": disposition,
@@ -359,15 +351,15 @@ def test_equivalent_records_preserve_normalized_pre_cutover_training_examples(tm
             payload={"type": "finding-judgment", "disposition": disposition, "rationale": "baseline equivalent"}))
     snapshot = store.select_snapshot(observed_before="2026-10-05T00:00:00+00:00")
     config = BuildFrozenCorpusConfig(out_dir=tmp_path / "out", store_dir=store.root,
-                                    snapshot_id=snapshot["snapshot_id"], license_policy_path=policy_file(tmp_path))
+                                    snapshot_id=snapshot["snapshot_id"])
     build_frozen_corpus(config)
     rows = _read_jsonl(config.out_dir / "corpus.jsonl")
-    fields = ("schema_version", "record_type", "tier", "session_id", "trajectory_id", "task_segment",
+    fields = ( "record_type", "tier", "session_id", "trajectory_id", "task_segment",
               "finding_fingerprint", "disposition", "outcome_label", "evidence", "profile", "stack",
               "finding_text", "finding_text_sha256", "diff")
     normalized = [{**{name: row[name] for name in fields},
                    "lineage": {name: row["lineage"][name] for name in (
-                       "as_of", "valid_at", "exclusion_reason", "repo_slug", "license_decision", "diff_digest")},
+                       "as_of", "valid_at", "exclusion_reason", "repo_slug", "diff_digest")},
                    "task_identity": {name: row["task_identity"][name] for name in (
                        "repo_slug", "base_sha", "head_sha", "diff_digest")}} for row in rows]
     expected = json.loads((Path(__file__).parent / "fixtures/training/projection-preservation.json").read_text())
@@ -399,9 +391,20 @@ def test_cli_output_refuses_record_store_overlap_without_mutating_input(
     before_files = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
     before_paths = set(tmp_path.rglob("*"))
     args = ["corpus", "build", "--store", str(input_root), "--snapshot-id", config.snapshot_id,
-            "--license-policy", str(config.license_policy_path), "--out", str(output_root / "corpus.jsonl")]
+            "--out", str(output_root / "corpus.jsonl")]
     assert cli_main(args) == 1
     assert "overlaps the record store namespace" in capsys.readouterr().out
     after_files = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
     assert after_files == before_files
     assert set(tmp_path.rglob("*")) == before_paths
+
+
+@pytest.mark.parametrize("slug", [17, ["owner/repo"], {"repo": "owner/repo"}])
+def test_capture_refuses_nonstring_identity_before_run_write(tmp_path: Path, slug: Any) -> None:
+    store = LocalRecordStore(tmp_path / "records")
+    record = projection_run()
+    record["original_task"]["value"]["repository"]["repo_slug"] = slug
+    with pytest.raises(StoreError, match="invalid_or_unknown_record_schema"):
+        store.commit_run(record)
+    assert store.read_records()["runs"] == ()
+    assert not (tmp_path / "out").exists()

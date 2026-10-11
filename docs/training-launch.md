@@ -37,7 +37,7 @@ Current RFT threshold axes are `composite`, `correctness_per_finding` (mean),
 and `length_penalty`, all interpreted as minimums.
 
 Corpus-side loading goes through `daydream.training.stacks.load_v2_projection`,
-which fail-closes on the C5 exclusion list and C8 copyleft opt-in before any
+which validates repository identity and enforces the C5 benchmark exclusion list before any
 record is returned, and re-verifies the projection's `_SUCCESS` marker,
 split-digest lineage, and split drift on every load.
 
@@ -68,7 +68,7 @@ For real-corpus training, the input is a frozen-corpus projection directory
 produced by the projector. The real-corpus command sequence is:
 
 ```bash
-daydream corpus build --store RECORD_STORE --snapshot-id SNAPSHOT_ID --license-policy LICENSE_POLICY --out PROJECTION_DIR/corpus.jsonl
+daydream corpus build --store RECORD_STORE --snapshot-id SNAPSHOT_ID --out PROJECTION_DIR/corpus.jsonl
 ```
 
 ```bash
@@ -77,6 +77,10 @@ daydream train --projection PROJECTION_DIR --out OUT_DIR --dry-run
 
 (Drop `--dry-run` for the real run. `--projection` is the pipeline's only
 training input: the legacy `--corpus` path is gone.)
+
+Dataset builders own permission and licensing decisions. Use the captured repository,
+base/head commit, and diff provenance when deciding whether to include or share records.
+Daydream does not fetch licenses or authorize training use.
 
 The projection directory is the immutable input contract for the run:
 
@@ -90,9 +94,8 @@ The projection directory is the immutable input contract for the run:
 - **`base_sha` / `head_sha`** — the per-record task-identity git SHAs, used by
   Stage-2 RFT to rebuild replay tasks; full-SHA values are validated before
   any task rebuild.
-- **C5/C8 re-application** — the projection loader re-applies the C5 exclusion list
-  and the C8 copyleft opt-in gate fail-closed on every load; the projector's
-  decision is never trusted on its own.
+- **C5 benchmark isolation** — the projection loader canonicalizes repository identity
+  and re-applies the benchmark exclusion list on every load.
 - **Fail-closed drift** — the split recorded on each record's `lineage.split`
   is recomputed from the record id under the lineage's pinned salt/rates, and
   any disagreement refuses the entire load with the offending record id

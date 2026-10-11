@@ -105,19 +105,19 @@ def test_history_pins_temporal_membership_and_preserves_typed_human_decisions(st
         payload={"type": "finding-judgment", "disposition": "rejected", "rationale": "suggestion"}))
     label = observation("label", item_uid=None, payload={"type": "run-label", "label": "contested",
         "reviewer_logins": ["alice"], "outcome_prior": 0.25, "outcome_prior_n": 4, "rubric": {"version": "v1"}})
-    license_evidence = observation("license", item_uid=None, payload={"type": "enrichment", "kind": "license",
+    base_evidence = observation("base", item_uid=None, payload={"type": "enrichment", "kind": "base",
         "evidence": {"status": "unavailable", "reason": "not acquired"}})
-    for raw in (label, license_evidence):
+    for raw in (label, base_evidence):
         store.append_observation(raw)
     snapshot = store.select_snapshot(observed_before="2026-10-04T13:00:00Z", valid_before="2026-10-04T11:30:00Z")
     read = LocalRecordStore(store.root).read_snapshot(snapshot["snapshot_id"])
     assert [run["run_id"] for run in read.runs] == ["run-1"] and read.snapshot == snapshot
-    assert {obs["observation_id"] for obs in read.observations} == {"judgment-1", "future", "model", "label", "license"}
-    assert {obs["observation_id"] for obs in read.eligible_observations} == {"judgment-1", "model", "label", "license"}
+    assert {obs["observation_id"] for obs in read.observations} == {"judgment-1", "future", "model", "label", "base"}
+    assert {obs["observation_id"] for obs in read.eligible_observations} == {"judgment-1", "model", "label", "base"}
     history = {obs["observation_id"]: obs for obs in read.observations}
     assert history["model"]["review_required"]
     assert history["label"]["payload"]["outcome_prior"] == 0.25
-    assert history["license"]["payload"]["evidence"]["status"] == "unavailable"
+    assert history["base"]["payload"]["evidence"]["status"] == "unavailable"
     judgment = read.effective_judgment("run-1", "item:1")
     assert judgment["disposition"] == "accepted" and judgment["role"] == "rater"
     store.append_observation(observation("bob", author="bob", observed_at="2026-10-04T14:00:00Z",
@@ -331,3 +331,18 @@ def test_snapshot_pins_download_provenance_independently_of_later_source_metadat
     assert first["snapshot_id"] != second["snapshot_id"]
     assert store.read_snapshot(first["snapshot_id"]).snapshot["source"]["revision"] == "a" * 40
     assert store.read_snapshot(second["snapshot_id"]).snapshot["source"]["revision"] == "b" * 40
+
+
+@pytest.mark.parametrize("version", ["daydream.observation.v1", "daydream.observation.v2"])
+def test_store_refuses_historical_observation_versions_without_writes(store: LocalRecordStore, version: str) -> None:
+    before = store.read_records()
+    with pytest.raises(StoreError):
+        store.append_observation(observation(schema_version=version))
+    assert store.read_records() == before
+
+
+def test_current_observation_contract_refuses_license_enrichment(store: LocalRecordStore) -> None:
+    with pytest.raises(StoreError):
+        store.append_observation(observation(item_uid=None, payload={"type": "enrichment", "kind": "license",
+                                               "evidence": {"status": "unavailable", "value": None}}))
+    assert store.read_records()["observations"] == ()

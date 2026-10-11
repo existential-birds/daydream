@@ -215,20 +215,6 @@ def _add_dry_run_argument(parser: argparse.ArgumentParser, help_text: str) -> No
     )
 
 
-def _add_license_arguments(
-    parser: argparse.ArgumentParser, *, policy_help: str, copyleft_help: str
-) -> None:
-    """Add the shared ``--license-policy``/``--allow-copyleft`` options."""
-    parser.add_argument(
-        "--license-policy", type=Path, default=None, dest="license_policy",
-        metavar="PATH", help=policy_help,
-    )
-    parser.add_argument(
-        "--allow-copyleft", action="append", default=[], dest="allow_copyleft",
-        metavar="OWNER/REPO", help=copyleft_help,
-    )
-
-
 def _print_namespace_help(usage: str, *, error: bool = False) -> None:
     """Print usage to stderr for errors, otherwise stdout."""
 

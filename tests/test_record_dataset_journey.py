@@ -3,7 +3,7 @@ import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import pytest
@@ -13,12 +13,11 @@ from daydream.dataset import LocalRecordStore
 from daydream.pr_review import DAYDREAM_FOOTER, finding_marker
 from daydream.run_config import RunConfig
 from daydream.runner import run
-from daydream.training.license_evidence import EnrichedEvidence, GithubLicenseResolver
 from daydream.training.record_evidence import sessions_from_snapshot
 from tests.harness.dataset import read_records
 from tests.harness.dataset_hub import FakeDatasetHub
 from tests.harness.git_helpers import git
-from tests.harness.record_projection import policy_file
+from tests.harness.record_projection import add_projection_run
 from tests.harness.scripts import cli_main
 from tests.test_dataset_hub_run import config as config
 
@@ -82,9 +81,6 @@ def test_capture_publish_download_annotate_republish_and_build_offline(
 
     monkeypatch.setattr(git_ops, "gh_api", github)
     monkeypatch.setattr(git_ops, "clone_with_token", unavailable_clone)
-    monkeypatch.setattr(GithubLicenseResolver, "resolve",
-                        lambda self, slug, *, repo_commit:
-                        EnrichedEvidence("MIT", f"github:{slug}@{repo_commit}", repo_commit))
     assert cli_main(["corpus", "harvest", "--store", str(downloaded.root),
                      "--snapshot-id", initial["snapshot_id"], "--cache-dir", str(tmp_path / "cache"),
                      "--gh-spacing-sec", "0"]) == 0
@@ -102,6 +98,17 @@ def test_capture_publish_download_annotate_republish_and_build_offline(
     assert cli_main(["corpus", "adjudicate", "label", "--state-dir", str(state), "--batch", str(len(items)),
                      "--disposition", "accepted", "--rationale", "Human confirmed the frozen evidence",
                      "--labeler", "alice"]) == 0
+    # Independent gold source runs provide balanced train/holdout populations while
+    # the real captured run retains its human judgment and complete reply provenance.
+    # Run 28 supplies both classes on the default frozen holdout independently of
+    # the captured run's random identity. Earlier runs supply both training classes.
+    for index in range(30):
+        add_projection_run(downloaded, run_id=f"journey-gold-{index:02d}",
+                           dispositions=("accepted", "rejected"),
+                           repo_slug=("gnu/coreutils" if index % 2 else "owner/unrecognized-license"))
+    for index in range(len(items)):
+        add_projection_run(downloaded, run_id=f"journey-balance-{index:02d}", dispositions=("rejected",),
+                           repo_slug="owner/unrecognized-license")
     assert cli_main(["corpus", "dataset", "publish", "--store", str(downloaded.root),
                      "--trajectory-hub-repo", repo]) == 0
     final_revision = hub.revision
@@ -110,9 +117,10 @@ def test_capture_publish_download_annotate_republish_and_build_offline(
     assert cli_main(["corpus", "dataset", "download", "--trajectory-hub-repo", repo,
                      "--revision", final_revision, "--output", str(final_path)]) == 0
     final = LocalRecordStore(final_path)
-    frozen = final.select_snapshot(observed_before="2100-01-01T00:00:00Z")
+    frozen = final.select_snapshot(observed_before="2100-01-01T00:00:00Z",
+                                   valid_before="2100-01-01T00:00:00Z")
     records = final.read_snapshot(frozen["snapshot_id"])
-    assert json.dumps(records.runs[0], sort_keys=True) == original
+    assert json.dumps(next(r for r in records.runs if r["run_id"] == captured["run_id"]), sort_keys=True) == original
     assert any(o["payload"]["type"] == "harvest-annotation" for o in records.observations)
     assert any(o["role"] == "rater" and o["source"] == "adjudication" for o in records.observations)
     assert [o for o in records.observations if o.get("reply_captures")] == [
@@ -129,11 +137,9 @@ def test_capture_publish_download_annotate_republish_and_build_offline(
         raise AssertionError("projection attempted network access")
 
     monkeypatch.setattr(git_ops, "gh_api", no_network)
-    monkeypatch.setattr(GithubLicenseResolver, "resolve", no_network)
     monkeypatch.setattr(dataset_hub, "HfDatasetHub", no_network)
     for name in ("out-a", "out-b"):
         assert cli_main(["corpus", "build", "--store", str(final.root), "--snapshot-id", frozen["snapshot_id"],
-                         "--license-policy", str(policy_file(tmp_path)),
                          "--out", str(tmp_path / name / "corpus.jsonl")]) == 0
     first = tmp_path / "out-a"
     second = tmp_path / "out-b"
@@ -141,3 +147,34 @@ def test_capture_publish_download_annotate_republish_and_build_offline(
     assert {p.name: p.read_bytes() for p in first.iterdir()} == {p.name: p.read_bytes() for p in second.iterdir()}
     source = final.download_source()
     assert source is not None and source["revision"] == final_revision
+
+    from daydream.training.calibration import CalibrationConfig, run_calibration
+    from daydream.training.stacks import load_v2_projection
+
+    projection = load_v2_projection(first)
+    rows = cast(list[dict[str, Any]], projection.records)
+    assert captured["run_id"] in {row["session_id"] for row in rows}
+    labels = [row["outcome_label"] for row in rows]
+    assert labels.count("accepted") == labels.count("rejected")
+    holdout = [row for row in rows if row["lineage"]["split"] == "holdout"]
+    assert {row["outcome_label"] for row in holdout} == {"accepted", "rejected"}
+    assert all("license_decision" not in row["lineage"] for row in rows)
+    assert "license-report.json" not in {path.name for path in first.iterdir()}
+    trained = tmp_path / "trained"
+    assert cli_main(["train", "--projection", str(first), "--out", str(trained), "--dry-run"]) == 0
+    manifest = json.loads((trained / "manifest.json").read_text())
+    assert manifest["stages"]["stage0"]["gate"]["passed"] is True
+    assert manifest["run_identity"]["corpus_digest"] == projection.digest
+    assert all(manifest["stages"][stage]["status"] in {"complete", "skipped_dry"}
+               for stage in ("stage0", "stage1", "stage2", "stage3"))
+    gold = tmp_path / "gold.json"
+    gold.write_text(json.dumps({row["record_id"]: {"accepted": row["outcome_label"] == "accepted"} for row in rows}))
+    breakdowns = tmp_path / "breakdowns.json"
+    breakdowns.write_text(json.dumps({
+        row["record_id"]: {"correctness": 0.8 if row["outcome_label"] == "accepted" else 0.2} for row in rows
+    }))
+    result = run_calibration(CalibrationConfig(corpus_dir=first, gold_labels=gold, breakdowns=breakdowns,
+                                              out_dir=tmp_path / "calibrated", run_id="record-hf-journey", seed=7,
+                                              candidates={"correctness": [0.3, 0.6]}))
+    assert result["record_count"] == len(rows)
+    assert (tmp_path / "calibrated/calibration.json").exists()

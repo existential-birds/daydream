@@ -45,7 +45,7 @@ REPO_SLUGS = [f"acme/widgets-{i % 3}" for i in range(RECORD_COUNT)]
 
 
 def _record(i: int) -> dict[str, Any]:
-    return {"schema_version": "2",
+    return {"schema_version": "3",
         "record_id": f"rec-{i:04d}", "session_id": f"sess-{i:04d}",
         "reward_version": REWARD_VERSION,
         "lineage": {
@@ -53,7 +53,6 @@ def _record(i: int) -> dict[str, Any]:
             # rates.
             "split": assign_split(f"rec-{i:04d}", holdout_rate=0.2, val_rate=0.2, salt=SALT), "as_of": AS_OF,
             "valid_at": VALID_AT, "repo_slug": REPO_SLUGS[i],
-            "license_decision": {"status": "admitted", "spdx_id": "MIT", "repo_slug": REPO_SLUGS[i]},
             "labeler_policy_version": LABELER_POLICY_VERSION,
             "reply_classifier_version": REPLY_CLASSIFIER_VERSION, "rubric_schema_version": RUBRIC_SCHEMA_VERSION,
         },

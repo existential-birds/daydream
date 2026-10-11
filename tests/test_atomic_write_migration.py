@@ -142,7 +142,7 @@ class TestProjectorKnobs:
         calls = _instrument(monkeypatch, "daydream.training.corpus_projection.projector")
         build_frozen_corpus(projection_config(store, tmp_path, out_dir=out))
         assert {target.name for target, _c, _k in calls} >= {"corpus.jsonl", "adjudication-report.json", "schema.json",
-            "lineage.json", "license-report.json", "_SUCCESS",
+            "lineage.json", "_SUCCESS",
         }
         # mode=None keeps mkstemp's 0600: this site must NOT be widened to the
         # umask-derived 0644 the other seven get.

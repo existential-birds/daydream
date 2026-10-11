@@ -208,22 +208,12 @@ def sessions_from_snapshot(records: SnapshotRecords, *, overlay_judgments: bool 
                 )
             resolutions.append(resolution)
         task = section_value(run, "original_task") or {}
-        license_evidence = None
-        for observation in sorted(
-            records.eligible_observations, key=lambda o: (datetime.fromisoformat(o["observed_at"]), o["observation_id"])
-        ):
-            payload = observation["payload"]
-            if observation["run_id"] == run_id and payload["type"] == "enrichment" and payload["kind"] == "license":
-                license_evidence = (
-                    payload["evidence"]["value"] if payload["evidence"]["status"] == "available" else None
-                )
         sessions.append(
             {
                 "session_id": run_id,
                 "trajectory_id": run_id,
                 "segment_id": run_id,
                 "repo_slug": (task.get("repository") or {}).get("repo_slug"),
-                "license_evidence": license_evidence,
                 "annotation": annotation,
                 "resolutions": resolutions,
             }

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Daydream training-record (JSONL) schema v2",
+  "title": "Daydream training-record (JSONL) schema v3",
   "description": "Per-finding training records projected offline from immutable run and eligible observation snapshots.",
   "type": "object",
   "additionalProperties": false,
@@ -20,7 +20,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "2"
+      "const": "3"
     },
     "record_id": {
       "type": "string",
@@ -192,7 +192,6 @@
         "split",
         "exclusion_reason",
         "repo_slug",
-        "license_decision",
         "snapshot_id",
         "source_identity_version"
       ],
@@ -264,53 +263,12 @@
           "type": "string",
           "minLength": 1
         },
-        "license_decision": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "status",
-            "reason_code",
-            "spdx_id",
-            "policy_version",
-            "evidence_ref",
-            "repo_slug"
-          ],
-          "properties": {
-            "status": {
-              "enum": [
-                "admitted",
-                "rejected"
-              ]
-            },
-            "reason_code": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "spdx_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "policy_version": {
-              "type": "string"
-            },
-            "evidence_ref": {
-              "type": "string"
-            },
-            "repo_slug": {
-              "type": "string"
-            }
-          }
-        },
         "snapshot_id": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
         },
         "source_identity_version": {
-          "const": "record-snapshot-v1"
+          "const": "record-snapshot-v2"
         }
       }
     },
@@ -341,6 +299,167 @@
     "item_uid": {
       "type": "string",
       "minLength": 1
+    },
+    "correction": {
+      "$ref": "#/$defs/correction"
+    },
+    "reply_captures": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/replyCapture"
+      }
+    }
+  },
+  "$defs": {
+    "correction": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "available",
+                "unavailable",
+                "unproduced",
+                "withheld",
+                "failed"
+              ]
+            },
+            "source_reply_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "body_sha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "text": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "captured_sha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "redaction_provenance": {
+              "type": "object"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "source_reply_id"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "replyCapture": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "available",
+            "unavailable",
+            "unproduced",
+            "withheld",
+            "failed"
+          ]
+        },
+        "source_reply_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "body_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "captured_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "redaction_provenance": {
+          "type": "object"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "html_url": {
+          "type": "string"
+        },
+        "in_reply_to_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "source_reply_id",
+        "body_sha256"
+      ]
     }
   }
 }

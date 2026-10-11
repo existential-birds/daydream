@@ -27,9 +27,6 @@ def _build_build_corpus_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="daydream corpus build",
         description="Project frozen run and observation records into deterministic training examples, offline.")
     _add_record_inputs(parser)
-    common._add_license_arguments(parser,
-        policy_help="Digest-pinned license policy JSON; required for fail-closed admission.",
-        copyleft_help="Repeatable; permit a copyleft repo by exact owner/repo slug.")
     parser.add_argument("--out", type=Path, required=True,
                         help="Corpus JSONL path; manifests and lineage go beside it.")
     for dimension in ("stack", "repo", "profile"):
@@ -45,7 +42,6 @@ def _handle_build_corpus_command(argv: list[str]) -> int:
     from dataclasses import replace
 
     from daydream.training.corpus_projection import BuildFrozenCorpusConfig, build_frozen_corpus
-    from daydream.training.corpus_projection.license import load_license_policy
 
     args = _build_build_corpus_parser().parse_args(argv)
     console = create_console()
@@ -54,19 +50,10 @@ def _handle_build_corpus_command(argv: list[str]) -> int:
         if value is not None and not 0.0 < value <= 1.0:
             print_error(console, f"Invalid --max-{dimension}-share", "Must be in (0, 1].")
             return 1
-    if args.license_policy is None:
-        print_error(console, "Missing --license-policy", "A corpus build requires a pinned license policy file.")
-        return 1
-    try:
-        load_license_policy(args.license_policy)
-    except (OSError, ValueError, TypeError) as exc:
-        print_error(console, "Invalid --license-policy", str(exc))
-        return 1
     try:
         config = BuildFrozenCorpusConfig(out_dir=args.out.parent,
             store_dir=args.store.expanduser(), snapshot_id=args.snapshot_id,
-            license_policy_path=args.license_policy,
-            allow_copyleft=frozenset(s.casefold() for s in args.allow_copyleft), as_of=args.as_of,
+            as_of=args.as_of,
             max_stack_share=args.max_stack_share, max_repo_share=args.max_repo_share,
             max_profile_share=args.max_profile_share)
         if args.dry_run:
@@ -146,7 +133,7 @@ def _handle_label_command(argv: list[str]) -> int:
             print_info(console, f"No prior label for {run['run_id']}.")
         evidence = {"outcome": args.outcome}
         now = datetime.now(timezone.utc).isoformat()
-        observation = {"schema_version": "daydream.observation.v1", "run_id": run["run_id"], "item_uid": None,
+        observation = {"schema_version": "daydream.observation.v3", "run_id": run["run_id"], "item_uid": None,
             "valid_at": now, "observed_at": now, "source": "manual", "author": args.author, "role": "rater",
             "policy_version": "human-outcome-v1", "rubric_version": "human-outcome-v1",
             "semantic_evidence": evidence, "evidence_digest": semantic_evidence_digest(evidence),
@@ -180,7 +167,7 @@ _CORPUS_USAGE = (
     "Data-pipeline sub-verbs:\n"
     "  dataset   publish/status/download JSONL evidence or select a frozen snapshot\n"
     "  harvest   append PR enrichment and annotations for selected run records\n"
-    "  build     project a frozen record snapshot offline (pinned --license-policy required)\n"
+    "  build     project a frozen record snapshot offline\n"
     "  label     append an authoritative human outcome label\n"
     "  calibrate-reward  emit deterministic reward-calibration artifacts from derived corpus output\n"
     "  adjudicate  per-finding queue, preview, label, export, report, materialize, and harvest-snapshot"

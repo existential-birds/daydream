@@ -45,9 +45,9 @@ def test_offline_queue_retry_download_and_immutable_history(tmp_path: Path, api:
     assert len(hub.commits) == 1
     tree = hub.trees[result.revision]
     manifest = json.loads(tree[api.MANIFEST_PATH])
-    assert manifest["schema_version"] == "daydream.hub.v2"
+    assert manifest["schema_version"] == "daydream.hub.v3"
     assert manifest["record_schemas"] == {"runs": ["daydream.run.v1"],
-        "observations": ["daydream.observation.v1", "daydream.observation.v2"]}
+        "observations": ["daydream.observation.v3"]}
     for kind, shards in manifest["shards"].items():
         assert len(shards) == 1
         shard = shards[0]
@@ -318,37 +318,28 @@ def test_download_rejects_concurrent_destination_capture_before_pinning_source(
     assert not (destination / "source.json").exists()
 
 
-def test_new_observation_schema_appends_to_immutable_canonical_v1_history(tmp_path: Path, api: Any) -> None:
+@pytest.mark.parametrize("version", ["daydream.hub.v1", "daydream.hub.v2"])
+def test_supported_publication_refuses_historical_manifests_without_rewriting_history(
+    tmp_path: Path, api: Any, version: str,
+) -> None:
     from tests.harness.dataset_hub import FakeDatasetHub
 
     hub = FakeDatasetHub()
     store = LocalRecordStore(tmp_path / "records")
     store.commit_run(run_record())
-    store.append_observation(observation())
     publisher = api.DatasetUploader(store, TEST_REPO, backend=hub)
-    initial = publisher.upload()
-    assert initial.published == 2
-    previous = json.loads(hub.trees[initial.revision][api.MANIFEST_PATH])
-    previous["schema_version"] = "daydream.hub.v1"
-    previous["record_schemas"] = {"runs": "daydream.run.v1", "observations": "daydream.observation.v1"}
+    published = publisher.upload()
+    previous = json.loads(hub.trees[published.revision][api.MANIFEST_PATH])
+    previous["schema_version"] = version
     old_pin = hub.commit(TEST_REPO, {api.MANIFEST_PATH: json.dumps(previous).encode()}, hub.revision)
-    old_store = api.download_snapshot(TEST_REPO, old_pin, tmp_path / "old", backend=hub)
-    assert old_store.read_records() == store.read_records()
-    old_shards = {shard["path"]: hub.trees[old_pin][shard["path"]]
-                  for kind in previous["shards"].values() for shard in kind}
-
-    store.append_observation(observation("second", schema_version="daydream.observation.v2",
-                                         observed_at="2026-10-05T12:00:00Z"))
-    upgraded = publisher.upload()
-    assert upgraded.published == 3 and upgraded.queued == upgraded.failed == 0
-    manifest = json.loads(hub.trees[upgraded.revision][api.MANIFEST_PATH])
-    assert manifest["schema_version"] == "daydream.hub.v2"
-    assert manifest["record_schemas"]["observations"] == ["daydream.observation.v1", "daydream.observation.v2"]
-    assert all(hub.trees[upgraded.revision][path] == content for path, content in old_shards.items())
-    downloaded = api.download_snapshot(TEST_REPO, upgraded.revision, tmp_path / "new", backend=hub)
-    assert downloaded.read_records() == store.read_records()
-    still_old = api.download_snapshot(TEST_REPO, old_pin, tmp_path / "still-old", backend=hub)
-    assert len(still_old.read_records()["observations"]) == 1
+    before = dict(hub.trees[old_pin])
+    with pytest.raises(StoreError):
+        api.download_snapshot(TEST_REPO, old_pin, tmp_path / "old", backend=hub)
+    store.append_observation(observation())
+    result = publisher.upload()
+    assert result.failed > 0
+    assert hub.revision == old_pin
+    assert hub.trees[old_pin] == before
 
 
 def test_snapshot_record_version_must_match_its_manifest_declaration(tmp_path: Path, api: Any) -> None:
@@ -357,12 +348,15 @@ def test_snapshot_record_version_must_match_its_manifest_declaration(tmp_path: P
     hub = FakeDatasetHub()
     store = LocalRecordStore(tmp_path / "records")
     store.commit_run(run_record())
-    store.append_observation(observation(schema_version="daydream.observation.v2"))
+    store.append_observation(observation(schema_version="daydream.observation.v3"))
     published = api.DatasetUploader(store, TEST_REPO, backend=hub).upload()
     manifest = json.loads(hub.trees[published.revision][api.MANIFEST_PATH])
-    manifest["schema_version"] = "daydream.hub.v1"
-    manifest["record_schemas"] = {"runs": "daydream.run.v1", "observations": "daydream.observation.v1"}
-    forged_pin = hub.commit(TEST_REPO, {api.MANIFEST_PATH: json.dumps(manifest).encode()}, hub.revision)
+    shard = manifest["shards"]["observations"][0]
+    data = hub.trees[published.revision][shard["path"]].replace(b"daydream.observation.v3", b"daydream.observation.v9")
+    shard["sha256"] = hashlib.sha256(data).hexdigest()
+    shard["path"] = "observations/" + shard["sha256"] + ".jsonl"
+    forged_pin = hub.commit(TEST_REPO, {api.MANIFEST_PATH: json.dumps(manifest).encode(), shard["path"]: data},
+                           hub.revision)
     destination = tmp_path / "download"
     with pytest.raises(StoreError, match="invalid_or_unknown_record_schema"):
         api.download_snapshot(TEST_REPO, forged_pin, destination, backend=hub)

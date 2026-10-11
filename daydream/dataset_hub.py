@@ -21,14 +21,10 @@ from daydream.hub import DatasetHub, HfDatasetHub, HubConflict, HubError
 from daydream.json_utils import atomic_write_bytes, canonical_json
 
 MANIFEST_PATH = "manifest.json"
-_SCHEMAS = {"runs": ["daydream.run.v1"], "observations": ["daydream.observation.v1", "daydream.observation.v2"]}
-_MANIFEST_SCHEMAS = {
-    "daydream.hub.v1": {"runs": "daydream.run.v1", "observations": "daydream.observation.v1"},
-    "daydream.hub.v2": _SCHEMAS,
-}
+_SCHEMAS = {"runs": ["daydream.run.v1"], "observations": ["daydream.observation.v3"]}
 _IDENTITY_FIELDS = {"runs": "run_id", "observations": "observation_id"}
 _PARSERS = {"runs": parse_run, "observations": parse_observation}
-_VERSION = "daydream.hub.v2"
+_VERSION = "daydream.hub.v3"
 _DIGEST = re.compile(r"[a-f0-9]{64}")
 _REVISION = re.compile(r"[a-f0-9]{40}")
 _REPO = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*")
@@ -67,8 +63,8 @@ def _manifest(raw: bytes) -> Record:
         value = json.loads(raw)
         if (not isinstance(value, dict) or set(value) != {"schema_version", "record_schemas", "shards"}
                 or not isinstance(value["schema_version"], str)
-                or value["schema_version"] not in _MANIFEST_SCHEMAS
-                or value["record_schemas"] != _MANIFEST_SCHEMAS[value["schema_version"]]
+                or value["schema_version"] != _VERSION
+                or value["record_schemas"] != _SCHEMAS
                 or not isinstance(value["shards"], dict) or set(value["shards"]) != set(_SCHEMAS)):
             raise ValueError
         for kind in _SCHEMAS:
@@ -154,9 +150,7 @@ def _remote_records(
             data = backend.read_file(repo_id, shard["path"], revision)
             if data is None:
                 raise StoreError("missing_shard")
-            declared = manifest["record_schemas"][kind]
-            schemas = [declared] if isinstance(declared, str) else declared
-            loaded.extend(_validate_shard(data, shard, kind, schemas))
+            loaded.extend(_validate_shard(data, shard, kind, manifest["record_schemas"][kind]))
         records[kind] = tuple(loaded)
     validate_record_targets(records["runs"], records["observations"])
     return records

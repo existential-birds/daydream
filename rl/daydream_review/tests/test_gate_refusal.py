@@ -81,7 +81,7 @@ def _projection_record(*, session_id: str, split: str, label: str | None,
     """A projected-corpus record the projector would emit for one finding, kept
     minimal but schema-faithful so the coordinator's fail-closed gates admit it."""
     diff_digest = hashlib.sha256(diff_body.encode("utf-8")).hexdigest()
-    record: dict[str, object] = {"schema_version": "2",
+    record: dict[str, object] = {"schema_version": "3",
         "record_id": hashlib.sha256(f"{session_id}\x1ffp".encode("utf-8")).hexdigest(),
         "record_type": "outcome-finding", "tier": "gold", "session_id": session_id,
         "trajectory_id": f"traj-{session_id}", "task_segment": "segment-0", "finding_fingerprint": "fp",
@@ -92,7 +92,6 @@ def _projection_record(*, session_id: str, split: str, label: str | None,
             "hub_commit": None, "curation_id": "cur-1", "content_digests": [], "labeler_policy_version": "labeler-v3",
             "reply_classifier_version": "rc-1", "rubric_schema_version": "rubric-v2", "as_of": "2026-01-01T00:00:00Z",
             "valid_at": "2026-01-01T00:00:00Z", "split": split, "exclusion_reason": None, "repo_slug": "owner/repo",
-            "license_decision": {"status": "admitted", "repo_slug": "owner/repo", "reason_code": None},
         }, "task_identity": {
             "repo_slug": "owner/repo", "source": "curation-bundle", "base_sha": base_sha, "head_sha": head_sha,
             "diff_digest": diff_digest,

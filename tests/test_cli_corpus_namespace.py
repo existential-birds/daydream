@@ -1,4 +1,4 @@
-"""Public record corpus commands, license gates, and retired command refusals."""
+"""Public record corpus commands, benchmark gates, and retired command refusals."""
 import json
 from pathlib import Path
 
@@ -6,7 +6,7 @@ import pytest
 
 from daydream.dataset import LocalRecordStore
 from tests.harness.dataset import observation, run_record
-from tests.harness.record_projection import policy_file, projection_config, seed_projection_store
+from tests.harness.record_projection import seed_projection_store
 from tests.harness.scripts import cli_main
 
 
@@ -66,27 +66,22 @@ def test_snapshot_cli_freezes_temporal_membership(tmp_path: Path, capsys: pytest
     assert store.read_snapshot(snapshot["snapshot_id"]).observations == selected.observations
 
 
-@pytest.mark.parametrize("policy", ["valid", "missing", "malformed"])
-def test_record_build_cli_license_policy_gate(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], policy: str,
-) -> None:
+def test_record_build_cli_without_license_configuration(tmp_path: Path) -> None:
     store = seed_projection_store(tmp_path, dispositions=("accepted",))
-    config = projection_config(store, tmp_path)
-    args = ["corpus", "build", "--store", str(store.root), "--snapshot-id", config.snapshot_id,
-            "--out", str(tmp_path / "out" / "corpus.jsonl")]
-    if policy != "missing":
-        path = policy_file(tmp_path)
-        if policy == "malformed":
-            path.write_text(json.dumps({"policy_version": "", "spdx_decisions": {}}))
-        args += ["--license-policy", str(path), "--allow-copyleft", "a/b", "--allow-copyleft", "c/d"]
-    assert cli_main(args) == (0 if policy == "valid" else 1)
-    if policy == "valid":
-        lineage = json.loads((tmp_path / "out" / "lineage.json").read_text())
-        assert lineage["license_policy"]["policy_version"] == "1"
-        assert lineage["copyleft_opt_ins"] == ["a/b", "c/d"]
-    else:
-        assert not (tmp_path / "out").exists()
-        assert "license-policy" in capsys.readouterr().out
+    snapshot = store.select_snapshot(observed_before="2100-01-01T00:00:00Z")
+    output = tmp_path / "out"
+    assert cli_main(["corpus", "build", "--store", str(store.root), "--snapshot-id", snapshot["snapshot_id"],
+                     "--out", str(output / "corpus.jsonl")]) == 0
+    assert (output / "_SUCCESS").exists()
+    lineage = json.loads((output / "lineage.json").read_text())
+    assert "license_policy" not in lineage
+    assert not (output / "license-report.json").exists()
+
+
+@pytest.mark.parametrize("flag", ["--license-policy", "--allow-copyleft"])
+def test_record_build_cli_rejects_removed_flags(tmp_path: Path, flag: str) -> None:
+    assert cli_main(["corpus", "build", flag, "unused"]) == 2
+    assert not (tmp_path / "out").exists()
 
 
 def test_bare_harvest_is_unknown_verb_treated_as_review_target(capsys: pytest.CaptureFixture[str]) -> None:

@@ -24,9 +24,9 @@ listed in `SHA256SUMS`, so additional files are tolerated. The in-repo
 reference producer (`tests/fixtures/training/calibration/build_fixture.py`)
 writes the three required files plus a derived `_SUCCESS` completion marker.
 
-- `corpus.jsonl` — one JSON object per line, each with `schema_version: "2"`,
+- `corpus.jsonl` — one JSON object per line, each with `schema_version: "3"`,
   `record_id`, `session_id`, `repo_slug`, `reward_version`, and a `lineage`
-  object carrying `split`, `as_of`, `valid_at`, `license_decision`, and the
+  object carrying `split`, `as_of`, `valid_at`, `repo_slug`, and the
   label version stamps (`labeler_policy_version`, `reply_classifier_version`,
   `rubric_schema_version`). `record_id` must be unique across lines, and each
   record's stored `lineage.split` must match the split deterministically
@@ -39,9 +39,9 @@ writes the three required files plus a derived `_SUCCESS` completion marker.
 `record_id` values.
 
 `daydream corpus build` emits this derived format from a frozen record snapshot,
-including `SHA256SUMS`. The corpus records carry `schema_version: "2"`, a
-`record_id`, pinned split lineage, and a resolved repository/license decision.
-Source lineage uses `record-snapshot-v1` with host finding identity and immutable
+including `SHA256SUMS`. The corpus records carry `schema_version: "3"`, a
+`record_id`, pinned split lineage, and canonical repository identity.
+Source lineage uses `record-snapshot-v2` with host finding identity and immutable
 snapshot membership; it also pins the download provenance captured in the snapshot.
 The calibration fixture builder uses the same derived wire contract.
 
@@ -93,5 +93,7 @@ gold/breakdown records that do not join cleanly on `record_id`, Stage-0
 scores whose `model_digest` does not match `--model-digest` (and a missing
 `--model-digest` whenever `--stage0-scores` is given), and a re-run that
 would collide with an existing `--run-id` in the output directory. C5-excluded
-repos are rejected as a defense-in-depth check on legacy corpora. All
+repos and malformed repository identities are rejected before calibration.
+Dataset builders own permission decisions and can use captured repository and
+commit provenance when deciding which records to include. All
 statistics are computed with the Python standard library only.

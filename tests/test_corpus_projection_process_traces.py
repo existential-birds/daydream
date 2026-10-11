@@ -54,11 +54,10 @@ def test_flag_on_emits_process_trace_and_task_only_records(tmp_path: Path) -> No
     ids = [r["record_id"] for r in records]
     assert len(ids) == len(set(ids)), "record_ids must be unique across types"
     for rec in derived:
-        assert rec["schema_version"] == "2"
+        assert rec["schema_version"] == "3"
         assert rec["session_id"] == "sess-a"
         lineage = rec["lineage"]
         assert lineage["repo_slug"] == "owner/repo-a"
-        assert lineage["license_decision"]["status"] == "admitted"
         assert lineage["split"] in ("train", "validation", "holdout")
         assert lineage["exclusion_reason"] is None
         # The adjudication report still carries the non-decisive finding (D8

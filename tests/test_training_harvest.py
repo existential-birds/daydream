@@ -24,7 +24,6 @@ from daydream.training.labeler_signals import (
     PerFindingResolution,
     PRMergeSignal,
 )
-from daydream.training.license_evidence import EnrichedEvidence
 from daydream.training.reward import ScoringInputs
 from daydream.training.rubric import Rubric
 from tests.harness.adjudication import snapshot_id
@@ -106,6 +105,8 @@ def github(
             )
 
     def response(repo: str, endpoint: str, **kwargs: Any) -> Any:
+        if "/license" in endpoint:
+            raise AssertionError(f"harvest requested removed license endpoint: {endpoint}")
         if endpoint.endswith("/comments"):
             return comments
         if endpoint.endswith("/reviews"):
@@ -117,18 +118,10 @@ def github(
     return response
 
 
-@pytest.fixture(autouse=True)
-def external_license(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "daydream.training.harvest.GithubLicenseResolver.resolve",
-        lambda self, repo_slug, *, repo_commit: EnrichedEvidence("MIT", "fixture", repo_commit),
-    )
-
-
 @pytest.mark.parametrize(
     ("reply", "expected"), [("applied", "accepted"), ("not applicable", "rejected"), (None, "unanswered")]
 )
-def test_cli_harvest_captures_record_judgments_rewards_and_license(
+def test_cli_harvest_captures_record_judgments_and_rewards_without_license_requests(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reply: str | None, expected: str
 ) -> None:
     store = store_run(tmp_path / "records")
@@ -170,7 +163,7 @@ def test_cli_harvest_captures_record_judgments_rewards_and_license(
         assert captures[0]["in_reply_to_id"] == "1"
     assert annotation["payload"]["annotation"]["composite_reward"] is not None
     assert annotation["valid_at"] == ("2026-10-04T11:00:00Z" if reply else "2026-10-04T13:00:00Z")
-    assert any(o["payload"]["type"] == "enrichment" and o["payload"]["kind"] == "license" for o in history)
+    assert all(o["payload"].get("kind") != "license" for o in history)
     assert store.read_records()["runs"] == before
     assert not (store.root / "index.db").exists()
 
@@ -481,7 +474,7 @@ def test_record_reviewer_prior_uses_strict_valid_cutoff_latest_shared_reviewers_
         store.append_observation(
             observation(
                 f"{run_id}:{stamp}",
-                schema_version="daydream.observation.v2",
+                schema_version="daydream.observation.v3",
                 run_id=run_id,
                 item_uid=None,
                 role="automatic",
@@ -538,7 +531,7 @@ def test_run_label_human_precedence_and_temporal_eligibility_preserve_intrinsic_
         store.append_observation(
             observation(
                 identity,
-                schema_version="daydream.observation.v2",
+                schema_version="daydream.observation.v3",
                 item_uid=None,
                 role="automatic",
                 observed_at=observed,
@@ -721,31 +714,6 @@ def test_cli_clone_uses_allowed_credential_free_identity(
         assert not (tmp_path / "cache" / "repos" / "owner" / "repo").exists()
 
 
-def test_cli_license_failure_is_durable_unavailable_evidence_without_losing_intrinsic_annotations(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from daydream.training.license_evidence import LicenseEvidenceError
-
-    store = store_run(tmp_path / "records")
-
-    def unavailable(self: Any, repo_slug: str, *, repo_commit: str) -> None:
-        raise LicenseEvidenceError("license_source_request_failed")
-
-    monkeypatch.setattr("daydream.training.harvest.GithubLicenseResolver.resolve", unavailable)
-    monkeypatch.setattr(git_ops, "gh_api", github(store, ("applied",)))
-    assert harvest_cli(store, tmp_path / "cache") == 0
-    history = store.read_records()["observations"]
-    license_observation = next(
-        o for o in history if o["payload"]["type"] == "enrichment" and o["payload"]["kind"] == "license"
-    )
-    assert license_observation["payload"]["evidence"] == {
-        "status": "failed",
-        "value": None,
-        "reason": "license_acquisition_failed",
-    }
-    assert any(o["payload"]["type"] == "harvest-annotation" for o in history)
-
-
 def test_cli_edited_automatic_evidence_becomes_new_generation_and_requeues_old_human_label(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -832,7 +800,7 @@ def test_record_reviewer_prior_orders_fractional_utc_spelling_chronologically(tm
         store.append_observation(
             observation(
                 identity,
-                schema_version="daydream.observation.v2",
+                schema_version="daydream.observation.v3",
                 run_id="past",
                 item_uid=None,
                 role="automatic",

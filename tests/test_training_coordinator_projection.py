@@ -38,17 +38,16 @@ def _v2_record(
 ) -> dict[str, Any]:
     """A full v2 record the projector would emit for one finding."""
     record: dict[str, Any] = {
-        "schema_version": "2", "record_id": _record_id(session_id, fingerprint), "record_type": record_type,
+        "schema_version": "3", "record_id": _record_id(session_id, fingerprint), "record_type": record_type,
         "tier": tier, "session_id": session_id, "trajectory_id": f"traj-{session_id}", "task_segment": "segment-0",
         "finding_fingerprint": fingerprint, "disposition": label if label is not None else "ambiguous", "evidence": [],
         "profile": {"profile_schema_version": 1, "profile_name": "decisive-only", "profile_source_kind": "curation",
             "profile_digest": hashlib.sha256(b"profile").hexdigest(),
         }, "stack": "python", "outcome_label": label, "lineage": {
-            "hub_commit": None, "snapshot_id": "c" * 64, "source_identity_version": "record-snapshot-v1",
+            "hub_commit": None, "snapshot_id": "c" * 64, "source_identity_version": "record-snapshot-v2",
             "content_digests": [], "labeler_policy_version": "labeler-v3",
             "reply_classifier_version": "rc-1", "rubric_schema_version": "rubric-v2", "as_of": "2026-01-01T00:00:00Z",
             "valid_at": "2026-01-01T00:00:00Z", "split": split, "exclusion_reason": None, "repo_slug": "owner/repo",
-            "license_decision": {"status": "admitted", "repo_slug": "owner/repo", "reason_code": None},
         }, "task_identity": {
             "repo_slug": "owner/repo", "source": "record", "base_sha": base_sha, "head_sha": HEAD_SHA,
             "diff_digest": hashlib.sha256(DIFF_BODY.encode("utf-8")).hexdigest(),

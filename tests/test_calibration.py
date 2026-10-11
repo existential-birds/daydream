@@ -43,7 +43,7 @@ CORRUPTION_FLAGS = frozenset(
         "posterior",
         "label-version",
         "c5-repo",
-        "license",
+        "identity",
         "digest",
         "split-overlap",
         "drop-session",
@@ -52,14 +52,14 @@ CORRUPTION_FLAGS = frozenset(
 
 def _record(i: int) -> dict[str, Any]:
     return {
-        "schema_version": "2", "record_id": f"rec-{i:04d}", "session_id": f"sess-{i:04d}",
+        "schema_version": "3", "record_id": f"rec-{i:04d}", "session_id": f"sess-{i:04d}",
         "reward_version": REWARD_VERSION,
         "lineage": {
             # Stored split must equal the split re-derived by run_calibration
             # from the fixture salt + split rates (0.1/0.1 in lineage.json).
             "split": assign_split(f"rec-{i:04d}", holdout_rate=0.1, val_rate=0.1, salt=SALT), "as_of": AS_OF,
             "valid_at": VALID_AT, "repo_slug": "acme/widgets",
-            "license_decision": {"status": "admitted", "spdx_id": "MIT", "repo_slug": "acme/widgets"}, **LABEL_STAMPS,
+            **LABEL_STAMPS,
         },
     }
 
@@ -123,8 +123,8 @@ def _corrupt_fixture(corpus_dir: Path, flags: frozenset[str]) -> None:
         del first["lineage"]["labeler_policy_version"]
     if "c5-repo" in flags:
         first["lineage"]["repo_slug"] = "getsentry/sentry"
-    if "license" in flags:
-        first["lineage"]["license_decision"] = "unknown"
+    if "identity" in flags:
+        first["lineage"]["repo_slug"] = "owner/repo/extra"
     if "split-overlap" in flags:
         records.append(json.loads(json.dumps(records[-1])))
     if "drop-session" in flags:
@@ -146,10 +146,10 @@ def _config(fixture_dir: Path, tmp_path: Path, **overrides: object) -> Calibrati
 
 @pytest.mark.parametrize("corrupt,expected",
     [
-        ("schema_version", "schema_version"),  # record stamped other than "2"
+        ("schema_version", "schema_version"),  # record stamped other than "3"
         ("posterior", "valid_at"),  # valid_at posterior to as_of
         ("label-version", "unrecognized label"),  # absent/unknown version stamp
-        ("c5-repo", "excluded repository"), ("license", "license decision"), ("digest", "digest mismatch"),
+        ("c5-repo", "excluded repository"), ("identity", "repo_slug"), ("digest", "digest mismatch"),
         ("split-overlap", "split membership overlaps"),
     ],
 )
@@ -419,3 +419,24 @@ def test_mixed_or_unknown_reward_versions_are_refused(fixture_corpus: Path, tmp_
     _write_corpus(corpus.parent, records)
     with pytest.raises(CalibrationError, match=error):
         run_calibration(_config(fixture_corpus, tmp_path))
+
+
+@pytest.mark.parametrize("slug", [None, "", "  ", 17, ["acme/widgets"], "owner/repo/extra"])
+def test_calibration_identity_validation_precedes_output(fixture_corpus: Path, tmp_path: Path, slug: Any) -> None:
+    records = [json.loads(line) for line in (fixture_corpus / "corpus/corpus.jsonl").read_text().splitlines()]
+    records[0]["lineage"]["repo_slug"] = slug
+    _write_corpus(fixture_corpus / "corpus", records)
+    with pytest.raises(CalibrationError, match="repo_slug"):
+        run_calibration(_config(fixture_corpus, tmp_path))
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize("slug", ["GETSENTRY/SENTRY", "https://github.com/getsentry/sentry.git",
+                                  "git@github.com:getsentry/sentry.git", " getsentry/sentry.git "])
+def test_calibration_canonicalizes_benchmark_identity(fixture_corpus: Path, tmp_path: Path, slug: str) -> None:
+    records = [json.loads(line) for line in (fixture_corpus / "corpus/corpus.jsonl").read_text().splitlines()]
+    records[0]["lineage"]["repo_slug"] = slug
+    _write_corpus(fixture_corpus / "corpus", records)
+    with pytest.raises(CalibrationError, match="excluded repository"):
+        run_calibration(_config(fixture_corpus, tmp_path))
+    assert not (tmp_path / "out").exists()
