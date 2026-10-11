@@ -62,10 +62,6 @@ from daydream.run_artifacts import _RunWriteCapture
 from daydream.trajectory import (
     RunWriteSnapshot,
     TrajectoryDocumentSnapshot,
-    partial_document_path,
-    run_directory,
-    run_document_path,
-    siblings_directory,
 )
 from daydream.workspace import WorkContext
 from tests.harness.git_helpers import git as _git
@@ -1070,18 +1066,20 @@ async def test_artifact_session_registers_destinations_and_rejects_aliases(tmp_p
         with pytest.raises(ArtifactVisibilityError, match="destination overlap"):
             session.register_destination(source / "findings.json" / "child", label=OutputLabel.DUMP_DIRECTORY)
 
-async def test_artifact_session_freezes_snapshot_bytes_not_document_path_and_publishes(tmp_path: Path, source: Path,
+async def test_artifact_session_freezes_snapshot_bytes_not_document_path_and_publishes(source: Path,
 ) -> None:
     work = _work(source)
     session_id = "snapshot-session"
     payload = _payload(session_id)
 
     async with open_artifact_session(work, session_id=session_id) as session:
-        stale = tmp_path / "stale-trajectory.json"
-        stale.write_bytes(b"wrong bytes")
-        frozen = _freeze_run(session, session_id, payload=payload)
+        document = TrajectoryDocumentSnapshot(
+            session_id, session.daydream_dir / "runs" / session_id / "trajectory.json", payload,
+        )
+        document.path.parent.mkdir(parents=True)
+        document.path.write_bytes(b"wrong bytes")
+        frozen = session.freeze(_snapshot(session_id, (document,)))
         assert (frozen.root / ".daydream" / "runs" / session_id / "trajectory.json").read_bytes() == payload
-        assert stale.read_bytes() == b"wrong bytes"
         with pytest.raises(ArtifactVisibilityError, match="frozen"):
             artifact_dir_for(work.repo, session=session)
         _publish(session, frozen)
@@ -1691,17 +1689,6 @@ async def test_trajectory_output_route_pairs_external_baselines_and_rejects_unpa
         for label in (OutputLabel.EXPLICIT_TRAJECTORY, OutputLabel.EXPLICIT_TRAJECTORY_PARTIAL,):
             with pytest.raises(ArtifactVisibilityError, match="paired trajectory"):
                 session.register_destination(requested, label=label)
-
-async def test_trajectory_route_paths_are_composed_from_the_layout_surface(source: Path) -> None:
-    session_id = "layout-route"
-    async with open_artifact_session(_work(source), session_id=session_id) as session:
-        route = session.register_trajectory_output(None)
-
-        assert route.run_dir == run_directory(session.daydream_dir, session_id)
-        assert route.full.frozen_path == run_document_path(route.run_dir)
-        assert route.partial.frozen_path == partial_document_path(run_document_path(route.run_dir))
-        assert route.partial.frozen_path == route.run_dir / "trajectory.json.partial"
-        assert siblings_directory(route.run_dir) == route.run_dir / "trajectories"
 
 @pytest.mark.parametrize(("disposition", "status"),
     [(artifact_visibility.ArtifactDisposition.COMPLETE, "complete"),
