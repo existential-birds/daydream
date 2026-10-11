@@ -12,6 +12,7 @@ import pytest
 
 from daydream.backends import Backend
 from daydream.backends.codex import CodexBackend
+from daydream.backends.pi import PiBackend
 from daydream.commands.improve import _parse_improve_args
 from daydream.commands.review import _parse_args
 from daydream.config_file import DaydreamFileConfig, load_file_config
@@ -134,6 +135,20 @@ def test_phase_default_effort_table_is_the_lowest_precedence_tier(tmp_path: Path
     fc_global = DaydreamFileConfig(model=None, backend=None, reasoning_effort="high")
     cfg2 = RunConfig(target=str(tmp_path), backend="codex", model=None, file_config=fc_global)
     assert _codex_backend(cfg2, "parse").reasoning_effort == "high"
+
+
+@pytest.mark.parametrize("phase", ["wonder", "arbiter"])
+def test_pi_review_effort_default_does_not_enable_latency_or_group_overrides(tmp_path: Path, phase: str) -> None:
+    file_config = DaydreamFileConfig()
+    cfg = RunConfig(target=str(tmp_path), backend="pi", file_config=file_config)
+    cfg.latency_route = route_for("balanced", summarize_risk(_routine_signals()))
+    backend = _resolve_backend(cfg, phase, effort_override="xhigh")
+    assert isinstance(backend, PiBackend)
+    assert backend.reasoning_effort is None
+    file_config.phases[phase] = {"reasoning_effort": "low"}
+    pinned = _resolve_backend(cfg, phase, effort_override="xhigh")
+    assert isinstance(pinned, PiBackend)
+    assert pinned.reasoning_effort == "low"
 
 
 def test_backend_cache_splits_on_table_default_effort(tmp_path: Path) -> None:

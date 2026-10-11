@@ -438,8 +438,15 @@ async def test_late_supervision_events_cannot_supply_reserved_finalization_or_re
         if prompt.startswith('INVESTIGATION HAS ENDED.'):
             finalized.append(prompt)
             assert late_title not in prompt
+            assert 'hidden evaluation' not in prompt
+            assert 'planted' not in prompt
+            assert 'an empty findings result can be successful when substantiated' in prompt
+            assert 'Do not call tools or obtain new evidence' in prompt
             yield ResultEvent(structured_output={'verdicts': []}, continuation=None)
         elif 'supervisor adjudication' in prompt.lower():
+            assert 'hidden evaluation' not in prompt
+            assert 'planted' not in prompt
+            assert 'Reopen a rejected candidate only when new evidence' in prompt
             if late_event == 'native-start':
                 yield RequestEvent(prompt=prompt, output_schema=SUPERVISE_SCHEMA,
                                    config=PiRequestConfig(schema_emulated=False, no_tools=False))

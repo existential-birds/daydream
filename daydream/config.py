@@ -103,9 +103,9 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
 # driver's ambient default. Each backend forwards through its native effort knob.
 # Merge deep and Improve tables independently so tuning one flow cannot move the other.
 
-# Deep review/fix effort remains Codex-only; Claude/Pi retain ambient defaults.
-# Mechanical phases use lower effort, while bounded quality-focused arbitration
-# gets xhigh. Expanding backend coverage requires separate behavioral evidence.
+# Deep mechanical phases use lower effort, while bounded Codex arbitration gets
+# xhigh. Pi stack review uses medium; its other deep phases and Claude retain
+# ambient defaults.
 DEEP_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
     "codex": {
         "parse": "low",
@@ -123,6 +123,7 @@ DEEP_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
         "merge": "medium",
         "intent": "medium",
     },
+    "pi": {"per_stack_review": "medium"},
 }
 
 # Improve tiers cover all backends. Plan authoring/repair uses max because

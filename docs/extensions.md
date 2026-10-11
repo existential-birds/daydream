@@ -559,12 +559,14 @@ unsuccessful or incomplete. The [review budgets](../README.md#review-budgets) de
 
 Discovery may leave candidates `open` or `unresolved`; both receive one triage round. Triage receives bounded admitted
 notes, candidate grounds/triggers/consequences, dispositions/findings and closed decisions. It can decide from those
-facts or investigate within the same cumulative allowance/deadline. Candidates still unresolved after triage keep
+reviewer judgments or investigate within the same cumulative allowance/deadline. Closed decisions carry
+`judgment_origin: reviewer`; host admission validates the submission contract, not semantic correctness.
+Source evidence can contradict an earlier inference without a changed premise. Candidates still unresolved after triage keep
 coverage incomplete. Contradictions among known closed candidates mark affected work incomplete without reopening
 decisions or discarding retained findings.
 The host owns candidate/finding identities and validates the final result; snapshot-bound typed coverage and findings
 are [atomically published](../README.md#terminal-review-findings-contract).
-Internal stage contract 9 invalidates contract-8 review caches; extension API remains 8.
+Internal stage contract 10 invalidates contract-9 review caches; extension API remains 8.
 
 The host owns text resolution from the final assistant turn, including explicit empty turns and bounded overflow.
 Staged text permits ordinary prose, closed JSON Markdown fences and one transparent object wrapper with exactly one

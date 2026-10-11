@@ -277,6 +277,8 @@ async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
         prose = call['prompt'].split('Host review stage:\n')[0]
         assert set(call['output_schema']['properties']) == {'targets', 'notes', 'candidates', 'contradictions'}
         assert 'with issues' not in prose
+        assert 'AI-generated code' not in prose
+        assert 'Be strict' not in prose
         assert 'Advisory' in prose or 'advisory' in prose
         assert 'Error Handling Semantics (QUAL-04)' in prose
         assert 'Confidence and Convention Rules' in prose
@@ -315,10 +317,14 @@ async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
                 assert decisions[0]['conclusion'].endswith('[conclusion clipped]') is long_grounds
                 assert decisions[1]['conclusion'] == 'The greeting is allowed by the updated consumer contract.'
                 assert all('evidence_references' not in decision for decision in decisions)
+                assert all(decision['judgment_origin'] == 'reviewer' for decision in decisions)
                 assert stage['candidates'] == []
                 instruction = review.backend.calls[-1]['review_instructions']
                 assert 'The greeting is allowed by the updated consumer contract.' in instruction
                 assert 'Host-retained receipt authority' not in instruction
+                policy = ' '.join(instruction.split())
+                assert 'Host admission validates the submission contract, not the correctness' in policy
+                assert 'Source evidence can disprove the original reasoning without a changed premise' in policy
         else:
             assert stage['stage'] == 'triage'
             assert 'SETTLED_UNRELATED_HISTORY' not in prose
@@ -486,7 +492,8 @@ async def test_one_triage_round_preserves_closed_decisions_and_rejects_invalid_i
         assert contract['schema'] == backend.calls[-1]['output_schema']
         validator = Draft202012Validator(contract['schema'])
         if stage['stage'] == 'first_pass':
-            output['candidates'] = [candidate(disposition='rejected'), candidate()]
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())
+                                    if decision == 'contradiction' else candidate(disposition='rejected'), candidate()]
             assert validator.is_valid(output)
             invented = dict(output, candidates=[candidate(candidate_id='invented-native-id')])
             assert not validator.is_valid(invented)
@@ -509,6 +516,8 @@ async def test_one_triage_round_preserves_closed_decisions_and_rejects_invalid_i
             elif decision == 'omitted':
                 output['candidates'] = []
             elif decision == 'contradiction':
+                # The same captured source refutes the earlier reasoning; no changed premise is needed.
+                output['notes'] = "api.py:2 already returns a greeting that current callers accept."
                 output['contradictions'] = [closed_id]
             elif decision == 'unknown-contradiction':
                 output['contradictions'] = ['foreign-candidate']
@@ -518,7 +527,7 @@ async def test_one_triage_round_preserves_closed_decisions_and_rejects_invalid_i
                 assert validator.is_valid(output) is (decision == 'rejected')
 
     await investigation.finish('python', reason=reason,
-                               findings=('Grounded defect',) if decision == 'confirmed' else ())
+                               findings=('Grounded defect',) if decision in {'confirmed', 'contradiction'} else ())
     assert [s['stage'] for s in backend.stages if s['scope_id'] == 'python'] == ['first_pass', 'triage']
     assert len(contracts) == 2 and all(contract['schema'] and contract['skeleton'] for contract in contracts)
     events = stage_ends(investigation, 'python')

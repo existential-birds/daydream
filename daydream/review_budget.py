@@ -49,9 +49,15 @@ searches to relevant source paths; exclude .git metadata and prior review/trajec
 Discovery candidates use empty candidate_id for host assignment; open and unresolved concerns receive bounded triage.
 Triage targets are exactly []; resolve only
 assigned candidates once as confirmed, rejected or unresolved, with no new candidates. Closed decisions stay closed.
-Use closed_decisions for host-assigned candidate IDs, locations and conclusions. Report contradictions by
-closed_candidate_ids only when a changed premise directly contradicts one; the host marks affected work incomplete
-without reopening or scheduling another round. Confirmed candidates require a concrete finding; other dispositions
+Use closed_decisions for host-assigned candidate IDs, locations and retained reviewer conclusions.
+Their judgment_origin is reviewer: confirmed and rejected are earlier model judgments.
+Host admission validates the submission contract, not the correctness of those judgments.
+Resolve assigned work against source evidence;
+a retained conclusion is not independent corroboration and cannot override a concrete counterexample.
+Report source-supported contradictions by closed_candidate_ids. Source evidence can disprove the original reasoning
+without a changed premise; do not repeat settled checks without concrete contradictory evidence. The host marks
+affected work incomplete without reopening, discarding retained findings or scheduling another round.
+Confirmed candidates require a concrete finding; other dispositions
 use finding=null. Keep notes and grounds compact with a concrete location, trigger and consequence.
 A valid decision may rely on supplied diff/context or useful ordinary investigation; no particular source-read call
 is required. The cumulative scope allowance, per-invocation tool allocation and absolute reviewer deadline are hard

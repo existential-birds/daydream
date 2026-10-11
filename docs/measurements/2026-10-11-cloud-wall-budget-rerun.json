@@ -1,0 +1,47 @@
+{
+  "baseline_run_id": "b3272dd6-cd46-4041-9903-5209cb95fb2a",
+  "rerun_run_id": "19a7f7b7-ed26-4582-b752-9d42c500f559",
+  "same_target_snapshot": true,
+  "rerun_per_stack_reasoning_effort": "medium",
+  "fanout_elapsed_s": {
+    "baseline": 960.118,
+    "rerun": 732.185
+  },
+  "review_through_merge_s": {
+    "baseline": 960.181,
+    "rerun": 806.402
+  },
+  "react": {
+    "baseline_complete_units": 12,
+    "rerun_complete_units": 25,
+    "total_units": 25,
+    "baseline_successful_batches": 3,
+    "rerun_successful_batches": 8,
+    "total_batches": 8,
+    "baseline_tool_starts": 64,
+    "rerun_tool_starts": 96,
+    "tool_allowance": 96
+  },
+  "all_rerun_scopes_complete": true,
+  "reconsideration_persists": true,
+  "final_finding_assessments": [
+    "confirmed_expired_candidate_recovery_defect",
+    "false_positive_sleep_expiry_race_as_described",
+    "factual_low_impact_documentation_omission"
+  ],
+  "decision_consistency_failure": {
+    "react_steps": [
+      51,
+      55
+    ],
+    "root_suppression_step": 6,
+    "root_merge_step": 9
+  },
+  "attribution_limits": [
+    "single_matched_pair",
+    "effort_and_instruction_removal_changed_together",
+    "faster_output_rate",
+    "cached_preparation",
+    "dirty_producer_not_independently_fingerprinted"
+  ]
+}

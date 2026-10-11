@@ -4,10 +4,12 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -48,16 +50,25 @@ from daydream.backends.pi import (
     _render_tool_result,
     _schema_instruction,
 )
+from daydream.config_file import DaydreamFileConfig
 from daydream.phases.schemas import PER_STACK_RECORD_SCHEMA
 from daydream.retry_policy import parse_message_retry_hint
 from daydream.runner import run
 from daydream.trajectory import DaydreamPhase
+from tests.conftest import ExtDir
 from tests.harness.fake_cli_process import LimitAwareStdout, assert_concurrent_streams_isolated
+from tests.harness.fake_clock import FakeClock
 from tests.harness.pi_replay import FIXTURES_DIR, make_mock_process, make_mock_process_from_fixture
 from tests.harness.process_replay import replay_process
 from tests.harness.protocol_cli import install_protocol_cli
 from tests.harness.protocol_cli_assertions import assert_protocol_cli_invariants, make_cancel_probe
-from tests.harness.stub_backend import force_interactive as _force_interactive, silence as _silence
+from tests.harness.review_profile import independent_alternatives_profile
+from tests.harness.stub_backend import (
+    force_interactive as _force_interactive,
+    review_stage_state,
+    silence as _silence,
+    stage_result,
+)
 from tests.harness.trajectory import make_recorder
 
 if TYPE_CHECKING:
@@ -623,7 +634,10 @@ async def test_zai_provider_with_fallback_model_warns(
 
 # Real-path through runner.run: real PiBackend, only the pi subprocess mocked
 
-def _capture_pi_subprocess(monkeypatch: pytest.MonkeyPatch, captured: list[list[str]]) -> None:
+def _capture_pi_subprocess(
+    monkeypatch: pytest.MonkeyPatch, captured: list[list[str]],
+    response: Callable[[list[str]], MagicMock] | None = None,
+) -> None:
     """Intercept only pi spawns, record argv, and replay a no-op session.
 
     Keep the real backend/factory; other asyncio subprocess calls pass through.
@@ -632,8 +646,9 @@ def _capture_pi_subprocess(monkeypatch: pytest.MonkeyPatch, captured: list[list[
     real_exec: Any = asyncio.create_subprocess_exec
     async def _fake_exec(*args: object, **kwargs: object) -> MagicMock:
         if args and args[0] == "pi":
-            captured.append([str(a) for a in args])
-            return make_mock_process_from_fixture("simple_text.jsonl")
+            argv = [str(a) for a in args]
+            captured.append(argv)
+            return response(argv) if response else make_mock_process_from_fixture("simple_text.jsonl")
         return cast(MagicMock, await real_exec(*args, **kwargs))
     monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", _fake_exec)
 
@@ -668,6 +683,119 @@ async def test_runner_real_path_pi_provider_axis(
     rc = await run(make_config( tiny_diff_target, backend="pi", assume="yes", ))
     assert rc == 0
     _assert_pi_model_and_provider(captured, model="deepseek/deepseek-v4-flash-0731", provider=expected_provider)
+
+@pytest.mark.parametrize(("ambient", "cli_effort", "file_global", "file_phase", "expected"), [
+    (None, None, None, None, "medium"), ("high", None, None, None, "medium"),
+    ("high", None, "low", None, "low"), ("high", None, "low", "xhigh", "xhigh"),
+    ("high", "low", "high", "xhigh", "low"),
+], ids=["default", "ambient-high", "file-global", "file-phase", "cli-global"])
+async def test_runner_pi_stack_review_effort_reaches_native_submission(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    ambient: str | None, cli_effort: str | None, file_global: str | None, file_phase: str | None, expected: str,
+) -> None:
+    """The built-in effort and explicit precedence survive runner, cache and Pi argv."""
+    _silence(monkeypatch)
+    if ambient is None:
+        monkeypatch.delenv("PI_THINKING", raising=False)
+    else:
+        monkeypatch.setenv("PI_THINKING", ambient)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    captured: list[list[str]] = []
+    reviewer_args: list[list[str]] = []
+    wall_allowances: list[float] = []
+    fake = FakeClock(monotonic_value=1000).install(monkeypatch)
+
+    def response(argv: list[str]) -> MagicMock:
+        prompt = Path(argv[-1][1:]).read_text()
+        stage = review_stage_state(prompt)
+        if len(captured) == 1:
+            fake.advance(1)  # Preparation/earlier phases spend the shared allowance.
+        if stage is None and "--extension" not in argv:
+            return make_mock_process_from_fixture("simple_text.jsonl")
+        if stage is not None:
+            reviewer_args.append(argv)
+            system_arg = argv[argv.index("--append-system-prompt") + 1]
+            system = Path(system_arg).read_text() if system_arg.startswith("/") else system_arg
+            match = re.search(r"effective wall allowance is ([0-9.]+) seconds", system)
+            assert match is not None
+            wall_allowances.append(float(match.group(1)))
+        payload = stage_result(stage) if stage is not None else {"issues": []}
+        call = {"type": "toolCall", "id": "submit", "name": "structured_output", "arguments": payload}
+        assistant = {"role": "assistant", "content": [call], "stopReason": "toolUse"}
+        tool_result = {"content": [{"type": "text", "text": "Submitted."}], "details": payload}
+        return make_mock_process([json.dumps(row) for row in [
+            {"type": "session", "sessionId": "review-fixture"},
+            {"type": "agent_start"}, {"type": "turn_start"},
+            {"type": "message_end", "message": assistant},
+            {"type": "tool_execution_start", "toolCallId": "submit", "toolName": "structured_output",
+             "args": payload},
+            {"type": "tool_execution_end", "toolCallId": "submit", "toolName": "structured_output",
+             "isError": False, "result": tool_result},
+            {"type": "message_end", "message": {"role": "toolResult", "toolCallId": "submit",
+             "toolName": "structured_output", "isError": False, **tool_result}},
+            {"type": "turn_end", "message": assistant},
+            {"type": "agent_end", "messages": []}, {"type": "agent_settled"},
+        ]])
+
+    _capture_pi_subprocess(monkeypatch, captured, response)
+    phases = {"per_stack_review": {"reasoning_effort": file_phase}} if file_phase else {}
+    profile = independent_alternatives_profile()
+    profile = replace(profile, profile=replace(profile.profile,
+        pipeline=replace(profile.profile.pipeline, review_wall_budget_s=385)))
+    config = make_config(multi_stack_target, backend="pi", reasoning_effort=cli_effort,
+        file_config=DaydreamFileConfig(reasoning_effort=file_global, phases=phases),
+        output_mode="review", assume="yes", diagram="off", latency_profile="forensic",
+        review_profile=profile,
+        shallow_fanout_threshold=0, review_cache_enabled=False, run_eval=False)
+    assert await run(config) == 0
+    assert reviewer_args
+    # The host nominal ceiling is 3600s; 385s shared minus 77s reserve and 1s spent leaves 307s.
+    assert wall_allowances and all(0 < wall <= 307 for wall in wall_allowances)
+    assert {(argv[argv.index("--thinking") + 1] if "--thinking" in argv else None)
+            for argv in reviewer_args} == {expected}
+    coverage = json.loads((multi_stack_target / ".daydream/deep/review-coverage.json").read_text())
+    assert {scope["status"] for scope in coverage["stack_outcomes"]} == {"complete"}
+    assert (multi_stack_target / ".review-output.md").is_file()
+    # The independently dispatched wonder keeps ambient effort under the forensic route.
+    other_args = [argv for argv in captured if argv not in reviewer_args]
+    assert other_args
+    other_effort = cli_effort or file_global or ambient
+    for argv in other_args:
+        assert (argv[argv.index("--thinking") + 1] if "--thinking" in argv else None) == other_effort
+
+async def test_runner_custom_flow_pi_reports_unbounded_allowance(
+    tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, ext_dir: ExtDir,
+) -> None:
+    """A supported extension flow's unbounded turn stays truthful at the real Pi boundary."""
+    _silence(monkeypatch)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    ext_dir.write_module(
+        "from daydream.agent import run_agent\n"
+        "from daydream.extensions import FlowStep\n"
+        "from daydream.trajectory import DaydreamPhase\n"
+        "async def unbounded(ctx):\n"
+        "    result, _, reason = await run_agent(ctx.backend_for('unbounded'), ctx.work.repo, 'Unbounded task',\n"
+        "        phase=DaydreamPhase.REVIEW, wall_budget_s=None, run_context=ctx.run_context)\n"
+        "    assert reason is None and ctx.artifacts is not None\n"
+        "    ctx.artifacts.review_output.write_text(result)\n"
+        "def register(registry):\n"
+        "    registry.register_phase(FlowStep(name='unbounded', run=unbounded))\n"
+        "    registry.set_flow('unbounded', ['unbounded'])\n"
+    )
+    system_prompts: list[str] = []
+
+    def response(argv: list[str]) -> MagicMock:
+        system_arg = argv[argv.index("--append-system-prompt") + 1]
+        system_prompts.append(Path(system_arg).read_text() if system_arg.startswith("/") else system_arg)
+        return make_mock_process_from_fixture("simple_text.jsonl")
+
+    _capture_pi_subprocess(monkeypatch, [], response)
+    assert await run(make_config(tiny_diff_target, backend="pi", flow_name="unbounded", run_eval=False)) == 0
+    assert (tiny_diff_target / ".review-output.md").read_text() == "Hello from Pi"
+    assert len(system_prompts) == 1
+    assert "wall allowance is unbounded" in system_prompts[0]
+    assert "1800 seconds" not in system_prompts[0]
+
 
 # System prompt preamble (--append-system-prompt)
 

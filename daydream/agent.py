@@ -593,7 +593,6 @@ async def _run_agent(
                 # later one is retry overhead. Retry attempts' backend time is
                 # charged to the recovery budget; the attempt that produces the
                 # first retryable failure is not (activation happens after it).
-                telemetry.start_attempt(clock.monotonic(), retry=recovery.active)
                 display = AgentDisplay(
                     console, run_context.policy, progress_callback, structured=output_schema is not None,
                 )
@@ -603,6 +602,17 @@ async def _run_agent(
                         assert_model_cwd_clean(cwd)
                     if sanctioned_inputs is not None:
                         sanctioned_inputs.revalidate(backend, cwd, read_only)
+                    dispatch_time = clock.monotonic()
+                    if effective_deadline is not None and dispatch_time >= effective_deadline:
+                        aborted_reason = "wall_budget_exceeded"
+                        partials_discarded_by_deadline = True
+                        if telemetry.spent_retry_overhead:
+                            _emit_ladder_stop(
+                                "retry_deadline_exhausted", limit_expired=limit_expired or "invocation_wall_budget",
+                            )
+                            stop_recorded = True
+                        break
+                    telemetry.start_attempt(dispatch_time, retry=recovery.active)
                     execute_kwargs: dict[str, Any] = {
                         "agents": agents,
                         "max_turns": max_turns,
@@ -621,10 +631,12 @@ async def _run_agent(
                     if not persist_session:
                         execute_kwargs["persist_session"] = False
                     if getattr(backend, "supports_budget_preamble", False):
-                        # State the ceiling this turn is really under: the
-                        # deadline above is derived from the same value, so
-                        # the prompt cannot promise time the host withholds.
-                        execute_kwargs["wall_budget_s"] = wall_budget_s
+                        # Preparation, earlier stages, and retry/backoff time already
+                        # spent the absolute bound. Recovery allowance only gates
+                        # retry overhead; it does not cap a healthy dispatched turn.
+                        execute_kwargs["wall_budget_s"] = (
+                            max(0.0, effective_deadline - dispatch_time) if effective_deadline is not None else None
+                        )
                         execute_kwargs["tool_call_budget"] = remaining_calls
                     attempt_prompt = prompt
                     if investigation_budget is not None and attempt > 0:
