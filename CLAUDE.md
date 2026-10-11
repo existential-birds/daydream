@@ -97,7 +97,7 @@ deep FlowSteps -> phases/ -> agent.py -> Backend.execute()
 | `deep/{detection,dedup,artifacts}.py` | `detect_stacks()` router, artifact paths, dedup pre-filter |
 | `deep/records.py` | Host-assigned identity, never content-derived: record `uid` (`stack:ordinal`) at record birth, merged-item `item_uid` (`item:n`) at merge write, and the `source_uids` derivation list |
 | `deep/latency.py` | Pure latency-profile vocabulary, risk summary, monotone `route_for`, and the `wonder_decision`/`arbiter_plan` predicates |
-| `deep/routing_record.py` | The single writer/reader of `.daydream/deep/latency-routing.json`; write-merged top-level keys, evidence only |
+| `deep/routing_record.py` | The single writer/reader of `.daydream/deep/latency-routing.json`; snapshot mappings replace, phase slices merge, evidence only |
 | `deep/arbiter.py` | Scoped Opus pass over high-severity/contested findings |
 | `deep/diagram_{types,trigger,schema,render}.py`, `deep/diagram_grounding/` | Grounded diagrams: shared dataclasses, eligibility rules, strict spec schemas, deterministic evidence checking (the sole authority on what may be drawn), pure mermaid emitters |
 | `services.py` | The single service-discovery implementation (declared `service_roots` or layout inference), shared by improve and diagram eligibility |
@@ -151,6 +151,14 @@ common private HF publication applies the existing complete-record secret scanne
 `--latency-profile`, config-file scalar, `RunConfig.latency_profile`). `forensic` names one profile and
 means exactly "today's wonder+arbiter behaviour" (wonder runs at `high`, arbiter at `xhigh`, unsharded);
 it is not a synonym for "sharding disabled" or "read-only". Sharding-off is called unsharded/sharding-off.
+
+Compute latency risk from the full captured patch before bounding `DeepState.diff`.
+Keep `snapshot_diff`, file/stack accounting, diff-key and review coverage bound to
+that full patch. The [routing population contract](README.md#latency-profiles)
+distinguishes full/retained patch counts from bounded prompt-diff bytes, including
+the marker. Resume replaces snapshot-owned `risk` and `diff_population` evidence
+as complete mappings; missing/corrupt routing evidence never blocks execution.
+Intent/wonder full-artifact reads retain the existing bounded prompt transport.
 
 ### Backend protocol
 

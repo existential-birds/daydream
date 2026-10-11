@@ -117,7 +117,14 @@ def bound_deep_diff(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> tuple[
     """
     original_bytes = len(diff.encode("utf-8"))
     if original_bytes <= budget:
-        return diff, DeepDiffBoundInfo(truncated=False, original_bytes=original_bytes, marker=None)
+        total_blocks = sum(1 for _ in iter_diff_blocks(diff))
+        return diff, DeepDiffBoundInfo(
+            truncated=False,
+            original_bytes=original_bytes,
+            retained_bytes=original_bytes,
+            total_blocks=total_blocks,
+            retained_blocks=total_blocks,
+        )
 
     retained: list[str] = []
     retained_bytes = 0

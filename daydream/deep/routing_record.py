@@ -4,8 +4,8 @@ One artifact, one writer, one meaning. ``latency-routing.json`` is *evidence*,
 not an input: no step reads it to decide behaviour, so a missing or corrupt
 record can never fail a run. Each step that owns a routing decision appends its
 slice through :func:`write_routing_record`, which read-modify-writes top-level
-keys so a later write never clobbers an earlier one and a ``--start-at`` resume
-does not erase a prior run's record.
+keys so a later phase write preserves earlier slices. The preamble replaces
+snapshot-owned risk and diff-population evidence together on a valid resume.
 """
 
 from __future__ import annotations
@@ -28,14 +28,15 @@ def write_routing_record(deep_dir_path: Path, updates: Mapping[str, Any]) -> Pat
     """Merge ``updates`` into the record and return the written path.
 
     Top-level keys in ``updates`` replace the existing value unless both are
-    mappings, in which case their contents are merged one level deep (so a step
-    can add ``arbiter`` without dropping the ``wonder`` slice already written).
+    mappings, in which case their contents are merged one level deep. ``risk``
+    and ``diff_population`` are complete snapshot-owned slices and always replace
+    their prior values, preventing stale nested metrics from surviving a resume.
     """
     path = DeepArtifact.LATENCY_ROUTING.at(deep_dir_path)
     merged = dict(read_routing_record(deep_dir_path))
     for key, value in updates.items():
         current = merged.get(key)
-        if isinstance(current, dict) and isinstance(value, dict):
+        if key not in {"risk", "diff_population"} and isinstance(current, dict) and isinstance(value, dict):
             nested = dict(current)
             nested.update(value)
             merged[key] = nested

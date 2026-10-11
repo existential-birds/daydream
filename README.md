@@ -521,7 +521,39 @@ that fits one group is unsharded and keeps the pre-profile arbiter effort
 (Codex `xhigh`, the Claude/Pi ambient default) whatever the profile: the
 route's arbiter effort is a per-group knob. Each run writes
 its decision to `.daydream/deep/latency-routing.json`, and the archived
-`evaluation.json` carries the selected profile. Compare profiles with:
+`evaluation.json` carries the selected profile.
+
+Risk signals describe the complete captured change before prompt truncation,
+including blocks omitted from the bounded prompt diff. File and stack counts
+also describe that full change. Surface flags are lexical evidence;
+`size_score` and `breadth_score` are audit-only and do not select effort.
+The routing record retains the existing `risk.signals` fields and adds
+`diff_population`:
+
+| Field | Population |
+|-------|------------|
+| `diff_key` | Identity of the full captured patch, also used by `deep/diff-key` and review coverage |
+| `full_patch.bytes`, `.lines`, `.blocks` | Full patch UTF-8 bytes, newline-delimited line count, and parsed file-block count |
+| `retained_patch.bytes`, `.blocks` | Patch content retained by whole-block bounding, excluding the marker |
+| `bounded_prompt_diff.bytes` | Bounded in-memory diff UTF-8 bytes, including any truncation marker |
+| `truncated`, `dropped_blocks` | Explicit bounding outcome and number of omitted file blocks |
+
+Both populations share `diff_key`. An untruncated change retains the complete
+patch; an empty change has zero counts and `truncated: false`. A leading
+oversized block remains intact under the existing soft cap. The bounded prompt
+diff measures `DeepState.diff`, not the total backend request: intent and wonder
+read the full persisted patch when truncation occurs, then use the existing
+bounded inline-clone or artifact-pointer transport.
+
+Routing evidence is diagnostic and never a requirement for execution or resume.
+A valid resume replaces the snapshot's `risk` and `diff_population` mappings
+together, while preserving phase decision evidence; missing or corrupt routing
+records do not block it. Archives and frozen dataset captures retain the complete
+record. Evaluation projects profile and wonder/arbiter decisions, and latency
+reports continue to compare those decisions. Historical records may lack the
+population fields.
+
+Compare profiles with:
 
 ```sh
 uv run python -m daydream.eval.latency_report --corpus tests/fixtures/latency_profiles/manifest.json
