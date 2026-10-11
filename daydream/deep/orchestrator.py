@@ -632,8 +632,8 @@ async def run_deep(
     write_hunk_index(daydream_dir, diff)
     # Diff is immutable from here on; compute the tiering verdict once and reuse
     # it at both the exploration step's gate and the alternatives step's gate.
-    # The latency route (issue #732) is resolved from the same immutable diff
-    # just before ``run_flow``, once the in-memory diff is bounded.
+    # The latency route is resolved from this full immutable diff before prompt
+    # bounding, so prompt capacity cannot hide changed-code surface signals.
     tier = review_steps.select_tier(review_steps.count_changed_files(diff))
     dd = deep_dir(
         target_dir,
@@ -741,6 +741,10 @@ async def run_deep(
                 exploration_available=review_steps.EXPLORATION_AVAILABLE,
             )
 
+        # Risk describes the captured change, independently of prompt retention.
+        latency_signals = diff_signals(
+            diff=diff, changed_files=len(changed_files), stack_count=len(stacks)
+        )
         # The context shares backends and bounded inline diff text. The full patch is
         # already persisted and remains the source for exploration, keys, and archival.
         bounded_diff, bound_info = bound_deep_diff(diff)
@@ -765,9 +769,6 @@ async def run_deep(
         # Publish one risk-escalated route before any phase resolves effort. Later stages
         # append their decisions through the same routing-record writer.
         latency_resolution = _resolved_latency_profile(config)
-        latency_signals = diff_signals(
-            diff=bounded_diff, changed_files=len(changed_files), stack_count=len(stacks)
-        )
         latency_summary = summarize_risk(latency_signals)
         latency_route = route_for(latency_resolution.profile, latency_summary)
         config.latency_route = latency_route
@@ -786,6 +787,21 @@ async def run_deep(
                     "floors": list(latency_summary.floors),
                     "size_score": latency_summary.size_score,
                     "breadth_score": latency_summary.breadth_score,
+                },
+                "diff_population": {
+                    "diff_key": current_diff_sha,
+                    "full_patch": {
+                        "bytes": latency_signals.diff_bytes,
+                        "lines": latency_signals.diff_lines,
+                        "blocks": bound_info.total_blocks,
+                    },
+                    "retained_patch": {
+                        "bytes": bound_info.retained_bytes,
+                        "blocks": bound_info.retained_blocks,
+                    },
+                    "bounded_prompt_diff": {"bytes": len(bounded_diff.encode("utf-8"))},
+                    "truncated": bound_info.truncated,
+                    "dropped_blocks": bound_info.total_blocks - bound_info.retained_blocks,
                 },
             },
         )
