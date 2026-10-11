@@ -96,6 +96,8 @@ class _Entry:
 def _init_repo(repo: Path) -> None:
     repo.mkdir(parents=True)
     _git(repo, "init", "-b", "main")
+    # Background Git maintenance must not race the full source manifest assertions.
+    _git(repo, "config", "maintenance.auto", "false")
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "Storage Spike")
     (repo / "source.txt").write_text("source canary\n", encoding="utf-8")
