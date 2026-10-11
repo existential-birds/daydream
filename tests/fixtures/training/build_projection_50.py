@@ -1,4 +1,4 @@
-"""Build 50 training records through the immutable store and offline projector."""
+"""Build 50 schema-3 records from observation-v3 evidence through the offline projector."""
 from __future__ import annotations
 
 import shutil

@@ -11,7 +11,7 @@ daydream corpus dataset snapshot --store FRESH_STORE --observed-before ISO_TIMES
 ```
 
 Use the printed snapshot ID for harvest, adjudication, and corpus build. Harvest
-appends PR/base/license enrichment and scoring annotations without rewriting run
+appends PR/base enrichment and scoring annotations without rewriting run
 evidence. Human run labels append with `corpus label`. Per-finding labels append
 through the adjudication CLI; use `corpus adjudicate --help` for queue and preview
 inputs. Queues can be recreated from records and contain no remote checkpoint.
@@ -58,13 +58,14 @@ the existing publication secret scanner checks retained reply text too.
 
 ```bash
 daydream corpus build --store FRESH_STORE --snapshot-id SNAPSHOT_ID \
-  --license-policy LICENSE_POLICY --out PROJECTION_DIR/corpus.jsonl
+  --out PROJECTION_DIR/corpus.jsonl
 ```
 
-Projection is offline. Admission requires trustworthy repository/license evidence
-and a pinned policy; missing licenses fail closed. Exact repository copyleft
-opt-ins use repeatable `--allow-copyleft OWNER/REPO`. Split policies and caps retain
-deterministic behavior. Lineage uses `record-snapshot-v1`, retaining snapshot
+Projection is offline. Admission validates captured repository identity and rejects
+C5 benchmark holdouts while preserving evidence eligibility and temporal guards.
+Dataset builders make permission and licensing decisions using recorded repository,
+base/head commit, and diff provenance. Split policies and caps retain deterministic
+behavior. Lineage uses `record-snapshot-v2`, retaining snapshot
 membership digests and, for downloaded stores, exact HF source provenance.
 
 Publication errors preserve local evidence and emit sanitized diagnostics. Retry

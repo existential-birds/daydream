@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Daydream training-record (JSONL) schema v2",
+  "title": "Daydream training-record (JSONL) schema v3",
   "description": "Per-finding training records projected offline from immutable run and eligible observation snapshots.",
   "type": "object",
   "additionalProperties": false,
@@ -20,7 +20,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "2"
+      "const": "3"
     },
     "record_id": {
       "type": "string",
@@ -192,7 +192,6 @@
         "split",
         "exclusion_reason",
         "repo_slug",
-        "license_decision",
         "snapshot_id",
         "source_identity_version"
       ],
@@ -264,53 +263,12 @@
           "type": "string",
           "minLength": 1
         },
-        "license_decision": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "status",
-            "reason_code",
-            "spdx_id",
-            "policy_version",
-            "evidence_ref",
-            "repo_slug"
-          ],
-          "properties": {
-            "status": {
-              "enum": [
-                "admitted",
-                "rejected"
-              ]
-            },
-            "reason_code": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "spdx_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "policy_version": {
-              "type": "string"
-            },
-            "evidence_ref": {
-              "type": "string"
-            },
-            "repo_slug": {
-              "type": "string"
-            }
-          }
-        },
         "snapshot_id": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
         },
         "source_identity_version": {
-          "const": "record-snapshot-v1"
+          "const": "record-snapshot-v2"
         }
       }
     },

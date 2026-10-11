@@ -1,7 +1,4 @@
-"""Real projection loads require record identity, license decisions, and C5/C8 gates.
-
-No argument may suppress C5; only explicit allow_copyleft admits C8.
-"""
+"""Real projection loads require canonical record identity and C5 benchmark isolation."""
 
 from __future__ import annotations
 
@@ -13,27 +10,22 @@ import pytest
 
 from daydream.training.admission import (
     REASON_CODE_C5_EXCLUDED_REPO,
-    REASON_CODE_C8_COPYLEFT_UNOPTED,
 )
 from daydream.training.stacks import load_dataset_v2
 
 
 def _record(**overrides: object) -> dict[str, object]:
-    """A minimal v2 record in the shape the projector emits: repo identity
-    and an immutable license decision nested under ``lineage``."""
-    record: dict[str, object] = {"schema_version": "2", "record_id": "rec-0001", "tier": "gold",
+    """A minimal current record carrying source repository identity."""
+    record: dict[str, object] = {"schema_version": "3", "record_id": "rec-0001", "tier": "gold",
         "lineage": {"repo_slug": "owner/repo",
-            "license_decision": {"status": "admitted", "repo_slug": "owner/repo", "reason_code": None},
         },
     }
     record.update(overrides)
     # Convenience: a repo_slug override must propagate into the lineage's
-    # identity and decision stamp, not land as a foreign top-level key.
+    # identity, not land as a foreign top-level key.
     if "repo_slug" in overrides:
         lineage = cast(dict[str, object], record["lineage"])
         lineage["repo_slug"] = overrides["repo_slug"]
-        decision = cast(dict[str, object], lineage["license_decision"])
-        decision["repo_slug"] = overrides["repo_slug"]
         # The override must not remain as a foreign top-level key.
         record.pop("repo_slug")
     return record
@@ -77,41 +69,26 @@ def test_load_v2_raises_on_stripped_repo_slug(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="repo_slug"):
         load_dataset_v2(tmp_path / "proj")
 
-def test_load_v2_raises_on_stripped_license_decision(tmp_path: Path) -> None:
-    _write_projection(tmp_path, [_record()])
-    _edit(tmp_path, "lineage.license_decision")
-    with pytest.raises(ValueError, match="license_decision"):
-        load_dataset_v2(tmp_path / "proj")
-
-def test_load_v2_raises_on_unknown_license_status(tmp_path: Path) -> None:
-    _write_projection(tmp_path, [_record()])
-    _edit(tmp_path, "lineage.license_decision.status", "maybe")
-    with pytest.raises(ValueError, match="license_decision"):
-        load_dataset_v2(tmp_path / "proj")
-
 def test_load_v2_enforces_c5_over_loaded_records(tmp_path: Path) -> None:
     _write_projection(tmp_path, [_record(repo_slug="grafana/grafana")])
     with pytest.raises(ValueError, match=REASON_CODE_C5_EXCLUDED_REPO):
         load_dataset_v2(tmp_path / "proj")
 
-def test_load_v2_enforces_c8_with_exact_slug_opt_in(tmp_path: Path) -> None:
-    record = _record(repo_slug="owner/gpl-repo")
-    assert isinstance(record["lineage"], dict)
-    record["lineage"]["license_decision"] = {
-        "status": "rejected", "repo_slug": "owner/gpl-repo", "reason_code": REASON_CODE_C8_COPYLEFT_UNOPTED,
-    }
-    out = _write_projection(tmp_path, [record])
-    with pytest.raises(ValueError, match=REASON_CODE_C8_COPYLEFT_UNOPTED):
+@pytest.mark.parametrize("slug", ["GRAFANA/GRAFANA", "https://github.com/grafana/grafana.git",
+                                  "git@github.com:grafana/grafana.git", " grafana/grafana.git "])
+def test_loader_canonicalizes_before_benchmark_comparison(tmp_path: Path, slug: str) -> None:
+    out = _write_projection(tmp_path, [_record(repo_slug=slug)])
+    with pytest.raises(ValueError, match=REASON_CODE_C5_EXCLUDED_REPO):
         load_dataset_v2(out)
-    # Opt-in via the function's new keyword admits the exact slug only.
-    admitted = load_dataset_v2(out, allow_copyleft=frozenset({"owner/gpl-repo"}))
-    assert [r["record_id"] for r in admitted] == ["rec-0001"]
 
-    other = _record(repo_slug="owner/other-gpl-repo")
-    assert isinstance(other["lineage"], dict)
-    other["lineage"]["license_decision"] = {
-        "status": "rejected", "repo_slug": "owner/other-gpl-repo", "reason_code": REASON_CODE_C8_COPYLEFT_UNOPTED,
-    }
-    _write_projection(tmp_path, [other])
-    with pytest.raises(ValueError, match=REASON_CODE_C8_COPYLEFT_UNOPTED):
-        load_dataset_v2(tmp_path / "proj", allow_copyleft=frozenset({"owner/gpl-repo"}))
+
+@pytest.mark.parametrize("slug", [None, "", 17, "owner/repo/extra"])
+def test_loader_refuses_malformed_identity(tmp_path: Path, slug: object) -> None:
+    out = _write_projection(tmp_path, [_record(repo_slug=slug)])
+    with pytest.raises(ValueError, match="repo_slug"):
+        load_dataset_v2(out)
+
+
+def test_loader_admits_formerly_blocked_repository_without_decision(tmp_path: Path) -> None:
+    out = _write_projection(tmp_path, [_record(repo_slug="gnu/coreutils")])
+    assert [record["record_id"] for record in load_dataset_v2(out)] == ["rec-0001"]

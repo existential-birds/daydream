@@ -1,18 +1,22 @@
 [
   {
+    "correction": null,
     "disposition": "ambiguous",
     "evidence": [],
     "exclusion_reason": "non-decisive disposition 'ambiguous' — missing decisive human verdict (evidence carried for the adjudication pass)",
     "fingerprint": "590816728636c3b3c8bda3ae5ed7b5a687caf14ce7769d10726605871a1e0e2a",
     "item_uid": "item:0",
+    "reply_captures": [],
     "session_id": "sess-amb-1"
   },
   {
+    "correction": null,
     "disposition": "ambiguous",
     "evidence": [],
     "exclusion_reason": "non-decisive disposition 'ambiguous' — missing decisive human verdict (evidence carried for the adjudication pass)",
     "fingerprint": "74a55078d8fdfad18624fe72d007bc59205d393cb6224a631899dfe2548794b5",
     "item_uid": "item:0",
+    "reply_captures": [],
     "session_id": "sess-amb-0"
   }
 ]

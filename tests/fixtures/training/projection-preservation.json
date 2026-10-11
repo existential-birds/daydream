@@ -19,14 +19,6 @@
         "as_of": null,
         "diff_digest": "2acd95d320d855bdbf2b2365c2af3f9cd7060894652b199d10c00f319abcd61f",
         "exclusion_reason": null,
-        "license_decision": {
-          "evidence_ref": "manifest",
-          "policy_version": "1",
-          "reason_code": null,
-          "repo_slug": "owner/repo-e808f6",
-          "spdx_id": "MIT",
-          "status": "admitted"
-        },
         "repo_slug": "owner/repo-e808f6",
         "valid_at": "2026-01-01T00:00:00+00:00"
       },
@@ -38,7 +30,6 @@
         "profile_source_kind": "builtin"
       },
       "record_type": "outcome-finding",
-      "schema_version": "2",
       "session_id": "sess-a",
       "stack": "python",
       "task_identity": {
@@ -69,14 +60,6 @@
         "as_of": null,
         "diff_digest": "2acd95d320d855bdbf2b2365c2af3f9cd7060894652b199d10c00f319abcd61f",
         "exclusion_reason": null,
-        "license_decision": {
-          "evidence_ref": "manifest",
-          "policy_version": "1",
-          "reason_code": null,
-          "repo_slug": "owner/repo-e808f6",
-          "spdx_id": "MIT",
-          "status": "admitted"
-        },
         "repo_slug": "owner/repo-e808f6",
         "valid_at": "2026-01-01T00:00:00+00:00"
       },
@@ -88,7 +71,6 @@
         "profile_source_kind": "builtin"
       },
       "record_type": "outcome-finding",
-      "schema_version": "2",
       "session_id": "sess-a",
       "stack": "python",
       "task_identity": {

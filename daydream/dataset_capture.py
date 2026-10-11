@@ -166,8 +166,7 @@ def capture_run_record(
                   "repository_context": {"branch": work.head_branch, "base_branch": work.base_branch,
                                          "source_path": str(work.source)},
                   "effective_configuration": None if identity is None else asdict(identity),
-                  "flow": config.flow_name or ("diagram" if config.output_mode == "diagram" else "deep"),
-                  "license": {"status": "unavailable", "reason": "license evidence not acquired"}}
+                  "flow": config.flow_name or ("diagram" if config.output_mode == "diagram" else "deep")}
     if identity is not None and identity.profile is not None:
         profile = identity.profile
         provenance["profile"] = {"profile_schema_version": profile.schema_version,

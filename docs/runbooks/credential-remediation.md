@@ -29,6 +29,6 @@ to restrict access or remediate history. Merely removing a current file does not
 remove earlier commits or caches.
 
 For private repository harvesting, `DAYDREAM_GIT_TOKEN` travels through Git's child
-process configuration, never a URL or command argument. GitHub license acquisition
-uses `GITHUB_TOKEN` from the launching environment and pins the request to an exact
-repository commit. Tokens must not become run or observation evidence.
+process configuration, never a URL or command argument. Tokens must not become run
+or observation evidence. Dataset builders own permission decisions and can use the
+recorded repository and commit provenance to assess the source material.

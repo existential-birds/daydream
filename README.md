@@ -272,7 +272,7 @@ daydream corpus harvest --store /tmp/daydream-records --snapshot-id <SNAPSHOT_ID
 daydream corpus label <run-id> --store /tmp/daydream-records --outcome accepted
 daydream corpus dataset snapshot --store /tmp/daydream-records --observed-before <LATER_ISO_TIMESTAMP>
 daydream corpus build --store /tmp/daydream-records --snapshot-id <ENRICHED_SNAPSHOT_ID> \
-  --license-policy LICENSE_POLICY --out PROJECTION_DIR/corpus.jsonl
+  --out PROJECTION_DIR/corpus.jsonl
 daydream corpus calibrate-reward ...  # docs/calibration.md
 ```
 
@@ -284,18 +284,20 @@ queue, and conflict handling for both run records and observations. Downloads
 verify every record at the requested commit. No archive conversion is performed.
 
 Harvest retains intrinsic reward axes, outcome priors, rubric evidence, and
-version pins in `daydream.observation.v2` harvest annotations. Human run labels
+version pins in `daydream.observation.v3` harvest annotations. Human run labels
 and per-finding judgments append independently; human decisions take precedence
 and model suggestions require human review. Adjudication queues are disposable
 local views of immutable evidence. See the [record dataset workflow](docs/runbooks/record-dataset.md).
 
-Corpus projection runs offline against a selected snapshot and a pinned license
-policy. It preserves license and exclusion admission, gold/silver eligibility,
+Corpus projection runs offline against a selected snapshot. It validates repository
+identity and excludes C5 benchmark holdouts, while preserving gold/silver eligibility,
 trace segmentation, temporal guards, deterministic splits, and stack/repository/
-profile caps. Source lineage uses `record-snapshot-v1`: snapshot membership pins
+profile caps. Source lineage uses `record-snapshot-v2`: snapshot membership pins
 run and observation digests, and downloaded evidence also pins its HF commit.
 Run identity, host finding identity, fingerprint, and training record identity
 remain distinct. Derived corpus exports are separate from canonical evidence.
+Dataset builders own permission and licensing decisions and can use the recorded
+repository, base/head commits, and diff provenance to assess the source material.
 
 The harvest stage can clone target repositories into a local cache. Setting
 `DAYDREAM_GIT_TOKEN` authenticates private clones through git configuration
@@ -364,7 +366,8 @@ index. A downloaded store can be read through `LocalRecordStore.select_snapshot`
 
 Local evidence preserves raw producer content. The credential scanner recognizes limited
 patterns; a passing scan does not establish that content is safe to share. Training admission
-continues to apply its separate license and eligibility policies.
+preserves benchmark isolation and evidence eligibility. Operators decide whether they
+have permission to use and share the recorded source material.
 
 ### Training roadmap
 

@@ -126,7 +126,7 @@ _REPLY_CAPTURE = _object(optional=("text", "captured_sha256", "redaction_provena
 _OBSERVATION_SCHEMA = _object(
     optional=("item_uid", "classifier_version", "correction", "reply_captures", "evidence_digest_scheme",
               "review_required"),
-    schema_version={"const": "daydream.observation.v1"}, observation_id=_ID, run_id=_ID,
+    schema_version={"const": "daydream.observation.v3"}, observation_id=_ID, run_id=_ID,
     item_uid=_nullable(_STRING), valid_at=_STRING, observed_at=_STRING, source=_ID, author=_ID,
     role={"enum": ["rater", "adjudicator", "model-suggested", "automatic"]}, policy_version=_ID, rubric_version=_ID,
     classifier_version=_nullable(_STRING), evidence_digest=_SHA, semantic_evidence={},
@@ -140,15 +140,13 @@ _OBSERVATION_SCHEMA = _object(
         _object(optional=("record_id",), type={"const": "finding-judgment"}, disposition={"enum": [
             "accepted", "rejected", "ambiguous", "unanswered", "missing", "unknown"]},
             rationale=_ID, record_id=_nullable(_SHA)),
-        _object(type={"const": "enrichment"}, kind={"enum": ["pr", "base", "license"]}, evidence=_EVIDENCE)]})
+        _object(type={"const": "enrichment"}, kind={"enum": ["pr", "base"]}, evidence=_EVIDENCE)]})
 _HARVEST_ANNOTATION = _object(
     labels=_array(_STRING), pr_state=_nullable(_STRING), valid_at=_nullable(_STRING),
     reward_version=_ID, reward_json=_STRING, composite_reward=_nullable(_NUMBER),
     evidence_sha=_nullable(_STRING), rubric_json=_nullable(_STRING), reviewer_logins=_array(_STRING),
     has_posterior=_BOOL, reply_classifier_version=_nullable(_STRING), reply_evidence_digest=_nullable(_SHA))
-_OBSERVATION_V2_SCHEMA = deepcopy(_OBSERVATION_SCHEMA)
-_OBSERVATION_V2_SCHEMA["properties"]["schema_version"] = {"const": "daydream.observation.v2"}
-_OBSERVATION_V2_SCHEMA["properties"]["payload"]["oneOf"].append(_object(
+_OBSERVATION_SCHEMA["properties"]["payload"]["oneOf"].append(_object(
     type={"const": "harvest-annotation"}, annotation=_HARVEST_ANNOTATION, labeler_policy_version=_ID))
 _MEMBER = _object(identity=_ID, record_digest=_SHA, shard={"type": "string", "pattern": "^[a-f0-9]{64}\\.jsonl$"},
                   shard_digest=_SHA)
@@ -161,8 +159,7 @@ _SNAPSHOT_V2_SCHEMA["properties"].update(
                             manifest_sha256=_nullable(_SHA))))
 _SNAPSHOT_V2_SCHEMA["required"].append("source")
 _VALIDATORS = {"daydream.run.v1": Draft202012Validator(_RUN_SCHEMA),
-               "daydream.observation.v1": Draft202012Validator(_OBSERVATION_SCHEMA),
-               "daydream.observation.v2": Draft202012Validator(_OBSERVATION_V2_SCHEMA),
+               "daydream.observation.v3": Draft202012Validator(_OBSERVATION_SCHEMA),
                "daydream.snapshot.v1": Draft202012Validator(_SNAPSHOT_SCHEMA),
                "daydream.snapshot.v2": Draft202012Validator(_SNAPSHOT_V2_SCHEMA)}
 
@@ -225,7 +222,7 @@ def parse_run(raw: Mapping[str, Any] | str | bytes) -> Record:
 
 
 def parse_observation(raw: Mapping[str, Any] | str | bytes) -> Record:
-    return _parse_typed(raw, versions=("daydream.observation.v1", "daydream.observation.v2"), name="ObservationRecord")
+    return _parse_typed(raw, versions=("daydream.observation.v3",), name="ObservationRecord")
 
 
 def parse_snapshot(raw: Mapping[str, Any] | str | bytes) -> Record:
@@ -379,7 +376,7 @@ def run_record_schema() -> Record:
 
 
 def observation_record_schema() -> Record:
-    return deepcopy(_OBSERVATION_V2_SCHEMA)
+    return deepcopy(_OBSERVATION_SCHEMA)
 
 
 _DEFAULT_MAX_RECORD_BYTES = 64 * 1024 * 1024

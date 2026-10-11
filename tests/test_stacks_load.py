@@ -21,10 +21,9 @@ VAL_RATE = 0.2
 
 
 def _make_record(record_id: str, split: str) -> dict[str, Any]:
-    """A minimal v2 record passing the existing identity/license gates."""
-    return {"schema_version": "2", "record_id": record_id, "record_type": "outcome-finding", "tier": "gold",
+    """A minimal v2 record passing the existing identity gates."""
+    return {"schema_version": "3", "record_id": record_id, "record_type": "outcome-finding", "tier": "gold",
         "lineage": {"repo_slug": "owner/repo", "split": split,
-            "license_decision": {"status": "admitted", "repo_slug": "owner/repo", "reason_code": None},
         },
     }
 

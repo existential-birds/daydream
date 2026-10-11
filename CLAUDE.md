@@ -133,6 +133,13 @@ deep FlowSteps -> phases/ -> agent.py -> Backend.execute()
 Self-describing modules are not listed: `findings.py`, `pricing.py`, `github_app.py`,
 `bot_identity.py`, `bot_setup.py`, `summarize.py`, `archive/`, `benchmark/`.
 
+Training projection derives canonical repository identity from captured task provenance.
+C5 exclusions protect held-out benchmarks; operators decide dataset permissions using
+recorded repository and commit provenance. New observations use `daydream.observation.v3`
+and private HF manifests use `daydream.hub.v3`; projected records use schema `3` and
+`record-snapshot-v2` source lineage. Unsupported observation and HF contracts are
+rejected without rewriting historical data. Finding IDs retain their original hash domain.
+
 Harvested finding observations retain complete source-bound `reply_captures` separately
 from their semantic reply evidence. Capture-only enrichment preserves semantic digests
 and matching human judgments; source-body edits create a new evidence generation.

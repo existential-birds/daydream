@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, Mapping, cast, overload
 
 from daydream.dataset import LocalRecordStore
 from daydream.json_utils import atomic_write_bytes, canonical_json
+from daydream.training.admission import REASON_CODE_C5_EXCLUDED_REPO, REASON_CODE_REPO_IDENTITY_MISSING
 from daydream.training.corpus import _is_posterior_leak, _trajectory_set_hash
-from daydream.training.corpus_projection.license import load_license_policy, resolve_repo_decision
 from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.corpus_projection.segments import segment
 from daydream.training.corpus_projection.selection import (
@@ -24,12 +24,12 @@ from daydream.training.corpus_projection.selection import (
 )
 from daydream.training.corpus_projection.splits import SPLIT_FILENAMES, assign_split
 from daydream.training.corpus_projection.tiers import classify_tier
-from daydream.training.exclusion import EXCLUSION_PATH
+from daydream.training.exclusion import EXCLUSION_PATH, load_exclusion_list
 from daydream.training.labeler_versions import LABELER_POLICY_VERSION, REPLY_CLASSIFIER_VERSION, RUBRIC_SCHEMA_VERSION
 from daydream.training.record_evidence import sessions_from_snapshot
-from daydream.training.record_identity import record_finding_id
+from daydream.training.record_identity import normalize_repo_slug, record_finding_id
 
-SOURCE_IDENTITY_VERSION = "record-snapshot-v1"
+SOURCE_IDENTITY_VERSION = "record-snapshot-v2"
 
 
 def _dump_jsonl(records: list[Record]) -> str:
@@ -42,12 +42,11 @@ def _write_artifact(path: Path, data: bytes) -> None:
 
 @dataclass(frozen=True)
 class BuildFrozenCorpusConfig:
-    """Pinned input membership and policy; no network or repository checkout required."""
+    """Pinned input membership and projection settings; no network or repository checkout required."""
 
     out_dir: Path
     store_dir: Path
     snapshot_id: str
-    license_policy_path: Path | None = None
     as_of: str | None = None
     holdout_rate: float = 0.1
     val_rate: float = 0.1
@@ -59,13 +58,10 @@ class BuildFrozenCorpusConfig:
     labeler_policy_version: str = LABELER_POLICY_VERSION
     reply_classifier_version: str = REPLY_CLASSIFIER_VERSION
     rubric_schema_version: str = RUBRIC_SCHEMA_VERSION
-    allow_copyleft: frozenset[str] = frozenset()
     emit_process_traces: bool = False
 
     def __post_init__(self) -> None:
-        if self.license_policy_path is None:
-            raise ValueError("license_policy_path is required: projection requires a pinned license policy")
-        for name in ("out_dir", "store_dir", "license_policy_path"):
+        for name in ("out_dir", "store_dir"):
             object.__setattr__(self, name, Path(getattr(self, name)))
         output_root = self.out_dir.expanduser().resolve()
         store_root = self.store_dir.expanduser().resolve()
@@ -212,23 +208,12 @@ def project_findings(
     return records
 
 
-def _license_decision_distribution(
-    decisions: dict[str, dict[str, Any]]
-) -> dict[str, int]:
-    """Admitted/rejected decision counts across admitted batches, keyed by
-    ``admitted`` or the rejection reason code — deterministic order."""
-    return count_by(
-        list(decisions.values()),
-        lambda d: "admitted" if d["status"] == "admitted" else str(d["reason_code"]),
-    )
-
-
 def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
     """Project verified snapshot evidence; gate all admission before writing any output.
 
     Findings belong to the first trajectory segment in captured fork order. IDs
-    use host UID identities; record-snapshot-v1 explicitly pins the
-    captured run/trajectory identity and replaces the old directory identities.
+    use stable host UID identities; source lineage pins captured run/trajectory
+    identity and immutable snapshot membership.
     """
     store = LocalRecordStore(config.store_dir)
     frozen = store.read_snapshot(config.snapshot_id)
@@ -240,21 +225,25 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
     as_of = config.as_of or pin
     source = frozen.snapshot.get("source") or {}
     hub_commit = source.get("revision")
-    assert config.license_policy_path is not None
-    policy, policy_digest = load_license_policy(config.license_policy_path)
     sessions = {row["session_id"]: row for row in sessions_from_snapshot(frozen)}
     runs = {run["run_id"]: run for run in frozen.runs}
-    decisions: dict[str, dict[str, Any]] = {}
-    license_refusals: list[tuple[str, str]] = []
-    for run_id, row in sessions.items():
-        decision = resolve_repo_decision(row.get("repo_slug") or "", row.get("license_evidence"),
-                                        policy, config.allow_copyleft)
-        decisions[run_id] = asdict(decision)
-        if decision.status != "admitted":
-            license_refusals.append((run_id, decision.reason_code or ""))
-    if license_refusals:
-        details = "\n".join(f"{reason}: {run_id}" for run_id, reason in sorted(license_refusals))
-        raise ValueError(f"license gate: refusing to project; no output written\n{details}")
+    repo_slugs: dict[str, str] = {}
+    identity_refusals: list[tuple[str, str]] = []
+    excluded = {slug.casefold() for slug in load_exclusion_list()}
+    for run_id in sessions:
+        original_task = runs[run_id]["original_task"]
+        task = original_task["value"] if original_task["status"] == "available" else {}
+        raw_slug = task.get("repository", {}).get("repo_slug")
+        slug = normalize_repo_slug(raw_slug) if isinstance(raw_slug, str) else ""
+        if not slug:
+            identity_refusals.append((run_id, REASON_CODE_REPO_IDENTITY_MISSING))
+        elif slug.casefold() in excluded:
+            identity_refusals.append((run_id, REASON_CODE_C5_EXCLUDED_REPO))
+        else:
+            repo_slugs[run_id] = slug
+    if identity_refusals:
+        details = "\n".join(f"{reason}: {run_id}" for run_id, reason in sorted(identity_refusals))
+        raise ValueError(f"repository identity gate: refusing to project; no output written\n{details}")
 
     records: list[Record] = []
     adjudication: list[Record] = []
@@ -313,8 +302,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                     "as_of": as_of, "valid_at": _max_valid_at(evidence, as_of),
                     "split": assign_split(str(rec["record_id"]), holdout_rate=config.holdout_rate,
                                           val_rate=config.val_rate, salt=config.salt),
-                    "exclusion_reason": None, "repo_slug": decisions[run_id]["repo_slug"],
-                    "license_decision": decisions[run_id],
+                    "exclusion_reason": None, "repo_slug": repo_slugs[run_id],
                 }
                 finding = findings_by_uid.get(item_uid, {})
                 text = finding.get("body")
@@ -322,7 +310,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                     rec["finding_text"] = text
                     rec["finding_text_sha256"] = hashlib.sha256(text.encode()).hexdigest()
                 revision = task.get("analyzed_revision", {})
-                task_identity = {"repo_slug": decisions[run_id]["repo_slug"]}
+                task_identity: dict[str, Any] = {"repo_slug": repo_slugs[run_id]}
                 for name, value in (("base_sha", revision.get("pr_base_sha") or revision.get("merge_base_sha")),
                                     ("head_sha", revision.get("head_sha"))):
                     if value:
@@ -334,7 +322,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                     task_identity.update(diff_digest=diff_digest, diff_ref=diff_ref)
                     cast(dict[str, Any], rec["lineage"]).update(diff_digest=diff_digest, diff_ref=diff_ref)
                 rec["task_identity"] = task_identity
-                rec["schema_version"] = "2"
+                rec["schema_version"] = "3"
                 scoring = run["scoring"]
                 if scoring["status"] == "available":
                     rec["reward_version"] = scoring["value"]["persisted_breakdown"]["reward_version"]
@@ -403,11 +391,9 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         f"{kind}/{member['identity']}": member["record_digest"]
         for kind in ("runs", "observations") for member in frozen.snapshot[kind]
     }
-    license_distribution = _license_decision_distribution(decisions)
     caps_report = {"configured": dict(sorted(config.caps.items())),
                    "applied": count_by(records, lambda r: str(r["tier"])) if config.caps else {}}
     share_caps_entry = {"share_caps": share_caps_report} if share_caps_report is not None else {}
-    copyleft_opt_ins = sorted(config.allow_copyleft)
     lineage = {
         "schema_version": "lineage",
         "source_identity_version": SOURCE_IDENTITY_VERSION,
@@ -433,40 +419,15 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         "caps": caps_report,
         **share_caps_entry,
         "adjudication_count": len(adjudication),
-        # Pin all license inputs and decisions for byte-identical reconstruction.
-        "license_policy": {
-            "path_digest": policy_digest,
-            "policy_version": policy.policy_version,
-        },
         "exclusion_list_digest": hashlib.sha256(EXCLUSION_PATH.read_bytes()).hexdigest(),
-        "copyleft_opt_ins": copyleft_opt_ins,
-        "license_decisions": {
-            str(session_id): decision for session_id, decision in decisions.items()
-        },
-        "license_decision_distribution": license_distribution,
     }
     _write_artifact(
         config.out_dir / "lineage.json",
         (json.dumps(lineage, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
     )
 
-    # The human report shares lineage's license evidence and precedes _SUCCESS.
-    license_report = {
-        "policy": {"policy_version": policy.policy_version, "digest": policy_digest},
-        "exclusion_list_digest": lineage["exclusion_list_digest"],
-        "copyleft_opt_ins": copyleft_opt_ins,
-        "decisions": dict(sorted(
-            (str(session_id), decision) for session_id, decision in decisions.items()
-        )),
-        "distribution": license_distribution,
-    }
-    _write_artifact(
-        config.out_dir / "license-report.json",
-        (json.dumps(license_report, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
-    )
-
     output_names = ("corpus.jsonl", *SPLIT_FILENAMES.values(), "adjudication-report.json", "schema.json",
-                    "lineage.json", "license-report.json")
+                    "lineage.json")
     sums = "".join(f"{hashlib.sha256((config.out_dir / name).read_bytes()).hexdigest()}  {name}\n"
                    for name in sorted(output_names))
     _write_artifact(config.out_dir / "SHA256SUMS", sums.encode("utf-8"))
@@ -485,5 +446,4 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         "caps": caps_report,
         **share_caps_entry,
         "exclusions_by_reason": dict(sorted(exclusions_by_reason.items())),
-        "license_distribution": license_distribution,
     }

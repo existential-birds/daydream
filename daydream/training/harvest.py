@@ -9,7 +9,7 @@ Each pass reads selected frozen run records. The record store deduplicates
 unchanged evidence and policy; changed evidence appends immutable observations.
 Dry-run suppresses all writes. A disposable response cache can skip completed
 rows; exhausted rate limits abort without losing already persisted evidence.
-PR/base/license enrichment is append-only and leaves captured records sealed.
+PR/base enrichment is append-only and leaves captured records sealed.
 Exact reply text is retained separately from semantic evidence and its digest.
 """
 
@@ -53,7 +53,6 @@ from daydream.training.labeler_signals import (
     pr_merge_signal,
     reviewer_logins_signal,
 )
-from daydream.training.license_evidence import GithubLicenseResolver, LicenseEvidenceError
 from daydream.training.record_evidence import section_value, validate_output_path
 from daydream.training.reward import FP_PENALTY_MAP, ScoringInputs, score_trajectory
 from daydream.training.rubric import Rubric, derive_outcome_label
@@ -705,20 +704,6 @@ class _ProductionHarvestServices:
         *,
         console: Console,
     ) -> None:
-        if not self._config.dry_run and row.repo_slug and row.head_sha:
-            try:
-                license_evidence = GithubLicenseResolver().resolve(row.repo_slug, repo_commit=row.head_sha)
-                value = asdict(license_evidence) if license_evidence is not None else None
-                evidence = {
-                    "status": "available" if value is not None else "unproduced",
-                    "value": value,
-                    "reason": None if value is not None else "license_unavailable",
-                }
-            except LicenseEvidenceError:
-                value = None
-                evidence = {"status": "failed", "value": None, "reason": "license_acquisition_failed"}
-                print_warning(console, "harvest: license acquisition failed; corpus admission remains unavailable")
-            self._append_typed(row.session_id, {"type": "enrichment", "kind": "license", "evidence": evidence}, value)
         if self._config.dry_run or row.base_sha:
             return
         if repo_clone is None or not row.base_branch or not row.head_sha:
@@ -870,9 +855,7 @@ class _ProductionHarvestServices:
             LocalRecordStore(self.store_dir)
             .append_observation(
                 {
-                    "schema_version": "daydream.observation.v2"
-                    if payload["type"] == "harvest-annotation"
-                    else "daydream.observation.v1",
+                    "schema_version": "daydream.observation.v3",
                     "observation_id": identity,
                     "run_id": run_id,
                     "item_uid": item_uid,

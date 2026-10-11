@@ -173,7 +173,7 @@ def test_real_cli_applies_caps_and_pins_matching_report(
     store = _store_with_caps_population(tmp_path)
     config = projection_config(store, tmp_path, **{f"max_{dimension}_share": 0.5})
     args = ["corpus", "build", "--store", str(store.root), "--snapshot-id", config.snapshot_id,
-            "--license-policy", str(config.license_policy_path), "--out", str(config.out_dir / "corpus.jsonl"),
+            "--out", str(config.out_dir / "corpus.jsonl"),
             f"--max-{dimension}-share", "0.5"]
     assert cli_main(args + ["--dry-run"]) == 0
     dry_text = capsys.readouterr().out
@@ -200,7 +200,6 @@ def test_cli_refuses_invalid_share_before_creating_output(tmp_path: Path, dimens
     store = _store_with_caps_population(tmp_path)
     config = projection_config(store, tmp_path)
     assert cli_main(["corpus", "build", "--store", str(store.root), "--snapshot-id", config.snapshot_id,
-                     "--license-policy", str(config.license_policy_path),
                      "--out", str(config.out_dir / "corpus.jsonl"), f"--max-{dimension}-share", value]) == 1
     assert not config.out_dir.exists()
 

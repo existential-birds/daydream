@@ -1,7 +1,7 @@
 """Load complete frozen projections and recheck their consumption gates.
 
-Require v2 records, repository/license identity, and _SUCCESS. C5 exclusions
-always refuse consumption; C8 requires exact repository opt-ins. Full projection
+Require current-schema records, repository identity, and _SUCCESS. C5
+exclusions always refuse consumption. Full projection
 loading also verifies pinned split assignments and computes a deterministic
 file-tree digest. Exclusion-list parsing remains owned by training.exclusion.
 """
@@ -14,16 +14,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
-from daydream.training.admission import (
-    REASON_CODE_C5_EXCLUDED_REPO,
-    REASON_CODE_C8_COPYLEFT_UNOPTED,
-)
+from daydream.training.admission import REASON_CODE_C5_EXCLUDED_REPO
 from daydream.training.corpus_projection.splits import SPLIT_FILENAMES, assign_split
-from daydream.training.exclusion import (
-    is_copyleft,
-    load_copyleft_list,
-    load_exclusion_list,
-)
+from daydream.training.exclusion import load_exclusion_list
+from daydream.training.record_identity import normalize_repo_slug
 
 __all__ = [
     "V2Projection",
@@ -130,16 +124,13 @@ def _enforce_split_consistency(
 
 def load_dataset_v2(
     path: str | Path,
-    *,
-    allow_copyleft: frozenset[str] | set[str] = frozenset(),
 ) -> list[dict[str, object]]:
     """Load split manifests in train/validation/holdout order after completeness checks.
 
-    Every record must have schema_version="2", a nonempty lineage.repo_slug,
-    and a resolved license decision with its own repository identity. Re-run
-    C5/C8 checks: exclusions always win; copyleft requires the exact slug in
-    allow_copyleft. Gate failures raise ValueError naming offending records or
-    repositories; malformed JSON propagates unchanged. No partial list returns."""
+    Every record must have schema_version="3" and a canonicalizable
+    lineage.repo_slug. Re-run C5 checks on canonical identity. Gate failures
+    raise ValueError naming offending records or repositories; malformed JSON
+    propagates unchanged. No partial list returns."""
     projection_dir = Path(path)
     if not (projection_dir / "_SUCCESS").is_file():
         raise ValueError(
@@ -155,101 +146,49 @@ def load_dataset_v2(
                     continue
                 record = json.loads(stripped)  # malformed line propagates verbatim
                 schema_version = record.get("schema_version")
-                if schema_version != "2":
+                if schema_version != "3":
                     raise ValueError(
                         f"projection record {record.get('record_id')!r} in "
                         f"{projection_dir / filename}: schema_version {schema_version!r} "
-                        "!= '2' — refusing a record not projected by the v2 schema"
+                        "!= '3' — refusing a record not projected by the current schema"
                     )
                 records.append(record)
 
-    _enforce_v2_identity_and_gates(records, projection_dir, allow_copyleft)
+    _enforce_identity_and_gates(records, projection_dir)
     return records
 
 
-_ALLOWED_V2_LICENSE_STATUSES = frozenset({"admitted", "rejected"})
-
-
-def _enforce_v2_identity_and_gates(
+def _enforce_identity_and_gates(
     records: list[dict[str, object]],
     path: Path,
-    allow_copyleft: frozenset[str] | set[str],
 ) -> None:
-    """Structural repo-identity requirement plus the C5/C8 fail-closed gates
-    re-run over loaded v2 records (see :func:`load_dataset_v2`)."""
+    """Validate repository identity and re-run benchmark isolation before consumption."""
+    excluded = {slug.casefold() for slug in load_exclusion_list()}
+    excluded_offenders: set[str] = set()
     for record in records:
         record_id = record.get("record_id")
         lineage_obj = record.get("lineage")
         lineage = lineage_obj if isinstance(lineage_obj, dict) else None
-        repo_slug = lineage.get("repo_slug") if lineage else None
-        if not isinstance(repo_slug, str) or not repo_slug:
+        raw_slug = lineage.get("repo_slug") if lineage else None
+        slug = normalize_repo_slug(raw_slug) if isinstance(raw_slug, str) else ""
+        if not slug:
             raise ValueError(
                 f"projection record {record_id!r} in {path}: lineage.repo_slug "
-                "missing or empty — refusing a record without repo identity"
+                "missing, empty, or malformed — refusing a record without repo identity"
             )
-        decision_obj = lineage.get("license_decision") if lineage else None
-        decision = decision_obj if isinstance(decision_obj, dict) else None
-        decision_slug = decision.get("repo_slug") if decision else None
-        if (
-            not isinstance(decision, dict)
-            or decision.get("status") not in _ALLOWED_V2_LICENSE_STATUSES
-            or not isinstance(decision_slug, str)
-            or not decision_slug
-        ):
-            raise ValueError(
-                f"projection record {record_id!r} in {path}: lineage.license_decision "
-                "missing, malformed, or not a resolved admitted/rejected decision — "
-                "refusing a record without an immutable license decision"
-            )
-
-    lineages = [cast(dict[str, object], rec["lineage"]) for rec in records]
-
-    excluded = {slug.casefold() for slug in load_exclusion_list()}
-    excluded_offenders = sorted(
-        {
-            slug
-            for lineage in lineages
-            if (slug := str(lineage["repo_slug"]).casefold()) in excluded
-        }
-    )
+        if slug.casefold() in excluded:
+            excluded_offenders.add(slug.casefold())
     if excluded_offenders:
         raise ValueError(
             f"C5 violation ({REASON_CODE_C5_EXCLUDED_REPO}): excluded repo(s) in "
-            f"projection {path}: {', '.join(excluded_offenders)}. These "
+            f"projection {path}: {', '.join(sorted(excluded_offenders))}. These "
             "repositories are the held-out benchmark and must never appear in a "
             "training dataset, regardless of any flag."
-        )
-
-    allowed = frozenset(slug.casefold() for slug in allow_copyleft)
-    copyleft_known = frozenset(slug.casefold() for slug in load_copyleft_list())
-    copyleft_offenders = sorted(
-        {
-            slug
-            for lineage in lineages
-            if (slug := str(lineage["repo_slug"]).casefold())
-            and slug not in allowed
-            and (
-                is_copyleft(slug, allowed, copyleft_list=copyleft_known)
-                or (
-                    cast(dict[str, object], lineage["license_decision"]).get("reason_code")
-                    == REASON_CODE_C8_COPYLEFT_UNOPTED
-                )
-            )
-        }
-    )
-    if copyleft_offenders:
-        raise ValueError(
-            f"C8 violation ({REASON_CODE_C8_COPYLEFT_UNOPTED}): copyleft repo(s) "
-            f"in projection {path} without explicit opt-in: "
-            f"{', '.join(copyleft_offenders)}. Pass these slugs via "
-            "allow_copyleft to admit them."
         )
 
 
 def load_v2_projection(
     path: str | Path,
-    *,
-    allow_copyleft: frozenset[str] | set[str] = frozenset(),
 ) -> V2Projection:
     """Load gate-clean records, verify pinned splits, and digest the directory.
 
@@ -257,7 +196,7 @@ def load_v2_projection(
     recomputed split mismatch refuse the entire load before grouping."""
     projection_dir = Path(path)
     try:
-        records = load_dataset_v2(projection_dir, allow_copyleft=allow_copyleft)
+        records = load_dataset_v2(projection_dir)
     except FileNotFoundError as exc:
         raise ValueError(
             f"projection {projection_dir}: missing split file "

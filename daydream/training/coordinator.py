@@ -51,7 +51,6 @@ class PipelineConfig:
     learning_rate: float = 1e-5
     seed: int = 0
     gate_config: GateConfig = field(default_factory=GateConfig)
-    allow_copyleft: frozenset[str] = frozenset()
     profile_policy: str = "decisive-only"
     stack_pins: dict[str, str] = field(
         default_factory=lambda: {"verifiers": "0.2.1", "prime-rl": "0.7.0"}
@@ -138,7 +137,7 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
 def _record_views(
     rec: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Read a record's v2 ``task_identity``/``lineage`` views."""
+    """Read a projected record's ``task_identity``/``lineage`` views."""
 
     def view(key: str) -> dict[str, Any]:
         value = rec.get(key)
@@ -203,7 +202,7 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # Map it onto the shared verdict vocabulary (the labels
         # score_trajectory's verdict_map consumes) so the replay reads a
         # real correctness axis instead of flooring every candidate at a
-        # 0.0 composite. format_valid is True: a frozen v2 record is
+        # 0.0 composite. format_valid is True: a frozen projection record is
         # admission/shape/drift-validated, so the v1 bronze-parse failure
         # floor cannot apply here.
         disposition = rec.get("outcome_label") or rec.get("disposition")
@@ -404,12 +403,12 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
     # PipelineConfig.__post_init__ enforces a projection input; the assert keeps
     # the invariant documented and narrows the type for mypy.
     assert config.projection is not None
-    # Frozen projection directory: the v2 loader re-applies the C5/C8 and
+    # Frozen projection directory: the projection loader re-applies the C5 and
     # split-drift gates, and the directory-level digest replaces the
     # single-file corpus digest in the run identity.
     projection_path = config.projection
     corpus_path = Path(projection_path)
-    projection = load_v2_projection(projection_path, allow_copyleft=config.allow_copyleft)
+    projection = load_v2_projection(projection_path)
     records = list(projection.records)
     corpus_digest = projection.digest
 
