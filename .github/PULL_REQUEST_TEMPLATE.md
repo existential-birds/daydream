@@ -36,6 +36,7 @@
 
 - [ ] Root and workflow checks pass locally via `make check` (requires Docker daemon for actionlint)
 - [ ] Standalone RL checks pass via `make rl-check` when changing `rl/daydream_review` (deliberately outside `make check`)
+- [ ] Run `$test-audit` on all test files created or updated in this PR (N/A if no test files changed)
 - [ ] Documentation updated (if applicable)
 
 ## Additional Context
