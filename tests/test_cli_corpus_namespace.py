@@ -79,9 +79,19 @@ def test_record_build_cli_without_license_configuration(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("flag", ["--license-policy", "--allow-copyleft"])
-def test_record_build_cli_rejects_removed_flags(tmp_path: Path, flag: str) -> None:
-    assert cli_main(["corpus", "build", flag, "unused"]) == 2
-    assert not (tmp_path / "out").exists()
+def test_record_build_cli_rejects_removed_flags(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], flag: str,
+) -> None:
+    store = seed_projection_store(tmp_path, dispositions=("accepted",))
+    snapshot = store.select_snapshot(observed_before="2100-01-01T00:00:00Z")
+    output = tmp_path / "out"
+    args = ["corpus", "build", "--store", str(store.root), "--snapshot-id", snapshot["snapshot_id"],
+            "--out", str(output / "corpus.jsonl")]
+    assert cli_main([*args, flag, "unused"]) == 2
+    assert f"unrecognized arguments: {flag}" in capsys.readouterr().err
+    assert not output.exists()
+    assert cli_main(args) == 0
+    assert (output / "_SUCCESS").exists()
 
 
 def test_bare_harvest_is_unknown_verb_treated_as_review_target(capsys: pytest.CaptureFixture[str]) -> None:
