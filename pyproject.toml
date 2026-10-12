@@ -180,8 +180,8 @@ omit = [
 ]
 
 [tool.coverage.report]
-# measured 86.94% at 411a50d on 2026-08-28; ratchet via docs/coverage.md
-fail_under = 86
+# measured 90.59% at 060e463f on 2026-10-12; ratchet via docs/coverage.md
+fail_under = 90
 
 [tool.coverage.xml]
 output = "coverage.xml"

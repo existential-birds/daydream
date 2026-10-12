@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from collections.abc import Callable
 from contextlib import nullcontext
 from pathlib import Path
@@ -160,66 +159,6 @@ class _LogRedactingConsole(Console):
 
 
 console = _LogRedactingConsole(theme=NEON_THEME)
-
-
-def detect_test_success(output: str) -> bool:
-    """Detect if tests passed using pattern matching.
-
-    Extracts structured pass/fail counts first (tolerating "N tests failed"
-    wording and any separator between counts), then falls through to sentinel
-    pass-phrases emitted by tooling or agents.
-    """
-    if not output:
-        return False
-
-    output_lower = output.lower()
-
-    # finditer so a later non-zero count isn't hidden by an earlier "0 failed".
-    # pytest "errors" (collection errors) are genuine non-passes — counted
-    # alongside failures here.
-    failed_counts = [
-        int(match.group(1).replace(",", ""))
-        for match in re.finditer(r"(\d[\d,]*)\s+(?:tests?\s+)?(?:fail(?:ed|ures?)|errors?)\b", output_lower)
-    ]
-    passed_counts = [
-        int(match.group(1).replace(",", ""))
-        for match in re.finditer(r"(\d[\d,]*)\s+(?:tests?\s+)?passed\b", output_lower)
-    ]
-
-    if any(count > 0 for count in failed_counts):
-        return False
-
-    # Hard negative signals win over success sentinels — a late traceback must not be
-    # masked by an earlier "all tests pass" phrase.
-    error_patterns = [
-        r"tests? failing",
-        r"test failure",
-        r"assertion error",
-        r"traceback",
-    ]
-    for pattern in error_patterns:
-        if re.search(pattern, output_lower):
-            return False
-
-    # Explicit sentinels emitted by tooling / the test agent.
-    success_sentinels = [
-        r"test result:\s*ok",           # cargo / rust native
-        r"tests?\s+pass(?:ed)?\s*[✅✓]", # agent emoji summary ("Tests PASS ✅")
-        r"all \d+ tests? passed",
-        r"tests? passed successfully",
-        r"test suite passed",
-        r"all tests pass",
-        r"no (?:test )?failures?",
-        r"\b0\s+failures?\b",
-        r"\d+\s+passed(?:,\s*\d+\s+(?:deselected|skipped|xfailed))*(?:,\s*\d+\s+warnings?)?",
-    ]
-    for pattern in success_sentinels:
-        if re.search(pattern, output_lower):
-            return True
-
-    # Positive failure counts were excluded above. A positive passed count is
-    # enough here; bare "passed" without a count remains a conservative False.
-    return any(count > 0 for count in passed_counts)
 
 
 def is_environmental_failure(test_output: str) -> bool:
