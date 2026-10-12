@@ -110,7 +110,9 @@ def associate_trajectory_identity(session_id: str) -> None:
     inherited["daydream.session.id"] = session_id
     inherited["daydream.trajectory.id"] = session_id
     inherited["traceloop.association.properties.session_id"] = session_id
-    _scope_attributes.set({key: value for key, value in inherited.items() if key in _INHERITED_ATTRIBUTES})
+    _scope_attributes.set(
+        {key: value for key, value in inherited.items() if key in _INHERITED_ATTRIBUTES and value is not None}
+    )
 
 
 def _reason_code(reason: str | None) -> str:
@@ -185,7 +187,7 @@ class SpanScope:
                 if recorder.descriptor:
                     common["daydream.trajectory.descriptor"] = recorder.descriptor
             self._token = _scope_attributes.set(
-                {key: value for key, value in common.items() if key in _INHERITED_ATTRIBUTES}
+                {key: value for key, value in common.items() if key in _INHERITED_ATTRIBUTES and value is not None}
             )
             self.span = self.session.tracer.start_span(
                 self.session.policy.text(self.name),
@@ -670,7 +672,7 @@ class AttemptObserver:
         draft["finish_reason"] = event.finish_reason
         # Every generation inherits session identity for vendor tree routing.
         for key, value in _scope_attributes.get().items():
-            if key in _INHERITED_ATTRIBUTES:
+            if key in _INHERITED_ATTRIBUTES and value is not None:
                 span.set_attribute(key, session.policy.value(value))
         span.set_attribute("traceloop.entity.name", session.policy.text(f"chat {model}" if model else "chat"))
         for key, value in {

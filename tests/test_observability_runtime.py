@@ -870,6 +870,93 @@ async def test_resource_secret_values_never_reach_serialized_spans(monkeypatch: 
     assert resource["api_key"] == "[REDACTED_CREDENTIAL]"
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("stack", "iteration"),
+    [(None, None), ("python", None), (None, 2), ("python", 2), ("python", 0), ("", False)],
+)
+async def test_generation_optional_scope_attributes_never_warn(
+    stack: str | None, iteration: int | None, caplog: pytest.LogCaptureFixture,
+) -> None:
+    exporter, registry = _memory_tracing()
+    with caplog.at_level(logging.WARNING, logger="opentelemetry.attributes"):
+        async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
+            with step_scope("review", stack=stack, iteration=iteration):
+                with agent_scope("review", backend="pi"):
+                    async with attempt_scope(1) as attempt:
+                        _observe_generation(attempt)
+
+    spans = exporter.get_finished_spans()
+    by_kind = {(span.attributes or {})["daydream.span.kind"]: span for span in spans}
+    assert set(by_kind) == {"run", "step", "agent", "attempt", "generation"}
+    assert len(spans) == len(by_kind)
+    for child, parent in (("step", "run"), ("agent", "step"), ("attempt", "agent"), ("generation", "attempt")):
+        parent_context = by_kind[parent].context
+        child_parent = by_kind[child].parent
+        assert parent_context is not None and child_parent is not None
+        assert child_parent.span_id == parent_context.span_id
+    for kind in ("step", "agent", "attempt", "generation"):
+        attrs = by_kind[kind].attributes or {}
+        for key, supplied in (("daydream.stack", stack), ("daydream.iteration", iteration)):
+            if supplied is None:
+                assert key not in attrs
+            else:
+                assert attrs[key] == supplied
+                assert type(attrs[key]) is type(supplied)
+    assert not [
+        record for record in caplog.records
+        if record.name == "opentelemetry.attributes" and "Invalid type NoneType" in record.getMessage()
+    ]
+
+
+@pytest.mark.anyio
+async def test_default_nested_scope_clears_optional_attributes_and_restores_outer_context(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    exporter, registry = _memory_tracing()
+    with caplog.at_level(logging.WARNING, logger="opentelemetry.attributes"):
+        async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
+            with step_scope("outer", stack="python", iteration=0):
+                with step_scope("default-nested"):
+                    runtime.associate_run_trajectory("nested-session")
+                    with agent_scope("nested", backend="pi"):
+                        async with attempt_scope(1) as attempt:
+                            _observe_generation(attempt)
+                with agent_scope("restored", backend="pi"):
+                    async with attempt_scope(1) as attempt:
+                        _observe_generation(attempt)
+            with step_scope("default-sibling"):
+                with agent_scope("sibling", backend="pi"):
+                    async with attempt_scope(1) as attempt:
+                        _observe_generation(attempt)
+
+    spans = exporter.get_finished_spans()
+    by_id = {span.context.span_id: span for span in spans if span.context is not None}
+    generations = [span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "generation"]
+    assert len(generations) == 3
+    assert {(span.attributes or {})["daydream.step"] for span in generations} == {
+        "outer", "default-nested", "default-sibling",
+    }
+    for generation in generations:
+        assert generation.parent is not None
+        assert (by_id[generation.parent.span_id].attributes or {})["daydream.span.kind"] == "attempt"
+    for span in spans:
+        attrs = span.attributes or {}
+        if attrs.get("daydream.step") == "outer":
+            assert attrs["daydream.stack"] == "python"
+            assert attrs["daydream.iteration"] == 0
+        elif attrs.get("daydream.step") in {"default-nested", "default-sibling"}:
+            assert "daydream.stack" not in attrs
+            assert "daydream.iteration" not in attrs
+        if attrs.get("daydream.step") == "default-nested" and attrs["daydream.span.kind"] != "step":
+            assert attrs["daydream.session.id"] == "nested-session"
+            assert attrs["traceloop.association.properties.session_id"] == "nested-session"
+    assert not [
+        record for record in caplog.records
+        if record.name == "opentelemetry.attributes" and "Invalid type NoneType" in record.getMessage()
+    ]
+
+
+@pytest.mark.anyio
 async def test_generation_child_span_seals_and_ends_once_at_historical_end() -> None:
 
     exporter, registry = _memory_tracing()
