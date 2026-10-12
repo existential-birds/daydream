@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import textwrap
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
@@ -440,6 +441,40 @@ async def _run_lifecycle_flow(
         config = _config(make_config, repo, collector.base_url, monkeypatch)
         assert await runner.run(config) == 0
     return collector
+
+
+async def test_runner_default_non_loop_generation_omits_optional_scope_attributes_without_warnings(
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    backend = ScriptedBackend(script=[[
+        RequestEvent("inspect sample"), _gen_start("gen-default"), _gen_end("gen-default", "sealed choice"),
+        TextEvent("final answer"), ResultEvent(None, None),
+    ]])
+    with caplog.at_level(logging.WARNING, logger="opentelemetry.attributes"):
+        collector = await _run_lifecycle_flow(
+            ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, backend,
+        )
+
+    assert json.loads((feature_branch_repo / _RESULT_FILE).read_text()) == {"output": "final answer", "aborted": None}
+    lifecycle = _read_subtrajectory(feature_branch_repo)
+    assert [draft["generation_id"] for draft in lifecycle["drafts"]] == ["gen-default"]
+    spans = collector.spans
+    by_kind = {kind: _kind(spans, kind) for kind in ("run", "step", "agent", "attempt", "generation")}
+    assert all(len(values) == 1 for values in by_kind.values())
+    assert by_kind["run"][0]["status"]["code"] == "STATUS_CODE_OK"
+    assert attributes(by_kind["generation"][0])["daydream.generation.id"] == "gen-default"
+    for child, parent in (("step", "run"), ("agent", "step"), ("attempt", "agent"), ("generation", "attempt")):
+        assert by_kind[child][0]["parentSpanId"] == by_kind[parent][0]["spanId"]
+    for span in spans:
+        attrs = attributes(span)
+        assert "daydream.stack" not in attrs
+        assert "daydream.iteration" not in attrs
+    assert not [
+        record for record in caplog.records
+        if record.name == "opentelemetry.attributes" and "Invalid type NoneType" in record.getMessage()
+    ]
 
 
 class _ExactAllocationBackend(_NoCancelBackend):
