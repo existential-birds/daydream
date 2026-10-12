@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +30,7 @@ from daydream.trajectory import (
     phase_scope,
 )
 from tests.harness import diagram_repos as dr
+from tests.harness.execution import host_test_command
 from tests.harness.git_helpers import bare_remote, git
 from tests.harness.phase_backend import PhaseDispatchBackend
 from tests.harness.remote_ci import NoCIRemote
@@ -472,6 +474,7 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     backend = _install_stub_backend(monkeypatch, target, pin_skill_availability=False)
     backend.fail_batched_fix_file = "api.py"
     backend.fix_edit_line = "\n"
+    suite_dir = tmp_path / "suite"
 
     # Allow discovery/operation time beyond the independently bounded CI wait.
     with anyio.fail_after(30 + remote_ci.DEFAULT_LIMITS.completion_seconds):
@@ -479,10 +482,13 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
                 target, archive=True, assume="yes", cleanup=False, output_mode="loop", run_eval=True,
                 review_profile=independent_exploration_profile(), pr_number=no_ci_remote.pr_number,
                 pr_repo=no_ci_remote.base_repository,
+                test_command=host_test_command(suite_dir),
             )
         )
 
     assert exit_code == 0
+    assert (suite_dir / "suite-count.txt").read_text() == "1"
+    assert backend.test_suite_calls == 0
     assert git(origin, "rev-parse", "refs/heads/feature") == git(target, "rev-parse", "HEAD")
     fix_calls = [call for call in backend.calls if call["prompt"].lower().startswith(("fix this issue", "fix these"))]
     api_batch = [call
@@ -591,11 +597,24 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
                 continue
             key = (document_descriptors[document_id], invocation["phase"])
             qualified_counts[key] = qualified_counts.get(key, 0) + 1
-    assert qualified_counts == {("root", "intent"): 1, ("root", "merge"): 1, ("root", "test"): 1, ("root", "verify"): 2,
+    assert qualified_counts == {("root", "intent"): 1, ("root", "merge"): 1, ("root", "verify"): 2,
         ("deep-generic", "deep"): 1, ("deep-python", "deep"): 1, ("deep-react", "deep"): 1,
         ("deep-structure", "deep"): 1, ("explore-dependency-tracer", "exploration"): 1, ("fix-api-py", "fix"): 4,
         ("fix-app-tsx", "fix"): 1,
     }
+
+    # The suite is a host operation within the TEST flow scope; it creates no
+    # agent invocation and carries its own duration and terminal metadata.
+    host_events = [event for event in root["extra"]["phase_events"] if event["phase"] == "test-execution"]
+    test_events = [event for event in root["extra"]["phase_events"] if event["phase"] == "test"]
+    assert [event["event"] for event in host_events] == ["phase_start", "phase_end"]
+    assert [event["event"] for event in test_events] == ["phase_start", "phase_end"]
+    assert host_events[0]["scope_id"] == host_events[1]["scope_id"]
+    assert host_events[0]["scope_id"] != test_events[0]["scope_id"]
+    assert host_events[1]["metadata"]["duration_ms"] >= 0
+    assert host_events[1]["metadata"]["stop_reason"] == "completed"
+    assert test_events[0]["timestamp"] <= host_events[0]["timestamp"]
+    assert host_events[0]["timestamp"] <= host_events[1]["timestamp"] <= test_events[1]["timestamp"]
 
     verify_invocations = [invocation
         for invocation in root["extra"]["subtrajectories"]
@@ -662,6 +681,7 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
 
     data = await _run_with_config(tmp_path, feature_branch_repo, stack="python", shallow=True, non_interactive=True,
         assume="yes",  # accept the fix gate so the fix/test cycle runs
+        test_command=f"{sys.executable} -c pass",
     )
 
     # The shallow review and fix test phases must both appear.
@@ -728,6 +748,7 @@ async def test_deep_run_accept_gate_wraps_fix_test_verify(
 
     data = await _run_with_config(tmp_path, multi_stack_target,
         assume="yes",  # accept the apply-fixes gate -> verify/fix/test run
+        test_command=f"{sys.executable} -c pass",
     )
 
     # The longest phases -- fix/test/verify -- only run past an accepted gate.
@@ -756,7 +777,8 @@ async def test_parallel_fix_registers_subtrajectories(
     mute_side_effects()
 
 
-    data = await _run_with_config(tmp_path, multi_stack_target, assume="yes",)
+    data = await _run_with_config(tmp_path, multi_stack_target, assume="yes",
+                                  test_command=f"{sys.executable} -c pass")
 
     subs = data["extra"].get("subtrajectories", [])
     fix_subs = [s for s in subs if s["phase"] == "fix"]

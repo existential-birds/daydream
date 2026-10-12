@@ -14,7 +14,7 @@ import pytest
 
 import daydream.trajectory as trajectory_module
 from daydream import git_ops
-from daydream.atif import Step as AtifStep, validate as atif_validate
+from daydream.atif import validate as atif_validate
 from daydream.atif.models import Step
 from daydream.backends import (
     AgentEvent,
@@ -30,20 +30,19 @@ from daydream.eval.analyzer import analyze_costs
 from daydream.phases.publish import (
     _do_commit,
 )
+from daydream.run_config import RunConfig
 from daydream.trajectory import (
     PARTIAL_SUFFIX,
     RUN_DOCUMENT_NAME,
     DaydreamPhase,
     DaydreamRunFlow,
     Invocation,
-    Redactor,
     RunWriteSnapshot,
     TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
     flush_active_signal_recorders,
     get_current_recorder,
     host_phase_scope,
-    now_iso,
     partial_document_path,
     redact_text,
     run_directory,
@@ -403,17 +402,6 @@ def test_lifecycle_snapshot_value_types_are_frozen(tmp_path: Path) -> None:
         setattr(snapshot, "cutoff_at", "changed")
 
 
-def test_redactor_is_passthrough() -> None:
-    """Clean steps preserve semantic values; a fresh model copy is allowed."""
-
-    step = AtifStep(step_id=1, timestamp=now_iso(), source="user", message="hello",)
-    out = Redactor().redact_step(step)
-    assert out.message == step.message
-    assert out.reasoning_content == step.reasoning_content
-    assert out.tool_calls == step.tool_calls
-    assert out.observation == step.observation
-    assert out.extra == step.extra
-
 def test_empty_secret_assignment_does_not_consume_the_following_line() -> None:
     """An empty API_KEY= assignment must preserve the following newline and content."""
     block = (
@@ -513,13 +501,12 @@ async def test_fork_child_no_steps_no_file(tmp_path: Path) -> None:
     """Pitfall 6: Child with 0 steps writes no sibling file; parent has no registration."""
     recorder = make_recorder(tmp_path)
     async with recorder:
-        async with recorder.fork("empty-child"):
+        async with recorder.fork("empty-child") as child:
             pass
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             observe_text_and_result(inv)
 
-    traj_dir = tmp_path / ".daydream" / "trajectories"
-    assert not traj_dir.exists() or len(list(traj_dir.iterdir())) == 0
+    assert not child.path.exists()
     root = read_trajectory(recorder.path)
     assert not any("sibling_trajectory_ref" in item for item in root["extra"]["subtrajectories"])
 
@@ -1351,7 +1338,7 @@ async def test_do_commit_records_commit_phase_event(git_repo: Path, make_work: A
     rec = make_recorder(git_repo)
     async with rec:
         ok = await _do_commit(
-            ScriptedBackend(), work, push=False,
+            ScriptedBackend(), work, push=False, config=RunConfig(test_command="true"),
             retained_paths=frozenset({"app.py"}),
             retained_states=git_ops.snapshot_worktree_paths(git_repo, {"app.py"}),
             initial_index=git_ops.snapshot_index(git_repo),

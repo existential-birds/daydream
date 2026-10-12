@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,8 +40,8 @@ _MIN_REDACTED_ENV_VALUE_LENGTH = 8
 # cap hit is recorded explicitly as ``output_truncated`` -- never a silent drop.
 _MERGED_OUTPUT_LIMIT_CHARS = 512 * 1024
 
-#: Bump whenever the recipe payload shape changes so a stale persisted recipe
-#: can never be read as the current contract (mirrors ``REUSE_KEY_FORMAT``).
+#: Diagnostic metadata extends this format compatibly; legacy unresolved facts
+#: load as named misses with unknown provenance, never as an execution fallback.
 RECIPE_FORMAT: int = 2
 
 #: The persisted recipe's filename inside the run's deep directory.
@@ -50,14 +51,50 @@ TEST_RECIPE_FILENAME = "test-recipe.json"
 FactSource = Literal["cli", "config", "admitted", "derived", "unresolved"]
 
 
+TestCommandReason = Literal[
+    "missing", "blank", "malformed", "invalid-type", "empty-argv", "unresolved", "unavailable", "spawn-failed",
+]
+
+
+@dataclass(frozen=True)
+class TestCommandDiagnostic:
+    """Safe configuration evidence; raw command text is never retained in errors."""
+
+    reason_code: TestCommandReason
+    source: FactSource
+
+    @property
+    def message(self) -> str:
+        descriptions = {
+            "missing": "No canonical test command is configured",
+            "blank": "The canonical test command is whitespace-only",
+            "malformed": "The canonical test command has malformed shell argv syntax",
+            "invalid-type": "The canonical test command must be a string",
+            "empty-argv": "The canonical test command has no executable argv",
+            "unresolved": "The stored canonical test command is unresolved",
+            "unavailable": "The canonical test executable is unavailable or not executable",
+            "spawn-failed": "The canonical test command could not start",
+        }
+        return (
+            f"{descriptions[self.reason_code]} (source: {self.source}); test execution is blocked. "
+            "Set --test-command or test_command in [tool.daydream] in pyproject.toml "
+            "or the root of .daydream.toml to an executable command."
+        )
+
+    def payload(self) -> dict[str, str]:
+        return {"reason_code": self.reason_code, "source": self.source, "message": self.message}
+
+
 class MissingTestCommandError(RuntimeError):
-    """No configured test command, or its shell-word syntax is invalid."""
+    """A canonical command cannot execute, with safe reason and provenance."""
+
+    def __init__(self, diagnostic: TestCommandDiagnostic) -> None:
+        self.diagnostic = diagnostic
+        super().__init__(diagnostic.message)
 
 
-def _select_raw_test_command(
-    config: object, run_config: object
-) -> tuple[str | None, Literal["cli", "config"]]:
-    """Select a truthy CLI command before the config value; parsing happens separately."""
+def _select_raw_test_command(config: object, run_config: object) -> tuple[object, Literal["cli", "config"]]:
+    """Preserve truthy CLI precedence, including invalid whitespace input."""
     cli_value = getattr(run_config, "test_command", None)
     if cli_value:
         return cli_value, "cli"
@@ -66,53 +103,91 @@ def _select_raw_test_command(
 
 @dataclass(frozen=True)
 class ResolvedFact:
-    """A resolved value and provenance, or None with source="unresolved"."""
+    """Resolved argv and provenance, or a named configuration miss."""
 
     value: str | tuple[str, ...] | None
     source: FactSource
+    diagnostic: TestCommandDiagnostic | None = None
 
     @property
     def resolved(self) -> bool:
-        """True only for a non-``None`` value with a real provenance."""
-        return self.value is not None and self.source != "unresolved"
+        return self.value is not None and self.source != "unresolved" and self.diagnostic is None
 
 
-def _parse_test_command(
-    config: object, run_config: object
-) -> tuple[tuple[str, ...], Literal["cli", "config"]]:
-    """Parse CLI-over-config argv, with actionable errors for missing or invalid commands."""
-    raw, source = _select_raw_test_command(config, run_config)
-    if not raw or not raw.strip():
-        raise MissingTestCommandError(
-            "No canonical test command is configured; refusing to run tests "
-            "without one (issue #726). Set it via the --test-command flag, or "
-            "in a config file under the `test_command` key: either the root of "
-            ".daydream.toml (highest precedence) or the [tool.daydream] table "
-            "in pyproject.toml. "
-            "Example: daydream --test-command 'uv run pytest -n auto' /path/to/project"
+def validate_test_command_fact(fact: ResolvedFact) -> ResolvedFact:
+    """Fail closed for legacy or malformed recipe facts without guessing argv."""
+    if fact.diagnostic is not None:
+        return ResolvedFact(None, "unresolved", fact.diagnostic)
+    if not fact.resolved or fact.source == "derived":
+        # Manifest-derived suggestions require explicit admission even in an old recipe.
+        reason: TestCommandReason = "unresolved"
+    elif not isinstance(fact.value, tuple) or not all(isinstance(arg, str) for arg in fact.value):
+        reason = "invalid-type"
+    elif not fact.value or not fact.value[0].strip() or any("\0" in arg for arg in fact.value):
+        reason = "empty-argv"
+    else:
+        return fact
+    return ResolvedFact(None, "unresolved", TestCommandDiagnostic(reason, fact.source))
+
+
+def check_test_command_executable(fact: ResolvedFact, *, cwd: Path) -> ResolvedFact:
+    """Check host executability without running probes or admitting suggestions."""
+    fact = validate_test_command_fact(fact)
+    if fact.diagnostic is not None:
+        return fact
+    assert isinstance(fact.value, tuple)
+    executable = fact.value[0]
+    if os.path.dirname(executable):
+        path = Path(executable)
+        path = path if path.is_absolute() else cwd / path
+        available = path.is_file() and os.access(path, os.X_OK)
+    else:
+        # Relative PATH entries are interpreted from the suite cwd, as exec does.
+        search_path = os.pathsep.join(
+            str(cwd / part) if not os.path.isabs(part) else part
+            for part in os.get_exec_path()
         )
+        available = shutil.which(executable, path=search_path) is not None
+    if available:
+        return fact
+    return ResolvedFact(None, "unresolved", TestCommandDiagnostic("unavailable", fact.source))
+
+
+def _parse_test_command(config: object, run_config: object) -> tuple[tuple[str, ...], Literal["cli", "config"]]:
+    raw, source = _select_raw_test_command(config, run_config)
+    reason: TestCommandReason | None = None
+    if source == "config" and getattr(config, "test_command_invalid", False):
+        reason = "invalid-type"
+    elif raw is None or raw == "":
+        reason = "missing"
+    elif not isinstance(raw, str):
+        reason = "invalid-type"
+    elif not raw.strip():
+        reason = "blank"
+    if reason is not None:
+        raise MissingTestCommandError(TestCommandDiagnostic(reason, source))
+    assert isinstance(raw, str)
     try:
-        return tuple(shlex.split(raw)), source
+        argv = tuple(shlex.split(raw))
     except ValueError as exc:
-        raise MissingTestCommandError(
-            "The configured test_command could not be parsed as shell argv "
-            f"(unbalanced or unterminated quote): {raw!r}. Set --test-command "
-            "or the `test_command` config key to a valid shell command."
-        ) from exc
+        raise MissingTestCommandError(TestCommandDiagnostic("malformed", source)) from exc
+    fact = validate_test_command_fact(ResolvedFact(argv, source))
+    if fact.diagnostic is not None:
+        raise MissingTestCommandError(fact.diagnostic)
+    return argv, source
 
 
 def canonical_test_command(config: object, run_config: object) -> list[str]:
-    """Split CLI-over-config test argv; missing or invalid commands raise MissingTestCommandError."""
+    """Resolve canonical argv or raise with actionable configuration evidence."""
     return list(_parse_test_command(config, run_config)[0])
 
 
 def resolve_test_command_fact(config: object, run_config: object) -> ResolvedFact:
-    """Resolve command argv and provenance; missing or invalid input returns an unresolved fact."""
     try:
         argv, source = _parse_test_command(config, run_config)
-        return ResolvedFact(value=argv, source=source)
-    except MissingTestCommandError:
-        return ResolvedFact(value=None, source="unresolved")
+        return ResolvedFact(argv, source)
+    except MissingTestCommandError as exc:
+        return ResolvedFact(None, "unresolved", exc.diagnostic)
 
 
 class RecipeConfinementError(ValueError):
@@ -358,6 +433,7 @@ def resolve_test_recipe(
     """
     command = resolve_test_command_fact(config, run_config)
     package = resolve_package(repo_root, cwd if cwd is not None else repo_root)
+    command = check_test_command_executable(command, cwd=repo_root / package.cwd_relative)
     declared = tuple(
         getattr(run_config, "test_required_suites", None)
         or getattr(config, "test_required_suites", None)
@@ -392,10 +468,25 @@ def _recipe_from_payload(payload: dict[str, Any]) -> TestRecipe | None:
             return None
         command_source = command_payload["source"]
         command_values = command_payload["value"]
+        diagnostic = None
+        diagnostic_payload = command_payload.get("diagnostic")
+        if diagnostic_payload is not None:
+            if not isinstance(diagnostic_payload, dict):
+                return None
+            reason = diagnostic_payload.get("reason_code")
+            source = diagnostic_payload.get("source")
+            if reason not in ("missing", "blank", "malformed", "invalid-type", "empty-argv", "unresolved",
+                              "unavailable", "spawn-failed"):
+                return None
+            if source not in ("cli", "config", "admitted", "derived", "unresolved"):
+                return None
+            diagnostic = TestCommandDiagnostic(cast(TestCommandReason, reason), cast(FactSource, source))
         if command_source == "unresolved":
-            command = ResolvedFact(value=None, source="unresolved")
+            command = ResolvedFact(value=None, source="unresolved", diagnostic=diagnostic)
         elif command_source in ("cli", "config", "admitted", "derived"):
-            command = ResolvedFact(value=_string_tuple(command_values), source=cast(FactSource, command_source))
+            command = ResolvedFact(
+                value=_string_tuple(command_values), source=cast(FactSource, command_source), diagnostic=diagnostic,
+            )
         else:
             return None
 
@@ -427,7 +518,7 @@ def _recipe_from_payload(payload: dict[str, Any]) -> TestRecipe | None:
     except (KeyError, TypeError, ValueError):
         return None
     return TestRecipe(
-        command=command,
+        command=validate_test_command_fact(command),
         package=package,
         declared=declared,
         candidate=candidate,
@@ -449,7 +540,7 @@ def load_test_recipe(deep_dir: Path) -> TestRecipe | None:
     return _recipe_from_payload(payload)
 
 
-def _redact_merged(output: str, env: dict[str, str] | None) -> str:
+def redact_test_output(output: str, env: dict[str, str] | None = None) -> str:
     """Scrub structured secrets and literal environment values of at least eight characters.
 
     Short values collide with ordinary output. Record matches before replacement;
@@ -458,7 +549,7 @@ def _redact_merged(output: str, env: dict[str, str] | None) -> str:
     redacted = redact_structured_text(output)
     env_values = [
         value
-        for value in (env or {}).values()
+        for value in (env if env is not None else dict(os.environ)).values()
         if value and len(value) >= _MIN_REDACTED_ENV_VALUE_LENGTH
     ]
     # Membership test against the pre-replacement buffer: the loop below can
@@ -548,7 +639,7 @@ async def run_test_command(
         return TestExecutionResult(
             exit_status=exit_status,
             timed_out=timed_out,
-            merged_output=_redact_merged("".join(chunks), effective_env),
+            merged_output=redact_test_output("".join(chunks), effective_env),
             output_truncated=truncated,
             incomplete=timed_out or truncated,
         )

@@ -26,13 +26,13 @@ from daydream.git_ops import GitError
 from daydream.json_utils import atomic_write_json, read_json_object
 from daydream.phases.test_evidence import (
     TestAttemptEvidence,
-    _canonical_test_cmd,
-    _recipe_command,
     _run_host_test_command,
     reuse_target,
+    test_command_fact,
 )
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.test_execution import (
+    MissingTestCommandError,
     TestExecutionIdentity,
     TestRecipe,
 )
@@ -224,15 +224,17 @@ async def _validate_declined_fixes(
 
     Compare revision identity because no commit moved it. Recipes supply command/cwd
     without re-resolution; otherwise resolve the canonical command. Red validation
-    raises; no configured command leaves the decline without a fabricated verdict.
+    raises; unresolved configuration cannot authorize a successful decline.
     """
-    cmd = _canonical_test_cmd(config) if recipe is None else _recipe_command(recipe)
+    readiness = test_command_fact(config, recipe, repo=work.repo)
+    if readiness.diagnostic is not None:
+        raise MissingTestCommandError(readiness.diagnostic)
+    assert isinstance(readiness.value, tuple)
+    cmd = list(readiness.value)
     decision = _reuse_or_report(
         work, recipe, evidence, retained_tree_key, "declined-commit"
     )
     if decision is not None and decision.reused:
-        return
-    if cmd is None:
         return
     result = await _run_host_test_command(cmd, work, config, recipe=recipe)
     if result.passed:
@@ -353,6 +355,12 @@ async def _do_commit(
 
     if retained_paths is None or retained_states is None or initial_index is None:
         raise TypeError("retained_paths, retained_states, and initial_index are required for committing")
+    # Readiness precedes staging and commit, including callers outside deep flow.
+    readiness = test_command_fact(config, recipe, repo=work.repo)
+    if readiness.diagnostic is not None:
+        raise MissingTestCommandError(readiness.diagnostic)
+    assert isinstance(readiness.value, tuple)
+    cmd = list(readiness.value)
     sha_before = git_ops.head_sha(work.repo)
     # Runtime output may change during host phases. Tracked and retained paths
     # remain protected even when their names belong to the runtime namespace.
@@ -397,29 +405,19 @@ async def _do_commit(
     # Reuse may skip Daydream's proactive test run after strict verification.
     # The repository's actual pre-push hook always runs during push_branch.
     if push and git_ops.has_executable_pre_push_hook(work.repo):
-        cmd = _canonical_test_cmd(config) if recipe is None else _recipe_command(recipe)
-        if cmd is None:
-            ui.print_warning(
-                agent.console,
-                "Pre-push hook detected but no canonical test command is "
-                "configured; the push-time suite run is skipped (set "
-                "--test-command or the `test_command` config key).",
-            )
-        else:
-            reuse = _reuse_or_report(
-                work, recipe, evidence, retained_tree_key, "pre-push", post_commit_verified=True
-            )
-            if reuse is None or not reuse.reused:
-                # Record the hook's own phase in addition to test-execution events.
-                async with host_phase_scope(DaydreamPhase.HOOK_RUN):
-                    result = await _run_host_test_command(cmd, work, config, recipe=recipe)
-                if not result.passed:
-                    raise RuntimeError(
-                        "Pre-push validation failed: the configured test command "
-                        "exited non-zero, so the commit was not pushed."
-                    )
-
-            _verify_strict("post-hook")
+        reuse = _reuse_or_report(
+            work, recipe, evidence, retained_tree_key, "pre-push", post_commit_verified=True
+        )
+        if reuse is None or not reuse.reused:
+            # Record the hook's own phase in addition to test-execution events.
+            async with host_phase_scope(DaydreamPhase.HOOK_RUN):
+                result = await _run_host_test_command(cmd, work, config, recipe=recipe)
+            if not result.passed:
+                raise RuntimeError(
+                    "Pre-push validation failed: the configured test command "
+                    "exited non-zero, so the commit was not pushed."
+                )
+        _verify_strict("post-hook")
 
     push_receipt: PushReceipt | None = None
     if push:

@@ -57,7 +57,7 @@ def test_runner_returns_exit_status_cwd_and_merged_redacted_output(tmp_path: Pat
     assert res.passed is True
     assert str(tmp_path) in res.merged_output  # ran in cwd
     assert "hello-stdout" in res.merged_output  # stdout captured
-    assert "sec+REDACTED+" not in res.merged_output  # env secret scrubbed
+    assert "sec+[REDACTED_ENV_VAR]+" in res.merged_output
     assert "REAL_SECRET" not in res.merged_output  # redacted before storage
 
 def test_runner_nonzero_exit_sets_passed_false(tmp_path: Path) -> None:
@@ -70,6 +70,7 @@ def test_runner_nonzero_exit_sets_passed_false(tmp_path: Path) -> None:
 @pytest.mark.parametrize(("config", "cli", "expected", "source"), [
     ("pytest -x", "/cli/cmd", ["/cli/cmd"], "cli"),
     ("uv run pytest -n auto", None, ["uv", "run", "pytest", "-n", "auto"], "config"),
+    ("pytest -x", "", ["pytest", "-x"], "config"),
 ])
 def test_command_and_provenance_share_cli_over_config_precedence(
     config: str, cli: str | None, expected: list[str], source: str,
@@ -79,13 +80,6 @@ def test_command_and_provenance_share_cli_over_config_precedence(
     fact = resolve_test_command_fact(cfg, run)
     assert fact.value == tuple(expected)
     assert fact.source == source
-
-@pytest.mark.parametrize("config", [None, "", "'unbalanced"])
-def test_command_fact_is_unresolved_and_never_guessed(config: str | None) -> None:
-    fact = resolve_test_command_fact(SimpleNamespace(test_command=None), SimpleNamespace(test_command=config))
-    assert fact.resolved is False
-    assert fact.source == "unresolved"
-    assert fact.value is None
 
 def test_canonical_command_missing_fails_safely_with_diagnostic() -> None:
 
@@ -114,6 +108,7 @@ def test_runner_timeout_kills_process_group_and_reports_timed_out(tmp_path: Path
     )
     assert res.timed_out is True
     assert res.passed is False
+    assert res.incomplete is True
     # The grandchild writes its pid before sleeping; poll until it lands
     # instead of assuming startup beat the wall budget.
     deadline = time.monotonic() + 5.0
@@ -143,7 +138,7 @@ async def test_runner_records_duration_and_phase(tmp_path: Path) -> None:
     ]
     assert len(events) == 1
     md = events[0]["metadata"]
-    assert md["stop_reason"] in {"completed", "timed_out"}
+    assert md["stop_reason"] == "completed"
     assert md["duration_ms"] >= 0
 
 async def test_runner_records_timed_out_stop_reason(tmp_path: Path) -> None:
@@ -263,11 +258,6 @@ def test_runner_flags_a_truncated_output_buffer_as_incomplete(tmp_path: Path) ->
     assert res.incomplete is True
     assert len(res.merged_output) <= 512 * 1024
 
-def test_timed_out_result_is_incomplete(tmp_path: Path) -> None:
-    res = _run([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path, wall_budget_s=0.2)
-
-    assert (res.timed_out, res.incomplete, res.passed) == (True, True, False)
-
 def test_result_serialises_timeout_and_truncation_explicitly(tmp_path: Path) -> None:
     payload = asdict(_run([sys.executable, "-c", "pass"], tmp_path))
     assert set(payload) >= {"exit_status", "timed_out", "output_truncated", "incomplete"}
@@ -311,9 +301,12 @@ def test_execution_identity_carries_every_reuse_component() -> None:
     identity = _identity(cwd_relative="services/api", interpreter="3.12")
 
     assert identity.reusable is True
-    assert identity.payload()["config_digest"] == "d" * 64
-    assert identity.payload()["argv"] == list(identity.argv)
-    assert identity.payload()["absent_components"] == list(identity.absent_components)
+    assert identity.payload() == {
+        "session_id": "s", "argv": ["uv", "run", "pytest"], "cwd_relative": "services/api", "runner": "uv",
+        "interpreter": "3.12", "config_digest": "d" * 64, "absent_components": [],
+        "input_tree_key": "t", "output_tree_key": "t", "head_sha": "a" * 40,
+        "branch": "feature", "kind": "host", "outcome": "passed",
+    }
 
 @pytest.mark.parametrize("outcome", ["failed", "timed-out", "truncated"])
 def test_only_a_passed_host_outcome_is_reusable(outcome: str) -> None:
@@ -322,3 +315,57 @@ def test_only_a_passed_host_outcome_is_reusable(outcome: str) -> None:
 
 def test_an_agent_outcome_is_never_reusable() -> None:
     assert _identity(kind="agent").reusable is False
+
+@pytest.mark.parametrize(("raw", "reason", "source"), [
+    (None, "missing", "config"), ("", "missing", "config"), ("   ", "blank", "config"),
+    ("'secret-unclosed", "malformed", "config"), (123, "invalid-type", "config"), ('""', "empty-argv", "config"),
+    ("   ", "blank", "cli"), ("'secret-unclosed", "malformed", "cli"),
+    (123, "invalid-type", "cli"), ('""', "empty-argv", "cli"),
+])
+def test_unresolved_command_preserves_safe_diagnostic_and_source(raw: object, reason: str, source: str) -> None:
+    config = SimpleNamespace(test_command=raw if source == "config" else None)
+    run_config = SimpleNamespace(test_command=raw if source == "cli" else None)
+    fact = resolve_test_command_fact(config, run_config)
+    assert not fact.resolved
+    assert fact.source == "unresolved" and fact.value is None
+    assert fact.diagnostic is not None
+    assert fact.diagnostic.reason_code == reason
+    assert fact.diagnostic.source == source
+    assert "--test-command" in fact.diagnostic.message
+    assert "[tool.daydream]" in fact.diagnostic.message
+    assert "secret-unclosed" not in fact.diagnostic.message
+
+
+def test_whitespace_cli_rejects_instead_of_selecting_valid_file_command() -> None:
+    fact = resolve_test_command_fact(SimpleNamespace(test_command="true"), SimpleNamespace(test_command="  "))
+    assert not fact.resolved
+    assert fact.diagnostic is not None
+    assert fact.diagnostic.reason_code == "blank" and fact.diagnostic.source == "cli"
+
+
+@pytest.mark.parametrize("value", [[], [""], [" "]])
+def test_loaded_recipe_with_empty_executable_remains_no_execution(tmp_path: Path, value: list[str]) -> None:
+    recipe = _recipe(tmp_path, cli="true")
+    deep = tmp_path / "deep"
+    deep.mkdir()
+    payload = recipe_to_payload(recipe)
+    payload["command"]["value"] = value
+    (deep / "test-recipe.json").write_text(json.dumps(payload))
+    loaded = load_test_recipe(deep)
+    assert loaded is not None and not loaded.command.resolved
+    assert loaded.command.diagnostic is not None
+    assert loaded.command.diagnostic.reason_code == "empty-argv"
+    assert loaded.command.diagnostic.source == "cli"
+
+
+def test_legacy_unresolved_recipe_does_not_invent_original_provenance(tmp_path: Path) -> None:
+    deep = tmp_path / "deep"
+    deep.mkdir()
+    payload = recipe_to_payload(_recipe(tmp_path))
+    payload["command"].pop("diagnostic")
+    (deep / "test-recipe.json").write_text(json.dumps(payload))
+    loaded = load_test_recipe(deep)
+    assert loaded is not None and not loaded.command.resolved
+    assert loaded.command.diagnostic is not None
+    assert loaded.command.diagnostic.source == "unresolved"
+    assert loaded.command.diagnostic.reason_code == "unresolved"

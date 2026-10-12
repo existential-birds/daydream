@@ -35,6 +35,7 @@ from daydream.trajectory import DaydreamPhase
 from daydream.ui import NEON_THEME
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
+from tests.harness.execution import host_test_command
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote, commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.phase_backend import PhaseDispatchBackend
@@ -587,8 +588,8 @@ async def test_shallow_commits_when_operator_ignores_red_suite(
 ) -> None:
     """Ignoring a red suite keeps proceed=True while passed=False.
 
-    Real heal and commit phases must then honor the commit approval and persist
-    the backend edit in Git, exiting successfully."""
+    Real heal and commit phases honor commit approval, retain the backend edit,
+    and require a green proactive host validation before pushing."""
     # stdin answers, in order: intent confirmation, decline the optional PR
     # review post, the apply-fixes gate, the heal menu ("3" = ignore and
     # continue), and the commit gate.
@@ -602,13 +603,15 @@ async def test_shallow_commits_when_operator_ignores_red_suite(
     silence_console("daydream.deep.diagram_steps")
     silence_console("daydream.deep.fix_steps")
     silence_console("daydream.ui")
-    install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]], tests_pass=False))
+    install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
+    suite_dir = tmp_path / "ignored-red-suite"
     # The real push and ls-remote verification need a bare origin.
     no_ci_remote.connect(feature_branch_repo, bare_remote(tmp_path / "origin.git"))
     head_before = _git(feature_branch_repo, "rev-parse", "HEAD")
     config = make_config(
         feature_branch_repo, stack="python", quiet=True, shallow=True, non_interactive=False, output_mode="loop",
         pr_number=no_ci_remote.pr_number, pr_repo=no_ci_remote.base_repository,
+        test_command=host_test_command(suite_dir, mode="first"),
     )
     exit_code = await run(config)
     assert exit_code == 0, "choice '3' must continue the run, not abort it"
@@ -619,6 +622,15 @@ async def test_shallow_commits_when_operator_ignores_red_suite(
         "the fix was reverted instead of committed"
     )
     assert "Daydream-Run:" in _git(feature_branch_repo, "log", "-1", "--format=%B")
+    verdict = json.loads((feature_branch_repo / ".daydream" / "deep" / "test-verdict.json").read_text())
+    assert (verdict["passed"], verdict["ignored"]) == (False, True)
+    assert verdict["repairs"] == []
+    assert len(verdict["attempts"]) == 1
+    assert verdict["attempts"][0]["kind"] == "host"
+    assert verdict["attempts"][0]["passed"] is False
+    # Ignoring the initial red result does not bypass publication validation:
+    # the host executes the canonical suite again and requires its green exit.
+    assert (suite_dir / "suite-count.txt").read_text() == "2"
 
 async def test_glob_tool_panel_displays_file_count_and_list(monkeypatch: pytest.MonkeyPatch) -> None:
     """Render the full Glob lifecycle, streamed text cursor, and stable thinking title."""

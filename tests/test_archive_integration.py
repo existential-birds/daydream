@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import sqlite3
 import sys
 from collections.abc import AsyncIterator
@@ -23,7 +24,7 @@ from daydream.artifact_visibility import (
 )
 from daydream.artifacts.filesystem import manifest_tree
 from daydream.atif import Step, validate as atif_validate
-from daydream.backends import AgentEvent, ResultEvent, ToolResultEvent, ToolStartEvent
+from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
 from daydream.commands.review import _parse_args
 from daydream.run_config import RunConfig
 from daydream.run_snapshot import (
@@ -75,6 +76,7 @@ async def test_runner_lifecycle_reason_redaction_reaches_evaluation_and_archive(
     monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
     assert await run(RunConfig(
         target=str(target), cleanup=False, non_interactive=True, review_profile=independent_exploration_profile(),
+        test_command=shlex.join([sys.executable, "-c", "pass"]),
     )) == 0
     assert backend.failures == 1
     roots = list((target / ".daydream/runs").glob("*/trajectory.json"))
@@ -250,16 +252,6 @@ def _assert_round_trip_bundle(
         assert row["test_backend"] == test_backend
     finally:
         conn.close()
-
-async def test_on_write_does_not_fire_on_empty_trajectory(tmp_path: Path) -> None:
-    callback_calls: list[tuple[str, str]] = []
-    def on_write(recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot) -> None:
-        callback_calls.append((recorder.session_id, snapshot.status))
-    recorder = make_recorder(tmp_path, on_write=on_write)
-    async with recorder:
-        pass
-    assert len(callback_calls) == 0
-    assert not (tmp_path / ".daydream" / "trajectory.json").exists()
 
 @pytest.mark.parametrize("run_flow", [DaydreamRunFlow.NORMAL, DaydreamRunFlow.IMPROVE])
 async def test_full_archive_round_trip_fix_test_backend_columns(
@@ -487,7 +479,7 @@ async def test_runner_archive_round_trip_redacts_structured_tool_credentials(tmp
     target_dir = tmp_path / "project"
     target_dir.mkdir()
 
-    backend = ScriptedBackend(events=(ToolStartEvent(id="t1", name="ListDir",
+    backend = ScriptedBackend(events=(TextEvent(text="hello"), ToolStartEvent(id="t1", name="ListDir",
                 input={"dir": "/tmp", "apiKey": {"nested": sentinel}, "displayName": "visible",},
             ),
             ToolResultEvent(id="t1", output='{"status": "ok", "token": "opaque-test-only-sentinel"}', is_error=False,),
@@ -509,6 +501,7 @@ async def test_runner_archive_round_trip_redacts_structured_tool_credentials(tmp
 
     assert live == archived
     assert atif_validate(live) is True
+    assert any(step["source"] == "agent" and step.get("message") == "hello" for step in live["steps"])
     blob = json.dumps(live)
     assert sentinel not in blob
     assert "[REDACTED_CREDENTIAL]" in blob

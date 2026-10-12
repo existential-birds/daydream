@@ -21,7 +21,7 @@ The current `fail_under` value is:
 
 | Measured % | Raw value | Git SHA | Date | Machine context |
 |------------|-----------|---------|------|-----------------|
-| 86 | 86.94% | 411a50d | 2026-08-28 | blacksmith-4vcpu-ubuntu-2404 |
+| 90 | 90.59% | 060e463f | 2026-10-12 | macOS arm64, Python 3.12.13, 16 workers |
 
 ## Ratchet procedure
 

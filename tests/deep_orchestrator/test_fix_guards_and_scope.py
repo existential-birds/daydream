@@ -9,9 +9,7 @@ from typing import Any
 import pytest
 
 import daydream
-from daydream import git_ops as _git_ops
 from daydream.config_file import DaydreamFileConfig, load_file_config
-from daydream.deep.scope_issues import _scope_edit_fingerprint, _scope_edit_marker
 from daydream.git_ops import GitError
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
@@ -19,6 +17,7 @@ from tests.deep_orchestrator.support import (
     _scan_phase_events,
     _scan_trajectory_extra,
 )
+from tests.harness.execution import host_test_command
 from tests.harness.git_helpers import bare_remote as _bare_remote, commit as _commit, git as _git
 from tests.harness.remote_ci import NoCIRemote
 from tests.test_deep_orchestrator import (
@@ -170,13 +169,16 @@ async def test_test_healing_guard_reverts_generated_migration_edit(
     mute_side_effects(heal=False)
     stub = _install_stub_backend(monkeypatch, project, pin_skill_availability=False)
     stub.merge_items = [_merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix")]
-    stub.fail_first_test_run = True
     stub.heal_fix_generated = "migrations/0001_init.sql"
     stub.heal_fix_new_generated = "migrations/0002_add_x.sql"
-    exit_code = await run(make_config(project, assume="yes", output_mode="loop", non_interactive=False, archive=False,)
+    suite_dir = tmp_path / "suite"
+    exit_code = await run(make_config(project, assume="yes", output_mode="loop", non_interactive=False, archive=False,
+                                     test_command=host_test_command(suite_dir, mode="first"))
     )
 
     assert exit_code == 0
+    assert int((suite_dir / "suite-count.txt").read_text()) >= 2
+    assert stub.test_suite_calls == 0
     assert migration.read_bytes() == pre_migration
     new_migration = project / "migrations" / "0002_add_x.sql"
     assert new_migration.is_file()
@@ -211,12 +213,15 @@ async def test_unauthorized_heal_edit_is_confined_before_the_test_rerun(
     stub.fix_edit_line = "\n# daydream fix\n"
     # The first suite run fails, so the heal turn runs and edits a file the
     # reviewed diff never covered.
-    stub.fail_first_test_run = True
     stub.heal_fix_unauthorized = "unrelated.py"
 
-    exit_code = await run(make_config(target, assume="yes", output_mode="loop", non_interactive=False, archive=False,))
+    suite_dir = tmp_path / "suite"
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop", non_interactive=False, archive=False,
+                                     test_command=host_test_command(suite_dir, mode="first")))
 
     assert exit_code == 0
+    assert (suite_dir / "suite-count.txt").read_text() == "2"
+    assert stub.test_suite_calls == 0
     # The unauthorized edit is gone from the retained tree...
     assert (target / "unrelated.py").read_text() == pre_unrelated
     # ...and it was the pre-rerun confinement that removed it: the guard event
@@ -238,6 +243,7 @@ async def test_fix_guard_restore_failure_aborts_before_commit(
     migration.parent.mkdir()
     migration.write_text("SELECT 1;\n")
     _git(multi_stack_target, "add", "migrations/0001_init.sql")
+    _commit(multi_stack_target, "test: add reviewed migration")
     head_before = _git(multi_stack_target, "rev-parse", "HEAD")
 
     _silence(monkeypatch)
@@ -246,15 +252,21 @@ async def test_fix_guard_restore_failure_aborts_before_commit(
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix")]
     stub.fix_edit_line = "-- FORBIDDEN EDIT\n"
-    monkeypatch.setattr("daydream.git_ops.restore_paths_from_ref",
-        lambda *args, **kwargs: (_ for _ in ()).throw(GitError("restore failed")),
-    )
+    restores: list[list[str]] = []
+
+    def fail_restore(repo: Path, ref: str, paths: Any) -> None:
+        restores.append(list(paths))
+        raise GitError("restore failed")
+
+    monkeypatch.setattr("daydream.git_ops.restore_worktree_paths_from_ref", fail_restore)
 
     exit_code = await run(
         make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False, archive=False,)
     )
 
     assert exit_code == 1
+    assert _fix_prompts(stub), "the restore fault must be reached after a real backend edit"
+    assert restores and all("migrations/0001_init.sql" in paths for paths in restores)
     assert _git(multi_stack_target, "rev-parse", "HEAD") == head_before
 
 async def test_parallel_fix_commit_runs_once_after_all(
@@ -338,14 +350,12 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
 
 async def test_reverted_edit_dedups_across_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-    no_ci_remote: NoCIRemote,
 ) -> None:
     """#1051 regression: an opted-in run does not re-file an issue for a
     reverted edit whose fingerprint marker already sits on an open issue."""
 
     target = _build_scope_creep_target(tmp_path, "scope_creep_dedup")
     bare = _add_bare_remote(target)
-    no_ci_remote.connect(target, bare)
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     mute_side_effects(commit=False)
@@ -354,48 +364,35 @@ async def test_reverted_edit_dedups_across_runs(
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     created: list[tuple[str, str]] = []
+    unrelated_before = (target / "unrelated.py").read_bytes()
+    prior_issues: list[dict[str, Any]] = []
 
     def _record_and_list_create(repo: Any, *, title: str, body: str, **kw: Any) -> str:
         created.append((title, body))
         return "https://github.com/owner/repo/issues/9"
 
     monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_and_list_create)
-    # The dedup lookup sees a prior issue carrying this revert's marker —
-    # computed the same way the edit filer computes it (path + diff head).
-    # Spy on the evidence diff the filer captures pre-revert: a prior run would
-    # have filed a marker over this exact patch (same path + same edit → same
-    # fingerprint), so the dedup lookup serves an issue body carrying it.
-
-    recorded: list[str] = []
-    _real_diff = _git_ops.diff_worktree_against
-
-    def _spy_diff(repo: Any, ref: str, paths: Any, **kw: Any) -> str:
-        patch = _real_diff(repo, ref, paths, **kw)
-        if list(paths) == ["unrelated.py"]:
-            recorded.append(patch)
-        return patch
-
-    monkeypatch.setattr("daydream.git_ops.diff_worktree_against", _spy_diff)
-
-    def _list_with_prior_marker(repo: Any, **kw: Any) -> list[dict[str, Any]]:
-        marker = _scope_edit_marker(_scope_edit_fingerprint("unrelated.py", recorded[-1]))
-        return [{"number": 11, "title": "[daydream] out-of-scope edit reverted: unrelated.py",
-                "body": f"prior run\n{marker}",
-                "url": "u",
-            }
-        ]
-
-    monkeypatch.setattr("daydream.git_ops.gh_issue_list", _list_with_prior_marker)
-    exit_code = await run(make_config(
+    monkeypatch.setattr("daydream.git_ops.gh_issue_list", lambda *_a, **_kw: list(prior_issues))
+    config = make_config(
             target, assume="yes", output_mode="loop", non_interactive=False, archive=False, scope_issue_filing=True,
-            pr_number=no_ci_remote.pr_number, pr_repo=no_ci_remote.base_repository,
         )
-    )
-    assert exit_code == 0
-    # Revert still happened; the duplicate issue did not.
-    committed_paths = _git(target, "show", "--name-only", "--format=", "HEAD").split()
-    assert "unrelated.py" not in committed_paths
-    assert created == [], f"stale revert must not re-file, got {created!r}"
+    for run_number in (1, 2):
+        head_before = _git(target, "rev-parse", "HEAD")
+        # A real local push has no GitHub CI identity. Both runs retain and push
+        # the fix, then report that separate remote-CI limitation explicitly.
+        assert await run(config) == 1
+        remote_ci = json.loads((target / ".daydream/deep/remote-ci-verdict.json").read_text())
+        assert remote_ci["status"] == "unavailable" and remote_ci["target"] is None
+        assert len(created) == 1, f"run {run_number} must not duplicate the previously filed edit"
+        assert (target / "unrelated.py").read_bytes() == unrelated_before
+        head_after = _git(target, "rev-parse", "HEAD")
+        assert head_after != head_before
+        assert _git(bare, "rev-parse", "refs/heads/feature") == head_after
+        committed_paths = _git(target, "show", "--name-only", "--format=", "HEAD").split()
+        assert "api.py" in committed_paths and "unrelated.py" not in committed_paths
+        # Replay the bytes production actually sent to GitHub on the first run.
+        prior_issues[:] = [{"number": 9, "title": created[0][0], "body": created[0][1],
+                            "url": "https://github.com/owner/repo/issues/9"}]
 
 async def test_fix_reverts_post_fix_edit_outside_reviewed_diff_restore_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,

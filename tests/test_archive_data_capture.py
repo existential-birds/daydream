@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import sys
 from collections.abc import AsyncIterator
 from contextlib import closing
 from dataclasses import replace
@@ -56,7 +57,10 @@ from tests.test_deep_orchestrator import _merge_item, _noop_commit, _ok, _pin_fi
 
 
 def _deep_run_config(target: Path, **overrides: Any) -> RunConfig:
-    config: dict[str, Any] = {"target": str(target), "assume": "yes", "output_mode": "loop", "cleanup": False,}
+    config: dict[str, Any] = {
+        "target": str(target), "test_command": f"{sys.executable} -c pass",
+        "assume": "yes", "output_mode": "loop", "cleanup": False,
+    }
     config.update(overrides)
     return RunConfig(**config)
 
@@ -162,9 +166,9 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     run_dir = _only_archived_run(archive_dir)
     manifest = json.loads((run_dir / "manifest.json").read_text())
     trajectory = json.loads((run_dir / "trajectory.json").read_text())
-    test_steps = [step for step in trajectory["steps"] if step.get("extra", {}).get("daydream_phase") == "test"]
-    assert any("Run the project's test suite" in step["message"] for step in test_steps)
-    assert any("2 passed, 0 failed" in step["message"] for step in test_steps)
+    assert not any("Run the project's test suite" in step.get("message", "") for step in trajectory["steps"])
+    verdict = json.loads((multi_stack_target / ".daydream/deep/test-verdict.json").read_text())
+    assert verdict["passed"] and all(attempt["kind"] == "host" for attempt in verdict["attempts"])
 
     metrics = manifest["metrics"]
     assert "grounding_rate" not in metrics
@@ -554,7 +558,8 @@ async def test_shallow_run_captures_recommended_patch(
 
     exit_code = await run(RunConfig(
             target=str(feature_branch_repo), stack="python", quiet=True, cleanup=False, shallow=True, assume="yes",
-            pr_number=no_ci_remote.pr_number, pr_repo=no_ci_remote.base_repository,
+            test_command=f"{sys.executable} -c pass", pr_number=no_ci_remote.pr_number,
+            pr_repo=no_ci_remote.base_repository,
         )
     )
     assert exit_code == 0

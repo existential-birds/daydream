@@ -357,6 +357,12 @@ def _test_state(
     verdict = _read_json_artifact(_deep_dir(target_dir) / "test-verdict.json", dict)
     if verdict is None or session_id is None or verdict.get("session_id") != session_id:
         return {"ran": False, "status": _ABSENT}
+    if verdict.get("status") == "no-execution":
+        attempts = verdict.get("attempts", [])
+        ran = isinstance(attempts, list) and any(
+            isinstance(attempt, dict) and attempt.get("kind") == "host" for attempt in attempts
+        )
+        return {"ran": ran, "status": _FAILED, "diagnostic": verdict.get("diagnostic")}
     if verdict.get("passed") is False:
         return {"ran": True, "status": _FAILED}
     return {"ran": True, "status": _SUCCEEDED}

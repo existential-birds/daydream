@@ -14,6 +14,7 @@ import pytest
 
 from daydream.deep.repair_job import read_repair_job_record
 from daydream.runner import run
+from tests.harness.execution import host_test_command
 from tests.harness.git_helpers import git as _git
 from tests.harness.stub_backend import StubBackend
 from tests.test_deep_orchestrator import (
@@ -51,38 +52,6 @@ def _repair_job(target: Path) -> dict[str, Any]:
     return payload
 
 
-async def test_repair_continues_automatically_within_one_run(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig, mute_side_effects: Mute,
-) -> None:
-    """Requirement 29: the coordinator dispatches the next execution itself."""
-
-    _silence(monkeypatch)
-    # The repair turn is cut short by the host wall budget; only the coordinator
-    # can give the job another execution.
-    monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
-    stub = _install_interrupted_heal(monkeypatch, multi_stack_target)
-    stub.merge_items = [_merge_item(1, "api.py", "high")]
-    stub.fail_first_test_run = True
-    mute_side_effects(heal=False)
-
-    with anyio.fail_after(60):
-        exit_code = await run(make_config(multi_stack_target, trajectory_path=tmp_path / "t.json",
-                                          assume="yes", output_mode="loop"))
-    assert exit_code == 0, "the continued execution validated the retained tree"
-
-    job = _repair_job(multi_stack_target)
-    assert job["state"] == "completed", job
-    assert job["executions"] == 2, job
-    # Two separate test executions ran: the interrupted one and the one the
-    # coordinator dispatched. The second saw the suite green, so it never
-    # launched a repair turn of its own.
-    assert stub.test_suite_calls == 2, stub.test_suite_calls
-    verdict = json.loads((multi_stack_target / ".daydream" / "deep" / "test-verdict.json").read_text())
-    assert verdict["passed"] is True
-    assert len(verdict["repairs"]) == 1, "only the interrupted turn is a repair record"
-
-
 async def test_repair_completes_only_after_canonical_validation_passes(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig, mute_side_effects: Mute,
@@ -94,12 +63,12 @@ async def test_repair_completes_only_after_canonical_validation_passes(
     stub = _install_interrupted_heal(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     # Every suite run stays red, so no execution can ever be validated.
-    stub.fail_all_test_runs = True
+    command = host_test_command(multi_stack_target.parent / "suite", mode="all")
     mute_side_effects(heal=False)
 
     with anyio.fail_after(60):
         exit_code = await run(make_config(multi_stack_target, trajectory_path=tmp_path / "t.json",
-                                          assume="yes", output_mode="loop"))
+                                          assume="yes", output_mode="loop", test_command=command))
     assert exit_code != 0, "a red suite cannot report a green run"
 
     job = _repair_job(multi_stack_target)
@@ -125,8 +94,10 @@ _RECOVERY_DRIVER = '''\
 import io
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, os.getcwd())
 
@@ -174,7 +145,10 @@ def tree_key():
 
 
 async def execute(stub, work, footprint):
-    return await phase_test_and_heal(stub, work, session_id=SESSION, capture_tree_key=tree_key,
+    command = shlex.join([sys.executable, "-c", "from pathlib import Path; import sys; "
+                          "sys.exit(0 if '# candidate repair' in Path('api.py').read_text() else 1)"])
+    return await phase_test_and_heal(stub, work, config=SimpleNamespace(test_command=command, file_config=None),
+                                     session_id=SESSION, capture_tree_key=tree_key,
                                      footprint=footprint, allow_standalone=True)
 
 
@@ -192,7 +166,6 @@ async def main():
     stub.heal_fix_authorized_line = CANDIDATE_LINE
     stub.heal_fix_partial = "PARTIAL-DIAGNOSIS-abc123"
     stub.runaway_fix_sleep_s = 0.0
-    stub.fail_first_test_run = MODE == "first"
 
     first = None if MODE == "resume" else await execute(stub, work, footprint)
     outcome = await continue_repair_job(

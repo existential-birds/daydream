@@ -12,12 +12,13 @@ import anyio
 import pytest
 
 from daydream import remote_ci
-from daydream.backends import AgentEvent, ResultEvent, TextEvent
+from daydream.backends import AgentEvent, ResultEvent
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.orchestrator import DEFAULT_SHALLOW_FANOUT_THRESHOLD, _shallow_fanout_threshold
 from daydream.phases import TestAndHealResult, phase_test_and_heal as _phase_test_and_heal
 from daydream.run_config import RunConfig
 from daydream.runner import run
+from daydream.test_execution import redact_test_output
 from tests.deep_orchestrator.support import (
     _batched_group_size,
     _install_accept_gate_pipeline,
@@ -28,6 +29,7 @@ from tests.deep_orchestrator.support import (
     _scan_trajectory_extra,
     _single_fix_calls_for,
 )
+from tests.harness.execution import host_test_command
 from tests.harness.git_helpers import git as _git
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.review_profile import independent_alternatives_profile
@@ -196,17 +198,20 @@ async def test_run_caps_runaway_file_group_serial_fixes(
     no_ci_remote.connect(multi_stack_target, bare)
     head_before = _git(multi_stack_target, "rev-parse", "HEAD")
     traj = tmp_path / "trajectory.json"
+    suite_dir = tmp_path / "suite"
     # Preserve the original work watchdog in addition to the newly required,
     # separately bounded remote-CI wait. The no-CI harness keeps its truthful
     # discovery window; reducing it previously failed under parallel load.
     with anyio.fail_after(30 + remote_ci.DEFAULT_LIMITS.completion_seconds):
         exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop",
+                test_command=host_test_command(suite_dir),
                 pr_number=no_ci_remote.pr_number, pr_repo=no_ci_remote.base_repository,
             )
         )
     assert exit_code == 0
     assert retained_marker in (multi_stack_target / "api.py").read_text()
-    assert stub.test_suite_calls >= 1
+    assert int((suite_dir / "suite-count.txt").read_text()) >= 1
+    assert stub.test_suite_calls == 0
     head_after = _git(multi_stack_target, "rev-parse", "HEAD")
     assert head_after != head_before
     remote = multi_stack_target.parent / "multi_stack-remote.git"
@@ -342,13 +347,18 @@ async def test_environmental_failure_aborts_heal_loop(
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
 
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.environmental_test_failure = True  # every test run reports infra-down
+    suite_dir = tmp_path / "suite"
+    test_command = host_test_command(suite_dir, mode="all", output=(
+        "could not connect to server: Connection refused\n"
+        "The dev Postgres container is not running."
+    ))
 
     # phase_test_and_heal stays REAL so the environmental short-circuit runs.
     mute_side_effects(heal=False)
 
     traj = tmp_path / "trajectory.json"
-    exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"))
+    exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop",
+                                     test_command=test_command))
 
     # Environmental failure is not healable -> run reports failure, not success.
     assert isinstance(exit_code, int)
@@ -365,12 +375,22 @@ async def test_environmental_failure_aborts_heal_loop(
     heal_prompts = [c for c in stub.calls if c["prompt"].lower().startswith("the tests failed")]
     assert not heal_prompts, "a heal fix prompt was dispatched despite environmental abort"
 
-    # The environmental outcome is observable: the test phase ran (the suite was
-    # invoked) and a TEST-phase trajectory step was recorded for this run.
-    assert stub.test_suite_calls >= 1, "test suite never ran -- heal phase not reached"
+    # The host executed one red suite and recorded its execution, then stopped
+    # before any repair turn or retry.
+    assert (suite_dir / "suite-count.txt").read_text() == "1"
+    assert stub.test_suite_calls == 0
     run_root = multi_stack_target / ".daydream"
-    saw_test_step = "test" in _scan_trajectory_extra(run_root, traj, "daydream_phase")
-    assert saw_test_step, "no TEST-phase trajectory step recorded -- heal phase not reached"
+    executions = [event for event in _scan_phase_events(run_root, traj, "phase_end")
+                  if event["phase"] == "test-execution"]
+    # Root and fork trajectories may project the same host event. Its durable
+    # scope identity, together with the real counter, proves one execution.
+    assert len({event["scope_id"] for event in executions}) == 1
+    assert all(event["metadata"]["stop_reason"] == "completed" for event in executions)
+    verdict = json.loads((run_root / "deep" / "test-verdict.json").read_text())
+    assert verdict["status"] == "executed"
+    assert verdict["retries"] == 0
+    assert verdict["repairs"] == []
+    assert [attempt["identity"]["outcome"] for attempt in verdict["attempts"]] == ["failed"]
 
 async def test_failure_handoff_names_the_budget_reason_and_partial_diagnosis(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -382,7 +402,6 @@ async def test_failure_handoff_names_the_budget_reason_and_partial_diagnosis(
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
     monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.fail_first_test_run = True
     stub.heal_fix_partial = "PARTIAL-DIAGNOSIS-abc123"
     # The interrupted turn is paced so the real wall budget, not the generator
     # running dry, is what ends it.
@@ -392,7 +411,8 @@ async def test_failure_handoff_names_the_budget_reason_and_partial_diagnosis(
     traj = tmp_path / "t.json"
     with anyio.fail_after(60):
         await run(make_config(multi_stack_target, trajectory_path=traj,
-                              assume="yes", output_mode="loop"))
+                              assume="yes", output_mode="loop",
+                              test_command=host_test_command(tmp_path / "suite", mode="first")))
 
     verdict = json.loads((multi_stack_target / ".daydream" / "deep" / "test-verdict.json").read_text())
     assert verdict["repairs"], "the repair record must reach the persisted verdict"
@@ -427,9 +447,6 @@ async def test_repair_turn_uses_a_distinctly_configured_fix_backend(
 
     def factory(_name: str, model: str | None = None, **_kw: object) -> _StubBackend:
         instance = _StubBackend(multi_stack_target, model=model or "mock-model", shared_calls=calls)
-        # Only the TEST phase's instance fails its first run, so exactly one
-        # repair turn is driven and it must be served by the FIX instance.
-        instance.fail_first_test_run = instance.model == "test-model"
         return instance
 
     monkeypatch.setattr("daydream.runner.create_backend", factory)
@@ -450,15 +467,20 @@ async def test_repair_turn_uses_a_distinctly_configured_fix_backend(
     monkeypatch.setattr("daydream.deep.fix_steps.phase_test_and_heal", _spy)
 
     traj = tmp_path / "trajectory.json"
+    suite_dir = tmp_path / "suite"
     with anyio.fail_after(60):
         exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes",
                 output_mode="loop", test_model="test-model", fix_model="fix-model",
+                test_command=host_test_command(suite_dir, mode="first"),
         ))
     assert exit_code == 0
 
-    # Test execution ran on the TEST configuration...
+    # Suite execution remains host-owned despite a configured TEST model.
     suite_models = {c["model"] for c in calls if "run the project's test suite" in c["prompt"].lower()}
-    assert suite_models == {"test-model"}, calls
+    assert suite_models == set(), calls
+    assert (suite_dir / "suite-count.txt").read_text() == "2"
+    assert [attempt.kind for attempt in results[0].attempts] == ["host", "host"]
+    assert [attempt.passed for attempt in results[0].attempts] == [False, True]
     # ...and the repair turn on the distinct FIX configuration.
     repair_models = [c["model"] for c in calls if c["prompt"].lower().startswith("the tests failed")]
     assert repair_models == ["fix-model"], repair_models
@@ -476,6 +498,7 @@ async def test_repair_turn_uses_a_distinctly_configured_fix_backend(
         pytest.param("custom-public", "known-leaf", id="custom-public-known-leaf-private-fallback",),
         pytest.param("external", "known-leaf", id="external-known-leaf-preserved"),
         pytest.param("default", "unknown-private", id="unknown-private-fallback"),
+        pytest.param("default", "redacted-private", id="redacted-private-structured-fallback"),
     ],
 )
 async def test_ephemeral_failure_handoff_projects_public_refs_without_private_paths(
@@ -490,11 +513,6 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
 
     class _HandoffReadingStub(_PromptHookStub):
         def intercept(self, cwd: Path, prompt: str) -> Sequence[AgentEvent] | None:
-            if response_kind == "unknown-private" and "run the project's test suite" in prompt.lower():
-                self.test_suite_calls += 1
-                return [TextEvent(text=f"1 failed at {cwd / '.daydream' / 'unreported.log'}"),
-                    ResultEvent(structured_output=None, continuation=None),
-                ]
             if "read-only failure-summarizer" not in prompt.lower():
                 return None
             private_partial = Path(_prompt_ref(prompt, "trajectory-partial"))
@@ -517,6 +535,10 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
                 model_body += f"\nExact evidence: {private_partial}\n"
             elif response_kind == "unknown-private":
                 model_body += f"\nUnknown evidence: {private_partial}.unknown\n"
+            elif response_kind == "redacted-private":
+                # A summarizer can echo an already masked host-output path.
+                # Structured transport must still recognize its private root.
+                model_body += f"\nUnknown evidence: {redact_test_output(str(private_partial) + '.unknown')}\n"
             private_partial_payloads.append(private_partial.read_bytes())
             summarizer_observations.append({"private_partial": str(private_partial), "cwd": str(cwd),
                     "session_id": str(partial_payload["session_id"]),
@@ -530,7 +552,6 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
     stub = _HandoffReadingStub(multi_stack_target)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub,)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
-    stub.fail_all_test_runs = True
     # The handoff's live bytes come from the run's authorized fix edit, not from
     # the heal turn's marker: an unauthorized new untracked path is confined away
     # before the rerun, which is the behavior under test elsewhere.
@@ -544,12 +565,23 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
         if trajectory_mode == "custom-public"
         else None
     )
+    suite_dir = tmp_path / "suite"
+    if response_kind in ("unknown-private", "redacted-private"):
+        # Exercise host environment masking before handoff privacy checks on
+        # every platform, including when TMPDIR itself is not a private prefix.
+        monkeypatch.setenv("DAYDREAM_PRIVATE_TEST_ROOT", str(artifact_runtime_root.parent))
     exit_code = await run(make_config(
             multi_stack_target, assume="yes", output_mode="loop", force_worktree=True, trajectory_path=trajectory_path,
+            test_command=host_test_command(suite_dir, mode="all", output=(
+                f"1 failed at {artifact_runtime_root / '.daydream' / 'unreported.log'}"
+                if response_kind in ("unknown-private", "redacted-private") else None
+            )),
         )
     )
 
     assert exit_code != 0
+    assert (suite_dir / "suite-count.txt").read_text() == "2"
+    assert stub.test_suite_calls == 0
     handoffs = list(multi_stack_target.glob(".daydream/runs/*/handoff.md"))
     assert len(handoffs) == 1
     body = handoffs[0].read_text(encoding="utf-8")
@@ -595,6 +627,11 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
         assert "HANDOFF_STRUCTURED_SUCCESS" not in body
         assert "Tests did not report success" in body
         assert ".daydream/unreported.log" not in body
+        assert "Test output omitted because it contained a private runtime path." in body
+        if response_kind == "redacted-private":
+            assert "[REDACTED_ENV_VAR]" in observation["model_body"]
+            assert ".partial.unknown" in observation["model_body"]
+            assert ".partial.unknown" not in body
     if trajectory_mode != "external":
         assert private_partial not in body
     assert observation["cwd"] not in body

@@ -852,7 +852,8 @@ async def run_deep(
         ctx.data["reuse_cache"] = build_reuse_cache(ctx)
 
         # Resolve and persist one test recipe for all host and prompt consumers.
-        # Confinement failure leaves no recipe and preserves the unresolved fallback.
+        # Without package facts, direct configuration still requires readiness;
+        # an unresolved command never dispatches a test agent.
         try:
             test_recipe = resolve_test_recipe(
                 getattr(config, "file_config", None), config, repo_root=work.repo

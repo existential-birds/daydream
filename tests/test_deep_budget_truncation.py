@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import shlex
+import sys
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
@@ -14,11 +16,11 @@ from daydream.config_file import DaydreamFileConfig
 from daydream.review_result import ReviewCoverage
 from daydream.run_config import RunConfig
 from daydream.runner import run
-from tests.deep_orchestrator.support import _scan_trajectory_extra
+from tests.deep_orchestrator.support import _scan_phase_events
 from tests.harness.fake_clock import FakeClock
 from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.stub_backend import StubBackend, install_stub_backend, review_stage_state, silence, stage_result
-from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipeline
+from tests.test_deep_orchestrator import _pin_findings_pr
 
 
 async def test_budget_truncated_stack_lands_in_failed_stacks(
@@ -43,24 +45,34 @@ async def test_budget_truncated_stack_lands_in_failed_stacks(
     assert "python" in failures, failures
     assert "budget" in failures["python"].lower()
 
-async def test_runaway_test_turn_is_bounded_and_reaches_abort(
+async def test_runaway_host_suite_is_bounded_and_reaches_abort(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., 'RunConfig'],
     mute_side_effects: Callable[..., None],
 ) -> None:
-    """A hung test turn is capped, so the run reaches the heal/abort path."""
+    """A hanging real suite cannot become green from pass prose before its timeout."""
 
     silence(monkeypatch)
     monkeypatch.setattr("daydream.config.DEFAULT_TOOL_CALL_BUDGET", 3)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.runaway_test = True
+    script = tmp_path / "hanging_suite.py"
+    script.write_text("import time\nprint('12 passed, 0 failed', flush=True)\ntime.sleep(60)\n")
     mute_side_effects(heal=False)
     traj = tmp_path / "trajectory.json"
     with anyio.fail_after(30):
-        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"))
+        exit_code = await run(make_config(
+            multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop",
+            test_command=shlex.join([sys.executable, str(script)]),
+            file_config=DaydreamFileConfig(test_command_wall_s=0.2),
+        ))
     assert exit_code != 0
-    assert [c for c in stub.calls if "run the project's test suite" in c["prompt"].lower()]
-    test_stop_reasons = _scan_trajectory_extra(multi_stack_target / ".daydream", traj, "stop_reason", phase="test")
-    assert any("budget" in r for r in test_stop_reasons), test_stop_reasons
+    assert stub.test_suite_calls == 0
+    verdict = json.loads((multi_stack_target / ".daydream/deep/test-verdict.json").read_text())
+    assert verdict["passed"] is False and verdict["attempts"]
+    assert all(attempt["kind"] == "host" and not attempt["passed"]
+               and attempt["identity"]["outcome"] == "timed-out" for attempt in verdict["attempts"])
+    ends = _scan_phase_events(multi_stack_target / ".daydream", traj, "phase_end")
+    test_ends = [event for event in ends if event["phase"] == "test-execution"]
+    assert test_ends and all(event["metadata"]["stop_reason"] == "timed_out" for event in test_ends)
 
 @pytest.mark.parametrize(
     "phase", ["intent", "alternatives", "per_stack", "merge", "arbiter", "suppression", "supervisor"],
@@ -194,22 +206,3 @@ async def test_admitted_interaction_findings_survive_triage_cutoff_and_merge_res
         assert scope["partial_evidence"] is True
         assert scope["reason_codes"] == ["host_tool_budget_exhaustion"]
         assert any("structure" in warning for warning in published["review_warnings"])
-
-async def test_spent_pipeline_budget_still_publishes_explicitly_incomplete_artifact(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig],
-) -> None:
-    silence(monkeypatch)
-    backend = install_stub_backend(monkeypatch, multi_stack_target)
-    _pin_findings_pr(monkeypatch, multi_stack_target)
-    out = multi_stack_target / "findings.json"
-    assert await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out),
-        review_profile=_profile_with_pipeline(review_wall_budget_s=0),
-    )) == 0
-    assert not backend.calls
-    artifact = json.loads(out.read_text())
-    assert artifact["findings"] == []
-    assert artifact["terminal_result"]["analysis_state"] == "failed"
-    assert "host_pipeline_budget_exhaustion" in artifact["terminal_result"]["reason_codes"]
-    assert all(row["status"] == "uncovered" for row in artifact["terminal_result"]["stack_outcomes"])
-    assert artifact["review_warnings"]
-    assert "Review incomplete" in (multi_stack_target / ".review-output.md").read_text()

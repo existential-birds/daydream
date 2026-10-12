@@ -23,6 +23,7 @@ from daydream.output_schema import strict_object
 from daydream.phases.inputs import _prepare_existing_phase_inputs, _render_bash_allowlist, _tail_test_output
 from daydream.phases.test_evidence import RepairAttemptEvidence
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
+from daydream.test_execution import redact_test_output
 from daydream.trajectory import (
     DaydreamPhase,
     TrajectoryRecorder,
@@ -498,6 +499,14 @@ async def _run_failure_summarizer(
         changed_for_model = durable_changed = changed_live
     readable_inputs = {label: path for label, path in possible_inputs.items() if path.is_file()}
 
+    # Host output has already masked inherited environment values. Compare
+    # both representations so masking a private path prefix cannot leave
+    # its undisclosed artifact suffix in either form of published handoff.
+    private_output_paths = {
+        variant for path in private_runtime_paths
+        for variant in (str(path), redact_test_output(str(path)))
+    }
+
     prompt = _build_failure_summarizer_prompt(
         test_output=test_output,
         artifacts=artifacts,
@@ -521,7 +530,7 @@ async def _run_failure_summarizer(
             )
             candidate = result.get("handoff_prompt") if isinstance(result, dict) else None
             if isinstance(candidate, str) and candidate.strip():
-                if any(str(path) in candidate for path in private_runtime_paths):
+                if any(path in candidate for path in private_output_paths):
                     _logger.warning(
                         "failure-summarizer output contained a private runtime path; using the deterministic handoff"
                     )
@@ -533,7 +542,7 @@ async def _run_failure_summarizer(
 
     if body is None:
         fallback_output = test_output
-        if any(str(path) in fallback_output for path in private_runtime_paths):
+        if any(path in fallback_output for path in private_output_paths):
             fallback_output = "Test output omitted because it contained a private runtime path."
         body = _build_minimal_handoff(
             test_output=fallback_output,

@@ -304,7 +304,7 @@ def make_work() -> Callable[..., WorkContext]:
 
 @pytest.fixture
 def make_config() -> Callable[..., "RunConfig"]:
-    """Build RunConfig with non_interactive=True, cleanup=False, archive=False.
+    """Build RunConfig with a real passing host command and unattended defaults.
 
     Other fields retain production defaults; explicit overrides always win.
     Paths are stringified to match RunConfig.target."""
@@ -312,6 +312,7 @@ def make_config() -> Callable[..., "RunConfig"]:
 
     def _make(target: Path | str, **overrides: object) -> RunConfig:
         fields: dict[str, object] = {"target": str(target), "non_interactive": True, "cleanup": False, "archive": False,
+            "test_command": f"{sys.executable} -c pass",
         }
         fields.update(overrides)
         return RunConfig(**fields)  # type: ignore[arg-type]

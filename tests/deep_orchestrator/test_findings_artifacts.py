@@ -20,6 +20,7 @@ from tests.deep_orchestrator.support import (
     _eroded_main_repo,
     _silence_gate_noise,
 )
+from tests.harness.execution import host_test_command
 from tests.harness.git_helpers import git as _git
 from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.stub_backend import review_stage_state
@@ -132,12 +133,13 @@ async def test_test_verdict_persists_actual_suite_outcome_and_operator_override(
     for name, value in host.items():
         monkeypatch.setattr(f"daydream.remote_ci.artifacts.platform.{name}", lambda value=value: value)
     stub = _install_stub_backend(monkeypatch, tiny_diff_target)
-    stub.fail_all_test_runs = not passed
+    command = host_test_command(tiny_diff_target.parent / "suite", mode="pass" if passed else "all")
     if ignored:
         _add_bare_remote(tiny_diff_target)
     mute_side_effects(heal=False, commit=not ignored)
     head_before = _git(tiny_diff_target, "rev-parse", "HEAD")
-    config = make_config(tiny_diff_target, assume=None if ignored else "yes", non_interactive=False)
+    config = make_config(tiny_diff_target, assume=None if ignored else "yes", non_interactive=False,
+                         test_command=command)
     assert await run(config) == exit_code
     path = tiny_diff_target / ".daydream" / "deep" / "test-verdict.json"
     assert path.is_file(), "suite verdict must survive both successful completion and an early failure return"
@@ -148,7 +150,8 @@ async def test_test_verdict_persists_actual_suite_outcome_and_operator_override(
     if ignored:
         assert _git(tiny_diff_target, "rev-parse", "HEAD") == head_before
         assert not (tiny_diff_target / ".fixed-api_py").exists()
-        assert stub.test_suite_calls == 1
+        assert (tiny_diff_target.parent / "suite/suite-count.txt").read_text() == "1"
+        assert stub.test_suite_calls == 0
 
 
 async def test_deep_run_inlines_small_diff_into_intent_and_wonder(
@@ -238,14 +241,16 @@ async def test_intent_artifact_survives_wonder_failure(multi_stack_target: Path,
     # The wonder half never ran, so its artifact is legitimately absent.
     assert not (multi_stack_target / ".daydream" / "deep" / "alternatives.json").exists()
 
-async def test_skip_tier_writes_empty_alternatives(tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Both artifacts exist even when the diff is small enough to run wonder."""
+async def test_folded_tiny_review_preserves_intent_and_empty_alternatives(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The collapsed default review retains intent and the folded alternatives artifact."""
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, tiny_diff_target)
     assert await _run_deep(tiny_diff_target) == 0
     deep = tiny_diff_target / ".daydream" / "deep"
     assert (deep / "intent.md").read_text().strip()
-    assert isinstance(json.loads((deep / "alternatives.json").read_text()), list)
+    assert json.loads((deep / "alternatives.json").read_text()) == []
 
 
 def test_extension_api_version_and_alternatives_step_removal() -> None:
