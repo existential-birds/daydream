@@ -29,6 +29,7 @@ from daydream.config_file import DaydreamFileConfig
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.harness.execution import host_test_command
+from tests.harness.fake_clock import FakeClock
 from tests.harness.git_helpers import commit as _commit, git as _git
 from tests.harness.stub_backend import StubBackend
 from tests.test_deep_orchestrator import (
@@ -74,8 +75,11 @@ class _AcceptanceStub(StubBackend):
     def __init__(self, target: Path) -> None:
         super().__init__(target)
         self.on_summarizer: Callable[[Path], None] | None = None
+        self.on_repair_attempt: Callable[[], None] | None = None
 
     async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+        if self.on_repair_attempt is not None and prompt.lower().startswith("the tests failed"):
+            self.on_repair_attempt()
         if self.on_summarizer is not None and _SUMMARIZER_PROMPT in prompt.lower():
             self.on_summarizer(cwd)
         async for event in super().execute(cwd, prompt, *args, **kwargs):
@@ -353,37 +357,36 @@ async def test_provider_retry_does_not_restart_the_execution_deadline(
 ) -> None:
     """Provider retries share one deadline: the execution cannot be re-based.
 
-    The repair turn fails with a transport-shaped error twice, and is then cut
-    short by the wall budget. The whole ladder -- failures, backoff, and the
-    partial turn -- must fit inside the single execution allowance.
+    Each real backend attempt spends 0.3 injected seconds before returning a
+    retryable transport error. A 0.5-second invocation may dispatch two attempts,
+    but it must stop the ladder before a third attempt receives a fresh budget.
     """
     _silence(monkeypatch)
     monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.5)
-    # Keep the retry ladder fast and bounded so the assertion is about the
-    # deadline, not about how long the harness is willing to wait.
+    fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
+    # Real backoff stays short; only backend-attempt time advances the injected
+    # deadline clock, so the exact dispatch ceiling is deterministic.
     monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "4")
     monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.05")
     monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "0.05")
     target = multi_stack_target
     stub = _install(
         monkeypatch, target,
-        **_interrupted_repair(heal_fix_retryable_failures=2, heal_fix_authorized=None),
+        **_interrupted_repair(heal_fix_retryable_failures=99, heal_fix_authorized=None),
     )
+    stub.on_repair_attempt = lambda: fake.advance(0.3)
     command = host_test_command(target.parent / "suite", mode="first")
     mute_side_effects(heal=False)
 
     exit_code = await _run_deep(target, test_command=command)
-    assert exit_code == 0, "the continued execution validated the retained tree"
-
     heal_calls = [call for call in stub.calls if call["prompt"].lower().startswith("the tests failed")]
-    assert len(heal_calls) >= 2, "the provider failure was retried within the same execution"
+    assert len(heal_calls) == 2, "retry attempts cannot each receive a fresh execution allowance"
+    assert fake.monotonic_value == pytest.approx(1_000.6)
+    assert exit_code == 0, "the continued execution validated the retained tree"
     verdict = _verdict(target)
     assert len(verdict["repairs"]) == 1, verdict["repairs"]
     repair = verdict["repairs"][0]
     assert repair["abort_reason"] == "wall_budget_exceeded", repair
-    # One absolute deadline covers every attempt: a re-based deadline per retry
-    # would show up here as several multiples of the wall budget.
-    assert repair["execution_elapsed_s"] < 2.0, repair
     job = _job(target)
     assert job["executions"] == 2, job
 

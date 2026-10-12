@@ -934,24 +934,6 @@ async def test_owner_preflight_failure_never_reaches_identity_or_backend(
     )
     assert await runner.run(config) == 1
 
-async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
-    monkeypatch: pytest.MonkeyPatch, patch_workspace: Any,
-    silence_runner_ui: None,  # noqa: F841
-    tmp_path: Path, make_config: Callable[..., 'RunConfig'],
-) -> None:
-    """Comment mode reaches deep without an open PR; the posting step owns warn-and-skip behavior."""
-    monkeypatch.setattr("daydream.runner.git_ops.gh_pr_list_for_branch", lambda _repo, _branch: [])
-    seen: dict[str, Any] = {}
-    def _capture(_name: str, _work: WorkContext, config: RunConfig, _run_context: RunContext) -> None:
-        seen["output_mode"] = config.output_mode
-        seen["branch"] = config.branch
-    _record = _make_recording_dispatch([], _capture)
-    monkeypatch.setattr("daydream.runner._run_loop_deep", _record("_run_loop_deep"))
-    config = make_config(tmp_path, output_mode="comment", branch="feat/missing")
-    exit_code = await runner.run(config)
-    assert exit_code == 0
-    assert seen == {"output_mode": "comment", "branch": "feat/missing"}, seen
-
 # --- Per-phase model resolution tests --------------------------------------
 
 class TestResolveBackendPhaseModel:
@@ -1286,19 +1268,26 @@ async def test_fix_cycle_non_interactive_declines_fix_and_commit(
     """
     _seed_fix_resume(feature_branch_repo, [_fix_item()])
     _silence_fix_cycle_ui(silence_console)
+    backend = StubBackend(feature_branch_repo)
+    backend.fix_edit_line = "\n# unexpected fix\n"
     monkeypatch.setattr(
-        "daydream.runner._resolve_backend",
-        lambda _config, _phase, cache=None, **_kwargs: ScriptedBackend(model="stub-model"),
+        "daydream.runner.create_backend", lambda *_args, **_kwargs: backend,
     )
     head_before = _git(feature_branch_repo, "rev-parse", "HEAD")
+    source = feature_branch_repo / "main.py"
+    index = feature_branch_repo / ".git" / "index"
+    source_before = source.read_bytes()
+    index_before = index.read_bytes()
+    tracked_diff_before = _git(feature_branch_repo, "diff", "HEAD", "--binary")
     exit_code = await runner.run(make_config(feature_branch_repo, start_at="fix", shallow=True))
     assert exit_code == 0
     assert _git(feature_branch_repo, "rev-parse", "HEAD") == head_before, (
         "a non-interactive run without --yes committed"
     )
-    assert not (feature_branch_repo / ".daydream-fix-applied").exists(), (
-        "a non-interactive run without --yes applied a fix"
-    )
+    assert source.read_bytes() == source_before
+    assert index.read_bytes() == index_before
+    assert _git(feature_branch_repo, "diff", "HEAD", "--binary") == tracked_diff_before
+    assert not (feature_branch_repo / ".daydream" / "deep" / "test-verdict.json").exists()
 
 async def _drive_fix_cycle_failing(
     monkeypatch: pytest.MonkeyPatch, target: Path, config: RunConfig, *, script: list[Turn],

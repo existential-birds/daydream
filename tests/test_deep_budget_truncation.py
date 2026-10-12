@@ -20,7 +20,7 @@ from tests.deep_orchestrator.support import _scan_phase_events
 from tests.harness.fake_clock import FakeClock
 from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.stub_backend import StubBackend, install_stub_backend, review_stage_state, silence, stage_result
-from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipeline
+from tests.test_deep_orchestrator import _pin_findings_pr
 
 
 async def test_budget_truncated_stack_lands_in_failed_stacks(
@@ -206,22 +206,3 @@ async def test_admitted_interaction_findings_survive_triage_cutoff_and_merge_res
         assert scope["partial_evidence"] is True
         assert scope["reason_codes"] == ["host_tool_budget_exhaustion"]
         assert any("structure" in warning for warning in published["review_warnings"])
-
-async def test_spent_pipeline_budget_still_publishes_explicitly_incomplete_artifact(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig],
-) -> None:
-    silence(monkeypatch)
-    backend = install_stub_backend(monkeypatch, multi_stack_target)
-    _pin_findings_pr(monkeypatch, multi_stack_target)
-    out = multi_stack_target / "findings.json"
-    assert await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out),
-        review_profile=_profile_with_pipeline(review_wall_budget_s=0),
-    )) == 0
-    assert not backend.calls
-    artifact = json.loads(out.read_text())
-    assert artifact["findings"] == []
-    assert artifact["terminal_result"]["analysis_state"] == "failed"
-    assert "host_pipeline_budget_exhaustion" in artifact["terminal_result"]["reason_codes"]
-    assert all(row["status"] == "uncovered" for row in artifact["terminal_result"]["stack_outcomes"])
-    assert artifact["review_warnings"]
-    assert "Review incomplete" in (multi_stack_target / ".review-output.md").read_text()

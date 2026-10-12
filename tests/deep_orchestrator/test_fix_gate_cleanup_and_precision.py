@@ -26,7 +26,7 @@ from tests.deep_orchestrator.support import (
     _silence_gate_noise,
 )
 from tests.harness.execution import host_test_command
-from tests.harness.git_helpers import seed_base_support_files
+from tests.harness.git_helpers import git as _git, seed_base_support_files
 from tests.test_deep_orchestrator import (
     _SUPPRESSION_COLLISION_STACKS,
     MakeConfig,
@@ -40,19 +40,9 @@ from tests.test_deep_orchestrator import (
     _record_issues,
     _recording_prompter,
     _run_deep,
-    _severity_sort_key,
     _silence,
 )
 
-
-def _install_phase_fix_spy(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """Install a phase_fix spy that records the items it was asked to fix."""
-    fix_calls: list[Any] = []
-    async def _spy_fix(backend: Any, work: Any, item: Any, idx: Any, total: Any, **kwargs: Any) -> None:  # noqa: ARG001
-        fix_calls.append(item)
-        return None
-    monkeypatch.setattr("daydream.phases.fix.phase_fix", _spy_fix)
-    return fix_calls
 
 async def test_verifier_contradicts_propagates_to_fix_prompt(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
@@ -132,36 +122,32 @@ async def test_structural_finding_reaches_fix_loop(
     """The fix gate feeds the canonical merged-items.json (structural included), severity-ordered, into phase_fix
     -- never the LLM re-parse that dropped structural findings."""
     stub = _install_accept_gate_pipeline(monkeypatch, multi_stack_target, mute_side_effects)
-    # One per-stack(high) + one per-stack(low); phase_cross_stack_merge appends
-    # the structure meta-stack as structural(high), giving the required mix.
+    # Keep every finding in one delivered file group so severity ordering is
+    # observable in the backend prompt as well as the retained source edit.
     stub.merge_items = [{"id": 1, "lens": "per-stack", "file": "api.py", "line": 1, "severity": "high",
             "description": "High-severity per-stack issue", "confidence": "HIGH", "rationale": "rationale",
             "evidence": "api.py:1",
         },
-        {"id": 2, "lens": "per-stack", "file": "App.tsx", "line": 1, "severity": "low",
+        {"id": 2, "lens": "per-stack", "file": "api.py", "line": 1, "severity": "low",
             "description": "Low-severity per-stack issue", "confidence": "MEDIUM", "rationale": "rationale",
-            "evidence": "App.tsx:1",
+            "evidence": "api.py:1",
         },
     ]
 
-    fixed: list[dict[str, Any]] = []
-
-    # Capture at the batched dispatch point: phase_fix_parallel now hands every
-    # file-group (single- or multi-item) to phase_fix_batched, so this is where
-    # every item that reaches the fix loop is observable.
-    async def _capture_fix(backend: Any, work: Any, items: Any, item_nums: Any, total: Any, **kwargs: Any) -> None:  # noqa: ARG001
-        fixed.extend(items)
-
-    monkeypatch.setattr("daydream.phases.fix.phase_fix_batched", _capture_fix)
+    marker = "\n# structural finding fixed\n"
+    stub.fix_edit_line = marker
 
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
-    assert any(i.get("lens") == "structural" for i in fixed), (
-        "structural finding never reached phase_fix -- it was dropped before the "
-        f"fix loop; items fixed: {[(i.get('lens'), i.get('severity')) for i in fixed]!r}"
-    )
-    sev = [str(i["severity"]) for i in fixed]
-    assert sev == sorted(sev, key=_severity_sort_key)
+    items = json.loads((multi_stack_target / ".daydream/deep/merged-items.json").read_text())["items"]
+    structural = [item for item in items if item["lens"] == "structural"]
+    assert len(structural) == 1 and structural[0]["severity"] == "medium"
+    prompts = _fix_prompts(stub)
+    assert len(prompts) == 1
+    prompt = prompts[0]
+    assert (prompt.index("High-severity per-stack issue") < prompt.index(structural[0]["description"])
+            < prompt.index("Low-severity per-stack issue"))
+    assert marker in (multi_stack_target / "api.py").read_text()
 
 async def test_verdict_join_reconciles_selection_skips_through_the_real_run(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
@@ -208,28 +194,15 @@ async def test_verdict_join_reconciles_selection_skips_through_the_real_run(
         elif decision["selected"] is False:
             assert item_id in buckets["skipped"]
 
-def test_severity_sort_key_names_unknown_value() -> None:
-    """Should-Have (R3): an unknown/absent severity in a fixture errors with a
-    message that names the value, instead of a bare ``KeyError``."""
-    with pytest.raises(ValueError, match="bogus"):
-        _severity_sort_key("bogus")
-    with pytest.raises(ValueError, match="unexpected severity in fixture"):
-        _severity_sort_key("")
-
 async def test_start_at_fix_recovers_merged_items(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
 ) -> None:
     """--start-at fix with ONLY the deep-dir merged-items.json present (canonical repo review-output.md ABSENT)
     still loads items and reaches phase_fix."""
 
-    _install_accept_gate_pipeline(monkeypatch, multi_stack_target, mute_side_effects)
-
-    fixed: list[dict[str, Any]] = []
-
-    async def _capture_fix(backend: Any, work: Any, item: Any, idx: Any, total: Any, **kwargs: Any) -> None:  # noqa: ARG001
-        fixed.append(item)
-
-    monkeypatch.setattr("daydream.phases.fix.phase_fix", _capture_fix)
+    stub = _install_accept_gate_pipeline(monkeypatch, multi_stack_target, mute_side_effects)
+    marker = "\n# recovered finding fixed\n"
+    stub.fix_edit_line = marker
 
     # Prime fix-resume prerequisites EXCEPT the canonical markdown report -- only
     # the deep-dir merged-items.json exists, no review-output.md anywhere.
@@ -248,13 +221,8 @@ async def test_start_at_fix_recovers_merged_items(
 
     exit_code = await _run_deep(multi_stack_target, start_at="fix")
     assert exit_code == 0
-    assert len(fixed) >= 1, ("no items reached phase_fix on --start-at fix; the recovery guard bailed "
-        "on the missing canonical markdown instead of loading the deep-dir "
-        f"merged-items.json; items fixed: {fixed!r}"
-    )
-    assert fixed[0].get("description") == "recovered issue", (
-        f"phase_fix received an item that did not originate from the deep-dir merged-items.json; got {fixed!r}"
-    )
+    assert any("recovered issue" in prompt for prompt in _fix_prompts(stub))
+    assert marker in (multi_stack_target / "api.py").read_text()
     # AC5 regression guard: a --start-at fix resume that applies fixes (gate
     # accepted) still produces verdicts -- verify runs post-gate-accept on resume.
     assert (multi_stack_target / ".daydream" / "deep" / "recommendation-verdicts.json").is_file(), (
@@ -269,10 +237,10 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
     _silence_gate_noise(monkeypatch)
     # The PR post runs before the gate; stub the non-idempotent GitHub write.
     mute_side_effects()
-    _install_stub_backend(monkeypatch, multi_stack_target)
-
-    # Spy on phase_fix to prove fixes are NOT applied when the gate declines.
-    fix_calls = _install_phase_fix_spy(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    source_before = {name: (multi_stack_target / name).read_bytes() for name in ("api.py", "App.tsx", "README.md")}
+    head_before = _git(multi_stack_target, "rev-parse", "HEAD")
+    index_before = _git(multi_stack_target, "ls-files", "--stage", "-z")
 
     # Any stdin read in non-interactive mode is a bug -- fail loudly.
     monkeypatch.setattr("builtins.input", _forbidden_input)
@@ -282,7 +250,10 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
     exit_code = await run(make_config(multi_stack_target, trajectory_path=traj))
     assert current_run_context() is None
     assert exit_code == 0
-    assert fix_calls == [], f"phase_fix ran despite the gate declining: {fix_calls!r}"
+    assert not _fix_prompts(stub)
+    assert _git(multi_stack_target, "rev-parse", "HEAD") == head_before
+    assert _git(multi_stack_target, "ls-files", "--stage", "-z") == index_before
+    assert {name: (multi_stack_target / name).read_bytes() for name in source_before} == source_before
     # The gate's "report written ... exiting" path ran (report on disk before return 0).
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).is_file(), (
         "merged report missing -- the apply-fixes gate's success/exit path did not run"
@@ -306,9 +277,10 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
 
     _silence_gate_noise(monkeypatch)
     mute_side_effects()
-    _install_stub_backend(monkeypatch, multi_stack_target)
-
-    fix_calls = _install_phase_fix_spy(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    source_before = {name: (multi_stack_target / name).read_bytes() for name in ("api.py", "App.tsx", "README.md")}
+    head_before = _git(multi_stack_target, "rev-parse", "HEAD")
+    index_before = _git(multi_stack_target, "ls-files", "--stage", "-z")
 
     # Every stdin read raises EOFError (closed stdin without the non_interactive flag).
     def _eof_input(*_a: Any, **_kw: Any) -> str:
@@ -325,7 +297,10 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
     exit_code = await run(make_config(multi_stack_target, non_interactive=False))
     assert current_run_context() is None
     assert exit_code == 0
-    assert fix_calls == [], f"phase_fix ran despite EOF at the gate: {fix_calls!r}"
+    assert not _fix_prompts(stub)
+    assert _git(multi_stack_target, "rev-parse", "HEAD") == head_before
+    assert _git(multi_stack_target, "ls-files", "--stage", "-z") == index_before
+    assert {name: (multi_stack_target / name).read_bytes() for name in source_before} == source_before
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).is_file(), (
         "merged report missing -- the apply-fixes gate's success/exit path did not run"
     )

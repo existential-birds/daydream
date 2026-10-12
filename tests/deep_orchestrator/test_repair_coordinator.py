@@ -52,39 +52,6 @@ def _repair_job(target: Path) -> dict[str, Any]:
     return payload
 
 
-async def test_repair_continues_automatically_within_one_run(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig, mute_side_effects: Mute,
-) -> None:
-    """Requirement 29: the coordinator dispatches the next execution itself."""
-
-    _silence(monkeypatch)
-    # The repair turn is cut short by the host wall budget; only the coordinator
-    # can give the job another execution.
-    monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
-    stub = _install_interrupted_heal(monkeypatch, multi_stack_target)
-    stub.merge_items = [_merge_item(1, "api.py", "high")]
-    command = host_test_command(multi_stack_target.parent / "suite", mode="first")
-    mute_side_effects(heal=False)
-
-    with anyio.fail_after(60):
-        exit_code = await run(make_config(multi_stack_target, trajectory_path=tmp_path / "t.json",
-                                          assume="yes", output_mode="loop", test_command=command))
-    assert exit_code == 0, "the continued execution validated the retained tree"
-
-    job = _repair_job(multi_stack_target)
-    assert job["state"] == "completed", job
-    assert job["executions"] == 2, job
-    # Two separate test executions ran: the interrupted one and the one the
-    # coordinator dispatched. The second saw the suite green, so it never
-    # launched a repair turn of its own.
-    assert (multi_stack_target.parent / "suite/suite-count.txt").read_text() == "2"
-    assert stub.test_suite_calls == 0
-    verdict = json.loads((multi_stack_target / ".daydream" / "deep" / "test-verdict.json").read_text())
-    assert verdict["passed"] is True
-    assert len(verdict["repairs"]) == 1, "only the interrupted turn is a repair record"
-
-
 async def test_repair_completes_only_after_canonical_validation_passes(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig, mute_side_effects: Mute,

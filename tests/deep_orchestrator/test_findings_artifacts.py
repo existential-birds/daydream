@@ -241,14 +241,16 @@ async def test_intent_artifact_survives_wonder_failure(multi_stack_target: Path,
     # The wonder half never ran, so its artifact is legitimately absent.
     assert not (multi_stack_target / ".daydream" / "deep" / "alternatives.json").exists()
 
-async def test_skip_tier_writes_empty_alternatives(tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Both artifacts exist even when the diff is small enough to run wonder."""
+async def test_folded_tiny_review_preserves_intent_and_empty_alternatives(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The collapsed default review retains intent and the folded alternatives artifact."""
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, tiny_diff_target)
     assert await _run_deep(tiny_diff_target) == 0
     deep = tiny_diff_target / ".daydream" / "deep"
     assert (deep / "intent.md").read_text().strip()
-    assert isinstance(json.loads((deep / "alternatives.json").read_text()), list)
+    assert json.loads((deep / "alternatives.json").read_text()) == []
 
 
 def test_extension_api_version_and_alternatives_step_removal() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -14,7 +15,6 @@ from daydream import git_ops, json_utils, runner
 from daydream.backends import AgentEvent, MaxTurnsError, ResultEvent, TextEvent, ToolStartEvent
 from daydream.dataset import LocalRecordStore
 from daydream.findings import FindingsValidationError, load_findings_artifact
-from daydream.phases import findings
 from daydream.phases.review import ReviewOutputError
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
@@ -234,6 +234,8 @@ async def test_snapshot_boundaries(review: ReviewRun, request: pytest.FixtureReq
     if case == 'pipeline-budget':
         assert 'host_pipeline_budget_exhaustion' in result['reason_codes']
         assert all(s['status'] == 'uncovered' for s in scopes(data).values())
+        assert data['findings'] == [] and data['review_warnings']
+        assert 'Review incomplete' in (review.repo / '.review-output.md').read_text()
     if case == 'no-diff':
         assert result['stack_outcomes'] == [] and result['phase_outcomes'][0]['noop'] is True and result['run_id']
     if case == 'live':
@@ -486,21 +488,30 @@ async def test_atomic_public_failure(review: ReviewRun, fault: str) -> None:
     if fault == 'prior-install':
         assert await review.run() == 0
     prior = review.output.read_bytes() if review.output.exists() else None
-    link, stage = os.link, json_utils._stage_bytes
+    link, stage, allocate = os.link, json_utils._stage_bytes, tempfile.mkstemp
     injected: list[bool] = []
+    staging_findings = False
     def fail_link(source: Any, destination: Any, **kwargs: Any) -> None:
         if Path(destination) == review.output and not injected:
             injected.append(True)
             raise OSError('public install failed')
         link(source, destination, **kwargs)
-    def fail_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
-        if b'"terminal_result"' in content:
+    def observe_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
+        nonlocal staging_findings
+        staging_findings = b'"terminal_result"' in content
+        try:
+            return stage(path, content, **kwargs)
+        finally:
+            staging_findings = False
+    def fail_allocation(*args: Any, **kwargs: Any) -> tuple[int, str]:
+        if staging_findings:
             injected.append(True)
             raise OSError('findings staging failed')
-        return stage(path, content, **kwargs)
+        return allocate(*args, **kwargs)
     review.patch.setattr(os, 'link', fail_link)
     if fault == 'staging':
-        review.patch.setattr(json_utils, '_stage_bytes', fail_stage)
+        review.patch.setattr(json_utils, '_stage_bytes', observe_stage)
+        review.patch.setattr(tempfile, 'mkstemp', fail_allocation)
     assert await review.run() == 1 and injected
     assert review.output.read_bytes() == prior if prior else not review.output.exists()
 
@@ -508,23 +519,32 @@ async def test_atomic_public_failure(review: ReviewRun, fault: str) -> None:
 @pytest.mark.parametrize('fault', ['coverage', 'fix', 'salvage'])
 async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str) -> None:
     error = RuntimeError('original provider error')
-    stage, write, salvage = json_utils._stage_bytes, Path.write_text, findings._write_single_stack_merged_items
+    stage, write, read, allocate = json_utils._stage_bytes, Path.write_text, Path.read_text, tempfile.mkstemp
     state: dict[str, Any] = {'failed': False, 'merged': None, 'rejected': False, 'writes': []}
+    staging_coverage = False
     def observe_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
+        nonlocal staging_coverage
+        staging_coverage = path.name == 'review-coverage.json'
         if path.name == 'review-coverage.json':
             state['writes'].append((state['failed'], content))
-            if fault == 'coverage':
-                raise OSError('coverage staging failed')
-        return stage(path, content, **kwargs)
+        try:
+            return stage(path, content, **kwargs)
+        finally:
+            staging_coverage = False
+    def fail_allocation(*args: Any, **kwargs: Any) -> tuple[int, str]:
+        if fault == 'coverage' and staging_coverage:
+            raise OSError('coverage staging failed')
+        return allocate(*args, **kwargs)
     def observe_write(path: Path, text: str, *args: Any, **kwargs: Any) -> int:
         if path.name == 'merged-items.json':
             state['merged'] = path
         return write(path, text, *args, **kwargs)
-    def reject_salvage(*args: Any, **kwargs: Any) -> None:
-        if state['failed'] and fault == 'salvage':
+    def faulty_read(path: Path, *args: Any, **kwargs: Any) -> str:
+        text = read(path, *args, **kwargs)
+        if state['failed'] and fault == 'salvage' and path.name == 'stack-structure-records.json':
             state['rejected'] = True
-            raise ValueError('rejected projection')
-        salvage(*args, **kwargs)
+            return '{"issues": "invalid"}'
+        return text
     def response(prompt: str) -> Any:
         trigger = {'coverage': 'present your understanding concisely', 'fix': 'fix this issue',
                    'salvage': 'supervisor adjudication'}[fault]
@@ -535,8 +555,9 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
                 state['merged'].unlink()
             return [error]
     review.patch.setattr(json_utils, '_stage_bytes', observe_stage)
+    review.patch.setattr(tempfile, 'mkstemp', fail_allocation)
     review.patch.setattr(Path, 'write_text', observe_write)
-    review.patch.setattr(findings, '_write_single_stack_merged_items', reject_salvage)
+    review.patch.setattr(Path, 'read_text', faulty_read)
     review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False,
                                        review_by_stack={'structure': [record()]}, responder=response)
     if fault == 'fix':

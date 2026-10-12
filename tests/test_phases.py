@@ -53,7 +53,6 @@ from daydream.phases.handoff import (
     _changed_files,
     _resolve_handoff_paths,
     _run_failure_summarizer,
-    _write_handoff,
 )
 from daydream.phases.inputs import (
     _PR_BODY_MAX_CHARS,
@@ -84,7 +83,7 @@ from daydream.prompt_budget import (
 )
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.run_context import InteractionPolicy, RunContext
-from daydream.test_execution import TestExecutionIdentity, TestExecutionResult, resolve_test_recipe
+from daydream.test_execution import TestExecutionIdentity, TestExecutionResult, resolve_test_recipe, run_test_command
 from daydream.trajectory import (
     DaydreamRunFlow,
     TrajectoryRecorder,
@@ -111,14 +110,13 @@ def _structured_turn(structured: object) -> tuple[AgentEvent, ...]:
 def _verdict(verdict: str, suggested_command: str | None, reason: str) -> dict[str, str | None]:
     return {"verdict": verdict, "suggested_command": suggested_command, "reason": reason}
 
-def _record_host_runs(monkeypatch: pytest.MonkeyPatch, *, exit_status: int = 0, output: str = "ok",
-) -> list[dict[str, Any]]:
-    """Patch ``run_test_command`` to record each call's kwargs and return *calls*."""
+def _record_host_runs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Observe calls while retaining the real bounded subprocess and its exit status."""
     calls: list[dict[str, Any]] = []
-    async def fake_run(*_a: Any, **kwargs: Any) -> TestExecutionResult:
+    async def record_run(**kwargs: Any) -> TestExecutionResult:
         calls.append(kwargs)
-        return TestExecutionResult(exit_status=exit_status, timed_out=False, merged_output=output)
-    monkeypatch.setattr("daydream.phases.test_evidence.run_test_command", fake_run)
+        return await run_test_command(**kwargs)
+    monkeypatch.setattr("daydream.phases.test_evidence.run_test_command", record_run)
     return calls
 
 def _host_suite_config(repo: Path, *, mode: Literal["first", "all"] = "first") -> Any:
@@ -736,7 +734,7 @@ async def test_hook_aware_push_runs_suite_exactly_once(
             _install_pre_push_hook(repo)
         (repo / "fix.py").write_text("fixed\n")  # the daydream change
 
-        runs = _record_host_runs(monkeypatch, output="")
+        runs = _record_host_runs(monkeypatch)
         ok = await _do_commit(ScriptedBackend(), make_work(repo), push=True, interactive=False,
             items=[{"file": "fix.py", "description": "fix bug"}], **_retained_commit_tree(repo, {"fix.py"}),
             config=_hook_run_config(),
@@ -764,12 +762,12 @@ async def test_hook_aware_push_red_suite_blocks_push(
     (repo / "fix.py").write_text("fixed\n")
     remote_head_before = git(repo, "ls-remote", "origin", "refs/heads/main")
 
-    _record_host_runs(monkeypatch, exit_status=1, output="1 failed")
+    _record_host_runs(monkeypatch)
 
     with pytest.raises(RuntimeError, match="Pre-push validation"):
         await _do_commit(ScriptedBackend(), make_work(repo), push=True, interactive=False,
             items=[{"file": "fix.py", "description": "fix bug"}], **_retained_commit_tree(repo, {"fix.py"}),
-            config=_hook_run_config(),
+            config=_hook_run_config("false"),
         )
     # Nothing was pushed: the remote still reports the baseline sha only.
     assert git(repo, "ls-remote", "origin", "refs/heads/main") == remote_head_before
@@ -1435,7 +1433,7 @@ async def test_declined_commit_surfaces_failed_validation(
     make_config: Callable[..., Any], _quiet_phase_ui: None,
 ) -> None:
     monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
-    _record_host_runs(monkeypatch, exit_status=1, output="1 failed")
+    _record_host_runs(monkeypatch)
     repo = _init_plain_repo(tmp_path)
     work = make_work(repo)
     config = make_config(tmp_path, test_command="false")
@@ -1767,20 +1765,21 @@ async def test_recorderless_handoff_rejects_a_bound_session_without_explicit_own
 
 # _write_handoff — must report write failure so the caller can fall back
 
-def test_write_handoff_returns_false_on_oserror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Return False on write failure so callers cannot announce a nonexistent file."""
-    target = tmp_path / "runs" / "sid" / "handoff.md"
-    def _boom(self: object, *args: Any, **kwargs: Any) -> None:  # noqa: ARG001 - signature must match Path.write_text
-        raise OSError("disk full")
-    monkeypatch.setattr(Path, "write_text", _boom)
-    assert _write_handoff(target, "BODY") is False
-
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_option4_inlines_body_when_write_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
     _quiet_phase_ui: None,
 ) -> None:
-    monkeypatch.setattr("daydream.phases.handoff._write_handoff", lambda *a, **kw: False)
+    real_write = Path.write_text
+    failed_paths: list[Path] = []
+
+    def fail_handoff_write(path: Path, *args: Any, **kwargs: Any) -> int:
+        if path.name == "handoff.md":
+            failed_paths.append(path)
+            raise OSError("disk full")
+        return real_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_handoff_write)
 
     printed: list[str] = []
     monkeypatch.setattr(
@@ -1796,10 +1795,12 @@ async def test_phase_test_and_heal_option4_inlines_body_when_write_fails(
     )
 
     assert success is False
+    assert failed_paths and all(not path.exists() for path in failed_paths)
     # A warning explaining the failure was emitted.
     assert any("Failed to write handoff" in m for m in warnings), warnings
     # Write failure prints the complete body instead of a preview.
     assert any("FULL_BODY_LINE_1" in line for line in printed), printed
+    assert any("FULL_BODY_LINE_2" in line for line in printed), printed
 
 # phase_test_and_heal — non-interactive short-circuit (Task 3)
 
@@ -2538,41 +2539,34 @@ def test_merge_demotion_preserves_original_severity_and_marks_distrust(tmp_path:
     assert items[0]["location_distrust"] is True  # machine-readable demotion mark
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cwd_relative", [".", "services/api"])
 async def test_first_targeted_call_runs_in_the_resolved_package_cwd(
     tmp_path: Path, make_work: Callable[..., WorkContext], make_config: Callable[..., Any],
-    monkeypatch: pytest.MonkeyPatch, _quiet_phase_ui: None,
+    _quiet_phase_ui: None, cwd_relative: str,
 ) -> None:
-    """MH8: the FIRST call runs under the right runner and cwd — no failed attempt then a retry."""
+    """The first actual subprocess uses the frozen package cwd and argv."""
     repo = _init_plain_repo(tmp_path)
-    api = repo / "services" / "api"
-    api.mkdir(parents=True)
-    (api / "pyproject.toml").write_text("[project]\nname = 'api'\n")
-    (api / "uv.lock").write_text("version = 1\n")
-    calls = _record_host_runs(monkeypatch)
-    config = make_config(repo, test_command="uv run pytest")
-    recipe = resolve_test_recipe(config, config, repo_root=repo, cwd=api)
+    package = repo / cwd_relative
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "pyproject.toml").write_text("[project]\nname = 'api'\n")
+    (package / "uv.lock").write_text("version = 1\n")
+    observed = tmp_path / "observed-cwd.txt"
+    argv = [sys.executable, "-c",
+            f"from pathlib import Path; Path({str(observed)!r}).open('a').write(str(Path.cwd()) + '\\n')"]
+    config = make_config(repo, test_command=shlex.join(argv))
+    recipe = resolve_test_recipe(config, config, repo_root=repo, cwd=package)
+    backend = ScriptedBackend()
 
-    await phases.phase_test_once(
-        ScriptedBackend(), make_work(repo), config=config, session_id="s", capture_tree_key=lambda: "k", recipe=recipe,
+    evidence, _, _ = await phases.phase_test_once(
+        backend, make_work(repo), config=config, session_id="s", capture_tree_key=lambda: "k", recipe=recipe,
     )
 
-    assert len(calls) == 1
-    assert calls[0]["cwd"] == api
-    assert calls[0]["cmd"] == ["uv", "run", "pytest"]
-
-@pytest.mark.asyncio
-async def test_repo_root_recipe_keeps_the_worktree_root_cwd(
-    tmp_path: Path, make_work: Callable[..., WorkContext], make_config: Callable[..., Any],
-    monkeypatch: pytest.MonkeyPatch, _quiet_phase_ui: None,
-) -> None:
-    repo = _init_plain_repo(tmp_path)
-    calls = _record_host_runs(monkeypatch)
-    config = make_config(repo, test_command="true")
-    recipe = resolve_test_recipe(config, config, repo_root=repo)
-    await phases.phase_test_once(
-        ScriptedBackend(), make_work(repo), config=config, session_id="s", capture_tree_key=lambda: "k", recipe=recipe,
-    )
-    assert calls[0]["cwd"] == repo
+    assert evidence.passed and evidence.command == tuple(argv)
+    assert observed.read_text().splitlines() == [str(package.resolve())]
+    assert evidence.identity is not None
+    assert evidence.identity.cwd_relative == cwd_relative
+    assert evidence.identity.runner == "uv"
+    assert backend.call_count == 0
 
 @pytest.mark.asyncio
 async def test_supplied_recipe_never_triggers_a_second_resolution(
@@ -2639,7 +2633,7 @@ async def test_declined_commit_with_red_evidence_still_raises(
     monkeypatch: pytest.MonkeyPatch, _quiet_phase_ui: None,
 ) -> None:
     monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
-    _record_host_runs(monkeypatch, exit_status=1, output="1 failed")
+    _record_host_runs(monkeypatch)
     repo = _init_plain_repo(tmp_path)
     config = make_config(repo, test_command="false")
     recipe = resolve_test_recipe(config, config, repo_root=repo)
@@ -2720,7 +2714,7 @@ async def test_matching_evidence_cannot_bypass_failed_commit_verification(
     repo = _pushable_repo(tmp_path)
     _install_pre_push_hook(repo)
     (repo / "fix.py").write_text("fixed\n")
-    runs = _record_host_runs(monkeypatch, output="")
+    runs = _record_host_runs(monkeypatch)
     config = _hook_run_config()
     recipe = resolve_test_recipe(config, config, repo_root=repo)
     identity = _execution_identity(repo, recipe=recipe, argv=("true",))
