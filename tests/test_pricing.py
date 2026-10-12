@@ -16,9 +16,11 @@ from daydream.pricing import (
 )
 
 
-@pytest.mark.parametrize("model", ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6"))
-def test_gpt56_long_context_rates_apply_to_whole_request(model: str) -> None:
-    """All GPT-5.6 ids use long-context rates only above the 272K boundary."""
+@pytest.mark.parametrize("model", (
+    "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6", "openai/gpt-6.1-sol", "gpt-6.1-sol",
+))
+def test_openai_long_context_rates_apply_to_whole_request(model: str) -> None:
+    """GPT-5.6 and GPT-6.1 Sol use long-context rates only above the 272K boundary."""
     price = MODEL_PRICES[model]
     assert compute_cost_from_totals(model, total_input_tokens=272_000, cached_input_tokens=72_000, output_tokens=10_000
     ) == pytest.approx((200_000 * price.input + 72_000 * price.cached_input + 10_000 * price.output) / 1_000_000)
@@ -47,6 +49,7 @@ def test_all_covered_models_have_complete_entries() -> None:
     required_models = {
         "gpt-5.5", "gpt-5.5-pro", "gpt-5-codex", "gpt-5.3-codex", "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra",
         "gpt-5.6-luna", "claude-sonnet-5",
+        "openai/gpt-6.1-sol", "gpt-6.1-sol",
     }
     assert required_models.issubset(MODEL_PRICES.keys())
     field_names = {f.name for f in fields(ModelPrice)}
@@ -64,6 +67,7 @@ def test_all_covered_models_have_complete_entries() -> None:
         ("gpt-5.6-sol", (5.00 + 30.00) * 0.1), ("gpt-5.6-terra", (2.50 + 15.00) * 0.1),
         ("gpt-5.6-luna", (1.00 + 6.00) * 0.1), ("gpt-5.6", (5.00 + 30.00) * 0.1),
         ("claude-sonnet-5", (3.00 + 15.00) * 0.1),
+        ("openai/gpt-6.1-sol", (2.00 + 10.00) * 0.1), ("gpt-6.1-sol", (2.00 + 10.00) * 0.1),
     ],
 )
 def test_new_default_model_ids_price_to_published_rates(model: str, expected: float) -> None:

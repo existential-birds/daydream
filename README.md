@@ -449,7 +449,7 @@ scope_issue_filing = false  # default; set true to file out-of-scope work as Git
 
 [tool.daydream.phases.fix]  # per-phase override
 backend = "codex"
-model = "gpt-5.6-terra"
+model = "gpt-6.1-sol"
 reasoning_effort = "medium"
 ```
 
@@ -464,6 +464,13 @@ backend = "codex"
 The resolution order, highest first, is:
 
 **CLI > config file (phase, then global) > built-in per-backend default.**
+
+Codex uses GPT-6.1 Sol for its main and middle model tiers. Deep stack review,
+ordinary review, and wonder default to `medium` reasoning effort; arbitration
+defaults to `high`. Named latency profiles can raise wonder/arbitration effort,
+and explicit reasoning-effort settings take precedence. These defaults follow
+[OpenAI's reasoning-effort guidance](https://developers.openai.com/api/docs/guides/reasoning#reasoning-effort);
+completion time and review quality still need evaluation on representative runs.
 
 ### Out-of-scope issue filing
 

@@ -118,8 +118,9 @@ def _codex_backend(
 
 def test_phase_default_effort_table_is_the_lowest_precedence_tier(tmp_path: Path) -> None:
     bare = RunConfig(target=str(tmp_path), backend="codex", model=None, file_config=DaydreamFileConfig())
-    assert _codex_backend(bare, "arbiter").reasoning_effort == "xhigh"
-    assert _codex_backend(bare, "review").reasoning_effort == "high"
+    assert _codex_backend(bare, "arbiter").reasoning_effort == "high"
+    assert _codex_backend(bare, "review").reasoning_effort == "medium"
+    assert _codex_backend(bare, "per_stack_review").reasoning_effort == "medium"
     assert _codex_backend(bare, "fix").reasoning_effort == "medium"
     assert _codex_backend(bare, "parse").reasoning_effort == "low"
 
@@ -156,9 +157,9 @@ def test_backend_cache_splits_on_table_default_effort(tmp_path: Path) -> None:
     cache: dict[tuple[str, str | None, str | None, Path | None], Backend] = {}
     review = _codex_backend(cfg, "review", cache)
     arbiter = _codex_backend(cfg, "arbiter", cache)
-    assert review.model == arbiter.model == "gpt-5.6-sol"
+    assert review.model == arbiter.model == "gpt-6.1-sol"
     assert review is not arbiter
-    assert (review.reasoning_effort, arbiter.reasoning_effort) == ("high", "xhigh")
+    assert (review.reasoning_effort, arbiter.reasoning_effort) == ("medium", "high")
     assert _resolve_backend(cfg, "review", cache) is review  # still cached per (backend, model, effort)
 
 
@@ -226,7 +227,7 @@ def test_latency_profile_precedence_cli_over_file_over_default(tmp_path: Path) -
 
 def test_profile_route_sets_wonder_and_arbiter_effort_on_codex(tmp_path: Path) -> None:
     cfg = RunConfig(target=str(tmp_path), backend="codex", file_config=DaydreamFileConfig())
-    assert _resolved_reasoning_effort(cfg, "wonder") == "high"  # table baseline
+    assert _resolved_reasoning_effort(cfg, "wonder") == "medium"  # table baseline
     cfg.latency_route = route_for("balanced", summarize_risk(_routine_signals()))
     assert _resolved_reasoning_effort(cfg, "wonder") == "medium"
     assert _resolved_reasoning_effort(cfg, "arbiter") == "high"
