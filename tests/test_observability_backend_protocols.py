@@ -276,11 +276,13 @@ async def test_claude_specialist_agents_make_aggregate_multi_model_without_claim
 
 # Codex: real CodexBackend replaying committed public JSONL + multi-turn fake
 
+@pytest.mark.parametrize("phase", ["review", "per_stack_review"])
 async def test_codex_real_backend_replays_public_golden_shape_through_runner(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig], monkeypatch: pytest.MonkeyPatch,
+    phase: str,
 ) -> None:
     canary = _CANARIES["codex"]
-    _flow(ext_dir)
+    _flow(ext_dir, _SINGLE_AGENT_BODY.replace('ctx.backend_for("review")', f'ctx.backend_for("{phase}")'))
     # The sanitized one-turn golden capture has no canary; inject it in this prompt/answer.
     lines = ['{"type":"thread.started","thread_id":"th_golden_public"}', '{"type":"turn.started"}',
         '{"type":"item.started","item":{"id":"item_0","type":"command_execution",'
@@ -296,11 +298,15 @@ async def test_codex_real_backend_replays_public_golden_shape_through_runner(
 
     with otlp_collector() as receiver:
         _configure_otlp(monkeypatch, receiver.base_url + "/v1/traces")
-        assert await runner.run(_flow_config(make_config, feature_branch_repo, backend="codex")) == 0
+        config = _flow_config(make_config, feature_branch_repo, backend="codex")
+        config.backend = "codex"
+        assert await runner.run(config) == 0
 
     # Codex omits cwd when it equals the caller’s directory.
     argv, _ = _spawner(spawner)
     assert argv[:4] == ("codex", "exec", "--experimental-json", "--model")
+    assert argv[4] == "gpt-6.1-sol"
+    assert 'model_reasoning_effort="medium"' in argv
     assert "--sandbox" in argv and "--cd" in argv
 
     spans = receiver.spans
@@ -314,10 +320,10 @@ async def test_codex_real_backend_replays_public_golden_shape_through_runner(
     assert billed["gen_ai.usage.reasoning.output_tokens"] == 79
     # Synthesized turn_end cost is not authoritative: no billing owner may close.
     assert billed["daydream.billing.owner"] == "unresolved"
-    # The observed review default uses the pinned gpt-5.6-sol price.
-    assert billed["daydream.models"] == ["gpt-5.6-sol"]
+    # Both review phases use the GPT-6.1 Sol default and its published price.
+    assert billed["daydream.models"] == ["gpt-6.1-sol"]
     assert billed["gen_ai.usage.cost"] == pytest.approx(
-        5.00 * (52101 - 39040) / 1_000_000 + 0.50 * 39040 / 1_000_000 + 30.0 * 225 / 1_000_000
+        2.00 * (52101 - 39040) / 1_000_000 + 0.10 * 39040 / 1_000_000 + 10.0 * 225 / 1_000_000
     )
     assert billed["gen_ai.conversation.id"] == "th_golden_public"
     tools = _kind(spans, "tool")

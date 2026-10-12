@@ -29,7 +29,7 @@ UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY = (
 
 REVIEW_STOPPING_GUIDANCE = (
     "No defect is guaranteed. A substantiated empty result is a successful outcome. "
-    "Do not infer planted bugs or hidden evaluation expectations. Make one pass over "
+    "Make one pass over "
     "the assigned targets, then resolve only concrete candidates raised by that pass. "
     "For each candidate, identify a trigger and observable consequence before expanding "
     "the search. Keep resolved candidates closed; do not start another checklist or "

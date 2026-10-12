@@ -141,7 +141,7 @@ def _resolve_backend(
     resolved_model = _resolved_model(config, phase)
     resolved_effort = (
         effort_override
-        if effort_override is not None and backend_name in DEEP_PHASE_DEFAULT_EFFORT
+        if effort_override is not None and phase in DEEP_PHASE_DEFAULT_EFFORT.get(backend_name, {})
         else _resolved_reasoning_effort(config, phase)
     )
     audit_root = (

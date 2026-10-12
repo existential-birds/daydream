@@ -77,6 +77,10 @@ MODEL_PRICES: dict[str, ModelPrice] = {
     "gpt-5.6-luna": ModelPrice(input=1.00, cached_input=0.10, output=6.00),
     # Bare alias routes to gpt-5.6-sol; priced identically (lookup is exact-match, no prefix fallback).
     "gpt-5.6": ModelPrice(input=5.00, cached_input=0.50, output=30.00),
+    # https://developers.openai.com/api/docs/models/gpt-6.1-sol (reviewed 2026-10-12).
+    # Preserve both the configured provider-qualified id and native response id.
+    "openai/gpt-6.1-sol": ModelPrice(input=2.00, cached_input=0.10, output=10.00),
+    "gpt-6.1-sol": ModelPrice(input=2.00, cached_input=0.10, output=10.00),
     # Post-introductory standard rate; the $2/$0.20/$10 intro rate lapses 2026-08-31.
     "claude-sonnet-5": ModelPrice(input=3.00, cached_input=0.30, output=15.00),
     "glm-5.2": ModelPrice(input=1.40, cached_input=0.26, output=4.40),
@@ -97,6 +101,14 @@ _GPT56_POLICIES = {
 }
 _BUILTIN_POLICIES: dict[str, PricingPolicy] = {
     **_GPT56_POLICIES,
+    **{
+        model: PricingPolicy(
+            MODEL_PRICES[model],
+            272_000,
+            ModelPrice(input=2.0, cached_input=2.0, output=1.5),
+        )
+        for model in ("openai/gpt-6.1-sol", "gpt-6.1-sol")
+    },
     "claude-sonnet-5": PricingPolicy(
         ModelPrice(input=2.00, cached_input=0.20, output=10.00),
         effective_prices=((date(2026, 9, 1), MODEL_PRICES["claude-sonnet-5"]),),

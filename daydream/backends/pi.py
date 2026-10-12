@@ -147,7 +147,7 @@ def _configured_pi_model(
 # ceiling the host does not impose must never be described as strict, because
 # a cap that does not exist is not a discipline, it is a lie about the budget.
 _PI_PREAMBLE_TEMPLATE = """\
-You are an efficient coding agent operating under a bounded time budget.
+You are an efficient coding agent.
 {allowance}
 Each call must resolve a specific unanswered question; the allowance is a ceiling,
 not a target.
@@ -180,7 +180,7 @@ Be concise in your responses. Do not narrate exploration step by step; report
 findings and conclusions."""
 
 
-def render_pi_preamble(wall_budget_s: float, tool_call_budget: int | None, *, staged: bool = False) -> str:
+def render_pi_preamble(wall_budget_s: float | None, tool_call_budget: int | None, *, staged: bool = False) -> str:
     """Render the preamble with the invocation's actual allowances.
 
     Requirement 17: the numbers are rendered, never hardcoded, and the tool-call
@@ -189,16 +189,16 @@ def render_pi_preamble(wall_budget_s: float, tool_call_budget: int | None, *, st
     uncapped rather than as a strict budget, and the wall allowance the host did
     impose is stated instead.
     """
-    wall = f"{float(wall_budget_s):g}"
+    wall = f"{float(wall_budget_s):g} seconds" if wall_budget_s is not None else "unbounded"
     if tool_call_budget is None:
         allowance = (
-            f"This turn's effective wall allowance is {wall} seconds and its tool-call "
+            f"This turn's effective wall allowance is {wall} and its tool-call "
             f"budget is uncapped: nothing stops you at a call count, so every call must "
             f"earn the time it spends."
         )
     else:
         allowance = (
-            f"This turn's effective wall allowance is {wall} seconds and its tool-call "
+            f"This turn's effective wall allowance is {wall} and its tool-call "
             f"budget is {int(tool_call_budget)} calls."
         )
     return _PI_PREAMBLE_TEMPLATE.format(allowance=allowance, starting_method=(
@@ -211,17 +211,17 @@ _PI_SYSTEM_PREAMBLE = render_pi_preamble(DEFAULT_WALL_BUDGET_S, DEFAULT_TOOL_CAL
 
 
 def pi_system_preamble(
-    wall_budget_s: float | None = None, tool_call_budget: int | None = None, *, staged: bool = False
+    wall_budget_s: float | None = DEFAULT_WALL_BUDGET_S, tool_call_budget: int | None = None, *, staged: bool = False
 ) -> str:
     """Render this invocation's preamble, defaulting to the module allowances.
 
     A turn granted a ceiling other than ``DEFAULT_WALL_BUDGET_S`` must not be told
     about the default: the rendered allowance has to be the one the host actually
-    imposes, or the model plans against time it does not have. ``None`` means "not
-    supplied by the caller", which for the tool-call budget is also the honest
-    uncapped answer, so the default resolves to the module constants.
+    imposes, or the model plans against time it does not have. Omitted wall
+    allowance retains the adapter's standalone default; explicit ``None`` means
+    the caller imposes no wall deadline. Tool-call ``None`` is likewise uncapped.
     """
-    wall = DEFAULT_WALL_BUDGET_S if wall_budget_s is None else wall_budget_s
+    wall = wall_budget_s
     calls = DEFAULT_TOOL_CALL_BUDGET if tool_call_budget is None else tool_call_budget
     if not staged and wall == DEFAULT_WALL_BUDGET_S and calls == DEFAULT_TOOL_CALL_BUDGET:
         return _PI_SYSTEM_PREAMBLE
@@ -559,7 +559,7 @@ class PiBackend:
         review_instructions: str | None = None,
         tools_disabled: bool = False,
         validate_structured_output: bool = True,
-        wall_budget_s: float | None = None,
+        wall_budget_s: float | None = DEFAULT_WALL_BUDGET_S,
         tool_call_budget: int | None = None,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Yield Pi events; a turn error raises PiError and nonempty agents are unsupported.
@@ -685,8 +685,7 @@ class PiBackend:
                 + "\nKeep searches repository-scoped to the working directory and assigned "
                 "files or their directly relevant dependencies. Do not search filesystem "
                 "roots, host caches, or unrelated repositories. Use explicitly supplied "
-                "review artifacts at their exact paths. Do not assume a planted defect "
-                "or hidden evaluation requirement. Once a candidate is resolved, do not reopen it without new "
+                "review artifacts at their exact paths. Once a candidate is resolved, do not reopen it without new "
                 "contradictory evidence. After covering the assigned changes and resolving "
                 "concrete candidates, emit the requested result immediately; an empty "
                 "findings result is valid. Do not spend remaining time reconsidering "

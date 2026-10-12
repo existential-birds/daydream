@@ -175,9 +175,9 @@ def _explicit_reasoning_effort_pin(config: RunConfig, phase: str) -> str | None:
 def _profile_phase_effort(config: RunConfig, backend_name: str, phase: str) -> str | None:
     """Resolve wonder/arbiter route effort below explicit pins and above table defaults.
 
-    Apply only to backends in the deep effort table; wonder=skip falls through.
+    Apply only to backend/phase pairs in the deep effort table; wonder=skip falls through.
     """
-    if phase not in ("wonder", "arbiter") or backend_name not in DEEP_PHASE_DEFAULT_EFFORT:
+    if phase not in ("wonder", "arbiter") or phase not in DEEP_PHASE_DEFAULT_EFFORT.get(backend_name, {}):
         return None
     route = config.latency_route
     if route is None:

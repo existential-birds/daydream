@@ -48,6 +48,10 @@ async def test_pi_review_system_is_scoped_and_preserves_retry_and_stage_spend(tm
     assert all(args[args.index("--thinking") + 1] == "high" for args in commands)
     assert "at most 17 seconds and 3 tool calls" in review_system
     assert REVIEW_STOPPING_GUIDANCE in review_system
+    assert "planted" not in review_system
+    assert "hidden evaluation" not in review_system
+    assert "Reopen a rejected candidate only when new evidence" in review_system
+    assert "an empty findings result is valid" in review_system
     assert "Closed candidate decisions stay closed" not in review_system
     assert "repository-scoped" in review_system
     assert "Search before you read" not in review_system
@@ -62,6 +66,8 @@ async def test_pi_review_system_is_scoped_and_preserves_retry_and_stage_spend(tm
     assert "2 remaining cumulative tool starts" in integration
     assert "2 tool starts for this invocation" in integration
     for instructions in (initial, retry, integration):
+        assert "planted" not in instructions
+        assert "hidden evaluation" not in instructions
         assert REVIEW_STOPPING_GUIDANCE not in instructions
         assert "Closed decisions stay closed" in instructions
         assert "Return exactly assigned target or triage candidate IDs" in instructions

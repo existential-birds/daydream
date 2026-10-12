@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **codex:** use GPT-6.1 Sol for the former Sol and Terra default tiers, with `medium` review/wonder effort and `high` arbitration effort. Preserve explicit overrides, named latency profiles, and Improve effort defaults; add GPT-6.1 Sol cost synthesis including long-context rates.
+- **review:** default Pi per-stack reasoning effort to `medium`, use neutral change-review framing, and remove instructions about assumed defects or hidden evaluation expectations. Carry reviewer-origin judgments with source-supported contradiction guidance; stage contract 10 invalidates prior cached reviews.
+- **pi:** advertise each attempt's remaining enforced wall allowance, including preparation and retry time, and describe unbounded turns truthfully (#1521).
 - **findings:** every `--findings-out` artifact, diagram included, now declares the commit its analysis read — the PR is captured and merge-base-rebound once at run start, a head that moved away ends the run non-zero before anything is written, and the shared artifact writer no longer falls back to resolving the target from live GitHub metadata at export (issue #1414).
 - **retry:** honor a provider `Retry-After` hint from a status-prefixed JSON error (read through the existing `json_utils.extract_json` convention, case-insensitive header match, shared numeric decoder) and never shorten an admitted wait to the jitter cap — the hint is evaluated against the remaining recovery allowance and invocation deadline only, and a hint that exceeds either stops the retry ladder with the existing insufficient-budget reason (issue #1438).
 - **cli:** `--log` was removed; use `--verbose` for the redacted plain agent-event stream on `stdout` plus redacted chained fatal diagnostics on `stderr` (issue #1236).

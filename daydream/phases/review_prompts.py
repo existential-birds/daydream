@@ -51,7 +51,7 @@ def _confidence_and_convention_instructions() -> str:
         "If your fix would violate a convention, DROP IT — do not include it.\n"
         "2. If the reviewed code itself violates a convention, that IS the issue. "
         "flag it as HIGH confidence and cite the convention by name in `rationale`.\n\n"
-        "You are reviewing AI-generated code. Be strict. Use the supplied change and useful ordinary "
+        "Review the changed behavior. Use the supplied change and useful ordinary "
         "investigation for both findings and clean decisions. Ground issues in evidence — the diff itself, "
         "a specific Exploration Context entry, or ordinary investigation. If you cannot "
         "point to what proves the issue is real, do not emit it. Do not pad the review with "

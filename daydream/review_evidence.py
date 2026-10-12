@@ -131,7 +131,7 @@ class ReviewEvidence:
         return (
             "INVESTIGATION HAS ENDED. Serialize the assigned task's final output using the supplied context and "
             "completed evidence below. No defect is guaranteed; an empty findings result can be successful when "
-            "substantiated. Do not infer hidden evaluation expectations. Do not call tools or obtain new evidence. "
+            "substantiated. Do not call tools or obtain new evidence. "
             "The host preserves the original incomplete reason. Report only substantiated findings and omit "
             "unresolved hypotheses. Mark unfinished files not_reviewed wherever the schema supports coverage; "
             "never claim complete coverage when required decisions or output are missing. For plain text, state "

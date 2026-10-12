@@ -30,7 +30,7 @@ from daydream.run_context import resolve_run_context
 from daydream.trajectory import DaydreamPhase, LifecycleReasonCode, LifecycleStatus, phase_scope
 from daydream.ui.agent_stream import present_result
 
-STAGED_REVIEW_CONTRACT = 9
+STAGED_REVIEW_CONTRACT = 10
 HANDOFF_MAX_BYTES = 64 * 1024
 HANDOFF_MAX_ITEMS = 128
 
@@ -126,7 +126,7 @@ class ReviewInvestigation:
                 conclusion = f"{candidate['finding']['description']}: {conclusion}"
             closed_decisions.append({
                 'candidate_id': candidate['candidate_id'], 'file': candidate['file'], 'line': candidate['line'],
-                'disposition': candidate['disposition'],
+                'disposition': candidate['disposition'], 'judgment_origin': 'reviewer',
                 'conclusion': truncate_utf8_to_budget(conclusion, 512, '[conclusion clipped]')})
         target = (max(4, 3 * len(candidate_ids)) if stage == 'triage' else
                   max(8, len(files)) if stage == 'integration' else max(4, 2 * len(files)))

@@ -170,7 +170,7 @@ recorder are backend-agnostic. `Diagnostic` is recorder-only parser/transport ev
 normalizes and redacts it into JSON-safe `Step.extra.backend_diagnostics`, while observability exports
 only scrubbed diagnostic codes and counts on the enclosing attempt span.
 Adapters emit assistant text and genuine transport/native payloads; `agent_output.py` owns final-turn selection
-and validation. Staged contract 9 accepts bounded, complete, unambiguous prose/fence/single-wrapper packaging;
+and validation. Staged contract 10 accepts bounded, complete, unambiguous prose/fence/single-wrapper packaging;
 `ReviewInvestigation._admit` owns domain admission before result presentation. Native lifecycle stays in adapters,
 Improve opt-out keeps text transport, and raw events remain trajectory evidence. See the staged output contract in
 `docs/extensions.md` for rejection and retry rules.
@@ -210,6 +210,9 @@ CLI subprocess env also sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` and lifts 
 | `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | 600s / 2700s | pi response silence / active-tool and codex silence before the subprocess is killed |
 
 - Failed/truncated/malformed reviews retain admitted evidence and incomplete coverage; read README.md#review-budgets.
+- Budget-aware backend prompts receive the remaining enforced deadline at each attempt; unbounded turns stay unbounded.
+- Carried closed decisions are reviewer judgments. Host admission validates the contract, not semantic correctness;
+  source-supported contradictions mark work incomplete without reopening stages or discarding retained findings.
 - Staged discovery's `open` and `unresolved` candidates receive one triage round; unresolved triage remains incomplete.
   Native Pi stage allowances reserve minimum capacity for undispatched assignment inputs/submissions and known triage
   submissions. Stop before dispatch when the current stage's minimum needs cannot fit; retain prior admitted evidence.
@@ -226,10 +229,11 @@ CLI subprocess env also sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` and lifts 
 ### Config and per-phase model overrides
 
 `config.py` holds `DEFAULT_{CLAUDE,CODEX,PI,EXPLORATION}_MODEL`, `PHASE_DEFAULT_MODELS[backend][phase]`,
-`PHASE_DEFAULT_EFFORT` (deep/review half Codex-only; improve half all three backends), budget constants, and improve `EFFORT_TIERS`. Pi
+`PHASE_DEFAULT_EFFORT` (deep/review Codex defaults plus Pi `per_stack_review` at `medium`;
+Improve defaults for Claude/Codex/Pi), budget constants, and improve `EFFORT_TIERS`. Pi
 resolves its own configured default before falling back to `DEFAULT_PI_MODEL`. Effort is not a pure table
 lookup: the run's latency route sits below the explicit user knobs and above `PHASE_DEFAULT_EFFORT` for
-`wonder`/`arbiter`, and each run records the decision in `.daydream/deep/latency-routing.json`.
+Codex `wonder`/`arbiter`, and each run records the decision in `.daydream/deep/latency-routing.json`.
 
 **Per-phase overrides are config-file-only — there are no per-phase CLI flags.** Set
 `[tool.daydream.phases.<phase>]` in `pyproject.toml` or the top-level equivalent in `.daydream.toml`.

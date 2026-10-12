@@ -449,7 +449,7 @@ scope_issue_filing = false  # default; set true to file out-of-scope work as Git
 
 [tool.daydream.phases.fix]  # per-phase override
 backend = "codex"
-model = "gpt-5.6-terra"
+model = "gpt-6.1-sol"
 reasoning_effort = "medium"
 ```
 
@@ -464,6 +464,13 @@ backend = "codex"
 The resolution order, highest first, is:
 
 **CLI > config file (phase, then global) > built-in per-backend default.**
+
+Codex uses GPT-6.1 Sol for its main and middle model tiers. Deep stack review,
+ordinary review, and wonder default to `medium` reasoning effort; arbitration
+defaults to `high`. Named latency profiles can raise wonder/arbitration effort,
+and explicit reasoning-effort settings take precedence. These defaults follow
+[OpenAI's reasoning-effort guidance](https://developers.openai.com/api/docs/guides/reasoning#reasoning-effort);
+completion time and review quality still need evaluation on representative runs.
 
 ### Out-of-scope issue filing
 
@@ -487,6 +494,9 @@ Phase names are the flow-step config keys: `exploration`, `intent`, `wonder`, `p
 The resolution order, highest first, is:
 
 **`--reasoning-effort` > config file (phase, then global) > built-in per-phase default.**
+
+Pi per-stack reviews default to `medium` reasoning effort. Explicit CLI or file
+settings override this default; other Pi deep phases retain their ambient effort.
 
 ### Latency profiles
 
@@ -707,6 +717,9 @@ carries over, never rejected output. Syntax, envelope, ambiguity and native-outp
 admission failures are terminal. Failed attempts admit no semantic state, and later failure preserves findings from
 successful stages while marking unfinished work incomplete.
 
+Pi receives the remaining enforced wall allowance at each attempt, including time
+spent preparing or retrying the invocation. Unbounded turns are described as unbounded.
+
 Optional Structure projections and their navigation catalogs share the remaining exact-input allowance
 (512 files and 8 MiB) after required/shared context. Catalogs list admitted pointers only; partial status and
 omitted-part counts describe unavailable supporting context without aborting the interaction review.
@@ -716,8 +729,13 @@ recorded and charged, but do not authenticate claims or establish completion. Fi
 snapshot-bound and atomically published. `complete` requires success or explicit host no-op for every planned scope and
 required phase; it does not guarantee exhaustive defect discovery. The
 [stage contract](docs/extensions.md#stage-aware-review-builders-api-8) specifies identity/capture checks, triage state,
-backend transports and native output rules. Stage contract 9 invalidates older cached reviews; extension API 8 requires
+backend transports and native output rules. Stage contract 10 invalidates older cached reviews; extension API 8 requires
 staged builders.
+
+Carried closed decisions are attributed reviewer judgments, not independent host
+confirmation. Concrete source evidence can contradict an earlier inference even
+when its premise has not changed. Such contradictions keep coverage incomplete
+without adding review rounds or discarding previously admitted findings.
 
 The host resolves only the final assistant turn. Staged text accepts one complete schema-valid result with ordinary
 prose, a closed JSON Markdown fence, or one transparent object wrapper (one property, no expected schema root fields).

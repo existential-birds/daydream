@@ -11,7 +11,7 @@ from dataclasses import dataclass
 # when no explicit override is supplied. Every other layer takes ``model: str``
 # as required and does no fallback of its own.
 DEFAULT_CLAUDE_MODEL = "claude-opus-5"
-DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
+DEFAULT_CODEX_MODEL = "gpt-6.1-sol"
 DEFAULT_PI_MODEL = "deepseek/deepseek-v4-flash-0731"
 
 # Caps the 1.5–5h time tail from a single unbounded run_agent turn (issue #169).
@@ -94,7 +94,7 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
     backend: {phase: model for phases, model in zip(_MODEL_PHASE_TIERS, models, strict=True) for phase in phases}
     for backend, models in {
         "claude": ("claude-haiku-4-5", "claude-sonnet-5", DEFAULT_CLAUDE_MODEL),
-        "codex": ("gpt-5.6-luna", "gpt-5.6-terra", DEFAULT_CODEX_MODEL),
+        "codex": ("gpt-5.6-luna", DEFAULT_CODEX_MODEL, DEFAULT_CODEX_MODEL),
     }.items()
 }
 
@@ -103,9 +103,10 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
 # driver's ambient default. Each backend forwards through its native effort knob.
 # Merge deep and Improve tables independently so tuning one flow cannot move the other.
 
-# Deep review/fix effort remains Codex-only; Claude/Pi retain ambient defaults.
-# Mechanical phases use lower effort, while bounded quality-focused arbitration
-# gets xhigh. Expanding backend coverage requires separate behavioral evidence.
+# GPT-6.1 Sol defaults to medium: use it for bounded review and judgment work,
+# low for mechanical work, and high for arbitration. Latency routes and explicit
+# pins can raise effort; xhigh needs measured benefit to justify its extra cost.
+# Pi stack review uses medium; its other deep phases and Claude retain ambient defaults.
 DEEP_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
     "codex": {
         "parse": "low",
@@ -113,16 +114,17 @@ DEEP_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
         "test": "medium",
         "verify": "medium",
         "exploration": "low",
-        "per_stack_review": "high",
-        "review": "high",
-        "arbiter": "xhigh",
+        "per_stack_review": "medium",
+        "review": "medium",
+        "arbiter": "high",
         "suppression": "medium",
         "supervise": "medium",
         "diagram": "medium",
-        "wonder": "high",
+        "wonder": "medium",
         "merge": "medium",
         "intent": "medium",
     },
+    "pi": {"per_stack_review": "medium"},
 }
 
 # Improve tiers cover all backends. Plan authoring/repair uses max because

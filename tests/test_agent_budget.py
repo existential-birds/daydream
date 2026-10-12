@@ -21,12 +21,16 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.backends.pi import PiBackend
 from daydream.config import RETRY_CIRCUIT_FAILURE_THRESHOLD
+from daydream.prompt_budget import prepare_sanctioned_inputs
 from daydream.retry_policy import derive_retry_summary
+from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
+from tests.harness.pi_replay import make_mock_process, make_mock_process_from_fixture
 from tests.harness.trajectory import make_recorder
 
 
@@ -584,3 +588,102 @@ async def test_a_fresh_run_starts_closed(tmp_path: Path) -> None:
         RunContext(InteractionPolicy(interactive=False)).outage_circuit.state()
         == "closed"
     )
+
+
+@pytest.mark.parametrize("bounded", [True, False], ids=["staged-deadline", "unbounded"])
+async def test_pi_attempt_preamble_tracks_preparation_and_retry_spend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bounded: bool,
+) -> None:
+    """The shipped Pi system prompt describes enforcement, including a healthy retry."""
+    fake = FakeClock(monotonic_value=1000).install(monkeypatch)
+    patch_retry_sleep(monkeypatch, fake)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "settings"))
+    backend = PiBackend(model="fixture-model")
+    backend.retry_attempts = 1
+    backend.retry_base_delay_s = backend.retry_max_delay_s = 5
+    source = tmp_path / "assigned.py"
+    source.write_text("answer = 42\n")
+    prepared = prepare_sanctioned_inputs(backend, tmp_path, {"assigned": source}, read_only=True)
+    real_stat = Path.stat
+
+    def delayed_stat(path: Path, *args: Any, **kwargs: Any) -> Any:
+        result = real_stat(path, *args, **kwargs)
+        if path == source:
+            fake.advance(3)  # Real input revalidation consumes time before dispatch.
+        return result
+
+    monkeypatch.setattr(Path, "stat", delayed_stat)
+    prompts: list[str] = []
+
+    async def spawn(*args: str, **kwargs: Any) -> Any:
+        system_arg = args[args.index("--append-system-prompt") + 1]
+        prompts.append(Path(system_arg).read_text() if system_arg.startswith("/") else system_arg)
+        if len(prompts) == 1:
+            fake.advance(20)
+            return make_mock_process([json.dumps(row) for row in [
+                {"type": "session", "sessionId": "retry-fixture"},
+                {"type": "turn_end", "message": {"role": "assistant", "content": [],
+                 "stopReason": "error", "errorMessage": "503 Service Unavailable"}},
+            ]])
+        # The recovery allowance restricts the retry ladder, not healthy execution.
+        fake.advance(100)
+        return make_mock_process_from_fixture("simple_text.jsonl")
+
+    monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", spawn)
+    budget = ReviewInvestigationBudget(ReviewLimits(960, 120, 96), deadline=1306.749)
+    result, _, reason = await run_agent(
+        backend, tmp_path, "Assigned work", phase=DaydreamPhase.DEEP, read_only=True,
+        sanctioned_inputs=prepared, retry_recovery_allowance_s=10,
+        wall_budget_s=3600 if bounded else None,
+        investigation_budget=budget if bounded else None,
+        deadline=1300 if bounded else None,  # Caller deadline wins over the staged 306.749s bound.
+    )
+    assert reason is None and result
+    assert len(prompts) == 2
+    if bounded:
+        # Revalidation takes 3s each time; failed attempt + backoff takes another 25s.
+        assert "effective wall allowance is 297 seconds" in prompts[0]
+        assert "effective wall allowance is 269 seconds" in prompts[1]
+    else:
+        assert all("wall allowance is unbounded" in system for system in prompts)
+        assert all("1800 seconds" not in system for system in prompts)
+
+
+async def test_sanctioned_input_preparation_expiry_never_dispatches_pi(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expiry while checking real input identity cannot launch a zero-allowance attempt."""
+    fake = FakeClock(monotonic_value=1000).install(monkeypatch)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "settings"))
+    backend = PiBackend(model="fixture-model")
+    source = tmp_path / "assigned.py"
+    source.write_text("answer = 42\n")
+    prepared = prepare_sanctioned_inputs(backend, tmp_path, {"assigned": source}, read_only=True)
+    real_stat = Path.stat
+
+    def delayed_stat(path: Path, *args: Any, **kwargs: Any) -> Any:
+        result = real_stat(path, *args, **kwargs)
+        if path == source:
+            fake.advance(5)
+        return result
+
+    monkeypatch.setattr(Path, "stat", delayed_stat)
+    prompts: list[str] = []
+
+    async def spawn(*args: str, **kwargs: Any) -> Any:
+        prompts.append(str(args))
+        return make_mock_process_from_fixture("simple_text.jsonl")
+
+    monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", spawn)
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        assert (await run_agent(backend, tmp_path, "Earlier work", phase=DaydreamPhase.DEEP))[2] is None
+        result, _, reason = await run_agent(backend, tmp_path, "Assigned work", phase=DaydreamPhase.DEEP,
+            read_only=True, sanctioned_inputs=prepared, wall_budget_s=5)
+    assert reason == "wall_budget_exceeded" and result == ""
+    assert len(prompts) == 1  # Only the completed earlier invocation launched Pi.
+    trajectory, stop = _budget_stop(recorder)
+    assert [step["message"] for step in trajectory["steps"] if step["source"] == "user"] == ["Earlier work"]
+    assert stop["attempts"] == 0 and stop["backend_s"] == 0
+    assert stop["partial_edit_handling"] == "discarded"
