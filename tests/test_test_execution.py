@@ -70,6 +70,7 @@ def test_runner_nonzero_exit_sets_passed_false(tmp_path: Path) -> None:
 @pytest.mark.parametrize(("config", "cli", "expected", "source"), [
     ("pytest -x", "/cli/cmd", ["/cli/cmd"], "cli"),
     ("uv run pytest -n auto", None, ["uv", "run", "pytest", "-n", "auto"], "config"),
+    ("pytest -x", "", ["pytest", "-x"], "config"),
 ])
 def test_command_and_provenance_share_cli_over_config_precedence(
     config: str, cli: str | None, expected: list[str], source: str,
@@ -322,3 +323,52 @@ def test_only_a_passed_host_outcome_is_reusable(outcome: str) -> None:
 
 def test_an_agent_outcome_is_never_reusable() -> None:
     assert _identity(kind="agent").reusable is False
+
+@pytest.mark.parametrize(("raw", "reason"), [
+    (None, "missing"), ("   ", "blank"), ("'secret-unclosed", "malformed"),
+    (123, "invalid-type"), ('""', "empty-argv"),
+])
+def test_unresolved_command_preserves_safe_diagnostic_and_source(raw: object, reason: str) -> None:
+    fact = resolve_test_command_fact(SimpleNamespace(test_command=raw), SimpleNamespace(test_command=None))
+    assert not fact.resolved
+    assert fact.diagnostic is not None
+    assert fact.diagnostic.reason_code == reason
+    assert fact.diagnostic.source == "config"
+    assert "--test-command" in fact.diagnostic.message
+    assert "[tool.daydream]" in fact.diagnostic.message
+    assert "secret-unclosed" not in fact.diagnostic.message
+
+
+def test_whitespace_cli_rejects_instead_of_selecting_valid_file_command() -> None:
+    fact = resolve_test_command_fact(SimpleNamespace(test_command="true"), SimpleNamespace(test_command="  "))
+    assert not fact.resolved
+    assert fact.diagnostic is not None
+    assert fact.diagnostic.reason_code == "blank" and fact.diagnostic.source == "cli"
+
+
+@pytest.mark.parametrize("value", [[], [""], [" "]])
+def test_loaded_recipe_with_empty_executable_remains_no_execution(tmp_path: Path, value: list[str]) -> None:
+    recipe = _recipe(tmp_path, cli="true")
+    deep = tmp_path / "deep"
+    deep.mkdir()
+    payload = recipe_to_payload(recipe)
+    payload["command"]["value"] = value
+    (deep / "test-recipe.json").write_text(json.dumps(payload))
+    loaded = load_test_recipe(deep)
+    assert loaded is not None and not loaded.command.resolved
+    assert loaded.command.diagnostic is not None
+    assert loaded.command.diagnostic.reason_code == "empty-argv"
+    assert loaded.command.diagnostic.source == "cli"
+
+
+def test_legacy_unresolved_recipe_does_not_invent_original_provenance(tmp_path: Path) -> None:
+    deep = tmp_path / "deep"
+    deep.mkdir()
+    payload = recipe_to_payload(_recipe(tmp_path))
+    payload["command"].pop("diagnostic")
+    (deep / "test-recipe.json").write_text(json.dumps(payload))
+    loaded = load_test_recipe(deep)
+    assert loaded is not None and not loaded.command.resolved
+    assert loaded.command.diagnostic is not None
+    assert loaded.command.diagnostic.source == "unresolved"
+    assert loaded.command.diagnostic.reason_code == "unresolved"

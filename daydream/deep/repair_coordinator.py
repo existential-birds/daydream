@@ -466,6 +466,10 @@ async def continue_repair_job(
     one that went blocked, and only because someone asked for it: the seconds the
     job already spent stay spent and the grant is recorded beside them.
     """
+    # A configuration miss is not an execution and cannot revive old repair
+    # state. Do this before reading checkpoints, taking ownership or charging.
+    if first is not None and first.diagnostic is not None:
+        return RepairContinuationResult(False, first, None, "test command configuration prevents execution")
     deep = Path(deep_dir_path)
     stored = read_repair_job_record(deep)
     checkpoint_read = read_repair_checkpoint(deep)
@@ -518,6 +522,12 @@ async def _continue_locked(
     dispatched = 0
     measured = first_elapsed_s
     while True:
+        # A replacement configuration may become unavailable on redispatch.
+        # Preserve the stored job without charging this non-execution.
+        if result is not None and result.diagnostic is not None:
+            return RepairContinuationResult(
+                dispatched > 0, result, job, "test command configuration prevents execution", dispatched,
+            )
         # Re-read every pass, not only at the start: a checkpoint that became
         # untrustworthy *during* the job is just as unrecoverable as one that
         # was corrupt when the job loaded, and "nothing to restore" would throw

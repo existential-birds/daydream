@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -97,11 +98,12 @@ def _profile_with_pipeline(**overrides: object) -> "ResolvedProfile":
 
 async def _run_deep(
     target: Path, *, start_at: str = "review", precision_mode: bool = False, approve_on_clean: bool = False,
-    review_profile: "ResolvedProfile | None" = None, review_cache_enabled: bool = True,
+    review_profile: "ResolvedProfile | None" = None, review_cache_enabled: bool = True, test_command: str | None = None,
 ) -> int:
     # cleanup=False suppresses the interactive cleanup prompt; deep is the default.
     config = RunConfig(target=str(target), start_at=start_at, cleanup=False, precision_mode=precision_mode,
         approve_on_clean=approve_on_clean, review_profile=review_profile, review_cache_enabled=review_cache_enabled,
+        test_command=test_command or f"{sys.executable} -c pass",
     )
     return await run(config)
 

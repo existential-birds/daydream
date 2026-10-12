@@ -6,9 +6,6 @@ from pathlib import Path
 from typing import Any, Literal
 
 from daydream import agent, config as phase_config, git_ops, ui
-from daydream.agent import (
-    detect_test_success,
-)
 from daydream.backends import (
     Backend,
     ContinuationToken,
@@ -18,49 +15,37 @@ from daydream.deep.evidence_reuse import (
     ReuseTarget,
 )
 from daydream.git_ops import GitError
-from daydream.phases.inputs import append_extended_facts
 from daydream.phases.repair_outcome import RepairOutcome, repair_reason_code
 from daydream.review_result import ReasonCode
-from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
+from daydream.run_context import RunContext, bind_resolved_run_context
 from daydream.test_execution import (
-    MissingTestCommandError,
+    FactSource,
+    ResolvedFact,
+    TestCommandDiagnostic,
     TestExecutionIdentity,
     TestExecutionResult,
     TestRecipe,
-    canonical_test_command,
+    check_test_command_executable,
+    resolve_test_command_fact,
     run_test_command,
-)
-from daydream.trajectory import (
-    DaydreamPhase,
+    validate_test_command_fact,
 )
 from daydream.workspace import WorkContext
 
-# Deprecated unconfigured fallback: the host parses the final test summary.
-# The suite must finish in the turn; "still running" prose is a failure.
-# Claude also enforces foreground execution mechanically.
-_TEST_RUN_INSTRUCTIONS = (
-    "Run it in the foreground and wait for it to finish; never run it in the background. "
-    "Report if tests pass or fail, quoting the test runner's final summary line verbatim."
-)
 
-
-def _canonical_test_cmd(config: Any) -> list[str] | None:
-    """Resolve CLI > file-config test argv; warn and return None on absent/malformed commands.
-
-    None selects the deprecated agent-reported fallback, which cannot prove a real
-    subprocess exit status.
-    """
-    file_config = getattr(config, "file_config", None)
-    if not isinstance(file_config, DaydreamFileConfig):
-        file_config = DaydreamFileConfig()
-    try:
-        return canonical_test_command(file_config, config)
-    except MissingTestCommandError as exc:
-        ui.print_warning(
-            agent.console,
-            f"{exc} Falling back to agent-run tests (deprecated by issue #726).",
-        )
-        return None
+def test_command_fact(config: Any, recipe: TestRecipe | None, *, repo: Path | None = None) -> ResolvedFact:
+    """Read frozen readiness or direct configuration, optionally checking host executability."""
+    if recipe is not None:
+        fact = validate_test_command_fact(recipe.command)
+    else:
+        file_config = getattr(config, "file_config", None)
+        if not isinstance(file_config, DaydreamFileConfig):
+            file_config = DaydreamFileConfig()
+        fact = resolve_test_command_fact(file_config, config)
+    if repo is not None:
+        cwd = repo if recipe is None else repo / recipe.package.cwd_relative
+        return check_test_command_executable(fact, cwd=cwd)
+    return fact
 
 
 def _test_command_wall_budget(config: Any) -> float:
@@ -71,16 +56,6 @@ def _test_command_wall_budget(config: Any) -> float:
         if configured is not None:
             return configured
     return phase_config.TEST_WALL_BUDGET_S
-
-
-def _recipe_command(recipe: TestRecipe) -> list[str] | None:
-    """Return resolved recipe argv, or None for its named miss; never guess a command."""
-    if not recipe.command.resolved:
-        return None
-    value = recipe.command.value
-    if isinstance(value, tuple):
-        return list(value)
-    return [value] if value else None
 
 
 async def _run_host_test_command(
@@ -122,9 +97,9 @@ def reuse_target(
 
     Missing recipes return None and require real validation.
     """
-    if recipe is None:
+    if recipe is None or not validate_test_command_fact(recipe.command).resolved:
         return None
-    command = recipe.command.value if recipe.command.resolved else None
+    command = recipe.command.value
     head_sha, branch = _git_revision_facts(work.repo)
     return ReuseTarget(
         session_id=session_id,
@@ -186,22 +161,24 @@ def _host_test_identity(
 
 @dataclass(frozen=True)
 class TestAttemptEvidence:
-    """Tree-bound evidence from a host execution or TEST-agent report.
+    """Tree-bound host execution evidence or an explicit configuration stop.
 
-    Only host runs carry a reusable execution identity; prose verdicts never do.
+    Only host runs carry a reusable execution identity; no-execution never does.
     ``abort_reason`` names why an agent turn's result is not a result: a turn the
     host cut short is never evidence of a passing suite, however much its partial
     output looks like one.
     """
 
     session_id: str
-    kind: Literal["host", "agent"]
+    kind: Literal["host", "agent", "no-execution"]
     command: tuple[str, ...] | None
     passed: bool
     input_tree_key: str
     output_tree_key: str
     identity: TestExecutionIdentity | None = None
     abort_reason: str | None = None
+    command_source: FactSource = "unresolved"
+    diagnostic: TestCommandDiagnostic | None = None
 
 
 @dataclass(frozen=True)
@@ -288,6 +265,7 @@ class TestAndHealResult:
     ignored: bool
     attempts: tuple[TestAttemptEvidence, ...]
     repairs: tuple[RepairAttemptEvidence, ...] = ()
+    diagnostic: TestCommandDiagnostic | None = None
 
 @bind_resolved_run_context
 async def phase_test_once(
@@ -302,89 +280,60 @@ async def phase_test_once(
     recipe: TestRecipe | None = None,
     run_context: RunContext | None = None,
 ) -> tuple[TestAttemptEvidence, ContinuationToken | None, str]:
-    """Execute one test attempt and capture the supplied before/after tree identity.
-
-    Configured or approved commands run on the host; absent commands use the agent
-    fallback. A recipe supplies command and cwd without re-resolution.
-    """
-    run_context = resolve_run_context(run_context)
-    cmd: list[str] | None
-    if command_override is not None:
-        cmd = command_override
-    elif recipe is not None:
-        cmd = _recipe_command(recipe)
-    else:
-        cmd = _canonical_test_cmd(config)
+    """Execute canonical or explicitly admitted argv; configuration stops never dispatch."""
+    del backend, continuation, run_context
+    fact = (
+        validate_test_command_fact(ResolvedFact(tuple(command_override), "admitted"))
+        if command_override is not None else test_command_fact(config, recipe)
+    )
+    cwd = work.repo if recipe is None else work.repo / recipe.package.cwd_relative
+    fact = check_test_command_executable(fact, cwd=cwd)
     input_tree_key = capture_tree_key()
-    next_continuation: ContinuationToken | None = None
-    identity: TestExecutionIdentity | None = None
-    host_result: TestExecutionResult | None = None
-    abort_reason: str | None = None
-    if cmd is not None:
-        try:
-            host_result = await _run_host_test_command(cmd, work, config, recipe=recipe)
-        except (OSError, ValueError) as exc:
-            output = f"The configured test command failed to run (spawn): {exc}"
-            passed = False
-        else:
-            if host_result.timed_out:
-                ui.print_warning(
-                    agent.console,
-                    f"Test command hit the {_test_command_wall_budget(config):g}s "
-                    "wall budget and was killed.",
-                )
-            output = host_result.merged_output
-            passed = host_result.passed
-        kind: Literal["host", "agent"] = "host"
-        command: tuple[str, ...] | None = tuple(cmd)
-    else:
-        prompt = f"Run the project's test suite. {_TEST_RUN_INSTRUCTIONS}"
-        prompt = append_extended_facts(prompt, recipe)
-        output, next_continuation, abort_reason = await agent.run_agent(
-            backend,
-            work.repo,
-            prompt,
-            continuation=continuation,
-            phase=DaydreamPhase.TEST,
-            tool_call_budget=phase_config.DEFAULT_TOOL_CALL_BUDGET,
-            wall_budget_s=phase_config.TEST_WALL_BUDGET_S,
-            run_context=run_context,
+    if fact.diagnostic is not None:
+        return (
+            TestAttemptEvidence(
+                session_id=session_id, kind="no-execution", command=None, passed=False,
+                input_tree_key=input_tree_key, output_tree_key=input_tree_key,
+                command_source=fact.diagnostic.source, diagnostic=fact.diagnostic,
+            ),
+            None,
+            fact.diagnostic.message,
         )
-        # An incomplete result is not a result. A turn the host cut off carries
-        # whatever text it had streamed, and a partial summary of a suite that
-        # never finished running is exactly the shape a false green takes, so
-        # the attempt is red and says why.
-        passed = abort_reason is None and detect_test_success(output)
-        if abort_reason is not None:
+    assert isinstance(fact.value, tuple)
+    cmd = list(fact.value)
+    host_result: TestExecutionResult | None = None
+    try:
+        host_result = await _run_host_test_command(cmd, work, config, recipe=recipe)
+    except (OSError, ValueError):
+        diagnostic = TestCommandDiagnostic("spawn-failed", fact.source)
+        return (
+            TestAttemptEvidence(
+                session_id=session_id, kind="no-execution", command=fact.value, passed=False,
+                input_tree_key=input_tree_key, output_tree_key=capture_tree_key(),
+                command_source=fact.source, diagnostic=diagnostic,
+            ),
+            None,
+            diagnostic.message,
+        )
+    else:
+        if host_result.timed_out:
             ui.print_warning(
                 agent.console,
-                f"Test-suite turn did not complete ({abort_reason}); it is not a result.",
+                f"Test command hit the {_test_command_wall_budget(config):g}s wall budget and was killed.",
             )
-        kind = "agent"
-        command = None
+        output = host_result.merged_output
+        passed = host_result.passed
     output_tree_key = capture_tree_key()
-    if kind == "host" and command is not None:
-        identity = _host_test_identity(
-            session_id=session_id,
-            argv=command,
-            work=work,
-            recipe=recipe,
-            input_tree_key=input_tree_key,
-            output_tree_key=output_tree_key,
-            result=host_result,
-            passed=passed,
-        )
+    identity = _host_test_identity(
+        session_id=session_id, argv=fact.value, work=work, recipe=recipe,
+        input_tree_key=input_tree_key, output_tree_key=output_tree_key, result=host_result, passed=passed,
+    )
     return (
         TestAttemptEvidence(
-            session_id=session_id,
-            kind=kind,
-            command=command,
-            passed=passed,
-            input_tree_key=input_tree_key,
-            output_tree_key=output_tree_key,
-            identity=identity,
-            abort_reason=abort_reason,
+            session_id=session_id, kind="host", command=fact.value, passed=passed,
+            input_tree_key=input_tree_key, output_tree_key=output_tree_key,
+            identity=identity, command_source=fact.source,
         ),
-        next_continuation,
+        None,
         output,
     )

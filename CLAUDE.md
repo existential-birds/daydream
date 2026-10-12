@@ -258,10 +258,18 @@ exploration pre-scan (cached across runs)
     -> arbiter review (Opus, scoped to high-severity/contested findings)
     -> cross-stack merge (dedup; resumes the arbiter's session)
     -> diagrams (conditional, grounded; sequence and/or flowchart)
+    -> fix consent and canonical command readiness
     -> recommendation verification (conditional)
-    -> fix gate (parallel, batched per-file)
+    -> fixes (parallel, batched per-file)
     -> test validation
 ```
+
+Canonical test readiness is checked after the accepted actionable fix gate and
+before verify/FIX work. Missing/invalid commands produce configuration evidence
+(`no-execution`) with safe reason/source guidance, never TEST turns or repair
+retries. Only configured or explicitly admitted argv executes on the bounded
+host runner; exit status remains authoritative. Unresolved legacy recipes and
+manifest candidates cannot authorize stabilization, reuse, or commit.
 
 - The fix/verify loop has at most three rounds. Remaining `unresolved` or
   `wrong_target` findings are reported honestly and do not prevent the retained

@@ -25,6 +25,7 @@ from tests.deep_orchestrator.support import (
     _scan_trajectory_extra,
     _silence_gate_noise,
 )
+from tests.harness.execution import host_test_command
 from tests.harness.git_helpers import seed_base_support_files
 from tests.test_deep_orchestrator import (
     _SUPPRESSION_COLLISION_STACKS,
@@ -99,12 +100,12 @@ async def test_heal_loop_receives_feedback_items_in_fix_prompt(
     monkeypatch.setattr("daydream.run_context._prompt_user", _prompt)
 
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.fail_first_test_run = True  # first run fails, second passes
+    command = host_test_command(multi_stack_target.parent / "suite", mode="first")
 
     # phase_test_and_heal stays REAL so feedback_items must flow through it.
     mute_side_effects(heal=False)
 
-    exit_code = await _run_deep(multi_stack_target)
+    exit_code = await _run_deep(multi_stack_target, test_command=command)
     assert exit_code == 0, "deep run did not complete -- heal loop should pass on the second test run"
 
     # Without the orchestrator threading feedback_items, the _build_fix_prompt
@@ -122,9 +123,8 @@ async def test_heal_loop_receives_feedback_items_in_fix_prompt(
     # removes it right after the repair turn, so the rerun's own evidence is
     # already bound to the converged retained tree and needs no stabilizing third
     # run: fail, then healed pass.
-    assert stub.test_suite_calls == 2, (
-        f"expected 2 test-suite runs (fail, confined healed pass), saw {stub.test_suite_calls}"
-    )
+    assert (multi_stack_target.parent / "suite/suite-count.txt").read_text() == "2"
+    assert stub.test_suite_calls == 0
 
 async def test_structural_finding_reaches_fix_loop(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,

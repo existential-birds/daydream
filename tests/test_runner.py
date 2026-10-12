@@ -115,7 +115,6 @@ async def test_unborn_improve_approved_head_rejected_before_backend(
     assert git_ops.is_unborn_head(repo)
     assert git_ops.staged_patch(repo) == before
 
-_FAIL_TURN: tuple[AgentEvent, ...] = (TextEvent(text="1 failed, 0 passed"), _RESULT)
 _FIX_TURN: tuple[AgentEvent, ...] = (TextEvent(text="Applied fix attempt"), _RESULT)
 # Raised if the heal loop calls the backend past its script -- the bounded-loop guard.
 _BEYOND_SCRIPT: Turn = (AssertionError("backend invoked beyond scripted call count"),)
@@ -1141,7 +1140,7 @@ async def test_fix_cycle_awaken_hero_followed_by_model_line(
     _seed_fix_resume(feature_branch_repo, [_fix_item()])
     _silence_fix_cycle_ui(silence_console)
     test_backend = ScriptedBackend(
-        script=[(TextEvent(text="All 1 tests passed. 0 failed."), _RESULT)], model="test-model-xyz",
+        script=[_BEYOND_SCRIPT], model="test-model-xyz",
     )
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
@@ -1160,7 +1159,9 @@ async def test_fix_cycle_awaken_hero_followed_by_model_line(
         calls.append(("dim", message))
     monkeypatch.setattr("daydream.ui.print_phase_hero", _hero_spy)
     monkeypatch.setattr("daydream.ui.print_dim", _dim_spy)
-    exit_code = await runner.run(make_config(feature_branch_repo, start_at="fix", shallow=True, assume="yes"))
+    exit_code = await runner.run(
+        make_config(feature_branch_repo, start_at="fix", shallow=True, assume="yes", test_command="true"),
+    )
     assert exit_code == 0
     awaken_idx = next(( i for i, (kind, payload) in enumerate(calls) if kind == "hero" and payload == "AWAKEN" ), None)
     assert awaken_idx is not None, f"AWAKEN hero never rendered; calls={calls!r}"
@@ -1199,7 +1200,9 @@ async def test_fix_cycle_items_severity_ordered(
     monkeypatch.setattr("daydream.deep.fix_steps.phase_fix_parallel", _spy_fix_parallel)
     monkeypatch.setattr("daydream.deep.fix_steps.phase_test_and_heal", _noop_test)
     monkeypatch.setattr("daydream.deep.fix_steps.phase_commit_push", _noop_commit)
-    exit_code = await runner.run(make_config(feature_branch_repo, start_at="fix", shallow=True, assume="yes"))
+    exit_code = await runner.run(
+        make_config(feature_branch_repo, start_at="fix", shallow=True, assume="yes", test_command="true"),
+    )
     assert exit_code == 0
     assert order, "phase_fix_parallel was never called"
     assert order[0] == ["high", "low"], (
@@ -1248,11 +1251,7 @@ async def test_fix_cycle_yes_commits_fixes(
     _silence_fix_cycle_ui(silence_console)
     # A bare origin is needed for the host commit and push.
     no_ci_remote.connect(feature_branch_repo, bare_remote(tmp_path / "origin.git"))
-    commit_backend = ScriptedBackend(
-        events=[TextEvent(text="All 1 tests passed. 0 failed."),
-                ResultEvent(structured_output=None, continuation=None)],
-        model="mock-model",
-    )
+    commit_backend = ScriptedBackend(script=[_BEYOND_SCRIPT], model="mock-model")
     monkeypatch.setattr(
         "daydream.runner._resolve_backend", lambda _config, _phase, cache=None, **_kwargs: commit_backend,
     )
@@ -1268,7 +1267,7 @@ async def test_fix_cycle_yes_commits_fixes(
     exit_code = await runner.run(
         make_config(
             feature_branch_repo, start_at="fix", shallow=True, assume="yes", pr_number=no_ci_remote.pr_number,
-            pr_repo=no_ci_remote.base_repository,
+            pr_repo=no_ci_remote.base_repository, test_command="true",
         )
     )
     assert exit_code == 0
@@ -1310,11 +1309,12 @@ async def _drive_fix_cycle_failing(
     """Drive real test-and-heal with seeded resume artifacts. Stub verify/fix, spy on commits, control gate
     answers, and reject excess healing via _BEYOND_SCRIPT. Return exit code, backends, and commit calls.
 
-    Test execution and the read-only summarizer run on the TEST phase's backend; the
-    heal turn is a fix turn, so it runs on the FIX phase's backend (issue #1210) and
+    Test execution runs as a real host process; the read-only summarizer runs on the
+    TEST phase's backend. The heal turn runs on the FIX phase's backend (issue #1210) and
     is scripted through ``repair_turn`` rather than through ``script``.
     """
     _seed_fix_resume(target, [_fix_item()])
+    config.test_command = "false"
     # The backend script observes phases; mute only terminal output.
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **k: None)
     monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", lambda *a, **k: None)
@@ -1375,14 +1375,14 @@ async def test_fix_cycle_failing_tests_abort_writes_handoff(
     exit_code, test_backend, repair_backend, commit_calls = await _drive_fix_cycle_failing(
         monkeypatch, feature_branch_repo,
         make_config(feature_branch_repo, start_at="fix", shallow=True, non_interactive=False),
-        script=[_FAIL_TURN, _handoff_turn("# Handoff\n\ninteractive abort")],
+        script=[_handoff_turn("# Handoff\n\ninteractive abort")],
         stdin_answers=["y", "4"],
     )
     assert exit_code == 1
     _assert_single_handoff(feature_branch_repo, "# Handoff\n\ninteractive abort")
     assert commit_calls == [], "a commit ran despite tests failing"
-    assert len(test_backend.prompts) == 2
-    assert "read-only failure-summarizer" in test_backend.prompts[1]
+    assert len(test_backend.prompts) == 1
+    assert "read-only failure-summarizer" in test_backend.prompts[0]
     assert all("Analyze the failures and fix them" not in p for p in test_backend.prompts), test_backend.prompts
     # An aborted heal never reaches the FIX backend.
     assert repair_backend.call_count == 0, repair_backend.prompts
@@ -1422,7 +1422,6 @@ async def test_fix_cycle_clipboard_timeout_keeps_event_loop_responsive_and_shows
 
     backend = EmptyReviewBackend(feature_branch_repo, responder=lambda prompt:
         _handoff_turn("# Handoff\n\nclipboard timeout") if "read-only failure-summarizer" in prompt else None)
-    backend.fail_all_test_runs = True
     backend.fix_edit_line = "\n# daydream fix\n"
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
     answers = iter(["y", "4", "y"])
@@ -1437,7 +1436,7 @@ async def test_fix_cycle_clipboard_timeout_keeps_event_loop_responsive_and_shows
     ticker_task = asyncio.create_task(_ticker())
     try:
         exit_code = await runner.run(
-            make_config(feature_branch_repo, start_at="fix", shallow=True, non_interactive=False))
+            make_config(feature_branch_repo, start_at="fix", shallow=True, non_interactive=False, test_command="false"))
     finally:
         stop_tick.set()
         await ticker_task
@@ -1460,23 +1459,25 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
     """Unattended failure runs one heal attempt, then writes a handoff and exits 1.
 
     The real cycle follows fail/fix/fail/summary, never reads stdin, and emits one fix prompt.
-    The fix prompt is served by the FIX backend; tests and the summary stay on TEST.
+    The fix prompt is served by the FIX backend; only the summary stays on TEST.
     """
     exit_code, test_backend, repair_backend, commit_calls = await _drive_fix_cycle_failing(
         monkeypatch, feature_branch_repo, make_config(feature_branch_repo, start_at="fix", shallow=True, assume="yes"),
-        # Reject a fourth backend call after fail, fail, and handoff.
-        script=[_FAIL_TURN, _FAIL_TURN, _handoff_turn("# Handoff\n\n--yes bounded fix failure")],
+        # Suite executions are host processes; reject a second TEST backend turn after the handoff.
+        script=[_handoff_turn("# Handoff\n\n--yes bounded fix failure")],
         repair_turn=_FIX_TURN,
         stdin_guard_message="input() must not be called under --yes",
     )
     assert exit_code == 1
     _assert_single_handoff(feature_branch_repo, "# Handoff\n\n--yes bounded fix failure")
     assert commit_calls == [], "a commit ran despite tests failing"
-    assert len(test_backend.prompts) == 3, test_backend.prompts
-    assert "read-only failure-summarizer" in test_backend.prompts[2]
-    assert test_backend.read_only_calls == [False, False, True], (
-        test_backend.read_only_calls
-    )
+    assert len(test_backend.prompts) == 1, test_backend.prompts
+    assert "read-only failure-summarizer" in test_backend.prompts[0]
+    assert test_backend.read_only_calls == [True]
+    verdict = json.loads((feature_branch_repo / ".daydream" / "deep" / "test-verdict.json").read_text())
+    assert len(verdict["attempts"]) == 2
+    assert all(attempt["kind"] == "host" and not attempt["passed"] for attempt in verdict["attempts"])
+    assert len(verdict["repairs"]) == 1
     # The single bounded repair turn ran on the FIX-configured backend, never on TEST.
     assert "Analyze the failures and fix them" in repair_backend.prompts[0]
     assert all("Analyze the failures and fix them" not in p for p in test_backend.prompts), test_backend.prompts

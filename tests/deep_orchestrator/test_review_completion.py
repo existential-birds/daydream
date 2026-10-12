@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -539,7 +540,7 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
     review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False,
                                        review_by_stack={'structure': [record()]}, responder=response)
     if fault == 'fix':
-        assert await review.run(output_mode='loop', findings_out=None) == 1
+        assert await review.run(output_mode='loop', findings_out=None, test_command=f'{sys.executable} -c pass') == 1
         saved_path = review.repo / '.daydream/deep/review-coverage.json'
         assert state['failed'] and state['writes'] and all(not after for after, _ in state['writes'])
         assert saved_path.read_bytes() == state['writes'][-1][1]

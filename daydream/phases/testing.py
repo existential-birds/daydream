@@ -64,8 +64,8 @@ from daydream.phases.test_evidence import (
     RepairAttemptEvidence,
     TestAndHealResult,
     TestAttemptEvidence,
-    _canonical_test_cmd,
     phase_test_once,
+    test_command_fact,
 )
 from daydream.redaction import redact_text
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
@@ -104,15 +104,8 @@ def _resolve_test_argv(config: Any, recipe: TestRecipe | None) -> list[str]:
     checkpoint names what the job ran, and a guessed command would let a
     resuming job re-run something the host never executed.
     """
-    if recipe is not None and recipe.command.resolved:
-        # A resolved recipe command is argv; the defensive string case would be a
-        # fact the recipe type forbids, so it is named rather than executed.
-        value = recipe.command.value
-        return list(value) if isinstance(value, tuple) else [value] if isinstance(value, str) else []
-    try:
-        return _canonical_test_cmd(config) or []
-    except (OSError, ValueError, TypeError):
-        return []
+    fact = test_command_fact(config, recipe)
+    return list(fact.value) if fact.resolved and isinstance(fact.value, tuple) else []
 
 
 def _capture_repair_checkpoint(
@@ -407,8 +400,8 @@ async def _run_setup_investigator(
 def _confine_repaired_tree(confinement: Callable[[], None] | None) -> str | None:
     """Run the host's footprint confinement, returning a named failure or ``None``.
 
-    ``None`` means there is nothing to enforce — the legacy agent-run path has
-    no run-wide footprint. A failure is returned, never raised: the caller is
+    ``None`` means the direct caller supplied no run-wide confinement routine.
+    A failure is returned, never raised: the caller is
     already holding a repair outcome, and the failure has to be recorded by name
     rather than replace the turn's own error.
     """
@@ -437,8 +430,8 @@ def _reject_test_healing_generated_file_edits(
     healing turn edited against the pre-turn stash. The run-wide *footprint*
     confinement (unauthorized paths, protected state, index) is the host's
     ``confinement`` seam and is independent of this guard. In the deep pipeline
-    both run, in that order, before any rerun; this guard remains because it
-    still owns the legacy agent-run path and the ``confinement=None`` case, where
+    both run, in that order, before any rerun; this guard also protects
+    direct phase callers and the ``confinement=None`` case, where
     the per-turn stash is the only pre-repair reference available.
     """
     if not snapshot_captured:
@@ -563,8 +556,8 @@ async def phase_test_and_heal(
 ) -> TestAndHealResult:
     """Run bound test attempts and offer a bounded authorized heal after failure.
 
-    Two backends serve this phase, because a repair turn is a fix turn: test
-    execution and summarization run on ``backend`` (the TEST configuration) while
+    The host executes canonical commands. Two backends serve any failure loop:
+    summarization runs on ``backend`` (the TEST configuration) while
     the heal turn runs on ``repair_backend`` (the FIX configuration). ``None``
     reuses ``backend`` for both, which is the single-instance behaviour every
     caller that predates the split relies on.
@@ -572,12 +565,24 @@ async def phase_test_and_heal(
     ``confinement`` is the host's run-wide footprint confinement, invoked once
     after every repair outcome and before the generated-file guard, so the rerun
     and any handoff observe the confined tree. ``None`` leaves the tree exactly
-    as the repair turn left it, which is the legacy agent-run behaviour.
+    as the repair turn left it for a direct caller without confinement.
     """
     run_context = resolve_run_context(run_context)
     if session_id is None or capture_tree_key is None or footprint is None:
         raise TypeError(
             "phase_test_and_heal requires session_id, capture_tree_key, and footprint"
+        )
+    readiness = test_command_fact(config, recipe, repo=work.repo)
+    if readiness.diagnostic is not None:
+        # Configuration is not a failed suite. Return before any repair budget,
+        # checkpoint, retry menu, or failure-summary agent can be reached.
+        evidence, _, output = await phase_test_once(
+            backend, work, config=config, session_id=session_id,
+            capture_tree_key=capture_tree_key, recipe=recipe, run_context=run_context,
+        )
+        ui.print_error(agent.console, "Test configuration: no execution", output)
+        return TestAndHealResult(
+            False, 0, False, False, (evidence,), diagnostic=readiness.diagnostic,
         )
     ui.print_phase_hero(agent.console, "AWAKEN", ui.phase_subtitle("AWAKEN"))
     # A repair turn is a fix turn, so it runs on the FIX-configured instance; the
@@ -597,8 +602,8 @@ async def phase_test_and_heal(
     # built by the module that owns the record, because a checkpoint captured
     # under one spelling is unrestorable under another.
     job_id = repair_job_id(session_id)
-    # Feed redacted host-suite failures through the same environmental/healing
-    # gate as agent-run failures on the next iteration.
+    # Feed a failed approved host command through the environmental/healing gate
+    # on the next iteration without rerunning it.
     host_failure_output: str | None = None
 
     async def _launch_fix(output: str) -> bool:
@@ -723,9 +728,11 @@ async def phase_test_and_heal(
         # Git-observed paths, never the feedback items' targets: only the tree
         # itself says what the turn actually changed.
         changed: tuple[str, ...] = ()
-        if snapshot is not None:
+        if snapshot_captured:
             try:
-                changed = tuple(git_ops.changed_paths_z(work.repo, snapshot))
+                # A clean tracked tree has no stash object: successful capture
+                # returning None still proves HEAD is the pre-repair baseline.
+                changed = tuple(git_ops.changed_paths_z(work.repo, snapshot or "HEAD"))
             except (GitError, OSError) as exc:
                 # Never abort the repair over a degraded read, and never hide it:
                 # the record names the miss so the job can re-derive the paths.
@@ -734,8 +741,8 @@ async def phase_test_and_heal(
         # generated-file guard and before any rerun or handoff, so the next test
         # execution observes the confined tree rather than the raw repair tree.
         # The host supplies the routine (the deep pipeline passes the same
-        # implementation its terminal stabilization uses); `None` is the legacy
-        # agent-run path, which has no run-wide footprint to enforce.
+        # implementation its terminal stabilization uses); `None` denotes a
+        # direct caller without a run-wide confinement routine.
         confinement_error = _confine_repaired_tree(confinement)
         if confinement_error is not None:
             diagnostics.append(f"confinement_failed: {confinement_error}")
@@ -861,6 +868,11 @@ async def phase_test_and_heal(
                 run_context=run_context,
             )
             attempts.append(evidence)
+            if evidence.kind == "no-execution":
+                ui.print_error(agent.console, "Test configuration: no execution", output)
+                return TestAndHealResult(
+                    False, retries_used, False, False, tuple(attempts), tuple(repairs), evidence.diagnostic,
+                )
             test_passed = evidence.passed
 
         if test_passed:
@@ -977,6 +989,11 @@ async def phase_test_and_heal(
                             retries_used += 1
                             continue
                         attempts.append(evidence)
+                        if evidence.kind == "no-execution":
+                            ui.print_error(agent.console, "Test configuration: no execution", alternate_output)
+                            return TestAndHealResult(
+                                False, retries_used, False, False, tuple(attempts), tuple(repairs), evidence.diagnostic,
+                            )
                         if evidence.passed:
                             ui.print_success(agent.console, "Tests passed")
                             return TestAndHealResult(

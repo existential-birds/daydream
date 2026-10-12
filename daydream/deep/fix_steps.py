@@ -55,8 +55,10 @@ from daydream.phases import (
     require_empty_staged_index,
     severity_sorted,
 )
+from daydream.phases.test_evidence import test_command_fact
 from daydream.repository_paths import strip_dot_slash
 from daydream.run_context import resolve_run_context
+from daydream.test_execution import TestCommandDiagnostic
 from daydream.trajectory import (
     DaydreamPhase,
     current_session_id,
@@ -190,6 +192,12 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     if not items:
         print_success(console, "No actionable items -- done.")
         return Stop(0)
+
+    # Command readiness belongs before verification and mutation: a missing
+    # suite is configuration evidence, never permission to start a fix cycle.
+    command = test_command_fact(ctx.config, deep_state.test_recipe, repo=ctx.work.repo)
+    if command.diagnostic is not None:
+        return _no_execution_stop(ctx, command.diagnostic)
 
     # Authorize canonical primary/related paths even outside the diff, without
     # widening each fixer to every reviewed file.
@@ -738,7 +746,8 @@ def _test_attempt_payload(attempt: TestAttemptEvidence) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "session_id": attempt.session_id,
         "kind": attempt.kind,
-        "command": list(attempt.command) if attempt.command is not None else "agent-fallback",
+        "command": list(attempt.command) if attempt.command is not None else None,
+        "command_source": attempt.command_source,
         "passed": attempt.passed,
         "input_tree_key": attempt.input_tree_key,
         "output_tree_key": attempt.output_tree_key,
@@ -746,17 +755,20 @@ def _test_attempt_payload(attempt: TestAttemptEvidence) -> dict[str, Any]:
     }
     if attempt.identity is not None:
         payload["identity"] = attempt.identity.payload()
+    if attempt.diagnostic is not None:
+        payload["diagnostic"] = attempt.diagnostic.payload()
     return payload
 
 
 def _persist_test_verdict(
     ctx: FlowContext,
-    state: FixCycleState,
+    state: FixCycleState | None,
     *,
     passed: bool,
     ignored: bool,
     attempts: list[TestAttemptEvidence],
     repairs: list[RepairAttemptEvidence] | None = None,
+    diagnostic: TestCommandDiagnostic | None = None,
 ) -> None:
     deep_state = DeepState(ctx.data)
     from daydream.remote_ci import local_host_facts
@@ -764,7 +776,9 @@ def _persist_test_verdict(
     atomic_write_json(
         DeepArtifact.TEST_VERDICT.at(deep_state.dd),
         {
-            "session_id": state.session_id,
+            "session_id": state.session_id if state is not None else current_session_id() or ctx.work.run_id,
+            "status": "no-execution" if diagnostic is not None else "executed",
+            "diagnostic": diagnostic.payload() if diagnostic is not None else None,
             "passed": passed,
             "ignored": ignored,
             "retries": max(0, len(attempts) - 1),
@@ -776,6 +790,36 @@ def _persist_test_verdict(
         },
         sort_keys=True,
     )
+
+
+def _no_execution_stop(
+    ctx: FlowContext,
+    diagnostic: TestCommandDiagnostic,
+    state: FixCycleState | None = None,
+    *,
+    attempts: list[TestAttemptEvidence] | None = None,
+    repairs: list[RepairAttemptEvidence] | None = None,
+) -> Stop:
+    """Record a configuration stop without repairing or finalizing any tree."""
+    if state is not None:
+        state.latest_test_evidence = None
+        state.latest_retained = None
+    if attempts is None:
+        attempts = [TestAttemptEvidence(
+            session_id=state.session_id if state is not None else current_session_id() or ctx.work.run_id,
+            kind="no-execution",
+            command=None,
+            passed=False,
+            input_tree_key="",
+            output_tree_key="",
+            command_source=diagnostic.source,
+            diagnostic=diagnostic,
+        )]
+    _persist_test_verdict(
+        ctx, state, passed=False, ignored=False, attempts=attempts, repairs=repairs, diagnostic=diagnostic,
+    )
+    print_error(console, "Test command configuration prevents execution", diagnostic.message)
+    return Stop(1)
 
 
 def _authorize_final_red_override(ctx: FlowContext) -> bool:
@@ -799,6 +843,11 @@ async def finalize_retained_tree_after_test(
     deep_state = DeepState(ctx.data)
     state = deep_state.fix_cycle_state
     attempts = list(result.attempts)
+    if result.diagnostic is not None:
+        return _no_execution_stop(ctx, result.diagnostic, state, attempts=attempts, repairs=list(result.repairs))
+    command = test_command_fact(ctx.config, deep_state.test_recipe, repo=ctx.work.repo)
+    if command.diagnostic is not None:
+        return _no_execution_stop(ctx, command.diagnostic, state, attempts=attempts, repairs=list(result.repairs))
     if not attempts:
         return _stabilization_stop(
             ctx, state, "test produced no evidence", round_number=None
@@ -865,6 +914,10 @@ async def finalize_retained_tree_after_test(
             except Exception as exc:
                 return _stop(f"final test failed to run: {exc}")
             attempts.append(evidence)
+            if evidence.diagnostic is not None:
+                return _no_execution_stop(
+                    ctx, evidence.diagnostic, state, attempts=attempts, repairs=list(result.repairs),
+                )
             ignored = False if evidence.passed else _authorize_final_red_override(ctx)
             ran_test = True
             # This extra pass runs no repair turn of its own, but it rewrites the
@@ -929,6 +982,9 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
     """Run typed, identity-bound tests and strictly finalize the retained tree."""
     deep_state = DeepState(ctx.data)
     state = deep_state.fix_cycle_state
+    command = test_command_fact(ctx.config, deep_state.test_recipe, repo=ctx.work.repo)
+    if command.diagnostic is not None:
+        return _no_execution_stop(ctx, command.diagnostic, state)
     async with phase_scope(DaydreamPhase.TEST):
         try:
             # Two resolutions, deliberately: test execution and summarization run on
@@ -979,6 +1035,10 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
             started = time.monotonic()
             result = await _run_execution()
             first_elapsed_s = time.monotonic() - started
+            if result.diagnostic is not None:
+                return _no_execution_stop(
+                    ctx, result.diagnostic, state, attempts=list(result.attempts), repairs=list(result.repairs),
+                )
             # The repair job owns continuation: it decides whether this run's
             # execution owes another one, restores captured work first, and is the
             # only thing that dispatches a second execution.
@@ -1005,6 +1065,11 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
                     ignored=continuation.result.ignored,
                     attempts=(*result.attempts, *continuation.result.attempts),
                     repairs=(*result.repairs, *continuation.result.repairs),
+                    diagnostic=continuation.result.diagnostic,
+                )
+            if result.diagnostic is not None:
+                return _no_execution_stop(
+                    ctx, result.diagnostic, state, attempts=list(result.attempts), repairs=list(result.repairs),
                 )
             job = continuation.job
             if job is not None and job.cannot_report_green:

@@ -30,6 +30,7 @@ from daydream.eval.analyzer import analyze_costs
 from daydream.phases.publish import (
     _do_commit,
 )
+from daydream.run_config import RunConfig
 from daydream.trajectory import (
     PARTIAL_SUFFIX,
     RUN_DOCUMENT_NAME,
@@ -1351,7 +1352,7 @@ async def test_do_commit_records_commit_phase_event(git_repo: Path, make_work: A
     rec = make_recorder(git_repo)
     async with rec:
         ok = await _do_commit(
-            ScriptedBackend(), work, push=False,
+            ScriptedBackend(), work, push=False, config=RunConfig(test_command="true"),
             retained_paths=frozenset({"app.py"}),
             retained_states=git_ops.snapshot_worktree_paths(git_repo, {"app.py"}),
             initial_index=git_ops.snapshot_index(git_repo),

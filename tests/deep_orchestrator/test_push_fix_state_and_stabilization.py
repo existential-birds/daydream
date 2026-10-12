@@ -281,6 +281,7 @@ async def test_terminal_red_after_heal_restores_unrelated_and_protected_state(
     scratch.write_bytes(b"\x00owner")
     items = [{**_merge_item(1, "a.py", "high"), "item_uid": "item:a"}]
     ctx = _direct_fix_context(repo, items, changed_files={"a.py"})
+    ctx.config.test_command = "false"
     state = _direct_fix_state(ctx, items, {"a.py"})
 
     async def _red_after_mutation(*_a: Any, **_k: Any) -> TestAndHealResult:

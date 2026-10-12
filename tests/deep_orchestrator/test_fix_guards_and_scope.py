@@ -19,6 +19,7 @@ from tests.deep_orchestrator.support import (
     _scan_phase_events,
     _scan_trajectory_extra,
 )
+from tests.harness.execution import host_test_command
 from tests.harness.git_helpers import bare_remote as _bare_remote, commit as _commit, git as _git
 from tests.harness.remote_ci import NoCIRemote
 from tests.test_deep_orchestrator import (
@@ -170,13 +171,16 @@ async def test_test_healing_guard_reverts_generated_migration_edit(
     mute_side_effects(heal=False)
     stub = _install_stub_backend(monkeypatch, project, pin_skill_availability=False)
     stub.merge_items = [_merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix")]
-    stub.fail_first_test_run = True
     stub.heal_fix_generated = "migrations/0001_init.sql"
     stub.heal_fix_new_generated = "migrations/0002_add_x.sql"
-    exit_code = await run(make_config(project, assume="yes", output_mode="loop", non_interactive=False, archive=False,)
+    suite_dir = tmp_path / "suite"
+    exit_code = await run(make_config(project, assume="yes", output_mode="loop", non_interactive=False, archive=False,
+                                     test_command=host_test_command(suite_dir, mode="first"))
     )
 
     assert exit_code == 0
+    assert int((suite_dir / "suite-count.txt").read_text()) >= 2
+    assert stub.test_suite_calls == 0
     assert migration.read_bytes() == pre_migration
     new_migration = project / "migrations" / "0002_add_x.sql"
     assert new_migration.is_file()
@@ -211,12 +215,15 @@ async def test_unauthorized_heal_edit_is_confined_before_the_test_rerun(
     stub.fix_edit_line = "\n# daydream fix\n"
     # The first suite run fails, so the heal turn runs and edits a file the
     # reviewed diff never covered.
-    stub.fail_first_test_run = True
     stub.heal_fix_unauthorized = "unrelated.py"
 
-    exit_code = await run(make_config(target, assume="yes", output_mode="loop", non_interactive=False, archive=False,))
+    suite_dir = tmp_path / "suite"
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop", non_interactive=False, archive=False,
+                                     test_command=host_test_command(suite_dir, mode="first")))
 
     assert exit_code == 0
+    assert (suite_dir / "suite-count.txt").read_text() == "2"
+    assert stub.test_suite_calls == 0
     # The unauthorized edit is gone from the retained tree...
     assert (target / "unrelated.py").read_text() == pre_unrelated
     # ...and it was the pre-rerun confinement that removed it: the guard event

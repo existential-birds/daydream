@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from collections.abc import AsyncIterator, Callable
@@ -52,6 +53,7 @@ from daydream.phases.repair_outcome import repair_scope_request
 from daydream.repository_paths import InvalidRepositoryFilePath
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
+from tests.harness.execution import host_test_command
 from tests.harness.git_helpers import commit as git_commit, git, init_repo, write_and_stage
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
@@ -158,10 +160,19 @@ async def test_phase_blocks_the_repair_when_the_checkpoint_cannot_be_persisted(
     git_commit(tmp_path, "test: seed authorized file")
 
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "2")
-    monkeypatch.setattr(
-        "daydream.phases.testing.write_repair_checkpoint",
-        lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk full")),
-    )
+    checkpoint_path = tmp_path / ".daydream" / "deep" / "repair-checkpoint.json"
+    real_replace = os.replace
+    rejected_installs: list[Path] = []
+
+    def reject_checkpoint_install(source: Any, destination: Any) -> None:
+        if Path(destination) == checkpoint_path:
+            rejected_installs.append(Path(destination))
+            raise OSError("disk full")
+        real_replace(source, destination)
+
+    monkeypatch.setattr("daydream.json_utils.os.replace", reject_checkpoint_install)
+    suite_dir = tmp_path.parent / f"{tmp_path.name}-suite"
+    config = SimpleNamespace(file_config=None, test_command=host_test_command(suite_dir, mode="all"))
     fail_turn = [TextEvent(text="1 failed, 0 passed"), _RESULT]
 
     def responder(_cwd: Path, prompt: str, *_rest: Any) -> Any:
@@ -172,12 +183,15 @@ async def test_phase_blocks_the_repair_when_the_checkpoint_cannot_be_persisted(
         run_allowed_paths=frozenset({"allowed.py"}), policy_revision=1,
     )
     result = await phases.phase_test_and_heal(
-        backend, make_work(tmp_path), session_id="s1",
+        backend, make_work(tmp_path), config=config, session_id="s1",
         capture_tree_key=lambda: "tree-1", footprint=footprint, allow_standalone=True,
     )
 
     assert (result.passed, result.proceed, result.retries) == (False, False, 1)
     assert result.repairs[0].checkpoint_ref is None
+    assert rejected_installs == [checkpoint_path]
+    assert not checkpoint_path.exists()
+    assert (suite_dir / "suite-count.txt").read_text() == "1"
     assert any("checkpoint_write_failed" in diagnostic and "OSError" in diagnostic
         for diagnostic in result.repairs[0].diagnostics)
     # The blocker is named in the job record too, so a resuming job sees it.
@@ -203,11 +217,15 @@ async def test_checkpoint_captures_authorized_work_before_the_guard_restores(
     monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "2")
 
+    suite_dir = tmp_path.parent / f"{tmp_path.name}-suite"
+    config = SimpleNamespace(file_config=None, test_command=host_test_command(suite_dir, mode="all"))
+
     async def repair(**_kwargs: Any) -> AsyncIterator[TextEvent]:
         # The spike's confirmed sequence: authorized edit, authorized new file,
         # then a stall to the wall budget with no terminal ResultEvent.
         (tmp_path / "allowed.py").write_text("-- repair edit\n")
         (tmp_path / "helper.py").write_text("# new helper\n")
+        (tmp_path / "migrations" / "0001_init.sql").write_text("-- forbidden generated edit\n")
         while True:
             yield TextEvent(text="PARTIAL-DIAGNOSIS")
             await anyio.sleep(0)
@@ -219,7 +237,7 @@ async def test_checkpoint_captures_authorized_work_before_the_guard_restores(
         policy_revision=1,
     )
     result = await phases.phase_test_and_heal(
-        backend, make_work(tmp_path), session_id="s1",
+        backend, make_work(tmp_path), config=config, session_id="s1",
         capture_tree_key=lambda: "tree-1", footprint=footprint,
         allow_standalone=True,
     )
@@ -233,6 +251,11 @@ async def test_checkpoint_captures_authorized_work_before_the_guard_restores(
     # read from the live tree before the guard could restore anything.
     assert "repair edit" in checkpoint.candidate_patch
     assert "helper.py" in checkpoint.candidate_patch
+    assert "forbidden generated edit" in checkpoint.candidate_patch
+    assert (tmp_path / "migrations" / "0001_init.sql").read_text() == "-- generated original\n"
+    assert (tmp_path / "allowed.py").read_text() == "-- repair edit\n"
+    assert (tmp_path / "helper.py").read_text() == "# new helper\n"
+    assert (suite_dir / "suite-count.txt").read_text() == "1"
     # The capture is the interrupted turn's own identity, not a later attempt's.
     assert checkpoint.execution_id == f"repair-s1:execution:{result.retries}"
     assert checkpoint.authorized_scope == ("allowed.py", "helper.py", "migrations/0001_init.sql")

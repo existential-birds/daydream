@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import sqlite3
 import sys
 from collections.abc import AsyncIterator
@@ -75,6 +76,7 @@ async def test_runner_lifecycle_reason_redaction_reaches_evaluation_and_archive(
     monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
     assert await run(RunConfig(
         target=str(target), cleanup=False, non_interactive=True, review_profile=independent_exploration_profile(),
+        test_command=shlex.join([sys.executable, "-c", "pass"]),
     )) == 0
     assert backend.failures == 1
     roots = list((target / ".daydream/runs").glob("*/trajectory.json"))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any, cast
@@ -427,7 +428,9 @@ def _direct_fix_context(repo: Path, items: list[dict[str, Any]], *, changed_file
     dd.mkdir(parents=True, exist_ok=True)
     items_file = dd / "merged-items.json"
     items_file.write_text(json.dumps({"items": items}))
-    return FlowContext(config=RunConfig(target=str(repo), assume="yes", cleanup=False, start_at=start_at),
+    return FlowContext(config=RunConfig(
+        target=str(repo), test_command=f"{sys.executable} -c pass", assume="yes", cleanup=False, start_at=start_at,
+    ),
         work=work_context(repo, run_id="session-current"), registry=Registry(), allow_standalone_artifacts=True,
         data={"dd": dd, "items_file": items_file, "merged_report": dd / "merged-review.md",
             "changed_files": changed_files,

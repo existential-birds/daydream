@@ -591,6 +591,16 @@ preamble, and writes the result to `.daydream/deep/test-recipe.json`. The same
 resolved facts feed the host test run, the pre-push hook run, and every agent
 prompt, so no phase re-discovers them.
 
+Missing or invalid canonical commands stop an accepted actionable fix run before
+verification or fixes begin. The run records `status: no-execution`, the safe
+reason and original command source, and returns failure without TEST/FIX turns,
+suite subprocesses, repair retries, stabilization, or commit. Set `--test-command`
+or the file configuration below to proceed. Manifest-derived candidates are
+suggestions requiring explicit admission; model prose cannot authorize them.
+Legacy unresolved recipes retain unknown provenance and cannot execute.
+Review-only, declined-fix, no-diff, and no-actionable-finding runs retain their
+existing outcomes.
+
 `test_required_suites` declares the suite ids the single configured
 `test_command` is the authoritative gate for. It is declaration-only: there is
 no second runner, and a narrowed `-k`/file check can never satisfy the required

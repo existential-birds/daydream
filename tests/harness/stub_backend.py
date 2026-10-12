@@ -91,12 +91,8 @@ class StubBackend:
         # resolve at fix_verify_resolve_after_round and remain unresolved before it.
         self.fix_verify_verdicts: dict[int, dict[str, Any]] | None = None
         self.fix_verify_resolve_after_round: int = 1
-        # Test invocation count supports first-run failures followed by healing.
+        # Forbidden legacy TEST dispatch count: real suites use host commands.
         self.test_suite_calls: int = 0
-        # Fail the first test call, then pass.
-        self.fail_first_test_run: bool = False
-        # Fail every test call.
-        self.fail_all_test_runs: bool = False
         # Override for the merge agent's item list (None -> default three-item payload).
         self.merge_items: list[dict[str, Any]] | None = None
         # Emit unstructured prose to exercise merge salvage.
@@ -182,24 +178,16 @@ class StubBackend:
         self.heal_fix_retryable_failures: int = 0
         self.heal_fix_retryable_error: Exception | None = None
         self._heal_retry_counts: int = 0
-        # Emit this test-suite turn's answer and then never finish, so the host
-        # records an incomplete result whatever summary the text contains.
-        self.test_turn_partial_summary: str | None = None
         # Emit a runaway ToolStartEvent burst without a result to exercise budgets.
         self.runaway_fix: bool = False
         # Runaway pacing; zero still yields via sleep(0). Positive values can trip
         # the wall limit before the tool limit. An injected clock replaces sleeps.
         self.runaway_fix_sleep_s: float = 0.0
-        # Emit a Postgres-unreachable test failure. The environmental short-circuit
-        # must abort before healing writes .daydream-heal-fix-applied.
-        self.environmental_test_failure: bool = False
         # Append a real tracked edit so recommended-change patches can capture it.
         self.fix_edit_line: str | None = None
         # Runaway wonder or named per-stack review: tool events without a result.
         self.runaway_alternatives: bool = False
         self.runaway_stack: str | None = None
-        # Runaway test-suite turn.
-        self.runaway_test: bool = False
         # Emit this many tool calls before a normal wonder result, testing whether
         # a tool-call ceiling truncates a long but terminating review.
         self.alternatives_tool_calls: int = 0
@@ -276,8 +264,6 @@ class StubBackend:
             and "you are reviewing the" in pl
             and f"you are reviewing the {self.runaway_stack} stack" in pl
         ):
-            return True
-        if self.runaway_test and "run the project's test suite" in pl:
             return True
         return False
 
@@ -779,32 +765,10 @@ class StubBackend:
             yield ResultEvent(structured_output=None, continuation=None)
             return
 
-        # Test failures can be first-only, permanent, or environmental. The
-        # Postgres signature must stop healing before another fix turn.
+        # Keep the old prompt recognizable as a negative dispatch observable.
         if "run the project's test suite" in pl:
             self.test_suite_calls += 1
-            if self.test_turn_partial_summary is not None:
-                # A pass summary the host then cuts off: the answer never arrived.
-                yield TextEvent(text=self.test_turn_partial_summary)
-                async for event in self._runaway_burst("ttc", self.runaway_fix_sleep_s):
-                    yield event
-                return
-            if self.environmental_test_failure:
-                yield TextEvent(text=(
-                        "could not connect to server: Connection refused\n"
-                        "\tIs the server running on host localhost (127.0.0.1) "
-                        "and accepting TCP/IP connections on port 5432?\n"
-                        "The dev Postgres container is not running."
-                    )
-                )
-            elif self.fail_all_test_runs:
-                yield TextEvent(text="1 failed, 0 passed")
-            elif self.fail_first_test_run and self.test_suite_calls == 1:
-                yield TextEvent(text="1 failed, 0 passed")
-            else:
-                yield TextEvent(text="2 passed, 0 failed")
-            yield ResultEvent(structured_output=None, continuation=None)
-            return
+            raise AssertionError("TEST agents cannot execute the canonical suite")
 
         # Default: empty.
         yield TextEvent(text="")

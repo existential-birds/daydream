@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,8 @@ def _is_verifier_prompt(prompt: str) -> bool:
 
 async def _run_deep_with(target: Path, **overrides: Any) -> int:
     """Run the deep pipeline through ``runner.run`` with explicit RunConfig overrides."""
-    config = RunConfig(target=str(target), start_at="review", cleanup=False, **overrides,)
+    fields = {"test_command": f"{sys.executable} -c pass", **overrides}
+    config = RunConfig(target=str(target), start_at="review", cleanup=False, **fields)
     return await run(config)
 
 async def test_start_at_fix_resume_reuses_unchanged_verdicts_and_reverifies_changed_ones(

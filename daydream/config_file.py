@@ -35,7 +35,9 @@ class DaydreamFileConfig:
     operator's additional finite allowance for a job that ran out of time.
     Non-negative bounds preserve zero: a zero group budget intentionally skips
     fixes. Test-command timeouts and diagram/improve bounds must be positive.
-    Invalid declared retry allowances warn before using the default.
+    Invalid declared retry allowances warn before using the default. Test commands
+    preserve whitespace and a safe invalid-type marker for actionable readiness
+    diagnostics instead of silently coercing malformed values to absent.
 
     ``latency_profile`` is deliberately parsed without validating its vocabulary:
     the runtime resolver promotes unknown names to forensic. ``review_profile``
@@ -104,6 +106,7 @@ class DaydreamFileConfig:
     diagram_min_branch_points: int | None = None
     diagram_service_roots: list[str] = field(default_factory=list)
     test_command: str | None = None
+    test_command_invalid: bool = False
     test_command_wall_s: float | None = None
     test_required_suites: list[str] = field(default_factory=list)
 
@@ -340,7 +343,8 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         diagram_min_modules=_coerce_positive_int(diagram, "min_modules"),
         diagram_min_branch_points=_coerce_positive_int(diagram, "min_branch_points"),
         diagram_service_roots=_coerce_string_list(diagram.get("service_roots")),
-        test_command=_coerce_string(merged.get("test_command")),
+        test_command=merged.get("test_command") if isinstance(merged.get("test_command"), str) else None,
+        test_command_invalid=merged.get("test_command") is not None and not isinstance(merged["test_command"], str),
         test_command_wall_s=_coerce_positive_float(merged.get("test_command_wall_s")),
         test_required_suites=_coerce_string_list(merged.get("test_required_suites")),
     )
