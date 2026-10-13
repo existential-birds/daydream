@@ -10,7 +10,12 @@ limiter retain their contracts.
 
 ## Reproducible planning
 
-[Planner records](evidence/1533-planner.json) contain full per-file patch weights,
+The one-off measurement tool and detailed JSON records were removed from the
+current tree after the study. The pinned links below retain those assets in signed
+commit `bfa3aa491770eb959224f8f924489b036421f64c`; the full raw reports and
+adjudication proofs also remain in the local issue-1533 measurement archive.
+
+[Historical planner records](https://github.com/existential-birds/daydream/blob/bfa3aa491770eb959224f8f924489b036421f64c/docs/evidence/1533-planner.json) contain full per-file patch weights,
 primary assignments, frontiers, exact target identities and repeated-plan checks.
 The archive patches were byte-identical to Git diffs at these frozen revisions:
 
@@ -52,7 +57,7 @@ files. Repeat each plan and count ownership with `Counter`, rather than a set un
 
 ## Live comparison method
 
-[Comparison records](evidence/1533-review-comparisons.json) preserve all 60 trials:
+[Historical comparison records](https://github.com/existential-birds/daydream/blob/bfa3aa491770eb959224f8f924489b036421f64c/docs/evidence/1533-review-comparisons.json) preserve all 60 trials:
 24 exploratory controls, 26 refined controls and ten exact frozen reviews. Each
 has actual planned/outcome scopes, revision/diff binding, phase outcomes, elapsed
 time, requests, tool starts, prompt/completion/cached tokens, cost, allowances and
@@ -96,27 +101,23 @@ rows remain in the records; additional pairs are disclosed. The small sample,
 shared provider/host load, caching and order variability prevent an isolated
 scheduling claim or generalized completion guarantee.
 
-The committed [`measure_overloaded_review.py`](../scripts/measure_overloaded_review.py)
-creates signed temporary Git fixtures and measures live trials. For example:
+The [historical one-off reproducer](https://github.com/existential-birds/daydream/blob/bfa3aa491770eb959224f8f924489b036421f64c/scripts/measure_overloaded_review.py)
+creates signed temporary Git fixtures and measures genuine `runner.run` trials.
+Its CLI and fixture definitions remain available at the pinned commit. To retrieve
+it without restoring an ongoing repository tool:
 
 ```sh
-make lockcheck
-uv run python scripts/measure_overloaded_review.py \
-  --prepare /tmp/sharding-python-clean --language python --variant clean
-uv run python scripts/measure_overloaded_review.py \
-  --source "$PWD" --fixture /tmp/sharding-python-clean \
-  --output /tmp/sharding-python-clean-off-first --mode off
-uv run python scripts/measure_overloaded_review.py \
-  --source "$PWD" --fixture /tmp/sharding-python-clean \
-  --output /tmp/sharding-python-clean-auto-first --mode auto
+git show bfa3aa491770eb959224f8f924489b036421f64c:scripts/measure_overloaded_review.py > /tmp/measure_overloaded_review.py
 ```
 
-Repeat with new output directories, reverse order, and prepare `local`/`cross` for
-both languages. For a frozen target, supply its immutable worktree as `--fixture`
-and its exact merge base as `--base-commit`; the source stays this branch. `cap8`
-is also supported by the tool, but the live results here compare off versus default
-automatic cap16. Cap8 evidence here is planning only. Fresh signed fixture commit
-identities may differ; compare fixture contents and pin one HEAD within every pair.
+Run it against an explicitly selected source checkout, immutable fixture HEAD and
+base, and new output directories for every trial. Reverse off/auto order between
+repeats; repeat clean, local and cross-file variants in both languages. The
+historical tool supports cap8, but live results here compare off versus default
+automatic cap16; cap8 evidence is planning only. Fresh signed fixture identities
+may differ, so compare contents and pin one HEAD within each pair. Current
+canonical planning remains `_prepare_review_stacks`, `file_change_bytes` and
+`shard_stacks`; the planning procedure above does not require this one-off tool.
 
 The subsequent [measurement-base fix](https://github.com/existential-birds/daydream/pull/1539#discussion_r4262423764)
 uses the dedicated `refs/daydream/measurement-base` ref instead of creating or
@@ -158,8 +159,8 @@ Off plans have three scopes (1,440s/144 aggregate starts); auto plans have four
 | Python cross-file | 144.7 (102.9–186.4), 2 | 131.2 (129.4–133.0), 2 |
 
 Python local automatic review was slower. Requests and token use also vary; the
-JSON reports individual values, completed/all-trial means, ranges and sample
-standard deviations. Unsupported observations and repeated findings never inflate
+pinned historical comparison records report individual values, completed/all-trial
+means, ranges and sample standard deviations. Unsupported observations and repeated findings never inflate
 seed recall. Initial exploratory fixtures lacked comprehensive API tests and had
 a Go subsecond/large-limit calibration problem. They were retained separately:
 16/16 seeds, four unsupported false positives, one additional valid missing-test
