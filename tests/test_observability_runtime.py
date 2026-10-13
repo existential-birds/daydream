@@ -3,7 +3,7 @@
 import json
 import logging
 import threading
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import Sequence
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -20,10 +20,8 @@ from opentelemetry.sdk.trace.export import SpanExportResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import NonRecordingSpan, SpanContext, StatusCode, TraceFlags
 
-import daydream.observability.spans as spans_module
 from daydream.agent import run_agent
 from daydream.backends import (
-    AgentEvent,
     CostEvent,
     DiagnosticEvent,
     GenerationEndEvent,
@@ -37,17 +35,18 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
-from daydream.extensions import ToolDecision, get_registry, set_registry
 from daydream.extensions.registry import Registry
 from daydream.observability import runtime
 from daydream.observability.config import (
     ObservabilityConfig,
     ObservabilityError,
+    resolve_observability_config,
 )
 from daydream.observability.privacy import PrivacyPolicy, diagnostic_scope
 from daydream.observability.runtime import trace_run
 from daydream.observability.spans import agent_scope, attempt_scope, step_scope
 from daydream.trajectory import DaydreamPhase
+from tests.harness.backend import ScriptedBackend
 
 
 @pytest.fixture
@@ -267,41 +266,19 @@ async def test_shutdown_deadline_is_total_and_shutdown_once(stall_during: str, c
     assert [exporter.shutdowns for exporter in exporters] == [1, 1]
 
 
-class _ScriptedBackend:
-    model = "requested"
-    retry_attempts = 1
-    retry_base_delay_s = 0
-    retry_max_delay_s = 0
-
-    def __init__(self, attempts: list[list[AgentEvent | BaseException]], *, stall: bool = False) -> None:
-        self.attempts = iter(attempts)
-        self.stall = stall
-        self.cancelled = False
-
-    async def execute(self, *args: Any, **kwargs: Any) -> AsyncGenerator[AgentEvent]:
-        for event in next(self.attempts):
-            if isinstance(event, BaseException):
-                raise event
-            yield event
-        if self.stall:
-            await anyio.sleep_forever()
-
-    async def cancel(self) -> None:
-        self.cancelled = True
-
 @pytest.mark.anyio
 async def test_retry_keeps_failed_billing_and_agent_records_salvaged_result(tmp_path: Path) -> None:
     class RetryableError(RuntimeError):
         retryable = True
 
     exporter, registry = _memory_tracing()
-    backend = _ScriptedBackend([
+    backend = ScriptedBackend(script=[
             [TextEvent("failed content"), CostEvent(0.05, 4, 2), ResultEvent(None, None), RetryableError("retry")],
             [RequestEvent("effective prompt", system_prompt="effective system"), TextEvent('{"ok":true}'),
                 ResultEvent({"wrong": True}, None), MetricsEvent("", 30, 6, 4, 0.2, usage_scope="invocation"),
                 CostEvent(None, 0, None),
             ],
-        ]
+        ], model="requested", retry_attempts=1, retry_base_delay_s=0, retry_max_delay_s=0,
     )
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
         result = await run_agent(backend, tmp_path, "original", phase=DaydreamPhase.REVIEW,
@@ -328,7 +305,7 @@ async def test_metadata_policy_omits_all_content_and_exception_strings(tmp_path:
 ) -> None:
     monkeypatch.setenv("LANGSMITH_API_KEY", "opaque-secret")
     exporter, registry = _memory_tracing()
-    backend = _ScriptedBackend([[
+    backend = ScriptedBackend(script=[[
                 RequestEvent("PRIVATE PROMPT", system_prompt="PRIVATE SYSTEM"), TextEvent("PRIVATE TEXT"),
                 ThinkingEvent("PRIVATE REASON"), ToolStartEvent("tool", "Read", {"arg": "PRIVATE INPUT"}),
                 ToolResultEvent("tool", "PRIVATE OUTPUT", True), CostEvent(0.1, 2, 3),
@@ -361,22 +338,6 @@ async def test_metadata_policy_omits_all_content_and_exception_strings(tmp_path:
     assert "exception.message" not in (attempt.events[-1].attributes or {})
 
 @pytest.mark.anyio
-async def test_cancelled_run_closes_open_tool_and_exporter(tmp_path: Path) -> None:
-    exporter, registry = _memory_tracing()
-    backend = _ScriptedBackend([[ToolStartEvent("tool", "Read", {})]], stall=True)
-    with anyio.move_on_after(0.03) as cancellation:
-        async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
-            await run_agent(backend, tmp_path, "inspect", phase=DaydreamPhase.REVIEW)
-    assert cancellation.cancelled_caught and backend.cancelled
-    spans = exporter.get_finished_spans()
-    assert len(spans) == 4
-    assert all(span.status.status_code == StatusCode.ERROR for span in spans)
-    tool = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "tool")
-    assert (tool.attributes or {})["daydream.outcome"] == "cancelled"
-    assert tool.status.description == "cancelled"
-    assert tool.events[-1].name == "exception"
-
-@pytest.mark.anyio
 async def test_partial_initialization_cleans_first_destination_once() -> None:
     class CountedExporter(InMemorySpanExporter):
         shutdowns = 0
@@ -396,38 +357,6 @@ async def test_partial_initialization_cleans_first_destination_once() -> None:
         async with trace_run(ObservabilityConfig(destinations=("first", "broken")), registry, flow="review"):
             pytest.fail("initialization must precede agent work")
     assert exporter.shutdowns == 1
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("budget", ["wall", "tools", "supervisor"])
-async def test_budget_and_supervision_close_tools_with_reason(tmp_path: Path, budget: str) -> None:
-    exporter, registry = _memory_tracing()
-
-    def veto(tool_name: str, tool_input: dict[str, Any], *, phase: DaydreamPhase) -> ToolDecision:
-        return ToolDecision(True, "deny this tool")
-
-    if budget == "supervisor":
-        registry.register_tool_supervisor(veto)
-    previous_registry = get_registry()
-    set_registry(registry)
-    try:
-        backend = _ScriptedBackend([[ToolStartEvent("tool", "Write", {})]], stall=True)
-        async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
-            result = await run_agent(backend, tmp_path, "inspect", phase=DaydreamPhase.REVIEW,
-                wall_budget_s=0.02 if budget == "wall" else None, tool_call_budget=0 if budget == "tools" else None,
-            )
-    finally:
-        set_registry(previous_registry)
-    reason = {"wall": "wall_budget_exceeded", "tools": "tool_call_budget_exceeded", "supervisor": "tool_vetoed:Write"}[
-        budget
-    ]
-    assert result[2] == reason
-    tool = next(
-        span for span in exporter.get_finished_spans() if (span.attributes or {}).get("daydream.span.kind") == "tool"
-    )
-    assert (tool.attributes or {})["daydream.outcome"] == reason.split(":")[0]
-    assert tool.status.status_code == StatusCode.ERROR
-    assert tool.status.description == reason.split(":")[0]
-    assert tool.events[-1].name == "exception"
 
 @pytest.mark.anyio
 async def test_concurrent_runs_and_fanout_are_isolated_from_ambient_span() -> None:
@@ -545,8 +474,6 @@ def _assert_no_ambient_enrichment(spans: Sequence[ReadableSpan], sentinel: str) 
         attrs = span.attributes or {}
         assert "traceloop.workflow.name" not in attrs or attrs["traceloop.workflow.name"] == "daydream.run"
         for key in forbidden_exact:
-            if key == "gen_ai.conversation.id":
-                continue
             assert key not in attrs, f"ambient {key} leaked into {span.name}"
         encoded = str(attrs) + str(span.events)
         assert sentinel not in encoded
@@ -587,46 +514,60 @@ async def test_nested_disabled_run_shields_children_from_ambient_context() -> No
         managed_prompt="nested-ambient-prompt",
     )
     outer = InMemorySpanExporter()
-    inner = InMemorySpanExporter()
     registry = Registry()
     registry.register_trace_exporter("outer", lambda _: outer)
-    registry.register_trace_exporter("inner", lambda _: inner)
     try:
         async with trace_run(ObservabilityConfig(destinations=("outer",)), registry, flow="review") as run:
             with step_scope("review"):
                 async with trace_run(ObservabilityConfig(destinations=()), registry, flow="inner"):
                     with step_scope("inner-step"):
-                        pass
+                        with agent_scope("inner-agent", backend="pi"):
+                            async with attempt_scope(1) as attempt:
+                                _observe_generation(attempt, text=True)
+                with agent_scope("resumed", backend="pi"):
+                    async with attempt_scope(1) as attempt:
+                        attempt.observe(TextEvent("outer answer"))
             run.finish(0)
     finally:
         _reset_ambient_openllmetry_context(tokens)
-    for exporter in (outer, inner):
-        for span in exporter.get_finished_spans():
-            attrs = span.attributes or {}
-            assert attrs.get("traceloop.workflow.name") in (None, "daydream.run")
-            assert "nested.ambient.path" not in str(attrs)
-            assert sentinel not in str(attrs) + str(span.events)
+    spans = outer.get_finished_spans()
+    assert sorted(str((span.attributes or {})["daydream.span.kind"]) for span in spans) == [
+        "agent", "attempt", "run", "step",
+    ]
+    attempt_span = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "attempt")
+    assert "outer answer" in str((attempt_span.attributes or {})["gen_ai.output.messages"])
+    assert "hello" not in str((attempt_span.attributes or {})["gen_ai.output.messages"])
+    _assert_no_ambient_enrichment(spans, sentinel)
 
 @pytest.mark.anyio
-async def test_ambient_context_restored_after_exception_and_cancellation() -> None:
+@pytest.mark.parametrize("interruption", ["exception", "cancellation"])
+async def test_ambient_context_restored_after_exception_and_cancellation(interruption: str) -> None:
 
     sentinel = "ambient-restore-secret-2277"
     ambient = otel_context.attach(otel_context.set_value("workflow_name", sentinel))
     exporter, registry = _memory_tracing()
     try:
-        with pytest.raises(RuntimeError, match="boom"):
-            async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review") as run:
-                otel_context.set_value("workflow_name", "overwritten-inside-run")
-                run.finish(0)
-                raise RuntimeError("boom")
-        with pytest.raises(RuntimeError, match="boom"):
-            async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
-                raise RuntimeError("boom")
+        if interruption == "exception":
+            with pytest.raises(RuntimeError, match="boom"):
+                async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
+                    raise RuntimeError("boom")
+        else:
+            with anyio.CancelScope() as cancellation:
+                async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
+                    cancellation.cancel()
+                    await anyio.sleep_forever()
+            assert cancellation.cancelled_caught
         current = otel_trace.get_current_span()
         # Failed runs must detach, restoring INVALID rather than leaving a stale run span.
         assert current.get_span_context().span_id == 0
         assert not current.is_recording()
         assert otel_context.get_value("workflow_name") == sentinel
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 1
+        assert spans[0].status.status_code == StatusCode.ERROR
+        assert (spans[0].attributes or {})["daydream.outcome"] == (
+            "error" if interruption == "exception" else "cancelled"
+        )
     finally:
         otel_context.detach(ambient)
 
@@ -662,10 +603,13 @@ async def test_concurrent_runs_with_distinct_ambient_context_are_isolated() -> N
         group.start_soon(one_run, "two")
     assert len(exporters) == 2
     for exporter in exporters:
-        for span in exporter.get_finished_spans():
-            attrs = span.attributes or {}
-            assert attrs.get("traceloop.workflow.name") in (None, "daydream.run")
-            assert not any(str(value).startswith("ambient-") for value in attrs.values())
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 2
+        _assert_no_ambient_enrichment(spans, "ambient-one")
+        _assert_no_ambient_enrichment(spans, "ambient-two")
+        for span in spans:
+            assert "ambient.one.path" not in str(span.attributes)
+            assert "ambient.two.path" not in str(span.attributes)
 
 
 # --- P18 Task 3: normal/notebook parity ---------------------------------------
@@ -771,7 +715,7 @@ async def test_operator_resource_attributes_merge_with_authoritative_precedence(
     assert "opaque-resource-secret" not in str(resource)
 
 @pytest.mark.anyio
-async def test_operator_service_instance_id_generated_once_when_absent(monkeypatch: pytest.MonkeyPatch,) -> None:
+async def test_operator_service_instance_id_generated_per_run_when_absent(monkeypatch: pytest.MonkeyPatch,) -> None:
     monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
     registry = Registry()
     exporters = []
@@ -797,7 +741,7 @@ async def test_operator_service_instance_id_generated_once_when_absent(monkeypat
 async def test_invalid_operator_resource_rejects_entire_variable(
     raw: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", raw)
+    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", f"valid.sibling=discard-me,{raw}")
     exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review") as run:
         run.finish(0)
@@ -805,6 +749,8 @@ async def test_invalid_operator_resource_rejects_entire_variable(
     assert resource["service.name"] == "daydream"
     assert resource["telemetry.sdk.name"] == "opentelemetry"
     assert "service.instance.id" in resource
+    assert "valid.sibling" not in resource
+    assert "dup.key" not in resource
     assert "OTEL_RESOURCE_ATTRIBUTES" in caplog.text
     assert "ignored" in caplog.text.lower()
     for span in exporter.get_finished_spans():
@@ -815,9 +761,8 @@ async def test_otel_service_name_overrides_service_name_resource(monkeypatch: py
     monkeypatch.setenv("OTEL_SERVICE_NAME", "operator-service")
     monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "service.name=should-lose")
     exporter, registry = _memory_tracing()
-    async with trace_run(
-        ObservabilityConfig(destinations=("memory",), service_name="operator-service"), registry, flow="review"
-    ) as run:
+    config = resolve_observability_config(destinations=("memory",))
+    async with trace_run(config, registry, flow="review") as run:
         run.finish(0)
     resource = _resource_of(exporter.get_finished_spans()[0])
     assert resource["service.name"] == "operator-service"
@@ -965,10 +910,17 @@ async def test_generation_child_span_seals_and_ends_once_at_historical_end() -> 
             async with attempt_scope(1) as attempt:
                 _observe_generation(attempt, text=True, metrics=True)
     spans = exporter.get_finished_spans()
-    generation = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "generation")
+    generations = [span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "generation"]
+    assert len(generations) == 1
+    generation = generations[0]
     attempt_span = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "attempt")
     # End once at the sealed historical message_end, preserving native child timing.
     attrs = generation.attributes or {}
+    root = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "run")
+    root_run_id = (root.attributes or {})["daydream.run.id"]
+    assert attrs["daydream.run.id"] == root_run_id
+    assert attrs["traceloop.association.properties.daydream_run_id"] == root_run_id
+    assert attrs["traceloop.entity.name"] == generation.name
     assert attrs["daydream.generation.native_started_at_unix_ms"] == 1788690314289
     assert attrs["daydream.generation.native_started_at_unix_ns"] == 1788690314289000000
     assert attrs["daydream.generation.sealed_end_unix_ns"] == 1788690709621000000
@@ -984,24 +936,6 @@ async def test_generation_child_span_seals_and_ends_once_at_historical_end() -> 
     assert isinstance(output_messages, str)
     assert json.loads(output_messages)["parts"][0]["text"] == "hello"
     assert (attempt_span.attributes or {})["daydream.billing.owner"] == "unresolved"
-
-@pytest.mark.anyio
-async def test_generation_span_carries_session_identity_and_aliases() -> None:
-    """Generation spans need the shared session identity to avoid orphaned vendor events."""
-
-    exporter, registry = _memory_tracing()
-    async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
-        with agent_scope("review", backend="pi", model="requested"):
-            async with attempt_scope(1) as attempt:
-                _observe_generation(attempt)
-    spans = exporter.get_finished_spans()
-    generation = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "generation")
-    root = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "run")
-    attrs = generation.attributes or {}
-    root_run_id = (root.attributes or {})["daydream.run.id"]
-    assert attrs["daydream.run.id"] == root_run_id
-    assert attrs["traceloop.association.properties.daydream_run_id"] == root_run_id
-    assert attrs["traceloop.entity.name"] == generation.name
 
 @pytest.mark.anyio
 async def test_descendant_spans_inherit_late_bound_session_identity() -> None:
@@ -1028,39 +962,6 @@ async def test_descendant_spans_inherit_late_bound_session_identity() -> None:
         assert attrs.get("traceloop.association.properties.session_id") == "late-session-identity"
         assert attrs.get("daydream.trajectory.id") == "late-session-identity"
         assert attrs.get("daydream.run.id") is not None
-
-@pytest.mark.anyio
-async def test_generation_child_billed_only_when_ledger_owner_is_children(monkeypatch: pytest.MonkeyPatch,) -> None:
-
-    exporter, registry = _memory_tracing()
-    fabricated = {"trajectory_id": "session:descriptor", "invocation_id": "inv-1", "phase": "review",
-        "generation_lifecycle": {"drafts": [{
-                    "generation_id": "gen-1", "billed": True, "sealed_end_unix_ns": 1788690709621000000,
-                    "usage": {"input_tokens": 10, "output_tokens": 2},
-                }
-            ], "billing_owner": "generation_children",
-        },
-    }
-    # Simulate invocation finalization: the observer reads its frozen ledger at attempt finish.
-    recorder = type(
-        "FakeRecorder", (), {"_subtrajectories": [fabricated], "session_id": "session", "descriptor": "descriptor"},
-    )()
-
-    monkeypatch.setattr(spans_module, "get_current_recorder", lambda: recorder)
-
-    async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
-        with agent_scope("review", backend="pi", model="requested"):
-            async with attempt_scope(1) as attempt:
-                _observe_generation(attempt, text=True, metrics=True)
-    spans = exporter.get_finished_spans()
-    generation = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "generation")
-    attempt_span = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "attempt")
-    attrs = generation.attributes or {}
-    assert attrs["daydream.generation.billed"] is True
-    assert attrs["gen_ai.response.id"] == "resp-1"
-    assert attrs["gen_ai.response.model"] == "pi-model"
-    assert (attempt_span.attributes or {})["daydream.billing.owner"] == "generation_children"
-    assert generation.end_time == 1788690709621000000
 
 @pytest.mark.anyio
 async def test_actual_nested_agent_scope_is_subagent_siblings_are_not() -> None:

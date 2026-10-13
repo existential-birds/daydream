@@ -250,6 +250,8 @@ async def test_runner_cancellation_reaches_caller_and_flushes_root_and_active_to
     tool = _kind(spans, "tool")[0]
     assert attributes(root)["daydream.outcome"] == "cancelled"
     assert attributes(tool)["daydream.outcome"] == "cancelled"
+    assert tool["status"]["message"] == "cancelled"
+    assert tool["events"][-1]["name"] == "exception"
     assert all(int(span["endTimeUnixNano"]) >= int(span["startTimeUnixNano"]) for span in spans)
 
 async def test_runner_export_outage_warns_and_preserves_review_result_and_output(
@@ -300,7 +302,10 @@ async def test_runner_partial_outcome_preserves_veto_and_budget_reasons(
     spans = collector.spans
     assert len(spans) == 5
     assert all(span["status"]["code"] == "STATUS_CODE_ERROR" for span in spans)
-    assert attributes(_kind(spans, "tool")[0])["daydream.outcome"] == reason.split(":")[0]
+    tool = _kind(spans, "tool")[0]
+    assert attributes(tool)["daydream.outcome"] == reason.split(":")[0]
+    assert tool["status"]["message"] == reason.split(":")[0]
+    assert tool["events"][-1]["name"] == "exception"
     assert attributes(_kind(spans, "attempt")[0])["gen_ai.usage.input_tokens"] == 5
     assert attributes(_kind(spans, "attempt")[0])["gen_ai.usage.cost"] == 0.005
     assert attributes(_kind(spans, "run")[0])["daydream.exit_code"] == 1
@@ -522,6 +527,7 @@ async def test_runner_exact_allocation_bills_children_and_chain_matches_wire(
         assert gens[generation_id]["status"]["code"] == "STATUS_CODE_OK"
         assert meta["daydream.generation.billed"] is True
         assert meta["gen_ai.response.id"] == {"gen-a": "resp-alpha", "gen-b": "resp-beta"}[generation_id]
+        assert meta["gen_ai.response.model"] == "gen-model"
         assert meta["gen_ai.usage.input_tokens"] == input_tokens
         assert meta["gen_ai.usage.output_tokens"] == output_tokens
         assert meta["gen_ai.usage.cost"] == pytest.approx(cost)
