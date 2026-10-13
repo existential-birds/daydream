@@ -192,14 +192,14 @@ def render_pi_preamble(wall_budget_s: float | None, tool_call_budget: int | None
     wall = f"{float(wall_budget_s):g} seconds" if wall_budget_s is not None else "unbounded"
     if tool_call_budget is None:
         allowance = (
-            f"This turn's effective wall allowance is {wall} and its tool-call "
-            f"budget is uncapped: nothing stops you at a call count, so every call must "
-            f"earn the time it spends."
+            f"Attempt dispatch-time snapshot: effective wall allowance is {wall}; tool-call allocation is uncapped. "
+            "Every call must earn the time it spends."
         )
     else:
         allowance = (
-            f"This turn's effective wall allowance is {wall} and its tool-call "
-            f"budget is {int(tool_call_budget)} calls."
+            f"Attempt dispatch-time snapshot: effective wall allowance is {wall}; "
+            f"tool-call allocation is {int(tool_call_budget)} calls. "
+            "For bounded native output, use the refreshed attempt-local remaining-call count during execution."
         )
     return _PI_PREAMBLE_TEMPLATE.format(allowance=allowance, starting_method=(
         '- Follow the active stage method and persistent exact access guide when choosing where to start.'

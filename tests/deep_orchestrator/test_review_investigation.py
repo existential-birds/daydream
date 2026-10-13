@@ -216,12 +216,26 @@ async def test_useful_completed_reads_borrow_cumulative_capacity_and_allow_later
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope_id: str) -> None:
     review = many_file_review(tmp_path, monkeypatch, docs_count=9)
     stage_spend: list[int] = []
+    request_prompts: list[str] = []
 
     @review.backend.script(scope_id)
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        prompt = review.backend.calls[-1]['prompt']
+        request_prompts.append(prompt)
+        yield RequestEvent(prompt=prompt, output_schema=stage['response_contract']['schema'],
+                           config=PiRequestConfig(schema_emulated=False, no_tools=False))
+        assert 'Host review stage budget fields are dispatch-time snapshots:' in prompt
+        assert 'Reviewer dispatch-time snapshot: hard wall allowance:' in prompt
+        assert prompt.count('current invocation allocation:') == 1
+        assert 'Cumulative observed starts:' not in prompt
+        assert 'Remaining hard cumulative tool allowance:' not in prompt
+        assert 'Advisory stage tool-call target:' not in prompt
+        assert 'advisory_tool_call_target guides pace rather than limiting useful assigned checks' in prompt
+        assert 'submit when those checks settle. Unused capacity is expected.' in ' '.join(prompt.split())
+        assert 'At zero remaining calls, capacity is exhausted' in prompt
         initial = not stage_spend
         starts = stage['advisory_tool_call_target'] + 1 if initial else 1
-        stage_spend.append(starts)
+        stage_spend.append(starts + 1)
         assert stage['observed_tool_starts'] == sum(stage_spend[:-1])
         assert stage['remaining_tool_calls'] == 48 - sum(stage_spend[:-1])
         path = stage['assigned_files'][0]
@@ -236,16 +250,20 @@ async def test_useful_completed_reads_borrow_cumulative_capacity_and_allow_later
                 output['candidates'].append(candidate(file=path, line=line))
         elif stage['stage'] == 'triage':
             output['candidates'] = [dict(item, disposition='rejected') for item in stage['candidates']]
+        yield ToolStartEvent(id='submit', name='structured_output', input=output)
+        yield ToolResultEvent(id='submit', output='Submitted.', is_error=False)
 
     await review.finish(scope_id, findings=('Grounded defect',))
     stages = [stage for stage in review.backend.stages if stage['scope_id'] == scope_id]
     metadata = [event['metadata'] for event in stage_ends(review, scope_id)]
-    assert len(stages) > 1 and stage_spend[0] > stages[0]['advisory_tool_call_target']
+    assert len(stages) > 1 and stage_spend[0] - 1 > stages[0]['advisory_tool_call_target']
     assert [item['observed_tool_starts'] for item in metadata] == [
         sum(stage_spend[:index + 1]) for index in range(len(stage_spend))]
     assert metadata[-1]['remaining_tool_calls'] == 48 - sum(stage_spend)
     assert all(item['admitted'] for item in metadata)
 
+    assert metadata[-1]['remaining_tool_calls'] > 0
+    assert len(request_prompts) == len(stages)
 
 @pytest.mark.parametrize(('sandbox', 'long_grounds'), [(False, False), (True, False), (False, True)],
                          ids=['exact-path-inputs', 'inline-inputs', 'clipped-closed-conclusion'])
@@ -279,7 +297,12 @@ async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
         assert 'with issues' not in prose
         assert 'AI-generated code' not in prose
         assert 'Be strict' not in prose
-        assert 'Advisory' in prose or 'advisory' in prose
+        assert 'Host review stage budget fields are dispatch-time snapshots:' in prose
+        assert 'remaining_tool_calls is the reviewer' in prose
+        assert 'hard_tool_call_allowance is the current invocation allocation' in prose
+        assert 'advisory_tool_call_target guides pace' in prose
+        assert stage['hard_tool_call_allowance'] <= stage['remaining_tool_calls']
+        assert stage['advisory_tool_call_target'] <= stage['hard_tool_call_allowance']
         assert 'Error Handling Semantics (QUAL-04)' in prose
         assert 'Confidence and Convention Rules' in prose
         assert 'HIGH: directly verified by the supplied change, ordinary investigation, or Exploration Context' in prose
@@ -374,7 +397,7 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
         nonlocal no_tool_turns
         prompt = backend.calls[-1]['prompt']
         if stop == 'deadline':
-            allowance = re.search(r'Hard reviewer allowance: at most ([\d.e+-]+) seconds', prompt)
+            allowance = re.search(r'Reviewer dispatch-time snapshot: hard wall allowance: ([\d.e+-]+) seconds', prompt)
             assert allowance is not None
             dispatch_deadlines.append(timer.monotonic() + float(allowance[1]))
         yield RequestEvent(prompt=prompt, output_schema=stage['response_contract']['schema'],

@@ -1,4 +1,4 @@
-/** Invocation-local exact-schema final submission for the packaged Pi provider. */
+/** Attempt-local exact-schema final submission for the packaged Pi provider. */
 import { constants, closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -30,19 +30,29 @@ export default function (pi: ExtensionAPI) {
       // Native starts include failed/invalid calls and every member of a parallel batch.
       // The Python host receives these asynchronously and remains the hard-limit authority.
       pi.on("tool_execution_start", () => { starts += 1; });
-      pi.on("context", (event) => ({
-        messages: [...event.messages.filter((message) => message.role !== "custom" || message.customType !== noteType), {
-          role: "custom" as const,
-          customType: noteType,
-          content: `Live native Pi invocation budget: ${Math.max(0, allowance - starts)} tool starts remain from ${allowance}; `
-            + `${starts} local native starts observed. This dispatch counter may lead the host's received-start ledger; `
-            + "the host still enforces hard limits. structured_output costs 1 tool start. Every parallel batch member counts, "
-            + "including failed calls. Preserve the submission start. Once concrete checks are settled, submit the assigned "
-            + "decisions; honestly mark unfinished work instead of continuing exploration.",
-          display: false,
-          timestamp: Date.now(),
-        }],
-      }));
+      pi.on("context", (event) => {
+        const remaining = Math.max(0, allowance - starts);
+        const guidance = remaining > 1
+          ? "Keep one call for structured_output. Continue concrete unresolved checks for assigned work while tool/time "
+            + "capacity permits; submit when those checks settle. Unused capacity is expected."
+          : remaining === 1
+            ? "Only submission capacity remains. Submit now using structured_output alone; report unfinished work "
+              + "with truthful incomplete decisions."
+            : "Tool-call capacity is exhausted; no call remains for structured_output. Assigned work that is unfinished "
+              + "remains incomplete; do not claim completion or additional submission capacity.";
+        return {
+          messages: [...event.messages.filter((message) => message.role !== "custom" || message.customType !== noteType), {
+            role: "custom" as const,
+            customType: noteType,
+            content: `Live native Pi attempt budget: This attempt has ${remaining} tool calls remaining`
+              + (remaining > 0 ? ", including final submission. " : ". ")
+              + "Each individual call counts, including failures and parallel batch members. "
+              + "Use this refreshed count without recounting history. " + guidance,
+            display: false,
+            timestamp: Date.now(),
+          }],
+        };
+      });
     }
     let submitted = false;
     let reminded = false;

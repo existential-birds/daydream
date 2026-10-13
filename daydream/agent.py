@@ -247,12 +247,12 @@ async def run_agent(
         remaining_calls = investigation_budget.remaining_tool_calls
         tool_call_budget = min(tool_call_budget, remaining_calls) if tool_call_budget is not None else remaining_calls
         budget_instructions = (
-            f"Hard reviewer allowance: at most {max(0.0, deadline - clock.monotonic()):g} seconds until "
-            f"the absolute deadline and {tool_call_budget} tool starts for this invocation. "
-            f"The reviewer scope has {remaining_calls} remaining cumulative tool starts. "
-            f"Cumulative observed starts: {investigation_budget.observed_tool_starts}. "
-            + (f"Advisory stage call target: {advisory_tool_call_target}; this is a planning hint, "
-               "not a ceiling. Useful assigned work may borrow within this invocation allocation. "
+            "Reviewer dispatch-time snapshot: hard wall allowance: "
+            f"{max(0.0, deadline - clock.monotonic()):g} seconds until the absolute deadline; "
+            f"current invocation allocation: {tool_call_budget} tool calls. "
+            "Future-stage reserves are already excluded from this allocation; do not subtract them again. "
+            + ("The advisory stage call target is a planning hint, not a ceiling. "
+               "Useful assigned work may continue within the invocation allocation and deadline. "
                if advisory_tool_call_target is not None else "")
             + ("\n\n" + review_budget.STAGED_REVIEW_GUIDANCE if not review_system_instructions else "")
         )
@@ -580,10 +580,9 @@ async def _run_agent(
                     attempt_prompt = prompt
                     if investigation_budget is not None and attempt > 0:
                         retry_budget_update = (
-                            "\n\nHost retry budget update: failed-attempt starts remain charged. "
-                            f"Hard remaining invocation allowance: {remaining_calls} tool starts; "
-                            f"{investigation_budget.remaining_tool_calls} remain for this reviewer "
-                            f"after {investigation_budget.observed_tool_starts} observed starts."
+                            "\n\nRetry dispatch-time snapshot (supersedes the earlier invocation allocation): "
+                            f"current invocation allocation: {remaining_calls} tool calls. "
+                            "Failed-attempt calls remain charged; future-stage reserves remain excluded."
                         )
                         attempt_prompt += retry_budget_update
                         if "review_instructions" in execute_kwargs:

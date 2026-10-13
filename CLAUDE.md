@@ -223,8 +223,15 @@ CLI subprocess env also sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` and lifts 
 - Staged discovery's `open` and `unresolved` candidates receive one triage round; unresolved triage remains incomplete.
   Native Pi stage allowances reserve minimum capacity for undispatched assignment inputs/submissions and known triage
   submissions. Stop before dispatch when the current stage's minimum needs cannot fit; retain prior admitted evidence.
-  Bounded native Pi calls receive one refreshed live budget note per model request, counting local tool starts;
-  feedback does not rewrite provider proposals or prospectively admit tools. The host ledger remains authoritative.
+  Static prompt budgets are dispatch-time snapshots; invocation allocation already excludes future-stage reserves.
+  Bounded native Pi calls receive one refreshed attempt-local remaining-tool-call count per model request, including
+  failed calls, parallel members and submissions. Transport retries reset the native counter against their effective
+  allowance; cumulative host accounting remains authoritative. Continue concrete unresolved assigned checks within
+  tool/time limits, including beyond advisory targets; submit when checks settle, with unused capacity expected.
+  Preserve one `structured_output` call; with only that call left, submit and mark unfinished work truthfully incomplete.
+  Zero calls means no submission capacity. Feedback preserves provider proposals, ordinary tool access and
+  stage/domain admission.
+  Full presentation and native-output contracts: docs/extensions.md#stage-aware-review-builders-api-8.
 - Do not add `max_turns` to fix or verify — it does not fail soft. The turn ends `error_max_turns`, the
   backend raises `MaxTurnsError`, and the fix group lands in `fix-failures.json` and is reverted, throwing
   a real fix away rather than trimming it.
