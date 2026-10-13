@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import AsyncIterator, Iterable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,10 @@ def staged_review(tmp: Path, patch: pytest.MonkeyPatch, *, files: int = 8) -> In
     after['api.py'] = before['api.py'].replace("return 'world'", "return 'universe'")
     repo = tmp / 'capture_sources'
     seed_feature_branch(repo, base=before, feature=after)
-    return InvestigationRun(repo, tmp, patch)
+    review = InvestigationRun(repo, tmp, patch)
+    # Retry/admission journeys share one logical reviewer and cumulative stage allowance.
+    review.config = replace(review.config, deep_shard_enabled=False)
+    return review
 
 
 def supporting_contents(prompt: str) -> dict[str, str]:
@@ -367,7 +371,8 @@ async def test_realistic_diff_and_index_are_scoped_to_assigned_files(tmp_path: P
             assert 'BOUNDARY_00 = 1' in (repo / 'api.py').read_text()
             output['candidates'] = [candidate(disposition='confirmed', finding=record(line=6))]
 
-    await review.finish('python', findings=('Grounded defect',))
+    # Exercise multiple bounded invocations within the same logical reviewer.
+    await review.finish('python', findings=('Grounded defect',), deep_shard_enabled=False)
     assert len((repo / '.daydream/diff.patch').read_bytes()) >= 156_000
     assert len((repo / '.daydream/hunk-index.json').read_bytes()) >= 32_000
     assert len(exposed) > 4
@@ -680,7 +685,8 @@ async def test_opaque_assignment_handles_cannot_alias_real_changed_filenames(
         if 'part:000001' in stage['assigned_files']:
             assert 'REAL_FILE_REQUIRED_CHANGE' in scoped_diff
         diffs.append(scoped_diff)
-    data = await review.finish('generic')
+    # Assignment handles must remain unique across batches of one logical scope.
+    data = await review.finish('generic', deep_shard_enabled=False)
     assert set(scopes(data)['generic']['files']) == {'00_oversize.md', 'part:000001'}
     assert 'part:000001' in targets and len(targets) > 2
     combined = '\n'.join(diffs)

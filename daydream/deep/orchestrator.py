@@ -129,14 +129,14 @@ def _supervise_enabled(ctx: FlowContext) -> bool:
     return _supervisor_mode(ctx.config) in {"rules", "llm"} and ctx.config.start_at != "fix"
 
 
-def _deep_shard_enabled(config: RunConfig, *, diff: str = "") -> bool:
-    """Resolve CLI-over-file sharding; absent overrides enable the default for large diffs."""
+def _deep_shard_enabled(config: RunConfig, *, diff: str = "", useful_shards: bool = False) -> bool:
+    """Resolve overrides before automatic aggregate-size or assignment-overload activation."""
     explicit = config.deep_shard_enabled
     if explicit is None and config.file_config is not None:
         explicit = config.file_config.deep_shard_enabled
     if explicit is not None:
         return explicit
-    return DEFAULT_DEEP_SHARD_ENABLED or review_scale_for_diff(diff) >= 4
+    return DEFAULT_DEEP_SHARD_ENABLED or review_scale_for_diff(diff) >= 4 or useful_shards
 
 
 def _deep_shard_max_files(config: RunConfig) -> int:
@@ -480,30 +480,44 @@ def _prepare_review_stacks(
     # Shard after collapse and before publishing scopes; use full persisted diff bytes.
     # Single-stack and sharding-off runs retain their assignments.
     import_graph: dict[str, set[str]] = {}
-    sharding_enabled = _deep_shard_enabled(config, diff=diff)
+    max_files = _deep_shard_max_files(config)
+    max_bytes = _resolve_non_negative_int(config, "deep_shard_max_bytes", DEFAULT_DEEP_SHARD_MAX_BYTES)
+    fanout_cap = _resolve_non_negative_int(config, "deep_shard_fanout_cap", DEFAULT_DEEP_SHARD_FANOUT_CAP)
+    frontier_max = _resolve_non_negative_int(config, "deep_shard_frontier_max", DEFAULT_DEEP_SHARD_FRONTIER_MAX)
+    graph_free_stacks = stacks
+    if not single_stack_mode and _resolve_config_value(config, "deep_shard_enabled", True):
+        graph_free_stacks = shard_stacks(
+            stacks, diff, max_files=max_files, max_bytes=max_bytes,
+            fanout_cap=fanout_cap, frontier_max=frontier_max,
+        )
+    # The existing planner owns overload and cap feasibility. An oversized
+    # singleton or a plan coarsened to one role per stack cannot add capacity.
+    useful_shards = len(graph_free_stacks) > len(stacks)
+    sharding_enabled = _deep_shard_enabled(config, diff=diff, useful_shards=useful_shards)
     shard_this_run = sharding_enabled and not single_stack_mode
     # Build one import graph for sharding and diagram eligibility. The guard also
     # catches unsafe tree-sitter versions that can escape the fail-open builder.
     diagram_needs_graph = (
         config.start_at != "fix" and _diagram_mode_for(config, mode) != "off"
     )
-    if shard_this_run or diagram_needs_graph:
+    if (shard_this_run and useful_shards) or diagram_needs_graph:
         try:
             import_graph = build_import_graph(changed_files, target_dir)
         except Exception:
             import_graph = {}
     if shard_this_run:
-        stacks = shard_stacks(
-            stacks,
-            diff,
-            max_files=_deep_shard_max_files(config),
-            max_bytes=_resolve_non_negative_int(config, "deep_shard_max_bytes", DEFAULT_DEEP_SHARD_MAX_BYTES),
-            fanout_cap=_resolve_non_negative_int(config, "deep_shard_fanout_cap", DEFAULT_DEEP_SHARD_FANOUT_CAP),
-            frontier_max=_resolve_non_negative_int(
-                config, "deep_shard_frontier_max", DEFAULT_DEEP_SHARD_FRONTIER_MAX
-            ),
-            graph=import_graph,
-        )
+        if import_graph:
+            stacks = shard_stacks(
+                stacks,
+                diff,
+                max_files=max_files,
+                max_bytes=max_bytes,
+                fanout_cap=fanout_cap,
+                frontier_max=frontier_max,
+                graph=import_graph,
+            )
+        else:
+            stacks = graph_free_stacks
 
     return stacks, single_stack_mode, import_graph
 

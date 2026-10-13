@@ -80,7 +80,7 @@ class RunConfig:
     improve_scope: str | None = None
     improve_plan_description: str | None = None
     improve_prune_name: str | None = None
-    # CLI > file > defaults for dependency-aware per-language sharding; disabled by default.
+    # CLI > file > automatic workload activation for dependency-aware per-language sharding.
     deep_shard_enabled: bool | None = None
     deep_shard_max_files: int | None = None
     deep_shard_max_bytes: int | None = None

@@ -6,6 +6,7 @@ import json
 import re
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable
 from contextlib import aclosing
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -184,7 +185,10 @@ def many_file_review(tmp_path: Path, patch: pytest.MonkeyPatch, *, count: int = 
     after = {name: content + ''.join(f'# changed {i}\n' for i in range(lines)) for name, content in before.items()}
     repo = tmp_path / 'many_files'
     seed_feature_branch(repo, base=before, feature=after, feature_message=feature_message)
-    return InvestigationRun(repo, tmp_path, patch)
+    review = InvestigationRun(repo, tmp_path, patch)
+    # These journeys exercise serial stages under one cumulative reviewer allowance.
+    review.config = replace(review.config, deep_shard_enabled=False)
+    return review
 
 
 @pytest.mark.parametrize('unfinished_target', [False, True], ids=['complete', 'unfinished-first-target'])
@@ -677,10 +681,14 @@ async def test_failed_retry_discards_poisoned_progress_but_charges_every_observe
     assert all(len(stage['assigned_files']) <= 4 for stage in python_stages)
 
 
+@pytest.mark.parametrize('automatic_shards', [False, True], ids=['whole-stack', 'automatic-shards'])
 async def test_runner_cancellation_closes_stream_and_does_not_admit_an_aborted_checkpoint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    review = many_file_review(tmp_path, monkeypatch)
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, automatic_shards: bool) -> None:
+    review = many_file_review(tmp_path, monkeypatch, count=10, docs_count=0)
     checkpoint_emitted = asyncio.Event()
+    blocked_scopes: set[str] = set()
+    closed_scopes: set[str] = set()
+    expected = {'python#0', 'python#1'} if automatic_shards else {'python'}
 
     class CancellationBackend(StagedBackend):
         cancel_done = False
@@ -690,31 +698,44 @@ async def test_runner_cancellation_closes_stream_and_does_not_admit_an_aborted_c
             self.cancel_done = True
 
     backend = CancellationBackend(review.repo)
+    backend.fanout_concurrency = 2
     review.backend = backend
-    closed = asyncio.Event()
 
-    @backend.script()
     async def response(stage: dict[str, Any], output: dict[str, Any]) -> AsyncGenerator[AgentEvent, None]:
+        scope_id = stage['scope_id']
+        if scope_id not in expected:
+            return
+        path = stage['assigned_files'][0]
+        line = 2 if path == 'api.py' else 1
+        finding = dict(record(line), file=path, evidence=f'{path}:{line}')
         if stage['progress']:
+            # The settled first stage's finding is carried into this later request.
+            assert len(stage['closed_decisions']) == 1
+            assert stage['closed_decisions'][0]['conclusion'].startswith('Grounded defect: ')
             try:
-                for event in read_events(review.repo, 'api.py', event_id='cancelled-read'):
+                for event in read_events(review.repo, path, event_id=f'{scope_id}-cancelled-read'):
                     yield event
-                output['candidates'] = [candidate(disposition='confirmed', finding=dict(
-                    record(), description='Aborted checkpoint'))]
+                output['candidates'] = [candidate(disposition='confirmed', file=path, line=line,
+                    grounds=finding['evidence'], finding=dict(finding, description='Aborted checkpoint'))]
                 yield ResultEvent(structured_output=output, continuation=None)
-                checkpoint_emitted.set()
+                blocked_scopes.add(scope_id)
+                if blocked_scopes == expected:
+                    checkpoint_emitted.set()
                 await asyncio.Event().wait()
             finally:
-                closed.set()
+                closed_scopes.add(scope_id)
             return
-        for path in stage['assigned_files']:
-            for event in read_events(review.repo, path, event_id=f'admitted-{path}'):
+        for assigned in stage['assigned_files']:
+            for event in read_events(review.repo, assigned, event_id=f'{scope_id}-admitted-{assigned}'):
                 yield event
-        output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+        output['candidates'] = [candidate(disposition='confirmed', file=path, line=line,
+                                         grounds=finding['evidence'], finding=finding)]
 
-    task = asyncio.create_task(review.run())
+    backend.stage_response = response
+    task = asyncio.create_task(review.run(deep_shard_enabled=None if automatic_shards else False,
+                                          review_cache_enabled=True))
     try:
-        await asyncio.wait_for(checkpoint_emitted.wait(), timeout=10)
+        await asyncio.wait_for(checkpoint_emitted.wait(), timeout=60)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -722,9 +743,22 @@ async def test_runner_cancellation_closes_stream_and_does_not_admit_an_aborted_c
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-    assert closed.is_set() and backend.cancel_done
-    completed, interrupted = stage_ends(review, 'python')
-    assert completed['metadata']['admitted'] is True
-    assert interrupted['metadata']['admitted'] is False
-    assert interrupted['metadata']['observed_tool_starts'] == 5
+    assert closed_scopes == expected and backend.cancel_done
+    for scope_id in expected:
+        completed, interrupted = stage_ends(review, scope_id)
+        assert completed['metadata']['admitted'] is True
+        assert interrupted['metadata']['admitted'] is False
+        assert interrupted['metadata']['failure_class'] == 'cancellation'
+        assert interrupted['metadata']['stop_reason'] == 'interruption'
+        assert interrupted['metadata']['retained_findings'] == completed['metadata']['retained_findings'] == 1
+        assert interrupted['metadata']['observed_tool_starts'] == 5
     assert not review.output.exists()
+    coverage_paths = list(review.repo.glob('.daydream/**/review-coverage.json'))
+    for coverage_path in coverage_paths:
+        coverage = json.loads(coverage_path.read_text())
+        assert not any(scope['scope_id'] in expected and scope['status'] == 'complete'
+                       for scope in coverage['stack_outcomes'])
+    # Cancellation must not publish any aborted scope as a reusable complete result.
+    manifests = list(review.repo.glob('.daydream/review-cache/entries/*/manifest.json'))
+    assert all(json.loads(path.read_text())['unit'] not in {f'shard:{scope}' for scope in expected}
+               for path in manifests)

@@ -201,8 +201,9 @@ EFFORT_TIERS: dict[str, EffortTier] = {
 # Output file for review results
 REVIEW_OUTPUT_FILE = ".review-output.md"
 
-# Opt-in dependency-aware review shards retain the stack-keyed pipeline;
-# disabled mode preserves one reviewer per stack.
+# Dependency-aware review shards retain the stack-keyed pipeline. Automatic
+# activation also considers whole-diff scale and splittable assignment overload;
+# an explicit disabled setting preserves one reviewer per stack.
 DEFAULT_DEEP_SHARD_ENABLED: bool = False
 DEFAULT_DEEP_SHARD_MAX_FILES: int = 5
 DEFAULT_DEEP_SHARD_MAX_BYTES: int = 12288  # == INLINE_DIFF_BUDGET_BYTES

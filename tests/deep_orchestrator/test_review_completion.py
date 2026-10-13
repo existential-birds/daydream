@@ -128,6 +128,36 @@ async def test_outcomes(review: ReviewRun, archive_dir: Path, case: str, state: 
         assert json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text()) == saved
 
 
+async def test_automatic_shard_failure_preserves_successful_sibling_findings_and_revision(
+    sibling_frontier_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    review = ReviewRun(sibling_frontier_target, tmp_path, monkeypatch)
+    finding = dict(record(1), file='core.py', evidence='core.py:1 defines core_helper')
+    review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
+        review_by_stack={'python#0': [finding]}, fail_stack='python#1')
+    review.backend.merge_echo_records = True
+    assert await review.run(review_cache_enabled=True) == 0
+    data = review.load()
+    result, inventory = data['terminal_result'], scopes(data)
+    assert list(inventory) == ['python#0', 'python#1', 'python#2', 'structure']
+    assert result['analysis_state'] == 'incomplete'
+    assert inventory['python#1']['status'] == 'failed'
+    assert inventory['python#1']['reason_codes'] == ['backend_failure']
+    assert all(scope['status'] == 'complete' for name, scope in inventory.items() if name != 'python#1')
+    assert [item['title'] for item in data['findings']] == ['Grounded defect']
+    deep = review.repo / '.daydream/deep'
+    persisted = json.loads((deep / 'review-coverage.json').read_text())
+    assert persisted['stack_outcomes'] == result['stack_outcomes']
+    assert persisted['analyzed_revision'] == result['analyzed_revision']
+    assert [scope['scope_id'] for scope in persisted['planned_scopes']] == list(inventory)
+    records = json.loads((deep / 'stack-python#0-records.json').read_text())
+    assert records['scope_id'] == 'python#0' and records['analyzed_revision'] == result['analyzed_revision']
+    assert records['issues'][0]['uid'] == 'python#0:1'
+    units = {json.loads(path.read_text())['unit']
+             for path in (deep.parent / 'review-cache/entries').glob('*/manifest.json')}
+    assert 'shard:python#1' not in units
+    assert {'shard:python#0', 'shard:python#2', 'shard:structure'} <= units
+
+
 @pytest.mark.parametrize(('mode', 'reason', 'payload'), [
     ('missing', 'missing_output', None), ('malformed', 'malformed_output', {'unexpected': []}),
     ('invalid', 'malformed_output', {'issues': [{'id': 1}, 'invalid']}),

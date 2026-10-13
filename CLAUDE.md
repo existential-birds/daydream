@@ -222,6 +222,11 @@ CLI subprocess env also sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` and lifts 
 | `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | 600s / 2700s | pi response silence / active-tool and codex silence before the subprocess is killed |
 
 - Failed/truncated/malformed reviews retain admitted evidence and incomplete coverage; read README.md#review-budgets.
+- Deep sharding retains explicit RunConfig/file-config precedence and aggregate scale4 activation.
+  Below scale4, post-collapse nonstructural assignments activate it only when the existing graph-free planner
+  retains multiple shards under the resolved file/byte/cap bounds. Plan from the full captured patch;
+  build/reuse the import graph only for useful sharding or diagram eligibility. Keep tiny/shallow gates,
+  indivisible primary ownership, whole-change Structure, concurrency and per-scope budgets unchanged.
 - Budget-aware backend prompts receive the remaining enforced deadline at each attempt; unbounded turns stay unbounded.
 - Carried closed decisions are reviewer judgments. Host admission validates the contract, not semantic correctness;
   source-supported contradictions mark work incomplete without reopening stages or discarding retained findings.

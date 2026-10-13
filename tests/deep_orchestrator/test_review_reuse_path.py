@@ -223,6 +223,34 @@ async def test_identical_rerun_reviews_no_stack_and_a_leaf_edit_invalidates_boun
     assert _count_review_prompts(stub.calls) >= 2  # changed snapshot cannot reuse prior completion claims
 
 
+async def test_automatic_plan_change_invalidates_whole_stack_reuse_at_unchanged_revision(
+    sibling_frontier_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.deep_orchestrator.test_review_completion import ReviewRun, scopes
+
+    review = ReviewRun(sibling_frontier_target, tmp_path, monkeypatch)
+    assert await review.run(deep_shard_enabled=False, review_cache_enabled=True) == 0
+    first = review.load()['terminal_result']
+    assert {scope['scope_id'] for scope in first['stack_outcomes']} == {'python', 'structure'}
+    deep = review.repo / '.daydream/deep'
+    assert _entry_count_for_unit(deep, 'shard:python') == 1
+
+    review.backend.calls.clear()
+    assert await review.run(review_cache_enabled=True) == 0
+    data = review.load()
+    second = data['terminal_result']
+    assert first['analyzed_revision'] == second['analyzed_revision']
+    assert list(scopes(data)) == ['python#0', 'python#1', 'python#2', 'structure']
+    assert _reviewed_stacks(review.backend.calls) == {'python#0', 'python#1', 'python#2'}
+    assert _reused_stacks(deep) == set(), 'Structure also depends on the full planned-scope inventory'
+    assert all(scope['status'] == 'complete' for scope in scopes(data).values())
+    records = _records_bytes(review.repo)
+    review.backend.calls.clear()
+    assert await review.run(review_cache_enabled=True) == 0
+    assert _count_review_prompts(review.backend.calls) == 0
+    assert _reused_stacks(deep) == set(scopes(data))
+    assert _records_bytes(review.repo) == records
+
+
 async def test_editing_a_recorded_frontier_file_invalidates_snapshot_bound_coverage(
     sibling_frontier_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
