@@ -2,11 +2,11 @@ import contextlib
 import hashlib
 import io
 import json
+import re
 from pathlib import Path
 
 import pytest
 
-import daydream.extensions as ext
 from daydream.benchmark.cli import _build_benchmark_parser
 from daydream.commands.review import _parse_args
 from daydream.extensions import Registry
@@ -34,22 +34,21 @@ def test_benchmark_objective_aggregate_parse() -> None:
     p.parse_args(["objective", "./ws", "--run-id", "run-abc123", "--json", "-"])
     p.parse_args(["aggregate", "./suite.json", "--json", "-"])
 
-def test_extensions_doc_claims_only_exposed() -> None:
+def test_extensions_doc_links_and_prompt_inventory() -> None:
     doc = (ROOT / "docs" / "extensions.md").read_text()
     reg = Registry()
     register_builtins(reg)
-    # every public API symbol the doc's table names must exist in production
-    table = doc.split("### Public API symbols")[1].split("### Discovery order")[0]
-    for row in table.splitlines():
-        if row.strip().startswith("| `"):
-            symbol = row.split("`")[1]
-            assert hasattr(ext, symbol), f"doc claims unexposed symbol {symbol!r}"
-    # every prompt the doc's table names must be registered
-    prompts = doc.split("### Prompts")[1].split("### Renderers")[0]
-    for row in prompts.splitlines():
-        if row.strip().startswith("| `"):
-            name = row.split("`")[1]
-            assert name in reg.prompt_names(), f"doc claims unexposed prompt {name!r}"
+    # Detailed API definitions now live behind relative source links.
+    links = re.findall(r"\]\(([^)#]+)(?:#[^)]*)?\)", doc)
+    assert links, "extension guide provides no reference links"
+    for target in links:
+        assert (ROOT / "docs" / target).is_file(), f"broken extension reference {target!r}"
+    # Check only the prompt table, independently of surrounding heading levels.
+    table = doc.split("| Prompt | Kwargs |", 1)[1].split("\n\n", 1)[0]
+    names = re.findall(r"^\| `([^`]+)` \|", table, re.MULTILINE)
+    assert names, "extension guide documents no prompts"
+    for name in names:
+        assert name in reg.prompt_names(), f"doc claims unexposed prompt {name!r}"
 
 def test_help_exposes_native_surface(capsys: pytest.CaptureFixture[str]) -> None:
     for flag in ("--help", "--help-all"):
