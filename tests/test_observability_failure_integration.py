@@ -378,12 +378,10 @@ async with anyio.create_task_group() as group:
         group.start_soon(invoke)
 ''')
     install_backend(PiBackend(model="test-model"))
-    lines = [json.dumps(frame) for frame in [
-        {"type": "message_start", "message": {"role": "assistant"}},
-        {"type": "message_update", "assistantMessageEvent": {
-            "type": "thinking_delta", "contentIndex": 0, "delta": "private-interrupted-reasoning",
-        }},
-    ]]
+    lines = [json.dumps({"type": "message_start", "message": {"role": "assistant"}})]
+    lines.extend(json.dumps({"type": "message_update", "assistantMessageEvent": {
+        "type": "thinking_delta", "contentIndex": 0, "delta": "private-interrupted-reasoning" + "x" * 512,
+    }}) for _ in range(512))
     spawner = install_fake_cli_process(monkeypatch, "pi", lines=lines, hang=True)
     monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "0")
     monkeypatch.setenv("DAYDREAM_TRACE_CONTENT", "metadata")
@@ -414,7 +412,7 @@ async with anyio.create_task_group() as group:
     for attempt in attempts:
         evidence = attempt["backend_lifecycle"]
         assert evidence["state"] == "generating"
-        assert evidence["thinking_delta_count"] == 1
+        assert evidence["thinking_delta_count"] == 512
         assert evidence["generation_open"] is True
         assert evidence["response_idle_timeout_s"] == 0
         assert evidence["last_progress_age_s"] >= 0
@@ -427,7 +425,7 @@ async with anyio.create_task_group() as group:
     for span in exported:
         attrs = attributes(span)
         assert attrs["daydream.outcome"] == "cancelled"
-        assert attrs["daydream.backend_lifecycle.thinking_delta_count"] == 1
+        assert attrs["daydream.backend_lifecycle.thinking_delta_count"] == 512
         assert attrs["daydream.backend_lifecycle.generation_open"] is True
         assert not any(key.startswith("gen_ai.usage.") for key in attrs)
     assert not _kind(collector.spans, "generation")
