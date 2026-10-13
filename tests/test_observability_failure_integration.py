@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import textwrap
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -33,8 +33,12 @@ from daydream.dataset import LocalRecordStore
 from daydream.observability.config import ObservabilityConfig
 from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
+from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.backend import ScriptedBackend
+from tests.harness.git_helpers import commit, write_and_stage
 from tests.harness.otlp import TraceCollector, attributes, kind_of as _kind, otlp_collector
+from tests.harness.review_result import saved_coverage
+from tests.harness.stub_backend import review_stage_state
 
 _RESULT_FILE = ".daydream/trace-failure-result.json"
 _FLOW_IMPORTS = """
@@ -192,6 +196,110 @@ async with anyio.create_task_group() as group:
         assert f"answer for {other}" not in attributes(attempt)["gen_ai.output.messages"]
         assert by_id[attempt["parentSpanId"]] in agents
     assert len({span["traceId"] for span in spans}) == 1
+
+
+@pytest.mark.parametrize("attribution", ["detected", "explicit", "sharded"])
+async def test_runner_detected_review_stacks_attribute_only_their_own_subtrees(
+    multi_stack_target: Path, tmp_path: Path, install_backend: Callable[[object], object],
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, attribution: str,
+) -> None:
+    """Real detection attributes overlapping reviewers without guessing shared-step stacks."""
+    sharded = attribution == "sharded"
+    selected_stack = "python" if attribution == "explicit" else None
+    if sharded:
+        write_and_stage(multi_stack_target, "other.py", "VALUE = 1\n")
+        commit(multi_stack_target, "add another Python review scope")
+    overlapping = {"python#0" if sharded else "python", "react"}
+    expected_scopes = {"python#0", "python#1", "react", "generic", "structure"} if sharded else {
+        "python", "react", "generic", "structure",
+    }
+    ready, release = anyio.Event(), anyio.Event()
+    active: set[str] = set()
+
+    class TracedReviewBackend(EmptyReviewBackend):
+        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            stage = review_stage_state(prompt)
+            scope = stage["scope_id"] if stage is not None else None
+            yield RequestEvent(prompt)
+            yield _gen_start("shared-generation-id")
+            if scope is not None:
+                yield ToolStartEvent("shared-tool-id", "Read", {"review_scope": scope})
+                if scope in overlapping:
+                    active.add(scope)
+                    if active == overlapping:
+                        ready.set()
+                    await release.wait()
+                    active.remove(scope)
+                yield ToolResultEvent("shared-tool-id", f"source for {scope}", False)
+            yield _gen_end("shared-generation-id", f"reviewed {scope or 'shared step'}")
+            async for event in super().execute(cwd, prompt, *args, **kwargs):
+                yield event
+
+    backend = TracedReviewBackend(multi_stack_target)
+    install_backend(backend)
+    trajectory_path = tmp_path / "trajectory.json"
+    with otlp_collector() as collector:
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", collector.base_url + "/v1/traces")
+        config = empty_review_config(
+            multi_stack_target, trajectory_path, stack=selected_stack,
+            deep_shard_enabled=sharded, deep_shard_max_files=1,
+            observability=ObservabilityConfig(destinations=("otlp",)),
+        )
+
+        async def drive() -> None:
+            assert await runner.run(config) == 0
+
+        with anyio.fail_after(60):
+            async with anyio.create_task_group() as tasks:
+                tasks.start_soon(drive)
+                await ready.wait()
+                await anyio.wait_all_tasks_blocked()
+                assert active == overlapping
+                release.set()
+
+    coverage = saved_coverage(multi_stack_target / ".daydream/deep")
+    assert set(coverage.scopes) == expected_scopes
+    assert all(scope["status"] == "complete" for scope in coverage.scopes.values())
+    report = (multi_stack_target / ".review-output.md").read_text()
+    assert report and report == (multi_stack_target / ".daydream/deep/review-output.md").read_text()
+    trajectory = json.loads(trajectory_path.read_text())
+    spans = collector.spans
+    root_run_id = attributes(_kind(spans, "run")[0])["daydream.run.id"]
+    by_id = {span["spanId"]: span for span in spans}
+    reviewer_ids: set[str] = set()
+    seen: set[str] = set()
+    for tool in _kind(spans, "tool"):
+        scope = json.loads(attributes(tool)["traceloop.entity.input"])["review_scope"]
+        seen.add(scope)
+        assert json.loads(attributes(tool)["traceloop.entity.output"]) == f"source for {scope}"
+        attempt = by_id[tool["parentSpanId"]]
+        agent = by_id[attempt["parentSpanId"]]
+        step = by_id[agent["parentSpanId"]]
+        assert attributes(step)["daydream.span.kind"] == "step"
+        generations = [span for span in _kind(spans, "generation") if span["parentSpanId"] == attempt["spanId"]]
+        assert len(generations) == 1
+        for span, kind in ((tool, "tool"), (attempt, "attempt"), (agent, "agent"), (generations[0], "generation")):
+            metadata = attributes(span)
+            assert metadata["daydream.span.kind"] == kind
+            expected_stack = selected_stack if selected_stack is not None else scope.split("#")[0]
+            assert metadata.get("daydream.stack") == expected_stack
+            assert metadata["daydream.session.id"] == trajectory["session_id"]
+            assert metadata["traceloop.association.properties.session_id"] == trajectory["session_id"]
+            assert metadata["daydream.run.id"] == root_run_id
+            assert metadata["traceloop.association.properties.daydream_run_id"] == root_run_id
+            assert metadata["daydream.trajectory.descriptor"] == f"deep-{scope}"
+            assert metadata["daydream.trajectory.id"] == f"{trajectory['session_id']}:deep-{scope}"
+            reviewer_ids.add(span["spanId"])
+    assert seen == set(coverage.scopes)
+    assert len({span["traceId"] for span in spans}) == 1
+    shared = [span for span in spans if span["spanId"] not in reviewer_ids]
+    assert any(attributes(span).get("daydream.span.kind") == "generation" for span in shared)
+    if selected_stack is None:
+        assert all("daydream.stack" not in attributes(span) for span in shared)
+    else:
+        assert all(attributes(span).get("daydream.stack") == selected_stack for span in shared
+                   if attributes(span)["daydream.span.kind"] != "run")
+    assert not [record for record in caplog.records if "Invalid type NoneType" in record.getMessage()]
 
 
 class _ActiveToolBackend:

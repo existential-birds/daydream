@@ -202,6 +202,22 @@ in private source-owned storage. After finalization, the same identifiers
 connect the published source output and archived bundle. An ephemeral worktree
 does not become a second run identity.
 
+`daydream.stack` preserves an explicitly selected stack throughout inherited
+scopes. Each concrete per-stack reviewer also binds its detected assignment for
+its agent, attempt, tool, and generation subtree. An existing non-None value wins
+unchanged, including an empty string; otherwise the assignment's base stack name
+is used: `python#1` exports `python`, while `generic` and `structure` keep those
+labels. Assignment IDs, records, and trajectory descriptors keep their shard
+identities.
+
+Detected attribution is local to each fan-out task inside its trajectory fork
+and lasts for the whole review investigation, including staged
+discovery/integration/triage and schema or transport retries. It adds no spans
+and restores inherited context on completion, exception, or cancellation.
+Without an explicitly selected stack, shared intent/wonder/merge/fix work and
+custom flows without detection leave `daydream.stack` absent. Tracing-disabled
+runs perform no attribution binding.
+
 An attempt represents one call to a Daydream backend, which may contain multiple
 internal model turns and tools. Backends expose different turn boundaries, so
 Daydream reports known usage for the whole attempt. Available terminal totals

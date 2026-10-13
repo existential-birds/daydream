@@ -44,6 +44,7 @@ from daydream.deep.review_reuse import ReviewReuseUnit
 from daydream.extensions import Registry, get_registry
 from daydream.hunk_index import load_hunk_index
 from daydream.json_utils import validates_schema
+from daydream.observability.spans import stack_scope
 from daydream.phases.inputs import (
     _budgeted_exploration_inputs,
     _inlineable_diff,
@@ -582,12 +583,13 @@ async def phase_per_stack_reviews(
                     ):
                         investigation = ReviewInvestigation(stack, input_factory.full_diff, coverage.revision.to_dict(),
                             assignment_batches=input_factory.assignment_batches)
-                        structured, budget_reason = await investigation.run(backend, work.repo, build_stage_prompt,
-                            stage_inputs=input_factory.prepare,
-                            wall_budget_s=phase_config.REVIEW_WALL_BUDGET_S,
-                            read_only=read_only,
-                            run_context=run_context,
-                        )
+                        with stack_scope(base_stack):
+                            structured, budget_reason = await investigation.run(backend, work.repo, build_stage_prompt,
+                                stage_inputs=input_factory.prepare,
+                                wall_budget_s=phase_config.REVIEW_WALL_BUDGET_S,
+                                read_only=read_only,
+                                run_context=run_context,
+                            )
                 except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
                     coverage.record_scope(stack_name, "failed",
                         reasons=(reason_for_exception(e),),

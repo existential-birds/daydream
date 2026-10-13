@@ -72,10 +72,21 @@ Emitted by `SpanScope`/`TraceSession` common attributes
 | `daydream.trajectory.descriptor` | All, P07/P10 recorder | recorder descriptor snapshot | All spans | string | – | 0..1 | P07 recorder | When recorder active | – | Span attribute | metadata | metadata | `test_observability_runtime.py` + P07 suites | pending | Conditional |
 | `traceloop.association.properties.daydream_run_id` | All | run id alias | All spans | string | – | 1 | Alias | Always | – | Span attribute | metadata | metadata | runtime suite | pending | Compatibility alias |
 | `traceloop.association.properties.session_id` | All | session id alias | All spans | string | – | 1 | Alias | After association | – | Span attribute | `metadata.session_id` | metadata | runtime suite + T5 identity asserts | pending | Compatibility alias; distinct from native conversation id |
-| `daydream.flow` / `.step` / `.phase` / `.iteration` / `.stack` | All, run/step scopes | actual runner flow/step/phase/iteration/stack | run + step + agent + attempt + tool (+children) via `_scope_attributes` | string / int | – | 1 (stack/iteration: 0..1) | Actual runner scopes | On applicable scopes; stack/iteration only when supplied | – | Span attributes | metadata/event classification | metadata | `test_runner_exports_complete_portable_trace` | pending | Applicable; low cardinality; unknown stack/iteration omitted, supplied iteration zero preserved; detected stack assignments and trajectory descriptors do not supply the scope stack |
+| `daydream.flow` / `.step` / `.phase` / `.iteration` / `.stack` | All, run/step scopes and concrete reviewer assignments | actual runner flow/step/phase/iteration; selected stack or detected review assignment | run + step + agent + attempt + tool/generation via `_scope_attributes`; detected stack only on reviewer subtree | string / int | – | 1 (stack/iteration: 0..1) | Runner scopes; detected stack uses `base_stack_name` | On applicable scopes; unknown stack/iteration omitted | – | Span attributes | metadata/event classification | metadata | `test_runner_exports_complete_portable_trace` + `test_runner_detected_review_stacks_attribute_only_their_own_subtrees` | pending | Applicable; supplied iteration zero and non-None stack (including empty string) preserved; detected reviewer stack removes shard suffix; trajectory descriptors do not determine the stack |
 | `daydream.span.kind` | All | constant per scope: run/step/agent/attempt/generation/tool | Every span | string | – | 1 | Scope kind | Always | – | Span attribute | `honeyhive_event_type` mapping | `langsmith.span.kind` mapping | `test_vendor_chain_model_tool_classification` | verified on wire (T4) | Applicable; classification authority |
 | `daydream.attempt` | All, attempt scope | attempt number (1-based) | attempt | int | – | 1 | Actual attempt counter | Always | – | Span attribute | metadata | metadata | T5 lifecycle suite | verified | Applicable |
 | `daydream.invocation.aggregate` | All, attempt scope | constant True on invocation aggregates | attempt | bool | – | 1 | Scope kind | Always | – | Span attribute | metadata | `langsmith.metadata.invocation_aggregate` | `test_langsmith_mapping_preserves_original_spans_and_only_attempts_own_usage` | verified | Applicable |
+
+An inherited non-None `daydream.stack` takes precedence unchanged, including an
+empty string. Otherwise each concrete reviewer binds its detected assignment's
+`base_stack_name` for the whole investigation: `python#1` becomes `python`, while
+`generic` and `structure` retain those labels. The binding is local to its fan-out
+task inside the trajectory fork, creates no span, and restores inherited context
+on completion, exception, or cancellation. Agent, attempt, tool, and generation
+children inherit it across staged discovery/integration/triage and schema or
+transport retries. Assignment IDs, records, and trajectory descriptors retain
+their original shard identities. Without an explicitly selected stack, shared
+intent/wonder/merge/fix work and custom flows without detection omit the field.
 
 ## Agent/operation identity
 
