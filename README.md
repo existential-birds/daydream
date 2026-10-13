@@ -693,7 +693,20 @@ The review model pipeline defaults to 45 minutes for modest diffs, including
 queueing and retries, with the last five minutes reserved for synthesis. Diffs
 over 1,000, 5,000, and 10,000 lines (or 64, 256, and 512 KiB) receive 2×, 4×,
 and 6× review time and per-role tool-call allowances respectively. The 4× and
-6× tiers also enable deep-review sharding unless explicitly disabled. An explicit review
+6× tiers also enable deep-review sharding unless explicitly disabled. Below those
+tiers, sharding activates when a detected nonstructural assignment exceeds the
+resolved file or diff-byte target and the existing planner can retain multiple
+shards under the role cap. Planning uses the full captured patch after tiny-diff
+collapse; tiny and shallow reviews remain unsharded. Oversized single files stay
+intact, and assignments coarsened to one role do not trigger graph construction
+solely for sharding. `RunConfig.deep_shard_enabled` takes precedence over file
+configuration, and an explicit `false` disables automatic activation.
+The default targets are five primary files and 12,288 patch bytes, with a
+16-role nonstructural cap and at most eight sorted supporting frontier files.
+The existing `deep_shard_max_files`, `deep_shard_max_bytes`,
+`deep_shard_fanout_cap`, and `deep_shard_frontier_max` settings resolve from
+RunConfig, then file configuration, then defaults; zero remains a valid bound.
+An explicit review
 profile keeps its configured whole-review deadline. Set
 `pipeline.review_wall_budget_s` in a `--review-profile` TOML file to change it.
 The nonstructural role cap coarsens the largest packed stacks by repeatedly merging adjacent groups with the smallest
