@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import stat
 import sys
@@ -14,23 +15,28 @@ import pytest
 
 from daydream import git_ops
 from daydream.backends import AgentEvent, MaxTurnsError, ResultEvent, ToolResultEvent, ToolStartEvent
+from daydream.config import DEFAULT_GROUP_MAX_WALL_S
 from daydream.config_file import DaydreamFileConfig
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.fix_isolation import FixIsolationRound
 from daydream.runner import run
 from daydream.workspace import WorkContext
+from tests.harness.fake_clock import FakeClock
 from tests.harness.git_helpers import git
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.stub_backend import StubBackend
+from tests.harness.trajectory import read_trajectory, root_trajectory
 from tests.test_deep_orchestrator import MakeConfig, Mute, _add_bare_remote, _merge_item, _silence
 
 
 class _ShellEscapeBackend(StubBackend):
     """Use real shell-equivalent Python writes, including absolute parent paths."""
 
-    def __init__(self, target: Path, outcome: str) -> None:
+    def __init__(self, target: Path, outcome: str, *, clock: FakeClock | None = None) -> None:
         super().__init__(target)
         self.outcome = outcome
+        self.clock = clock
+        self.sibling_finished = anyio.Event()
         self.fix_edit_line = "\n# successful sibling\n"
         self.merge_items = [_merge_item(1, "App.tsx", "high"), _merge_item(2, "api.py", "high")]
         self.parse_by_stack = {"structure": {
@@ -53,18 +59,26 @@ for root in (Path.cwd(), Path(sys.argv[1])):
     subprocess.run(['git', 'add', 'api.py'], cwd=root, check=True)
     (root / 'README.md').chmod(0o600)
 (Path.cwd() / 'App.tsx').write_text('// assigned fix\\n')
+print('unauthorized writes completed')
 """
             yield ToolStartEvent(id="shell-escape", name="Bash", input={"command": "python restore.py"})
-            await anyio.run_process([sys.executable, "-c", script, str(self._target)], cwd=cwd)
-            yield ToolResultEvent(id="shell-escape", output="restored files", is_error=False)
+            process = await anyio.run_process([sys.executable, "-c", script, str(self._target)], cwd=cwd)
+            if self.outcome == "timeout":
+                # Expire only after the shell has finished and the healthy
+                # sibling returned. Real Git latency must not choose the outcome
+                # or let the shared clock cancel the sibling's active turn.
+                await self.sibling_finished.wait()
+                assert self.clock is not None
+                self.clock.advance(DEFAULT_GROUP_MAX_WALL_S)
+            yield ToolResultEvent(id="shell-escape", output=process.stdout.decode(), is_error=False)
             if self.outcome == "failure":
                 raise MaxTurnsError("failed after writing outside the assigned file")
-            if self.outcome == "timeout":
-                await anyio.sleep(10)
             yield ResultEvent(structured_output=None, continuation=None)
             return
         async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
+        if prompt.lower().startswith(("fix this issue", "fix these")) and match and Path(match[1]).name == "api.py":
+            self.sibling_finished.set()
 
 @pytest.mark.parametrize("outcome", ["success", "failure", "timeout"])
 async def test_run_contains_shell_writes_and_keeps_successful_sibling(
@@ -79,12 +93,13 @@ async def test_run_contains_shell_writes_and_keeps_successful_sibling(
     (target / "owner-draft.txt").write_text("owner's private draft\n")
     before_app = (target / "App.tsx").read_text()
     before_index = git_ops.snapshot_index(target)
-    backend = _ShellEscapeBackend(target, outcome)
+    clock = FakeClock(monotonic_value=10_000).install(monkeypatch) if outcome == "timeout" else None
+    backend = _ShellEscapeBackend(target, outcome, clock=clock)
     monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
-    with anyio.fail_after(30):
+    with anyio.fail_after(120):
         exit_code = await run(make_config(target, assume="yes", output_mode="loop",
-            file_config=DaydreamFileConfig(group_max_wall_s=2.0, quality_gate_enabled=False),
+            file_config=DaydreamFileConfig(quality_gate_enabled=False),
         ))
 
     assert (target / "README.md").read_text() == before_readme
@@ -96,6 +111,25 @@ async def test_run_contains_shell_writes_and_keeps_successful_sibling(
     assert git_ops.snapshot_index(target) == before_index
     assert (target / "App.tsx").read_text() == ("// assigned fix\n" if outcome == "success" else before_app)
     assert exit_code == (1 if outcome == "failure" else 0)
+
+    root = root_trajectory(target)
+    fix_refs = [ref for ref in root["extra"]["subtrajectories"] if ref.get("descriptor") == "fix-App.tsx"]
+    assert len(fix_refs) == 1
+    child = read_trajectory(target / ".daydream" / fix_refs[0]["sibling_trajectory_ref"])
+    shell_steps = [step for step in child["steps"]
+        if any(call["tool_call_id"] == "shell-escape" for call in step.get("tool_calls", []))]
+    assert shell_steps, "the escaping shell must run before restoration is tested"
+    assert all(any(result.get("source_call_id") == "shell-escape"
+                   and result["content"] == "unauthorized writes completed\n"
+                   for result in step.get("observation", {}).get("results", []))
+               for step in shell_steps)
+    if outcome != "success":
+        failures = json.loads((target / ".daydream/deep/fix-failures.json").read_text())
+        expected = ("MaxTurnsError: failed after writing outside the assigned file" if outcome == "failure"
+                    else "file_group_budget_exceeded: group_wall_budget_exceeded")
+        assert failures == {"App.tsx": expected}
+    if outcome == "timeout":
+        assert shell_steps[-1]["extra"]["stop_reason"] == "wall_budget_exceeded"
 
 async def test_run_publishes_only_assigned_shell_fixes_with_real_checks_and_hooks(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, no_ci_remote: NoCIRemote,
