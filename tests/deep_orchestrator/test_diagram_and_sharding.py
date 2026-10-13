@@ -15,6 +15,8 @@ from daydream.config import (
     DEFAULT_DEEP_SHARD_MAX_FILES,
 )
 from daydream.config_file import DaydreamFileConfig
+from daydream.deep import orchestrator
+from daydream.deep.dependency import build_import_graph
 from daydream.deep.orchestrator import (
     _deep_shard_enabled,
     _deep_shard_max_files,
@@ -31,6 +33,74 @@ from tests.test_deep_orchestrator import (
     _run_deep,
     _silence,
 )
+
+
+@pytest.mark.parametrize('shape', ['fitting', 'singleton', 'cap-coarsened', 'explicit-false'])
+def test_preparation_skips_native_graph_when_sharding_cannot_help(
+    sibling_frontier_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str,
+) -> None:
+    """Supplement runner ownership proofs with the independent graph-work contract."""
+    repo = sibling_frontier_target
+    if shape == 'singleton':
+        repo = tmp_path / 'graph_singleton'
+        seed_feature_branch(repo, base={'module.py': 'VALUE = 0\n'},
+                            feature={'module.py': 'VALUE = 0\n' + '# changed\n' * 50})
+    changes = git(repo, 'diff', '--name-only', 'main..HEAD').splitlines()
+    diff = git(repo, 'diff', 'main..HEAD')
+    config = RunConfig(target=str(repo), diagram='off', shallow_fanout_threshold=0,
+        deep_shard_enabled=shape != 'explicit-false',
+        deep_shard_max_files=20 if shape == 'fitting' else 1,
+        deep_shard_max_bytes=10**9 if shape == 'fitting' else 1,
+        deep_shard_fanout_cap=1 if shape == 'cap-coarsened' else 16)
+    calls: list[list[str]] = []
+
+    def observed_build(files: list[str], root: Path) -> dict[str, set[str]]:
+        calls.append(files)
+        return build_import_graph(files, root)
+
+    monkeypatch.setattr(orchestrator, 'build_import_graph', observed_build)
+    assignments, collapsed, graph = orchestrator._prepare_review_stacks(config, changes, diff, repo, 'review')
+    assert collapsed is False
+    assert calls == [] and graph == {}
+    assert {scope.stack_name for scope in assignments} == {'structure', 'python'}
+    assert Counter(path for scope in assignments if scope.stack_name != 'structure'
+                   for path in scope.files) == Counter(changes)
+
+
+def test_preparation_shares_native_graph_with_diagram_and_preserves_scopes_after_failure(
+    sibling_frontier_target: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A native builder failure retains useful shards through the outer preparation guard."""
+    repo = sibling_frontier_target
+    changes = git(repo, 'diff', '--name-only', 'main..HEAD').splitlines()
+    diff = git(repo, 'diff', 'main..HEAD')
+    config = RunConfig(target=str(repo), diagram='auto', shallow_fanout_threshold=0,
+        deep_shard_enabled=True, deep_shard_max_files=5, deep_shard_max_bytes=700)
+    calls: list[list[str]] = []
+    fail = False
+
+    def observed_build(files: list[str], root: Path) -> dict[str, set[str]]:
+        calls.append(files)
+        graph = build_import_graph(files, root)
+        if fail:
+            raise RuntimeError('native graph build failed outside parser recovery')
+        return graph
+
+    monkeypatch.setattr(orchestrator, 'build_import_graph', observed_build)
+    normal, _, graph = orchestrator._prepare_review_stacks(config, changes, diff, repo, 'review')
+    assert calls == [changes] and any(graph.values())
+    assert any(scope.frontier_files for scope in normal)
+    calls.clear()
+    fail = True
+    recovered, collapsed, failed_graph = orchestrator._prepare_review_stacks(config, changes, diff, repo, 'review')
+    assert calls == [changes] and collapsed is False and failed_graph == {}
+    assert [(scope.stack_name, scope.files) for scope in recovered] == [
+        (scope.stack_name, scope.files) for scope in normal]
+    assert [scope.stack_name for scope in recovered] == ['structure', *(f'python#{index}' for index in range(5))]
+    assert Counter(path for scope in recovered if scope.stack_name != 'structure'
+                   for path in scope.files) == Counter(changes)
+    assert set(recovered[0].files) == set(changes)
+    assert all(not scope.frontier_files for scope in recovered)
 
 
 @pytest.mark.parametrize('language', ['go', 'python'])
