@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,7 @@ def git(repo: Path, *args: str) -> str:
     return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
 
 
-def fixture_files(language: str, variant: str) -> tuple[dict[str, str], dict[str, str]]:
+def _helper_sources(language: str) -> tuple[dict[str, str], dict[str, str]]:
     """Behavior-preserving API additions with separately introduced defects.
 
     Local: empty-batch mean raises or returns NaN. Cross: a caller passes milliseconds
@@ -59,11 +60,6 @@ def fixture_files(language: str, variant: str) -> tuple[dict[str, str], dict[str
             "def test_nonempty_statistics():\n    assert mean([2, 4]) == 3\n    assert total([2, 4]) == 6\n\n"
             "def test_future_token():\n    assert valid_token(5000, 1000)\n"
         )
-        if variant == "local":
-            after["stats.py"] = after["stats.py"].replace("    if not values:\n        return 0.0\n", "")
-        elif variant == "cross":
-            after["tokens.py"] = after["tokens.py"].replace("expires_at_ms / 1000, now_ms / 1000",
-                                                                         "expires_at_ms, now_ms / 1000")
     else:
         before = {
             "stats.go": "package helpers\n\nfunc Mean(values []float64) float64 {\n"
@@ -105,17 +101,217 @@ def fixture_files(language: str, variant: str) -> tuple[dict[str, str], dict[str
             "\tif Mean([]float64{2, 4}) != 3 || Total([]float64{2, 4}) != 6 { t.Fatal(\"stats\") }\n"
             "\tif !ValidToken(5000, 1000) { t.Fatal(\"future token\") }\n}\n"
         )
-        if variant == "local":
-            after["stats.go"] = after["stats.go"].replace("\tif len(values) == 0 { return 0 }\n", "")
-        elif variant == "cross":
-            after["tokens.go"] = after["tokens.go"].replace("expiresAtMS / 1000, nowMS / 1000",
-                                                                      "expiresAtMS, nowMS / 1000")
     before["README.md"] = (
         "# Shared helpers\n\nThe mean of an empty batch is zero. Token expiry is supplied in milliseconds; "
         "expiry primitives accept Unix seconds. A token is invalid at or after its expiry. "
         "Paging callers supply nonnegative offsets and limits. Sorting never mutates caller input.\n"
     )
     after["README.md"] = before["README.md"] + "\nAdd convenience helpers while preserving existing behavior.\n"
+    return before, after
+
+
+def fixture_files(language: str, variant: str) -> tuple[dict[str, str], dict[str, str]]:
+    before, after = _helper_sources(language)
+    before["README.md"] += "\nLimit helpers receive nonnegative maximum bounds.\n"
+    if language == "python":
+        before["test_legacy.py"] = """from stats import mean
+from tokens import valid_token
+from expiry import is_expired
+from formatting import format_count
+from limits import clamp
+from paging import page
+from sorting import sorted_ids
+
+def test_original_statistics():
+    assert mean([]) == 0.0
+    assert mean([2, 4]) == 3.0
+    assert mean([-2, 2]) == 0.0
+
+def test_original_expiry():
+    assert not is_expired(5, 4)
+    assert is_expired(5, 5)
+    assert is_expired(5, 6)
+    assert valid_token(5000, 1000)
+    assert not valid_token(5000, 5000)
+    assert not valid_token(5000, 6000)
+    assert valid_token(1500, 1000)
+    assert valid_token(1500, 1499)
+    assert not valid_token(1500, 1500)
+    assert not valid_token(1500, 1501)
+
+def test_original_helpers():
+    assert format_count(0) == "0"
+    assert format_count(12) == "12"
+    assert clamp(-1, 10) == 0
+    assert clamp(5, 10) == 5
+    assert clamp(11, 10) == 10
+    assert clamp(0, 0) == 0
+    assert page([1, 2, 3], 1, 2) == [2, 3]
+    assert page([1, 2, 3], 4, 2) == []
+    assert page([1, 2, 3], 0, 0) == []
+    assert page([], 0, 2) == []
+    assert page([1, 2, 3], 1, 1 << 100) == [2, 3]
+    values = [3, 1, 2]
+    assert sorted_ids(values) == [1, 2, 3]
+    assert values == [3, 1, 2]
+    assert sorted_ids([]) == []
+"""
+        after["test_helpers.py"] = before["test_legacy.py"] + """
+from stats import total
+from tokens import normalized_token
+from expiry import remaining_seconds
+from formatting import format_label
+from limits import within_limit
+from paging import first_page
+from sorting import unique_ids
+
+def test_added_statistics_and_expiry():
+    assert total([]) == 0
+    assert total([2, 4]) == 6
+    assert total([-2, 2]) == 0
+    assert remaining_seconds(5, 1) == 4
+    assert remaining_seconds(5, 5) == 0
+    assert remaining_seconds(5, 6) == 0
+    assert remaining_seconds(1.5, 1.0) == 0.5
+
+def test_added_strings_and_bounds():
+    assert normalized_token("  token\\n") == "token"
+    assert normalized_token("") == ""
+    assert format_label("  label\\n") == "label"
+    assert format_label(" ") == ""
+    assert within_limit(0, 10)
+    assert within_limit(10, 10)
+    assert not within_limit(-1, 10)
+    assert not within_limit(11, 10)
+    assert within_limit(0, 0)
+
+def test_added_sequences():
+    assert first_page([1, 2, 3], 2) == [1, 2]
+    assert first_page([1], 3) == [1]
+    assert first_page([], 2) == []
+    assert first_page([1], 0) == []
+    assert first_page([1, 2, 3], 1 << 100) == [1, 2, 3]
+    values = [3, 1, 3, 2]
+    assert unique_ids(values) == [1, 2, 3]
+    assert values == [3, 1, 3, 2]
+    assert unique_ids([]) == []
+"""
+        if variant == "local":
+            after["stats.py"] = after["stats.py"].replace("    if not values:\n        return 0.0\n", "")
+        elif variant == "cross":
+            after["tokens.py"] = after["tokens.py"].replace("expires_at_ms / 1000, now_ms / 1000",
+                                                                         "expires_at_ms, now_ms / 1000")
+        api_description = (
+            "Convenience helpers include total for numeric batches, remaining_seconds for nonnegative time-to-expiry, "
+            "normalized_token and format_label for trimming strings, within_limit for inclusive bounds, first_page "
+            "for leading slices, and unique_ids for sorted duplicate-free IDs. "
+            "Existing helper contracts remain unchanged."
+        )
+    else:
+        for files in [before, after]:
+            files["paging.go"] = files["paging.go"].replace(
+                "\tif offset >= len(values) { return []int{} }; end := offset + limit\n"
+                "\tif end > len(values) { end = len(values) }; return values[offset:end]\n",
+                "\tif offset >= len(values) { return []int{} }\n"
+                "\tremaining := len(values) - offset\n"
+                "\tif limit > remaining { limit = remaining }\n"
+                "\treturn values[offset:offset + limit]\n")
+            files["expiry.go"] = files["expiry.go"].replace(
+                "func IsExpired(expiresAtS, nowS int64) bool", "func IsExpired(expiresAtS, nowS float64) bool")
+            files["tokens.go"] = files["tokens.go"].replace(
+                "IsExpired(expiresAtMS / 1000, nowMS / 1000)",
+                "IsExpired(float64(expiresAtMS) / 1000, float64(nowMS) / 1000)")
+        # Share the ordinary total operation instead of repeating its loop.
+        after["stats.go"] = after["stats.go"].replace(
+            "\tvar sum float64\n\tfor _, value := range values { sum += value }\n"
+            "\treturn sum / float64(len(values))", "\treturn Total(values) / float64(len(values))")
+        before["legacy_test.go"] = (
+            'package helpers\n'
+            '\n'
+            'import (\n'
+            '    "reflect"\n'
+            '    "testing"\n'
+            ')\n'
+            '\n'
+            'func TestOriginalStatistics(t *testing.T) {\n'
+            '    for _, values := range [][]float64{nil, {}, {2, 4}, {-2, 2}} {\n'
+            '        want := 0.0\n'
+            '        if len(values) == 2 && values[0] == 2 { want = 3 }\n'
+            '        if got := Mean(values); got != want { t.Fatalf("Mean(%v)=%v want%v"'
+            ', values, got, want) }\n'
+            '    }\n'
+            '}\n'
+            'func TestOriginalExpiry(t *testing.T) {\n'
+            '    for _, tc := range []struct{ expiry, now int64; valid bool }{\n'
+            '        {5000,1000,true}, {5000,5000,false}, {5000,6000,false},\n'
+            '        {1500,1000,true}, {1500,1499,true}, {1500,1500,false}, {1500,1501,f'
+            'alse},\n'
+            '    } {\n'
+            '        if got := ValidToken(tc.expiry,tc.now); got != tc.valid { t.Fatalf('
+            '"ValidToken(%d,%d)=%v want%v",tc.expiry,tc.now,got,tc.valid) }\n'
+            '    }\n'
+            '    if IsExpired(5,4) || !IsExpired(5,5) || !IsExpired(5,6) { t.Fatal("expi'
+            'ry boundary") }\n'
+            '}\n'
+            'func TestOriginalHelpers(t *testing.T) {\n'
+            '    if FormatCount(0)!="0" || FormatCount(12)!="12" { t.Fatal("count format'
+            'ting") }\n'
+            '    if Clamp(-1,10)!=0 || Clamp(5,10)!=5 || Clamp(11,10)!=10 || Clamp(0,0)!'
+            '=0 { t.Fatal("clamp bounds") }\n'
+            '    if !reflect.DeepEqual(Page([]int{1,2,3},1,2),[]int{2,3}) || len(Page([]'
+            'int{1,2,3},4,2))!=0 || len(Page([]int{1},0,0))!=0 || len(Page(nil,0,2))!=0 '
+            '{ t.Fatal("page edges") }\n'
+            '    maxInt := int(^uint(0) >> 1)\n'
+            '    if !reflect.DeepEqual(Page([]int{1,2,3},1,maxInt),[]int{2,3}) { t.Fatal'
+            '("page limit overflow") }\n'
+            '    values:=[]int{3,1,2}; got:=SortedIDs(values)\n'
+            '    if !reflect.DeepEqual(got,[]int{1,2,3}) || !reflect.DeepEqual(values,[]'
+            'int{3,1,2}) || len(SortedIDs(nil))!=0 { t.Fatal("sorted IDs or input mutati'
+            'on") }\n'
+            '}\n'
+        )
+        after["helpers_test.go"] = before["legacy_test.go"] + (
+            '\n'
+            'func TestAddedStatisticsAndExpiry(t *testing.T) {\n'
+            '    if Total(nil)!=0 || Total([]float64{2,4})!=6 || Total([]float64{-2,2})!'
+            '=0 { t.Fatal("totals") }\n'
+            '    if RemainingSeconds(5,1)!=4 || RemainingSeconds(5,5)!=0 || RemainingSec'
+            'onds(5,6)!=0 { t.Fatal("remaining seconds") }\n'
+            '}\n'
+            'func TestAddedFormattingAndBounds(t *testing.T) {\n'
+            '    if !TokenPresent("token") || TokenPresent("") { t.Fatal("token presence'
+            '") }\n'
+            '    if FormatTotal(nil)!="0" || FormatTotal([]int{2,4})!="6" || FormatTotal'
+            '([]int{-2,2})!="0" { t.Fatal("formatted totals") }\n'
+            '    if !WithinLimit(0,10) || !WithinLimit(10,10) || WithinLimit(-1,10) || W'
+            'ithinLimit(11,10) || !WithinLimit(0,0) { t.Fatal("inclusive bounds") }\n'
+            '}\n'
+            'func TestAddedSequences(t *testing.T) {\n'
+            '    if !reflect.DeepEqual(FirstPage([]int{1,2,3},2),[]int{1,2}) || !reflect'
+            '.DeepEqual(FirstPage([]int{1},3),[]int{1}) || len(FirstPage(nil,2))!=0 || l'
+            'en(FirstPage([]int{1},0))!=0 { t.Fatal("first page") }\n'
+            '    maxInt := int(^uint(0) >> 1)\n'
+            '    if !reflect.DeepEqual(FirstPage([]int{1,2,3},maxInt),[]int{1,2,3}) { t.'
+            'Fatal("first page huge limit") }\n'
+            '    values:=[]int{3,1,2};got,ok:=Smallest(values)\n'
+            '    if got!=1 || !ok || !reflect.DeepEqual(values,[]int{3,1,2}) { t.Fatal("'
+            'smallest or input mutation") }\n'
+            '    if _,ok:=Smallest(nil);ok { t.Fatal("empty smallest") }\n'
+            '}\n'
+        )
+        if variant == "local":
+            after["stats.go"] = after["stats.go"].replace("\tif len(values) == 0 { return 0 }\n", "")
+        elif variant == "cross":
+            after["tokens.go"] = after["tokens.go"].replace(
+                "float64(expiresAtMS) / 1000, float64(nowMS) / 1000",
+                "float64(expiresAtMS), float64(nowMS) / 1000")
+        api_description = (
+            "Convenience helpers include Total for numeric batches, RemainingSeconds for nonnegative time-to-expiry, "
+            "TokenPresent for nonempty token strings, FormatTotal for count batches, WithinLimit for inclusive bounds, "
+            "FirstPage for leading slices, and Smallest for nonmutating minimum lookup. "
+            "Existing helper contracts remain unchanged."
+        )
+    after["README.md"] = before["README.md"] + "\n" + api_description + "\n"
     return before, after
 
 
@@ -139,11 +335,12 @@ def prepare(repo: Path, language: str, variant: str) -> None:
 async def measure(args: argparse.Namespace) -> None:
     source = args.source.resolve()
     sys.path.insert(0, str(source))
+    from daydream import runner
     from daydream.artifacts.models import PrivateRootLocations
+    from daydream.backends import Backend, effective_fanout_concurrency
     from daydream.review_budget import review_scale_for_diff
     from daydream.review_profile import build_default_profile
     from daydream.run_config import RunConfig
-    from daydream.runner import run
 
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -168,13 +365,31 @@ async def measure(args: argparse.Namespace) -> None:
         deep_shard_fanout_cap=8 if args.mode == "cap8" else None,
     )
     os.environ["PI_PROVIDER"] = args.provider
+    constructed_backends: list[dict[str, Any]] = []
+    create_backend: Callable[..., Backend] = getattr(runner, "create_backend")
+
+    def measured_backend(*backend_args: Any, **backend_kwargs: Any) -> Backend:
+        backend = create_backend(*backend_args, **backend_kwargs)
+        constructed_backends.append({
+            "model": backend.model,
+            "reasoning_effort": getattr(backend, "reasoning_effort", None),
+            "fanout_hint": getattr(backend, "fanout_concurrency", None),
+            "review_capacity": effective_fanout_concurrency(10, backend),
+        })
+        return backend
+
+    setattr(runner, "create_backend", measured_backend)
     started = time.monotonic()
     failure = None
     exit_code = None
     try:
-        exit_code = await run(config, private_roots=PrivateRootLocations(output / "private", output / "workspaces"))
+        exit_code = await runner.run(
+            config, private_roots=PrivateRootLocations(output / "private", output / "workspaces"),
+        )
     except Exception as exc:
         failure = type(exc).__name__
+    finally:
+        setattr(runner, "create_backend", create_backend)
     elapsed = time.monotonic() - started
     deep = repo / ".daydream" / "deep"
     coverage_path = deep / "review-coverage.json"
@@ -200,6 +415,7 @@ async def measure(args: argparse.Namespace) -> None:
         "diff_scale": scale,
         "source_head": git(source, "rev-parse", "HEAD"), "source_sha256": source_digest.hexdigest(),
         "model": args.model, "provider": args.provider, "effort": args.effort, "latency_profile": "balanced",
+        "constructed_backends": constructed_backends,
         "profile_digest": build_default_profile().digest, "cache": False, "diagram": "off", "elapsed_s": elapsed,
         "exit_code": exit_code, "failure_type": failure, "coverage": coverage,
         "scope_count": scope_count,
