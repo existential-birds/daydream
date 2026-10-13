@@ -716,6 +716,10 @@ is outside the cap. More groups increase aggregate model opportunity: the captur
 one to eight groups, 288 to 2,304 maximum starts, and 48 to 384 nominal role-minutes. Shared pipeline time, queueing and
 concurrency still limit execution; these are neither billing estimates nor guarantees of cold review completion.
 
+See [overloaded-stack activation evidence](docs/overloaded-stack-sharding.md) for
+exact frozen plans, repeated live quality/latency comparisons, aggregate allowances
+and measurement limitations.
+
 Per-stack reviewers share eight minutes and 48 observed tool starts across stages and retries. Language/generic
 assignments prefer nearby complete files, at most four per batch, within 24,576 bytes for exact paths or 12,288 bytes
 inline, including wrappers, scoped diff/index and snapshot bindings. Exact assignment pointers do not consume the
