@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import asdict
 from functools import singledispatchmethod
@@ -327,6 +327,22 @@ def step_scope(
             "daydream.stack": stack,
         },
     )
+
+
+@contextmanager
+def stack_scope(stack: str) -> Iterator[None]:
+    """Bind a concrete reviewer's stack without creating a span or replacing explicit attribution."""
+    if current_session() is None:
+        yield
+        return
+    inherited = dict(_scope_attributes.get())
+    if inherited.get("daydream.stack") is None:
+        inherited["daydream.stack"] = stack
+    token = _scope_attributes.set(inherited)
+    try:
+        yield
+    finally:
+        _scope_attributes.reset(token)
 
 
 def agent_scope(phase: str, *, backend: str, model: str | None = None) -> SpanScope:

@@ -44,7 +44,7 @@ from daydream.observability.config import (
 )
 from daydream.observability.privacy import PrivacyPolicy, diagnostic_scope
 from daydream.observability.runtime import trace_run
-from daydream.observability.spans import agent_scope, attempt_scope, step_scope
+from daydream.observability.spans import agent_scope, attempt_scope, stack_scope, step_scope
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
 
@@ -851,6 +851,48 @@ async def test_generation_optional_scope_attributes_never_warn(
         record for record in caplog.records
         if record.name == "opentelemetry.attributes" and "Invalid type NoneType" in record.getMessage()
     ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("inherited_stack", [None, "python", ""])
+@pytest.mark.parametrize("exit_path", ["normal", "exception", "cancellation"])
+async def test_stack_binding_preserves_precedence_and_restores_context_on_every_exit(
+    inherited_stack: str | None, exit_path: str,
+) -> None:
+    """Spanless attribution restores the caller even after a cancelled reviewer."""
+    exporter, registry = _memory_tracing()
+    async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
+        with step_scope("review", stack=inherited_stack, iteration=0):
+            try:
+                with anyio.CancelScope() as cancellation:
+                    with stack_scope("react"):
+                        with stack_scope("generic"):
+                            with agent_scope("bound", backend="pi"):
+                                async with attempt_scope(1) as attempt:
+                                    _observe_generation(attempt)
+                        if exit_path == "exception":
+                            raise RuntimeError("review failed")
+                        if exit_path == "cancellation":
+                            cancellation.cancel()
+                            await anyio.sleep(0)
+            except RuntimeError as error:
+                assert str(error) == "review failed"
+            with agent_scope("restored", backend="pi"):
+                async with attempt_scope(1) as attempt:
+                    _observe_generation(attempt)
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 8  # run + step + two agent/attempt/generation subtrees, no binding spans
+    generations = [span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "generation"]
+    assert len(generations) == 2
+    bound, restored = generations
+    expected = inherited_stack if inherited_stack is not None else "react"
+    assert (bound.attributes or {})["daydream.stack"] == expected
+    if inherited_stack is None:
+        assert "daydream.stack" not in (restored.attributes or {})
+    else:
+        assert (restored.attributes or {})["daydream.stack"] == inherited_stack
+    assert all((span.attributes or {})["daydream.iteration"] == 0 for span in generations)
 
 
 @pytest.mark.anyio

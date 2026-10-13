@@ -189,6 +189,13 @@ the structural attempt or its sealed generation children. Native turn boundaries
 so do not infer per-provider-call usage from `TurnEndEvent`. Preserve available
 terminal metrics before raising a backend error. Exporters register through
 `Registry.register_trace_exporter`; registration/validation must not construct exporters.
+`daydream.stack` preserves every inherited non-None selected value unchanged, including an empty string.
+Otherwise a spanless binding inside each per-stack review task's trajectory fork attributes the whole
+`ReviewInvestigation.run()` subtree to `base_stack_name(stack.stack_name)` (`python#1` → `python`;
+`generic`/`structure` stay those labels), including staged and retry calls. Restore its ContextVar token
+in `finally`; binding is a no-op without a trace session. Keep assignment/shard IDs, records, descriptors,
+parentage, and billing unchanged. Shared intent/wonder/merge/fix work and custom undetected flows acquire
+no guessed stack; only the concrete reviewer subtree gains detected attribution.
 Full contract and operator recipes: `docs/observability.md` and `docs/extensions.md`.
 
 The Claude backend enforces two always-on `PreToolUse` guards in every phase and profile: the
