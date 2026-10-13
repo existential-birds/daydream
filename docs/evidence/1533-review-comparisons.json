@@ -9,7 +9,7 @@
     "profile_digest": "781622aa97a644eac6b13bb22238e5b67fb399811000859dd0eb0e4bc9f64239",
     "production_python_source_sha256": "71102d6610e13f47fa4f1321c1a7c0123a515c6b5b612bfbd81261c245b94432",
     "source_snapshot_base": "63e57d1c7d4880e916a41f3096e1d97e8469b665",
-    "source_snapshot_disclosure": "Detached baseline plus orchestrator/config/run_config patches; all production Python bytes match this branch. The baseline SHA alone does not identify the patched experiment source. Digest hashes sorted relative daydream/*.py paths followed by file bytes.",
+    "source_snapshot_disclosure": "Detached baseline plus orchestrator/config/run_config patches; all production Python bytes matched measured PR head40b95cbf529541485409612b3de2318e424bfcab. These historical measurements precede the opt-out feasibility guard. Recorded trial digests remain immutable and do not identify current post-review source. Digest hashes sorted relative daydream/*.py paths followed by file bytes.",
     "host_review_cache": false,
     "diagram": "off",
     "file_config": "none",
@@ -26,7 +26,121 @@
     "reporting_corrections": "Early reporting trimmed the patch final newline and did not collect all typed failures. Records were independently re-bound to actual captured full diffs and outcome artifacts; production review inputs were unchanged.",
     "allowances": "Nominal cumulative per-scope maxima include Structure in aggregate totals. Shared deadline, provider queueing and concurrency constrain execution; other pipeline phases have separate limits. More scopes increase aggregate opportunity without changing each scope budget.",
     "quality": "Independent source and executable contract adjudication; unique defect roots determine recall/precision, repetitions and support observations are disclosed separately. Frozen unseeded workloads have no exhaustive oracle.",
-    "limitations": "Small repeated samples, mixed shared load, order and provider caching variability; observed elapsed differences are not an isolated scheduling effect or guaranteed completion savings."
+    "limitations": "Small repeated samples, mixed shared load, order and provider caching variability; observed elapsed differences are not an isolated scheduling effect or guaranteed completion savings.",
+    "measured_pr_head": "40b95cbf529541485409612b3de2318e424bfcab",
+    "post_review_source_verification": {
+      "review_comment_id": 4262423746,
+      "measured_pr_head": "40b95cbf529541485409612b3de2318e424bfcab",
+      "measured_production_source_sha256": "71102d6610e13f47fa4f1321c1a7c0123a515c6b5b612bfbd81261c245b94432",
+      "post_review_production_source_sha256": "9d6998ffd8addc96e2e87ec281868efa4851e754af6dff52fa7bc927c7eec0b3",
+      "post_review_orchestrator_sha256": "2d40cc79ef2c99f2a7021d5db06dca87fc82d2eec1330c04dd6203d9e54c8ca0",
+      "equivalent_mode_count": 20,
+      "equivalent_mode_keys": [
+        [
+          "go",
+          "exact-target-graph",
+          "automatic-cap8"
+        ],
+        [
+          "go",
+          "exact-target-graph",
+          "automatic-defaults"
+        ],
+        [
+          "go",
+          "exact-target-graph",
+          "explicit-off"
+        ],
+        [
+          "go",
+          "exact-target-graph",
+          "explicit-true-cap8"
+        ],
+        [
+          "go",
+          "exact-target-graph",
+          "explicit-true-defaults"
+        ],
+        [
+          "go",
+          "graph-free",
+          "automatic-cap8"
+        ],
+        [
+          "go",
+          "graph-free",
+          "automatic-defaults"
+        ],
+        [
+          "go",
+          "graph-free",
+          "explicit-off"
+        ],
+        [
+          "go",
+          "graph-free",
+          "explicit-true-cap8"
+        ],
+        [
+          "go",
+          "graph-free",
+          "explicit-true-defaults"
+        ],
+        [
+          "python",
+          "exact-target-graph",
+          "automatic-cap8"
+        ],
+        [
+          "python",
+          "exact-target-graph",
+          "automatic-defaults"
+        ],
+        [
+          "python",
+          "exact-target-graph",
+          "explicit-off"
+        ],
+        [
+          "python",
+          "exact-target-graph",
+          "explicit-true-cap8"
+        ],
+        [
+          "python",
+          "exact-target-graph",
+          "explicit-true-defaults"
+        ],
+        [
+          "python",
+          "graph-free",
+          "automatic-cap8"
+        ],
+        [
+          "python",
+          "graph-free",
+          "automatic-defaults"
+        ],
+        [
+          "python",
+          "graph-free",
+          "explicit-off"
+        ],
+        [
+          "python",
+          "graph-free",
+          "explicit-true-cap8"
+        ],
+        [
+          "python",
+          "graph-free",
+          "explicit-true-defaults"
+        ]
+      ],
+      "all_scope_file_frontier_weight_inventory_bounds_graph_and_budget_records_equal": true,
+      "live_measurements_repeated": false,
+      "disclosure": "Explicit sharding opt-out now bypasses feasibility packing. Historical live measurements remain source40b95 with unchanged recorded digests; current-source exact frozen planner replay proves inventory equivalence only."
+    }
   },
   "fixture_gold": {
     "oracle": "Independent executable checks of documented integral-second and fractional-second millisecond expiry boundaries, empty-mean behavior, and additive helpers; seeded variants independently isolated. Gold files never installed in reviewed fixtures.",

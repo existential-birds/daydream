@@ -17,10 +17,12 @@ from daydream.config import (
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep import orchestrator
 from daydream.deep.dependency import build_import_graph
+from daydream.deep.detection import StackAssignment
 from daydream.deep.orchestrator import (
     _deep_shard_enabled,
     _deep_shard_max_files,
 )
+from daydream.deep.sharding import shard_stacks
 from daydream.review_budget import review_scale_for_diff
 from daydream.run_config import RunConfig
 from daydream.runner import run
@@ -63,6 +65,36 @@ def test_preparation_skips_native_graph_when_sharding_cannot_help(
     assert collapsed is False
     assert calls == [] and graph == {}
     assert {scope.stack_name for scope in assignments} == {'structure', 'python'}
+    assert Counter(path for scope in assignments if scope.stack_name != 'structure'
+                   for path in scope.files) == Counter(changes)
+
+
+@pytest.mark.parametrize(('run_enabled', 'file_enabled', 'should_plan'), [
+    (False, True, False),
+    (None, False, False),
+    (True, False, True),
+], ids=['runconfig-false', 'file-false', 'runconfig-true-over-file-false'])
+def test_explicit_sharding_opt_out_skips_feasibility_packing(
+    sibling_frontier_target: Path, monkeypatch: pytest.MonkeyPatch,
+    run_enabled: bool | None, file_enabled: bool, should_plan: bool,
+) -> None:
+    """Supplement real runner precedence coverage with the independent packing-work contract."""
+    repo = sibling_frontier_target
+    changes = git(repo, 'diff', '--name-only', 'main..HEAD').splitlines()
+    diff = git(repo, 'diff', 'main..HEAD')
+    planned: list[None] = []
+
+    def observed_plan(*args: Any, **kwargs: Any) -> list[StackAssignment]:
+        planned.append(None)
+        return shard_stacks(*args, **kwargs)
+
+    monkeypatch.setattr(orchestrator, 'shard_stacks', observed_plan)
+    config = RunConfig(target=str(repo), diagram='off', deep_shard_enabled=run_enabled,
+                       file_config=DaydreamFileConfig(deep_shard_enabled=file_enabled))
+    assignments, collapsed, _ = orchestrator._prepare_review_stacks(config, changes, diff, repo, 'review')
+    assert collapsed is False
+    assert bool(planned) is should_plan
+    assert any('#' in scope.stack_name for scope in assignments) is should_plan
     assert Counter(path for scope in assignments if scope.stack_name != 'structure'
                    for path in scope.files) == Counter(changes)
 

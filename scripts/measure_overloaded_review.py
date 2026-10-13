@@ -346,18 +346,20 @@ async def measure(args: argparse.Namespace) -> None:
     output.mkdir(parents=True, exist_ok=False)
     repo = output / "repo"
     subprocess.run(["git", "clone", "-q", "--no-hardlinks", str(args.fixture.resolve()), str(repo)], check=True)
-    # Clone does not create the fixture's base branch locally.
-    git(repo, "branch", "main", args.base_commit or "origin/main")
-    # Unlike scalar Git answers, a patch must retain its final newline for identity binding.
-    patch = subprocess.check_output(["git", "-C", str(repo), "diff", "main...HEAD"]).decode()
     fixture_head = git(repo, "rev-parse", "HEAD")
-    fixture_base = git(repo, "rev-parse", "main")
+    # A fixture may already be checked out on main. Keep its HEAD and branch
+    # untouched, and give patch capture and the runner the same private base ref.
+    base_ref = "refs/daydream/measurement-base"
+    git(repo, "update-ref", base_ref, args.base_commit or "refs/remotes/origin/main")
+    # Unlike scalar Git answers, a patch must retain its final newline for identity binding.
+    patch = subprocess.check_output(["git", "-C", str(repo), "diff", f"{base_ref}...HEAD"]).decode()
+    fixture_base = git(repo, "merge-base", base_ref, fixture_head)
     source_digest = hashlib.sha256()
     for path in sorted((source / "daydream").rglob("*.py")):
         source_digest.update(str(path.relative_to(source)).encode())
         source_digest.update(path.read_bytes())
     config = RunConfig(
-        target=str(repo), base="main", backend="pi", model=args.model, reasoning_effort=args.effort,
+        target=str(repo), base=base_ref, backend="pi", model=args.model, reasoning_effort=args.effort,
         latency_profile="balanced", output_mode="review", diagram="off", non_interactive=True,
         review_cache_enabled=False, archive=False, run_eval=False, dataset_capture_disabled=True,
         trajectory_path=output / "trajectory.json", cleanup=False,

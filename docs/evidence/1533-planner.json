@@ -1527,5 +1527,119 @@
         }
       ]
     }
-  ]
+  ],
+  "source_disclosure": "Historical planning source matched measured PR head40b95cbf529541485409612b3de2318e424bfcab; original source_baseline and source_orchestrator_sha256 fields remain unchanged.",
+  "post_review_verification": {
+    "review_comment_id": 4262423746,
+    "measured_pr_head": "40b95cbf529541485409612b3de2318e424bfcab",
+    "measured_production_source_sha256": "71102d6610e13f47fa4f1321c1a7c0123a515c6b5b612bfbd81261c245b94432",
+    "post_review_production_source_sha256": "9d6998ffd8addc96e2e87ec281868efa4851e754af6dff52fa7bc927c7eec0b3",
+    "post_review_orchestrator_sha256": "2d40cc79ef2c99f2a7021d5db06dca87fc82d2eec1330c04dd6203d9e54c8ca0",
+    "equivalent_mode_count": 20,
+    "equivalent_mode_keys": [
+      [
+        "go",
+        "exact-target-graph",
+        "automatic-cap8"
+      ],
+      [
+        "go",
+        "exact-target-graph",
+        "automatic-defaults"
+      ],
+      [
+        "go",
+        "exact-target-graph",
+        "explicit-off"
+      ],
+      [
+        "go",
+        "exact-target-graph",
+        "explicit-true-cap8"
+      ],
+      [
+        "go",
+        "exact-target-graph",
+        "explicit-true-defaults"
+      ],
+      [
+        "go",
+        "graph-free",
+        "automatic-cap8"
+      ],
+      [
+        "go",
+        "graph-free",
+        "automatic-defaults"
+      ],
+      [
+        "go",
+        "graph-free",
+        "explicit-off"
+      ],
+      [
+        "go",
+        "graph-free",
+        "explicit-true-cap8"
+      ],
+      [
+        "go",
+        "graph-free",
+        "explicit-true-defaults"
+      ],
+      [
+        "python",
+        "exact-target-graph",
+        "automatic-cap8"
+      ],
+      [
+        "python",
+        "exact-target-graph",
+        "automatic-defaults"
+      ],
+      [
+        "python",
+        "exact-target-graph",
+        "explicit-off"
+      ],
+      [
+        "python",
+        "exact-target-graph",
+        "explicit-true-cap8"
+      ],
+      [
+        "python",
+        "exact-target-graph",
+        "explicit-true-defaults"
+      ],
+      [
+        "python",
+        "graph-free",
+        "automatic-cap8"
+      ],
+      [
+        "python",
+        "graph-free",
+        "automatic-defaults"
+      ],
+      [
+        "python",
+        "graph-free",
+        "explicit-off"
+      ],
+      [
+        "python",
+        "graph-free",
+        "explicit-true-cap8"
+      ],
+      [
+        "python",
+        "graph-free",
+        "explicit-true-defaults"
+      ]
+    ],
+    "all_scope_file_frontier_weight_inventory_bounds_graph_and_budget_records_equal": true,
+    "live_measurements_repeated": false,
+    "disclosure": "Explicit sharding opt-out now bypasses feasibility packing. Historical live measurements remain source40b95 with unchanged recorded digests; current-source exact frozen planner replay proves inventory equivalence only."
+  }
 }

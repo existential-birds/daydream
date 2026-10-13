@@ -69,14 +69,25 @@ real backend and records hint10/capacity10; earlier empty observation lists mean
 that instrumentation was absent, not that capacity was measured differently.
 Provider prompt caching remained active and is reported separately.
 
-The isolated experiment source was detached baseline
+The historical source measured in all 60 trials corresponds to PR head
+`40b95cbf529541485409612b3de2318e424bfcab`. The isolated experiment source was detached baseline
 `63e57d1c7d4880e916a41f3096e1d97e8469b665` plus the production orchestrator/config/
-run-config patches. Its entire production Python tree matches this branch:
+run-config patches. Its entire production Python tree matched that measured PR head:
 `71102d6610e13f47fa4f1321c1a7c0123a515c6b5b612bfbd81261c245b94432`.
 The digest hashes sorted relative `daydream/**/*.py` paths followed by file bytes;
 the baseline SHA alone does not identify the patched experiment source. Trials
 clone immutable fixtures, assert unchanged tracked source/HEAD afterward and bind
 typed coverage to the full captured patch including its final newline.
+
+The subsequent [review fix](https://github.com/existential-birds/daydream/pull/1539#discussion_r4262423746)
+honors explicit sharding opt-out before feasibility packing, avoiding a discarded
+full-patch scan and cap coarsening. This changes the production source digest to
+`9d6998ffd8addc96e2e87ec281868efa4851e754af6dff52fa7bc927c7eec0b3`.
+Historical trial records and their source digests remain unchanged. A separate
+current-source replay against both exact frozen targets verifies identical primary
+assignments, frontiers, weights, bounds, graph edges and allowances in all 20
+graph-free/native off/automatic/explicit-enable cap16/cap8 plans. This is inventory
+equivalence evidence, not a new live timing or quality measurement.
 
 For each language, repeat1 ran off then auto and repeat2 auto then off. Independent
 language lanes and synthetic/frozen lanes overlapped. Additional Go-local and
@@ -106,6 +117,13 @@ and its exact merge base as `--base-commit`; the source stays this branch. `cap8
 is also supported by the tool, but the live results here compare off versus default
 automatic cap16. Cap8 evidence here is planning only. Fresh signed fixture commit
 identities may differ; compare fixture contents and pin one HEAD within every pair.
+
+The subsequent [measurement-base fix](https://github.com/existential-birds/daydream/pull/1539#discussion_r4262423764)
+uses the dedicated `refs/daydream/measurement-base` ref instead of creating or
+overwriting a local `main` branch in the clone. Six real-runner checks cover main,
+feature and detached fixture HEADs with explicit and default bases, preserving
+the fixture HEAD/tree, full diff hash and typed coverage binding. This repairs
+the reproducer; it does not revise historical live trial results.
 
 ## Quality controls and observed timing
 
@@ -193,6 +211,10 @@ because terminal coverage contains one language scope, then pass with multiple
 actual scopes here. Supplemental graph-contract regressions demonstrate zero graph
 builds for fitting, singleton, cap-coarsened and explicit-false plans, one shared
 native graph for diagram/sharding, and intact graph-failure planning.
+The explicit-opt-out resource regression also verifies zero feasibility packing
+for RunConfig false and file-config false, with RunConfig true overriding file false.
+It failed for both opt-outs at measured head `40b95cbf` before the guard; existing
+real-runner precedence and actual-scope tests remain the behavioral proof.
 
 Event/barrier tests prove constrained capacity and host ceiling10 without timing
 sleeps. Cancellation closes active streams, rejects aborted streamed decisions,

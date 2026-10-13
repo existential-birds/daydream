@@ -485,7 +485,7 @@ def _prepare_review_stacks(
     fanout_cap = _resolve_non_negative_int(config, "deep_shard_fanout_cap", DEFAULT_DEEP_SHARD_FANOUT_CAP)
     frontier_max = _resolve_non_negative_int(config, "deep_shard_frontier_max", DEFAULT_DEEP_SHARD_FRONTIER_MAX)
     graph_free_stacks = stacks
-    if not single_stack_mode:
+    if not single_stack_mode and _resolve_config_value(config, "deep_shard_enabled", True):
         graph_free_stacks = shard_stacks(
             stacks, diff, max_files=max_files, max_bytes=max_bytes,
             fanout_cap=fanout_cap, frontier_max=frontier_max,
