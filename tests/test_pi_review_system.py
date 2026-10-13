@@ -59,13 +59,18 @@ async def test_pi_review_system_is_scoped_and_preserves_retry_and_stage_spend(tm
     assert REVIEW_STOPPING_GUIDANCE not in fix_system
     assert "Investigation allowance" not in fix_system
     assert budget.observed_tool_starts == 2 and budget.remaining_tool_calls == 2
-    assert "4 tool starts for this invocation" in initial
-    assert "The reviewer scope has 4 remaining cumulative tool starts" in initial
-    assert "Hard remaining invocation allowance: 2 tool starts" in retry
-    assert "2 remain for this reviewer after 2 observed starts" in retry
-    assert "2 remaining cumulative tool starts" in integration
-    assert "2 tool starts for this invocation" in integration
+    assert "Reviewer dispatch-time snapshot:" in initial
+    assert "current invocation allocation: 4 tool calls" in initial
+    assert "Retry dispatch-time snapshot (supersedes the earlier invocation allocation):" in retry
+    assert "current invocation allocation: 2 tool calls" in retry
+    assert "Failed-attempt calls remain charged; future-stage reserves remain excluded" in retry
+    assert "current invocation allocation: 2 tool calls" in integration
     for instructions in (initial, retry, integration):
+        assert "Cumulative observed starts:" not in instructions
+        assert "remaining cumulative tool starts" not in instructions
+        assert "backend-attempt-local remaining-call count" in instructions
+        assert "Unused capacity is expected" in instructions
+        assert "submit when those" in instructions
         assert "planted" not in instructions
         assert "hidden evaluation" not in instructions
         assert REVIEW_STOPPING_GUIDANCE not in instructions

@@ -273,7 +273,7 @@ async def test_unsuccessful_stage_discards_checkpoints(review: ReviewRun, budget
                 supporting = supporting_contents(prompt)
                 assert state['stage'] == 'integration' and 'review-assignment' in supporting
                 assert supporting['intent'] == intent and intent in prompt and 'AUTHORITATIVE' in prompt
-                assert 'api.py' in prompt and 'Hard reviewer allowance' in prompt
+                assert 'api.py' in prompt and 'Reviewer dispatch-time snapshot:' in prompt
                 assert str(review.repo / '.daydream/diff.patch') not in prompt
             if nonempty is not None:
                 yield ResultEvent(structured_output=review_stage_result(prompt, [record()] if nonempty else []),

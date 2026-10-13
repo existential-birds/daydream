@@ -542,7 +542,7 @@ review cache entries.
 | Bundle: `supporting_bundle` | Bounded diff/index/binding or integration context. Built-ins use it; custom builders opt in with `review_input_bundle = True`. Otherwise `diff_path` and adjacent `hunk-index.json` retain their real file semantics. |
 | Navigation: `supporting_catalog` | Exact pointers to admitted Structure diff projections; `status` and `omitted_part_count` declare partial availability. Navigation grants no directory access. |
 | Residual work: `remaining_work` | Estimated residual assignments, files and stages; native Pi also exposes current submission/total start floors, remaining submission floor and reserved future starts. |
-| Budget: `advisory_tool_call_target`, `remaining_tool_calls`, `hard_tool_call_allowance` | Suggested pace, remaining cumulative allowance and the current invocation's hard allowance. Native Pi limits preserve minimum capacity for known later work. |
+| Budget: `advisory_tool_call_target`, `remaining_tool_calls`, `hard_tool_call_allowance` | Dispatch-time snapshots: suggested pace, remaining reviewer cumulative allowance and the current invocation's hard allocation. Future-stage reserves are already excluded from that allocation. |
 | Context: `context_inputs`, `context_transport`, `context_statuses`, `canonical_input_identities` | Admitted supporting inputs, transport/availability and original artifact identities. Omitted optional context is advisory; corrupted required inputs block admission. |
 
 The stage factory projects canonical frozen diff/index inputs through the owning `ArtifactSession`. Required assignment
@@ -581,17 +581,29 @@ Adapters emit assistant text and genuine transport/native structured payloads; h
 schema-aware selection/salvage remain separate from transport. Improve recon/authoring keep validation-opt-out text
 transport and downstream partial-object repair.
 
+Static budget values in the stage prompt and initial backend preamble describe dispatch-time snapshots, distinct from
+the refreshed attempt-local feedback below. API 8 fields and builder kwargs retain their existing names and values.
 For native Pi stages, the host reserves minimum assignment-input reads and structured submissions for undispatched
-batches, plus submissions for known later triage chunks. The current invocation's hard allowance excludes that reserve;
-the host does not dispatch a stage or transport retry whose minimum input-read and submission needs cannot fit.
-Advisory targets allow borrowing only within that invocation allowance. This bounds observed starts, rather than prospectively admitting
-tools, and does not force submission within a dispatched stage. Budget stops preserve prior admitted findings and
-truthful incomplete coverage.
+batches, plus submissions for known later triage chunks. The current invocation's hard allocation already excludes
+that reserve; reviewers must not subtract it again. The host does not dispatch a stage or transport retry whose
+minimum input-read and submission needs cannot fit.
+Concrete unresolved assigned checks may exceed advisory targets within the existing invocation allocation and
+deadline. This bounds observed starts, rather than prospectively admitting tools. Budget stops preserve prior admitted
+findings and truthful incomplete coverage.
 
-For bounded native Pi invocations, the packaged output extension refreshes one live budget note before each model
-request. It counts invocation-local tool starts, including failed tools, parallel batch members and structured
-submissions. The feedback cannot change a batch already proposed by the model; raw provider proposals and host
-accounting retain their existing authority.
+For bounded native Pi invocations, the packaged output extension replaces one bounded live budget note before each
+model request. It shows one backend-attempt-local remaining-tool-call count, including final submission, instead of
+repeating used/allocated arithmetic. Each individual tool start counts, including failed calls, parallel batch members
+and structured submissions. A transport retry starts a fresh native counter against its effective attempt allowance;
+host cumulative accounting and recorded evidence remain authoritative. Unbounded calls stay unbounded.
+
+Guidance asks reviewers to use that refreshed count without recounting history, preserve one call for
+`structured_output`, and continue concrete unresolved assigned checks while tool/time capacity permits. Submit when
+assigned checks settle; unused capacity is expected. With only submission capacity left, submit truthful incomplete
+decisions for unfinished work. At zero remaining calls, report exhaustion without implying another submission can fit.
+These instructions do not infer semantic completion, force settlement, add capacity or change ordinary tool access.
+The feedback cannot change a batch already proposed by the model; raw provider proposals, native output authority,
+stage/domain admission and host enforcement retain their existing contracts.
 
 Pi keeps read-only `read`, `find`, `ls` and `grep`, with materialized ordinary files for useful before-side
 deleted/renamed source. Codex keeps its disposable read-only checkout; Claude/Codex may inspect captured revisions with

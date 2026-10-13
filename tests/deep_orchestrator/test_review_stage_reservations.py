@@ -53,9 +53,13 @@ async def test_prior_borrowing_preserves_later_native_stage_capacity(
     @backend.script()
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         prompt = backend.calls[-1]['prompt']
-        bound = re.search(r'and (\d+) (?:remaining cumulative tool starts|tool starts for this invocation)', prompt)
+        bound = re.search(r'current invocation allocation: (\d+) tool calls', prompt)
         assert bound is not None
         allowance = int(bound[1])
+        assert allowance == stage['hard_tool_call_allowance']
+        assert 'Future-stage reserves are already excluded from this allocation; do not subtract them again.' in prompt
+        assert prompt.count('current invocation allocation:') == 1
+        assert 'Cumulative observed starts:' not in prompt
         allowances.append(allowance)
         yield RequestEvent(prompt=prompt, output_schema=stage['response_contract']['schema'],
                            config=PiRequestConfig(schema_emulated=False, no_tools=False))
@@ -191,6 +195,11 @@ async def test_completed_unresolved_triage_chunk_does_not_reserve_another_round(
             output['candidates'] = stage['candidates']
             # Spend the first chunk's allowance; only the reserved final submission remains.
             reads = stage['hard_tool_call_allowance'] - 1 if len(triage_chunks) == 1 else 0
+            if len(triage_chunks) == 2:
+                assert stage['hard_tool_call_allowance'] == 1
+                assert 'current invocation allocation: 1 tool calls' in prompt
+                assert 'When only submission capacity remains, submit truthful unfinished decisions.' in (
+                    ' '.join(prompt.split()))
         else:
             reads = 1
             if not stage['progress']:
@@ -201,7 +210,10 @@ async def test_completed_unresolved_triage_chunk_does_not_reserve_another_round(
         yield ToolStartEvent(id='submit', name='structured_output', input=output)
         yield ToolResultEvent(id='submit', output='Submitted.', is_error=False)
 
-    await review.finish('python', reason='evidence_incomplete', findings=('Grounded defect',))
+    data = await review.finish('python', reason='evidence_incomplete', findings=('Grounded defect',))
+    assert data['terminal_result']['analysis_state'] == 'incomplete'
+    assert scopes(data)['python']['partial_evidence'] is True
+    assert scopes(data)['python']['reason_codes'] == ['evidence_incomplete']
     metadata = [event['metadata'] for event in stage_ends(review, 'python')]
     assert [len(chunk) for chunk in triage_chunks] == [8, 1]
     assert all(item['admitted'] for item in metadata)

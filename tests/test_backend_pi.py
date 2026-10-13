@@ -716,6 +716,8 @@ async def test_runner_pi_stack_review_effort_reaches_native_submission(
             reviewer_args.append(argv)
             system_arg = argv[argv.index("--append-system-prompt") + 1]
             system = Path(system_arg).read_text() if system_arg.startswith("/") else system_arg
+            assert "Attempt dispatch-time snapshot:" in system
+            assert "use the refreshed attempt-local remaining-call count" in system
             match = re.search(r"effective wall allowance is ([0-9.]+) seconds", system)
             assert match is not None
             wall_allowances.append(float(match.group(1)))
@@ -793,6 +795,8 @@ async def test_runner_custom_flow_pi_reports_unbounded_allowance(
     assert await run(make_config(tiny_diff_target, backend="pi", flow_name="unbounded", run_eval=False)) == 0
     assert (tiny_diff_target / ".review-output.md").read_text() == "Hello from Pi"
     assert len(system_prompts) == 1
+    assert "Attempt dispatch-time snapshot:" in system_prompts[0]
+    assert "tool-call allocation is uncapped" in system_prompts[0]
     assert "wall allowance is unbounded" in system_prompts[0]
     assert "1800 seconds" not in system_prompts[0]
 
@@ -1178,7 +1182,8 @@ async def test_pi_request_event_config_matches_exact_argv(monkeypatch: pytest.Mo
     # System preamble is invocation-level content, never a config value.
     assert request.system_prompt is not None
     if mode != "finalization":
-        assert "tool-call budget" in request.system_prompt
+        assert "Attempt dispatch-time snapshot:" in request.system_prompt
+        assert "tool-call allocation is uncapped" in request.system_prompt
 
 
 async def test_pi_error_turn_sets_explicit_incomplete_boundary() -> None:

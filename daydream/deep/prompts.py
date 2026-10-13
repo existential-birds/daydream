@@ -343,8 +343,10 @@ def _build_review_stage_prompt(*, strategy: str, stack_name: str, files: list[st
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(SEVERITY_RUBRIC)
     parts.append(STAGED_REVIEW_GUIDANCE)
-    parts.append(f"Advisory stage tool-call target: {review_stage['advisory_tool_call_target']}. "
-        f"Remaining hard cumulative tool allowance: {review_stage['remaining_tool_calls']}.")
+    parts.append("Host review stage budget fields are dispatch-time snapshots: remaining_tool_calls is the "
+        "reviewer's cumulative capacity; hard_tool_call_allowance is the current invocation allocation; "
+        "advisory_tool_call_target guides pace rather than limiting useful assigned checks. "
+        "During native Pi execution, use the refreshed attempt-local remaining-call count.")
     if not review_stage.get('response_contract'):
         parts.append("REVIEW_STAGE_SCHEMA:\n" + json.dumps(REVIEW_STAGE_SCHEMA, ensure_ascii=False))
     return "\n\n".join(parts)

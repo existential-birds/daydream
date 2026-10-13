@@ -712,15 +712,22 @@ complete. Required assignments take priority over separately bounded context.
 
 Each stage gets a fresh prompt. Structure reviews whole-change interactions using a compact inventory, bounded diff
 parts and supporting documentation; discovery candidates marked `open` or `unresolved` receive one finite triage round.
-A candidate still `unresolved` after triage keeps coverage incomplete. Call targets guide pace, while the cumulative
-allowance and absolute deadline remain hard limits. For native Pi stages, the host withholds minimum input-read and
-submission capacity for undispatched assignments and submission capacity for known pending triage. Each invocation
-has a hard allowance within that reservation and may borrow above its advisory target only within that allowance.
+A candidate still `unresolved` after triage keeps coverage incomplete. Static prompt budget values are dispatch-time
+snapshots: the reviewer has a cumulative allowance, each invocation has a hard allocation, and the advisory target
+guides pace. Concrete unresolved assigned checks may continue beyond that target within the allocation and absolute
+deadline. For native Pi stages, the host withholds minimum input-read and submission capacity for undispatched
+assignments and submission capacity for known pending triage. Future-stage reserves are already excluded from the
+current invocation's allocation; the reviewer need not subtract them again.
 The host stops before dispatch if the current stage's minimum input-read and submission needs cannot fit. Reservations
 do not guarantee model completion: observed tool starts can arrive after execution, and a stage that spends its own
-allowance without submitting remains incomplete. Native Pi supplies bounded live feedback on invocation-local tool
-starts before each model request, including failed tools and submissions; every member of a parallel batch counts.
-This improves pacing without changing tool admission or the recorded provider proposals. One fresh full-stage retry
+allowance without submitting remains incomplete. Before each bounded native Pi model request, one refreshed note
+shows the backend attempt's remaining tool calls, including final submission. Each individual call counts, including
+failed tools, parallel batch members and structured submissions. The native counter starts anew for each transport
+retry against its effective allowance; cumulative host accounting remains unchanged. Use the refreshed count rather
+than recounting history. Keep one call for `structured_output`, continue concrete unresolved assigned checks while
+tool/time capacity permits, and submit when those checks settle; unused capacity is expected. With only one call left,
+submit truthful incomplete decisions for unfinished work. At zero, there is no submission capacity. This guidance
+preserves ordinary tool access, host enforcement and recorded provider proposals. One fresh full-stage retry
 is permitted after a normally completed text-mode
 invocation fails strict schema validation and passes the domain rejection guard; only safe validator metadata
 carries over, never rejected output. Syntax, envelope, ambiguity and native-output failures are terminal. Other
