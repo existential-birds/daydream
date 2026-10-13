@@ -64,6 +64,7 @@ from daydream.backends._transport import (
     reap,
     teardown,
 )
+from daydream.backends.lifecycle import current_backend_lifecycle
 from daydream.config import DEFAULT_PI_MODEL, DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
 from daydream.retry_policy import classify_failure, parse_message_retry_hint
 
@@ -577,6 +578,15 @@ class PiBackend:
         Stdout silence raises retryable StreamStalledError; run_agent starts a fresh
         subprocess for each retry.
         """
+        if self._execution_input is not None:
+            response_idle_timeout_s = self._execution_input.pi_response_idle_timeout_s
+            tool_idle_timeout_s = self._execution_input.stream_idle_timeout_s
+        else:
+            response_idle_timeout_s = stream_idle_timeout_s(default=DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S)
+            tool_idle_timeout_s = stream_idle_timeout_s(default=DEFAULT_STREAM_IDLE_TIMEOUT_S)
+        lifecycle = current_backend_lifecycle()
+        if lifecycle is not None:
+            lifecycle.activate(response_idle_timeout_s=response_idle_timeout_s, tool_idle_timeout_s=tool_idle_timeout_s)
         if agents:
             raise NotImplementedError(
                 "Pi backend does not support exploration subagents; use --backend claude for exploration."
@@ -788,6 +798,8 @@ class PiBackend:
         # P18 Task 1: closed typed effective-config admission from the exact
         # argv built above. max_turns is accepted-but-not-enforced by Pi (no
         # native flag) so it stays None. Native schemas validate tool arguments, not provider decoding.
+        if lifecycle is not None:
+            lifecycle.request_prepared()
         yield RequestEvent(
             prompt=full_prompt,
             system_prompt=system_prompt,
@@ -851,22 +863,13 @@ class PiBackend:
                 limit=_PI_STDOUT_LIMIT_BYTES,
                 env=child_env,
                 cwd=str(cwd),
+                spawn_pending=lifecycle.spawn_pending if lifecycle is not None else None,
+                spawn_completed=lifecycle.spawn_completed if lifecycle is not None else None,
+                raw_line_received=lifecycle.raw_line_received if lifecycle is not None else None,
             )
             self._transports.append(transport)
             await transport.start()
 
-            if self._execution_input is not None:
-                response_idle_timeout_s = (
-                    self._execution_input.pi_response_idle_timeout_s
-                )
-                tool_idle_timeout_s = self._execution_input.stream_idle_timeout_s
-            else:
-                response_idle_timeout_s = stream_idle_timeout_s(
-                    default=DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S
-                )
-                tool_idle_timeout_s = stream_idle_timeout_s(
-                    default=DEFAULT_STREAM_IDLE_TIMEOUT_S
-                )
             active_tool_calls = 0
             is_first_line = True
             async for raw_line in transport.lines(
@@ -902,6 +905,8 @@ class PiBackend:
                         continue
 
                 event_type = event.get("type", "")
+                if lifecycle is not None and isinstance(event_type, str) and event_type in _PI_EVENT_TYPES:
+                    lifecycle.native_event()
                 if event_type in {"agent_start", "turn_start", "message_start", "tool_execution_start"}:
                     saw_native_settlement = False
 
@@ -921,6 +926,8 @@ class PiBackend:
                         # completed message's Unix-ms timestamp at message_end.
                         open_generation_id = _new_generation_id()
                         generation_start_ns = time.time_ns()
+                        if lifecycle is not None:
+                            lifecycle.generation_started()
                         assert generation_start_ns is not None  # just assigned
                         yield GenerationStartEvent(
                             generation_id=open_generation_id,
@@ -928,9 +935,26 @@ class PiBackend:
                             boundary_complete=True,
                         )
 
+                elif event_type == "message_update":
+                    # Pi's JSON mode emits delta-only assistantMessageEvent frames;
+                    # no outer message role or content is needed for admission.
+                    update = event.get("assistantMessageEvent")
+                    if lifecycle is not None and isinstance(update, dict):
+                        content_index, delta = update.get("contentIndex"), update.get("delta")
+                        if type(content_index) is int and content_index >= 0 and isinstance(delta, str) and delta:
+                            update_type = update.get("type")
+                            if update_type == "text_delta":
+                                lifecycle.progress("text")
+                            elif update_type == "thinking_delta":
+                                lifecycle.progress("thinking")
+                            elif update_type == "toolcall_delta":
+                                lifecycle.progress("toolcall")
+
                 elif event_type == "message_end":
                     msg = event.get("message") or {}
                     if msg.get("role") == "assistant":
+                        if lifecycle is not None:
+                            lifecycle.generation_ended()
                         last_model = msg.get("responseModel") or msg.get("model") or last_model
                         last_provider = msg.get("provider") or last_provider
                         choice_parts: list[Any] = []
@@ -1033,6 +1057,8 @@ class PiBackend:
 
                 elif event_type == "tool_execution_start":
                     active_tool_calls += 1
+                    if lifecycle is not None:
+                        lifecycle.active_tools(active_tool_calls)
                     call_id = event.get("toolCallId")
                     yield ToolStartEvent(
                         id=call_id or str(uuid.uuid4()),
@@ -1047,6 +1073,8 @@ class PiBackend:
 
                 elif event_type == "tool_execution_end":
                     active_tool_calls = max(0, active_tool_calls - 1)
+                    if lifecycle is not None:
+                        lifecycle.active_tools(active_tool_calls)
                     call_id = event.get("toolCallId")
                     result = event.get("result")
                     yield ToolResultEvent(
@@ -1063,9 +1091,16 @@ class PiBackend:
                         associate_submission(event.get("toolCallId"), "started",
                                              "error" if event["isError"] else "success")
 
+                elif event_type == "tool_execution_update":
+                    if (lifecycle is not None and active_tool_calls > 0
+                            and isinstance(event.get("partialResult"), dict)):
+                        lifecycle.progress("tool")
+
                 elif event_type == "turn_end":
                     if not native_output:
                         active_tool_calls = 0
+                        if lifecycle is not None:
+                            lifecycle.active_tools(0)
                     msg = event.get("message") or {}
                     stop_reason = msg.get("stopReason")
                     last_model = msg.get("responseModel") or msg.get("model") or last_model
@@ -1132,9 +1167,8 @@ class PiBackend:
                 elif event_type == "agent_settled":
                     saw_native_settlement = True
 
-                # turn_start / message_start / message_update /
-                # tool_execution_update are streaming-only; the full content is
-                # already captured at message_end / tool_execution_end.
+                # Streaming updates only retain content-free progress here;
+                # full output events still come from message_end/tool_execution_end.
 
             # Reap the child, then yield its terminal events before the shared
             # exit check formats the backend-specific message from the code and

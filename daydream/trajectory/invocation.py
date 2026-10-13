@@ -24,6 +24,7 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.backends.lifecycle import BackendLifecycleSnapshot
 from daydream.redaction import redact_value as redact_value
 from daydream.trajectory.generation import _GenerationLedger
 from daydream.trajectory.types import DaydreamPhase as DaydreamPhase
@@ -222,6 +223,7 @@ class Invocation:
     # UNENDED until finish() resolves the billing owner; terminal/cancel/error
     # paths drain every draft exactly once at its sealed historical end.
     _generation_ledger: _GenerationLedger = field(default_factory=_GenerationLedger)
+    _backend_lifecycle: BackendLifecycleSnapshot | None = None
 
     def summary(self, *, partial: bool = False) -> dict[str, Any]:
         """Project invocation identity/timing; generation billing appears only after completion."""
@@ -235,7 +237,13 @@ class Invocation:
         }
         if not partial and self._generation_ledger.has_drafts():
             summary["generation_lifecycle"] = self._generation_ledger.to_dict()
+        if self._backend_lifecycle is not None:
+            summary["backend_lifecycle"] = self._backend_lifecycle.to_dict()
         return summary
+
+    def record_backend_lifecycle(self, snapshot: BackendLifecycleSnapshot) -> None:
+        """Retain finalized attempt observations without completing or billing generations."""
+        self._backend_lifecycle = snapshot
 
     def observe_user_step(self, prompt: str) -> None:
         """Append an initial user Step without ATIF agent-only fields."""

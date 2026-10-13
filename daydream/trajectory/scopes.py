@@ -6,6 +6,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from typing import TYPE_CHECKING
 
+import anyio
+
 from daydream import timeutil, ui
 from daydream.trajectory.context import _RECORDER_VAR
 from daydream.trajectory.invocation import Invocation
@@ -26,6 +28,12 @@ async def invocation_scope(recorder: TrajectoryRecorder, phase: DaydreamPhase) -
     recorder._active_invocations.append(invocation)
     try:
         yield invocation
+    except anyio.get_cancelled_exc_class():
+        # Cancellation is a terminal attempt outcome, not a backend error.
+        # An earlier budget/veto reason remains authoritative during cleanup.
+        if invocation._stop_reason is None:
+            invocation.mark_aborted("cancelled")
+        raise
     except Exception as exc:
         # Record escaping backend errors before the final step closes, without
         # masking the original error if recording its subtype fails.

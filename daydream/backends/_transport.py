@@ -72,6 +72,9 @@ class CliTransport:
         limit: int,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
+        spawn_pending: Callable[[], None] | None = None,
+        spawn_completed: Callable[[], None] | None = None,
+        raw_line_received: Callable[[], None] | None = None,
     ) -> None:
         if stdin_mode is StdinMode.PIPE and stdin_data is None:
             raise ValueError("stdin_mode=PIPE requires stdin_data")
@@ -81,6 +84,9 @@ class CliTransport:
         self._stdin_data = stdin_data
         self._stderr_policy = stderr_policy
         self._stderr_sink = stderr_sink
+        self._spawn_pending = spawn_pending
+        self._spawn_completed = spawn_completed
+        self._raw_line_received = raw_line_received
         # Backend decode policy: codex/pi were strict pre-transport; osprey
         # decoded with errors="replace" and must keep doing so (see the
         # backend's ``decode_errors="replace"`` construction below).
@@ -108,6 +114,8 @@ class CliTransport:
             else asyncio.subprocess.PIPE
         )
         # Spawn OSError propagates: the caller maps it to its backend error type.
+        if self._spawn_pending is not None:
+            self._spawn_pending()
         proc = await asyncio.create_subprocess_exec(
             *self._argv,
             stdin=stdin,
@@ -118,6 +126,8 @@ class CliTransport:
         )
         self._proc = proc
         self.processes.append(proc)
+        if self._spawn_completed is not None:
+            self._spawn_completed()
 
         if self._stdin_mode is StdinMode.PIPE:
             stdin_writer = proc.stdin
@@ -174,6 +184,8 @@ class CliTransport:
             )
             if not raw:
                 return
+            if self._raw_line_received is not None:
+                self._raw_line_received()
             yield raw.decode(errors=self._decode_errors).strip()
 
     async def wait(self) -> int:

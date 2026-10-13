@@ -41,7 +41,7 @@ from tests.harness.claude_sdk import (
     patch_claude_sdk,
     scripted_client,
 )
-from tests.harness.fake_cli_process import install_fake_cli_process
+from tests.harness.fake_cli_process import FakeCliScript, install_fake_cli_process
 from tests.harness.otlp import TraceCollector, attributes, kind_of as _kind, otlp_collector, otlp_grpc_collector
 
 # Distinct backend canaries expose cross-task, fan-out, and destination leaks.
@@ -53,7 +53,7 @@ _CANARIES = {
 _FLOW_IMPORTS = """
 import json
 from daydream.agent import run_agent
-from daydream.extensions import FlowStep
+from daydream.extensions import FlowStep, Stop
 from daydream.trajectory import DaydreamPhase
 """
 
@@ -372,6 +372,78 @@ async def test_codex_multi_turn_replay_yields_two_tool_spans_and_isolated_turns(
 
 
 # Pi: real PiBackend with the explicitly labeled long-generation replay
+
+
+@pytest.mark.parametrize("stage", ["blocked_spawn", "launched", "generation", "thinking", "diagnostic"])
+async def test_pi_wall_timeout_retains_lifecycle_on_disk_and_wire(
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    """Wall-first expiry distinguishes unfinished launch, silence, and interrupted native response."""
+    _flow(ext_dir, _SINGLE_AGENT_BODY.replace(
+        'phase=DaydreamPhase.REVIEW,', 'phase=DaydreamPhase.REVIEW, wall_budget_s=0.05,'
+    ).replace('"output": str(output)', '"output": str(output), "aborted": aborted'))
+    backend = PiBackend()
+    install_backend(backend)
+    frames: list[dict[str, Any]] = []
+    if stage in {"generation", "thinking"}:
+        frames.append({"type": "message_start", "message": {"role": "assistant"}})
+    if stage == "thinking":
+        frames.extend({"type": "message_update", "assistantMessageEvent": {
+            "type": kind + "_delta", "contentIndex": 0, "delta": "private-lifecycle-canary",
+        }} for kind in ("text", "thinking", "toolcall"))
+    lines = [json.dumps(frame) for frame in frames]
+    if stage == "diagnostic":
+        lines = ["", "private-stderr-canary", json.dumps({"type": "heartbeat", "delta": "private-lifecycle-canary"})]
+    spawner = install_fake_cli_process(monkeypatch, "pi", lines=[], scripts=[
+        FakeCliScript(lines=lines, hang=True, blocked_spawn=stage == "blocked_spawn"),
+    ])
+    monkeypatch.setenv("DAYDREAM_TRACE_CONTENT", "metadata")
+    with otlp_collector() as receiver:
+        _configure_otlp(monkeypatch, receiver.base_url + "/v1/traces")
+        assert await runner.run(_flow_config(make_config, feature_branch_repo, backend="pi")) == 1
+    output = json.loads((feature_branch_repo / ".daydream/protocol-result.json").read_text())
+    assert output["aborted"] == "wall_budget_exceeded"
+    trajectory_paths = list((feature_branch_repo / ".daydream/runs").glob("*/trajectory.json"))
+    assert len(trajectory_paths) == 1
+    trajectory = json.loads(trajectory_paths[0].read_text())
+    evidence = trajectory["extra"]["subtrajectories"][0]["backend_lifecycle"]
+    expected_state = "spawn_pending" if stage == "blocked_spawn" else (
+        "generating" if stage in {"generation", "thinking"} else "launched"
+    )
+    assert evidence["state"] == expected_state
+    assert evidence["response_idle_timeout_s"] == 600
+    assert evidence["tool_idle_timeout_s"] == 2700
+    assert (evidence["spawn_completed_s"] is not None) is (stage != "blocked_spawn")
+    assert (evidence["first_raw_line_s"] is not None) is bool(lines)
+    assert evidence["raw_line_count"] == len(lines)
+    assert evidence["generation_count"] == int(stage in {"generation", "thinking"})
+    for kind in ("text", "thinking", "toolcall"):
+        assert evidence[f"{kind}_delta_count"] == int(stage == "thinking")
+    assert (evidence["last_progress_age_s"] is not None) is (stage == "thinking")
+    assert evidence["remaining_wall_s"] == 0
+    attempt = attributes(_attempt(receiver.spans))
+    assert attempt["daydream.outcome"] == "wall_budget_exceeded"
+    for key, value in evidence.items():
+        if value is not None:
+            assert attempt[f"daydream.backend_lifecycle.{key}"] == value
+    assert not _kind(receiver.spans, "generation")
+    assert "gen_ai.usage.cost" not in attempt
+    assert "private-lifecycle-canary" not in json.dumps(evidence)
+    wire = json.dumps(receiver.requests)
+    assert "private-lifecycle-canary" not in wire and "private-stderr-canary" not in wire
+    if stage == "blocked_spawn":
+        assert spawner.procs == []
+    else:
+        assert len(spawner.procs) == 1
+        assert spawner.procs[0].reaped and spawner.procs[0].returncode == -15
+    if stage in {"generation", "thinking"}:
+        ledger = trajectory["extra"]["subtrajectories"][0]["generation_lifecycle"]
+        assert ledger["billing_owner"] == "none"
+        assert ledger["drafts"][0]["sealed"] is False
+        assert ledger["drafts"][0]["billed"] is False
+        assert ledger["drafts"][0]["ended_at_unix_ns"] is None
 
 async def test_pi_replay_exact_native_timing_choice_and_billing_through_runner(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig], monkeypatch: pytest.MonkeyPatch,

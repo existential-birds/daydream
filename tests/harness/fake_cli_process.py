@@ -146,6 +146,21 @@ class _FakePipeTransport:
         self._proc._release_pipes()
 
 
+class _ObservedStdout(asyncio.StreamReader):
+    """Expose when a real reader has consumed its script and waits for more bytes."""
+
+    _buffer: bytearray
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.blocked = asyncio.Event()
+
+    async def readline(self) -> bytes:
+        if not self._buffer and not self.at_eof():
+            self.blocked.set()
+        return await super().readline()
+
+
 class FakeCliProcess:
 
     def __init__(self, lines: list[str], *, hang: bool = False, exit_code: int = 0, ignore_sigterm: bool = False,
@@ -155,7 +170,7 @@ class FakeCliProcess:
         if stdout_reader is not None:
             self.stdout: asyncio.StreamReader = stdout_reader
         else:
-            self.stdout = asyncio.StreamReader()
+            self.stdout = _ObservedStdout()
             for line in lines:
                 self.stdout.feed_data((line + "\n").encode())
         self.stderr: asyncio.StreamReader | None = stderr_reader
@@ -205,6 +220,12 @@ class FakeCliProcess:
         assert self.returncode is not None
         return self.returncode
 
+    def finish(self, lines: list[str], *, exit_code: int = 0) -> None:
+        """Release a scripted live peer with final stdout bytes and process exit."""
+        for line in lines:
+            self.stdout.feed_data((line + "\n").encode())
+        self._exit(exit_code)
+
 
 @dataclass
 class FakeCliSpawner:
@@ -213,12 +234,33 @@ class FakeCliSpawner:
     procs: list[FakeCliProcess] = field(default_factory=list)
     argvs: list[tuple[str, ...]] = field(default_factory=list)
     kwargs: list[dict[str, Any]] = field(default_factory=list)
+    entered: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def wait_for_read(self, index: int = 0) -> None:
+        """Wait until the selected child has consumed its initial stdout script."""
+        await self.entered.wait()
+        while len(self.procs) <= index:
+            await asyncio.sleep(0)
+        stdout = self.procs[index].stdout
+        assert isinstance(stdout, _ObservedStdout)
+        await stdout.blocked.wait()
+
+
+@dataclass
+class FakeCliScript:
+    """One launch's external-process behavior, including an unfinished OS spawn."""
+
+    lines: list[str] = field(default_factory=list)
+    hang: bool = False
+    blocked_spawn: bool = False
+    exit_code: int = 0
 
 
 def install_fake_cli_process(
     monkeypatch: pytest.MonkeyPatch, cli: str, *, lines: list[str], hang: bool = False, exit_code: int = 0,
     ignore_sigterm: bool = False, stderr_lines: list[str] | None = None, stderr_held_open: bool = False,
     stdout_reader: asyncio.StreamReader | None = None, stderr_reader: asyncio.StreamReader | None = None,
+    scripts: list[FakeCliScript] | None = None,
 ) -> FakeCliSpawner:
     """Patch spawning at the transport seam and assert the declared CLI is argv[0]. Each launch gets a
     fresh process recorded by the returned spawner. stderr options model Osprey's separate pipe,
@@ -228,13 +270,18 @@ def install_fake_cli_process(
 
     async def fake_exec(*args: Any, **kwargs: Any) -> FakeCliProcess:
         assert args[0] == cli, (f"spawned CLI argv[0] {args[0]!r} does not match declared cli {cli!r}")
+        script = scripts[len(spawner.argvs)] if scripts is not None else FakeCliScript(lines, hang, False, exit_code)
+        spawner.argvs.append(tuple(str(a) for a in args))
+        spawner.kwargs.append(kwargs)
+        spawner.entered.set()
+        if script.blocked_spawn:
+            await asyncio.Event().wait()
         proc = FakeCliProcess(
-            lines, hang=hang, exit_code=exit_code, ignore_sigterm=ignore_sigterm, stderr_lines=stderr_lines,
+            script.lines, hang=script.hang, exit_code=script.exit_code,
+            ignore_sigterm=ignore_sigterm, stderr_lines=stderr_lines,
             stderr_held_open=stderr_held_open, stdout_reader=stdout_reader, stderr_reader=stderr_reader,
         )
         spawner.procs.append(proc)
-        spawner.argvs.append(tuple(str(a) for a in args))
-        spawner.kwargs.append(kwargs)
         return proc
 
     monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec)
