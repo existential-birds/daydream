@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from daydream.agent import run_agent
 from daydream.atif import validate
 from daydream.backends import (
     BackendExecutionInput,
@@ -56,7 +57,11 @@ from daydream.retry_policy import parse_message_retry_hint
 from daydream.runner import run
 from daydream.trajectory import DaydreamPhase
 from tests.conftest import ExtDir
-from tests.harness.fake_cli_process import LimitAwareStdout, assert_concurrent_streams_isolated
+from tests.harness.fake_cli_process import (
+    LimitAwareStdout,
+    assert_concurrent_streams_isolated,
+    install_fake_cli_process,
+)
 from tests.harness.fake_clock import FakeClock
 from tests.harness.pi_replay import FIXTURES_DIR, make_mock_process, make_mock_process_from_fixture
 from tests.harness.process_replay import replay_process
@@ -70,6 +75,66 @@ from tests.harness.stub_backend import (
     stage_result,
 )
 from tests.harness.trajectory import make_recorder
+
+
+@pytest.mark.parametrize("kind", ["text", "thinking", "toolcall", "tool", "diagnostic"])
+async def test_interrupted_pi_updates_retain_only_admitted_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
+) -> None:
+    """The installed delta-only schema survives interruption without turning diagnostics into progress.
+
+    Runner journeys own end-to-end export proof; this seam protects Pi frame admission,
+    including missing outer message, empty/malformed deltas, and tool updates.
+    """
+    frames: list[dict[str, Any]] = [
+        {"type": "session", "id": "private-session-canary"},
+        {"type": "message_start", "message": {"role": "assistant"}},
+        {"type": "message_update", "assistantMessageEvent": {"type": "heartbeat", "contentIndex": 0,
+                                                             "delta": "private-canary"}},
+        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": ""}},
+        {"type": "message_update", "assistantMessageEvent": {"type": "thinking_delta", "contentIndex": True,
+                                                             "delta": "private-canary"}},
+        {"type": "message_update", "assistantMessageEvent": {"type": "toolcall_delta", "contentIndex": -1,
+                                                             "delta": "private-canary"}},
+        {"type": "tool_execution_update", "partialResult": {"content": [{"text": "private-canary"}]}},
+    ]
+    if kind == "tool":
+        frames.extend([
+            {"type": "message_end", "message": {"role": "assistant", "stopReason": "toolUse", "content": [
+                {"type": "toolCall", "id": "active-tool", "name": "read", "arguments": {}},
+            ]}},
+            {"type": "tool_execution_start", "toolCallId": "active-tool", "toolName": "read", "args": {}},
+            {"type": "tool_execution_update", "partialResult": "invalid"},
+            {"type": "tool_execution_update", "partialResult": {"content": [{"text": "private-canary"}]}},
+        ])
+    elif kind != "diagnostic":
+        frames.append({"type": "message_update", "assistantMessageEvent": {
+            "type": f"{kind}_delta", "contentIndex": 0, "delta": "private-canary",
+        }})
+    lines = ["", "private stderr-canary", *[json.dumps(frame) for frame in frames]]
+    spawner = install_fake_cli_process(monkeypatch, "pi", lines=lines, hang=True)
+    monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "0")
+    recorder = make_recorder(tmp_path, backend_name="pi")
+    async with recorder:
+        output, _, reason = await run_agent(
+            PiBackend(model="test-model"), tmp_path, "review", phase=DaydreamPhase.REVIEW, wall_budget_s=0.05,
+        )
+    assert reason == "wall_budget_exceeded"
+    assert output == ""
+    trajectory = json.loads(recorder.path.read_text())
+    evidence = trajectory["extra"]["subtrajectories"][0]["backend_lifecycle"]
+    assert evidence["state"] == ("native_event" if kind == "tool" else "generating")
+    assert evidence["generation_count"] == 1 and evidence["generation_open"] is (kind != "tool")
+    assert evidence["idle_detection_enabled"] is False
+    assert evidence["response_idle_timeout_s"] == 0.0 and evidence["tool_idle_timeout_s"] == 0.0
+    assert evidence["raw_line_count"] == len(lines)
+    for field, admitted_kind in (("text_delta_count", "text"), ("thinking_delta_count", "thinking"),
+                                 ("toolcall_delta_count", "toolcall"), ("tool_progress_count", "tool")):
+        assert evidence[field] == int(kind == admitted_kind)
+    assert (evidence["last_progress_s"] is None) == (kind == "diagnostic")
+    assert evidence["active_tool_count"] == int(kind == "tool")
+    assert "private" not in json.dumps(evidence)
+    assert spawner.procs[0].reaped and spawner.procs[0].returncode == -15
 
 if TYPE_CHECKING:
     from daydream.run_config import RunConfig

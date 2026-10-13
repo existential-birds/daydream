@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from daydream.backends import (
@@ -25,7 +26,7 @@ from daydream.backends import (
     TurnEndEvent,
 )
 from daydream.trajectory import DaydreamPhase, Invocation
-from tests.harness.trajectory import make_recorder
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 # Sanitized replay: native start to sealed host end spans exactly 395.332 seconds.
 NATIVE_START_MS = 1788690314289
@@ -339,3 +340,70 @@ class TestEventDispatchAndSummary:
         draft = _summary(inv)["drafts"][0]
         assert "usage" not in draft or draft["usage"] == {}
         assert draft["billed"] is False
+
+
+@pytest.mark.parametrize("completed", [False, True], ids=["cancelled-unfinished", "completed-billed"])
+async def test_attempt_lifecycle_persists_without_changing_generation_billing(
+    tmp_path: Path, completed: bool,
+) -> None:
+    """Attempt evidence survives scope exit independently of native completion and billing."""
+    from daydream.backends.lifecycle import BackendLifecycleSnapshot
+
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        with anyio.CancelScope() as cancel_scope:
+            async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+                inv.observe_user_step("review request")
+                inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
+                if completed:
+                    inv.observe(_end_event())
+                    _usage(recorder, inv)
+                    _total(recorder, inv)
+                inv.record_backend_lifecycle(BackendLifecycleSnapshot(
+                    attempt=1,
+                    state="generating",
+                    response_idle_timeout_s=600.0,
+                    tool_idle_timeout_s=2700.0,
+                    idle_detection_enabled=True,
+                    wall_allowance_s=300.0,
+                    remaining_wall_s=0.0,
+                    elapsed_s=300.0,
+                    generation_open=not completed,
+                ))
+                if not completed:
+                    cancel_scope.cancel()
+                    await anyio.sleep_forever()
+
+    trajectory = read_trajectory(recorder.path)
+    summary = trajectory["extra"]["subtrajectories"][0]
+    lifecycle = summary["backend_lifecycle"]
+    assert lifecycle["attempt"] == 1
+    assert lifecycle["state"] == "generating"
+    assert lifecycle["timestamp_source"] == "host_observed"
+    assert lifecycle["clock"] == "monotonic_elapsed"
+    assert lifecycle["response_idle_timeout_s"] == 600.0
+    assert lifecycle["tool_idle_timeout_s"] == 2700.0
+    assert lifecycle["wall_allowance_s"] == 300.0
+    assert lifecycle["remaining_wall_s"] == 0.0
+    assert lifecycle["generation_open"] is (not completed)
+    ledger = summary["generation_lifecycle"]
+    draft = ledger["drafts"][0]
+    if completed:
+        assert ledger["billing_owner"] == "generation_children"
+        assert draft["sealed"] is True
+        assert draft["billed"] is True
+        assert draft["ended_at_unix_ns"] == HOST_END_NS
+        assert trajectory["final_metrics"]["total_prompt_tokens"] == 10
+        assert trajectory["final_metrics"]["total_completion_tokens"] == 5
+        assert trajectory["final_metrics"]["total_cost_usd"] == 0.00402781
+    else:
+        assert ledger["billing_owner"] == "none"
+        assert draft["sealed"] is False
+        assert draft["billed"] is False
+        assert draft["ended_at_unix_ns"] is None
+        assert "usage" not in draft
+        assert trajectory["final_metrics"].get("total_cost_usd") is None
+        agent_steps = [step for step in trajectory["steps"] if step["source"] == "agent"]
+        assert len(agent_steps) == 1
+        assert agent_steps[0]["extra"]["stop_reason"] == "cancelled"
+        assert trajectory["extra"]["partial"] is True

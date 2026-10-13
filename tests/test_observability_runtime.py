@@ -20,6 +20,7 @@ from opentelemetry.sdk.trace.export import SpanExportResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import NonRecordingSpan, SpanContext, StatusCode, TraceFlags
 
+from daydream import clock
 from daydream.agent import run_agent
 from daydream.backends import (
     CostEvent,
@@ -35,6 +36,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.backends.lifecycle import BackendLifecycleCollector
 from daydream.extensions.registry import Registry
 from daydream.observability import runtime
 from daydream.observability.config import (
@@ -183,6 +185,68 @@ async def test_attempt_records_only_scrubbed_diagnostic_codes_and_counts(monkeyp
     for span in spans:
         if span is not attempt_span:
             assert not any(key.startswith("daydream.backend_diagnostic") for key in (span.attributes or {}))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("response_idle_timeout_s", [600.0, 0.0])
+async def test_interrupted_generation_lifecycle_exports_only_attempt_evidence(
+    monkeypatch: pytest.MonkeyPatch, response_idle_timeout_s: float,
+) -> None:
+    """Unsealed native progress must not become a model completion or billing evidence."""
+    monkeypatch.setenv("DAYDREAM_TEST_TOKEN", "private-lifecycle-secret")
+    monkeypatch.setattr(clock, "monotonic", lambda: 100.0)
+    lifecycle = BackendLifecycleCollector(attempt=1, started_at=100.0, wall_allowance_s=0.1, deadline=100.1)
+    lifecycle.activate(response_idle_timeout_s=response_idle_timeout_s, tool_idle_timeout_s=2700.0)
+    lifecycle.spawn_pending()
+    lifecycle.spawn_completed()
+    lifecycle.native_event()
+    lifecycle.generation_started()
+    lifecycle.progress("thinking")
+    monkeypatch.setattr(clock, "monotonic", lambda: 100.1)
+    snapshot = lifecycle.finalize()
+    assert snapshot is not None
+
+    exporter, registry = _memory_tracing()
+    async with trace_run(
+        ObservabilityConfig(destinations=("memory",), capture_content=False), registry, flow="review",
+    ):
+        with agent_scope("review", backend="pi"):
+            async with attempt_scope(1) as attempt:
+                attempt.observe(RequestEvent("PRIVATE PROMPT private-lifecycle-secret"))
+                attempt.observe(GenerationStartEvent(generation_id="private-generation", observed_at_unix_ns=123))
+                attempt.observe(DiagnosticEvent(
+                    code="pi_protocol", message="PRIVATE diagnostic",
+                    metadata={"delta": "PRIVATE reasoning", "token": "private-lifecycle-secret"},
+                ))
+                attempt.record_backend_lifecycle(snapshot)
+                attempt.abort("wall_budget_exceeded")
+
+    spans = exporter.get_finished_spans()
+    assert {span.attributes["daydream.span.kind"] for span in spans if span.attributes} == {"run", "agent", "attempt"}
+    attempt_span = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "attempt")
+    attrs = dict(attempt_span.attributes or {})
+    assert attrs["daydream.outcome"] == "wall_budget_exceeded"
+    assert attrs["daydream.backend_lifecycle.state"] == "generating"
+    assert attrs["daydream.backend_lifecycle.clock"] == "monotonic_elapsed"
+    assert attrs["daydream.backend_lifecycle.timestamp_source"] == "host_observed"
+    assert attrs["daydream.backend_lifecycle.response_idle_timeout_s"] == response_idle_timeout_s
+    assert attrs["daydream.backend_lifecycle.tool_idle_timeout_s"] == 2700.0
+    assert attrs["daydream.backend_lifecycle.idle_detection_enabled"] is bool(response_idle_timeout_s)
+    assert attrs["daydream.backend_lifecycle.wall_allowance_s"] == 0.1
+    assert attrs["daydream.backend_lifecycle.remaining_wall_s"] == 0.0
+    assert attrs["daydream.backend_lifecycle.generation_open"] is True
+    assert attrs["daydream.backend_lifecycle.generation_count"] == 1
+    assert attrs["daydream.backend_lifecycle.thinking_delta_count"] == 1
+    assert attrs["daydream.backend_lifecycle.last_progress_age_s"] == pytest.approx(0.1)
+    assert "daydream.backend_lifecycle.first_raw_line_s" not in attrs
+    assert attrs["daydream.billing.owner"] == "unresolved"
+    assert not any(key.startswith("gen_ai.usage.") for key in attrs)
+    assert "private-lifecycle-secret" not in str(spans)
+    assert "PRIVATE" not in str(spans)
+    assert "private-generation" not in str(spans)
+    for span in spans:
+        if span is not attempt_span:
+            assert not any(key.startswith("daydream.backend_lifecycle.") for key in (span.attributes or {}))
 
 def test_diagnostics_scrub_formatted_arguments_and_exception(caplog: pytest.LogCaptureFixture) -> None:
     policy = PrivacyPolicy(environ={"LANGSMITH_API_KEY": "opaque-value"})

@@ -169,6 +169,11 @@ transformations. Adding a backend means producing that stream correctly — phas
 recorder are backend-agnostic. `Diagnostic` is recorder-only parser/transport evidence: the recorder
 normalizes and redacts it into JSON-safe `Step.extra.backend_diagnostics`, while observability exports
 only scrubbed diagnostic codes and counts on the enclosing attempt span.
+Pi startup and interrupted native progress use a separate typed, content-free attempt collector.
+The runner freezes its host-monotonic observations synchronously after stream cleanup and before
+invocation/span finalization. Trajectory invocation summaries retain `backend_lifecycle`; existing
+attempt spans export its fixed scalar fields as `daydream.backend_lifecycle.*`. This evidence does
+not change deadlines, idle windows, retries, native generation completion, or billing ownership.
 Adapters emit assistant text and genuine transport/native payloads; `agent_output.py` owns final-turn selection
 and validation. Staged contract 10 accepts bounded, complete, unambiguous prose/fence/single-wrapper packaging;
 `ReviewInvestigation._admit` owns domain admission before result presentation. Native lifecycle stays in adapters,

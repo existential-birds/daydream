@@ -46,6 +46,7 @@ from daydream.backends import (
     _admit_identity_label,
     unix_ms_to_ns,
 )
+from daydream.backends.lifecycle import BackendLifecycleSnapshot
 from daydream.diagnostics import exception_text
 from daydream.observability.privacy import PrivacyPolicy
 from daydream.observability.runtime import current_session
@@ -370,6 +371,18 @@ _USAGE_ATTRIBUTES = {
     "cost_usd": "gen_ai.usage.cost",
 }
 
+# Lifecycle evidence has a closed export surface independent of recorder-only
+# diagnostics and future snapshot additions. No native payloads belong here.
+_BACKEND_LIFECYCLE_FIELDS = frozenset({
+    "attempt", "backend", "timestamp_source", "clock", "state",
+    "response_idle_timeout_s", "tool_idle_timeout_s", "idle_detection_enabled",
+    "wall_allowance_s", "remaining_wall_s", "elapsed_s", "request_prepared_s",
+    "spawn_pending_s", "spawn_completed_s", "first_raw_line_s", "first_native_event_s",
+    "generation_started_s", "last_progress_s", "last_progress_age_s", "raw_line_count",
+    "native_event_count", "generation_count", "text_delta_count", "thinking_delta_count",
+    "toolcall_delta_count", "tool_progress_count", "active_tool_count", "generation_open",
+})
+
 
 def _usage_attributes(usage: dict[str, int | float]) -> dict[str, int | float]:
     attributes = {_USAGE_ATTRIBUTES[name]: value for name, value in usage.items()}
@@ -451,6 +464,16 @@ class AttemptObserver:
             self._observe(event, self.scope.session.policy)
         except Exception:
             _logger.warning("Trace event could not be recorded; execution continues")
+
+    def record_backend_lifecycle(self, snapshot: BackendLifecycleSnapshot) -> None:
+        """Attach finalized host observations to this attempt without generation billing."""
+        if type(snapshot) is not BackendLifecycleSnapshot:
+            return
+        self.scope.attrs({
+            f"daydream.backend_lifecycle.{key}": value
+            for key, value in snapshot.to_dict().items()
+            if key in _BACKEND_LIFECYCLE_FIELDS
+        })
 
     @singledispatchmethod
     def _observe(self, event: AgentEvent, policy: PrivacyPolicy) -> None:

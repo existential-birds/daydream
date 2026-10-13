@@ -32,6 +32,7 @@ from daydream.backends import (
     TurnEndEvent,
 )
 from daydream.backends.codex import supervisor_shell_command
+from daydream.backends.lifecycle import BackendLifecycleCollector, BackendLifecycleSnapshot
 from daydream.config import BUDGET_CLEANUP_GRACE_S
 from daydream.diagnostics import exception_text, sanitize_verbose_message
 from daydream.extensions import get_registry
@@ -119,11 +120,17 @@ def _scrubbed_supervisor_error(original: BaseException) -> BaseException:
 class _EventStreamScope:
     """Idempotent owner for one backend invocation's event stream."""
 
-    def __init__(self, event_iter: AgentEventStream) -> None:
+    def __init__(
+        self, event_iter: AgentEventStream, *, lifecycle: BackendLifecycleCollector,
+        record_lifecycle: Callable[[BackendLifecycleSnapshot], None],
+    ) -> None:
         self.event_iter = event_iter
         self._closed = False
+        self._lifecycle = lifecycle
+        self._record_lifecycle = record_lifecycle
 
     async def __aenter__(self) -> AgentEventStream:
+        self._lifecycle_token = self._lifecycle.bind()
         return self.event_iter
 
     async def __aexit__(
@@ -132,7 +139,17 @@ class _EventStreamScope:
         exc: BaseException | None,
         _traceback: TracebackType | None,
     ) -> None:
-        await self.aclose()
+        try:
+            await self.aclose()
+        finally:
+            # No await/yield between freezing and handing evidence to the scopes
+            # that finalize next. GeneratorExit/cancellation cannot drop this.
+            try:
+                snapshot = self._lifecycle.finalize()
+                if snapshot is not None:
+                    self._record_lifecycle(snapshot)
+            finally:
+                self._lifecycle.reset(self._lifecycle_token)
 
     async def aclose(self) -> None:
         """Close the invocation once without masking its outcome."""
@@ -594,7 +611,22 @@ async def _run_agent(
                     invocation_cm: Any = (
                         recorder.invocation(phase=phase) if recorder is not None else nullcontext(None)
                     )
-                    event_stream_scope = _EventStreamScope(event_iter)
+                    lifecycle = BackendLifecycleCollector(
+                        attempt=attempt + 1, started_at=dispatch_time,
+                        wall_allowance_s=(
+                            max(0.0, effective_deadline - dispatch_time) if effective_deadline is not None else None
+                        ),
+                        deadline=effective_deadline,
+                    )
+
+                    def record_lifecycle(snapshot: BackendLifecycleSnapshot) -> None:
+                        if inv is not None:
+                            inv.record_backend_lifecycle(snapshot)
+                        observed.record_backend_lifecycle(snapshot)
+
+                    event_stream_scope = _EventStreamScope(
+                        event_iter, lifecycle=lifecycle, record_lifecycle=record_lifecycle,
+                    )
 
                     async with (
                         attempt_scope(attempt + 1) as observed,

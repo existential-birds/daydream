@@ -225,6 +225,35 @@ reconcile with intermediate metrics without adding both copies. Cache reads and
 cache creation are part of input tokens; reasoning tokens are part of output tokens.
 Unavailable values remain absent, and known zero values remain zero.
 
+Pi attempts retain bounded startup and native-progress evidence under
+`daydream.backend_lifecycle.*`, including timeout and cancellation. The same
+snapshot is persisted in each invocation's trajectory subtrajectory as
+`backend_lifecycle`. States distinguish request preparation, a pending spawn,
+a launched process, recognized native events, and an open generation. Separate
+raw-line and native-progress counters distinguish transport activity from genuine
+text, thinking, tool-call, and tool-execution updates and boundaries. Blank lines and diagnostic
+output count as transport receipt without becoming model progress.
+
+All lifecycle times are host observations in monotonic seconds since attempt
+dispatch (`clock=monotonic_elapsed`, `timestamp_source=host_observed`). Optional
+milestone fields remain absent from spans until observed; zero values are retained.
+The snapshot includes effective response/tool idle settings, whether idle detection
+is enabled, invocation wall allowance and remaining enforced time when bounded,
+active-tool count, open-generation state, and last-progress age. Counts saturate
+at 2,147,483,647; no event history or payload contents are retained in this evidence.
+The existing `daydream.outcome` remains the authoritative stop reason.
+
+An unfinished generation adds attempt evidence without a completion span, usage,
+or cost. These observations establish neither provider receipt nor an upstream
+failure cause. Lifecycle capture does not change the 600/2700-second response/tool
+idle defaults, zero-disable behavior, active-tool allowance, absolute deadlines,
+recovery allowance, one-stall-retry cap, or partial-result and cleanup behavior.
+Wall expiry before idle expiry remains `wall_budget_exceeded`; current exploration
+investigations can expire at 300 seconds. The lifecycle fields are content-free in
+both metadata and full tracing modes, and never include deltas, tool arguments or
+results, identifiers, stderr, usage payloads, or environment values. See the
+[field contract](observability-fields.md#pi-attempt-lifecycle-host-observations).
+
 All four backends share the same trace path. Data hidden by a backend's public
 stream—such as a proprietary CLI's internal system prompt or individual provider
 request timings—cannot be captured. Daydream records the effective request it sends

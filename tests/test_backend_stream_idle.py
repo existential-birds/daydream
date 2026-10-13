@@ -213,9 +213,10 @@ def test_malformed_override_falls_back_to_default(raw: str, monkeypatch: pytest.
     monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, raw)
     assert stream_idle_timeout_s() == DEFAULT_STREAM_IDLE_TIMEOUT_S
 
-def test_default_windows_straddle_the_wall_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pi response silence must preempt the wall budget; output-silent tools and Codex generations retain a
-    longer idle window.
+def test_default_idle_windows_straddle_the_default_turn_allowance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Defaults straddle an ordinary turn; the 300-second exploration investigation can wall-expire first.
+
+    This constant comparison makes no claim about an invocation's enforced deadline.
     """
     monkeypatch.delenv(STREAM_IDLE_TIMEOUT_ENV, raising=False)
     assert stream_idle_timeout_s() == DEFAULT_STREAM_IDLE_TIMEOUT_S
@@ -251,6 +252,17 @@ async def test_stall_retry_is_limited_below_backend_retry_budget(
         if (step.get("extra") or {}).get("error_subtype") == "StreamStalledError"
     ]
     assert errored, "the stall was not recorded on any trajectory step"
+    attempts = trajectory["extra"]["subtrajectories"]
+    assert [attempt["backend_lifecycle"]["attempt"] for attempt in attempts] == [1, 2]
+    for attempt in attempts:
+        evidence = attempt["backend_lifecycle"]
+        assert evidence["state"] == "native_event"
+        assert evidence["response_idle_timeout_s"] == float(TINY_WINDOW)
+        assert evidence["tool_idle_timeout_s"] == float(TINY_WINDOW)
+        assert evidence["raw_line_count"] == 2
+        assert evidence["native_event_count"] == 1
+        assert evidence["generation_count"] == 0
+        assert evidence["last_progress_s"] is None
 
 async def test_wall_budget_still_aborts_while_blocked_in_the_idle_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

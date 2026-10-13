@@ -29,12 +29,14 @@ from daydream.backends import (
     ToolStartEvent,
 )
 from daydream.backends.codex import CodexBackend, CodexError
+from daydream.backends.pi import PiBackend
 from daydream.dataset import LocalRecordStore
 from daydream.observability.config import ObservabilityConfig
 from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.harness.backend import ScriptedBackend
+from tests.harness.fake_cli_process import FakeCliScript, install_fake_cli_process
 from tests.harness.git_helpers import commit, write_and_stage
 from tests.harness.otlp import TraceCollector, attributes, kind_of as _kind, otlp_collector
 from tests.harness.review_result import saved_coverage
@@ -361,6 +363,193 @@ async def test_runner_cancellation_reaches_caller_and_flushes_root_and_active_to
     assert tool["status"]["message"] == "cancelled"
     assert tool["events"][-1]["name"] == "exception"
     assert all(int(span["endTimeUnixNano"]) >= int(span["startTimeUnixNano"]) for span in spans)
+
+
+async def test_pi_runner_external_cancellation_flushes_progress_and_reaps_all_children(
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run cancellation preserves native deltas and retains backend-wide shutdown semantics."""
+    _flow(ext_dir, body='''
+async with anyio.create_task_group() as group:
+    for label in ("first", "second"):
+        async def invoke(label=label):
+            await run_agent(ctx.backend_for("review"), ctx.work.repo, label, phase=DaydreamPhase.REVIEW)
+        group.start_soon(invoke)
+''')
+    install_backend(PiBackend(model="test-model"))
+    lines = [json.dumps(frame) for frame in [
+        {"type": "message_start", "message": {"role": "assistant"}},
+        {"type": "message_update", "assistantMessageEvent": {
+            "type": "thinking_delta", "contentIndex": 0, "delta": "private-interrupted-reasoning",
+        }},
+    ]]
+    spawner = install_fake_cli_process(monkeypatch, "pi", lines=lines, hang=True)
+    monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "0")
+    monkeypatch.setenv("DAYDREAM_TRACE_CONTENT", "metadata")
+    cancelled = False
+    with otlp_collector() as collector:
+        config = _config(make_config, feature_branch_repo, collector.base_url, monkeypatch)
+        async def launch() -> None:
+            nonlocal cancelled
+            try:
+                await runner.run(config)
+                pytest.fail("cancelled runner returned")
+            except anyio.get_cancelled_exc_class():
+                cancelled = True
+                raise
+        with anyio.fail_after(15):
+            async with anyio.create_task_group() as group:
+                group.start_soon(launch)
+                await spawner.wait_for_read(0)
+                await spawner.wait_for_read(1)
+                group.cancel_scope.cancel()
+    assert cancelled and len(spawner.procs) == 2
+    assert all(proc.reaped and proc.returncode == -15 for proc in spawner.procs)
+    paths = list((feature_branch_repo / ".daydream/runs").glob("*/trajectory.json"))
+    assert len(paths) == 1
+    trajectory = json.loads(paths[0].read_text())
+    attempts = trajectory["extra"]["subtrajectories"]
+    assert len(attempts) == 2
+    for attempt in attempts:
+        evidence = attempt["backend_lifecycle"]
+        assert evidence["state"] == "generating"
+        assert evidence["thinking_delta_count"] == 1
+        assert evidence["generation_open"] is True
+        assert evidence["response_idle_timeout_s"] == 0
+        assert evidence["last_progress_age_s"] >= 0
+        assert len(json.dumps(evidence)) < 2000
+        assert attempt["generation_lifecycle"]["billing_owner"] == "none"
+        assert attempt["generation_lifecycle"]["drafts"][0]["sealed"] is False
+    assert any(step.get("extra", {}).get("stop_reason") == "cancelled" for step in trajectory["steps"])
+    exported = _kind(collector.spans, "attempt")
+    assert len(exported) == 2
+    for span in exported:
+        attrs = attributes(span)
+        assert attrs["daydream.outcome"] == "cancelled"
+        assert attrs["daydream.backend_lifecycle.thinking_delta_count"] == 1
+        assert attrs["daydream.backend_lifecycle.generation_open"] is True
+        assert not any(key.startswith("gen_ai.usage.") for key in attrs)
+    assert not _kind(collector.spans, "generation")
+    assert "private-interrupted-reasoning" not in json.dumps(collector.requests)
+
+
+async def test_pi_runner_invocation_timeout_preserves_healthy_sibling(
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local timeout/aclose reaps one invocation while its peer completes and bills once."""
+    _flow(ext_dir, body='''
+results = {}
+async def invoke(label, allowance):
+    output, _, aborted = await run_agent(ctx.backend_for("review"), ctx.work.repo, label,
+        phase=DaydreamPhase.REVIEW, wall_budget_s=allowance)
+    results[label] = {"output": output, "aborted": aborted}
+async with anyio.create_task_group() as group:
+    group.start_soon(invoke, "timed-out", 0.05)
+    group.start_soon(invoke, "healthy", 5)
+(ctx.data["daydream_dir"] / "trace-failure-result.json").write_text(json.dumps(results))
+''')
+    install_backend(PiBackend(model="test-model"))
+    start = json.dumps({"type": "message_start", "message": {"role": "assistant"}})
+    spawner = install_fake_cli_process(monkeypatch, "pi", lines=[], scripts=[
+        FakeCliScript(lines=[start], hang=True), FakeCliScript(lines=[start], hang=True),
+    ])
+    monkeypatch.setenv("DAYDREAM_TRACE_CONTENT", "metadata")
+    completed: list[int] = []
+    with otlp_collector() as collector:
+        config = _config(make_config, feature_branch_repo, collector.base_url, monkeypatch)
+        async def launch() -> None:
+            completed.append(await runner.run(config))
+        with anyio.fail_after(15):
+            async with anyio.create_task_group() as group:
+                group.start_soon(launch)
+                await spawner.wait_for_read(0)
+                await spawner.wait_for_read(1)
+                assert await spawner.procs[0].wait() == -15
+                assert spawner.procs[1].returncode is None
+                spawner.procs[1].finish([json.dumps(frame) for frame in [
+                    {"type": "message_update", "assistantMessageEvent": {
+                        "type": "text_delta", "contentIndex": 0, "delta": "private-delta-content",
+                    }},
+                    {"type": "message_end", "message": {"role": "assistant", "model": "test-model",
+                        "content": [{"type": "text", "text": "healthy result"}], "stopReason": "stop",
+                        "usage": {"input": 10, "output": 5, "cost": {"total": 0.01}},
+                    }},
+                    {"type": "turn_end", "message": {"role": "assistant", "model": "test-model",
+                        "usage": {"input": 10, "output": 5, "cost": {"total": 0.01}}, "stopReason": "stop",
+                    }}, {"type": "agent_end"},
+                ]])
+    assert completed == [0]
+    result = json.loads((feature_branch_repo / _RESULT_FILE).read_text())
+    assert result == {"timed-out": {"output": "", "aborted": "wall_budget_exceeded"},
+                      "healthy": {"output": "healthy result", "aborted": None}}
+    paths = list((feature_branch_repo / ".daydream/runs").glob("*/trajectory.json"))
+    assert len(paths) == 1
+    trajectory = json.loads(paths[0].read_text())
+    evidence = [attempt["backend_lifecycle"] for attempt in trajectory["extra"]["subtrajectories"]]
+    assert [entry["text_delta_count"] for entry in evidence] == [0, 1]
+    assert [entry["generation_open"] for entry in evidence] == [True, False]
+    assert trajectory["final_metrics"]["total_prompt_tokens"] == 10
+    assert trajectory["final_metrics"]["total_completion_tokens"] == 5
+    assert trajectory["final_metrics"]["total_cost_usd"] == 0.01
+    attempts = _kind(collector.spans, "attempt")
+    assert len(attempts) == 2
+    assert {attributes(span)["daydream.outcome"] for span in attempts} == {"wall_budget_exceeded", "success"}
+    generations = _kind(collector.spans, "generation")
+    assert len(generations) == 1
+    assert attributes(generations[0])["daydream.generation.billed"] is False
+    assert "gen_ai.usage.cost" not in attributes(generations[0])
+    billed_attempts = [attributes(span) for span in attempts if "gen_ai.usage.cost" in attributes(span)]
+    assert len(billed_attempts) == 1
+    assert billed_attempts[0]["daydream.billing.owner"] == "structural_attempt"
+    assert billed_attempts[0]["gen_ai.usage.cost"] == 0.01
+    assert "private-delta-content" not in json.dumps(collector.requests)
+
+
+async def test_pi_runner_idle_retry_retains_each_attempt_evidence_and_original_deadline(
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Native silence exports both original attempts under the existing one-stall-retry cap."""
+    _flow(ext_dir, body='''
+from daydream.backends._subprocess import StreamStalledError
+try:
+    await run_agent(ctx.backend_for("review"), ctx.work.repo, "silent review",
+        phase=DaydreamPhase.REVIEW, wall_budget_s=5)
+except StreamStalledError:
+    (ctx.data["daydream_dir"] / "trace-failure-result.json").write_text(json.dumps({"error": "StreamStalledError"}))
+    return Stop(1)
+''')
+    monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "0.02")
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "3")
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0")
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "0")
+    install_backend(PiBackend(model="test-model"))
+    spawner = install_fake_cli_process(monkeypatch, "pi", lines=[], hang=True)
+    monkeypatch.setenv("DAYDREAM_TRACE_CONTENT", "metadata")
+    with otlp_collector() as collector:
+        assert await runner.run(_config(make_config, feature_branch_repo, collector.base_url, monkeypatch)) == 1
+    assert json.loads((feature_branch_repo / _RESULT_FILE).read_text()) == {"error": "StreamStalledError"}
+    assert len(spawner.procs) == 2
+    assert all(proc.reaped and proc.returncode == -15 for proc in spawner.procs)
+    paths = list((feature_branch_repo / ".daydream/runs").glob("*/trajectory.json"))
+    assert len(paths) == 1
+    trajectory = json.loads(paths[0].read_text())
+    evidence = [attempt["backend_lifecycle"] for attempt in trajectory["extra"]["subtrajectories"]]
+    assert [entry["attempt"] for entry in evidence] == [1, 2]
+    assert all(entry["state"] == "launched" and entry["response_idle_timeout_s"] == 0.02 for entry in evidence)
+    assert evidence[1]["wall_allowance_s"] < evidence[0]["wall_allowance_s"]
+    assert evidence[1]["remaining_wall_s"] < evidence[0]["remaining_wall_s"]
+    attempts = sorted(_kind(collector.spans, "attempt"), key=lambda span: int(span["startTimeUnixNano"]))
+    assert len(attempts) == 2
+    for span, entry in zip(attempts, evidence, strict=True):
+        attrs = attributes(span)
+        assert attrs["daydream.outcome"] == "error"
+        assert span["events"][-1]["attributes"]
+        assert attrs["daydream.backend_lifecycle.attempt"] == entry["attempt"]
+        assert attrs["daydream.backend_lifecycle.response_idle_timeout_s"] == 0.02
+        assert not any(key.startswith("gen_ai.usage.") for key in attrs)
 
 async def test_runner_export_outage_warns_and_preserves_review_result_and_output(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
