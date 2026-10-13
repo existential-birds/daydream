@@ -210,7 +210,7 @@ async def test_over_budget_diff_preserves_full_disk_evidence_and_uses_safe_promp
             assert "line 500 of filler content" not in prompt and "SMALL_RETAINED_MARKER" not in prompt
     python_calls = [(call["prompt"], stage) for call in stub.calls
                     if (stage := review_stage_state(call["prompt"])) is not None
-                    and stage["scope_id"] == "python" and stage["stage"] == "first_pass"]
+                    and stage["scope_id"].split("#", 1)[0] == "python" and stage["stage"] == "first_pass"]
     assert python_calls
     assert {path for _, stage in python_calls for path in stage["assigned_files"]} == set(files) | {"api.py"}
     for python_prompt, stage in python_calls:
