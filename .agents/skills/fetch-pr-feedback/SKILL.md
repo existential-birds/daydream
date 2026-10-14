@@ -63,7 +63,7 @@ if [ -n "${PR_NUMBER:-}" ]; then
     --json number,url,author,headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository \
     > "$FEEDBACK_DIR/pr.json"
 else
-  gh pr view --repo "$OWNER/$REPO" \
+  gh pr view \
     --json number,url,author,headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository \
     > "$FEEDBACK_DIR/pr.json"
 fi
