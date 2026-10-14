@@ -81,7 +81,7 @@ command -v daydream
 The command should resolve to the uv tool executable directory (`uv tool dir --bin`),
 usually `~/.local/bin`. If it resolves to a pyenv shim or another installation,
 remove that stale Daydream installation or put the uv tool directory first on
-`PATH`. The install requires Python 3.12.13 or newer.
+`PATH`. The install requires Python 3.14 or newer.
 
 To run directly from the clone with its synchronized dependencies:
 

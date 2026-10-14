@@ -49,7 +49,7 @@ differs (four versus eight). Both jobs passed 7,111 tests and the 90% floor
 | 3.12 | 8 | 513 seconds | 577 seconds |
 
 Eight workers were 8.9% slower in the test step, so the final workflow retains
-four workers through pytest's automatic selection on the four-vCPU runner.
+an explicit cap of four workers, including when Blacksmith grants extra CPUs.
 The temporary matrix has been removed.
 
 ## Python 3.14 measurement
@@ -64,8 +64,16 @@ rollout was skipped.
 [Coverage.py 7.16.1](https://coverage.readthedocs.io/en/7.16.1/config.html#run-core)
 uses the sys.monitoring collector by default on Python 3.14, including branch
 coverage. Complete test selection, workers, coverage exclusions, and the floor
-remain unchanged. The Blacksmith runtime measurement and final workload savings
-calculation are still in progress.
+remain unchanged. [Run 38580430834](https://github.com/existential-birds/daydream/actions/runs/38580430834)
+at `98499566a4ebed1a550d45a1a304bf00d2ad5fea` passed 7,111 tests and five skips
+with 90.64% branch coverage on Python 3.14.7. The test step took 427 seconds;
+the complete job took 519 seconds. Against the four-worker Python 3.12 job,
+this is a 9.3% test-step improvement and a 3.7% complete-job improvement.
+Python 3.14 alone does not establish the 50% workload target.
+
+The [focused test consolidation](ci-test-consolidation.md) transfers duplicate
+flow assertions into stronger existing keepers and batches Git fixture staging.
+Its complete gate and comparable Blacksmith measurement remain in progress.
 
 ## Alternatives considered
 
