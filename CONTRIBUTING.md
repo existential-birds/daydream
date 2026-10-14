@@ -1,17 +1,18 @@
 # Contributing to Daydream
 
-Thanks for contributing! This guide walks you from a fresh clone to a signed,
-gate-green pull request: prerequisites, one-time setup, the commands that make
-up the local quality gate, and the conventions reviewers will hold your change
-to. Daydream is developed with coding agents in the loop, so
-[CLAUDE.md](CLAUDE.md) is the agent-facing counterpart of this document — it
-carries the architecture and testing rules the agent must follow. This guide
-links to it rather than duplicating it: if you are changing behavior that
-CLAUDE.md describes, update both.
+This guide is for coding agents contributing to Daydream. Read it before
+starting work, alongside [AGENTS.md](AGENTS.md), the source of repository guidance.
+This document owns the contribution workflow; AGENTS.md owns architecture and
+runtime contracts. Update the relevant guidance whenever a change makes it stale.
+
+Start with the [shared agent skill workflow](#shared-agent-skill-workflow):
+`prepare-implement` → generate a self-contained `/goal` prompt → execute it.
+Use the setup and validation references below during execution, and satisfy the
+[pull request requirements](#pull-request-requirements) before requesting review.
 
 ## Prerequisites
 
-Required for any contribution:
+Verify these prerequisites before running the local gate:
 
 - **Python ≥ 3.14**
 - **[`uv`](https://docs.astral.sh/uv/)** — installs and manages the virtualenv and runs every gate tool
@@ -67,7 +68,7 @@ The pre-push hook **rejects unsigned commits** and accepts any valid signature
 2. Have your SSH key loaded — `ssh-add -l` must list a key. If it lists
    nothing, run `ssh-add ~/.ssh/<your-key>`.
 
-If you already made commits without signing, re-sign them:
+If the contribution branch contains unsigned commits, re-sign those commits:
 
 ```bash
 git rebase --exec 'git commit --amend --no-edit -S' HEAD~N
@@ -111,34 +112,12 @@ local gate is the stricter one. The pre-push hook runs `make check` after
 verifying signatures, so a green local `make check` is what keeps your push from
 being rejected. CI runs the full gate before a queued merge and reuses only a verified merge-group tree afterward. PR updates run basic checks only while effective branch rules enforce the queue and required `check`; otherwise they run in full. See the [CI spend policy](.github/workflows/README.md#ci-spend-policy). The local gate always runs in full.
 
-## Testing policy
+## Testing
 
-For the [terminal findings contract](README.md#terminal-review-findings-contract), exercise the production runner with real Git/public outputs, stub provider/GitHub seams, and inject filesystem faults at actual read/write/install operations.
-
-Every user-visible behavior must have at least one **real-path test**: a test
-that enters from the production entrypoint (`runner.run` / the CLI) with real
-dependencies — a real temp git worktree, a real filesystem, a real event loop —
-mocking only the external network/API backend, via the `Backend` protocol /
-`create_backend` seam. Tests must assert observable outcomes (exit code, files
-written, fixes applied or declined, transcript state), never that a function was
-merely called. Unit tests are supplementary, not a substitute.
-
-This is the standard reviewers hold PRs to, and the one the agent-facing
-[CLAUDE.md](CLAUDE.md) §Testing standard states as mandatory.
-
-## Exemplars
-
-Read these before writing your first test — they are the reference
-implementations of the real-path standard:
-
-- `tests/deep_orchestrator/test_fix_gate_cleanup_and_precision.py`:
-  `test_apply_fixes_gate_non_interactive_takes_safe_default` and
-  `test_apply_fixes_gate_eof_declines_cleanly_no_crash` — the non-interactive /
-  EOF gate tests, exercising `runner.run` against a real worktree with only the
-  backend stubbed.
-- Secondary stub-backend-seam examples: `tests/test_cli.py` and
-  `tests/test_integration.py`, which reuse the `_install_stub_backend` and
-  `_silence` helpers imported from `tests/test_deep_orchestrator.py`.
+Follow the [testing guidance in AGENTS.md](AGENTS.md#testing-standard-mandatory)
+when writing, changing, or reviewing tests. Run affected checks during implementation
+and the [required gate](#everyday-commands-and-the-required-gate) before publication.
+Record commands, results, and any skips in the PR's Test Plan.
 
 ## Conventions
 
@@ -151,23 +130,65 @@ implementations of the real-path standard:
 - **Dependencies** — declared in `pyproject.toml`; keep `uv.lock` in sync (`uv
   lock`) or `make check` fails at its first step (`lockcheck`).
 - **Commit messages** — Conventional Commits, e.g. `feat(backends): ...`.
+- **History** — keep a linear history; rebase the contribution branch instead of
+  creating merge commits.
 - **Staging** — stage explicitly (`git add <path>`), never `git add -A`.
 - **Documentation** — update it when your change makes it stale, including
-  [CLAUDE.md](CLAUDE.md) when the agent-facing contract changes.
-- **Pull requests** — must include a **Test Plan** section per the
-  [PR template](.github/PULL_REQUEST_TEMPLATE.md).
-- **Never** bypass the pre-push hook, skip tests, or push with
-  `git push --no-verify`.
+  [AGENTS.md](AGENTS.md) when the agent-facing contract changes.
+- **Pull requests** — follow the [pull request requirements](#pull-request-requirements).
+- **Git hooks** — run every commit and push with hooks enabled. Never bypass
+  hooks with `--no-verify`, environment variables, configuration, or any other
+  mechanism, even for pre-existing failures. Fix the failure on the branch and
+  retry normally, or report the blocker. A commit or push is complete only after
+  the hook-enabled command succeeds.
 - **No caveats** — work is completed and proven, or explicitly in progress.
   No deferred items, no "optional" follow-ups, no smoke tests substituted for
   real coverage.
+
+## Versioning and changelog
+
+Daydream follows [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
+Assess changes to public contracts and state the compatibility impact in the PR.
+For stable releases, incompatible API changes require a major version, compatible
+new functionality or deprecations a minor version, and compatible bug fixes a
+patch version. Apply SemVer's initial-development rules while the version is
+`0.y.z`; still identify breaking changes and migration steps explicitly.
+Change version metadata when release/version work is in scope, keeping package
+version declarations and `uv.lock` consistent.
+
+[CHANGELOG.md](CHANGELOG.md) follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Add notable changes under
+`[Unreleased]`, using the appropriate `Added`, `Changed`, `Deprecated`, `Removed`,
+`Fixed`, or `Security` heading. Describe the impact for users and contributors;
+link the issue or PR when available. During a release, move those entries into a
+versioned section with an ISO date (`YYYY-MM-DD`), newest release first, and
+update comparison links. If a PR has no notable change, explain why the changelog
+checklist item is N/A.
+
+## Pull request requirements
+
+Every PR must start from [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md),
+including PRs created through `gh` or another API. Use the
+[pr skill](.agents/skills/pr/SKILL.md) when writing the body; the repository
+template takes precedence over illustrative layouts in that skill.
+
+Complete **Summary**, **Motivation**, **Test Plan**, and **Checklist**. Remove
+only sections the template explicitly marks optional. Link the source issue
+when one exists, using closing keywords only when the PR fully resolves it.
+
+Account for every checklist item before requesting review. Check applicable
+items only after verification and put the evidence in **Test Plan**. Keep an
+inapplicable conditional item unchecked and append `N/A` with a concrete reason.
+An applicable item that is incomplete remains unchecked and blocks readiness for
+review; report it as a blocker. Refresh the checklist and evidence after changes
+so they describe the latest PR HEAD.
 
 ## Where to look deeper
 
 This guide links rather than duplicates; these documents carry the detail:
 
-- [CLAUDE.md](CLAUDE.md) §Architecture — the module responsibility map and
-  pipeline walkthrough.
+- [AGENTS.md](AGENTS.md#architecture) — architecture boundaries, runtime invariants,
+  and required references for each subsystem.
 - [docs/extensions.md](docs/extensions.md) — the versioned extension API for
   forks (`daydream_ext`).
 - [docs/coverage.md](docs/coverage.md) — the coverage gate and ratchet
@@ -183,13 +204,22 @@ By task:
 
 ## Shared agent skill workflow
 
-Ask a dot agent to use
-[prepare-implement](.agents/skills/prepare-implement/SKILL.md) for a GitHub issue.
-It reads the issue and repository context with subagents, leaves the checkout
-unchanged, and returns a single self-contained `/goal` prompt. Run that prompt in
-a new session: that session creates the branch, implements the issue, validates
-the change, and delivers a merge-ready PR. Use the
-[pr skill](.agents/skills/pr/SKILL.md) when writing the PR body.
+Use this sequence for a GitHub issue or implementation spec:
+
+1. **Prepare:** invoke [prepare-implement](.agents/skills/prepare-implement/SKILL.md).
+   Read the complete source and repository guidance, gather bounded context with
+   subagents, and capture the exact base and worktree state. Preparation is
+   read-only; leave the checkout, refs, and files unchanged.
+2. **Generate the goal prompt:** return one self-contained `/goal` prompt with
+   the scope, acceptance criteria, verified baseline, implementation lanes,
+   validation, publication, and review-loop requirements defined by the skill.
+   The prompt must contain enough context for a fresh session to execute it.
+3. **Execute the prompt:** run it in a new session. Recheck repository guidance
+   and worktree state, create a new branch from the verified requested base or
+   captured HEAD, preserve unrelated work, and implement the goal. Validate,
+   make signed Conventional Commits with explicit staging, and push with hooks
+   enabled. Open a PR following the [PR requirements](#pull-request-requirements),
+   then complete the review loop below before reporting merge readiness.
 
 After opening the PR, run the available Daydream reviewer from its checkout:
 
@@ -218,34 +248,11 @@ the opportunity and provenance, then
 its implementation. These specialized workflows preserve discovery and benchmark
 evidence; they are separate from ordinary issue implementation.
 
-## Your first PR
-
-A compact walkthrough; each step links back to the section that explains it:
-
-1. Branch from a clean, up-to-date main:
-   `git checkout -b <your-branch>`. (Daydream uses a linear history — rebase
-   rather than merge.)
-2. `make install && make hooks` — once per clone ([Setup](#setup)), including
-   SSH signing so the pre-push hook accepts your commits.
-3. Develop with a real-path test per the [testing policy](#testing-policy);
-   the [exemplars](#exemplars) show the shape.
-4. Run the focused targets for what you touched (`make lint`, `make
-   typecheck`, `make test`) — see the [commands table](#everyday-commands-and-the-required-gate).
-   If you changed `rl/daydream_review`, also run `make rl-check`.
-5. Run the full gate: `make check`.
-6. Commit with a Conventional Commits message and explicit staging
-   ([Conventions](#conventions)).
-7. Push (`git push -u origin <your-branch>`) — the hook re-runs `make check`
-   after verifying signatures.
-8. Open a PR with a **Test Plan** section per the
-   [PR template](.github/PULL_REQUEST_TEMPLATE.md).
-
 ## Where the agent guidance lives
 
 Repository architecture and runtime guidance — invariants, backend protocol,
-budgets, and artifact boundaries — lives in [CLAUDE.md](CLAUDE.md). Reusable agent
+budgets, and artifact boundaries — lives in [AGENTS.md](AGENTS.md). Reusable agent
 workflows live under `.agents/skills/`; the [.gitignore](.gitignore) allowlist
 tracks the shared skills linked above. Keep detailed workflow procedures in their
 skills rather than duplicating them here. If your PR changes a contract described
-in CLAUDE.md, update it in the same PR. Before opening the PR, run through the
-checklist at the bottom of the [PR template](.github/PULL_REQUEST_TEMPLATE.md).
+in AGENTS.md, update it in the same PR.

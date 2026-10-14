@@ -9,7 +9,7 @@ from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
 def test_populated_context_produces_markdown() -> None:
     ctx = ExplorationContext(affected_files=[FileInfo("src/app.py", "modified", "Main entry point")],
-        conventions=[Convention("snake_case", "All functions use snake_case", "CLAUDE.md")],
+        conventions=[Convention("snake_case", "All functions use snake_case", "AGENTS.md")],
         dependencies=[Dependency("app.py", "utils.py", "imports")], guidelines=["Use type annotations everywhere"],
         raw_notes="Found interesting patterns in the codebase.",
     )
@@ -75,7 +75,7 @@ def test_merge_contexts_restores_source_file_on_static_tie() -> None:
 
 def test_write_to_dir_creates_all_files(tmp_path: Path) -> None:
     ctx = ExplorationContext(affected_files=[FileInfo("src/app.py", "modified", "Main entry point")],
-        conventions=[Convention("snake_case", "All functions use snake_case", "CLAUDE.md")],
+        conventions=[Convention("snake_case", "All functions use snake_case", "AGENTS.md")],
         dependencies=[Dependency("app.py", "utils.py", "imports")], guidelines=["Use type annotations everywhere"],
         raw_notes="Found interesting patterns.",
     )

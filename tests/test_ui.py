@@ -139,7 +139,7 @@ def test_render_exploration_summary_shows_content_not_json() -> None:
 
     ctx = ExplorationContext(affected_files=[FileInfo(path="services/library/openapi.yaml", role="modified")],
         conventions=[
-            Convention(name="OpenAPI First", description="openapi.yaml is the HTTP contract", source="CLAUDE.md")
+            Convention(name="OpenAPI First", description="openapi.yaml is the HTTP contract", source="AGENTS.md")
         ], dependencies=[Dependency(source="router.go", target="gen/server.go", relationship="imports")],
     )
     console = Console(file=StringIO(), record=True, force_terminal=True, width=100)

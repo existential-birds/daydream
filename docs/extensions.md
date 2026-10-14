@@ -141,6 +141,9 @@ and resume checks precede all steps; the first insertion point is `exploration`.
   the default mode runs the fix pipeline.
 - `per-stack-reviews` also runs the alternatives pass on fresh multi-stack runs,
   as a sibling task. Its backend/config key is `wonder`; it has no separate step.
+- Cross-stack merge can resume an unsharded arbiter session only when the arbiter
+  returned a continuation token and both phases use the same backend instance.
+  The resumed prompt requires rereading the record files rewritten by arbitration.
 - `fix` and `fix-verify` form `LoopGroup("fix-verify-loop", ...)`, capped at
   three rounds. The latter audits retained hunks, uses the `verify` backend/config
   key, and invokes the `fix-verify` prompt. At the cap, `unresolved`/`wrong_target`
@@ -162,6 +165,9 @@ writes a `kind="diagram"` findings artifact when `--findings-out` is set;
 otherwise it posts a standalone PR issue comment with a hidden
 `daydream-diagram` marker per kind. It always ends the flow. Diagram-only runs
 reuse the deep preamble and preserve previous deep recovery artifacts.
+They neither clear `.daydream/deep/` nor replace its `diff-key`. Recorder/manifest
+identity stays `DaydreamRunFlow.DIAGRAM`, so surviving merged findings are not
+captured as results of the diagram-only run.
 
 #### `improve`
 

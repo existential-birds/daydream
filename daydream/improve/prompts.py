@@ -573,7 +573,7 @@ The goal is not a percentage — it is which untested code is dangerous.
 - Missing or broken typecheck scripts, lint config, formatter, pre-commit hooks, or editor configuration.
 - Slow feedback loops: minute-scale startup, no watch mode, or CI without caching.
 - Onboarding friction: wrong setup steps, undocumented required environment variables, or no `.env.example`.
-- Missing `CLAUDE.md`/`AGENTS.md` where agents will execute plans; include a concrete outline if recommending one.
+- Missing `AGENTS.md`/`CLAUDE.md` where agents will execute plans; include a concrete outline if recommending one.
 - Error messages/logging: unstructured service logs, missing correlation IDs, or debugging that requires code changes.""",
     "docs": """## Docs
 

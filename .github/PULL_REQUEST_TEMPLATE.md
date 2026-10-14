@@ -32,12 +32,22 @@
 
 ## Checklist
 
-<!-- Verify before requesting review. -->
+<!--
+Follow CONTRIBUTING.md's pull request requirements and versioning/changelog policy:
+https://github.com/existential-birds/daydream/blob/main/CONTRIBUTING.md#pull-request-requirements
+https://github.com/existential-birds/daydream/blob/main/CONTRIBUTING.md#versioning-and-changelog
+Keep every checklist item. Check satisfied applicable items and record evidence in Test Plan.
+For an inapplicable conditional item, leave it unchecked and append "N/A: <reason>";
+do not claim a check ran. Unresolved applicable items stay unchecked and block ready-for-review status.
+-->
 
-- [ ] Root and workflow checks pass locally via `make check` (requires Docker daemon for actionlint)
+- [ ] Repository PR template followed and every required section completed
+- [ ] Root and workflow gate `make check` completed successfully; any local actionlint skip due to an unavailable Docker daemon is reported in Test Plan
 - [ ] Standalone RL checks pass via `make rl-check` when changing `rl/daydream_review` (deliberately outside `make check`)
 - [ ] Run `$test-audit` on all test files created or updated in this PR (N/A if no test files changed)
 - [ ] Documentation updated (if applicable)
+- [ ] Semantic Versioning compatibility impact stated in the PR (or N/A with a reason)
+- [ ] Notable changes recorded under `CHANGELOG.md`'s `[Unreleased]` in an appropriate Keep a Changelog category (or N/A with a reason)
 
 ## Additional Context
 

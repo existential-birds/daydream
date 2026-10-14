@@ -337,7 +337,7 @@ def _build_setup_investigator_prompt(test_output: str) -> str:
         "- `pyproject.toml` (scripts, tool config)\n"
         "- `package.json` (scripts)\n"
         "- CI configs: `.github/workflows/`, `.circleci/`, `.gitlab-ci.yml`\n"
-        "- `CLAUDE.md` and `README*` for documented test commands\n\n"
+        "- `AGENTS.md` (or `CLAUDE.md` in repositories that use it) and `README*` for documented test commands\n\n"
         f"## Failing invocation\n\n{output_section}\n\n"
         "## Output\n"
         "Return a JSON object matching this schema (and ONLY this JSON, no prose):\n"
