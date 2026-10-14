@@ -564,10 +564,12 @@ async def test_one_triage_round_preserves_closed_decisions_and_rejects_invalid_i
             'assignment_mismatch' if decision == 'extra-target' else None)
 
 
-@pytest.mark.parametrize(('confirmed', 'fault'), [
-    (False, None), (True, None), (False, 'cutoff'), (True, 'cutoff'), (False, 'syntax')])
+@pytest.mark.parametrize(('confirmed', 'fault', 'integration_starts'), [
+    (False, None, 18), (True, None, 18), (False, 'cutoff', 18), (True, 'cutoff', 18), (False, 'syntax', 18),
+    (True, None, 81), (True, 'cutoff', 81)])
 async def test_integration_retains_admitted_findings_and_cumulative_spend(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, confirmed: bool, fault: str | None) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, confirmed: bool, fault: str | None,
+    integration_starts: int) -> None:
     review = many_file_review(tmp_path, monkeypatch, count=41, lines=35)
     cutoff = fault == 'cutoff'
     backend = review.backend
@@ -576,7 +578,7 @@ async def test_integration_retains_admitted_findings_and_cumulative_spend(
     @backend.script('structure', terminal=False)
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         if stage['stage'] == 'integration':
-            starts = 0 if fault == 'syntax' else 18
+            starts = 0 if fault == 'syntax' else integration_starts
             assert stage['observed_tool_starts'] == 0
             assert stage['remaining_tool_calls'] == 96
             assert stage['assigned_target_ids'] == ['integration:structure']
@@ -587,11 +589,17 @@ async def test_integration_retains_admitted_findings_and_cumulative_spend(
             output['candidates'] = [candidate(disposition='rejected'), candidate()]
         else:
             starts = stage['remaining_tool_calls'] + 1 if cutoff else 0
-            assert stage['observed_tool_starts'] == 18
-            assert stage['remaining_tool_calls'] == 78
+            assert stage['observed_tool_starts'] == integration_starts
+            assert stage['remaining_tool_calls'] == stage['hard_tool_call_allowance'] == 96 - integration_starts
+            assert stage['completed_target_ids'] == ['integration:structure']
+            assert stage['progress'] == stage['assigned_target_ids'] == []
+            assert [(item['candidate_id'], item['disposition']) for item in stage['closed_decisions']] == (
+                [('structure:candidate:1', 'rejected'), ('structure:candidate:3', 'confirmed')] if confirmed
+                else [('structure:candidate:1', 'rejected')])
+            assert stage['closed_candidate_ids'] == [item['candidate_id'] for item in stage['closed_decisions']]
             pending, = stage['candidates']
             assert pending['disposition'] == 'open'
-            assert stage['assigned_candidate_ids'] == [pending['candidate_id']]
+            assert stage['assigned_candidate_ids'] == [pending['candidate_id']] == ['structure:candidate:2']
             output['candidates'] = [candidate(disposition='rejected', candidate_id=pending['candidate_id'])]
         for i in range(starts):
             name = ('api.py', 'module_00.py')[i] if stage['stage'] == 'integration' and i < 2 else 'api.py'
@@ -623,9 +631,10 @@ async def test_integration_retains_admitted_findings_and_cumulative_spend(
         assert coverage['diagnostics']['scopes']['structure'] in coverage['diagnostics']['phases']['alternatives']
     else:
         assert phases['alternatives']['status'] == ('failed' if cutoff else 'complete')
-        assert len(observations) == (97 if cutoff else 18)
-        assert metadata[-1]['observed_tool_starts'] == (97 if cutoff else 18)
-        assert metadata[-1]['remaining_tool_calls'] == (0 if cutoff else 78)
+        assert len(observations) == (97 if cutoff else integration_starts)
+        assert metadata[-1]['observed_tool_starts'] == (97 if cutoff else integration_starts)
+        assert metadata[-1]['remaining_tool_calls'] == (0 if cutoff else 96 - integration_starts)
+        assert [item['admitted'] for item in metadata] == [True, not cutoff]
         stages = [stage for stage in backend.stages if stage['scope_id'] == 'structure']
         assert [stage['stage'] for stage in stages] == ['integration', 'triage']
         assert all(stage['advisory_tool_call_target'] <= stage['remaining_tool_calls'] for stage in stages)
