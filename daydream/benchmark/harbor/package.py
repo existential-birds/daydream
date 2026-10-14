@@ -26,7 +26,7 @@ ENV_BASE_IMAGE = f"python:3.14.6-slim@{_BASE_DIGEST}"
 VERIFIER_BASE_IMAGE = ENV_BASE_IMAGE
 PI_BASE_IMAGE = (
     "node:24.18.1-bookworm-slim@"
-    "sha256:a09aabc645e86e81e23dab78e0c0f2eaa233cab4277c7188232181a1a8bd5d39"
+    "sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7"
 )
 PI_PACKAGE = "@earendil-works/pi-coding-agent@0.84.3"
 
