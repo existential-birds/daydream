@@ -264,8 +264,9 @@ def print_preflight_notice(
     stack_lines: list[str],
     agent_count: int,
     exploration_available: bool,
+    conditional_arbiter: bool = True,
 ) -> None:
-    """Show selected stages, stack skills, and total agent count before review."""
+    """Show review assignments and a scoped nominal agent estimate before review."""
     console.print("[neon.cyan]▶[/] [neon.fg]Deep-review pipeline pre-flight[/]")
     if exploration_available:
         console.print("Exploration pre-scan: enabled (runs before stage 1)", style="dim")
@@ -277,7 +278,17 @@ def print_preflight_notice(
     console.print("[neon.fg]  Stages:[/]")
     for idx, stage in enumerate(stages, start=1):
         console.print(f"    {idx}. {stage}")
-    console.print("[neon.fg]  Detected stacks:[/]")
+    console.print("[neon.fg]  Review assignments:[/]")
     for line in stack_lines:
         console.print(f"    - {line}")
-    console.print(f"[neon.fg]  Total agents: {agent_count}[/]")
+    console.print(f"[neon.fg]  Estimated review agents: {agent_count}[/]")
+    allowance = (
+        "includes 1 conditional arbiter allowance"
+        if conditional_arbiter else "no merge or arbiter allowance"
+    )
+    console.print(f"    Nominal review estimate; {allowance}.", style="dim")
+    console.print(
+        "    Excludes exploration and optional phases; retries and caching can change backend attempts. "
+        "Not a concurrency limit.",
+        style="dim",
+    )

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **preflight:** label sharded work as review assignments, show the structural reviewer, and remove obsolete parse agents from the scoped review estimate, including only the applicable conditional arbiter allowance ([#1494](https://github.com/existential-birds/daydream/issues/1494)).
+
 ### Changed
 
 - **dependencies:** consolidate the pending runtime, development, RL, and GitHub Actions updates; validate Harbor 0.24 and OpenTelemetry 1.45.1 compatibility and refresh the hash-pinned benchmark runtime dependencies.
