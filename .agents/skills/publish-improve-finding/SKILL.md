@@ -11,9 +11,12 @@ one durable Markdown record. This is capture, not a new repository audit. Here,
 push, GitHub issue, PR, merge, source edit, or training upload. Follow any separately
 authorized actions without requesting the same permission again.
 
-Read `improve_curated/AGENTS.md` and use [finding-template.md](finding-template.md).
-The directory's schema is shared with `create-improve-issue` and `create-improve-pr`;
-preserve its field names and any existing issue/PR links. After capture, the user can
+Use [finding-template.md](finding-template.md) as the canonical finding schema,
+including its validation comments and the evidence rules below. Read
+`improve_curated/AGENTS.md` for additional collection guidance when that file is
+present; its absence does not block capture. Create `improve_curated/` if needed.
+The schema is shared with `create-improve-issue` and `create-improve-pr`; preserve
+its field names, existing extensions, and any issue/PR links. After capture, the user can
 invoke `create-improve-issue` to queue implementation in a future session. Do not
 create that issue automatically as part of capture.
 
@@ -62,8 +65,10 @@ create that issue automatically as part of capture.
    immutable identity; do not silently designate current HEAD as the baseline. A
    finding introduced later belongs to another baseline. Never change a frozen
    baseline to accommodate a fix or a new finding.
-9. Validate frontmatter shape and allowed values against `improve_curated/AGENTS.md`,
-   confirm that referenced paths/symbols exist in the **observed** source state, and
+9. Validate frontmatter shape and allowed values against the tracked
+   [finding-template.md](finding-template.md) and this procedure, plus collection
+   guidance when `improve_curated/AGENTS.md` is present. Confirm that referenced
+   paths/symbols exist in the **observed** source state, and
    inspect the complete document for unsupported claims and exposed secrets. No
    source tests are needed for this documentation-only capture. Report the local
    file link, confirmation status, and any source/baseline provenance gap.

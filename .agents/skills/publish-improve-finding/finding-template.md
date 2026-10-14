@@ -1,32 +1,37 @@
 ---
-schema_version: 1
-id: "REPLACE_WITH_STABLE_ID"
-title: "REPLACE_WITH_CONCRETE_OPPORTUNITY"
+# Canonical schema for new findings; preserve existing extensions when updating.
+# Scalars are strings unless noted; unknown optional scalar values are YAML null.
+# All [] fields are lists of strings, except validation (entry shape below).
+schema_version: 1 # Integer schema version; retain 1.
+id: "REPLACE_WITH_STABLE_ID" # improve-YYYYMMDD-<8 lowercase hex>; stable and unique.
+title: "REPLACE_WITH_CONCRETE_OPPORTUNITY" # Nonempty string.
 repository: null
-discovered_at: null
+discovered_at: null # Actual ISO date/timestamp when known; never invent one.
 origin:
-  kind: human
+  kind: human # human | agent | mixed; discoverer, not document author.
   session_ref: null
-  human_confirmation: null
-status: proposed
+  human_confirmation: null # Or {by, at, evidence}; by/evidence required, at may be null.
+status: proposed # proposed | confirmed | rejected; confirmed requires human evidence.
 observed:
-  commit: null
-  working_tree: unknown
-  snapshot_ref: null
+  commit: null # Full verified commit SHA, or null; dirty state needs separate identity.
+  working_tree: unknown # clean | dirty | unknown
+  snapshot_ref: null # Durable exact snapshot reference with checksum/retrieval details.
   dirty_paths: []
 benchmark:
-  commit: null
-  snapshot_ref: null
-  verified: false
+  commit: null # Full verified commit SHA, or null; dirty state needs separate identity.
+  snapshot_ref: null # Durable exact snapshot reference with checksum/retrieval details.
+  verified: false # Boolean; true only after checking this exact immutable baseline.
 affected_paths: []
 affected_symbols: []
 related_findings: []
 resolution:
-  status: open
-  issues: []
-  prs: []
-  fix_commits: []
-  validation: []
+  status: open # open | in_progress | fixed; an open fix PR stays in_progress.
+  issues: [] # Canonical issue URLs; absent in older records means [].
+  prs: [] # Canonical PR URLs.
+  fix_commits: [] # Full verified commit SHAs.
+  validation: [] # {command, result, checked_commit}; command/result strings, SHA or null.
+  # Explain null checked_commit with exact checked snapshot identity or an explicit gap
+  # in Resolution and validation. Never attribute checks to untested source states.
 ---
 
 # REPLACE_WITH_CONCRETE_OPPORTUNITY
