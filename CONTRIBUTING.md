@@ -89,7 +89,7 @@ The focused targets, all run from the repo root:
 | `make actionlint` | Docker-pinned actionlint over `.github/workflows/*.yml` plus the packaged workflow templates; without `ACTIONLINT_REQUIRE_DOCKER`, a missing daemon skips with a note (exit 0); with it set, a missing daemon fails |
 | `make lockcheck` | `uv lock --check` — fails if `uv.lock` is out of sync with `pyproject.toml` |
 | `make check-naming` | naming-convention check over the repo (`scripts/check-naming.sh`) |
-| `make rl-check` | the RL project's own lockcheck + ruff + mypy + pytest suite, run with a scoped git identity as process env. **This is explicitly not part of `make check`** — it mirrors `ci.yml`, where RL is a separate job (its e2e test drives the `claude` CLI that CI's `check` job never installs). Run it by hand whenever you change `rl/daydream_review`. |
+| `make rl-check` | the RL project's own lockcheck + ruff + mypy + pytest suite, run with a scoped git identity as process env. **This is explicitly not part of `make check`** — it mirrors `ci.yml`, where RL is a manually dispatched job while RL work is paused (its e2e test drives the `claude` CLI that CI's `check` job never installs). Run it by hand whenever you change `rl/daydream_review`. |
 
 The required gate:
 
@@ -103,13 +103,13 @@ which runs, in order:
 lockcheck install lint deadcode typecheck test actionlint coverage-report check-naming
 ```
 
-This is the same set of steps the `check` job in `.github/workflows/ci.yml` runs —
+This is the same set of steps a full `check` job in `.github/workflows/ci.yml` runs —
 `rl-check` is the only CI job the gate deliberately omits. One scope difference:
 `make deadcode` also runs vulture over `rl/daydream_review/`, which CI's `check`
-job does not include — that scan happens in the separate `rl-check` job — so the
+job does not include — that scan happens in the manual `rl-check` job — so the
 local gate is the stricter one. The pre-push hook runs `make check` after
 verifying signatures, so a green local `make check` is what keeps your push from
-being rejected.
+being rejected. CI can reuse a verified PR tree or use a lightweight gate for documentation and dormant RL changes; see the [CI spend policy](.github/workflows/README.md#ci-spend-policy). The local gate always runs in full.
 
 ## Testing policy
 

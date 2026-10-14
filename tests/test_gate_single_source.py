@@ -103,12 +103,18 @@ _CHECK_JOB = "check"
 # the one-line reason. Keep this list small and reasoned; a step that is
 # neither declared here nor a gate invocation fails the guard.
 _CI_ONLY_STEPS: dict[str, str] = {"Run vulture": (
-        "root project only — the standalone RL scan runs in the separate rl-check job, "
+        "root project only — the standalone RL scan runs in the manual rl-check job, "
         "so the local gate's wider dead-code scope is not restated here"
     ),
     "Install Pi for native output contract tests": (
         "provision the native CLI on the disposable CI runner — the local gate exercises installed tools "
         "without globally installing or replacing a contributor's optional backend runtimes"
+    ),
+    "Plan CI gate": (
+        "remote evidence determines whether CI needs to repeat a gate; local hooks always run the full gate"
+    ),
+    "Record successful PR tree": (
+        "publish the actual remote checkout identity after its selected gates pass; local gates publish no CI proof"
     ),
 }
 
@@ -185,7 +191,7 @@ def test_ci_check_job_is_represented_by_the_declared_gate() -> None:
 
 def test_guard_rejects_a_restated_gate_command() -> None:
     """An inlined gate command is caught, and names the step that owns it."""
-    steps = [{"name": "Lint with ruff", "run": "uv run ruff check daydream tests"}]
+    steps = [{"name": "Lint with ruff", "run": "uv run ruff check daydream tests scripts/ci_plan.py"}]
     violations = _gate_violations(steps, set(_gate_steps()), _observed_gate_commands(), {})
 
     assert violations and "lint" in violations[0], violations

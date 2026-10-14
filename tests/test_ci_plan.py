@@ -145,12 +145,13 @@ def test_ci_cli_rechecks_code_but_reuses_pr_code_for_documentation_updates(
 
 
 @pytest.mark.parametrize("fault", [
-    "none", "tree", "head", "pr", "repository", "run", "commit", "expired", "failed", "bad-zip", "api-error",
+    "none", "tree", "head", "pr", "repository", "run", "commit", "parent", "changed-base", "expired",
+    "failed", "bad-zip", "api-error",
 ])
 def test_ci_cli_reuses_only_verified_exact_merged_trees(
     git_repo: Path, ci_cli: Callable[..., tuple[str, str]], tmp_path: Path, fault: str,
 ) -> None:
-    _, head, proof, replies = _successful_merge_proof(git_repo, ci_cli, tmp_path)
+    base, head, proof, replies = _successful_merge_proof(git_repo, ci_cli, tmp_path)
     if fault in {"tree", "head", "commit"}:
         proof[{"tree": "tree", "head": "head_sha", "commit": "commit"}[fault]] = "f" * 40
     elif fault in {"pr", "run"}:
@@ -163,6 +164,25 @@ def test_ci_cli_reuses_only_verified_exact_merged_trees(
         replies[f"repos/{_REPO}/actions/workflows/ci.yml/runs"]["workflow_runs"][0]["conclusion"] = "failure"
     elif fault == "api-error":
         replies[f"repos/{_REPO}/actions/workflows/ci.yml/runs"] = subprocess.CalledProcessError(1, "gh")
+    elif fault == "parent":
+        # A resolvable synthetic merge with the same tree but a different PR
+        # parent must be rejected by the parent guard, not the tree guard.
+        _git(git_repo, "checkout", "-b", "other", base)
+        _commit(git_repo, "daydream/app.py")
+        _git(git_repo, "-c", "commit.gpgsign=false", "commit", "--amend", "-m", "different PR head")
+        _git(git_repo, "checkout", "-b", "wrong-merge", base)
+        _git(git_repo, "-c", "commit.gpgsign=false", "merge", "--no-ff", "other", "-m", "wrong parent")
+        proof["commit"] = _git(git_repo, "rev-parse", "HEAD")
+        assert _git(git_repo, "rev-parse", "HEAD^{tree}") == proof["tree"]
+        assert _git(git_repo, "rev-parse", "HEAD^2") != head
+    elif fault == "changed-base":
+        # The final PR head still matches but main now contains an additional
+        # change absent from the successful synthetic checkout.
+        _commit(git_repo, "daydream/base_change.py")
+    if fault == "none":
+        # A squash has a different commit identity but exactly the tested tree.
+        _git(git_repo, "reset", "--soft", base)
+        _git(git_repo, "-c", "commit.gpgsign=false", "commit", "-m", "squash merge")
     replies[f"repos/{_REPO}/actions/artifacts/202/zip"] = b"invalid" if fault == "bad-zip" else _archive(proof)
     sha = _git(git_repo, "rev-parse", "HEAD")
     replies[f"repos/{_REPO}/commits/{sha}/pulls"] = [{
