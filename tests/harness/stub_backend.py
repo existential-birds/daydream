@@ -388,7 +388,7 @@ class StubBackend:
             if self.fail_exploration:
                 raise RuntimeError("exploration unavailable")
             payload = {"conventions": [{"name": self.exploration_sentinel or "OpenAPI First",
-                        "description": "openapi.yaml is the HTTP contract", "source": "CLAUDE.md",
+                        "description": "openapi.yaml is the HTTP contract", "source": "AGENTS.md",
                     }
                 ], "guidelines": [],
             }

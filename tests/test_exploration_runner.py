@@ -67,6 +67,7 @@ def test_pattern_scanner_prompt_includes_guideline_files() -> None:
     dynamic = build_pattern_scanner_prompt(
         files, "main...HEAD", cwd=cwd, strategy=_default_strategy("exploration.pattern_scan")
     )
+    assert "AGENTS.md" in dynamic
     assert "CLAUDE.md" in dynamic
     assert "main...HEAD" in dynamic
     assert "daydream/foo.py" in dynamic
@@ -78,7 +79,7 @@ def test_pattern_scanner_prompt_includes_guideline_files() -> None:
 
 # Orchestrator helpers and mock backend
 _VALID_ENVELOPE: dict[str, Any] = {"pattern_scanner": {
-        "conventions": [{"name": "snake_case", "description": "snake_case for funcs", "source": "CLAUDE.md"}],
+        "conventions": [{"name": "snake_case", "description": "snake_case for funcs", "source": "AGENTS.md"}],
         "guidelines": ["use type hints"],
     }, "dependency_tracer": {"affected_files": [{"path": "daydream/extra.py", "role": "imports", "summary": "helper"}],
         "dependencies": [{"source": "daydream/a.py", "target": "daydream/extra.py", "relationship": "imports"}],

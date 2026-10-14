@@ -222,7 +222,7 @@ def build_pattern_scanner_prompt(
         PATTERN_SCANNER_SCHEMA,
         inline_diff=inline_diff,
         instructions="""Instructions:
-- Read root CLAUDE.md / AGENTS.md if present, as evidence of applicable conventions.
+- Read root AGENTS.md / CLAUDE.md if present, as evidence of applicable conventions.
 - Read only house-style config relevant to languages or directories changed here.
 - Stop after the applicable guidelines and configuration establish conventions.
   Where they are silent, inspect at most one representative changed source per language.
@@ -256,7 +256,7 @@ def build_repo_survey_prompt(
 {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}
 
 Instructions:
-- Read CLAUDE.md / AGENTS.md at the repo root if they exist.
+- Read AGENTS.md / CLAUDE.md at the repo root if they exist.
 - Read any other house-style config files you find (ruff.toml, .editorconfig, tsconfig.json, go.mod, Cargo.toml).
 - Infer conventions from the code itself where config files are silent.
 - Cover the repository's real source directories, not just the sample below.

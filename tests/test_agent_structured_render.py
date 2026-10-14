@@ -21,8 +21,8 @@ from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
 
-RAW = '{"conventions": [{"name": "OpenAPI First", "description": "x", "source": "CLAUDE.md"}]}'
-PAYLOAD = {"conventions": [{"name": "OpenAPI First", "description": "x", "source": "CLAUDE.md"}]}
+RAW = '{"conventions": [{"name": "OpenAPI First", "description": "x", "source": "AGENTS.md"}]}'
+PAYLOAD = {"conventions": [{"name": "OpenAPI First", "description": "x", "source": "AGENTS.md"}]}
 
 def _scripted(events: list[Any]) -> ScriptedBackend:
     """ScriptedBackend whose turn ends with an empty structured result."""
@@ -80,7 +80,7 @@ async def test_log_mode_captures_structured_output(tmp_path: Path, capsys: pytes
     and the printed projection is redacted while the returned object stays raw."""
     sentinel = "ghp_" + "x" * 16
     payload = {
-        "conventions": [{"name": "OpenAPI First", "description": "x", "source": "CLAUDE.md"}], "token": sentinel,
+        "conventions": [{"name": "OpenAPI First", "description": "x", "source": "AGENTS.md"}], "token": sentinel,
         "nested": {"path": f"/Users/{sentinel}"},
     }
     backend = ScriptedBackend(events=[ResultEvent(structured_output=payload, continuation=None)], model="mock-model")

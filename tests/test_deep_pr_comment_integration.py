@@ -158,7 +158,7 @@ class _FakeSDKClient:
         # where the 'Exploration' rollup row renders 'unknown' / '$0.00'.
         if "pattern-scanner" in pl:
             return _FakeSDKClient._exploration_messages(
-                {"conventions": [], "guidelines": []}, tool_name="Read", tool_input={"file_path": "CLAUDE.md"},
+                {"conventions": [], "guidelines": []}, tool_name="Read", tool_input={"file_path": "AGENTS.md"},
             )
         if "dependency-tracer" in pl:
             return _FakeSDKClient._exploration_messages(

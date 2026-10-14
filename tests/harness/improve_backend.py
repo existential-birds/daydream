@@ -385,7 +385,7 @@ class ImproveStubBackend:
         if marker == "repo-scan":
             yield ResultEvent(structured_output={"conventions": [{
                             "name": "OpenAPI First", "description": "openapi.yaml is the HTTP contract",
-                            "source": "CLAUDE.md",
+                            "source": "AGENTS.md",
                         }
                     ], "guidelines": [],
                 }, continuation=None,
