@@ -434,6 +434,34 @@ async def _run_with_context(
                 observed.finish(1)
                 return 1
 
+            # App routing is already captured in session auth. CLI sessions may
+            # also discover gh-supported hosts or SSH aliases outside local admission.
+            if config.pr_repo is None:
+                try:
+                    repository = git_ops.resolve_github_repository(
+                        target_dir, base_environment=session.execution.auth.environment_for_request(),
+                    )
+                    if repository is None and config.discover_github_provenance:
+                        repository = git_ops.gh_repo_view(target_dir, auth=session.execution.auth)
+                except git_ops.GitError:
+                    repository = None
+                if repository is not None:
+                    config.pr_repo = "/".join(repository)
+
+            # Resolve the CLI's branch PR while the original checkout still has its
+            # symbolic branch, using the same run-owned auth as later reads.
+            if (
+                config.discover_github_provenance
+                and config.pr_number is None
+                and (config.flow_name is None or config.flow_name in DEEP_FLOW_ALIASES)
+            ):
+                try:
+                    pr = git_ops.gh_pr_view(target_dir, None, auth=session.execution.auth)
+                except git_ops.GitError:
+                    pr = None
+                if pr is not None and isinstance(pr.get("number"), int):
+                    config.pr_number = pr["number"]
+
             config.identity = session.identity.login
             run_context.github_identity = session.identity
 

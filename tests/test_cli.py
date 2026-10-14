@@ -291,6 +291,7 @@ def test_explicit_review_argv_uses_target_remote_ci_verdict_drives_exit(
 ) -> None:
 
     project, remote, hook_marker, raw_remote = _remote_ci_push_project(tmp_path)
+    monkeypatch.setenv("GH_REPO", "base-user/project")
     seed_pr_identity(fake_gh, head_sha=git(project, "rev-parse", "HEAD"))
     seeder = start_remote_ci_fake(project, fake_gh, hook_marker, outcome=remote_outcome)
 
@@ -452,7 +453,7 @@ def test_improve_audit_isolation_rejects_unsupported_cli_before_spawn(tmp_path: 
     assert "Use backend 'claude'" in combined
     assert not backend_marker.exists()
     assert gh_log.read_text(encoding="utf-8").splitlines() == [
-        "repo view --json nameWithOwner -q .nameWithOwner", "api /user",
+        "api /user", "repo view --json nameWithOwner -q .nameWithOwner",
     ]
     assert git(repo, "rev-parse", "HEAD") == before_head
     assert git(repo, "show-ref") == before_refs
@@ -582,7 +583,7 @@ def test_signal_flushes_all_runner_recorders(tmp_path: Path, git_repo: Path, ext
     assert "trajectory write failed" not in (stdout + stderr).lower()
 
     calls = gh_log.read_text(encoding="utf-8").splitlines()
-    assert calls == ["repo view --json nameWithOwner -q .nameWithOwner", "api /user"]
+    assert calls == ["api /user", "repo view --json nameWithOwner -q .nameWithOwner"]
 
 def test_cli_maps_grouped_interrupt_to_shutdown_exit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
@@ -614,15 +615,9 @@ def test_harvest_parser_repo_clone_root_defaults_to_none() -> None:
     args = parser.parse_args(["--snapshot-id", "a" * 64])
     assert args.repo_clone_root is None
 
-def test_pr_repo_falls_back_to_cwd_without_target(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    invoking_repo = tmp_path / "invoking-repo"
-    invoking_repo.mkdir()
-    monkeypatch.chdir(invoking_repo)
-    def fake_gh_repo_view(repo: Any, **_kwargs: Any) -> tuple[Any, ...]:
-        assert Path(repo) == invoking_repo
-        return ("existential-birds", "daydream")
-    monkeypatch.setattr("daydream.git_ops.gh_repo_view", fake_gh_repo_view)
-    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, _branch, **_kwargs: None)
+def test_pr_repo_falls_back_to_cwd_without_target(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
+    git(git_repo, "remote", "add", "origin", "https://github.com/existential-birds/daydream.git")
+    monkeypatch.chdir(git_repo)
     monkeypatch.setattr(sys, "argv", ["daydream"])
     config = _parse_args()
 

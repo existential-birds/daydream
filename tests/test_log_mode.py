@@ -49,8 +49,8 @@ def _capture_stdout_and_run(config: RunConfig, monkeypatch: pytest.MonkeyPatch) 
     """Run daydream with the given config and capture stdout output."""
     # Mock external dependencies
     monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.git_ops.gh_repo_view", lambda repo: ("test", "repo"))
-    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, _branch: None)
+    monkeypatch.setattr("daydream.git_ops.gh_repo_view", lambda repo, *, auth=None: ("test", "repo"))
+    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, _branch, *, auth=None: None)
 
     # Capture stdout
     old_stdout = sys.stdout

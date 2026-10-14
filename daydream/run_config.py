@@ -47,6 +47,8 @@ class RunConfig:
     ignore_paths: list[str] = field(default_factory=list)
     trajectory_path: Path | None = None
     pr_repo: str | None = None
+    # Internal CLI repository/PR discovery request, resolved after session authentication.
+    discover_github_provenance: bool = False
     archive: bool = True
     run_eval: bool = True
     dataset_capture: bool = False

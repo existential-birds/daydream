@@ -88,12 +88,13 @@ def test_cli_main_trajectory_pr_repo_is_target_not_cwd(
 ) -> None:
     """Persist the target checkout's slug in the trajectory.
 
-    The GitHub seam encodes the inspected directory basename, so the artifact
-    proves provenance follows the target even when the invoking cwd differs."""
+    A real local origin establishes identity without consulting ambient GitHub;
+    the artifact proves provenance follows the target when invoking cwd differs."""
 
     _silence_all(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
 
+    git(multi_stack_target, "remote", "add", "origin", f"https://github.com/acme/{multi_stack_target.name}.git")
     trajectory_path = tmp_path / "trajectory.json"
     assert (_cli_main_exit(monkeypatch, "--trajectory", str(trajectory_path), str(multi_stack_target)) == 0)
 

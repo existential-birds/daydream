@@ -277,26 +277,41 @@ def test_resolve_run_identity_refreshes_installation_token_after_expiry(monkeypa
     """A long-running review remints before its next GitHub request."""
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", _TEST_PEM)
+    base = {"DAYDREAM_APP_ID": "12345", "DAYDREAM_APP_PRIVATE_KEY": _TEST_PEM,
+            "GH_REPO": "conflicting/repository", "GH_HOST": "github.com", "PATH": "/captured/tools"}
     minted = 0
     captured: dict[str, Any] = {}
     def fake_gh_api(repo: Any, endpoint: str, **kwargs: Any) -> Any:
         nonlocal minted
+        environment = kwargs["auth"].environment_for_request()
+        assert environment["GH_REPO"] == "myorg/myrepo"
+        assert environment["GH_HOST"] == "github.com"
+        assert environment["PATH"] == "/captured/tools"
         if endpoint == "/app/installations":
             return [{"id": 999, "account": {"login": "myorg"}, "app_slug": "daydream-bot"}]
         assert endpoint == "/app/installations/999/access_tokens"
+        assert kwargs["input_data"] == {"repositories": ["myrepo"]}
         minted += 1
         if minted == 1:
             return {"token": "ghs_expired", "expires_at": "1970-01-01T00:00:00Z"}
         return {"token": "ghs_fresh", "expires_at": "9999-01-01T00:00:00Z"}
     spy_run = _spy_run(captured, "{}")
     with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
-        session = resolve_run_identity(tmp_path, "myorg/myrepo", is_posting=True)
+        session = resolve_run_identity(tmp_path, "myorg/myrepo", is_posting=True, base_environment=base)
+        base["GH_REPO"] = "mutated/repository"
+        base["GH_HOST"] = "foreign.invalid"
+        monkeypatch.setenv("GH_REPO", "ambient/repository")
+        monkeypatch.setenv("GH_HOST", "foreign.invalid")
         with patch("subprocess.run", side_effect=spy_run):
             git_process._run_gh(tmp_path, ["api", "/user"], auth=session.execution.auth)
 
     assert session.identity == github_app.GitHubIdentity("daydream-bot[bot]")
     assert minted == 2
     assert captured["env"]["GH_TOKEN"] == "ghs_fresh"
+
+    assert captured["env"]["GH_REPO"] == "myorg/myrepo"
+    assert captured["env"]["GH_HOST"] == "github.com"
+    assert captured["env"]["PATH"] == "/captured/tools"
 
 
 def test_resolve_run_identity_binds_explicit_base_without_app_credentials(tmp_path: Path,) -> None:

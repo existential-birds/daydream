@@ -16,28 +16,10 @@ from daydream.trajectory import RUN_DOCUMENT_NAME, RUNS_DIRNAME
 from daydream.ui import NEON_THEME
 
 
-def _auto_detect_pr_number(repo: Path) -> int | None:
-    """Find the PR for the target checkout branch, independent of the invoking cwd."""
-    try:
-        data = git_ops.gh_pr_view(repo, None, auth=git_ops.INHERIT_GITHUB_AUTH)
-    except git_ops.GitError:
-        return None
-    if not data:
-        return None
-    number = data.get("number")
-    return int(number) if isinstance(number, int) else None
-
-
 def _detect_repo_slug(repo: Path) -> str | None:
-    """Detect owner/repo from the target checkout so archives and trajectories retain its provenance."""
-    try:
-        slug = git_ops.gh_repo_view(repo, auth=git_ops.INHERIT_GITHUB_AUTH)
-    except git_ops.GitError:
-        return None
-    if slug is None:
-        return None
-    owner, name = slug
-    return f"{owner}/{name}"
+    """Resolve target provenance locally, before GitHub authentication exists."""
+    identity = git_ops.resolve_github_repository(repo)
+    return "/".join(identity) if identity is not None else None
 
 
 def _resolve_target_provenance(target: str | None) -> tuple[Path, str | None, DaydreamFileConfig]:
@@ -244,13 +226,16 @@ def config_from_args(
     policy.
     """
     observability = _resolve_cli_observability(parser, args)
-    target_repo, pr_repo, file_config = _resolve_target_provenance(args.target)
+    _, pr_repo, file_config = _resolve_target_provenance(args.target)
     values = {item.name: getattr(args, item.name) for item in fields(RunConfig) if hasattr(args, item.name)}
     if args.dataset_store_path is not None:
         values["dataset_capture"] = True
     if args.dataset_capture_disabled:
         values["dataset_capture"] = False
     if detect_pr:
-        values["pr_number"] = args.pr_number if args.pr_number is not None else _auto_detect_pr_number(target_repo)
-    values.update(observability=observability, file_config=file_config, pr_repo=pr_repo, archive=not args.no_archive)
+        values["pr_number"] = args.pr_number
+    values.update(
+        observability=observability, file_config=file_config, pr_repo=pr_repo,
+        archive=not args.no_archive, discover_github_provenance=True,
+    )
     return RunConfig(**(values | overrides))

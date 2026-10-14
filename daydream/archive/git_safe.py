@@ -1,6 +1,7 @@
 """Credential-safe Git URL normalizer (issue #981).
 
-Sole authority for interpreting Git remote URLs. Parses, strips
+Archive normalization for Git remote URLs. Authentication admission uses the
+stricter git_ops.repository resolver. Parses, strips
 credentials, and reconstructs a canonical HTTPS URL — never serializes
 userinfo or credential-like query parameters into any output form.
 """

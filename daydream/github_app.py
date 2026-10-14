@@ -376,11 +376,15 @@ def resolve_run_identity(
             GitHubExecutionInput(inherited_auth),
         )
 
-    owner_repo = _owner_repo_for(pr_repo, target_dir, auth=inherited_auth)
+    owner_repo = git_ops.resolve_github_repository(
+        target_dir, pr_repo, base_environment=source_environment,
+    )
     if owner_repo is None:
-        raise GitHubAppError("Cannot determine owner/repo for installation token minting")
+        raise GitHubAppError("Cannot determine owner/repo locally for installation token minting")
 
     owner, repo = owner_repo
+    source_environment["GH_REPO"] = f"{owner}/{repo}"
+    source_environment["GH_HOST"] = "github.com"
 
     def mint() -> tuple[_InstallationToken, git_ops.StaticGitHubAuth]:
         token = _mint_installation_token(
@@ -414,19 +418,3 @@ def resolve_run_identity(
         GitHubIdentity(minted.identity),
         GitHubExecutionInput(auth),
     )
-
-
-def _owner_repo_for(
-    pr_repo: str | None,
-    target_dir: Path,
-    *,
-    auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
-) -> tuple[str, str] | None:
-    """Prefer a valid owner/repo override, otherwise query the repository; unresolved
-    identity returns None.
-    """
-    if pr_repo:
-        parsed = git_ops.split_owner_repo(pr_repo)
-        if parsed is not None:
-            return parsed
-    return git_ops.gh_repo_view(target_dir, auth=auth)

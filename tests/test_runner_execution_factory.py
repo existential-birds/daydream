@@ -26,6 +26,7 @@ async def test_runner_factory_reaches_real_flows_and_preserves_ordinary_fallback
     flow: str, injected: bool, improve_monorepo_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ext_dir: ExtDir,
 ) -> None:
+    """Embedded/custom flows without provenance must not add repository or PR discovery requests."""
     repo = improve_monorepo_target
     login = "execution-owner" if injected else "ambient-owner"
     ext_dir.write_module(
@@ -105,6 +106,7 @@ async def test_runner_factory_reaches_real_flows_and_preserves_ordinary_fallback
         config, execution=execution, private_roots=private_root_locations(base=tmp_path / "private"),
     )
     assert result == 0
+    assert config.pr_repo is None
     assert created and any(backend.calls for backend in created)
     assert len(github_environments) == 1
     if injected:
