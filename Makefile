@@ -87,7 +87,7 @@ lockcheck:
 #
 # `rl-check` is deliberately NOT a dependency, mirroring that job: the standalone
 # RL project is separately locked and has its own ci.yml job (own runner, own
-# `uv sync`, Python 3.12), and one of its e2e tests drives the real `claude` CLI
+# `uv sync`, Python 3.14), and one of its e2e tests drives the real `claude` CLI
 # — present on a developer machine, absent on that runner, where the test's own
 # `shutil.which` guard skips it. As a `check` dependency it therefore failed the
 # pre-push gate on changes that never touch rl/. Run `make rl-check` when you

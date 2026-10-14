@@ -60,7 +60,7 @@ async def test_env_scores_with_stage0_composite(
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(rundir_golden, dest)
     trace = vf.Trace(task=vf.TraceTask(type=type(task).__name__, data=task.data),
-        agent=vf.AgentInfo(model=MODEL), state=DaydreamReviewState(),
+        agent=vf.AgentInfo(config=vf.AgentConfig(model=MODEL)), state=DaydreamReviewState(),
     )
     trace.info["daydream_archive_root"] = str(archive_root)
     trace.info["daydream_repo_path"] = str(tmp_path / "repo")
@@ -77,7 +77,7 @@ async def test_env_scores_with_stage0_composite(
     assert stage0["composite"] is not None
     assert stage0["reward_version"]  # rubric version stamped for provenance
     assert stage0["terms"]["intrinsic_composite"] is None  # no verifier verdicts in this rollout
-    assert trace.rewards["intrinsic_composite"] == stage0["composite"]
+    assert trace.rewards["intrinsic_composite"] == vf.Reward(score=stage0["composite"], weight=1.0)
 
 def test_stage0_composition_absent_without_model(tmp_path: Path) -> None:
     # No outcome model short-circuits before any run artifact is read, so a real

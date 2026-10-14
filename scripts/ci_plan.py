@@ -99,6 +99,9 @@ def plan(event_name: str, event: dict[str, Any], repo: str) -> tuple[str, str]:
                 continue
             if lightweight_diff(proof["commit"], "HEAD"):
                 return "lightweight", f"Only documentation/RL differs from successful PR CI: {url}"
+            # The latest valid successful checkout changed code: run the gate
+            # rather than downloading every older artifact for this branch.
+            break
     elif event_name == "push":
         sha = os.environ["GITHUB_SHA"]
         # Never reuse a direct push, a multi-commit branch tip unrelated to a

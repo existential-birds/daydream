@@ -133,9 +133,9 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
         runtime: vf.Runtime,
         endpoint: str,
         secret: str,
-        mcp_urls: dict[str, str],  # noqa: F841 — tool-server wiring lands in a later verifiers
+        mcp_urls: dict[str, str],  # noqa: F841 — this harness does not expose tool servers
+        data: DaydreamReviewData,
     ) -> vf.ProgramResult:
-        data: DaydreamReviewData = trace.task.data
         strategy = self.strategy
         await strategy.provision(runtime, endpoint, secret, ctx.model)
 
@@ -208,8 +208,7 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
 
         # Zero captured turns means model calls may have bypassed interception: artifacts can still
         # score normally, but the rollout is untrainable. Never absorb capture loss. Use num_turns
-        # from the node graph; trace.calls exists in verifiers 0.2.1 but not prime-rl's vendored
-        # version.
+        # from the captured message graph.
         if not trace.num_turns:
             raise RuntimeError(
                 f"backend={strategy.name} made no model calls through the interception server at "

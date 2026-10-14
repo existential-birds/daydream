@@ -25,7 +25,7 @@ RUN set -eux; \
         aarch64) narch=arm64; nsha=08bfbf538bad0e8cbb0269f0173cca28d705874a67a22f60b57d99dc99e30050;; \
         *) echo "unsupported arch"; exit 1;; \
     esac; \
-    # python:3.12-slim ships no curl/xz-utils; use the Python stdlib for both
+    # python:3.14-slim ships no curl/xz-utils; use the Python stdlib for both
     # the download and the xz-compressed tar extraction. The socket default
     # timeout bounds every network operation, so a stalled nodejs.org
     # connection fails the build instead of hanging it indefinitely.

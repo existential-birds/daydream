@@ -360,7 +360,7 @@ async def _prepare_verify_checkout(runtime: vf.Runtime, repo: str, head_sha: str
 #: Wall-clock ceilings per rollout stage, in seconds. ``harness`` bounds the whole
 #: deep loop (daydream's own per-phase wall budget is 1800s); ``scoring`` must fit a
 #: full re-run of the repository's test suite.
-DEFAULT_TIMEOUT = vf.TaskTimeout(setup=900, harness=5400, scoring=1800)
+DEFAULT_TIMEOUT = vf.TaskTimeout(setup=900, agent=5400, scoring=1800)
 
 
 class GoldenComment(BaseModel):
@@ -401,7 +401,7 @@ class DaydreamReviewData(vf.TaskData):
 
 
 class DaydreamReviewTaskConfig(vf.TaskConfig):
-    """Reward weights, overridable as ``--taskset.task.*``."""
+    """Reward weights, overridable as ``--env.taskset.task.*``."""
 
     w_composite: float = 1.0
 
@@ -726,7 +726,7 @@ class DaydreamReviewTaskset(vf.Taskset[DaydreamReviewTask, DaydreamReviewConfig]
     def load(self) -> list[DaydreamReviewTask]:
         config = self.config
         if config.manifest_path == Path(""):
-            raise ValueError("no image manifest: pass --taskset.manifest-path <images/manifest.toml>")
+            raise ValueError("no image manifest: pass --env.taskset.manifest-path <images/manifest.toml>")
 
         if not config.use_images:
             logger.warning(
@@ -741,7 +741,7 @@ class DaydreamReviewTaskset(vf.Taskset[DaydreamReviewTask, DaydreamReviewConfig]
         # first only because they are argument errors, not gate decisions.
         if config.gate_report_path == Path(""):
             raise Stage0GateRefused(
-                "no Stage-0 gate report configured: pass --taskset.gate-report-path <gate.json>. "
+                "no Stage-0 gate report configured: pass --env.taskset.gate-report-path <gate.json>. "
                 "A Stage-3 run may not schedule rollouts until the offline gate has passed (M4)."
             )
         gate_report = require_stage0_gate(config.gate_report_path)
@@ -789,7 +789,6 @@ class DaydreamReviewTaskset(vf.Taskset[DaydreamReviewTask, DaydreamReviewConfig]
                 name=f"{slug}#{pr.pr_number}",
                 # Informational only: the daydream CLI takes no prompt. It must still be
                 # non-None or the interception server opens a user simulator instead
-                # (verifiers 0.2.1 interception/server.py:346-356).
                 prompt=f"Deep-review PR #{pr.pr_number} of {slug} @ {pr.head_sha[:12]}",
                 image=f"{entry.image}:{pr.head_sha[:12]}" if config.use_images else None,
                 timeout=DEFAULT_TIMEOUT,

@@ -13,7 +13,7 @@ CLAUDE.md describes, update both.
 
 Required for any contribution:
 
-- **Python ≥ 3.12.13**
+- **Python ≥ 3.14**
 - **[`uv`](https://docs.astral.sh/uv/)** — installs and manages the virtualenv and runs every gate tool
 - **Claude Code CLI** ([claude.ai/code](https://claude.ai/code)) — the default review backend; the test suite exercises it
 
@@ -81,7 +81,7 @@ The focused targets, all run from the repo root:
 
 | Command | What it does |
 |---|---|
-| `make lint` | Ruff over `daydream tests` (120 cols, `E F I W`, py312; `daydream/atif/**` is lint-exempt as vendored code) |
+| `make lint` | Ruff over `daydream tests` (120 cols, `E F I W`, py314; `daydream/atif/**` is lint-exempt as vendored code) |
 | `make typecheck` | mypy over `daydream tests` |
 | `make test` | `pytest -n auto` with coverage; the branch-coverage floor (`fail_under` in `pyproject.toml`) is enforced here, not in global addopts — a bare or targeted `pytest` run stays plain |
 | `make deadcode` | vulture dead-code scan over the root project and the RL package |
@@ -142,7 +142,7 @@ implementations of the real-path standard:
 
 ## Conventions
 
-- **Ruff** — 120 columns, rule set `E F I W`, target Python 3.12.
+- **Ruff** — 120 columns, rule set `E F I W`, target Python 3.14.
   `daydream/atif/**` is lint-exempt as vendored Harbor code (see
   [daydream/atif/NOTICE](daydream/atif/NOTICE)); make only mechanical edits
   there.

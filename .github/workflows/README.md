@@ -33,7 +33,10 @@ gh workflow run ci.yml --ref main -f run_rl=true
 ```
 
 Use `--ref YOUR_BRANCH` to check another revision. The root gate also runs in
-full on a manual dispatch. `make rl-check` remains the local RL gate.
+full on a manual dispatch. `make rl-check` remains the local RL gate. Both
+projects and all workflow tool installations use Python 3.14. The standalone
+project uses verifiers 0.4.0; Prime-RL training integration is paused because
+its Python 3.12 workspace cannot install the migrated package.
 
 These three workflows are this repository's own **repository-only Codex dogfood configuration**
 — maintained for this repository and intentionally differing from the packaged workflow templates.

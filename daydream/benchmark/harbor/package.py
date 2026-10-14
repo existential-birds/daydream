@@ -21,8 +21,8 @@ from daydream.benchmark.harbor import env_policy
 from daydream.benchmark.harbor.build import CompileError
 from daydream.benchmark.workspace import validate_workspace
 
-_BASE_DIGEST = "sha256:876416ecde9aca2bcc90e1fb0c7a9500bbf749f5788b70f82d4c5a5c2357f8b4"
-ENV_BASE_IMAGE = f"python:3.12-slim@{_BASE_DIGEST}"
+_BASE_DIGEST = "sha256:7bec7ddcddeff7975d6ba9b4be7dd6f6b2f55e7491539145e2978f7f97ce9144"
+ENV_BASE_IMAGE = f"python:3.14.6-slim@{_BASE_DIGEST}"
 VERIFIER_BASE_IMAGE = ENV_BASE_IMAGE
 PI_BASE_IMAGE = (
     "node:24.18.1-bookworm-slim@"

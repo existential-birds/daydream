@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
-from verifiers.v1.loaders import load_taskset, taskset_config_type
+from verifiers.v1 import load_taskset, taskset_config_type
 
 from daydream_review.fixture import (
     FIXTURE_BASE_SHA,
@@ -149,7 +149,7 @@ def test_load_builds_tasks_from_the_committed_manifest(fixture_manifest_path: Pa
     assert pr1.image == f"daydream-rl/fixture:{FIXTURE_PR1_HEAD_SHA[:12]}"
     assert pr1.name == f"{FIXTURE_SLUG}#1"
     assert pr1.prompt is not None and "#1" in pr1.prompt
-    assert pr1.timeout.harness == 5400
+    assert pr1.timeout.agent == 5400
     assert [c.path for c in pr1.golden_comments] == ["calc.py"]
     assert "ZeroDivisionError" in pr1.golden_comments[0].comment
     assert pr1.golden_comments[0].resolved is True
@@ -273,7 +273,7 @@ def test_load_refuses_without_gate_report_path(fixture_manifest_path: Path) -> N
     taskset = _taskset(fixture_manifest_path, Path(""))
     with pytest.raises(Stage0GateRefused) as excinfo:
         list(taskset.load())
-    assert "--taskset.gate-report-path" in str(excinfo.value)
+    assert "--env.taskset.gate-report-path" in str(excinfo.value)
 
 def test_load_refuses_missing_gate_report(fixture_manifest_path: Path, tmp_path: Path) -> None:
     taskset = _taskset(fixture_manifest_path, tmp_path / "missing-gate.json")
@@ -329,18 +329,16 @@ def test_load_requires_manifest_path_flag() -> None:
     taskset = DaydreamReviewTaskset(DaydreamReviewConfig(id="daydream-review"))
     with pytest.raises(ValueError) as excinfo:
         list(taskset.load())
-    assert "--taskset.manifest-path" in str(excinfo.value)
+    assert "--env.taskset.manifest-path" in str(excinfo.value)
 
 def test_loader_contract_resolves_package(fixture_manifest_path: Path, stage0_gate_report: Path) -> None:
-    """The real path the verifiers CLI/orchestrator takes (loaders.py:110-127)."""
+    """The public loader resolves the configured environment and its real task manifest."""
     config_type = taskset_config_type("daydream-review")
     assert config_type is DaydreamReviewConfig
 
     taskset = load_taskset(
         config_type(id="daydream-review", manifest_path=fixture_manifest_path, gate_report_path=stage0_gate_report)
     )
-    # load(), not select(): select() is a 0.2.1 convenience the verifiers
-    # submodule prime-rl trains against does not have, and load() is the payload.
     assert len(list(taskset.load())) == 3
 
 def test_reference_manifest_loads_against_the_committed_snapshot(fixture_manifest_path: Path, stage0_gate_report: Path

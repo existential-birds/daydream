@@ -26,14 +26,6 @@ concurrency:
 jobs:
   check:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    # Temporary paired measurement; removed after choosing the worker count.
-    strategy:
-      fail-fast: false
-      matrix:
-        workers: [4, 8]
-    env:
-      PYTEST_WORKERS: ${{ matrix.workers }}
-
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,7 +48,7 @@ jobs:
         if: steps.plan.outputs.full == 'true'
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Set up Node for native Pi contract tests
         if: steps.plan.outputs.full == 'true'
@@ -132,7 +124,7 @@ jobs:
         if: always() && steps.plan.outputs.full == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # ea165f8d65b6e75b540449e92b4886f43607fa02 v7.0.1
         with:
-          name: coverage-report-${{ matrix.workers }}
+          name: coverage-report
           path: coverage.xml
           if-no-files-found: error
 
@@ -146,7 +138,7 @@ jobs:
         if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ci-proof-${{ matrix.workers }}
+          name: ci-proof
           path: ${{ runner.temp }}/ci-proof/proof.json
           retention-days: 14
           if-no-files-found: error
@@ -174,7 +166,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       # The standalone suite's negative-gate tests git-commit into throwaway
       # temp repos (e.g. the empty-commit fix-tracking cases). Runners carry no

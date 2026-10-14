@@ -19,11 +19,11 @@
 FROM ghcr.io/astral-sh/uv:0.11.29@sha256:eb2843a1e56fd9e30c7276ce1a52cba86e64c7b385f5e3279a0e08e02dd058fc AS uv
 
 # The base is pinned by its immutable multi-platform index digest, not a mutable
-# tag: a tag like `3.12-slim` tracks whatever `latest`-flavored manifest it
+# tag: a tag like `3.14-slim` tracks whatever `latest`-flavored manifest it
 # currently resolves to, so a base rebuilt later could silently pick up a moved
-# tag. The digest names one specific index for Python 3.12.13 slim and cannot
+# tag. The digest names one specific index for Python 3.14.6 slim and cannot
 # drift.
-FROM python:3.12.13-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
+FROM python:3.14.6-slim@sha256:7bec7ddcddeff7975d6ba9b4be7dd6f6b2f55e7491539145e2978f7f97ce9144
 
 # git: the repo image clones from an in-container mirror and daydream shells out
 #   to git for every diff, patch and commit it takes.

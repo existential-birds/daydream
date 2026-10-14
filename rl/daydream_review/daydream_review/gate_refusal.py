@@ -25,7 +25,7 @@ def require_stage0_gate(gate_report_path: Path) -> dict[str, Any]:
         raise Stage0GateRefused(
             f"Stage-0 gate report missing at {gate_report_path}: the offline gate has not run, "
             "so no rollout may be scheduled. Run the Stage-0 gate first and point "
-            "--taskset.gate-report-path at its report."
+            "--env.taskset.gate-report-path at its report."
         )
     try:
         report = json.loads(gate_report_path.read_text(encoding="utf-8"))

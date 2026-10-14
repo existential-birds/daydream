@@ -62,6 +62,35 @@ def _anthropic_message(model: str, reply: str) -> dict[str, Any]:
     }
 
 
+def _stream_payload(path: str, model: str, reply: str) -> bytes:
+    """Emit the provider's terminal event so interception can commit a sampled turn."""
+    if path.endswith("/messages"):
+        message = _anthropic_message(model, "")
+        message.update(content=[], stop_reason=None)
+        events: list[dict[str, Any]] = [
+            {"type": "message_start", "message": message},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": reply}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+             "usage": {"output_tokens": 1}},
+            {"type": "message_stop"},
+        ]
+    elif path.endswith("/responses"):
+        response = _response(model, reply)
+        events = [
+            {"type": "response.created", "sequence_number": 0, "response": {**response, "status": "in_progress"}},
+            {"type": "response.completed", "sequence_number": 1, "response": response},
+        ]
+    else:
+        completion = _chat_completion(model, reply)
+        completion["object"] = "chat.completion.chunk"
+        completion["choices"] = [{"index": 0, "delta": {"role": "assistant", "content": reply},
+                                  "finish_reason": "stop"}]
+        return (f"data: {json.dumps(completion)}\n\ndata: [DONE]\n\n").encode()
+    return "".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events).encode()
+
+
 class StubUpstreamHandler(BaseHTTPRequestHandler):
     """Return the upstream path's dialect-specific completion shape. A merged payload fails strict
     response validation and would exercise retries instead of the intended dialect.
@@ -76,9 +105,12 @@ class StubUpstreamHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length)
         try:
-            model = json.loads(raw).get("model") or "stub/canned"
+            request = json.loads(raw)
+            model = request.get("model") or "stub/canned"
+            stream = bool(request.get("stream"))
         except (ValueError, TypeError):
             model = "stub/canned"
+            stream = False
 
         if self.path.endswith("/messages"):
             payload = _anthropic_message(model, self.reply)
@@ -87,9 +119,9 @@ class StubUpstreamHandler(BaseHTTPRequestHandler):
         else:
             payload = _chat_completion(model, self.reply)
 
-        body = json.dumps(payload).encode()
+        body = _stream_payload(self.path, model, self.reply) if stream else json.dumps(payload).encode()
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "text/event-stream" if stream else "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
