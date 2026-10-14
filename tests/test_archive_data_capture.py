@@ -147,14 +147,15 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, no_ci_remote: NoCIRemote,
     tmp_path: Path,
 ) -> None:
-    """Editing tracked api.py gives real test/heal and commit phases a nonempty recommended diff."""
+    """Archive and push tracked/generated fixes while leaving pre-existing notes untracked."""
     head_before = git_ops.head_sha(multi_stack_target)
     base_before = git_ops.resolve_diff_merge_base(multi_stack_target, "main", head_before)
     original_diff = git_ops.diff(multi_stack_target, "main")
     store = LocalRecordStore(archive_dir.parent / "records")
     dump_dir = tmp_path / "uploaded-artifacts"
     remote, exit_code = await _run_real_phases_deep(
-        multi_stack_target, monkeypatch, archive_dir, no_ci_remote, dataset_store=store.root, dump_path=dump_dir)
+        multi_stack_target, monkeypatch, archive_dir, no_ci_remote, dataset_store=store.root, dump_path=dump_dir,
+        untracked_fix="migrations/0002_add_x.sql")
     assert exit_code == 0
     head_after = git_ops.head_sha(multi_stack_target)
     assert head_after != head_before
@@ -191,6 +192,12 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert recommended_text != diff_text
     assert "# daydream recommended change" in recommended_text
     assert "# daydream recommended change" not in diff_text
+    assert "migrations/0002_add_x.sql" in recommended_text
+    assert "notes.txt" not in recommended_text
+    committed = git(remote, "ls-tree", "-r", "--name-only", "refs/heads/feature").splitlines()
+    assert "migrations/0002_add_x.sql" in committed
+    assert "notes.txt" not in committed
+    assert "notes.txt" in git(multi_stack_target, "status", "--porcelain")
     for filename in ("manifest.json", "trajectory.json", "diff.patch", "evaluation.json"):
         assert (dump_dir / filename).is_file()
         assert (dump_dir / filename).read_bytes() == (run_dir / filename).read_bytes()
@@ -280,26 +287,6 @@ async def test_mixed_case_pr_identity_reaches_remote_ci_and_archives_success(
     assert "reason_code" not in remote_ends[0]
     assert remote_ends[0]["metadata"]["stop_reason"] == "no_ci"
 
-async def test_deep_archive_excludes_preexisting_untracked_files_from_patch_and_push(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, no_ci_remote: NoCIRemote,
-) -> None:
-    # One run, two surfaces: the archived patch and the pushed ref must both
-    # carry the fix-created file and neither may pick up pre-existing notes.txt.
-    remote, exit_code = await _run_real_phases_deep(
-        multi_stack_target, monkeypatch, archive_dir, no_ci_remote, untracked_fix="migrations/0002_add_x.sql",
-    )
-    assert exit_code == 0
-    recommended = (_only_archived_run(archive_dir) / "recommended.patch").read_text()
-    assert "migrations/0002_add_x.sql" in recommended  # fix-created file present
-    assert "notes.txt" not in recommended              # pre-existing file excluded
-
-    # Inspect the ref actually pushed by the stub.
-    branch = git(multi_stack_target, "branch", "--show-current")
-    committed = git(remote, "ls-tree", "-r", "--name-only", branch).splitlines()
-    assert "migrations/0002_add_x.sql" in committed
-    assert "notes.txt" not in committed
-    assert "notes.txt" in git(multi_stack_target, "status", "--porcelain")
-
 async def test_deep_rejects_unauthorized_heal_file_before_archiving_recommendation(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
 ) -> None:
@@ -382,28 +369,19 @@ async def _assert_target_is_reusable(target: Path) -> None:
     exit_code = await run(_deep_run_config(target, output_mode="review"))
     assert exit_code == 0
 
-@pytest.mark.parametrize(("filename", "content", "canary", "expected_rule"),
-    [pytest.param("creds.py",
-            'GITHUB_TOKEN = "ghp_canaryfake123"\n',
-            "ghp_canaryfake123", "api_key", id="token-canary",
-        ),
-        pytest.param("deploy_key.pem",
-            "-----BEGIN PRIVATE KEY-----\n"
-            "MIIFAKEKEYMATERIALFORTESTSONLY\n"
-            "MIIFAKEKEYMATERIALFORTESTSONLY\n"
-            "-----END PRIVATE KEY-----\n",
-            "MIIFAKEKEYMATERIALFORTESTSONLY", "pem_key", id="multiline-pem",
-        ),
-    ],
-)
 async def test_dump_artifacts_copies_credentials_in_diff(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path,
-    capfd: pytest.CaptureFixture[str], filename: str, content: str, canary: str, expected_rule: str,
+    capfd: pytest.CaptureFixture[str],
 ) -> None:
-    """Diagnostic dumps preserve credential bytes and completed review evidence."""
+    """Diagnostic dumps preserve token and PEM bytes, binding evidence without console disclosure."""
     silence(monkeypatch)
     install_stub_backend(monkeypatch, multi_stack_target)
-    _commit_scanned_file(multi_stack_target, filename, content)
+    canaries = ("ghp_canaryfake123", "MIIFAKEKEYMATERIALFORTESTSONLY")
+    _commit_scanned_file(multi_stack_target, "creds.py", f'GITHUB_TOKEN = "{canaries[0]}"\n')
+    _commit_scanned_file(multi_stack_target, "deploy_key.pem",
+        "-----BEGIN PRIVATE KEY-----\n"
+        f"{canaries[1]}\n{canaries[1]}\n"
+        "-----END PRIVATE KEY-----\n")
     dump_dir = tmp_path / "uploaded-artifacts"
     exit_code = await run(_deep_run_config(
         multi_stack_target, output_mode="review", dump_artifacts=str(dump_dir),
@@ -413,15 +391,15 @@ async def test_dump_artifacts_copies_credentials_in_diff(
     with closing(sqlite3.connect(f"{(archive_dir / 'index.db').as_uri()}?mode=ro", uri=True)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
     assert (multi_stack_target / ".review-output.md").is_file()
-    assert canary in (run_dir / "diff.patch").read_text()
+    assert all(canary in (run_dir / "diff.patch").read_text() for canary in canaries)
     assert (dump_dir / "diff.patch").read_bytes() == (run_dir / "diff.patch").read_bytes()
-    assert expected_rule in {finding.category for finding in scan.scan_run_dir(run_dir).findings}
+    assert {"api_key", "pem_key"} <= {finding.category for finding in scan.scan_run_dir(run_dir).findings}
     manifest = json.loads((dump_dir / "manifest.json").read_text())
     assert manifest["session_id"] == json.loads((run_dir / "manifest.json").read_text())["session_id"]
     assert json.loads((dump_dir / "trajectory.json").read_text())["session_id"] == manifest["session_id"]
 
     out = "".join(capfd.readouterr())
-    assert canary not in out
+    assert all(canary not in out for canary in canaries)
     await _assert_target_is_reusable(multi_stack_target)
 
 @pytest.mark.parametrize("failure", ["evaluation", "filesystem", "index", "upload"])

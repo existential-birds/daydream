@@ -164,19 +164,15 @@ async def test_fix_failure_confines_orphan_and_restores_protected_file_in_archiv
     restored = {event["path"] for event in run_audit["events"] if event["action"] in {"remove", "restore"}}
     assert {"store/uuid.go", "owner-scratch.bin"} <= restored
 
-@pytest.mark.parametrize("location", ["live-artifact", "archived-manifest"])
 async def test_fix_quality_gate_persists_verbosity_regression(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: MakeConfig,
-    mute_side_effects: Mute, location: str,
+    mute_side_effects: Mute,
 ) -> None:
     assert await _run_quality_gate_fixture(multi_stack_target, monkeypatch, make_config, mute_side_effects) == 0
     assert "def choose(x):" in (multi_stack_target / "api.py").read_text()
-    if location == "live-artifact":
-        gate = _read_quality_gate(multi_stack_target)
-    else:
-        manifest = json.loads((_only_archived_run(archive_dir) / "manifest.json").read_text())
-        gate = manifest["fix_quality_gate"]
-    assert gate is not None
+    gate = _read_quality_gate(multi_stack_target)
+    manifest = json.loads((_only_archived_run(archive_dir) / "manifest.json").read_text())
+    assert manifest["fix_quality_gate"] == gate
     assert gate["enabled"] is True
     entry = gate["rounds"][0]["per_file"]["api.py"]
     assert entry["verbosity_after"] > entry["verbosity_before"]

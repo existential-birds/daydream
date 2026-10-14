@@ -37,7 +37,7 @@ from tests.harness.remote_ci import NoCIRemote
 from tests.harness.review_profile import independent_alternatives_profile, independent_exploration_profile
 from tests.harness.stub_backend import StubBackend
 from tests.harness.trajectory import make_recorder, observe_text_and_result, read_trajectory
-from tests.test_deep_orchestrator import _install_stub_backend, _merge_item, _pin_findings_pr, _silence
+from tests.test_deep_orchestrator import _install_stub_backend, _pin_findings_pr, _silence
 
 
 def _snapshot_document(path: Path, payload: dict[str, Any]) -> TrajectoryDocumentSnapshot:
@@ -509,6 +509,15 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     roots = list((target / ".daydream" / "runs").glob("*/trajectory.json"))
     assert len(roots) == 1
     root = json.loads(roots[0].read_bytes())
+    assert atif_validate(root, validate_images=False) is True
+    fix_summaries = [summary for summary in root["extra"]["subtrajectories"] if summary["phase"] == "fix"]
+    assert len(fix_summaries) == 2
+    for summary in fix_summaries:
+        assert summary["descriptor"].startswith("fix-")
+        assert summary["started_at"]
+        assert summary["ended_at"]
+        assert summary["sibling_trajectory_ref"]
+        assert "step_ids" not in summary
     fix_dispatches = [step
         for step in root["steps"]
         if step.get("extra", {}).get("daydream_phase") == "fix"
@@ -632,6 +641,9 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     archive = archive_dir / "runs" / root["session_id"]
     manifest = json.loads((archive / "manifest.json").read_bytes())
     evaluation = json.loads((archive / "evaluation.json").read_bytes())
+    phase_timings = manifest["metrics"]["phase_timings"]
+    assert {"intent", "verify", "fix", "test", "deep"} <= phase_timings.keys()
+    assert "alternatives" not in phase_timings
     completeness = {"total": len(invocation_keys), "attributed": len(invocation_keys), "unattributed": 0}
     assert manifest["metrics"]["timing_coverage"]["agent_completeness"] == completeness
     assert evaluation["timing"]["agent_completeness"] == completeness
@@ -734,61 +746,6 @@ async def test_deep_run_emits_phase_events_and_manifest_timings(
     # A declined gate retains earlier phase timing.
     assert "intent" in phase_timings
     assert "alternatives" not in phase_timings  # Folded into the structural review.
-
-async def test_deep_run_accept_gate_wraps_fix_test_verify(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Any,
-) -> None:
-    """Accepted deep fix gate records fix/test/verify timing events."""
-
-    _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-
-    mute_side_effects()
-
-
-    data = await _run_with_config(tmp_path, multi_stack_target,
-        assume="yes",  # accept the apply-fixes gate -> verify/fix/test run
-        test_command=f"{sys.executable} -c pass",
-    )
-
-    # The longest phases -- fix/test/verify -- only run past an accepted gate.
-    events = data["extra"].get("phase_events", [])
-    event_phases = {e["phase"] for e in events}
-    for phase in ("verify", "fix", "test"):
-        assert phase in event_phases, f"{phase} phase_events missing; got phases: {sorted(event_phases)!r}"
-
-    # Manifest: phase_timings must carry every wrapped deep phase.
-    phase_timings = _read_phase_timings(tmp_path)
-    assert phase_timings is not None
-    for phase in ("intent", "verify", "fix", "test", "deep"):
-        assert phase in phase_timings, f"{phase} missing from deep phase_timings: {phase_timings!r}"
-    assert "alternatives" not in phase_timings
-
-async def test_parallel_fix_registers_subtrajectories(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Any,
-) -> None:
-    """A real multi-file fix run records multiple forked fix trajectories."""
-
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    # Override merge items to produce 2 findings on distinct files.
-    stub.merge_items = [_merge_item(1, "api.py", "high"), _merge_item(2, "App.tsx", "medium")]
-
-    mute_side_effects()
-
-
-    data = await _run_with_config(tmp_path, multi_stack_target, assume="yes",
-                                  test_command=f"{sys.executable} -c pass")
-
-    subs = data["extra"].get("subtrajectories", [])
-    fix_subs = [s for s in subs if s["phase"] == "fix"]
-    assert len(fix_subs) >= 2, f"expected >=2 fix subtrajectories from parallel forks, got {len(fix_subs)}: {fix_subs}"
-    for sub in fix_subs:
-        assert sub["descriptor"].startswith("fix-"), f"fix subtrajectory descriptor must start with 'fix-': {sub}"
-        assert sub["started_at"], f"fix subtrajectory missing started_at: {sub}"
-        assert sub["ended_at"], f"fix subtrajectory missing ended_at: {sub}"
-        assert sub["sibling_trajectory_ref"], f"fix subtrajectory missing sibling_trajectory_ref: {sub}"
-        assert "step_ids" not in sub, f"step_ids should be replaced by sibling_trajectory_ref: {sub}"
 
 async def test_review_flow_emits_phase_events_and_manifest_timings(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Any,

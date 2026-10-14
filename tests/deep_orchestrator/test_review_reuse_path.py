@@ -148,6 +148,13 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
     canonical = {**_records_bytes(multi_stack_target), **{name: (deep / name).read_bytes() for name in names}}
     failures = saved_coverage(deep).unfinished_scopes
     first = json.loads((deep / "review-coverage.json").read_text())
+    if unit == "all-units":
+        store = deep.parent / "review-cache"
+        assert store.is_dir(), "store must be published beside the deep artifacts"
+        first_units = cast(dict[str, Any], _latest_provenance(deep)["units"])
+        assert first_units["exploration"]["outcome"] in {"reused", "regenerated"}
+        unknown_entry = store / "entries" / ("a" * 64)
+        unknown_entry.mkdir()
     if unit == "independent":
         assert _count_unit_prompts(stub.calls, _INTENT_DISCRIMINATOR) == 1
         assert _count_unit_prompts(stub.calls, _WONDER_DISCRIMINATOR) == 1
@@ -163,6 +170,8 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
     assert all(first[field] == second[field] for field in ("analyzed_revision", "planned_scopes", "stack_outcomes"))
     assert all(scope["status"] == "complete" for scope in second["stack_outcomes"])
     units = cast(dict[str, Any], _latest_provenance(deep)["units"])
+    if unit == "all-units":
+        assert unknown_entry.is_dir(), "a fresh run must preserve unknown cache entries"
     if unit == "independent":
         for name, grounding in (("intent", {"exploration"}), ("alternatives", {"intent", "exploration"})):
             assert units[name]["outcome"] == "hit" and set(units[name]["grounding_status"]) == grounding
@@ -182,25 +191,6 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
             os.close(report_fd)
     finally:
         os.close(parent_fd)
-
-async def test_store_directory_survives_a_fresh_run_and_is_readable_by_the_next(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    """Published review-cache survives detachment and reseeding of the next live root."""
-    install_stub_backend(monkeypatch, multi_stack_target)
-    assert await run(make_config(multi_stack_target)) == 0
-    store = multi_stack_target / ".daydream" / "review-cache"
-    assert store.is_dir(), "store must be published beside .daydream/deep"
-    provenance = multi_stack_target / ".daydream" / "review-cache" / "provenance"
-    records = list(provenance.glob("*.json"))
-    assert records, "the run must record its reuse provenance inside the store"
-    record = json.loads(records[0].read_text(encoding="utf-8"))
-    assert record["units"]["exploration"]["outcome"] in {"reused", "regenerated"}
-
-    (store / "entries").mkdir(exist_ok=True)
-    (store / "entries" / ("a" * 64)).mkdir()
-    assert await run(make_config(multi_stack_target)) == 0
-    assert (store / "entries" / ("a" * 64)).is_dir(), "a fresh run must not wipe the store"
 
 async def test_identical_rerun_reviews_no_stack_and_a_leaf_edit_invalidates_bound_coverage(
     shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,

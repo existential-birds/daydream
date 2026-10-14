@@ -67,7 +67,6 @@ from tests.harness.protocol_cli import install_protocol_cli
 from tests.harness.protocol_cli_assertions import assert_protocol_cli_invariants, make_cancel_probe
 from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.stub_backend import (
-    force_interactive as _force_interactive,
     review_stage_state,
     silence as _silence,
     stage_result,
@@ -138,7 +137,6 @@ if TYPE_CHECKING:
     from daydream.run_config import RunConfig
 
 MakeConfig = Callable[..., "RunConfig"]
-Mute = Callable[..., None]
 
 def test_backend_execution_input_is_immutable_parsed_and_returns_fresh_environment(tmp_path: Path) -> None:
     source = {
@@ -720,46 +718,29 @@ def _assert_pi_model_and_provider(captured: list[list[str]], *, model: str, prov
         assert argv[argv.index("--provider") + 1] == provider
 
 @pytest.mark.parametrize(
-    ("env_provider", "expected_provider"), [(None, "nous"), ("custom-proxy", "custom-proxy")],
-    ids=["default-nous", "PI_PROVIDER-override"],
+    ("ambient", "cli_effort", "file_global", "file_phase", "expected", "env_provider", "expected_provider"), [
+        (None, None, None, None, "medium", None, "nous"),
+        ("high", None, None, None, "medium", "custom-proxy", "custom-proxy"),
+        ("high", None, "low", None, "low", None, "nous"),
+        ("high", None, "low", "xhigh", "xhigh", "custom-proxy", "custom-proxy"),
+        ("high", "low", "high", "xhigh", "low", None, "nous"),
+    ], ids=["default", "ambient-high", "file-global", "file-phase", "cli-global"],
 )
-async def test_runner_real_path_pi_provider_axis(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-    env_provider: str | None, expected_provider: str,
-) -> None:
-    """Run the real factory/backend in a Git worktree with only Pi spawning mocked.
-
-    An empty settings directory forces the fallback model and tests provider overrides.
-    """
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    mute_side_effects()
-    if env_provider is None:
-        monkeypatch.delenv("PI_PROVIDER", raising=False)
-    else:
-        monkeypatch.setenv("PI_PROVIDER", env_provider)
-    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tiny_diff_target / "pi-agent"))
-    captured: list[list[str]] = []
-    _capture_pi_subprocess(monkeypatch, captured)
-    rc = await run(make_config( tiny_diff_target, backend="pi", assume="yes", ))
-    assert rc == 0
-    _assert_pi_model_and_provider(captured, model="deepseek/deepseek-v4-flash-0731", provider=expected_provider)
-
-@pytest.mark.parametrize(("ambient", "cli_effort", "file_global", "file_phase", "expected"), [
-    (None, None, None, None, "medium"), ("high", None, None, None, "medium"),
-    ("high", None, "low", None, "low"), ("high", None, "low", "xhigh", "xhigh"),
-    ("high", "low", "high", "xhigh", "low"),
-], ids=["default", "ambient-high", "file-global", "file-phase", "cli-global"])
 async def test_runner_pi_stack_review_effort_reaches_native_submission(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     ambient: str | None, cli_effort: str | None, file_global: str | None, file_phase: str | None, expected: str,
+    env_provider: str | None, expected_provider: str,
 ) -> None:
-    """The built-in effort and explicit precedence survive runner, cache and Pi argv."""
+    """Built-in effort precedence and default/override provider/model reach native Pi argv."""
     _silence(monkeypatch)
     if ambient is None:
         monkeypatch.delenv("PI_THINKING", raising=False)
     else:
         monkeypatch.setenv("PI_THINKING", ambient)
+    if env_provider is None:
+        monkeypatch.delenv("PI_PROVIDER", raising=False)
+    else:
+        monkeypatch.setenv("PI_PROVIDER", env_provider)
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
     captured: list[list[str]] = []
     reviewer_args: list[list[str]] = []
@@ -811,6 +792,7 @@ async def test_runner_pi_stack_review_effort_reaches_native_submission(
         review_profile=profile,
         shallow_fanout_threshold=0, review_cache_enabled=False, run_eval=False)
     assert await run(config) == 0
+    _assert_pi_model_and_provider(captured, model="deepseek/deepseek-v4-flash-0731", provider=expected_provider)
     assert reviewer_args
     # The host nominal ceiling is 3600s; 385s shared minus 77s reserve and 1s spent leaves 307s.
     assert wall_allowances and all(0 < wall <= 307 for wall in wall_allowances)
@@ -826,11 +808,21 @@ async def test_runner_pi_stack_review_effort_reaches_native_submission(
     for argv in other_args:
         assert (argv[argv.index("--thinking") + 1] if "--thinking" in argv else None) == other_effort
 
+@pytest.mark.parametrize(
+    ("env_provider", "expected_provider"), [(None, "nous"), ("custom-proxy", "custom-proxy")],
+    ids=["default-nous", "PI_PROVIDER-override"],
+)
 async def test_runner_custom_flow_pi_reports_unbounded_allowance(
     tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, ext_dir: ExtDir,
+    env_provider: str | None, expected_provider: str,
 ) -> None:
-    """A supported extension flow's unbounded turn stays truthful at the real Pi boundary."""
+    """One real Pi turn preserves provider selection, fallback model and unbounded allowance."""
     _silence(monkeypatch)
+    if env_provider is None:
+        monkeypatch.delenv("PI_PROVIDER", raising=False)
+    else:
+        monkeypatch.setenv("PI_PROVIDER", env_provider)
+    # No user settings may replace the production fallback model/provider.
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
     ext_dir.write_module(
         "from daydream.agent import run_agent\n"
@@ -852,8 +844,10 @@ async def test_runner_custom_flow_pi_reports_unbounded_allowance(
         system_prompts.append(Path(system_arg).read_text() if system_arg.startswith("/") else system_arg)
         return make_mock_process_from_fixture("simple_text.jsonl")
 
-    _capture_pi_subprocess(monkeypatch, [], response)
+    captured: list[list[str]] = []
+    _capture_pi_subprocess(monkeypatch, captured, response)
     assert await run(make_config(tiny_diff_target, backend="pi", flow_name="unbounded", run_eval=False)) == 0
+    _assert_pi_model_and_provider(captured, model="deepseek/deepseek-v4-flash-0731", provider=expected_provider)
     assert (tiny_diff_target / ".review-output.md").read_text() == "Hello from Pi"
     assert len(system_prompts) == 1
     assert "Attempt dispatch-time snapshot:" in system_prompts[0]
