@@ -1,74 +1,34 @@
 # Agent guidance
 
-AGENTS.md is the source of repository guidance for all coding agents working in
-Daydream. Keep it current when architecture, runtime contracts, or contribution
-requirements change.
+AGENTS.md owns repository guidance for coding agents. Keep cross-cutting rules
+here and subsystem detail in the linked documents; update the relevant owner when
+its contract changes. Prefer links to executable configuration over copied inventories.
 
-Before starting contribution work, read and follow [CONTRIBUTING.md](CONTRIBUTING.md).
-Use its [shared agent skill workflow](CONTRIBUTING.md#shared-agent-skill-workflow):
-`prepare-implement` → generate a self-contained `/goal` prompt → execute it.
-Follow its [SemVer and Keep a Changelog rules](CONTRIBUTING.md#versioning-and-changelog)
-and [PR template and checklist requirements](CONTRIBUTING.md#pull-request-requirements)
-for every PR.
+Before contribution work, read [CONTRIBUTING.md](CONTRIBUTING.md), which owns the
+shared `prepare-implement` → goal prompt → execution workflow, validation,
+SemVer/changelog policy, and PR template/checklist requirements. Read
+[Makefile](Makefile) and [pyproject.toml](pyproject.toml) for current commands,
+settings, and exemptions; use [README.md](README.md) for the product surface.
 
 ## Never bypass Git hooks
 
 Run every commit and push with hooks enabled. Never use `--no-verify`,
 hook-disabling environment variables, configuration, or another mechanism that
-skips verification, even for pre-existing failures. Fix the failure on the current
-branch and retry normally, or report the blocker. Sign commits and stage only
-related paths explicitly. A commit or push is complete only after the normal
-hook-enabled command succeeds.
+skips verification, even for pre-existing failures. Fix the failure on the
+current branch and retry normally, or report the blocker. Sign commits and stage
+only related paths explicitly. A commit or push is complete only after the
+normal hook-enabled command succeeds.
 
-## Project overview
-
-Automated code review and fix loop: reviews diffs, applies fixes, validates via test suite, and
-records every agent interaction as an
-[ATIF v1.7](https://www.harborframework.com/docs/agents/trajectory-format) trajectory. A bitemporal corpus
-pipeline scores, labels, and projects those trajectories into JSONL datasets for SFT/RL fine-tuning.
-
-Default flow is the deep multi-stack pipeline; `--shallow` is a single-stack, single pass; `--comment`/`--review`
-are review-only. Four backends — Claude
-(in-process SDK), Codex, Pi, and Osprey (subprocess CLIs) — all emit the same `AgentEvent` stream. Improve currently requires Claude for every model phase.
-
-First read Makefile/config (current commands/settings/exemptions) and README.md/CONTRIBUTING.md#where-to-look-deeper;
-update changed contracts. Corpus requires docs/calibration.md; follow docs/coverage.md's ratchet without lowering it.
-Review exports follow the [terminal findings contract](README.md#terminal-review-findings-contract); preserve typed coverage, snapshot binding and atomic publication.
-
-## Commands
+## Validation
 
 ```bash
-make install   # uv sync --all-extras
-make hooks     # install pre-commit and pre-push hooks
-make lint       # ruff over daydream, tests, and the CI policy script
-make typecheck  # mypy over daydream, tests, and the CI policy script
-make deadcode   # whole-project dead-code detection (vulture)
-make test       # pytest -n auto
-make actionlint # actionlint over live + packaged workflows (Docker)
-make rl-check   # standalone RL lockcheck + ruff + mypy + pytest (run by hand when you change rl/)
 make check      # lockcheck + install + lint + deadcode + typecheck + test + actionlint + coverage-report + check-naming (the gate)
 ```
 
-```bash
-# Golden paths (near-zero-flag; `daydream /path` == `daydream review /path`)
-daydream /path/to/project                          # review -> fix -> test (deep multi-stack)
-daydream --comment /path/to/project                # review -> post inline PR comments, then exit
-daydream improve /path/to/project                  # read-only repo audit -> prioritized plans
-daydream improve plan "add rate limiting" /path/to/project  # investigate one request -> plan
-daydream improve prune-reanchor <NAME> /path/to/project   # remove one executed re-anchor worktree (exit 0 on removal, non-zero when the name is rejected/absent/git-failed)
-daydream improve list-reanchor /path/to/project   # list existing -reanchor worktrees
-
-# Other verbs / flags (`--help-all` for the full advanced surface)
-daydream --shallow -s python /path/to/project      # shallow Python single-pass review-fix-test
-daydream --review /path/to/project                 # review only, skip fixes
-daydream --yes /path/to/project                    # auto-apply fixes without prompting
-daydream --non-interactive /path/to/project        # unattended/harness run
-daydream --diagram-only flowchart /path/to/project   # grounded flowchart comment only
-```
-
-The rest of the surface — `setup`, `ext validate`, `corpus *` — is in README "Self-hosted review bot" /
-"Extensions" / "Corpus commands"; `post-findings` and `summarize` are unattended-only helpers driven by the
-packaged workflows (`daydream/templates/workflows/README.md`); `daydream benchmark` is in `docs/benchmark.md`.
+The pre-push hook checks signatures and runs this gate. Follow
+[CONTRIBUTING.md's setup and focused checks](CONTRIBUTING.md#everyday-commands-and-the-required-gate).
+Run `make rl-check` separately when changing `rl/daydream_review`; it is outside
+`make check`. Follow [the coverage ratchet](docs/coverage.md) without lowering it.
 
 ## Testing standard (mandatory)
 
@@ -77,377 +37,115 @@ Each new or changed test must identify a credible regression and explain why exi
 coverage misses it. Prefer extending existing tests and fixtures; preserve real
 filesystem, Git, and event-loop behavior when those are part of the contract.
 Unit, integration, and end-to-end tests are valid choices according to the behavior
-and risk. Use the `test-audit` skill for test changes and address its findings.
-This section is authoritative when a skill repeats conflicting or older testing requirements.
+and risk. Use the [test-audit skill](.agents/skills/test-audit/SKILL.md) for test
+changes and address its findings. This section is authoritative when a skill
+repeats conflicting or older testing requirements.
 For fix-loop changes, assert retained fixes and trajectory state.
-Inject terminal-finding faults at actual filesystem operations (README.md#terminal-review-findings-contract).
-
-**No caveats.** All work is completed and proven, or explicitly in progress. No deferred items, no
-"optional" follow-ups, no smoke-tests substituted for real coverage.
+Inject terminal-finding faults at actual filesystem operations; preserve typed
+coverage, snapshot binding, and atomic publication under the
+[terminal findings contract](README.md#terminal-review-findings-contract).
 
 ## Architecture
 
-```text
-cli.py -> runner.py -> deep/orchestrator.py -> flows/engine.py (deep FlowSteps)
-              |        -> improve/orchestrator.py -> flows/engine.py (improve FlowSteps)
-              |        -> flows/engine.py (custom extension flows)
-              \-> ui/ (terminal output)
-deep FlowSteps -> phases/ -> agent.py -> Backend.execute()
-```
-
-- `runner.run()` is the async entry: builds the per-run extension `Registry` onto a `ContextVar`, then
-  dispatches PR-process modes (`deep`, `shallow`, `review`, or `comment`) to the single deep
-  orchestrator. `improve` and custom extension flows run through `run_flow()` over registered `FlowStep` lists.
-- `agent.run_agent()` is the only agent call site. **Never call a backend/SDK directly from phases.**
-- Subagent fan-out (exploration, per-stack review, parallel fix) is N parallel `run_agent()` calls under
-  `anyio.CapacityLimiter(effective_fanout_concurrency(ceiling, backend))`, **not** SDK `agents=`.
-- `TrajectoryRecorder` propagates via `ContextVar`; `recorder.fork()` makes sibling trajectories per fan-out.
-
-### Module responsibilities
-
-| File | Responsibility |
-|------|----------------|
-| `cli.py`, `commands/` | Process lifecycle and verb dispatch; each command family owns its parser and execution |
-| `runner.py` | Workspace lifecycle, registry, and flow dispatch |
-| `run_config.py`, `run_artifacts.py` | Run settings and backend precedence; recorder, manifest, and archive lifecycle |
-| `run_snapshot.py` | Immutable manifest identity and archive aggregate; runner captures policy before recorder entry |
-| `flows/` | `FlowContext` + `run_flow()` engine: ordering, `enabled` gates, `Stop`/`BreakLoop`, loop groups |
-| `extensions/` | `Registry` (phases+flows, prompts, stack rules), `daydream_ext` loader |
-| `deep/orchestrator.py` | Public deep/diagram entry points, flow assembly, mode gates, diff/stack preamble, and success-only cleanup dispatch |
-| `deep/{review,adjudication,merge,diagram,fix}_steps.py` | Review fan-out, record verdicts and arbiter work, publication, grounded diagrams, and authorized fix sequencing |
-| `deep/fix_state.py`, `deep/quality_gate.py`, `deep/remote_ci_steps.py` | Fix baselines/capture/confinement, quality checks, and remote CI gates |
-| `deep/review_reuse.py` | Reusable-unit identity and shared restore/store bookkeeping |
-| `deep/state.py` | Checked `DeepState` view over the same extension-visible `FlowContext.data` mapping; validates when consumed and writes through |
-| `deep/diff.py` | Shared changed-file parsing and full-diff reads, also consumed by scope enforcement and Improve |
-| `deep/{detection,dedup,artifacts}.py` | `detect_stacks()` router, artifact paths, dedup pre-filter |
-| `deep/records.py` | Host-assigned identity, never content-derived: record `uid` (`stack:ordinal`) at record birth, merged-item `item_uid` (`item:n`) at merge write, and the `source_uids` derivation list |
-| `deep/latency.py` | Pure latency-profile vocabulary, risk summary, monotone `route_for`, and the `wonder_decision`/`arbiter_plan` predicates |
-| `deep/routing_record.py` | The single writer/reader of `.daydream/deep/latency-routing.json`; snapshot mappings replace, phase slices merge, evidence only |
-| `deep/arbiter.py` | Pure target selection and deterministic grouping for arbiter/suppression passes |
-| `deep/diagram_{types,trigger,schema,render}.py`, `deep/diagram_grounding/` | Grounded diagrams: shared dataclasses, eligibility rules, strict spec schemas, deterministic evidence checking (the sole authority on what may be drawn), pure mermaid emitters |
-| `services.py` | The single service-discovery implementation (declared `service_roots` or layout inference), shared by improve and diagram eligibility |
-| `improve/orchestrator.py`, `recon.py`, `audit.py` | Flow registration, repository survey/verified commands, and bounded audit/vetting execution |
-| `improve/audit_scope.py`, `planning.py` | Partitions, coverage, finding identity, and incremental plan selection |
-| `improve/plans.py`, `plan_index.py`, `reanchor.py` | Plan reservation/landing, durable identity/recovery, and re-anchor worktree lifecycle |
-| `improve/assemble.py`, `plan_contract.py`, `plan_normalization.py` | Author-content expansion, schema/path/command validation, and safe projection/repair |
-| `improve/issue_publication.py`, `reporting.py`, `plan_diagnostics.py` | Validated-plan publication, summaries, and safe diagnostics |
-| `phases/` | Review, findings, fixing, testing, and publication operations; `inputs.py` and `schemas.py` own shared preparation/contracts |
-| `agent.py`, `agent_output.py`, `agent_retry.py`, `ui/agent_stream.py` | Backend lifecycle/budgets, host output resolution, retry decisions, and event/accepted-result presentation |
-| `trajectory/` | `recorder.py` owns persistence, `scopes.py` owns fork/invocation lifetimes, `invocation.py` handles backend events, and `lifecycle.py` tracks phase/dispatch metadata; timing, layout, and billing stay independent |
-| `redaction.py` | Shared credential redaction for backend events, logging, archives, and trajectory text |
-| `artifact_visibility.py`, `artifacts/` | Session routing over owned filesystem, ledger, transfer, publication, and recovery modules; conflicts preserve competing bytes |
-| `observability/` | Operator trace settings, exporter factories, per-run OTel lifecycle, backend-event hydration and export privacy |
-| `backends/` | `Backend` protocol, Claude/Codex/Pi/Osprey, `AgentEvent` union, `create_backend()` |
-| `ui/` | Rich output (Dracula): `console`, `panels`, `messages`, `tools`, `agent_text`, `summary`, `theme`, `colorize` |
-| `config.py`, `config_file.py` | Per-phase model/effort defaults, budgets; `[tool.daydream]` / `.daydream.toml` parser |
-| `workspace.py` | `WorkContext`: in-place vs ephemeral detached worktree; private operational worktrees under `~/.daydream/workspaces/` are separate from the runtime artifact root |
-| `git_ops/` | **Single Git/GitHub subprocess boundary**: process policy, authentication, queries, mutations, state, and snapshots |
-| `exploration*.py`, `tree_sitter_index/` | Pre-scan conventions; safe parser/query runtime, import impact, and statement classification |
-| `remote_ci/` | Captured CI evidence, rule parsing, evaluation, GitHub reads, polling, and artifact writes |
-| `supervision.py` | Runtime findings + tool supervision (extension veto seam) |
-| `reconcile.py` | Cross-run dedup vs prior bot PR comments (GitHub is the store) |
-| `pr_review.py`, `reviews/` | Posting orchestration over finding/placement models, host-owned comment identity, captured rendering, and immutable diagram validation |
-| `pr_comment_renderer.py` | Pure renderer: trajectory in, markdown out (no I/O) |
-| `training/` vs `eval/` | Corpus pipeline (harvest, reward, projection, JSONL) vs deterministic trajectory analysis; `eval/quality.py` owns source-quality analysis and `eval/latency_report.py` renders the per-profile report |
-| `dataset.py`, `dataset_capture.py`, `dataset_hub.py`, `hub.py` | Frozen run capture, immutable local records and snapshots, canonical JSONL publication/download, and the single lazy HF SDK client |
-| `dataset_scoring.py` | Shared acquisition of live producer scoring artifacts for frozen capture and RL; harvest reads recorded scoring inputs |
-| `training/harvest.py`, `training/harvest_types.py` | Record-based acquisition and immutable observation persistence; pure reward/rubric reduction preserves scoring semantics |
-| `training/corpus_projection/`, `training/calibration.py` | Offline projection from frozen record snapshots with eligible observations, followed by fail-closed calibration of derived corpus exports |
-| `prompts/` | Authorial intent, exploration subagents, CWD grounding |
-
-Self-describing modules are not listed: `findings.py`, `pricing.py`, `github_app.py`,
-`bot_identity.py`, `bot_setup.py`, `summarize.py`, `archive/`, `benchmark/`.
-
-Training projection derives canonical repository identity from captured task provenance.
-C5 exclusions protect held-out benchmarks; operators decide dataset permissions using
-recorded repository and commit provenance. New observations use `daydream.observation.v3`
-and private HF manifests use `daydream.hub.v3`; projected records use schema `3` and
-`record-snapshot-v2` source lineage. Unsupported observation and HF contracts are
-rejected without rewriting historical data. Finding IDs retain their original hash domain.
-
-Harvested finding observations retain complete source-bound `reply_captures` separately
-from their semantic reply evidence. Capture-only enrichment preserves semantic digests
-and matching human judgments; source-body edits create a new evidence generation.
-Pinned snapshot readers, materialization, and exports retain the captures even when
-human precedence supplies the disposition. Local capture keeps fetched text intact;
-common private HF publication applies the existing complete-record secret scanner.
-
-**Latency-profile naming.** The concept is `latency_profile` (config key `latency_profile`, CLI
-`--latency-profile`, config-file scalar, `RunConfig.latency_profile`). `forensic` names one profile and
-means exactly "today's wonder+arbiter behaviour" (wonder runs at `high`, arbiter at `xhigh`, unsharded);
-it is not a synonym for "sharding disabled" or "read-only". Sharding-off is called unsharded/sharding-off.
-
-Compute latency risk from the full captured patch before bounding `DeepState.diff`.
-Keep `snapshot_diff`, file/stack accounting, diff-key and review coverage bound to
-that full patch. The [routing population contract](README.md#latency-profiles)
-distinguishes full/retained patch counts from bounded prompt-diff bytes, including
-the marker. Resume replaces snapshot-owned `risk` and `diff_population` evidence
-as complete mappings; missing/corrupt routing evidence never blocks execution.
-Intent/wonder full-artifact reads retain the existing bounded prompt transport.
-
-### Backend protocol
-
-`Backend` (in `backends/__init__.py`) is `model` + `execute()` + `cancel()`.
-`execute()` yields the `AgentEvent` union (`Request`, `Text`, `Thinking`, `ToolStart`, `ToolResult`,
-`Diagnostic`, `Cost`, `Metrics`, `TurnEnd`, `GenerationStart`, `GenerationEnd`, `Result`). `Request` exposes the effective Daydream-sent request after adapter
-transformations. Adding a backend means producing that stream correctly — phases and the
-recorder are backend-agnostic. `Diagnostic` is recorder-only parser/transport evidence: the recorder
-normalizes and redacts it into JSON-safe `Step.extra.backend_diagnostics`, while observability exports
-only scrubbed diagnostic codes and counts on the enclosing attempt span.
-Pi startup/native progress and Codex stream/process boundaries use a typed, content-free attempt collector.
-The runner freezes its host-monotonic observations synchronously after stream cleanup and before
-invocation/span finalization. Trajectory invocation summaries retain `backend_lifecycle`; existing
-attempt spans export its fixed scalar fields as `daydream.backend_lifecycle.*`. This evidence does
-not own deadlines, idle windows, retries, native generation completion, or billing ownership.
-Codex success requires the latest public turn to complete, stdout EOF, and an independently observed zero
-exit. Its preterminal silence window defaults to 600 seconds (`DAYDREAM_STREAM_IDLE_TIMEOUT_S`,
-zero disables only silence detection). Absolute terminal drain, EOF-to-exit reap, and cleanup
-allowances default to 5/5/10 seconds; positive finite `DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S`,
-`DAYDREAM_CODEX_PROCESS_REAP_TIMEOUT_S`, and `DAYDREAM_CODEX_CLEANUP_TIMEOUT_S` override them.
-Frozen `BackendExecutionInput` owns these settings when supplied. Completion timing begins
-before metric/cost yields and repeated terminal events cannot extend it. Duplicate public completion
-within a turn does not charge usage again; a genuine `turn.started` permits distinct-turn accounting
-without restarting the tail allowance. Postterminal expiry
-prohibits automatic replay of a potentially completed mutating turn. Attempt cancellation closes
-only its own stream; backend-wide cancellation belongs to run shutdown.
-Adapters emit assistant text and genuine transport/native payloads; `agent_output.py` owns final-turn selection
-and validation. Staged contract 10 accepts bounded, complete, unambiguous prose/fence/single-wrapper packaging;
-`ReviewInvestigation._admit` owns domain admission before result presentation. Native lifecycle stays in adapters,
-Improve opt-out keeps text transport, and raw events remain trajectory evidence. See the staged output contract in
-`docs/extensions.md` for rejection and retry rules.
-Codex transport coverage is necessarily evidence-driven: a recognized public `item.type == "error"`
-sentinel produces an incomplete-coverage diagnostic, but if a transport omits a tool and emits no public
-marker, Daydream cannot infer the invisible call. Never synthesize a hidden tool pair or emit an
-invocation-wide coverage warning without public evidence. The committed generic-tool fixture is a
-sanitized public capture with separate raw/sanitized digests; its maintenance script creates an
-unpublished public-only candidate that requires exact-run private corroboration and separate review.
-
-Observability is activated only by operator CLI/environment settings. The target's file config never
-selects destinations or credentials. A run owns its OTel provider and OpenLLMetry 0.62.3 processors;
-never install a global provider or call `Traceloop.init()`. Span ownership is run → executed flow step →
-logical agent → backend attempt → tool/generation. Frozen billing ownership assigns usage to either
-the structural attempt or its sealed generation children. Native turn boundaries differ by backend,
-so do not infer per-provider-call usage from `TurnEndEvent`. Preserve available
-terminal metrics before raising a backend error. Exporters register through
-`Registry.register_trace_exporter`; registration/validation must not construct exporters.
-`daydream.stack` preserves every inherited non-None selected value unchanged, including an empty string.
-Otherwise a spanless binding inside each per-stack review task's trajectory fork attributes the whole
-`ReviewInvestigation.run()` subtree to `base_stack_name(stack.stack_name)` (`python#1` → `python`;
-`generic`/`structure` stay those labels), including staged and retry calls. Restore its ContextVar token
-in `finally`; binding is a no-op without a trace session. Keep assignment/shard IDs, records, descriptors,
-parentage, and billing unchanged. Shared intent/wonder/merge/fix work and custom undetected flows acquire
-no guessed stack; only the concrete reviewer subtree gains detected attribution.
-Full contract and operator recipes: `docs/observability.md` and `docs/extensions.md`.
-
-The Claude backend enforces two always-on `PreToolUse` guards in every phase and profile: the
-dangerous-command guard (root-anchored scans, `rm -rf /`) and the background-Bash guard. The host reads a
-turn's final text as the phase result and stops consuming the session when the turn ends, at which point
-the CLI kills its background tasks — so `Bash(run_in_background=True)` can never report and is denied. The
-CLI subprocess env also sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` and lifts the Bash timeout ceiling to
-`TEST_WALL_BUDGET_S` so a slow test suite has no reason to be backgrounded.
-
-### Run-agent budgets
-
-| Bound | Value | Scope |
-|-------|-------|-------|
-| `DEFAULT_WALL_BUDGET_S` | 1800s | common phase budget; callers supply bounds (Improve phases deliberately unbounded) |
-| `TEST_WALL_BUDGET_S` | 3600s | the test run — bounds the *target repo's* suite, not an LLM tail |
-| `DEFAULT_TOOL_CALL_BUDGET` | `None` | unlimited; per-call `tool_call_budget` still accepted |
-| `DEFAULT_GROUP_MAX_WALL_S` / `_SERIAL_ITEMS` | 600s / 6 | cumulative over all fix calls for one file group |
-| `EXPLORATION_MAX_TURNS` | 50 | exploration specialists — the only `max_turns` call site |
-| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | 600s / 2700s | Pi response/Codex silence / Pi active-tool and Osprey silence before the subprocess is killed |
-
-- Failed/truncated/malformed reviews retain admitted evidence and incomplete coverage; read README.md#review-budgets.
-- Deep sharding retains explicit RunConfig/file-config precedence and aggregate scale4 activation.
-  Below scale4, post-collapse nonstructural assignments activate it only when the existing graph-free planner
-  retains multiple shards under the resolved file/byte/cap bounds. Plan from the full captured patch;
-  build/reuse the import graph only for useful sharding or diagram eligibility. Keep tiny/shallow gates,
-  indivisible primary ownership, whole-change Structure, concurrency and per-scope budgets unchanged.
-- Budget-aware backend prompts receive the remaining enforced deadline at each attempt; unbounded turns stay unbounded.
-- Carried closed decisions are reviewer judgments. Host admission validates the contract, not semantic correctness;
-  source-supported contradictions mark work incomplete without reopening stages or discarding retained findings.
-- Staged discovery's `open` and `unresolved` candidates receive one triage round; unresolved triage remains incomplete.
-  Native Pi stage allowances reserve minimum capacity for undispatched assignment inputs/submissions and known triage
-  submissions. Stop before dispatch when the current stage's minimum needs cannot fit; retain prior admitted evidence.
-  Static prompt budgets are dispatch-time snapshots; invocation allocation already excludes future-stage reserves.
-  Bounded native Pi calls receive one refreshed attempt-local remaining-tool-call count per model request, including
-  failed calls, parallel members and submissions. Transport retries reset the native counter against their effective
-  allowance; cumulative host accounting remains authoritative. Continue concrete unresolved assigned checks within
-  tool/time limits, including beyond advisory targets; submit when checks settle, with unused capacity expected.
-  Preserve one `structured_output` call; with only that call left, submit and mark unfinished work truthfully incomplete.
-  Zero calls means no submission capacity. Feedback preserves provider proposals, ordinary tool access and
-  stage/domain admission.
-  Full presentation and native-output contracts: docs/extensions.md#stage-aware-review-builders-api-8.
-- Do not add `max_turns` to fix or verify — it does not fail soft. The turn ends `error_max_turns`, the
-  backend raises `MaxTurnsError`, and the fix group lands in `fix-failures.json` and is reverted, throwing
-  a real fix away rather than trimming it.
-- `run_agent` retries retryable backend errors with exponential backoff. The default permits **20 retries**
-  after the initial dispatch, subject to recovery allowance, deadline, and circuit state
-  (`DAYDREAM_PI_RETRY_ATTEMPTS` overrides); a stream stall gets one fresh attempt. Never retried:
-  tool-supervisor veto, non-transport logic error. A stall fires only on the *absence* of output, never
-  on slow output; pi keeps the long window while a tool is active.
-
-### Config and per-phase model overrides
-
-`config.py` holds `DEFAULT_{CLAUDE,CODEX,PI}_MODEL`, `PHASE_DEFAULT_MODELS[backend][phase]`,
-`PHASE_DEFAULT_EFFORT` (deep/review Codex defaults plus Pi `per_stack_review` at `medium`;
-Improve defaults for Claude/Codex/Pi), budget constants, and improve `EFFORT_TIERS`. Pi
-resolves its own configured default before falling back to `DEFAULT_PI_MODEL`. Effort is not a pure table
-lookup: the run's latency route sits below the explicit user knobs and above `PHASE_DEFAULT_EFFORT` for
-Codex `wonder`/`arbiter`, and each run records the decision in `.daydream/deep/latency-routing.json`.
-
-**Per-phase overrides are config-file-only — there are no per-phase CLI flags.** Set
-`[tool.daydream.phases.<phase>]` in `pyproject.toml` or the top-level equivalent in `.daydream.toml`.
-Precedence: CLI `--model`/`--backend` > config-file phase > config-file global > backend default; resolved
-in `runner._resolve_backend()`. The phase table accepts any registered step's config key, including
-fork-defined phases (`docs/extensions.md`).
-
-Improve runtime controls are CLI-derived `RunConfig` fields (`improve_effort`, `improve_focus`,
-`improve_scope`, `improve_plan_description`) with **no** env-var equivalents; service discovery and fan-out
-bounds are config-file-only (`[tool.daydream.improve]`, keys in README "Configuration"). Fan-out is
-`partition-groups × categories`; when `max_partition_groups` binds, the largest groups are kept and every
-skipped partition is named in `.daydream/improve/coverage.json` and the report's "What was not audited".
-
-### Deep-review pipeline
+Daydream reviews diffs, applies authorized fixes, validates them, and records agent
+interactions as ATIF v1.7 trajectories. Captured records feed the bitemporal corpus
+pipeline. Deep multi-stack review is the default; shallow is single-stack, and
+review/comment modes stop before fixes. Improve currently requires Claude for
+every model phase because it needs the snapshot-root tool boundary.
 
 ```text
-exploration pre-scan (cached across runs)
-    -> intent analysis
-    -> alternative review (wonder) ∥ per-stack reviews (parallel;
-       structural review for cross-cutting concerns)
-    -> load per-stack structured records
-    -> arbiter review (scoped to high-severity/contested findings)
-    -> cross-stack merge (dedup; resumes the arbiter's session)
-    -> diagrams (conditional, grounded; sequence and/or flowchart)
-    -> fix consent and canonical command readiness
-    -> recommendation verification (conditional)
-    -> fixes (parallel, batched per-file)
-    -> test validation
+cli.py / commands/ → runner.py → deep/orchestrator.py → flows/engine.py
+                              → improve/orchestrator.py → flows/engine.py
+                              → custom extension flows → flows/engine.py
+flow steps → phases/ → agent.run_agent() → Backend.execute()
 ```
 
-Canonical test readiness is checked after the accepted actionable fix gate and
-before verify/FIX work. Missing/invalid commands produce configuration evidence
-(`no-execution`) with safe reason/source guidance, never TEST turns or repair
-retries. Only configured or explicitly admitted argv executes on the bounded
-host runner; exit status remains authoritative. Unresolved legacy recipes and
-manifest candidates cannot authorize stabilization, reuse, or commit.
+These boundaries matter across subsystems; module docstrings carry finer detail:
 
-- The fix/verify loop has at most three rounds. Remaining `unresolved` or
-  `wrong_target` findings are reported honestly and do not prevent the retained
-  patch from proceeding through tests, commit, and push. A `regressed` verdict
-  stops publication. Post-test re-verification permits existing unresolved
-  findings but stops newly actionable findings; tree identity, scope, tests, and
-  repository hooks remain required. Commit messages list only resolved findings.
-- Reviewers return structured records, loaded in **stack-name order** to keep merge input ordering
-  and global issue numbering reproducible.
-- **Record identity is host-assigned, not content-derived.** Every per-stack record is stamped with a `uid`
-  (`stack:ordinal`, `deep/records.py`) at birth by the per-stack reviewers.
-  The reviewer's `id` restarts at 1 per stack and is *not* unique; `normalize_items` mints the human-facing
-  `id` only at the final merge write. Dedup, arbitration, suppression and the structural fold all run before
-  that, so they key on `uid`. A content key (`compute_fingerprint`, `descriptions_match`) answers
-  "same defect?" and stays content-derived; it must never be used to answer "which record is this?" — it gets
-  *less* discriminating exactly as records get more similar, which is the only case those sites see.
-  `uid` is a **pre-merge** handle: the merge agent re-emits items from scratch, so a multi-stack merged item
-  has none *of its own*. Its derivation is `source_uids` — the list of records it was synthesized from, which
-  the merge agent emits and the host **validates against the run's record pool** (an unknown uid is dropped
-  with a warning, fail-open, never trusted). Read a record's identity with `record_uid()` and an item's
-  provenance with `item_source_uids()`; `""`/`[]` means "no pre-merge identity", which is a real answer.
-- **A merged item's own identity is `item_uid`, not `id`.** `normalize_items` reassigns `id` to a dense
-  1..N sequence on every call *by design* — that is what makes a report read `1, 2, 3` — so it cannot also
-  be a durable handle; the two requirements contradict. `item_uid` is minted alongside it and never
-  reassigned. Three distinct keys can sit on one merged item and answer three different questions:
-  `uid` (the record it was born as, structural/single-stack only), `item_uid` (which shipped finding this
-  is), `source_uids` (which records it was made of). Provenance is *not* identity — two items may cite the
-  same record, so `source_uids` is not unique. Keep `id` integer: five strict `*_SCHEMA` constants type the
-  echoed `id`/`issue_id` as `integer`, and the report renders it as the finding number.
-- Before changing staged review or Pi transport, read docs/extensions.md#stage-aware-review-builders-api-8.
-- Merge resumes the arbiter's session when both phases resolve to the same backend instance; the resumed
-  prompt forces a re-read of the per-stack record files, rewritten after arbitration.
-- **Diagrams (`diagram` step, after merge/supervision).** The LLM **never writes mermaid**: it emits a
-  strict JSON spec whose every element carries `file:line` (+`symbol`) evidence, and
-  `deep/diagram_grounding/` is the sole authority on what may be drawn — path confinement, existence,
-  line range, symbol-on-line (±3 snap), tree-sitter node kind, and definition lookup. Then **one** repair
-  turn with the reason codes, prune
-  (dependents go with their element), the render caps, and finally the omission floors — caps run **before**
-  the floor so a cap-induced drop cannot leave a thin diagram rendered, and `spec_final` is rebuilt
-  key-by-key so it re-validates against the `additionalProperties: false` spec schema in the privileged
-  poster. The step writes `.daydream/deep/diagram.json` (eligibility, final specs, omission reasons;
-  zero agent calls when nothing is eligible) and `diagram.md`. Eligibility re-runs `detect_stacks()` itself
-  rather than reading `ctx.data["stacks"]`, which
-  is post-tiny-diff-collapse and would read a two-language diff as non-code. Per-kind failure is **fail-open
-  in every review mode** (warn, record `status="failed"`, review continues) and **exit 1** under
-  `--diagram-only`, after the artifact is written. The author prompt follows the turn's **resolved
-  sanctioned-input transport**, never the disposable-clone capability: an INLINE run inlines the diff
-  and exploration context (the diff truncated with an explicit marker when over budget) and names no
-  host-private artifact path, while EXACT_PATHS keeps the budget-gated pointer path. The `diagram` flow is
-  `exploration -> diagram -> post-diagram` and reuses the deep preamble, but the spine's fresh-run
-  `rmtree(.daydream/deep/)` is skipped in that mode — a diagram-only run must not delete a prior review's
-  artifacts — so it writes no `diff-key` either. Its recorder/manifest label is `DaydreamRunFlow.DIAGRAM`,
-  never `TTT`: that mapping would make `_flow_runs_merge` true and let the run inherit the surviving
-  `merged-items.json` as its own pipeline state.
-- `.daydream/exploration/` survives the run and is reused only on an **exact** key match:
-  format version, head SHA, diff, tier, and effective exploration strategies, recorded in a sibling
-  `cache-key` file. `--no-review-cache` disables reuse. Cache misses clear stale exploration artifacts;
-  the canonical key and admission rules live in `exploration.py` and `deep/review_steps.py`.
-- `--start-at` refuses stale artifacts: a fresh run records its diff in `.daydream/deep/diff-key`; a resume
-  whose diff no longer matches (or has no key) exits 1 rather than adjudicating stale findings.
+| Owner | Responsibility |
+|-------|----------------|
+| `runner.py`, `run_config.py`, `run_artifacts.py`, `run_snapshot.py` | Workspace/registry dispatch, resolved configuration, recorder lifecycle, frozen run identity |
+| `flows/`, `extensions/` | Ordered/gated flow execution and the per-run extension registry |
+| `deep/`, `improve/` | Flow assembly and domain steps; `deep/state.py` validates the shared `FlowContext.data` mapping |
+| `agent.py`, `agent_output.py`, `agent_retry.py` | Backend lifecycle/budgets, host result selection/validation, retry policy |
+| `backends/` | Native transport and the common `Backend` / `AgentEvent` contract |
+| `trajectory/`, `observability/` | Recorded evidence, generation billing ownership, and per-run tracing |
+| `artifact_visibility.py`, `artifacts/`, `workspace.py` | Private artifact ownership, finalization/recovery, and operational worktrees |
+| `git_ops/` | Single Git/GitHub subprocess boundary |
+| `reviews/`, `pr_review.py`, `pr_comment_renderer.py` | Finding placement/publication and pure comment rendering |
+| `dataset*.py`, `training/`, `archive/`, `eval/` | Frozen records/Hub exchange, corpus projection, diagnostic archives, deterministic analysis |
 
-### Extension seam
+### Runtime invariants
 
-A fork customizes phases, flows, and prompts from a top-level `daydream_ext` package (found via
-`$DAYDREAM_EXT_DIR` → `import daydream_ext`) without editing `daydream/`. It must export
-`DAYDREAM_EXT_API` within `MIN_SUPPORTED_EXTENSION_API_VERSION..EXTENSION_API_VERSION` (see `extensions/api.py`), may
-register one `ToolDecision`-returning tool supervisor, and is resolve-checked by `daydream ext validate`.
-Full contract: `docs/extensions.md`.
+- Call agents through `agent.run_agent()`, never directly through a backend/SDK
+  from phases. Fan-out uses parallel calls under
+  `anyio.CapacityLimiter(effective_fanout_concurrency(ceiling, backend))` and
+  `TrajectoryRecorder.fork()` for sibling trajectories, not SDK `agents=`.
+- Keep ATIF construction in `trajectory/`. Use the vendored models without adding
+  Harbor to core runtime dependencies; the benchmark extra is separate. Follow
+  [the vendoring policy](daydream/atif/NOTICE): re-vendor wholesale, no local patches.
+- Resolve the private artifact owner once and pass the same owner/session through
+  workspace, recorder, and flows. Route generated files through that session;
+  join writers before freezing evidence, then archive/evaluate/publish. Preserve
+  competing bytes on conflicts. Use sanctioned exact inputs or bounded inline
+  contents without broadening backend read roots or reconstructing public paths.
+- Host-assigned `uid` identifies a pre-merge record, `item_uid` a merged item,
+  `source_uids` provenance, and integer `id` a renumberable display position.
+  Preserve identities through rewriting; content fingerprints answer similarity,
+  not identity. Load stack records in stack-name order for reproducibility.
+- Compute latency risk, sharding inputs, file/stack counts, diff keys, and coverage
+  from the full captured patch before bounding `DeepState.diff`. Routing evidence
+  is diagnostic; missing/corrupt routing records must not block execution/resume.
+  `forensic` is a latency profile with an unsharded arbiter; per-stack review
+  sharding is independent.
+- Preserve admitted findings and truthful incomplete coverage on review failure.
+  Canonical test readiness gates accepted fixes before verify/FIX work; model
+  prose or unresolved command candidates cannot authorize tests or publication.
+- Archive indexes must be empty or use the current complete schema. Preserve and
+  reject unsupported indexes; use a fresh archive directory instead of migrating.
+  Annotation history belongs in LocalRecordStore observations.
 
-## Constraints and conventions
+### Backend changes
 
-- **SDK** use the `claude-agent-sdk` pin in `pyproject.toml`, which must stay ≥ 0.2.111: earlier versions tear down the CLI subprocess
-  unshielded on cancellation, so a budget/fan-out cancel mid-stream corrupts anyio's cancel-scope stack.
-- **ATIF** vendored from Harbor v0.17.1-9 under `daydream/atif/` (Apache-2.0), pinned to v1.7 emission.
-  Re-vendor wholesale on Harbor updates; no local patches. **No `harbor` runtime dep** — ATIF construction belongs in
-  `daydream/trajectory/` only. **Module-bloat ban**: no ATIF construction in `phases/` or `ui/`.
-- Deps live in `pyproject.toml`; keep `uv.lock` in sync via `uv lock` or `make check` fails at step one.
-- **`make check`** = root `uv lock --check` + install + ruff over `daydream tests scripts/ci_plan.py` + vulture dead-code scan over `daydream tests` and the RL package + mypy over `daydream tests scripts/ci_plan.py` + pytest + actionlint (Docker) + coverage-report existence check + naming-convention check; `scripts/hooks/pre-push` verifies signatures then delegates to it. `rl-check` is **not** part of it, mirroring `ci.yml`, whose `check` job carries no RL gate either — the paused RL project retains a manual-dispatch job (own runner, own `uv sync`, Python 3.14) and one of its e2e tests drives the real `claude` CLI that runner never installs, so as a `check` dependency it failed the pre-push gate on changes that never touch `rl/`. Run `make rl-check` when you change `rl/daydream_review`. Remote CI runs full checks before queued merges, falls back to full PR checks until the queue is enforced, and verifies merge-group tree proofs before post-merge reuse. CI spend routing and remote RL dispatch are documented in `.github/workflows/README.md#ci-spend-policy`; local Git hooks always run the full root gate.
-- Ruff: 120 cols, `E F I W`, py314. `daydream/atif/**` is lint-exempt (vendored, mechanical edits only).
-- Root `.editorconfig` declares editor-side defaults (UTF-8/LF/final newline,
-  4-space Python, 2-space YAML, 4-space TOML, Makefile tabs, `*.md` trailing-whitespace
-  preserved); the `daydream/atif/**` carve-out declares no indent/trim keys
-  (a section can add or override inherited keys but never unset them, so
-  `[*.py]` 4-space rules still apply to vendored `.py` files).
-- **Artifact boundary**: resolve the private owner once from the canonical source; pass that same
-  owner and the active artifact session through workspace, recorder, and flow composition. Route
-  generated files through the session. Join all writers before freezing immutable evidence;
-  archive/evaluate/publish only after that boundary. Never reconstruct public output paths or
-  broaden backend read roots.
-- **Archive index**: initialize an empty database or use the complete current schema.
-  The local diagnostic archive uses runs-only schema version 9. Unsupported indexes are preserved and rejected; use a fresh archive directory instead of migrating. Annotation history lives only in LocalRecordStore observations.
-  Evaluation consumes the immutable write snapshot and leaves unavailable lifecycle timing unmeasured.
-- **Conventional Commits** (`feat(backends): ...`). Stage explicitly (`git add <path>`), never `git add -A`.
-- Own your own bugs in plain language. Never describe your defect as the tool being buggy.
-- Never claim success that isn't verified-working.
+Read the protocols in [backends/__init__.py](daydream/backends/__init__.py) and the
+adapter being changed, plus [lifecycle evidence](docs/observability.md#codex-lifecycle-evidence)
+and the relevant contracts below.
 
-## Environment variables
+- Attempt cancellation closes only that invocation's stream; backend-wide
+  cancellation belongs to run shutdown. Preserve terminal metrics on errors.
+- Codex success requires the latest public turn to complete, stdout EOF, and an
+  independently observed zero exit. Preserve bounded terminal drain, process reap,
+  and cleanup; repeated terminal events cannot extend the tail allowance or charge
+  usage twice. Postterminal expiry prohibits replay of a possibly completed mutation.
+- Preserve Claude's dangerous-command/background-Bash guards for ordinary turns
+  and its deny-by-default snapshot-root guard for Improve, which permits no Bash.
+  Background Bash cannot report after the host stops consuming the completed turn.
+  Keep the SDK pin at least `0.2.111` for cancellation-safe subprocess teardown.
+- Do not add `max_turns` to fix or verify: exhaustion raises `MaxTurnsError` and
+  causes the fix group to be reverted. Use enforced wall/tool budgets; exploration
+  is the bounded-turn caller. Read defaults from `config.py` and `agent_retry.py`.
+- Adapters emit native events; `agent_output.py` selects final-turn output and
+  `ReviewInvestigation` admits staged domain results before presentation. Retain
+  raw events as evidence. Report transport gaps only from public evidence; never
+  invent missing tool calls or invocation-wide coverage warnings.
 
-| Variable | Scope | Purpose |
-|----------|-------|---------|
-| `DAYDREAM_APP_ID` / `DAYDREAM_APP_PRIVATE_KEY` | GitHub App | Bot identity (PEM **content**, not a path) |
-| `DAYDREAM_BOT_HANDLE` | Actions | Mention handle (no `@`) used by the three PR-comment commands: `@<bot> review`, `@<bot> add sequence diagram` (alias `@<bot> add sequence`), `@<bot> add flowchart` |
-| `DAYDREAM_EXT_DIR` | Extensions | Path to `daydream_ext` (overrides `import daydream_ext`) |
-| `DAYDREAM_GH_TIMEOUT_SECONDS` / `_RETRIES` | Git ops | `gh` CLI timeout and retry count |
-| `DAYDREAM_GIT_TOKEN` | Harvest | Optional out-of-band auth for sanitized repo clones during `corpus harvest` of private repos (e.g. a GitHub PAT); injected via git config environment variables (`http.extraHeader`), **never embedded in the remote URL** and **never on the command line**. Without it, plain clone via the ambient credential helper |
-| `DAYDREAM_TRAJECTORY_HUB_REPO` | Dataset | Explicit private Hugging Face dataset repo for capture and retryable JSONL shard publication; CLI `--trajectory-hub-repo` wins. The target checkout's file config is ignored; `--no-capture-data` disables collection/upload |
-| `DAYDREAM_TRACE_TO` | Observability | Comma-separated trace destinations; empty/unset disables tracing. `--trace-to` overrides this list; `--no-tracing` disables tracing |
-| `DAYDREAM_TRACE_CONTENT` | Observability | Content policy: `full` (default) or `metadata`; overridden by `--trace-content`. Does not enable tracing by itself |
-| `PI_PROVIDER` / `PI_THINKING` | Pi | `--provider` / `--thinking`; `PI_THINKING` loses to a per-phase `reasoning_effort` |
-| `PI_API_KEY` | Pi | Copied into the child's provider-native var (e.g. `ZAI_API_KEY`), **never onto argv**; warns and ignores if the provider has no mapped var |
-| `DAYDREAM_PI_RETRY_ATTEMPTS` / `_BASE_DELAY_S` / `_MAX_DELAY_S` | Retry | Retry policy for all backends; defaults in `agent_retry.py` |
-| `DAYDREAM_FANOUT_CONCURRENCY` | Claude / Codex | Parallel `execute()` hint (default 8; bad value warns). Pi uses `DAYDREAM_PI_FANOUT_CONCURRENCY` (default 10) |
-| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | Pi / Codex | Stdout-silence kill (Pi response/Codex default 600; Pi active-tool default 2700; `0` disables) |
-| `DAYDREAM_REVIEW_API_KEY` / `DAYDREAM_JUDGE_API_KEY` | Benchmark | Harbor reviewer/judge OpenRouter keys; read from the launching env, never written into the workspace or task. `daydream/benchmark/harbor/env_policy.py` is the single declaration of which environment names are let through and which are scrubbed. |
+## Read before changing a subsystem
 
-Plain path overrides: `DAYDREAM_PRICES_FILE`, `DAYDREAM_ARCHIVE_DIR`, `PI_CODING_AGENT_DIR` (`~/.pi/agent`), `CLAUDE_CONFIG_DIR` (`~/.claude`).
+Read the relevant row before editing its implementation or contracts. Keep detailed
+rules in these owners rather than expanding this file with defaults and inventories.
 
-## Platform requirements
-
-Python ≥3.14 + uv; `git` and `gh` on `$PATH`; `codex`/`pi`/`osprey` CLIs for their backends; pre-commit and pre-push hooks via `make hooks`.
+| Change | Required reference |
+|--------|--------------------|
+| Flow order, extension phases/prompts, configuration | [Extension contract](docs/extensions.md), [configuration](README.md#configuration); defaults in `config.py`, resolution in `run_config.py` / `runner._resolve_backend()` |
+| Staged review, Pi output, budgets/retries, sharding | [Stage-aware builders](docs/extensions.md#stage-aware-review-builders-api-8), [review budgets](README.md#review-budgets), [retry recovery](README.md#retry-recovery), [sharding evidence](docs/overloaded-stack-sharding.md) |
+| Latency routing or diff bounding | [Latency profiles and routing populations](README.md#latency-profiles); `deep/latency.py` and `deep/routing_record.py` own selection and evidence |
+| Record identity or merge/adjudication | [Finding identity](docs/extensions.md#finding-identity), [built-in flow steps](docs/extensions.md#built-in-flows-and-steps); `deep/records.py` owns identities |
+| Fix, verify, test, commit, remote CI | [Flow gates](docs/extensions.md#built-in-flows-and-steps), [test recipe/reuse](README.md#test-recipe-and-evidence-reuse), [repair jobs](docs/extensions.md#repair-jobs-test-step) |
+| Artifacts, sanctioned inputs, recovery | [Working artifact paths](docs/extensions.md#working-artifact-paths), [output/cache contracts](README.md#output-files), [terminal findings](README.md#terminal-review-findings-contract) |
+| Diagrams | [Diagram contract](README.md#diagrams), [diagram-only flow](docs/extensions.md#diagram); `deep/diagram_grounding/` is the drawing authority, models supply JSON specs and the host renders Mermaid |
+| Tracing, timing, billing | [Observability](docs/observability.md), [field contract](docs/observability-fields.md); tracing is operator-controlled and owns a per-run provider, never a global provider or `Traceloop.init()` |
+| Improve audit/plans | [Improve usage](README.md#audit-a-repository-and-write-implementation-plans), [Improve flow](docs/extensions.md#improve); `services.py` owns shared service discovery |
+| Capture, harvest, adjudication, dataset publication, corpus projection | [Training data](README.md#training-data), [record dataset workflow](docs/runbooks/record-dataset.md), [calibration](docs/calibration.md); preserve immutable evidence, repository provenance, and C5 benchmark isolation |
+| Training launches or RL | [Training launch](docs/training-launch.md), [RL package](rl/daydream_review/README.md) |
+| Benchmarks | [Benchmark runbook](docs/benchmark.md); `daydream/benchmark/harbor/env_policy.py` owns environment allow/scrub policy |
+| Bot/workflow publication or CI policy | [Packaged workflows](daydream/templates/workflows/README.md), [self-hosted bot](docs/self-hosted-bot-setup.md), [CI spend policy](.github/workflows/README.md#ci-spend-policy) |

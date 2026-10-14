@@ -187,8 +187,8 @@ so they describe the latest PR HEAD.
 
 This guide links rather than duplicates; these documents carry the detail:
 
-- [AGENTS.md](AGENTS.md#architecture) — the module responsibility map and
-  pipeline walkthrough.
+- [AGENTS.md](AGENTS.md#architecture) — architecture boundaries, runtime invariants,
+  and required references for each subsystem.
 - [docs/extensions.md](docs/extensions.md) — the versioned extension API for
   forks (`daydream_ext`).
 - [docs/coverage.md](docs/coverage.md) — the coverage gate and ratchet

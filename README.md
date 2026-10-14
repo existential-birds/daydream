@@ -512,11 +512,13 @@ latency_profile = "fast"
 latency_profile = "fast"
 ```
 
-| Name | Wonder | Arbiter | Sharding |
+| Name | Wonder | Arbiter | Arbiter sharding |
 |------|--------|---------|----------|
 | `fast` | skip | `medium` | on |
 | `balanced` (default) | `medium` | `high` | on |
 | `forensic` | `high` | `xhigh` | off — today's behaviour |
+
+Per-stack review sharding follows the independent [review-budget rules](#review-budgets).
 
 A profile sets an effort *floor*, never a ceiling: a security-, concurrency-,
 persistence-, interface-, or migration-shaped diff raises the route, so a
@@ -1030,7 +1032,15 @@ Logs and local archives can contain sensitive information, so upload only the in
 
 Private storage prevents generated artifacts from appearing in ordinary cwd-rooted discovery. It is not an OS sandbox. When a later phase needs a generated file, Daydream passes its exact approved path or, for isolated backend modes, its bounded contents inline. It does not grant access to an entire runtime directory.
 
-The `.daydream/exploration/` cache is reused on an exact key match. The key excludes uncommitted edits. A near-match never counts as a hit, because a stale hit would misground every review prompt. The `--shallow` and `--review` modes delete the directory. Alternating modes degrade to a cache miss, never to stale grounding.
+The `.daydream/exploration/` cache is reused only when its format version, head
+SHA, diff, tier, and effective exploration strategies match exactly. The key is
+stored in `.daydream/exploration/cache-key`; a miss clears stale exploration
+artifacts. `--no-review-cache` disables reuse. Shallow and review modes use the
+same cache admission rules.
+
+`--start-at` also requires a matching `.daydream/deep/diff-key`; a missing or
+changed key refuses the resume instead of adjudicating stale findings. Review
+reuse additionally requires the typed coverage proofs described below.
 
 ### Terminal review findings contract
 
