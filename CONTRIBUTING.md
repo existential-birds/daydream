@@ -181,6 +181,38 @@ By task:
 - RL package work → [rl/daydream_review/README.md](rl/daydream_review/README.md)
   (and run `make rl-check` — see the commands table above)
 
+## Shared agent skill workflow
+
+Ask a dot agent to use
+[prepare-implement](.agents/skills/prepare-implement/SKILL.md) for a GitHub issue.
+It reads the issue and repository context with subagents, leaves the checkout
+unchanged, and returns a single self-contained `/goal` prompt. Run that prompt in
+a new session: that session creates the branch, implements the issue, validates
+the change, and delivers a merge-ready PR. Use the
+[pr skill](.agents/skills/pr/SKILL.md) when writing the PR body.
+
+After opening the PR, run the available Daydream reviewer from its checkout:
+
+```bash
+daydream . --backend codex --comment --non-interactive
+```
+
+Then use [fetch-pr-feedback](.agents/skills/fetch-pr-feedback/SKILL.md),
+[receive-feedback](.agents/skills/receive-feedback/SKILL.md), and
+[respond-pr-feedback](.agents/skills/respond-pr-feedback/SKILL.md) to collect all
+reviewer and bot feedback, verify findings, address valid issues, and reply.
+Include other bots such as `greptile-apps`; author/self comments can contain
+Daydream findings, so the goal uses `--include-author --include-self`. Follow the
+linked skills for the review loop and confirm review and required CI cover the
+latest PR HEAD before reporting merge readiness. The workflow stops before merging.
+
+For a curated simplification, use
+[publish-improve-finding](.agents/skills/publish-improve-finding/SKILL.md) to capture
+the opportunity and provenance, then
+[create-improve-pr](.agents/skills/create-improve-pr/SKILL.md) when asked to publish
+its implementation. These specialized workflows preserve discovery and benchmark
+evidence; they are separate from ordinary issue implementation.
+
 ## Your first PR
 
 A compact walkthrough; each step links back to the section that explains it:
@@ -205,9 +237,10 @@ A compact walkthrough; each step links back to the section that explains it:
 
 ## Where the agent guidance lives
 
-Daydream is developed with coding agents in the loop. Everything agent-facing —
-architecture invariants, backend protocol, budgets, artifact boundaries — lives
-in [CLAUDE.md](CLAUDE.md), which this guide deliberately links instead of
-duplicating. If your PR changes any contract described there, update it in the
-same PR. Before opening the PR, run through the checklist at the bottom of the
-[PR template](.github/PULL_REQUEST_TEMPLATE.md).
+Repository architecture and runtime guidance — invariants, backend protocol,
+budgets, and artifact boundaries — lives in [CLAUDE.md](CLAUDE.md). Reusable agent
+workflows live under `.agents/skills/`; the [.gitignore](.gitignore) allowlist
+tracks the shared skills linked above. Keep detailed workflow procedures in their
+skills rather than duplicating them here. If your PR changes a contract described
+in CLAUDE.md, update it in the same PR. Before opening the PR, run through the
+checklist at the bottom of the [PR template](.github/PULL_REQUEST_TEMPLATE.md).
