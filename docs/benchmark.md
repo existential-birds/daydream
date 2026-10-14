@@ -400,7 +400,7 @@ judge reasoning, or source code is ever emitted.
     "daydream_version": "0.12.0",
     "daydream_wheel_sha256": "sha256:<40-hex>",
     "compiled_lock_sha256": "sha256:<40-hex>",
-    "harbor_version": "0.24.0",
+    "harbor_version": "0.24",
     "reviewer_backend": "pi",
     "reviewer_model": "z-ai/glm-5.2",
     "reviewer_base_url": "",
