@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Choose the repository CI gate; unverifiable reuse always runs the full gate.
+"""Choose CI checks; only verified merge-queue trees can replace a full gate.
 
-Uses only the runner's Python standard library, git, and authenticated gh CLI.
-Successful PR jobs publish a small proof of the actual checkout, including the
-synthetic merge commit (the Actions run's head_sha names the PR head instead).
+Uses the runner's Python standard library, Git, and authenticated gh CLI.
+PR checks become basic only while effective branch rules require a merge queue.
+Queue checks and manual runs always execute the complete root gate.
 """
 
 from __future__ import annotations
@@ -21,7 +21,9 @@ from typing import Any
 from urllib.parse import urlencode
 
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
-_DOCS = {"README.md", "CONTRIBUTING.md", "CHANGELOG.md", ".github/workflows/README.md"}
+_BASE_REFS = {"refs/heads/main", "refs/heads/master"}
+_PROOF_SCHEMA = 2
+_ACTIONS_APP_ID = 15368
 
 
 def git(*args: str) -> str:
@@ -33,28 +35,38 @@ def api(endpoint: str, *, binary: bool = False) -> Any:
     return result if binary else json.loads(result)
 
 
-def lightweight_diff(before: str, after: str) -> bool:
-    paths = subprocess.check_output(
-        ["git", "diff", "--name-only", "--no-renames", "-z", before, after], timeout=30
-    ).decode().split("\0")
-    # Use a narrow documentation allowlist. Markdown under prompts/templates
-    # is executable product input and must still run the full gate.
-    return all(
-        not path or path in _DOCS or (path.startswith("docs/") and path.endswith(".md")) or path.startswith("rl/")
-        for path in paths
+def queue_identity(group: dict[str, Any]) -> bool:
+    """Validate the event's queue namespace before using its Git identities."""
+    base_ref = group.get("base_ref")
+    return (
+        base_ref in _BASE_REFS
+        and isinstance(group.get("head_ref"), str)
+        and group["head_ref"].startswith(f"refs/heads/gh-readonly-queue/{base_ref.removeprefix('refs/heads/')}/")
+        and all(isinstance(group.get(key), str) and _SHA.fullmatch(group[key]) for key in ("head_sha", "base_sha"))
     )
 
 
-def proofs(repo: str, branch: str, pr_number: int, head_sha: str | None = None) -> Iterator[tuple[dict[str, Any], str]]:
-    query = {"event": "pull_request", "status": "success", "branch": branch, "per_page": "20"}
-    if head_sha:
-        query["head_sha"] = head_sha
+def verify_commit(proof: dict[str, Any]) -> bool:
+    """Resolve actual tested objects and the captured base, never trust JSON alone."""
+    git("fetch", "--no-tags", "origin", proof["commit"])
+    return (
+        git("rev-parse", f"{proof['commit']}^{{commit}}") == proof["head_sha"]
+        and git("rev-parse", f"{proof['commit']}^{{tree}}") == proof["tree"]
+        and git("rev-parse", f"{proof['base_sha']}^{{tree}}") == proof["base_tree"]
+        and proof["base_sha"] != proof["head_sha"]
+        and git("merge-base", "--is-ancestor", proof["base_sha"], proof["commit"]) == ""
+    )
+
+
+def proofs(repo: str, base_ref: str) -> Iterator[tuple[dict[str, Any], str]]:
+    query = {"event": "merge_group", "status": "success", "per_page": "20"}
     runs = api(f"repos/{repo}/actions/workflows/ci.yml/runs?{urlencode(query)}")["workflow_runs"]
     for run in runs:
         if (
-            run["event"] != "pull_request"
+            run["event"] != "merge_group"
             or run["conclusion"] != "success"
             or run["path"] != ".github/workflows/ci.yml"
+            or run["repository"]["full_name"] != repo
         ):
             continue
         artifacts = api(f"repos/{repo}/actions/runs/{run['id']}/artifacts")["artifacts"]
@@ -67,57 +79,90 @@ def proofs(repo: str, branch: str, pr_number: int, head_sha: str | None = None) 
                 continue
             proof = json.loads(z.read("proof.json"))
         if (
-            proof.get("repository") == repo
-            and proof.get("pr_number") == pr_number
+            proof.get("schema") == _PROOF_SCHEMA
+            and proof.get("event") == "merge_group"
+            and proof.get("gate") == "full"
+            and proof.get("repository") == repo
             and proof.get("run_id") == run["id"]
-            and proof.get("head_sha") == run["head_sha"]
-            and (head_sha is None or proof["head_sha"] == head_sha)
-            and _SHA.fullmatch(proof.get("tree", ""))
-            and _SHA.fullmatch(proof.get("commit", ""))
+            and proof.get("base_ref") == base_ref
+            and queue_identity(proof)
+            and proof["head_ref"].removeprefix("refs/heads/") == run["head_branch"]
+            and proof.get("head_sha") == proof.get("commit") == run["head_sha"]
+            and all(isinstance(proof.get(key), str) and _SHA.fullmatch(proof[key])
+                    for key in ("tree", "commit", "base_tree"))
         ):
             yield proof, run["html_url"]
 
 
-def verify_commit(proof: dict[str, Any]) -> bool:
-    git("fetch", "--no-tags", "origin", proof["commit"])
-    return (
-        git("rev-parse", f"{proof['commit']}^{{tree}}") == proof["tree"]
-        and git("rev-parse", f"{proof['commit']}^2") == str(proof["head_sha"])
-    )
-
-
 def plan(event_name: str, event: dict[str, Any], repo: str) -> tuple[str, str]:
-    current = git("rev-parse", "HEAD^{tree}")
     if event_name == "pull_request":
-        pr = event["pull_request"]
-        if lightweight_diff(pr["base"]["sha"], "HEAD"):
-            return "lightweight", "Only documentation or dormant RL files changed."
-        for proof, url in proofs(repo, pr["head"]["ref"], event["number"]):
-            # Historical synthetic merge commits can disappear from refs. An
-            # unavailable object/fetch fails closed rather than guessing a base.
-            if not verify_commit(proof):
-                continue
-            if lightweight_diff(proof["commit"], "HEAD"):
-                return "lightweight", f"Only documentation/RL differs from successful PR CI: {url}"
-            # The latest valid successful checkout changed code: run the gate
-            # rather than downloading every older artifact for this branch.
-            break
-    elif event_name == "push":
+        base = event["pull_request"]["base"]
+        if base["repo"]["full_name"] == repo and f"refs/heads/{base['ref']}" in _BASE_REFS:
+            # This endpoint returns effective active rules, excluding disabled
+            # and evaluate-only rulesets, including inherited organization rules.
+            rules = api(f"repos/{repo}/rules/branches/{base['ref']}?per_page=100")
+            queue = any(rule["type"] == "merge_queue" for rule in rules)
+            check = any(
+                required["context"] == "check" and required["integration_id"] == _ACTIONS_APP_ID
+                for rule in rules if rule["type"] == "required_status_checks"
+                for required in rule["parameters"]["required_status_checks"]
+            )
+            if queue and check:
+                return "basic", "Active rules require merge queue and the Actions check before merge."
+        return "full", "Merge queue is not verified active; run the complete PR gate."
+    if event_name == "push" and event["ref"] in _BASE_REFS:
         sha = os.environ["GITHUB_SHA"]
-        # Never reuse a direct push, a multi-commit branch tip unrelated to a
-        # merged PR, or an earlier base's PR result. Match both PR identity and
-        # the entire tested merge tree, including workflow/dependency files.
-        for pr in api(f"repos/{repo}/commits/{sha}/pulls"):
+        if git("rev-parse", "HEAD") != sha or event["after"] != sha:
+            return "full", "Push checkout identity differs; run the complete gate."
+        current = git("rev-parse", "HEAD^{tree}")
+        merged = api(f"repos/{repo}/commits/{sha}/pulls")
+        if not any(
+            pr["merged_at"] and pr["merge_commit_sha"] == sha
+            and pr["base"]["repo"]["full_name"] == repo
+            and event["ref"] == f"refs/heads/{pr['base']['ref']}"
+            for pr in merged
+        ):
+            return "full", "No matching merged PR for this push; run the complete gate."
+        for proof, url in proofs(repo, event["ref"]):
+            # Direct pushes cannot borrow an unrelated successful queue tree:
+            # require the event's old branch tip to be in the tested history.
             if (
-                not pr["merged_at"]
-                or pr["merge_commit_sha"] != sha
-                or event["ref"] != f"refs/heads/{pr['base']['ref']}"
+                proof["tree"] == current
+                and verify_commit(proof)
+                and git("merge-base", "--is-ancestor", event["before"], proof["commit"]) == ""
             ):
-                continue
-            for proof, url in proofs(repo, pr["head"]["ref"], pr["number"], pr["head"]["sha"]):
-                if proof["tree"] == current and verify_commit(proof):
-                    return "reuse", f"Exact merged tree already passed PR CI: {url}"
+                return "reuse", f"Exact pushed tree already passed full merge-queue CI: {url}"
     return "full", "Run the complete root gate."
+
+
+def record(event_name: str, event: dict[str, Any], repo: str, proof_dir: Path) -> None:
+    if event_name != "merge_group" or event["action"] != "checks_requested":
+        raise ValueError("Only a full merge-group gate can publish reusable proof")
+    group = event["merge_group"]
+    if event["repository"]["full_name"] != repo or not queue_identity(group):
+        raise ValueError("Invalid merge-group repository or ref identity")
+    commit = git("rev-parse", "HEAD")
+    if commit != os.environ["GITHUB_SHA"] or commit != group["head_sha"]:
+        raise ValueError("The checkout changed identity during CI")
+    git("diff", "--exit-code", "HEAD", "--")
+    proof = {
+        "schema": _PROOF_SCHEMA,
+        "event": "merge_group",
+        "gate": "full",
+        "repository": repo,
+        "run_id": int(os.environ["GITHUB_RUN_ID"]),
+        "head_ref": group["head_ref"],
+        "head_sha": commit,
+        "commit": commit,
+        "tree": git("rev-parse", "HEAD^{tree}"),
+        "base_ref": group["base_ref"],
+        "base_sha": group["base_sha"],
+        "base_tree": git("rev-parse", f"{group['base_sha']}^{{tree}}"),
+    }
+    if proof["base_sha"] == commit or git("merge-base", "--is-ancestor", proof["base_sha"], commit) != "":
+        raise ValueError("The merge-group base is not an earlier ancestor")
+    proof_dir.mkdir(parents=True, exist_ok=True)
+    (proof_dir / "proof.json").write_text(json.dumps(proof))
 
 
 def main() -> None:
@@ -130,28 +175,13 @@ def main() -> None:
     if args.command == "record":
         if args.proof_dir is None:
             parser.error("record requires --proof-dir")
-        pr = event["pull_request"]
-        commit = git("rev-parse", "HEAD")
-        if commit != os.environ["GITHUB_SHA"]:
-            raise ValueError("The checkout changed identity during CI")
-        git("diff", "--exit-code", "HEAD", "--")
-        proof = {
-            "repository": repo,
-            "pr_number": event["number"],
-            "run_id": int(os.environ["GITHUB_RUN_ID"]),
-            "head_sha": pr["head"]["sha"],
-            "commit": commit,
-            "tree": git("rev-parse", "HEAD^{tree}"),
-        }
-        args.proof_dir.mkdir(parents=True, exist_ok=True)
-        (args.proof_dir / "proof.json").write_text(json.dumps(proof))
+        record(os.environ["GITHUB_EVENT_NAME"], event, repo, args.proof_dir)
         return
     try:
         mode, reason = plan(os.environ["GITHUB_EVENT_NAME"], event, repo)
     except Exception as exc:
-        # This is a cost optimization, never authority to weaken a gate when
-        # its evidence reader fails (including an unexpected decoding error).
-        mode, reason = "full", f"Reuse evidence unavailable ({type(exc).__name__}); run the complete gate."
+        # Cost evidence never authorizes weaker checks when its reader fails.
+        mode, reason = "full", f"CI evidence unavailable ({type(exc).__name__}); run the complete gate."
     with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
         output.write(f"full={'true' if mode == 'full' else 'false'}\nmode={mode}\n")
     print(reason)

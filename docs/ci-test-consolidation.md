@@ -68,6 +68,25 @@ and byte-restoration hashes.
 
 The complete `make check` passed on Python 3.14.3: 7,089 tests, 14 skips,
 90.63% branch coverage, and all lint/type/dead-code/workflow/naming gates.
-Local timing under concurrent exploration is not a CI comparison. Matched
-Blacksmith timing remains in progress; this batch does not yet establish the
-50% spend target.
+Local timing under concurrent exploration is not a CI comparison. The ordinary
+signed, hook-enabled push also passed the complete gate at four workers.
+
+Matched Blacksmith [run 38589585408](https://github.com/existential-birds/daydream/actions/runs/38589585408)
+passed 7,098 tests with five skips and 90.63% branch coverage. Its test step took
+411 seconds and complete job took 494, compared with 427/519 at the Python 3.14
+baseline. The test-step improvement is 3.7%; complete-job improvement is 4.8%.
+This batch does not establish the 50% workload-spend target.
+
+## Verdict keeper portability repair
+
+The retained three-row verdict flow previously searched the entire serialized
+JSON for `Linux` and `coverage`, rejecting valid interpreter or suite paths.
+All three rows now execute a real script named `Linux-coverage-suite`; the old
+assertion fails all three, and the repair passes all three. Exact recorded host
+metadata and the script's recorded command remain asserted. A recursive key
+check rejects coverage metadata fields while accepting those words in command
+values. Independent review preserved real-runner execution, retry state,
+operator override, host binding and verdict persistence. Isolated nested
+coverage-field and wrong-host mutations fail their intended assertions; both
+production sources restore byte-for-byte and pass. These control records are
+included in the same evidence JSON.

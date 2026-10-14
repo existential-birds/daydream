@@ -21,28 +21,32 @@
       "returncode": 1,
       "original_sha256": "9d563d6b3b9d88a63df00bfbdedcf4a8369419752fd77c6c12631b5123c0a5c4",
       "restored_returncode": 0,
-      "restored_sha256": "9d563d6b3b9d88a63df00bfbdedcf4a8369419752fd77c6c12631b5123c0a5c4"
+      "restored_sha256": "9d563d6b3b9d88a63df00bfbdedcf4a8369419752fd77c6c12631b5123c0a5c4",
+      "node": "tests/test_archive_data_capture.py::test_default_deep_run_populates_eval_captures_patch_and_current_merge_phase_state"
     },
     {
       "mutant": "scan-api-key",
       "returncode": 1,
       "original_sha256": "aa54101b07f2fb4839e2ed604cc77405c03247792acb0e68c9f438ec2727dcab",
       "restored_returncode": 0,
-      "restored_sha256": "aa54101b07f2fb4839e2ed604cc77405c03247792acb0e68c9f438ec2727dcab"
+      "restored_sha256": "aa54101b07f2fb4839e2ed604cc77405c03247792acb0e68c9f438ec2727dcab",
+      "node": "tests/test_archive_data_capture.py::test_dump_artifacts_copies_credentials_in_diff"
     },
     {
       "mutant": "scan-pem-key",
       "returncode": 1,
       "original_sha256": "aa54101b07f2fb4839e2ed604cc77405c03247792acb0e68c9f438ec2727dcab",
       "restored_returncode": 0,
-      "restored_sha256": "aa54101b07f2fb4839e2ed604cc77405c03247792acb0e68c9f438ec2727dcab"
+      "restored_sha256": "aa54101b07f2fb4839e2ed604cc77405c03247792acb0e68c9f438ec2727dcab",
+      "node": "tests/test_archive_data_capture.py::test_dump_artifacts_copies_credentials_in_diff"
     },
     {
       "mutant": "recon-rejection",
       "returncode": 1,
       "original_sha256": "b77bc6ab677900e3e26e0cab1923a6b386010b521ca313df7e045659d9bc9a7a",
       "restored_returncode": 0,
-      "restored_sha256": "b77bc6ab677900e3e26e0cab1923a6b386010b521ca313df7e045659d9bc9a7a"
+      "restored_sha256": "b77bc6ab677900e3e26e0cab1923a6b386010b521ca313df7e045659d9bc9a7a",
+      "node": "tests/test_improve_flow.py::test_capable_improve_stub_partial_failure_is_successful_and_safe[asyncio]"
     },
     {
       "case": "default-provider",
@@ -123,7 +127,8 @@
           "variant": "restored",
           "exit": 0
         }
-      ]
+      ],
+      "case": "post-commit-verification"
     },
     {
       "original_sha256": "e95f51365bb4153369f733c70ffc8169f75f91b3d9104d35797ab84a265102fa",
@@ -137,7 +142,8 @@
           "variant": "restored",
           "exit": 0
         }
-      ]
+      ],
+      "case": "archived-quality-snapshot"
     },
     {
       "original_sha256": "81d9815237eb90584cf6e38a21a2dcb6e9c482bed7d7be6b3191d0a6f495440d",
@@ -151,7 +157,8 @@
           "variant": "restored",
           "exit": 0
         }
-      ]
+      ],
+      "case": "shard-filenames"
     }
   ],
   "audited_test_sha256": {
@@ -167,5 +174,43 @@
     "tests/test_git_ops.py": "f7919ab4525740c32f82b705014f6f838d706421699a98d4134a566ab4ec83aa",
     "tests/test_improve_flow.py": "2342633531102fa85e4f74b59bfa6dd8e00040b54e57fb8407f52d52c79f20e0",
     "tests/test_trajectory_phase_events.py": "6dd4d915cb2a9ce0ae929c4e609c4ef5f1b8927a3184954d30934044c6f09dde"
+  },
+  "blacksmith": {
+    "run_id": 38589585408,
+    "head_sha": "1fc0fc8d5374acab4c26f31ca860737d6f4b1891",
+    "test_step_seconds": 411,
+    "job_seconds": 494,
+    "passed": 7098,
+    "skipped": 5,
+    "branch_coverage_percent": 90.63,
+    "conclusion": "success"
+  },
+  "verdict_keeper_repair": {
+    "test_file": "tests/deep_orchestrator/test_findings_artifacts.py",
+    "rows": 3,
+    "legitimate_path": "Linux-coverage-suite",
+    "before_seeded_path": "3 failures",
+    "after_seeded_path": "3 passed",
+    "independent_review": "approved; real runner/host equality/retry/operator override retained",
+    "isolated_controls": [
+      {
+        "case": "nested-coverage",
+        "node": "tests/deep_orchestrator/test_findings_artifacts.py::test_test_verdict_persists_actual_suite_outcome_and_operator_override[passing-suite]",
+        "mutant_exit": 1,
+        "restored_exit": 0,
+        "source_sha256": "8a7fe85aede1c0818f898c711e859a619c9f7092c440d2fd4f0abb48e5048ed7",
+        "restored_sha256": "8a7fe85aede1c0818f898c711e859a619c9f7092c440d2fd4f0abb48e5048ed7",
+        "witness": "host verdict must not claim unmeasured coverage"
+      },
+      {
+        "case": "wrong-host",
+        "node": "tests/deep_orchestrator/test_findings_artifacts.py::test_test_verdict_persists_actual_suite_outcome_and_operator_override[passing-suite]",
+        "mutant_exit": 1,
+        "restored_exit": 0,
+        "source_sha256": "8a7fe85aede1c0818f898c711e859a619c9f7092c440d2fd4f0abb48e5048ed7",
+        "restored_sha256": "8a7fe85aede1c0818f898c711e859a619c9f7092c440d2fd4f0abb48e5048ed7",
+        "witness": "assert verdict[\"local_host\"] == host"
+      }
+    ]
   }
 }

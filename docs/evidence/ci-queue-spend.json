@@ -1,0 +1,194 @@
+{
+  "baseline_file": "ci-spend-baseline.json",
+  "baseline_seconds": 51859,
+  "runner": "blacksmith-4vcpu-ubuntu-2404",
+  "policy": "full before queued merge; basic PR only with enforced queue; verified postmerge reuse",
+  "budgets": [
+    {
+      "work": "PR basic",
+      "count": 64,
+      "seconds_each": 70,
+      "measurement": "Component estimate: observed remaining full-job components 49s plus 21s reserve"
+    },
+    {
+      "work": "successful merge-group full",
+      "count": 15,
+      "seconds_each": 519,
+      "measurement_run": 38580430834
+    },
+    {
+      "work": "postmerge push reuse",
+      "count": 15,
+      "seconds_each": 60,
+      "measurement": "reserve, requires native rollout measurement"
+    },
+    {
+      "work": "all historical failed root jobs",
+      "count": 23,
+      "total_seconds": 12107,
+      "measurement": "original baseline elapsed; no repair credit"
+    }
+  ],
+  "component_source_run": 38589585408,
+  "component_job_seconds": 494,
+  "removed_full_only_seconds": {
+    "tests": 411,
+    "mypy_and_vulture": 22,
+    "node_and_pi": 9,
+    "coverage_upload": 2,
+    "proof_upload": 1
+  },
+  "projected_seconds": 25272,
+  "reduction_percent": 51.267860930600285,
+  "queue_ruleset_id": 25094989,
+  "queue_enforcement": "disabled pending default-branch rollout",
+  "assumptions": [
+    "One successful full queue build per 15 actual historical merges, rather than per 22 PRs",
+    "All 64 PR updates are paid",
+    "All 15 post-merge checks are paid",
+    "All 23 historical root failures are reserved at their original cost",
+    "No cancellation, cache, batching, failure repair or provider allowance credit",
+    "New queue rebuilds, direct pushes and manual RL work can add cost"
+  ],
+  "failed_root_jobs": [
+    {
+      "run_id": 37657314669,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/37657314669/job/112915596604",
+      "conclusion": "failure",
+      "seconds": 574.0
+    },
+    {
+      "run_id": 37697636172,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/37697636172/job/113053176534",
+      "conclusion": "failure",
+      "seconds": 449.0
+    },
+    {
+      "run_id": 37715762293,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/37715762293/job/113111725663",
+      "conclusion": "failure",
+      "seconds": 431.0
+    },
+    {
+      "run_id": 37843797096,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/37843797096/job/113539487526",
+      "conclusion": "failure",
+      "seconds": 805.0
+    },
+    {
+      "run_id": 37867746188,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/37867746188/job/113618451553",
+      "conclusion": "failure",
+      "seconds": 905.0
+    },
+    {
+      "run_id": 37920343422,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/37920343422/job/113786488944",
+      "conclusion": "failure",
+      "seconds": 883.0
+    },
+    {
+      "run_id": 37980919496,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/37980919496/job/113990899423",
+      "conclusion": "failure",
+      "seconds": 806.0
+    },
+    {
+      "run_id": 38011197845,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/38011197845/job/114091362979",
+      "conclusion": "failure",
+      "seconds": 831.0
+    },
+    {
+      "run_id": 38017502433,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/38017502433/job/114110948332",
+      "conclusion": "failure",
+      "seconds": 432.0
+    },
+    {
+      "run_id": 38022012626,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/38022012626/job/114124835483",
+      "conclusion": "failure",
+      "seconds": 398.0
+    },
+    {
+      "run_id": 38027026483,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/38027026483/job/114139925483",
+      "conclusion": "failure",
+      "seconds": 392.0
+    },
+    {
+      "run_id": 38030657192,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/38030657192/job/114150716268",
+      "conclusion": "failure",
+      "seconds": 454.0
+    },
+    {
+      "run_id": 38031569970,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/38031569970/job/114153422327",
+      "conclusion": "failure",
+      "seconds": 448.0
+    },
+    {
+      "run_id": 38033346510,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/38033346510/job/114158636768",
+      "conclusion": "failure",
+      "seconds": 400.0
+    },
+    {
+      "run_id": 38034504824,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/38034504824/job/114162036779",
+      "conclusion": "failure",
+      "seconds": 411.0
+    },
+    {
+      "run_id": 38035420119,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/38035420119/job/114164727584",
+      "conclusion": "failure",
+      "seconds": 431.0
+    },
+    {
+      "run_id": 38036460663,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/38036460663/job/114167789763",
+      "conclusion": "failure",
+      "seconds": 413.0
+    },
+    {
+      "run_id": 38038418368,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/38038418368/job/114173623810",
+      "conclusion": "failure",
+      "seconds": 433.0
+    },
+    {
+      "run_id": 38040116041,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/38040116041/job/114178502025",
+      "conclusion": "failure",
+      "seconds": 411.0
+    },
+    {
+      "run_id": 38040391413,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/38040391413/job/114179299531",
+      "conclusion": "failure",
+      "seconds": 447.0
+    },
+    {
+      "run_id": 38105586987,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/38105586987/job/114370316568",
+      "conclusion": "failure",
+      "seconds": 442.0
+    },
+    {
+      "run_id": 38171676295,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/38171676295/job/114565405695",
+      "conclusion": "failure",
+      "seconds": 460.0
+    },
+    {
+      "run_id": 37690478327,
+      "job_url": "https://github.com/existential-birds/daydream/actions/runs/37690478327/job/113029055305",
+      "conclusion": "failure",
+      "seconds": 451,
+      "classification_note": "Previously docs-lightweight, excluded from full-only failure records"
+    }
+  ]
+}

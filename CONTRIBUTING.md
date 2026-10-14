@@ -109,7 +109,7 @@ This is the same set of steps a full `check` job in `.github/workflows/ci.yml` r
 job does not include — that scan happens in the manual `rl-check` job — so the
 local gate is the stricter one. The pre-push hook runs `make check` after
 verifying signatures, so a green local `make check` is what keeps your push from
-being rejected. CI can reuse a verified PR tree or use a lightweight gate for documentation and dormant RL changes; see the [CI spend policy](.github/workflows/README.md#ci-spend-policy). The local gate always runs in full.
+being rejected. CI runs the full gate before a queued merge and reuses only a verified merge-group tree afterward. PR updates run basic checks only while effective branch rules enforce the queue and required `check`; otherwise they run in full. See the [CI spend policy](.github/workflows/README.md#ci-spend-policy). The local gate always runs in full.
 
 ## Testing policy
 
