@@ -7,9 +7,9 @@
 - Semantic convention producer pin: open-telemetry/semantic-conventions-genai
   commit `94f432d7126f5884d30a2cdde6f4e89908ebb6fd` (registry + 4 content
   schemas pinned byte-for-byte in `tests/fixtures/observability_contract/manifest.json`).
-- Dependency pins: OTel API/SDK/HTTP/gRPC/proto 1.44.0, traceloop 0.62.3,
+- Dependency pins: OTel API/SDK/HTTP/gRPC/proto 1.45.1, traceloop 0.62.4,
   semconv-ai 0.5.1, HTTPX 0.28.1, AnyIO 4.15.1, Pi 0.84.3, claude-agent-sdk
-  0.2.152.
+  0.2.165.
 - Verification commands: representative-real (`representative_real_run` receipts)
   and sanitized-replay (`sanitized_protocol_replay`) public readback use separate
   commands below. Many vendor/limitation rows are per-backend; Claude, Codex,
@@ -271,7 +271,7 @@ BatchSpanProcessor path with zero global provider/instrumentor signals.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | queued/rejected/unverified counts + fixed dispositions | DeliveryLedger / exporter lifecycle | decoded bounded acknowledgments; `force_flush=True` is NOT acceptance | session-local | int + fixed codes | – | per destination | Transport lifecycle | Real lifecycle | no headers/body/endpoints/credentials | local receipt only | local receipt only | local receipt only | `test_observability_otlp_delivery.py` + T4A suite | verified (local) | Applicable; partial success never retried; UI/API proof separate |
 | OTLP HTTP canonical full-success ack | otlp_compat transport | HTTP 200 + complete empty body `b""` (any or no Content-Type) | – | status | – | 1 | Binding decision 8 | Full success only | – | transport verdict | – | – | T4A zero-byte ack tests | verified (local) | Applicable; undecodable non-empty bodies (incl. error-indicating or non-object JSON) and oversized/truncated reads are terminal/unverified; JSON object ack with a truthy top-level `success` and no error indication delivers with warning; partials never retried |
-| gRPC bridge ownership | otlp_compat `GrpcBridge` | the pinned 1.44 channel/stub bridge touches exactly `_client, _channel, _headers, _timeout, _shutdown, _initialize_channel_and_stub`; one owned `Export(...)` per retry | – | – | – | 1 | Frozen 1.44 bridge surface | – | – | transport | – | – | T4A gRPC guards | verified (local) | Applicable; no delegated exporter retry loops. gRPC RESOURCE_EXHAUSTED retries only with valid RetryInfo; a valid zero-byte HTTP success (`HTTP 200` + complete empty body, any or no content type) is distinct from a gRPC bridge ack; both are documented success paths |
+| gRPC bridge ownership | otlp_compat `GrpcBridge` | the audited 1.44.0/1.45.1 channel/stub bridge touches exactly `_client, _channel, _headers, _timeout, _shutdown, _initialize_channel_and_stub`; one owned `Export(...)` per retry | – | – | – | 1 | Explicit audited releases and private bridge surface; drift closes the channel and fails initialization | – | – | transport | – | – | T4A gRPC guards | verified (local) | Applicable; no delegated exporter retry loops. gRPC RESOURCE_EXHAUSTED retries only once with valid RetryInfo; a valid zero-byte HTTP success (`HTTP 200` + complete empty body, any or no content type) is distinct from a gRPC bridge ack; both are documented success paths |
 | private credential-provider rejection | otlp_compat | OTel HTTP private requests.Session credential-provider path fails closed BEFORE client/send with one fixed sanitized diagnostic | – | – | – | 0..1 | Reviewed fixed behavior | – | fixed diagnostic only | transport | – | – | T4A pre-send rejection | verified (local) | Applicable; never an unsafe fallback |
 
 ## Explicit unavailable/inapplicable rows per backend

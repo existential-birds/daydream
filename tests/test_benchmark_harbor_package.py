@@ -1,4 +1,4 @@
-"""Packaging and Harbor 0.23 integration tests for compiled benchmarks."""
+"""Packaging and Harbor 0.24 integration tests for compiled benchmarks."""
 import hashlib
 import importlib.metadata
 import importlib.resources
@@ -107,7 +107,6 @@ def test_validate_wheel_accepts_matching_and_rejects_mismatch(tmp_path: Path) ->
 def test_resolve_harbor_checks_same_interpreter_and_version(monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("harbor")
 
-    monkeypatch.setattr(importlib.metadata, "version", lambda d: "0.23.0")
     exe = pkg.resolve_harbor()
     assert exe == str(Path(sys.executable).parent / "harbor")
 
@@ -119,10 +118,11 @@ def test_resolve_harbor_checks_same_interpreter_and_version(monkeypatch: pytest.
         pkg.resolve_harbor()
     assert "pip install 'daydream[benchmark]'" in str(missing.value)
 
-    monkeypatch.setattr(importlib.metadata, "version", lambda d: "0.22.0")
-    with pytest.raises(pkg.PackageError) as wrong:
-        pkg.resolve_harbor()
-    assert "[0.23, 0.24)" in str(wrong.value)
+    for unsupported in ("0.23.0", "0.25.0", "invalid"):
+        monkeypatch.setattr(importlib.metadata, "version", lambda d, version=unsupported: version)
+        with pytest.raises(pkg.PackageError) as wrong:
+            pkg.resolve_harbor()
+        assert "[0.24, 0.25)" in str(wrong.value)
 
 def test_render_task_toml_threads_reviewer_and_judge_hosts() -> None:
     text = pkg.render_task_toml("case-abc123def456", reviewer_hosts=["api.anthropic.com"],
@@ -337,7 +337,15 @@ def test_validate_compiled_instantiates_harbor_tasks_and_job_configs(tmp_path: P
     pkg.build_harbor(ws, wheel=wheel)
     assert pkg.validate_compiled(ws) == 0
     case = ws / "harbor" / build.derive_task_key(case_id)
-    assert Task(str(case), disable_verification=True) is not None
+    task = Task(str(case), disable_verification=True)
+    # Harbor must retain the network boundary, not merely accept our task schema.
+    assert task.config.environment.network_mode == "no-network"
+    assert task.config.agent.network_mode == "allowlist"
+    assert task.config.agent.allowed_hosts == ["h1.example.com"]
+    assert task.config.verifier.environment_mode == "separate"
+    assert task.config.verifier.environment is not None
+    assert task.config.verifier.environment.network_mode == "allowlist"
+    assert task.config.verifier.environment.allowed_hosts == ["h2.example.com"]
     for name in ("harbor-job.yaml", "harbor-oracle.yaml"):
         assert JobConfig.model_validate(yaml.safe_load((ws / "harbor" / name).read_text())) is not None
     (ws / "harbor/harbor-job.yaml").write_text("n_attempts: not-an-int\n")

@@ -312,16 +312,22 @@ def test_grpc_export_full_success_and_snapshot(monkeypatch: pytest.MonkeyPatch) 
     with _generic_grpc(monkeypatch, receive) as exporter:
         assert exporter.export(_spans()) == SpanExportResult.SUCCESS
         exporter.shutdown()
+        exporter.shutdown()
+        assert exporter.export(_spans()) == SpanExportResult.FAILURE
         assert len(received) == 1
         snapshot = exporter.delivery_snapshot()
         assert snapshot["delivered"] == 1
 
-def test_grpc_resource_exhausted_retries_only_with_valid_retry_info(monkeypatch: pytest.MonkeyPatch,) -> None:
+@pytest.mark.parametrize("persistent", [False, True], ids=["recovers", "retry-exhausted"])
+def test_grpc_resource_exhausted_retries_only_with_valid_retry_info(
+    monkeypatch: pytest.MonkeyPatch, persistent: bool,
+) -> None:
+    """Valid RetryInfo allows one retry; repeated exhaustion cannot enter SDK backoff."""
     attempts = {"n": 0}
 
     def receive(request: ExportTraceServiceRequest, context: grpc.ServicerContext) -> ExportTraceServiceResponse:
         attempts["n"] += 1
-        if attempts["n"] == 1:
+        if attempts["n"] == 1 or persistent:
             retry = error_details_pb2.RetryInfo()
             retry.retry_delay.FromSeconds(0)
             detail = any_pb2.Any()
@@ -332,9 +338,14 @@ def test_grpc_resource_exhausted_retries_only_with_valid_retry_info(monkeypatch:
         return ExportTraceServiceResponse()
 
     with _generic_grpc(monkeypatch, receive) as exporter:
-        assert exporter.export(_spans()) == SpanExportResult.SUCCESS
+        expected = SpanExportResult.FAILURE if persistent else SpanExportResult.SUCCESS
+        assert exporter.export(_spans()) == expected
         exporter.shutdown()
         assert attempts["n"] == 2  # one owned retry under valid RetryInfo
+        snapshot = exporter.delivery_snapshot()
+        assert snapshot["delivered"] == (0 if persistent else 1)
+        assert snapshot["unverified"] == (1 if persistent else 0)
+        assert snapshot["diagnostics"] == (["OTLP_GRPC_RETRY_BUDGET_EXHAUSTED"] if persistent else [])
 
 @pytest.mark.parametrize(
     ("status", "message"), [(grpc.StatusCode.RESOURCE_EXHAUSTED, "exhausted"), (grpc.StatusCode.UNAVAILABLE, "down")],
