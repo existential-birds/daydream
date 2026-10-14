@@ -49,8 +49,8 @@ namespace_packages = true
 mypy_path = "../..:tests"
 strict = true
 # daydream is a sibling first-party package (no py.typed; mypy_path + follow
-# make it fully checked). verifiers is the only untyped seam: it ships without
-# py.typed and has no stub package on the registry (checked upstream 0.2.1), so
+# make it fully checked). verifiers is the only untyped seam: its pinned 0.4.0
+# wheel ships without a py.typed marker or .pyi stubs, so
 # its import surface and strict-subclass / strict-decorator expectations are the
 # legitimate typed-against-untyped boundary. mypy applies the subclassing and
 # untyped-decorator toggles per checked FILE, not per the base/dependent module,
@@ -63,7 +63,7 @@ disallow_subclassing_any = false
 disallow_untyped_decorators = false
 
 [[tool.mypy.overrides]]
-# verifiers has no py.typed marker and no stub package on the registry; strip
+# The pinned verifiers wheel has no py.typed marker or .pyi stubs; strip
 # the import to Any for verifiers modules only, never a blanket-library ignore.
 module = ["verifiers.*"]
 ignore_missing_imports = true

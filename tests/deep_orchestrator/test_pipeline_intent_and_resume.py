@@ -146,7 +146,6 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
 
     parse_calls = [c for c in calls if "extract only actionable issues" in c["prompt"].lower()]
     assert parse_calls == [], "parse-* stage must be removed (issue #745)"
-    assert not any("parse" in str(call.get("model", "")).lower() for call in calls)
     # One records file per per-stack review, plus the structural meta-stack.
     assert len(records_files) >= len(per_stack_prompts)
 

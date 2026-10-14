@@ -2,7 +2,7 @@
 """Choose CI checks; only verified merge-queue trees can replace a full gate.
 
 Uses the runner's Python standard library, Git, and authenticated gh CLI.
-PR checks become basic only while effective branch rules require a merge queue.
+PR checks become basic only while effective rules require a queue without bypass.
 Queue checks and manual runs always execute the complete root gate.
 """
 
@@ -94,6 +94,27 @@ def proofs(repo: str, base_ref: str) -> Iterator[tuple[dict[str, Any], str]]:
             yield proof, run["html_url"]
 
 
+def queue_without_bypass(repo: str, rule: dict[str, Any]) -> bool:
+    ruleset_id = rule["ruleset_id"]
+    if (
+        type(ruleset_id) is not int or ruleset_id <= 0
+        or not isinstance(rule["ruleset_source"], str) or not rule["ruleset_source"]
+        or rule["ruleset_source_type"] not in ("Repository", "Organization", "Enterprise")
+    ):
+        return False
+    ruleset = api(f"repos/{repo}/rulesets/{ruleset_id}?includes_parents=true")
+    # GitHub omits bypass_actors without write access; absence is not proof.
+    return (
+        type(ruleset["id"]) is int and ruleset["id"] == ruleset_id
+        and ruleset["source"] == rule["ruleset_source"]
+        and ruleset["source_type"] == rule["ruleset_source_type"]
+        and ruleset["target"] == "branch"
+        and ruleset["enforcement"] == "active"
+        and any(item["type"] == "merge_queue" for item in ruleset["rules"])
+        and ruleset.get("bypass_actors") == []
+    )
+
+
 def plan(event_name: str, event: dict[str, Any], repo: str) -> tuple[str, str]:
     if event_name == "pull_request":
         base = event["pull_request"]["base"]
@@ -101,15 +122,15 @@ def plan(event_name: str, event: dict[str, Any], repo: str) -> tuple[str, str]:
             # This endpoint returns effective active rules, excluding disabled
             # and evaluate-only rulesets, including inherited organization rules.
             rules = api(f"repos/{repo}/rules/branches/{base['ref']}?per_page=100")
-            queue = any(rule["type"] == "merge_queue" for rule in rules)
+            queue = [rule for rule in rules if rule["type"] == "merge_queue"]
             check = any(
                 required["context"] == "check" and required["integration_id"] == _ACTIONS_APP_ID
                 for rule in rules if rule["type"] == "required_status_checks"
                 for required in rule["parameters"]["required_status_checks"]
             )
-            if queue and check:
-                return "basic", "Active rules require merge queue and the Actions check before merge."
-        return "full", "Merge queue is not verified active; run the complete PR gate."
+            if queue and check and all(queue_without_bypass(repo, rule) for rule in queue):
+                return "basic", "Active rules require merge queue without bypass and the Actions check before merge."
+        return "full", "Merge queue without bypass is not verified active; run the complete PR gate."
     if event_name == "push" and event["ref"] in _BASE_REFS:
         sha = os.environ["GITHUB_SHA"]
         if git("rev-parse", "HEAD") != sha or event["after"] != sha:

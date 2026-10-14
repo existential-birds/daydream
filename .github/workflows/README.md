@@ -10,8 +10,12 @@ complete local gate.
 A PR runs lock verification, dependency installation, lint, naming checks, and
 workflow lint only when GitHub's effective
 active branch rules require both the merge queue and the Actions `check` status.
-Until those rules are active, or if their API response cannot be verified, every
-PR runs the complete root gate. This preserves full verification during rollout.
+The originating queue rulesets, including inherited rulesets, must also be active
+and explicitly report an empty bypass-actor list. Until those rules are active,
+or if their identity or bypass evidence cannot be verified, every PR runs the
+complete root gate. GitHub omits bypass actors when the caller lacks write access
+to the ruleset; that omitted evidence also keeps the complete gate. This workflow
+does not increase token permissions to obtain it.
 Documentation and RL-only changes follow the same rule; no path allowlist skips
 the queue gate.
 
@@ -106,8 +110,7 @@ commit SHA — enforced by
 its lockcheck-first ordering is what catches `uv.lock` / `pyproject.toml`
 drift. CI installs codex at the version read from the tracked
 `.github/workflows/package.json`, so an npm block bump PR updates CI end-to-end
-with no parallel edit; `tests/test_dependabot_config.py` fails if the workflow
-reintroduces a hardcoded pin instead of reading the manifest.
+with no parallel edit.
 
 **Ownership.** Reviewers are auto-requested via the single-rule `CODEOWNERS`
 (`* @existential-birds @anderskev`); no per-path entries were added.

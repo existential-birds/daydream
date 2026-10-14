@@ -81,8 +81,8 @@ The focused targets, all run from the repo root:
 
 | Command | What it does |
 |---|---|
-| `make lint` | Ruff over `daydream tests` (120 cols, `E F I W`, py314; `daydream/atif/**` is lint-exempt as vendored code) |
-| `make typecheck` | mypy over `daydream tests` |
+| `make lint` | Ruff over `daydream tests scripts/ci_plan.py` (120 cols, `E F I W`, py314; `daydream/atif/**` is lint-exempt as vendored code) |
+| `make typecheck` | mypy over `daydream tests scripts/ci_plan.py` |
 | `make test` | `pytest -n auto` with coverage; the branch-coverage floor (`fail_under` in `pyproject.toml`) is enforced here, not in global addopts — a bare or targeted `pytest` run stays plain |
 | `make deadcode` | vulture dead-code scan over the root project and the RL package |
 | `make coverage-report` | checks that `coverage.xml` exists after `make test`; the measurement + ratchet procedure is in [docs/coverage.md](docs/coverage.md) |
@@ -146,7 +146,7 @@ implementations of the real-path standard:
   `daydream/atif/**` is lint-exempt as vendored Harbor code (see
   [daydream/atif/NOTICE](daydream/atif/NOTICE)); make only mechanical edits
   there.
-- **mypy** — configured in `pyproject.toml`, run over `daydream tests`;
+- **mypy** — configured in `pyproject.toml`, run over `daydream tests scripts/ci_plan.py`;
   hand-written stubs live in `mypy_stubs/`.
 - **Dependencies** — declared in `pyproject.toml`; keep `uv.lock` in sync (`uv
   lock`) or `make check` fails at its first step (`lockcheck`).

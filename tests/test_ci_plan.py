@@ -18,12 +18,19 @@ import pytest
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "ci_plan.py"
 _REPO = "acme/widgets"
 _RULES = f"repos/{_REPO}/rules/branches/main"
+_RULESET = f"repos/{_REPO}/rulesets/42"
 _RUNS = f"repos/{_REPO}/actions/workflows/ci.yml/runs"
 _ARTIFACTS = f"repos/{_REPO}/actions/runs/101/artifacts"
 _ARCHIVE = f"repos/{_REPO}/actions/artifacts/202/zip"
-_ACTIVE_RULES = [{"type": "merge_queue"}, {"type": "required_status_checks", "parameters": {
+_ACTIVE_RULES = [{
+    "type": "merge_queue", "ruleset_id": 42, "ruleset_source": _REPO, "ruleset_source_type": "Repository",
+}, {"type": "required_status_checks", "parameters": {
     "required_status_checks": [{"context": "check", "integration_id": 15368}],
 }}]
+_QUEUE_RULESET = {
+    "id": 42, "source": _REPO, "source_type": "Repository", "target": "branch", "enforcement": "active",
+    "rules": [{"type": "merge_queue"}], "bypass_actors": [],
+}
 _QUEUE_REF = "refs/heads/gh-readonly-queue/main/pr-7-queue"
 
 
@@ -60,6 +67,8 @@ def ci_cli(git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> C
             # Exercise the actual query too: successful queue evidence only.
             assert parse_qs(url.query)["event"] == ["merge_group"]
             assert parse_qs(url.query)["status"] == ["success"]
+        if url.path.startswith(f"repos/{_REPO}/rulesets/"):
+            assert parse_qs(url.query)["includes_parents"] == ["true"]
         value = responses[url.path]
         if isinstance(value, Exception):
             raise value
@@ -109,7 +118,9 @@ def test_ci_cli_pr_checks_require_verified_active_queue(
 ) -> None:
     base = _git(git_repo, "rev-parse", "HEAD")
     head = _commit(git_repo, path)
-    output, _ = ci_cli(_pr(base, head), replies={_RULES: _ACTIVE_RULES if queue else []})
+    output, _ = ci_cli(_pr(base, head), replies={
+        _RULES: _ACTIVE_RULES if queue else [], _RULESET: _QUEUE_RULESET,
+    })
     assert f"mode={'basic' if queue else 'full'}\n" in output
     assert f"full={'false' if queue else 'true'}\n" in output
 
@@ -135,7 +146,77 @@ def test_ci_cli_queue_uncertainty_keeps_full_pr_gate(
         event["pull_request"]["base"]["repo"]["full_name"] = "other/repo"
     else:
         event["pull_request"]["base"]["ref"] = "release"
-    output, _ = ci_cli(event, replies={_RULES: rules})
+    output, _ = ci_cli(event, replies={_RULES: rules, _RULESET: _QUEUE_RULESET})
+    assert "mode=full\n" in output and "full=true\n" in output
+
+
+@pytest.mark.parametrize("source_type,source", [
+    ("Repository", _REPO), ("Organization", "acme"), ("Enterprise", "acme-enterprise"),
+])
+def test_ci_cli_verifies_queue_ruleset_at_its_origin(
+    git_repo: Path, ci_cli: Callable[..., tuple[str, str]], source_type: str, source: str,
+) -> None:
+    rules = json.loads(json.dumps(_ACTIVE_RULES))
+    rules[0].update(ruleset_source=source, ruleset_source_type=source_type)
+    ruleset = {**_QUEUE_RULESET, "source": source, "source_type": source_type}
+    sha = _git(git_repo, "rev-parse", "HEAD")
+    output, _ = ci_cli(_pr(sha, sha), replies={_RULES: rules, _RULESET: ruleset})
+    assert "mode=basic\n" in output and "full=false\n" in output
+
+
+@pytest.mark.parametrize("fault", [
+    "always", "pull_request", "exempt", "omitted", "null", "object", "string", "inaccessible",
+    "malformed", "wrong-id", "wrong-source", "wrong-source-type", "wrong-target", "inactive",
+    "missing-queue", "missing-origin", "invalid-id", "other-queue-bypass", "float-id",
+    "null-source", "empty-source", "null-source-type", "unknown-source-type",
+])
+def test_ci_cli_queue_bypass_or_unverified_ruleset_keeps_full_pr_gate(
+    git_repo: Path, ci_cli: Callable[..., tuple[str, str]], fault: str,
+) -> None:
+    rules = json.loads(json.dumps(_ACTIVE_RULES))
+    ruleset: Any = json.loads(json.dumps(_QUEUE_RULESET))
+    replies: dict[str, Any] = {_RULES: rules, _RULESET: ruleset}
+    if fault in {"always", "pull_request", "exempt"}:
+        ruleset["bypass_actors"] = [{"actor_id": 7, "actor_type": "Team", "bypass_mode": fault}]
+    elif fault == "omitted":
+        del ruleset["bypass_actors"]
+    elif fault in {"null", "object", "string"}:
+        ruleset["bypass_actors"] = {"null": None, "object": {}, "string": ""}[fault]
+    elif fault == "inaccessible":
+        replies[_RULESET] = subprocess.CalledProcessError(1, "gh")
+    elif fault == "malformed":
+        replies[_RULESET] = []
+    elif fault == "wrong-id":
+        ruleset["id"] = 99
+    elif fault == "wrong-source":
+        ruleset["source"] = "other/repo"
+    elif fault == "wrong-source-type":
+        ruleset["source_type"] = "Organization"
+    elif fault == "wrong-target":
+        ruleset["target"] = "tag"
+    elif fault == "inactive":
+        ruleset["enforcement"] = "evaluate"
+    elif fault == "missing-queue":
+        ruleset["rules"] = []
+    elif fault == "missing-origin":
+        del rules[0]["ruleset_source"]
+    elif fault == "invalid-id":
+        rules[0]["ruleset_id"] = True
+    elif fault == "float-id":
+        ruleset["id"] = 42.0
+    elif fault in {"null-source", "empty-source"}:
+        rules[0]["ruleset_source"] = ruleset["source"] = None if fault == "null-source" else ""
+    elif fault in {"null-source-type", "unknown-source-type"}:
+        rules[0]["ruleset_source_type"] = ruleset["source_type"] = (
+            None if fault == "null-source-type" else "Unknown"
+        )
+    else:
+        rules.append({**rules[0], "ruleset_id": 99})
+        replies[f"repos/{_REPO}/rulesets/99"] = {
+            **ruleset, "id": 99, "bypass_actors": [{"actor_id": 7, "actor_type": "Team", "bypass_mode": "always"}],
+        }
+    sha = _git(git_repo, "rev-parse", "HEAD")
+    output, _ = ci_cli(_pr(sha, sha), replies=replies)
     assert "mode=full\n" in output and "full=true\n" in output
 
 
