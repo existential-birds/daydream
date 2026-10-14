@@ -69,10 +69,11 @@ class BlockingStdout:
 
     """
 
-    def __init__(self) -> None:
+    def __init__(self, lines: list[str] | None = None) -> None:
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
         self._waiting = False
+        self._lines = iter(lines or [])
 
     async def readline(self) -> bytes:
         if self._waiting:
@@ -81,6 +82,8 @@ class BlockingStdout:
         self.entered.set()
         try:
             await self.release.wait()
+            return (next(self._lines) + "\n").encode()
+        except StopIteration:
             return b""
         finally:
             self._waiting = False
@@ -100,12 +103,14 @@ def cli_process(stdout: object) -> MagicMock:
     return process
 
 
-async def assert_concurrent_streams_isolated(backend: Any, first_lines: list[str]) -> None:
+async def assert_concurrent_streams_isolated(
+    backend: Any, first_lines: list[str], *, second_lines: list[str] | None = None,
+) -> None:
     """Overlap two executions of one backend with separate scripted processes. The second reader blocks
     while the first reaches TurnEnd/Cost, proving stdout ownership is per execution.
     """
     first_proc = cli_process(ImmediateStdout(first_lines))
-    second_stdout = BlockingStdout()
+    second_stdout = BlockingStdout(second_lines)
     second_proc = cli_process(second_stdout)
     procs = iter([first_proc, second_proc])
 

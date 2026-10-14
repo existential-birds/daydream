@@ -10,10 +10,10 @@ import anyio
 
 from daydream.backends import _parsed_nonnegative_float
 
-# Reset idle detection on each complete line. Codex can remain silent for a
-# whole generation/tool call, so use 2700s (2.7x its largest observed turn).
-# Pi token updates permit a shorter response window below.
+# Reset idle detection on each complete line. Pi's active-tool/Osprey window
+# remains 2700s; Codex silence is diagnosed before the default caller budget.
 DEFAULT_STREAM_IDLE_TIMEOUT_S = 2700.0
+DEFAULT_CODEX_STREAM_IDLE_TIMEOUT_S = 600.0
 DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S = 600.0
 STREAM_IDLE_TIMEOUT_ENV = "DAYDREAM_STREAM_IDLE_TIMEOUT_S"
 
@@ -21,6 +21,22 @@ STREAM_IDLE_TIMEOUT_ENV = "DAYDREAM_STREAM_IDLE_TIMEOUT_S"
 # exits on SIGTERM long before this; the window only bounds how long we wait on a
 # child that ignores it before forcing the kill.
 TERMINATE_GRACE_S = 5.0
+
+
+class ProcessCleanupTimeout(TimeoutError):
+    """The direct child's exit/join did not finish within bounded cleanup."""
+
+
+async def observe_process_exit(proc: asyncio.subprocess.Process) -> int:
+    """Observe the child's exit independently of inherited pipe disconnection.
+
+    A registered asyncio Process.wait() waiter can remain pending after the
+    child watcher sets returncode, until every inherited pipe is disconnected.
+    Poll the public returncode instead; caller-owned deadlines bound this wait.
+    """
+    while proc.returncode is None:
+        await asyncio.sleep(0.01)
+    return proc.returncode
 
 
 class StreamStalledError(Exception):
@@ -74,7 +90,8 @@ async def readline_with_idle_timeout(
 
 
 async def terminate_process(
-    proc: asyncio.subprocess.Process, timeout: float | None = None
+    proc: asyncio.subprocess.Process, timeout: float | None = None,
+    *, cleanup_timeout_s: float | None = None,
 ) -> None:
     """Shielded, idempotent process-group teardown: SIGTERM, grace, SIGKILL, reap, close.
 
@@ -88,24 +105,41 @@ async def terminate_process(
     calls skip terminate/wait after the child is reaped and safely close pipes.
     """
     grace = TERMINATE_GRACE_S if timeout is None else timeout
+    # A zero grace requests immediate escalation, not zero time to observe
+    # the SIGKILL exit and join the transport.
+    allowance = max(0.1, grace * 2) if cleanup_timeout_s is None else cleanup_timeout_s
     with anyio.CancelScope(shield=True):
-        _kill_process_group(proc, signal.SIGTERM)
-        if proc.returncode is None:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=grace)
-            except asyncio.TimeoutError:
-                # The CLI ignored SIGTERM. SIGKILL the group while it is still
-                # alive so the grandchildren die with it — killing just the
-                # direct child first would orphan them and a later group kill
-                # would fail with EPERM.
+        try:
+            async with asyncio.timeout(allowance):
+                _kill_process_group(proc, signal.SIGTERM)
+                if proc.returncode is None:
+                    try:
+                        proc.terminate()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        async with asyncio.timeout(min(grace, allowance / 2)):
+                            await observe_process_exit(proc)
+                    except TimeoutError:
+                        _kill_process_group(proc, signal.SIGKILL)
+                        try:
+                            proc.kill()
+                        except ProcessLookupError:
+                            pass
+                        # Close inherited pipes before joining: an escaped
+                        # writer must not keep asyncio's exit waiter alive.
+                        _close_process_io(proc)
+                        await observe_process_exit(proc)
                 _kill_process_group(proc, signal.SIGKILL)
-                proc.kill()
+                # Known returncode means asyncio's Process.wait returns
+                # immediately, without depending on inherited pipe EOF.
+                # Keep the ordinary join inside the same absolute bound.
                 await proc.wait()
-            else:
-                # The CLI exited on SIGTERM; reap any surviving grandchildren.
-                _kill_process_group(proc, signal.SIGKILL)
-        _close_process_io(proc)
+        except TimeoutError as exc:
+            raise ProcessCleanupTimeout("process exit/join allowance expired during cleanup") from exc
+        finally:
+            _kill_process_group(proc, signal.SIGKILL)
+            _close_process_io(proc)
 
 
 def _kill_process_group(proc: asyncio.subprocess.Process, sig: int) -> None:

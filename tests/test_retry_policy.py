@@ -9,6 +9,7 @@ import pytest
 
 from daydream.agent import _ToolSupervisorFailure
 from daydream.backends import BackendExecutionInput
+from daydream.backends.codex import CodexError
 from daydream.backends.pi import PiError
 from daydream.config_file import load_file_config
 from daydream.retry_policy import (
@@ -71,6 +72,14 @@ def test_category_only_transient_failure_without_retryable_flag_is_retryable() -
 
     assert decision.failure_class is FailureClass.RATE_LIMIT
     assert decision.retries_allowed is True
+
+
+@pytest.mark.parametrize("category", ["TIMEOUT", "TRANSPORT"])
+def test_explicit_retry_prohibition_beats_transient_category(category: str) -> None:
+    decision = classify_failure(CodexError(
+        "Completed mutating turn could not drain", category=category, retryable=False,
+    ))
+    assert decision.retries_allowed is False
 
 
 def test_derive_retry_summary_ignores_deadline_only_stops() -> None:

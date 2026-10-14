@@ -19,6 +19,7 @@ import anyio
 
 from daydream.backends._subprocess import (
     cancel_processes,
+    observe_process_exit,
     readline_with_idle_timeout,
     terminate_process,
 )
@@ -75,6 +76,8 @@ class CliTransport:
         spawn_pending: Callable[[], None] | None = None,
         spawn_completed: Callable[[], None] | None = None,
         raw_line_received: Callable[[], None] | None = None,
+        stdout_eof: Callable[[], None] | None = None,
+        process_exited: Callable[[int], None] | None = None,
     ) -> None:
         if stdin_mode is StdinMode.PIPE and stdin_data is None:
             raise ValueError("stdin_mode=PIPE requires stdin_data")
@@ -87,6 +90,9 @@ class CliTransport:
         self._spawn_pending = spawn_pending
         self._spawn_completed = spawn_completed
         self._raw_line_received = raw_line_received
+        self._stdout_eof = stdout_eof
+        self._process_exited = process_exited
+        self._exit_task: asyncio.Task[None] | None = None
         # Backend decode policy: codex/pi were strict pre-transport; osprey
         # decoded with errors="replace" and must keep doing so (see the
         # backend's ``decode_errors="replace"`` construction below).
@@ -126,6 +132,8 @@ class CliTransport:
         )
         self._proc = proc
         self.processes.append(proc)
+        if self._process_exited is not None:
+            self._exit_task = asyncio.create_task(self._observe_exit(proc))
         if self._spawn_completed is not None:
             self._spawn_completed()
 
@@ -139,6 +147,11 @@ class CliTransport:
 
         if self._stderr_policy is StderrPolicy.DRAIN_TASK and proc.stderr is not None:
             self._drain_task = asyncio.create_task(self._drain_stderr(proc.stderr))
+
+    async def _observe_exit(self, proc: asyncio.subprocess.Process) -> None:
+        returncode = await observe_process_exit(proc)
+        if self._process_exited is not None:
+            self._process_exited(returncode)
 
     async def _drain_stderr(self, stderr: asyncio.StreamReader) -> None:
         while True:
@@ -183,16 +196,23 @@ class CliTransport:
                 stdout, cli=self._cli, timeout_s=timeout_for_line()
             )
             if not raw:
+                if self._stdout_eof is not None:
+                    self._stdout_eof()
                 return
             if self._raw_line_received is not None:
                 self._raw_line_received()
             yield raw.decode(errors=self._decode_errors).strip()
 
-    async def wait(self) -> int:
+    async def wait(self, *, timeout_s: float | None = None) -> int:
         """Wait for exit; raise TransportExitError carrying any nonzero returncode."""
         if self._proc is None:
             raise RuntimeError("transport not started; call start() first")
-        returncode = await self._proc.wait()
+        if timeout_s is None:
+            returncode = await self._proc.wait()
+        else:
+            async with asyncio.timeout(timeout_s):
+                returncode = await observe_process_exit(self._proc)
+                await self._proc.wait()
         if returncode != 0:
             raise TransportExitError(self._cli, returncode)
         return returncode
@@ -204,10 +224,19 @@ class CliTransport:
             with anyio.CancelScope(shield=True):
                 await asyncio.gather(task, return_exceptions=True)
 
-    async def terminate(self) -> None:
+    async def terminate(self, *, cleanup_timeout_s: float | None = None) -> None:
         """Group-signal, reap, and close pipes; shielded and idempotent."""
         if self._proc is not None:
-            await terminate_process(self._proc)
+            try:
+                await terminate_process(self._proc, cleanup_timeout_s=cleanup_timeout_s)
+            finally:
+                if self._exit_task is not None:
+                    task, self._exit_task = self._exit_task, None
+                    if self._proc.returncode is not None and self._process_exited is not None:
+                        self._process_exited(self._proc.returncode)
+                    task.cancel()
+                    with anyio.CancelScope(shield=True):
+                        await asyncio.gather(task, return_exceptions=True)
 
     @classmethod
     async def cancel_all(cls, transports: list[CliTransport]) -> None:
@@ -229,13 +258,13 @@ class CliTransport:
 PROCESS_EXIT_EXCERPT_MAX_LINES = 10
 
 
-async def reap(transport: CliTransport) -> int | None:
+async def reap(transport: CliTransport, *, timeout_s: float | None = None) -> int | None:
     """Return the actual exit code, suppressing TransportExitError.
 
     Adapters may emit diagnostics/terminal events before checking the code.
     """
     try:
-        await transport.wait()
+        await transport.wait(timeout_s=timeout_s)
     except TransportExitError:
         pass
     return transport.returncode
@@ -258,15 +287,25 @@ def raise_for_exit(
     raise error_type(build_message(returncode), **kwargs)
 
 
-async def teardown(transport: CliTransport, transports: list[CliTransport]) -> None:
+async def teardown(
+    transport: CliTransport, transports: list[CliTransport], *, cleanup_timeout_s: float | None = None,
+) -> None:
     """Shielded, idempotent terminate/drain/remove for a tracked transport.
 
     Osprey invokes this before its finally block as well as during cleanup.
     """
-    await transport.terminate()
-    await transport.drain_finished()
-    if transport in transports:
-        transports.remove(transport)
+    try:
+        if cleanup_timeout_s is None:
+            await transport.terminate()
+            await transport.drain_finished()
+        else:
+            with anyio.CancelScope(shield=True):
+                async with asyncio.timeout(cleanup_timeout_s):
+                    await transport.terminate(cleanup_timeout_s=cleanup_timeout_s)
+                    await transport.drain_finished()
+    finally:
+        if transport in transports:
+            transports.remove(transport)
 
 
 def process_exit_message(*, display: str, returncode: int, lines: list[str]) -> str:

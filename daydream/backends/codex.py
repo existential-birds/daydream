@@ -20,6 +20,7 @@ import threading
 import uuid
 from collections import Counter
 from collections.abc import AsyncGenerator, Iterator, Mapping
+from contextlib import aclosing
 from pathlib import Path
 from typing import Any
 
@@ -39,9 +40,10 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
+    _parsed_positive_float,
     resolve_fanout_concurrency,
 )
-from daydream.backends._subprocess import stream_idle_timeout_s
+from daydream.backends._subprocess import DEFAULT_CODEX_STREAM_IDLE_TIMEOUT_S, StreamStalledError, stream_idle_timeout_s
 from daydream.backends._transport import (
     CliTransport,
     StderrPolicy,
@@ -52,6 +54,7 @@ from daydream.backends._transport import (
     teardown,
     write_temp_json_schema,
 )
+from daydream.backends.lifecycle import CodexPublicEventKind, LifecycleStage, current_backend_lifecycle
 from daydream.pricing import ModelPrice, compute_cost_from_totals, load_user_prices, resolve_prices
 from daydream.trajectory import redact_structured_text
 
@@ -396,9 +399,11 @@ def _parser_diagnostics(
 class CodexError(Exception):
     """Codex failure: category=None for turn.failed, PROCESS_EXIT for a nonzero CLI exit."""
 
-    def __init__(self, message: str, *, category: str | None = None):
+    def __init__(self, message: str, *, category: str | None = None, retryable: bool | None = None):
         super().__init__(message)
         self.category = category
+        if retryable is not None:
+            self.retryable = retryable
 
 
 def _file_change_events(
@@ -493,6 +498,12 @@ class CodexBackend:
         self.model = model
         self.reasoning_effort = reasoning_effort
         self._execution_input = execution_input
+        self._terminal_drain_timeout_s = execution_input.codex_terminal_drain_timeout_s if execution_input else (
+            _parsed_positive_float(os.environ, "DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S", 5.0))
+        self._process_reap_timeout_s = execution_input.codex_process_reap_timeout_s if execution_input else (
+            _parsed_positive_float(os.environ, "DAYDREAM_CODEX_PROCESS_REAP_TIMEOUT_S", 5.0))
+        self._cleanup_timeout_s = execution_input.codex_cleanup_timeout_s if execution_input else (
+            _parsed_positive_float(os.environ, "DAYDREAM_CODEX_CLEANUP_TIMEOUT_S", 10.0))
         if execution_input is not None:
             self.fanout_concurrency = execution_input.fanout_concurrency
             self.retry_policy = execution_input.retry_policy
@@ -507,6 +518,22 @@ class CodexBackend:
         self._checkouts: dict[Path, _SharedCheckout] = {}
 
     async def execute(
+        self, cwd: Path, prompt: str, output_schema: dict[str, Any] | None = None,
+        continuation: ContinuationToken | None = None, agents: dict[str, Any] | None = None,
+        max_turns: int | None = None, read_only: bool = False, persist_session: bool = True,
+        finalization: bool = False,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        """Observe the adapter delivery boundary while preserving invocation-local cleanup."""
+        lifecycle = current_backend_lifecycle()
+        stream = self._execute(cwd, prompt, output_schema, continuation, agents, max_turns,
+                               read_only, persist_session, finalization)
+        async with aclosing(stream):
+            async for event in stream:
+                if lifecycle is not None:
+                    lifecycle.adapter_yield()
+                yield event
+
+    async def _execute(
         self,
         cwd: Path,
         prompt: str,
@@ -564,6 +591,24 @@ class CodexBackend:
         non_json_count = 0
         error_sentinel_count = 0
         _pending_result: ResultEvent | None = None
+        lifecycle = current_backend_lifecycle()
+        idle_timeout_s = self._execution_input.stream_idle_timeout_s if self._execution_input is not None else (
+            stream_idle_timeout_s(default=DEFAULT_CODEX_STREAM_IDLE_TIMEOUT_S))
+        if lifecycle is not None:
+            lifecycle.activate_codex(stream_idle_timeout_s=idle_timeout_s,
+                                    terminal_drain_timeout_s=self._terminal_drain_timeout_s,
+                                    process_reap_timeout_s=self._process_reap_timeout_s,
+                                    cleanup_timeout_s=self._cleanup_timeout_s)
+        terminal_deadline: float | None = None
+        cleaned_up = False
+
+        def _line_timeout() -> float | None:
+            if terminal_deadline is not None:
+                remaining = terminal_deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise StreamStalledError("codex", self._terminal_drain_timeout_s)
+                return remaining
+            return idle_timeout_s
         non_json_lines: list[str] = []  # redacted/capped process-exit excerpts
         unmatched_seq = 0  # monotonic source for orphaned tool-result ids
 
@@ -726,6 +771,8 @@ class CodexBackend:
             if continuation is not None and codex_resume_applied:
                 thread_value = continuation.data.get("thread_id")
                 codex_resume_thread = thread_value if isinstance(thread_value, str) else None
+            if lifecycle is not None:
+                lifecycle.request_prepared()
             yield RequestEvent(
                 prompt=prompt, model_name=model_name, output_schema=output_schema,
                 reasoning_effort=effort,
@@ -754,16 +801,16 @@ class CodexBackend:
                 limit=_CODEX_STDOUT_LIMIT_BYTES,
                 env=child_env,
                 cwd=str(execution_cwd) if execution_cwd != cwd else None,
+                spawn_pending=lifecycle.spawn_pending if lifecycle is not None else None,
+                spawn_completed=lifecycle.spawn_completed if lifecycle is not None else None,
+                raw_line_received=lifecycle.raw_line_received if lifecycle is not None else None,
+                stdout_eof=lifecycle.stdout_eof if lifecycle is not None else None,
+                process_exited=lifecycle.process_exited if lifecycle is not None else None,
             )
             self._transports.append(transport)
             await transport.start()
 
-            idle_timeout_s = (
-                self._execution_input.stream_idle_timeout_s
-                if self._execution_input is not None
-                else stream_idle_timeout_s()
-            )
-            async for raw_line in transport.lines(lambda: idle_timeout_s):
+            async for raw_line in transport.lines(_line_timeout):
                 try:
                     event = json.loads(raw_line)
                 except json.JSONDecodeError:
@@ -790,6 +837,15 @@ class CodexBackend:
                     for diagnostic in _take_early_diagnostics():
                         yield diagnostic
                     continue
+
+                if lifecycle is not None:
+                    kinds: dict[str, CodexPublicEventKind] = {
+                        "thread.started": "thread_started", "turn.started": "turn_started",
+                        "item.started": "item_started", "item.updated": "item_updated",
+                        "item.completed": "item_completed", "turn.completed": "turn_completed",
+                        "turn.failed": "turn_failed", "error": "error",
+                    }
+                    lifecycle.native_event(kinds.get(event_type, "unknown"))
 
                 if event_type in ("item.started", "item.updated", "item.completed"):
                     item = event.get("item", {})
@@ -950,6 +1006,13 @@ class CodexBackend:
                         )
 
                 elif event_type == "turn.completed":
+                    # Establish the absolute tail allowance before yielding
+                    # metrics: downstream suspension and terminal chatter
+                    # cannot restart the completion clock.
+                    if terminal_deadline is None:
+                        terminal_deadline = asyncio.get_running_loop().time() + self._terminal_drain_timeout_s
+                        if lifecycle is not None:
+                            lifecycle.terminal_received()
                     usage = event.get("usage", {})
                     if not isinstance(usage, dict):
                         malformed_shapes["usage_not_object"] += 1
@@ -1058,7 +1121,13 @@ class CodexBackend:
             # Reap the child, then surface its final diagnostics before the
             # shared exit check formats the backend-specific message from the
             # code and captured diagnostics.
-            returncode = await reap(transport)
+            try:
+                returncode = await reap(transport, timeout_s=self._process_reap_timeout_s)
+            except TimeoutError as exc:
+                if lifecycle is not None:
+                    lifecycle.expiry("process_reap")
+                raise CodexError("Codex process_reap allowance expired before actual child exit",
+                                 category="TIMEOUT", retryable=terminal_deadline is None) from exc
 
             for diagnostic in _take_final_diagnostics():
                 yield diagnostic
@@ -1073,20 +1142,68 @@ class CodexBackend:
                 category="PROCESS_EXIT",
                 build_message=lambda rc: process_exit_message(display="Codex", returncode=rc, lines=non_json_lines),
             )
+            if _pending_result is None or returncode != 0:
+                raise CodexError("Codex exited without valid public turn.completed and observed zero exit",
+                                 category="TRANSPORT")
+            # Completion is delivered only after actual zero exit and bounded
+            # cleanup; cleanup cannot manufacture a successful turn.
+            if lifecycle is not None:
+                lifecycle.teardown_started()
+            try:
+                await teardown(transport, self._transports, cleanup_timeout_s=self._cleanup_timeout_s)
+            except TimeoutError as exc:
+                if lifecycle is not None:
+                    lifecycle.expiry("cleanup")
+                raise CodexError("Codex cleanup allowance expired", category="TIMEOUT", retryable=False) from exc
+            finally:
+                cleaned_up = True
+            if lifecycle is not None:
+                lifecycle.teardown_completed()
             if _pending_result is not None:
                 yield _pending_result
 
+        except StreamStalledError as exc:
+            stage: LifecycleStage = "terminal_drain" if terminal_deadline is not None else "preterminal_stream"
+            if lifecycle is not None:
+                lifecycle.expiry(stage)
+            if terminal_deadline is not None:
+                raise CodexError("Codex terminal_drain allowance expired before stdout EOF",
+                                 category="TIMEOUT", retryable=False) from exc
+            raise
         finally:
-            if transport is not None:
-                await teardown(transport, self._transports)
+            primary = sys.exception()
+            cleanup_error: CodexError | None = None
+            if transport is not None and not cleaned_up:
+                if lifecycle is not None:
+                    lifecycle.teardown_started()
+                try:
+                    await teardown(transport, self._transports, cleanup_timeout_s=self._cleanup_timeout_s)
+                except TimeoutError as exc:
+                    if lifecycle is not None:
+                        lifecycle.expiry("cleanup")
+                    if primary is None:
+                        cleanup_error = CodexError(
+                            "Codex cleanup allowance expired", category="TIMEOUT", retryable=False)
+                        cleanup_error.__cause__ = exc
+                else:
+                    if lifecycle is not None:
+                        lifecycle.teardown_completed()
             if schema_path:
-                Path(schema_path).unlink(missing_ok=True)
+                try:
+                    Path(schema_path).unlink(missing_ok=True)
+                except OSError as exc:
+                    if primary is None and cleanup_error is None:
+                        cleanup_error = CodexError("Codex temporary schema cleanup failed",
+                                                   category="TRANSPORT", retryable=False)
+                        cleanup_error.__cause__ = exc
             if shared_checkout is not None:
                 async with self._checkout_lock:
                     shared_checkout.refs -= 1
                     if shared_checkout.refs <= 0:
                         self._checkouts.pop(shared_checkout.cwd, None)
                         shared_checkout.temp_dir.cleanup()
+            if cleanup_error is not None:
+                raise cleanup_error
 
     async def cancel(self) -> None:
         """Terminate and reap every active Codex transport."""

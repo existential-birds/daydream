@@ -169,11 +169,20 @@ transformations. Adding a backend means producing that stream correctly — phas
 recorder are backend-agnostic. `Diagnostic` is recorder-only parser/transport evidence: the recorder
 normalizes and redacts it into JSON-safe `Step.extra.backend_diagnostics`, while observability exports
 only scrubbed diagnostic codes and counts on the enclosing attempt span.
-Pi startup and interrupted native progress use a separate typed, content-free attempt collector.
+Pi startup/native progress and Codex stream/process boundaries use a typed, content-free attempt collector.
 The runner freezes its host-monotonic observations synchronously after stream cleanup and before
 invocation/span finalization. Trajectory invocation summaries retain `backend_lifecycle`; existing
 attempt spans export its fixed scalar fields as `daydream.backend_lifecycle.*`. This evidence does
-not change deadlines, idle windows, retries, native generation completion, or billing ownership.
+not own deadlines, idle windows, retries, native generation completion, or billing ownership.
+Codex success requires public `turn.completed`, stdout EOF, and an independently observed zero
+exit. Its preterminal silence window defaults to 600 seconds (`DAYDREAM_STREAM_IDLE_TIMEOUT_S`,
+zero disables only silence detection). Absolute terminal drain, EOF-to-exit reap, and cleanup
+allowances default to 5/5/10 seconds; positive finite `DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S`,
+`DAYDREAM_CODEX_PROCESS_REAP_TIMEOUT_S`, and `DAYDREAM_CODEX_CLEANUP_TIMEOUT_S` override them.
+Frozen `BackendExecutionInput` owns these settings when supplied. Completion timing begins
+before metric/cost yields and repeated terminal events cannot extend it. Postterminal expiry
+prohibits automatic replay of a potentially completed mutating turn. Attempt cancellation closes
+only its own stream; backend-wide cancellation belongs to run shutdown.
 Adapters emit assistant text and genuine transport/native payloads; `agent_output.py` owns final-turn selection
 and validation. Staged contract 10 accepts bounded, complete, unambiguous prose/fence/single-wrapper packaging;
 `ReviewInvestigation._admit` owns domain admission before result presentation. Native lifecycle stays in adapters,

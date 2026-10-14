@@ -478,3 +478,27 @@ HoneyHive's documented JSON ack (`{"success": true}`) is recorded as
 Operator note: `LANGSMITH_WORKSPACE_ID` must be the LangSmith *workspace*
 id — a project id yields HTTP 403 because it is forwarded as
 `x-tenant-id`.
+
+### Codex lifecycle evidence
+
+Codex attempt summaries retain bounded `backend_lifecycle` scalars and attempt spans export
+an explicit allowlist under `daydream.backend_lifecycle.*`. Milestones cover request/spawn,
+raw line reads, recognized public event kinds, adapter yields, consumer demand/delivery,
+recorder observation, public terminal receipt, stdout EOF, independently observed direct-child
+exit (including zero and signed return codes), and teardown. The first expiry stage is one of
+`preterminal_stream`, `terminal_drain`, `process_reap`, or `cleanup`; `cleanup_expired` preserves
+secondary cleanup expiry without overwriting the primary stage. Missing milestones stay absent.
+
+Raw reads are labelled `pull_driven`: no read callback means no completed host read, not that
+OS/asyncio buffers were empty. An independent sampler counts loop progress and maximum observed
+lag while consumers await other work. It cannot observe a blocked event loop until it resumes.
+Direct-child exit is observed separately from pipe EOF so descendant-held stdout is visible.
+The sampler joins after bounded cleanup and evidence freezes before invocation/span finalization.
+The schema accepts no payloads, commands, arguments, credentials, environment, identifiers, or paths.
+It creates no generation, tool, usage, or billing evidence.
+
+These repairs bound reproduced public stream/process stalls. They do not establish why the
+October 5 three-worker incident lost later public evidence. A deliberately suspended host consumer
+can produce a similar pattern; no spontaneous suspension was demonstrated. Private `task_complete`
+is not public `turn.completed`, and generic-tool omission alone does not demonstrate a stall.
+The precise historical cause remains unresolved; the retained milestones support diagnosis on recurrence.

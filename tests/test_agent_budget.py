@@ -306,19 +306,24 @@ async def test_aborting_invocation_does_not_cancel_shared_backend_sibling(tmp_pa
     }
     assert backend.cancel_calls == 0
 
-async def test_run_agent_cancellation_awaits_backend_cancel(tmp_path: Path) -> None:
+async def test_run_agent_cancellation_closes_only_its_invocation(tmp_path: Path) -> None:
     entered = asyncio.Event()
+    closed = asyncio.Event()
     async def stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[AgentEvent]:
-        entered.set()
-        yield TextEvent(text="started")
-        await asyncio.sleep(3600)
+        try:
+            entered.set()
+            yield TextEvent(text="started")
+            await asyncio.sleep(3600)
+        finally:
+            closed.set()
     backend = ScriptedBackend(responder=stream, model="mock-model")
     task = asyncio.create_task(run_agent(backend, tmp_path, "hi", phase=DaydreamPhase.REVIEW))
     await entered.wait()  # run_agent is inside the invocation
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert backend.cancel_calls == 1
+    assert closed.is_set()
+    assert backend.cancel_calls == 0
 
 async def test_retry_recovery_allowance_ends_the_ladder_without_dispatching_again(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

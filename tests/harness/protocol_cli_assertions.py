@@ -10,13 +10,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from pathlib import Path
-from typing import Any, Literal
-from unittest.mock import AsyncMock, MagicMock
+from typing import Any, Literal, cast
 
 from daydream.backends import ResultEvent, TextEvent
 from daydream.backends._transport import CliTransport
 from daydream.backends.osprey import OspreyBackend
 from daydream.backends.pi import PiBackend
+from tests.harness.fake_cli_process import FakeCliProcess
 
 
 def assert_protocol_cli_invariants(fixture: Any, target: Path, prompt: str, events: list[Any], backend: Any
@@ -39,8 +39,8 @@ def assert_protocol_cli_invariants(fixture: Any, target: Path, prompt: str, even
     return observation
 
 
-def make_cancel_probe(kind: Literal["pi", "osprey"]) -> tuple[Any, MagicMock]:
-    """A backend with one tracked transport whose process times out then reaps."""
+def make_cancel_probe(kind: Literal["pi", "osprey"]) -> tuple[Any, FakeCliProcess]:
+    """A backend whose tracked child ignores TERM and reports actual exit on KILL."""
     backend: Any
     if kind == "pi":
         backend = PiBackend(model="glm-5.2")
@@ -48,11 +48,7 @@ def make_cancel_probe(kind: Literal["pi", "osprey"]) -> tuple[Any, MagicMock]:
     else:
         backend = OspreyBackend(osprey_binary="fake")
         transport = CliTransport("osprey", ["osprey", "agent"], limit=1024)
-    proc = MagicMock()
-    proc.returncode = None
-    proc.wait = AsyncMock(side_effect=[asyncio.TimeoutError(), 0])
-    proc.terminate = MagicMock()
-    proc.kill = MagicMock()
-    transport.processes.append(proc)
+    proc = FakeCliProcess([], hang=True, ignore_sigterm=True)
+    transport.processes.append(cast(asyncio.subprocess.Process, proc))
     backend._transports = [transport]
     return backend, proc

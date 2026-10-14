@@ -6,6 +6,7 @@ use ``deep.orchestrator.run_deep``. ``improve`` opens a read-only audit workspac
 other registered flow names use the custom-flow preamble.
 """
 
+import asyncio
 import os
 import sys
 import uuid
@@ -38,6 +39,7 @@ from daydream.backends import (
     create_backend,
 )
 from daydream.config import (
+    BUDGET_CLEANUP_GRACE_S,
     DEEP_PHASE_DEFAULT_EFFORT,
     EFFORT_TIERS,
     REVIEW_OUTPUT_FILE,
@@ -293,20 +295,19 @@ async def run(
         if hub_repo:
             config = replace(config, dataset_capture=True, trajectory_hub_repo=hub_repo)
 
-    backend_factory: BackendFactory | None = None
-    if execution is not None:
-        backend_execution = execution.backend
+    run_backends: list[Backend] = []
 
-        def create_for_context(
-            flow_config: RunConfig, phase: str, cache: BackendCache,
-            cwd: Path, audit: AuditWorkspace | None,
-        ) -> Backend:
-            return _resolve_backend(
-                flow_config, phase, cache, cwd=cwd, audit_workspace=audit,
-                execution_input=backend_execution,
-            )
-
-        backend_factory = create_for_context
+    def create_for_context(
+        flow_config: RunConfig, phase: str, cache: BackendCache,
+        cwd: Path, audit: AuditWorkspace | None,
+    ) -> Backend:
+        backend = _resolve_backend(
+            flow_config, phase, cache, cwd=cwd, audit_workspace=audit,
+            execution_input=None if execution is None else execution.backend,
+        )
+        if not any(existing is backend for existing in run_backends):
+            run_backends.append(backend)
+        return backend
 
     # Codex backends need shell output visible (the commands ARE the signal), so
     # disable quiet when any phase resolves to codex. Done before backend construction.
@@ -325,12 +326,24 @@ async def run(
         log_mode=config.log_mode,
     ))
     with bind_run_context(run_context):
-        return await _run_with_context(
-            config, private_roots=private_roots, run_context=run_context,
-            backend_factory=backend_factory,
-            backend_execution=None if execution is None else execution.backend,
-            github_execution=None if execution is None else execution.github,
-        )
+        try:
+            return await _run_with_context(
+                config, private_roots=private_roots, run_context=run_context,
+                backend_factory=create_for_context,
+                backend_execution=None if execution is None else execution.backend,
+                github_execution=None if execution is None else execution.github,
+            )
+        except anyio.get_cancelled_exc_class():
+            # Only the run owner may cancel every invocation of a shared backend.
+            # Individual attempts already close their own streams during unwind.
+            async def cancel_backend(backend: Backend) -> None:
+                # Defer lookup/call into the task as well: an extension's broken
+                # cancel implementation must not replace the run cancellation.
+                await backend.cancel()
+
+            with anyio.move_on_after(BUDGET_CLEANUP_GRACE_S, shield=True):
+                await asyncio.gather(*(cancel_backend(backend) for backend in run_backends), return_exceptions=True)
+            raise
 
 
 async def _run_with_context(

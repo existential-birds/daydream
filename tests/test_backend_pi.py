@@ -452,11 +452,12 @@ async def test_agent_end_always_finalizes_when_stream_ends_without_it() -> None:
     assert cont is not None
     assert cont.data["session_id"] == "pi_ses_truncated"
 
-async def test_cancel_terminates_then_kills() -> None:
+async def test_cancel_terminates_then_kills(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("daydream.backends._subprocess.TERMINATE_GRACE_S", 0.0)
     backend, proc = make_cancel_probe("pi")
     await backend.cancel()
-    proc.terminate.assert_called_once()
-    proc.kill.assert_called_once()
+    assert proc.terminate_calls == 1 and proc.kill_calls == 1
+    assert proc.returncode == -9 and proc.reaped
 
 async def test_cancel_no_op_when_no_processes() -> None:
     backend = PiBackend(model="glm-5.2")

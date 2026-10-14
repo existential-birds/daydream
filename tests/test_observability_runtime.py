@@ -1086,3 +1086,31 @@ async def test_actual_nested_agent_scope_is_subagent_siblings_are_not() -> None:
     assert by_path["daydream.agent.parent"]["daydream.agent.role"] == "root"
     assert by_path["daydream.agent.child"]["daydream.agent.role"] == "subagent"
     assert by_path["daydream.agent.sibling"]["daydream.agent.role"] == "root"
+
+
+@pytest.mark.parametrize("returncode", [0, -9])
+async def test_codex_lifecycle_export_retains_exit_without_creating_usage(returncode: int) -> None:
+    from daydream.backends.lifecycle import BackendLifecycleSnapshot
+
+    exporter, registry = _memory_tracing()
+    snapshot = BackendLifecycleSnapshot(
+        attempt=1, backend="codex", last_native_event_kind="turn_completed", terminal_received_s=0.0,
+        process_exit_s=0.1, process_returncode=returncode, expiry_stage="terminal_drain",
+        teardown_started_s=0.2, teardown_completed_s=0.3, loop_sample_count=4, loop_max_lag_s=0.01,
+    )
+    async with trace_run(
+        ObservabilityConfig(destinations=("memory",), capture_content=False), registry, flow="review",
+    ):
+        with agent_scope("review", backend="codex"):
+            async with attempt_scope(1) as attempt:
+                attempt.record_backend_lifecycle(snapshot)
+                attempt.abort("backend_error")
+    span = next(span for span in exporter.get_finished_spans()
+                if (span.attributes or {}).get("daydream.span.kind") == "attempt")
+    attrs = dict(span.attributes or {})
+    assert attrs["daydream.backend_lifecycle.process_returncode"] == returncode
+    assert attrs["daydream.backend_lifecycle.terminal_received_s"] == 0.0
+    assert attrs["daydream.backend_lifecycle.expiry_stage"] == "terminal_drain"
+    assert attrs["daydream.backend_lifecycle.loop_sample_count"] == 4
+    assert "daydream.backend_lifecycle.stdout_eof_s" not in attrs
+    assert not any(key.startswith("gen_ai.usage.") for key in attrs)

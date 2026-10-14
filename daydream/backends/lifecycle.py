@@ -1,4 +1,4 @@
-"""Bounded host observations for one Pi attempt, independent of streamed output.
+"""Bounded host observations for one CLI attempt, independent of streamed output.
 
 The runner owns the absolute deadline and freezes this collector synchronously
 before recorder/span finalization. No native payload or identifier is accepted.
@@ -8,15 +8,23 @@ timestamps. Observing activity never changes timeout or retry decisions.
 
 from __future__ import annotations
 
+import asyncio
 import math
 from contextvars import ContextVar, Token
 from dataclasses import asdict, dataclass, fields, replace
 from typing import Any, Literal
 
+import anyio
+
 from daydream import clock
 
 _MAX_COUNT = 2_147_483_647
 LifecycleState = Literal["preparation", "prepared", "spawn_pending", "launched", "native_event", "generating"]
+LifecycleStage = Literal["preterminal_stream", "terminal_drain", "process_reap", "cleanup"]
+CodexPublicEventKind = Literal[
+    "thread_started", "turn_started", "item_started", "item_updated", "item_completed",
+    "turn_completed", "turn_failed", "error", "unknown",
+]
 ProgressKind = Literal["text", "thinking", "toolcall", "tool"]
 
 
@@ -25,7 +33,7 @@ class BackendLifecycleSnapshot:
     """Closed, content-free attempt evidence; absent observations remain None."""
 
     attempt: int
-    backend: Literal["pi"] = "pi"
+    backend: Literal["pi", "codex"] = "pi"
     timestamp_source: Literal["host_observed"] = "host_observed"
     clock: Literal["monotonic_elapsed"] = "monotonic_elapsed"
     state: LifecycleState = "preparation"
@@ -53,16 +61,54 @@ class BackendLifecycleSnapshot:
     active_tool_count: int = 0
     generation_open: bool = False
 
+    read_observation: Literal["pull_driven"] = "pull_driven"
+    stream_idle_timeout_s: float | None = None
+    terminal_drain_timeout_s: float | None = None
+    process_reap_timeout_s: float | None = None
+    cleanup_timeout_s: float | None = None
+    last_raw_line_s: float | None = None
+    last_native_event_s: float | None = None
+    last_native_event_kind: CodexPublicEventKind | None = None
+    terminal_received_s: float | None = None
+    stdout_eof_s: float | None = None
+    process_exit_s: float | None = None
+    process_returncode: int | None = None
+    teardown_started_s: float | None = None
+    teardown_completed_s: float | None = None
+    expiry_stage: LifecycleStage | None = None
+    cleanup_expired: bool = False
+    adapter_yield_count: int = 0
+    last_adapter_yield_s: float | None = None
+    consumer_request_count: int = 0
+    consumer_event_count: int = 0
+    last_consumer_request_s: float | None = None
+    last_consumer_event_s: float | None = None
+    recorder_event_count: int = 0
+    last_recorder_event_s: float | None = None
+    loop_sample_count: int = 0
+    last_loop_sample_s: float | None = None
+    loop_max_lag_s: float = 0.0
+
     def __post_init__(self) -> None:
         allowed_strings = {
-            "backend": {"pi"}, "timestamp_source": {"host_observed"}, "clock": {"monotonic_elapsed"},
+            "backend": {"pi", "codex"}, "read_observation": {"pull_driven"},
+            "timestamp_source": {"host_observed"}, "clock": {"monotonic_elapsed"},
             "state": {"preparation", "prepared", "spawn_pending", "launched", "native_event", "generating"},
+        }
+        optional_enums = {
+            "last_native_event_kind": {"thread_started", "turn_started", "item_started", "item_updated",
+                                       "item_completed", "turn_completed", "turn_failed", "error", "unknown"},
+            "expiry_stage": {"preterminal_stream", "terminal_drain", "process_reap", "cleanup"},
         }
         for field in fields(self):
             value = getattr(self, field.name)
             if field.name in allowed_strings:
                 valid = type(value) is str and value in allowed_strings[field.name]
-            elif field.name in {"idle_detection_enabled", "generation_open"}:
+            elif field.name in optional_enums:
+                valid = value is None or (type(value) is str and value in optional_enums[field.name])
+            elif field.name == "process_returncode":
+                valid = value is None or (type(value) is int and -_MAX_COUNT <= value <= _MAX_COUNT)
+            elif field.name in {"idle_detection_enabled", "generation_open", "cleanup_expired"}:
                 valid = type(value) is bool
             elif field.name == "attempt" or field.name.endswith("_count"):
                 valid = type(value) is int and (1 if field.name == "attempt" else 0) <= value <= _MAX_COUNT
@@ -86,6 +132,7 @@ class BackendLifecycleCollector:
         self._snapshot = BackendLifecycleSnapshot(attempt=attempt, wall_allowance_s=wall_allowance_s)
         self._active = False
         self._finalized = False
+        self._sampler: asyncio.Task[None] | None = None
 
     def bind(self) -> Token[BackendLifecycleCollector | None]:
         """Bind this attempt only; concurrent invocations inherit separate collectors."""
@@ -96,7 +143,8 @@ class BackendLifecycleCollector:
         _CURRENT.reset(token)
 
     def _elapsed(self) -> float:
-        return max(0.0, clock.monotonic() - self._started_at)
+        elapsed = clock.monotonic() - self._started_at
+        return max(0.0, elapsed) if math.isfinite(elapsed) else self._snapshot.elapsed_s
 
     def _update(self, **values: Any) -> None:
         # dataclasses.replace has heterogeneous keyword types; the snapshot
@@ -115,6 +163,78 @@ class BackendLifecycleCollector:
                      tool_idle_timeout_s=tool_idle_timeout_s or 0.0,
                      idle_detection_enabled=bool(response_idle_timeout_s))
 
+    def activate_codex(self, *, stream_idle_timeout_s: float | None, terminal_drain_timeout_s: float,
+                       process_reap_timeout_s: float, cleanup_timeout_s: float) -> None:
+        """Observe effective runtime policy without owning or extending its deadlines."""
+        self._active = True
+        self._update(backend="codex", stream_idle_timeout_s=stream_idle_timeout_s,
+                     idle_detection_enabled=bool(stream_idle_timeout_s),
+                     terminal_drain_timeout_s=terminal_drain_timeout_s,
+                     process_reap_timeout_s=process_reap_timeout_s, cleanup_timeout_s=cleanup_timeout_s)
+        if self._sampler is None and not self._finalized:
+            self._sampler = asyncio.create_task(self._sample_loop())
+
+    async def _sample_loop(self) -> None:
+        # Runs even when the stream consumer is suspended at a yield. A blocked
+        # event loop is observable only after it resumes; this is not an OS probe.
+        interval = 0.05
+        loop = asyncio.get_running_loop()
+        expected = loop.time() + interval
+        while True:
+            await asyncio.sleep(max(0.0, expected - loop.time()))
+            lag = max(0.0, loop.time() - expected)
+            self._update(loop_sample_count=self._increment("loop_sample_count"),
+                         last_loop_sample_s=self._elapsed(),
+                         loop_max_lag_s=max(self._snapshot.loop_max_lag_s, lag))
+            expected = loop.time() + interval
+
+    async def stop_sampling(self) -> None:
+        """Join the attempt's sampler before synchronously freezing evidence."""
+        if self._sampler is not None:
+            task, self._sampler = self._sampler, None
+            task.cancel()
+            with anyio.CancelScope(shield=True):
+                await asyncio.gather(task, return_exceptions=True)
+
+    def _observe_boundary(self, count: str, timestamp: str) -> None:
+        self._update(**{count: self._increment(count), timestamp: self._elapsed()})
+
+    def adapter_yield(self) -> None:
+        self._observe_boundary("adapter_yield_count", "last_adapter_yield_s")
+
+    def consumer_requested(self) -> None:
+        self._observe_boundary("consumer_request_count", "last_consumer_request_s")
+
+    def consumer_event(self) -> None:
+        self._observe_boundary("consumer_event_count", "last_consumer_event_s")
+
+    def recorder_event(self) -> None:
+        self._observe_boundary("recorder_event_count", "last_recorder_event_s")
+
+    def terminal_received(self) -> None:
+        if self._snapshot.terminal_received_s is None:
+            self._update(terminal_received_s=self._elapsed())
+
+    def stdout_eof(self) -> None:
+        if self._snapshot.stdout_eof_s is None:
+            self._update(stdout_eof_s=self._elapsed())
+
+    def process_exited(self, returncode: int) -> None:
+        if self._snapshot.process_exit_s is None:
+            self._update(process_exit_s=self._elapsed(), process_returncode=returncode)
+
+    def teardown_started(self) -> None:
+        if self._snapshot.teardown_started_s is None:
+            self._update(teardown_started_s=self._elapsed())
+
+    def teardown_completed(self) -> None:
+        if self._snapshot.teardown_completed_s is None:
+            self._update(teardown_completed_s=self._elapsed())
+
+    def expiry(self, stage: LifecycleStage) -> None:
+        self._update(expiry_stage=self._snapshot.expiry_stage or stage,
+                     cleanup_expired=self._snapshot.cleanup_expired or stage == "cleanup")
+
     def request_prepared(self) -> None:
         self._update(state="prepared", request_prepared_s=self._elapsed())
 
@@ -125,12 +245,13 @@ class BackendLifecycleCollector:
         self._update(state="launched", spawn_completed_s=self._elapsed())
 
     def raw_line_received(self) -> None:
-        self._update(raw_line_count=self._increment("raw_line_count"),
+        self._update(raw_line_count=self._increment("raw_line_count"), last_raw_line_s=self._elapsed(),
                      first_raw_line_s=self._snapshot.first_raw_line_s
                      if self._snapshot.first_raw_line_s is not None else self._elapsed())
 
-    def native_event(self) -> None:
+    def native_event(self, kind: CodexPublicEventKind | None = None) -> None:
         self._update(native_event_count=self._increment("native_event_count"),
+                     last_native_event_s=self._elapsed(), last_native_event_kind=kind,
                      state="generating" if self._snapshot.generation_open else "native_event",
                      first_native_event_s=self._snapshot.first_native_event_s
                      if self._snapshot.first_native_event_s is not None else self._elapsed())

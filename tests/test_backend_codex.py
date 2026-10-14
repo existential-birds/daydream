@@ -884,6 +884,7 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
             '{"type":"item.completed","item":{"type":"agent_message","text":"first"}}',
             '{"type":"turn.completed","usage":{}}',
         ],
+        second_lines=['{"type":"turn.completed","usage":{}}'],
     )
 
 class TestUnwrapShellCommand:
