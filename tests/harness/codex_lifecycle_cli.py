@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 LifecycleMode = Literal[
     "healthy", "terminal_open_stdout", "terminal_eof_live_child", "descendant_stdout",
-    "nonzero_exit", "preterminal_silence", "repeated_terminal",
+    "nonzero_exit", "preterminal_silence", "repeated_terminal", "unfinished_next_turn",
 ]
 _FIXTURE_CONFIG: dict[str, Any] = globals().get("_FIXTURE_CONFIG", {})
 FIX_MARKER = "\n# synthetic lifecycle fix\n"
@@ -193,7 +193,10 @@ def _run() -> int:
         _block("terminal", mode=mode, file=file)
     else:
         _observe("terminal", mode=mode, file=file)
-    if mode == "descendant_stdout":
+    if mode == "unfinished_next_turn":
+        _emit({"type": "turn.started"})
+        _observe("unfinished_turn_exit", mode=mode, file=file)
+    elif mode == "descendant_stdout":
         descendant = subprocess.Popen([sys.executable, __file__, "--fixture-descendant"])
         deadline = time.monotonic() + 5
         ready = Path(_FIXTURE_CONFIG["root"]) / "observations" / f"{descendant.pid}.json"

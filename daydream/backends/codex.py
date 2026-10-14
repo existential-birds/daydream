@@ -1153,9 +1153,10 @@ class CodexBackend:
                 category="PROCESS_EXIT",
                 build_message=lambda rc: process_exit_message(display="Codex", returncode=rc, lines=non_json_lines),
             )
-            if _pending_result is None or returncode != 0:
-                raise CodexError("Codex exited without valid public turn.completed and observed zero exit",
-                                 category="TRANSPORT")
+            if _pending_result is None or not current_turn_completed or returncode != 0:
+                raise CodexError(
+                    "Codex exited without valid public turn.completed or observed zero exit for its latest turn",
+                    category="TRANSPORT", retryable=False if terminal_deadline is not None else None)
             # Completion is delivered only after actual zero exit and bounded
             # cleanup; cleanup cannot manufacture a successful turn.
             if lifecycle is not None:

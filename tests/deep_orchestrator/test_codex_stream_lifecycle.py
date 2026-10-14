@@ -24,12 +24,16 @@ from tests.harness.trajectory import make_recorder, read_trajectory, root_trajec
 from tests.test_deep_orchestrator import MakeConfig, _silence
 
 
-@pytest.mark.parametrize("drain_mode", ["terminal_open_stdout", "descendant_stdout"])
+@pytest.mark.parametrize("worker_mode,expected_failure", [
+    ("terminal_open_stdout", "terminal_drain"),
+    ("descendant_stdout", "terminal_drain"),
+    ("unfinished_next_turn", "without valid public turn.completed"),
+])
 async def test_run_isolates_three_codex_fixers_and_retains_terminal_evidence(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-    drain_mode: LifecycleMode,
+    worker_mode: LifecycleMode, expected_failure: str,
 ) -> None:
-    """A real drain/reap stall restores its group and cannot discard healthy edits.
+    """A stalled or unfinished turn restores its group and preserves healthy edits.
 
     The executable barrier requires all three fix processes to be live before
     any answers complete. The actual runner factory creates one cached backend.
@@ -37,7 +41,7 @@ async def test_run_isolates_three_codex_fixers_and_retains_terminal_evidence(
     target = multi_stack_target
     _silence(monkeypatch)
     fixture = install_codex_lifecycle_cli(tmp_path / "codex", fix_modes={
-        "App.tsx": "healthy", "api.py": drain_mode, "README.md": "terminal_eof_live_child",
+        "App.tsx": "healthy", "api.py": worker_mode, "README.md": "terminal_eof_live_child",
     })
     monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S", "0.2")
@@ -68,7 +72,7 @@ async def test_run_isolates_three_codex_fixers_and_retains_terminal_evidence(
     assert (target / "README.md").read_bytes() == before["README.md"]
     failures = json.loads((target / ".daydream/deep/fix-failures.json").read_text())
     assert set(failures) == {"api.py", "README.md"}
-    assert "terminal_drain" in failures["api.py"]
+    assert expected_failure in failures["api.py"]
     assert "process_reap" in failures["README.md"]
     assert all("wall_budget" not in reason for reason in failures.values())
     observations = [row for row in fixture.observations() if row["file"]]
@@ -101,11 +105,15 @@ async def test_run_isolates_three_codex_fixers_and_retains_terminal_evidence(
             assert lifecycle["process_returncode"] == 0
             assert lifecycle["expiry_stage"] is None
             assert "failed" not in invocations[0].get("status", "")
+        elif file == "api.py" and worker_mode == "unfinished_next_turn":
+            assert lifecycle["expiry_stage"] is None
+            assert lifecycle["stdout_eof_s"] is not None
+            assert lifecycle["last_native_event_kind"] == "turn_started"
         else:
             assert lifecycle["expiry_stage"] == ("terminal_drain" if file == "api.py" else "process_reap")
         if file == "README.md":
             assert lifecycle["stdout_eof_s"] is not None
-        if file == "api.py" and drain_mode == "descendant_stdout":
+        if file == "api.py" and worker_mode in ("descendant_stdout", "unfinished_next_turn"):
             assert lifecycle["process_returncode"] == 0
             assert lifecycle["process_exit_s"] is not None
     for row in observations:

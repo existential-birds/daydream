@@ -11,6 +11,7 @@ from daydream.agent import run_agent
 from daydream.backends import AgentEvent, BackendExecutionInput, CostEvent, MetricsEvent, ResultEvent, TextEvent
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.codex import CodexBackend, CodexError
+from daydream.backends.lifecycle import BackendLifecycleCollector
 from daydream.trajectory import DaydreamPhase
 from tests.harness.codex_lifecycle_cli import LifecycleMode, install_codex_lifecycle_cli
 from tests.harness.processes import wait_for_process_group_gone
@@ -195,5 +196,39 @@ async def test_codex_cleanup_expiry_preserves_primary_drain_error_and_recorded_e
     agent_steps = [step for step in trajectory["steps"] if step["source"] == "agent"]
     assert any("Synthetic lifecycle response" in step.get("message", "") for step in agent_steps)
     assert any(step.get("metrics", {}).get("prompt_tokens") == 10 for step in agent_steps)
+    for observation in fixture.observations():
+        await wait_for_process_group_gone(observation["pid"], timeout_s=5)
+
+
+async def test_codex_incomplete_latest_turn_cannot_reuse_prior_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Zero exit cannot complete a reopened public turn using an earlier turn's result."""
+    fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode="unfinished_next_turn")
+    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
+    lifecycle = BackendLifecycleCollector(attempt=1, started_at=asyncio.get_running_loop().time(),
+                                          wall_allowance_s=None, deadline=None)
+    token = lifecycle.bind()
+    seen: list[AgentEvent] = []
+    try:
+        async with asyncio.timeout(3):
+            with pytest.raises(CodexError) as failure:
+                async for event in CodexBackend(model="fixture-model").execute(tmp_path, "synthetic lifecycle request"):
+                    seen.append(event)
+    finally:
+        await lifecycle.stop_sampling()
+        snapshot = lifecycle.finalize()
+        lifecycle.reset(token)
+    assert failure.value.category == "TRANSPORT" and failure.value.retryable is False
+    assert not any(isinstance(event, ResultEvent) for event in seen)
+    assert any(isinstance(event, TextEvent) and "Synthetic lifecycle response" in event.text for event in seen)
+    metrics = [event for event in seen if isinstance(event, MetricsEvent)]
+    costs = [event for event in seen if isinstance(event, CostEvent)]
+    assert len(metrics) == 1 and metrics[0].prompt_tokens == 10 and metrics[0].completion_tokens == 5
+    assert len(costs) == 1 and costs[0].input_tokens == 10 and costs[0].output_tokens == 5
+    assert snapshot is not None and snapshot.process_returncode == 0
+    assert snapshot.terminal_received_s is not None and snapshot.stdout_eof_s is not None
+    assert snapshot.expiry_stage is None and snapshot.cleanup_expired is False
+    assert snapshot.teardown_started_s is not None and snapshot.teardown_completed_s is not None
     for observation in fixture.observations():
         await wait_for_process_group_gone(observation["pid"], timeout_s=5)

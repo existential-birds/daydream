@@ -174,7 +174,7 @@ The runner freezes its host-monotonic observations synchronously after stream cl
 invocation/span finalization. Trajectory invocation summaries retain `backend_lifecycle`; existing
 attempt spans export its fixed scalar fields as `daydream.backend_lifecycle.*`. This evidence does
 not own deadlines, idle windows, retries, native generation completion, or billing ownership.
-Codex success requires public `turn.completed`, stdout EOF, and an independently observed zero
+Codex success requires the latest public turn to complete, stdout EOF, and an independently observed zero
 exit. Its preterminal silence window defaults to 600 seconds (`DAYDREAM_STREAM_IDLE_TIMEOUT_S`,
 zero disables only silence detection). Absolute terminal drain, EOF-to-exit reap, and cleanup
 allowances default to 5/5/10 seconds; positive finite `DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S`,
