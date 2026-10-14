@@ -2,38 +2,71 @@ name: CI
 
 permissions:
   contents: read
+  actions: read
+  pull-requests: read
 
 on:
   push:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      run_rl:
+        description: Run the dormant standalone RL gate as well as the root gate
+        type: boolean
+        default: false
+
+# Only superseded PR runs are cancelled. Push runs have a unique group so
+# every main/master commit keeps its own verification run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Temporary paired measurement; removed after choosing the worker count.
+    strategy:
+      fail-fast: false
+      matrix:
+        workers: [4, 8]
+    env:
+      PYTEST_WORKERS: ${{ matrix.workers }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Plan CI gate
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_plan.py plan
 
       - name: Set up uv
+        if: steps.plan.outputs.full == 'true'
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
 
       - name: Set up Python
+        if: steps.plan.outputs.full == 'true'
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
       - name: Set up Node for native Pi contract tests
+        if: steps.plan.outputs.full == 'true'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "24.18.1"
           package-manager-cache: false
 
       - name: Install Pi for native output contract tests
+        if: steps.plan.outputs.full == 'true'
         run: |
           npm install --global @earendil-works/pi-coding-agent@1.0.4
           node --version
@@ -49,24 +82,29 @@ jobs:
       # stale lock (which breaks `uv sync --locked` for reproducible installs)
       # can never merge.
       - name: Verify uv.lock is in sync
+        if: steps.plan.outputs.full == 'true'
         run: make lockcheck
 
       - name: Install dependencies
+        if: steps.plan.outputs.full == 'true'
         # The benchmark extra (harbor) is required by the benchmark objective/
         # aggregate tests in the default suite; the `install` step syncs all
         # extras so the full suite runs with every dependency it exercises.
         run: make install
 
       - name: Lint with ruff
+        if: steps.plan.outputs.full == 'true'
         run: make lint
 
       - name: Run vulture
-        # Root project only: the standalone RL scan is the separate rl-check
+        if: steps.plan.outputs.full == 'true'
+        # Root project only: the standalone RL scan is the manual rl-check
         # job's business, so this deliberately does not call `make deadcode`
         # (whose scan also covers rl/daydream_review, the richer local gate).
         run: uv run vulture --config pyproject.toml daydream tests
 
       - name: Type check with mypy
+        if: steps.plan.outputs.full == 'true'
         run: make typecheck
 
       - name: Naming grep-gate
@@ -81,6 +119,7 @@ jobs:
         run: make actionlint
 
       - name: Run tests
+        if: steps.plan.outputs.full == 'true'
         # The coverage flags live in the `test` step (not in pyproject addopts),
         # so targeted runs like `pytest tests/foo.py` stay plain and never trip
         # the enforced floor even when all their tests pass (#336).
@@ -90,14 +129,32 @@ jobs:
         # Machine-readable XML from pytest-cov (--cov-report=xml on the Run tests
         # step above, #932). Uploaded on every check run so coverage results are
         # inspectable after any run, not just green ones.
-        if: always()
+        if: always() && steps.plan.outputs.full == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # ea165f8d65b6e75b540449e92b4886f43607fa02 v7.0.1
         with:
-          name: coverage-report
+          name: coverage-report-${{ matrix.workers }}
           path: coverage.xml
           if-no-files-found: error
 
+      # Published only after all selected gates pass. Records the actual
+      # synthetic merge checkout, not the Actions run's PR head SHA.
+      - name: Record successful PR tree
+        if: github.event_name == 'pull_request'
+        run: python3 scripts/ci_plan.py record --proof-dir "${{ runner.temp }}/ci-proof"
+
+      - name: Upload successful PR tree
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-proof-${{ matrix.workers }}
+          path: ${{ runner.temp }}/ci-proof/proof.json
+          retention-days: 14
+          if-no-files-found: error
+
   rl-check:
+    # RL development is paused. Retain the complete gate for explicit runs.
+    if: github.event_name == 'workflow_dispatch' && inputs.run_rl
+
     runs-on: blacksmith-4vcpu-ubuntu-2404
 
     defaults:

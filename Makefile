@@ -1,15 +1,18 @@
 .PHONY: install lint typecheck test actionlint rl-check check lockcheck hooks deadcode coverage-report check-naming
 
+# CI can overlap I/O-heavy Git/subprocess tests while local runs use CPU count.
+PYTEST_WORKERS ?= auto
+
 install:
 	# All extras so `make check` runs the full suite (benchmark objective tests
 	# need the harbor package from the benchmark extra).
 	uv sync --all-extras
 
 lint:
-	uv run ruff check daydream tests
+	uv run ruff check daydream tests scripts/ci_plan.py
 
 typecheck:
-	uv run mypy daydream tests
+	uv run mypy daydream tests scripts/ci_plan.py
 
 # Whole-project dead-code detection (#935). Both projects' scans live in their
 # own [tool.vulture]; pass --config explicitly so each project's pyproject.toml
@@ -26,7 +29,7 @@ deadcode:
 # -n auto. No --no-cov-on-fail so coverage.xml survives
 # a failed run for the coverage-report / CI artifact upload.
 test:
-	uv run pytest -n auto --cov --cov-branch --cov-report=term-missing --cov-report=xml
+	uv run pytest -n $(PYTEST_WORKERS) --cov --cov-branch --cov-report=term-missing --cov-report=xml
 
 # Machine-readable coverage report for humans who want the XML locally; the
 # terminal term-missing report + coverage floor enforcement already happen inside
