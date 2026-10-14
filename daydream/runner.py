@@ -295,19 +295,20 @@ async def run(
         if hub_repo:
             config = replace(config, dataset_capture=True, trajectory_hub_repo=hub_repo)
 
-    run_backends: list[Backend] = []
+    backend_factory: BackendFactory | None = None
+    if execution is not None:
+        backend_execution = execution.backend
 
-    def create_for_context(
-        flow_config: RunConfig, phase: str, cache: BackendCache,
-        cwd: Path, audit: AuditWorkspace | None,
-    ) -> Backend:
-        backend = _resolve_backend(
-            flow_config, phase, cache, cwd=cwd, audit_workspace=audit,
-            execution_input=None if execution is None else execution.backend,
-        )
-        if not any(existing is backend for existing in run_backends):
-            run_backends.append(backend)
-        return backend
+        def create_for_context(
+            flow_config: RunConfig, phase: str, cache: BackendCache,
+            cwd: Path, audit: AuditWorkspace | None,
+        ) -> Backend:
+            return _resolve_backend(
+                flow_config, phase, cache, cwd=cwd, audit_workspace=audit,
+                execution_input=backend_execution,
+            )
+
+        backend_factory = create_for_context
 
     # Codex backends need shell output visible (the commands ARE the signal), so
     # disable quiet when any phase resolves to codex. Done before backend construction.
@@ -329,7 +330,7 @@ async def run(
         try:
             return await _run_with_context(
                 config, private_roots=private_roots, run_context=run_context,
-                backend_factory=create_for_context,
+                backend_factory=backend_factory,
                 backend_execution=None if execution is None else execution.backend,
                 github_execution=None if execution is None else execution.github,
             )
@@ -342,7 +343,9 @@ async def run(
                 await backend.cancel()
 
             with anyio.move_on_after(BUDGET_CLEANUP_GRACE_S, shield=True):
-                await asyncio.gather(*(cancel_backend(backend) for backend in run_backends), return_exceptions=True)
+                await asyncio.gather(
+                    *(cancel_backend(backend) for backend in run_context.used_backends()), return_exceptions=True,
+                )
             raise
 
 

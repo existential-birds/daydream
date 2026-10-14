@@ -49,7 +49,7 @@ _T = TypeVar("_T")
 class RunContext:
     """Own the immutable policy, active backends, and outage circuit for one run."""
 
-    __slots__ = ("_policy", "_run_token", "github_identity", "_outage_circuit", "_circuit_lock")
+    __slots__ = ("_policy", "_run_token", "github_identity", "_outage_circuit", "_circuit_lock", "_used_backends")
 
     def __init__(
         self, policy: InteractionPolicy, *, github_identity: GitHubIdentity | None = None,
@@ -61,6 +61,7 @@ class RunContext:
         self.github_identity = github_identity if github_identity is not None else GitHubIdentity("unknown")
         self._outage_circuit: OutageCircuit | None = None
         self._circuit_lock = RLock()
+        self._used_backends: list[Backend] = []
 
     @property
     def policy(self) -> InteractionPolicy:
@@ -131,7 +132,10 @@ class RunContext:
 
     @contextmanager
     def backend_registration(self, backend: Backend) -> Iterator[None]:
-        """Register one backend invocation until its entire lifecycle exits."""
+        """Register one invocation and retain its backend for run-owned shutdown."""
+        with _registry_lock:
+            if not any(existing is backend for existing in self._used_backends):
+                self._used_backends.append(backend)
         registration_token = object()
         try:
             with _registry_lock:
@@ -142,6 +146,11 @@ class RunContext:
         finally:
             with _registry_lock:
                 _active_registrations.pop(registration_token, None)
+
+    def used_backends(self) -> tuple[Backend, ...]:
+        """Return run-owned backends after attempt registrations have unwound."""
+        with _registry_lock:
+            return tuple(self._used_backends)
 
     def active_backends(self) -> tuple[Backend, ...]:
         """Return the unique backend identities active in this run."""
