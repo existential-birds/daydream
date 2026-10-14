@@ -2,6 +2,12 @@
 
 Account for every source item in a concise table or prose. Preserve identifiers, URLs, source snapshot, current verification target, evidence, and results in the handoff even when the human summary is shorter.
 
+Identify the selected PR's base/head repositories and branches, acquired remote
+head, and exact verification worktree/snapshot. When checking an ahead or dirty
+local candidate, record its ancestry and owned patch separately from the remote
+PR tree. Label evidence and outcomes by the tree checked; a local candidate fix
+remains local until its publication on the selected PR is confirmed.
+
 ## Verification summary
 
 | ID / source | Assessment | Evidence | Next action |
@@ -28,4 +34,4 @@ Report combined-tree validation once, with actual commands/results and unavailab
 
 After verified fixes, follow [Push and response handoff](SKILL.md#push-and-response-handoff). Include the publication target, commit scope, and published SHA/link as each becomes available. Proceed with authorized publication and response actions; include a decision question only when existing authorization does not cover that action. Record declined or pending decisions and failed publication accurately.
 
-For `respond-pr-feedback`, retain original REST/node comment IDs, review IDs, thread IDs, URLs, reply parents, original locations, and source head SHA. Include assessment, implementation disposition, evidence, tested current tree/commit, open issues, and whether the patch is only local, committed, or present on the PR's remote head. This skill does not post replies or resolve threads; those actions need separate authorization.
+For `respond-pr-feedback`, retain original REST/node comment IDs, review IDs, thread IDs, URLs, reply parents, original locations, and source head SHA, selected base/head repository and branch identities, exact target worktree path, and remote/candidate snapshot identities. Include assessment, implementation disposition, evidence, tested current tree/commit, open issues, and whether the patch is only local, committed, or present on the PR's remote head. This skill does not post replies or resolve threads; those actions need separate authorization.
