@@ -25,8 +25,8 @@ material in your control.
 
 ### Prerequisites
 
-- **Harbor** `0.22` in range `[0.22, 0.23)` installed in the **same Python
-  environment** as Daydream (`uv sync` installs it alongside the `daydream`
+- **Harbor** `0.24` in range `[0.24, 0.25)` installed in the **same Python
+  environment** as Daydream (`uv sync --all-extras` installs it alongside the `daydream`
   console script).
 - **Docker Desktop for macOS** in its standard, local configuration. The first
   build/run performs a live `nftables` capability preflight against the local
@@ -278,7 +278,7 @@ fields.
 daydream benchmark build-harbor ~/bench-owner-repo --daydream-wheel dist/daydream.whl
 ```
 
-Packages a validated workspace for Harbor `0.22`. `--daydream-wheel` names the
+Packages a validated workspace for Harbor `0.24`. `--daydream-wheel` names the
 wheel for this Daydream version; the emitted `harbor/benchmark.lock.json`
 `daydream` block records its version and SHA-256.
 Compilation re-renders every ready case's canonical task specification and
@@ -400,7 +400,7 @@ judge reasoning, or source code is ever emitted.
     "daydream_version": "0.12.0",
     "daydream_wheel_sha256": "sha256:<40-hex>",
     "compiled_lock_sha256": "sha256:<40-hex>",
-    "harbor_version": "0.22",
+    "harbor_version": "0.24",
     "reviewer_backend": "pi",
     "reviewer_model": "z-ai/glm-5.2",
     "reviewer_base_url": "",

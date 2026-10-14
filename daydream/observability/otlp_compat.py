@@ -36,7 +36,7 @@ from daydream.observability.config import ObservabilityError
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-#: Pinned OTLP protobuf flags masks (opentelemetry-proto 1.44.0).
+#: OTLP protobuf flags masks audited against opentelemetry-proto 1.45.1.
 from opentelemetry.proto.trace.v1.trace_pb2 import (  # noqa: E402
     SPAN_FLAGS_CONTEXT_HAS_IS_REMOTE_MASK,
     SPAN_FLAGS_CONTEXT_IS_REMOTE_MASK,
@@ -59,8 +59,11 @@ _CREDENTIAL_PROVIDER_VARS = (
     "_OTEL_PYTHON_EXPORTER_OTLP_HTTP_CREDENTIAL_PROVIDER",
 )
 
-#: The exact OTel 1.44.0 gRPC delegate surface this bridge may touch. Drift is
-#: an initialization failure, never a fallback to stock retry loops.
+#: Audited releases and private delegate surface. 1.45.1 preserves the 1.44.0
+#: channel/stub, unary export, shutdown, and encoding contracts; its metrics
+#: endpoint parsing change still accepts the explicit NoOpMeterProvider.
+#: Drift fails initialization, never falling back to stock retry loops.
+_GRPC_BRIDGE_VERSIONS = frozenset({"1.44.0", "1.45.1"})
 _GRPC_BRIDGE_SURFACE = ("_client", "_channel", "_headers", "_timeout", "_shutdown", "_initialize_channel_and_stub")
 
 _ACK_OK = "ok"
@@ -125,7 +128,7 @@ class DeliveryLedger:
 
 
 def encode_batch(spans: Sequence[ReadableSpan]) -> ExportTraceServiceRequest:
-    """Encode with pinned OTel 1.44, validating span/link identity and position before repair.
+    """Encode with the audited OTel SDK, validating span/link identity and position before repair.
 
     Restore lost trace flags and link trace state; preserve other encoded fields.
     """
@@ -540,7 +543,7 @@ def _grpc_retry_delay(exc: Any) -> float | None:
 
 
 class GrpcBridge:
-    """Own bounded retries over the pinned OTel 1.44 private unary Export surface.
+    """Own bounded retries over audited OTel releases' private unary Export surface.
 
     Version/surface drift fails initialization. Each attempt uses remaining time;
     the delegate's retry loop is never called.
@@ -553,15 +556,15 @@ class GrpcBridge:
         missing = [name for name in _GRPC_BRIDGE_SURFACE if not hasattr(delegate, name)]
         if missing:
             raise ObservabilityError(
-                "The installed OpenTelemetry gRPC exporter does not expose the pinned "
-                "1.44.0 bridge surface; refusing to fall back to unowned retries"
+                "The installed OpenTelemetry gRPC exporter does not expose the audited "
+                "bridge surface; refusing to fall back to unowned retries"
             )
         from importlib.metadata import version
 
         otel_version = version("opentelemetry-exporter-otlp-proto-grpc")
-        if not otel_version.startswith("1.44"):
+        if otel_version not in _GRPC_BRIDGE_VERSIONS:
             raise ObservabilityError(
-                f"OpenTelemetry gRPC exporter {otel_version} is outside the pinned 1.44 bridge surface"
+                f"OpenTelemetry gRPC exporter {otel_version} is outside the audited bridge releases"
             )
         self._delegate = delegate
         self._ledger = ledger

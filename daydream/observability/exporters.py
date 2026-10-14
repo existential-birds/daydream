@@ -228,7 +228,7 @@ def _http_generic_exporter(timeout: float, config: ObservabilityConfig) -> SpanE
     endpoint_setting = _traces_or_shared_endpoint_setting()
     raw_endpoint = os.environ.get(endpoint_setting, "http://localhost:4318")
     # Shared endpoints append /v1/traces even after an existing path; signal
-    # endpoints stay verbatim (pinned OTel 1.44 behavior).
+    # endpoints stay verbatim (audited OTel 1.45.1 behavior).
     is_signal_specific = endpoint_setting == "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
     if is_signal_specific:
         endpoint = raw_endpoint
@@ -293,7 +293,11 @@ def _grpc_generic_exporter(timeout: float, config: ObservabilityConfig) -> SpanE
             compression=compression,
             meter_provider=NoOpMeterProvider(),
         )
-        bridge = GrpcBridge(delegate, ledger)
+        try:
+            bridge = GrpcBridge(delegate, ledger)
+        except Exception:
+            delegate.shutdown()
+            raise
     return CompatSpanExporter(bridge, ledger, timeout_s=timeout)
 
 

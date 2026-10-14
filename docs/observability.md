@@ -307,6 +307,14 @@ Each run owns its tracer provider and selected exporters. Daydream does not repl
 the process-wide OTel provider or initialize OpenLLMetry's global instrumentors.
 This supports repeated invocations and keeps separate runs isolated.
 
+The generic gRPC transport audits the private channel/stub bridge for OTel
+1.44.0 and 1.45.1. Other exporter releases or a changed private surface fail
+initialization and close the newly created channel. Daydream owns unary export
+deadlines, acknowledgment accounting, and the single retry allowed for
+`RESOURCE_EXHAUSTED` with valid `RetryInfo`; the SDK's retry loop is never called.
+An explicit no-op meter provider keeps SDK exporter metrics isolated from the
+ambient global provider, including when internal metrics are enabled.
+
 Unknown destinations, missing required credentials, and invalid configuration fail
 before agent work begins. Once execution starts, export failures produce sanitized
 diagnostics and preserve the review outcome. At exit, Daydream closes spans and

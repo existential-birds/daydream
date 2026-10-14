@@ -9,6 +9,7 @@ from typing import Any
 import grpc
 import pytest
 from opentelemetry import trace as trace_api
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter as GrpcExporter
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
     ExportTraceServiceRequest,
     ExportTraceServiceResponse,
@@ -252,6 +253,42 @@ def test_generic_grpc_exporter_uses_standard_environment(monkeypatch: pytest.Mon
             attr.key == "gen_ai.usage.input_tokens" and attr.value.int_value == 100 for attr in span.attributes
         )
         assert ("x-custom", "grpc-credential") in headers
+
+@pytest.mark.parametrize("drift", ["1.45.2", "1.440.0", "missing-surface"])
+def test_grpc_bridge_drift_refuses_send_and_closes_channel(monkeypatch: pytest.MonkeyPatch, drift: str) -> None:
+    """Unreviewed SDK versions or missing private fields must release the real channel before failing."""
+    delegates: list[GrpcExporter] = []
+    received: list[ExportTraceServiceRequest] = []
+
+    def receive(request: ExportTraceServiceRequest, context: grpc.ServicerContext) -> ExportTraceServiceResponse:
+        received.append(request)
+        return ExportTraceServiceResponse()
+
+    def create_delegate(**kwargs: Any) -> GrpcExporter:
+        delegate = GrpcExporter(**kwargs)
+        delegates.append(delegate)
+        if drift == "missing-surface":
+            delattr(delegate, "_timeout")
+        return delegate
+
+    monkeypatch.setattr("daydream.observability.exporters.GrpcExporter", create_delegate)
+    if drift != "missing-surface":
+        monkeypatch.setattr("importlib.metadata.version", lambda _distribution: drift)
+    with grpc_trace_server(receive) as port:
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", f"http://127.0.0.1:{port}")
+        try:
+            with pytest.raises(ObservabilityError, match="OpenTelemetry"):
+                otlp_exporter(ObservabilityConfig())
+            assert len(delegates) == 1
+            client = delegates[0]._client
+            assert client is not None
+            with pytest.raises(ValueError, match="closed"):
+                client.Export(request=ExportTraceServiceRequest(), timeout=1)
+            assert received == []
+        finally:
+            for delegate in delegates:
+                delegate.shutdown()
 
 @pytest.mark.parametrize("destination", ["langsmith", "honeyhive"])
 def test_presets_do_not_forward_redirected_payloads_or_credentials(

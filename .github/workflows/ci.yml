@@ -50,13 +50,13 @@ jobs:
 
       - name: Set up uv
         if: steps.plan.outputs.mode != 'reuse'
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
       - name: Set up Node for native Pi contract tests
         if: steps.plan.outputs.full == 'true'
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24.18.1"
           package-manager-cache: false
@@ -126,7 +126,7 @@ jobs:
         # step above, #932). Uploaded on every check run so coverage results are
         # inspectable after any full run, not just green ones.
         if: always() && steps.plan.outputs.full == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # ea165f8d65b6e75b540449e92b4886f43607fa02 v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # ea165f8d65b6e75b540449e92b4886f43607fa02 v7.0.2
         with:
           name: coverage-report
           overwrite: true
@@ -141,7 +141,7 @@ jobs:
 
       - name: Upload successful merge-group tree
         if: github.event_name == 'merge_group' && steps.plan.outputs.full == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-proof
           overwrite: true
@@ -164,7 +164,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: rl/daydream_review/uv.lock

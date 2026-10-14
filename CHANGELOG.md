@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **dependencies:** consolidate the pending runtime, development, RL, and GitHub Actions updates; validate Harbor 0.24 and OpenTelemetry 1.45.1 compatibility and refresh the hash-pinned benchmark runtime dependencies.
 - **agent guidance:** condense AGENTS.md into core contribution, testing, and runtime rules with task-specific references; clarify arbiter sharding, backend guards, merge continuation, and exploration cache behavior against the implementation.
 - **contributing:** make the contribution guide agent-facing, require the prepare-implement → goal prompt → execution workflow and complete PR template/checklist, document SemVer and Keep a Changelog requirements, and consolidate current repository guidance in AGENTS.md while retiring the outdated blanket testing policy.
 - **codex:** use GPT-6.1 Sol for the former Sol and Terra default tiers, with `medium` review/wonder effort and `high` arbitration effort. Preserve explicit overrides, named latency profiles, and Improve effort defaults; add GPT-6.1 Sol cost synthesis including long-context rates.
