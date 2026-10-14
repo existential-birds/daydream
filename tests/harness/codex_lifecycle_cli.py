@@ -5,7 +5,6 @@ diagnostics. No native session or private rollout content is used.
 """
 
 import asyncio
-import errno
 import json
 import os
 import re
@@ -42,17 +41,8 @@ class CodexLifecycleCli:
         raise AssertionError(f"synthetic Codex did not reach {stage}")
 
     def release(self, pid: int) -> None:
-        deadline = time.monotonic() + 5
-        while True:
-            try:
-                descriptor = os.open(self.root / "controls" / f"{pid}.fifo", os.O_WRONLY | os.O_NONBLOCK)
-                break
-            except OSError as exc:
-                if exc.errno not in (errno.ENOENT, errno.ENXIO):
-                    raise
-                if time.monotonic() >= deadline:
-                    raise AssertionError("synthetic Codex FIFO reader did not become ready") from exc
-                time.sleep(0.01)
+        """Release a blocked child after observing its reader-ready stage."""
+        descriptor = os.open(self.root / "controls" / f"{pid}.fifo", os.O_WRONLY | os.O_NONBLOCK)
         try:
             os.write(descriptor, b"release\n")
         finally:
@@ -86,11 +76,20 @@ def _observe(stage: str, *, mode: str, file: str | None = None, descendant: int 
     os.replace(temporary, path)
 
 
-def _block() -> None:
+def _block(stage: str, *, mode: str, file: str | None = None) -> None:
+    """Publish readiness only after this process holds an actual FIFO reader.
+
+    POSIX read/write open avoids waiting for a writer on Darwin and Linux. A
+    single-byte read then blocks until ``release`` supplies the readiness token.
+    """
     fifo = Path(_FIXTURE_CONFIG["root"]) / "controls" / f"{os.getpid()}.fifo"
     os.mkfifo(fifo, 0o600)
-    with fifo.open("rb") as stream:
-        stream.read()
+    descriptor = os.open(fifo, os.O_RDWR)
+    try:
+        _observe(stage, mode=mode, file=file)
+        os.read(descriptor, 1)
+    finally:
+        os.close(descriptor)
 
 
 def _issue(file: str, ordinal: int) -> dict[str, Any]:
@@ -155,8 +154,7 @@ def _response(prompt: str) -> tuple[str, str | None]:
 
 def _run() -> int:
     if "--fixture-descendant" in sys.argv:
-        _observe("descendant_ready", mode="descendant_stdout")
-        _block()
+        _block("descendant_ready", mode="descendant_stdout")
         return 0
     if "--cd" in sys.argv:
         os.chdir(sys.argv[sys.argv.index("--cd") + 1])
@@ -174,10 +172,10 @@ def _run() -> int:
     _emit({"type": "thread.started", "thread_id": f"synthetic-{os.getpid()}"})
     _emit({"type": "item.completed", "item": {"type": "agent_message", "id": "initial",
                                                "text": "Synthetic initial commentary", "phase": "commentary"}})
-    _observe("initial", mode=mode, file=file)
     if mode == "preterminal_silence":
-        _block()
+        _block("initial", mode=mode, file=file)
         return 0
+    _observe("initial", mode=mode, file=file)
     _emit({"type": "item.started", "item": {"type": "command_execution", "id": "command",
                                               "command": "git diff --check", "status": "in_progress"}})
     _emit({"type": "item.completed", "item": {"type": "command_execution", "id": "command",
@@ -187,15 +185,15 @@ def _run() -> int:
                                                 "phase": "final_answer"}})
     terminal = {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}}
     _emit(terminal)
-    _observe("terminal", mode=mode, file=file)
     if mode == "terminal_eof_live_child":
         os.close(1)
         os.close(2)
-        _observe("stdout_closed", mode=mode, file=file)
-        _block()
+        _block("stdout_closed", mode=mode, file=file)
     elif mode == "terminal_open_stdout":
-        _block()
-    elif mode == "descendant_stdout":
+        _block("terminal", mode=mode, file=file)
+    else:
+        _observe("terminal", mode=mode, file=file)
+    if mode == "descendant_stdout":
         descendant = subprocess.Popen([sys.executable, __file__, "--fixture-descendant"])
         deadline = time.monotonic() + 5
         ready = Path(_FIXTURE_CONFIG["root"]) / "observations" / f"{descendant.pid}.json"

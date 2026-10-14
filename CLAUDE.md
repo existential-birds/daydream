@@ -180,7 +180,9 @@ zero disables only silence detection). Absolute terminal drain, EOF-to-exit reap
 allowances default to 5/5/10 seconds; positive finite `DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S`,
 `DAYDREAM_CODEX_PROCESS_REAP_TIMEOUT_S`, and `DAYDREAM_CODEX_CLEANUP_TIMEOUT_S` override them.
 Frozen `BackendExecutionInput` owns these settings when supplied. Completion timing begins
-before metric/cost yields and repeated terminal events cannot extend it. Postterminal expiry
+before metric/cost yields and repeated terminal events cannot extend it. Duplicate public completion
+within a turn does not charge usage again; a genuine `turn.started` permits distinct-turn accounting
+without restarting the tail allowance. Postterminal expiry
 prohibits automatic replay of a potentially completed mutating turn. Attempt cancellation closes
 only its own stream; backend-wide cancellation belongs to run shutdown.
 Adapters emit assistant text and genuine transport/native payloads; `agent_output.py` owns final-turn selection

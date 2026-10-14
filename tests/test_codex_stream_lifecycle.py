@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from daydream.agent import run_agent
-from daydream.backends import AgentEvent, BackendExecutionInput, MetricsEvent, ResultEvent, TextEvent
+from daydream.backends import AgentEvent, BackendExecutionInput, CostEvent, MetricsEvent, ResultEvent, TextEvent
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.codex import CodexBackend, CodexError
 from daydream.trajectory import DaydreamPhase
@@ -44,7 +44,10 @@ async def test_completed_codex_turn_has_bounded_failure_and_retains_evidence(
     assert stage in str(failure.value)
     assert asyncio.get_running_loop().time() - started < 2
     assert any(isinstance(event, TextEvent) and "Synthetic lifecycle response" in event.text for event in seen)
-    assert any(isinstance(event, MetricsEvent) and event.prompt_tokens == 10 for event in seen)
+    metrics = [event for event in seen if isinstance(event, MetricsEvent)]
+    costs = [event for event in seen if isinstance(event, CostEvent)]
+    assert len(metrics) == 1 and metrics[0].prompt_tokens == 10 and metrics[0].completion_tokens == 5
+    assert len(costs) == 1 and costs[0].input_tokens == 10 and costs[0].output_tokens == 5
     assert not any(isinstance(event, ResultEvent) for event in seen)
     for observation in fixture.observations():
         await wait_for_process_group_gone(observation["pid"], timeout_s=5)

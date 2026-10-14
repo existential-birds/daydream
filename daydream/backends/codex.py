@@ -600,6 +600,7 @@ class CodexBackend:
                                     process_reap_timeout_s=self._process_reap_timeout_s,
                                     cleanup_timeout_s=self._cleanup_timeout_s)
         terminal_deadline: float | None = None
+        current_turn_completed = False
         cleaned_up = False
 
         def _line_timeout() -> float | None:
@@ -1006,6 +1007,13 @@ class CodexBackend:
                         )
 
                 elif event_type == "turn.completed":
+                    # A repeated completion for the same public turn is
+                    # observed above, but must not duplicate usage/billing or
+                    # replace its captured result. Only an explicit public
+                    # turn.started opens a distinct accounting boundary.
+                    if current_turn_completed:
+                        continue
+                    current_turn_completed = True
                     # Establish the absolute tail allowance before yielding
                     # metrics: downstream suspension and terminal chatter
                     # cannot restart the completion clock.
@@ -1108,7 +1116,10 @@ class CodexBackend:
                         yield diagnostic
                     raise CodexError(str(message))
 
-                elif event_type not in ("turn.started",):
+                elif event_type == "turn.started":
+                    current_turn_completed = False
+
+                else:
                     _record_unknown(
                         unknown_event_types,
                         event_type,
