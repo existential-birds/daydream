@@ -240,13 +240,22 @@ def test_cli_ambiguous_origin_aborts_before_mint(
     assert not (feature_branch_repo / ".review-output.md").exists()
 
 
-def test_cli_no_app_retains_identity_for_ssh_alias(
-    feature_branch_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport: _Transport,
+@pytest.mark.parametrize("origin", [
+    "git@work-github:acme/widgets.git",
+    "https://github.enterprise.test/acme/widgets.git",
+    "https://github.com/contributor/widgets.git",
+])
+def test_cli_no_app_uses_gh_selected_repository(
+    feature_branch_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport: _Transport, origin: str,
 ) -> None:
+    """CLI artifacts must follow gh's upstream selection even when origin is a fork.
+
+    Alias-only coverage misses recognizable github.com origins winning over gh.
+    """
     transport.require_app = False
     monkeypatch.delenv("DAYDREAM_APP_ID")
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY")
-    git(feature_branch_repo, "remote", "add", "origin", "git@work-github:acme/widgets.git")
+    git(feature_branch_repo, "remote", "add", "origin", origin)
     output = tmp_path / "trajectory.json"
 
     assert _run(feature_branch_repo, output, "--review", "--base", "main") == 0

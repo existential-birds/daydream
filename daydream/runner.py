@@ -434,15 +434,21 @@ async def _run_with_context(
                 observed.finish(1)
                 return 1
 
-            # App routing is already captured in session auth. CLI sessions may
-            # also discover gh-supported hosts or SSH aliases outside local admission.
+            # CLI provenance follows gh's selected base repository, which may
+            # differ from a fork origin. App sessions already bind gh routing
+            # locally; embedded callers never add implicit remote discovery.
             if config.pr_repo is None:
                 try:
                     repository = git_ops.resolve_github_repository(
                         target_dir, base_environment=session.execution.auth.environment_for_request(),
                     )
-                    if repository is None and config.discover_github_provenance:
-                        repository = git_ops.gh_repo_view(target_dir, auth=session.execution.auth)
+                    if config.discover_github_provenance:
+                        try:
+                            selected = git_ops.gh_repo_view(target_dir, auth=session.execution.auth)
+                        except git_ops.GitError:
+                            selected = None
+                        if selected is not None:
+                            repository = selected
                 except git_ops.GitError:
                     repository = None
                 if repository is not None:

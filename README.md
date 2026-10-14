@@ -984,8 +984,10 @@ The behavior notes are:
   Supported `GH_REPO` forms are `OWNER/REPO`, `github.com/OWNER/REPO`, and
   `https://github.com/OWNER/REPO` (an optional `.git` URL suffix is removed). Origins support HTTPS, `ssh://git@github.com/OWNER/REPO`,
   and `git@github.com:OWNER/REPO`, with an optional `.git` suffix.
-- No-App and read-only CLI runs retain `gh` repository discovery for other hosts or SSH aliases,
-  after their session authentication is resolved. Embedded runs resolve provenance locally
+- CLI runs use authenticated `gh` repository discovery after session resolution, retaining
+  the selected upstream for forks as well as other hosts and SSH aliases. Explicit internal
+  `pr_repo` overrides win; local identity is a fallback when discovery is unavailable.
+  Embedded runs resolve provenance locally
   without an implicit remote repository lookup.
 - App runs support only `github.com`; `GH_HOST` must be unset or `github.com`.
   Malformed or ambiguous identities abort before minting, without falling back to another

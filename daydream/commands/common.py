@@ -8,26 +8,11 @@ from typing import Any
 
 from rich.console import Console
 
-from daydream import git_ops
-from daydream.config_file import DaydreamFileConfig, load_file_config
+from daydream.config_file import load_file_config
 from daydream.observability.config import ObservabilityConfig, ObservabilityError, resolve_observability_config
 from daydream.run_config import RunConfig
 from daydream.trajectory import RUN_DOCUMENT_NAME, RUNS_DIRNAME
 from daydream.ui import NEON_THEME
-
-
-def _detect_repo_slug(repo: Path) -> str | None:
-    """Resolve target provenance locally, before GitHub authentication exists."""
-    identity = git_ops.resolve_github_repository(repo)
-    return "/".join(identity) if identity is not None else None
-
-
-def _resolve_target_provenance(target: str | None) -> tuple[Path, str | None, DaydreamFileConfig]:
-    """Return the target repository, slug, and low-precedence file policy; never infer from invoking cwd."""
-    target_repo = Path(target) if target else Path.cwd()
-    pr_repo = _detect_repo_slug(target_repo)
-    file_config = load_file_config(target_repo)
-    return target_repo, pr_repo, file_config
 
 
 def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = True) -> None:
@@ -221,12 +206,13 @@ def _dispatch_namespace(argv: list[str], subverbs: dict[str, Callable[[list[str]
 def config_from_args(
     parser: argparse.ArgumentParser, args: argparse.Namespace, *, detect_pr: bool = False, **overrides: Any,
 ) -> RunConfig:
-    """Copy only RunConfig destinations; resolve operator settings before target provenance.
-    Command-specific transformations stay at callers and parser-only flags never enter runtime
-    policy.
+    """Copy RunConfig destinations and resolve operator settings and target file policy.
+    Repository discovery waits for session authentication in the runner. Command-specific
+    transformations stay at callers and parser-only flags never enter runtime policy.
     """
     observability = _resolve_cli_observability(parser, args)
-    _, pr_repo, file_config = _resolve_target_provenance(args.target)
+    target_repo = Path(args.target) if args.target else Path.cwd()
+    file_config = load_file_config(target_repo)
     values = {item.name: getattr(args, item.name) for item in fields(RunConfig) if hasattr(args, item.name)}
     if args.dataset_store_path is not None:
         values["dataset_capture"] = True
@@ -235,7 +221,7 @@ def config_from_args(
     if detect_pr:
         values["pr_number"] = args.pr_number
     values.update(
-        observability=observability, file_config=file_config, pr_repo=pr_repo,
+        observability=observability, file_config=file_config,
         archive=not args.no_archive, discover_github_provenance=True,
     )
     return RunConfig(**(values | overrides))
