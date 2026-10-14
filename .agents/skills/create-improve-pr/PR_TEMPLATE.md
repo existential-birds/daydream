@@ -9,6 +9,14 @@
 - Observed result and preserved contracts: ...
 - Equivalent discoveries, alternatives, and exclusions: see the linked finding's matching guidance; note any new evidence here.
 
+## Evidence
+
+<!-- Use observed behavior, output, or measurements with their source identities.
+State Unknown or Not yet measured when unavailable; never invent before/after results. -->
+
+- **Before:** OBSERVED_PRE_FIX_EVIDENCE_OR_UNKNOWN (commit or exact snapshot).
+- **After:** OBSERVED_IMPLEMENTATION_EVIDENCE_OR_NOT_YET_MEASURED (checked state).
+
 ## Test Plan
 
 <!-- Include only commands and before/after observations actually obtained. Explain not-run/failed/blocked checks and any validation gaps. -->
