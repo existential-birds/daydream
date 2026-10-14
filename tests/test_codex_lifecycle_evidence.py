@@ -1,20 +1,18 @@
 """Closed lifecycle evidence contracts; real process/runner tests own stall outcomes."""
 from __future__ import annotations
 
-from dataclasses import replace
-
 import pytest
 
 from daydream.backends.lifecycle import BackendLifecycleCollector, BackendLifecycleSnapshot
 
 
-def test_codex_snapshot_preserves_zero_exit_and_absent_milestones() -> None:
-    snapshot = BackendLifecycleSnapshot(attempt=1, backend="codex", process_returncode=0, process_exit_s=0.0)
+@pytest.mark.parametrize("returncode", [0, -9])
+def test_codex_snapshot_preserves_exit_code_and_absent_milestones(returncode: int) -> None:
+    snapshot = BackendLifecycleSnapshot(attempt=1, backend="codex", process_returncode=returncode, process_exit_s=0.0)
     evidence = snapshot.to_dict()
-    assert evidence["process_returncode"] == 0
+    assert evidence["process_returncode"] == returncode
     assert evidence["process_exit_s"] == 0.0
     assert evidence["stdout_eof_s"] is None
-    assert replace(snapshot, process_returncode=-9).process_returncode == -9
 
 
 @pytest.mark.parametrize("values", [

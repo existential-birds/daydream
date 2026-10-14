@@ -339,15 +339,6 @@ async def test_empty_final_codex_message_cannot_reuse_planning_json(tmp_path: Pa
     assert reason is None
 
 
-async def test_turn_failed_raises() -> None:
-    backend = CodexBackend(model="fixture-model")
-    mock_proc = make_mock_process_from_fixture("turn_failed.jsonl")
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        with pytest.raises(CodexError, match="Model returned an error") as exc_info:
-            async for _ in backend.execute(Path("/tmp"), "Fail"):
-                pass
-    assert exc_info.value.category is None
-
 async def test_nonzero_exit_raises_with_captured_output() -> None:
     backend = CodexBackend(model="fixture-model")
     mock_proc = make_mock_process(["Error: authentication required. Run `codex login` to authenticate."])
@@ -1095,29 +1086,15 @@ def test_parser_label_redacts_complete_value_before_64_character_cap() -> None:
     assert "ghp_" not in bounded
     assert "[REDACTED" in bounded
 
-async def test_parser_diagnostic_precedes_structured_turn_failure() -> None:
-    backend = CodexBackend(model="fixture-model")
-    lines = [
-        json.dumps({"type": "future.event"}),
-        json.dumps({"type": "turn.failed", "error": {"message": "Model returned an error"}}),
-    ]
-    mock_proc = make_mock_process(lines)
-    observed: list[Any] = []
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        with pytest.raises(CodexError, match="Model returned an error"):
-            async for event in backend.execute(Path("/tmp"), "Fail"):
-                observed.append(event)
-    assert isinstance(observed[-1], DiagnosticEvent)
-    assert observed[-1].code == "codex_parser_coverage"
-
-async def test_turn_failed_flushes_current_aggregate_without_waiting_for_stdout() -> None:
+@pytest.mark.parametrize("error_code", [None, "model_error"])
+async def test_turn_failed_flushes_current_aggregate_without_waiting_for_stdout(error_code: str | None) -> None:
     backend = CodexBackend(model="fixture-model")
     class _FailureThenBlockingStdout:
         def __init__(self) -> None:
             self._lines = iter(
                 [
                     json.dumps({"type": "future.one"}), json.dumps({"type": "future.two"}),
-                    json.dumps({"type": "turn.failed", "error": {"message": "terminal failure"}}),
+                    json.dumps({"type": "turn.failed", "error": {"message": "terminal failure", "code": error_code}}),
                 ]
             )
             self.blocking_read_started = False
@@ -1136,8 +1113,11 @@ async def test_turn_failed_flushes_current_aggregate_without_waiting_for_stdout(
         async for event in backend.execute(Path("/tmp"), "Fail now"):
             observed.append(event)
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
-        with pytest.raises(CodexError, match="terminal failure"):
+        with pytest.raises(CodexError, match="terminal failure") as failure:
             await asyncio.wait_for(consume(), timeout=0.2)
+    assert failure.value.category is None
+    assert isinstance(observed[-1], DiagnosticEvent)
+    assert observed[-1].code == "codex_parser_coverage"
     parser_diagnostics = [
         event
         for event in observed

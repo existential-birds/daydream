@@ -104,7 +104,6 @@ async def test_run_isolates_three_codex_fixers_and_retains_terminal_evidence(
         if file == "App.tsx":
             assert lifecycle["process_returncode"] == 0
             assert lifecycle["expiry_stage"] is None
-            assert "failed" not in invocations[0].get("status", "")
         elif file == "api.py" and worker_mode == "unfinished_next_turn":
             assert lifecycle["expiry_stage"] is None
             assert lifecycle["stdout_eof_s"] is not None

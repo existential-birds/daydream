@@ -11,6 +11,7 @@ idle windows, and shielded terminate/kill teardown remain active.
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from daydream.backends import CostEvent, RequestEvent, TextEvent, TurnEndEvent
+from daydream.backends import CostEvent, RequestEvent, ResultEvent, TextEvent, TurnEndEvent
 
 SIGTERM_RC = -15
 SIGKILL_RC = -9
@@ -108,6 +109,7 @@ async def assert_concurrent_streams_isolated(
 ) -> None:
     """Overlap two executions of one backend with separate scripted processes. The second reader blocks
     while the first reaches TurnEnd/Cost, proving stdout ownership is per execution.
+    Both executions must then deliver their own result and close their streams.
     """
     first_proc = cli_process(ImmediateStdout(first_lines))
     second_stdout = BlockingStdout(second_lines)
@@ -121,22 +123,24 @@ async def assert_concurrent_streams_isolated(
         return [event async for event in backend.execute(Path("/tmp"), "second")]
 
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
-        first_iter = backend.execute(Path("/tmp"), "first")
-        assert isinstance(await anext(first_iter), RequestEvent)
-        first_event = await anext(first_iter)
-        assert isinstance(first_event, TextEvent)
+        async with aclosing(backend.execute(Path("/tmp"), "first")) as first_iter:
+            assert isinstance(await anext(first_iter), RequestEvent)
+            first_event = await anext(first_iter)
+            assert isinstance(first_event, TextEvent)
 
-        second_task = asyncio.create_task(consume_second())
-        await second_stdout.entered.wait()
-
-        try:
-            turn_end = await anext(first_iter)
-            assert isinstance(turn_end, TurnEndEvent)
-            next_first_event = await anext(first_iter)
-            assert isinstance(next_first_event, CostEvent)
-        finally:
-            second_stdout.release.set()
-            await second_task
+            second_task = asyncio.create_task(consume_second())
+            try:
+                await second_stdout.entered.wait()
+                turn_end = await anext(first_iter)
+                assert isinstance(turn_end, TurnEndEvent)
+                next_first_event = await anext(first_iter)
+                assert isinstance(next_first_event, CostEvent)
+                remaining = [event async for event in first_iter]
+                assert sum(isinstance(event, ResultEvent) for event in remaining) == 1
+            finally:
+                second_stdout.release.set()
+                second_events = await second_task
+        assert sum(isinstance(event, ResultEvent) for event in second_events) == 1
 
 
 class _FakePipeTransport:

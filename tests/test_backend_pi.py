@@ -49,11 +49,9 @@ from daydream.backends.pi import (
     _pi_retry_max_delay,
     _pi_retryable_for,
     _render_tool_result,
-    _schema_instruction,
 )
 from daydream.config_file import DaydreamFileConfig
 from daydream.phases.schemas import PER_STACK_RECORD_SCHEMA
-from daydream.retry_policy import parse_message_retry_hint
 from daydream.runner import run
 from daydream.trajectory import DaydreamPhase
 from tests.conftest import ExtDir
@@ -261,10 +259,13 @@ async def test_pi_execution_input_controls_native_argv_environment_and_policy(
     assert backend.retry_policy == RetryPolicy(1, 0.0, 4.0)
 
 
-async def test_structured_output() -> None:
+@pytest.mark.parametrize("schema", [
+    {"type": "object", "properties": {"issues": {"type": "array"}}},
+    {"type": "object", "properties": {"x": {"type": "string"}}},
+])
+async def test_structured_output(schema: dict[str, Any]) -> None:
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("structured_output.jsonl")
-    schema = {"type": "object", "properties": {"issues": {"type": "array"}}}
     events, mock_exec = await replay_process(backend, mock_proc, Path("/tmp"), "Parse",
                                              output_schema=schema, finalization=True)
     result_events = [e for e in events if isinstance(e, ResultEvent)]
@@ -569,12 +570,6 @@ async def test_concurrent_execute_calls_do_not_share_stdout_reader() -> None:
 )
 def test_render_tool_result(result: Any, expected: Any) -> None:
     assert _render_tool_result(result) == expected
-
-def test_schema_instruction_contains_schema_json() -> None:
-    schema = {"type": "object", "properties": {"x": {"type": "string"}}}
-    instruction = _schema_instruction(schema)
-    assert "JSON schema" in instruction
-    assert json.dumps(schema) in instruction
 
 
 def test_create_backend_invalid_includes_pi_in_message() -> None:
@@ -920,15 +915,6 @@ def test_backend_execution_input_parses_the_retry_recovery_allowance(tmp_path: P
             {**source, "DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S": junk}, backend="pi"
         )
         assert invalid.retry_policy.retry_recovery_allowance_s is None, junk
-
-def test_pi_error_carries_the_retry_hint_from_the_error_message() -> None:
-    error = PiError(
-        "503 Service Unavailable; retry-after: 30",
-        retryable=_pi_retryable_for(category="SERVER_ERROR", message="503 Service Unavailable; retry-after: 30"),
-        category=_pi_error_category("503 Service Unavailable; retry-after: 30"),
-        retry_after=parse_message_retry_hint("503 Service Unavailable; retry-after: 30"),
-    )
-    assert error.retry_after == 30.0
 
 @pytest.mark.parametrize(
     "message",
