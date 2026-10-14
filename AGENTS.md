@@ -77,6 +77,15 @@ These boundaries matter across subsystems; module docstrings carry finer detail:
 
 ### Runtime invariants
 
+- `git_ops.repository` resolves embedded provenance and App bootstrap locally (explicit `pr_repo`,
+  captured `GH_REPO`, then target `origin`), admitting only unambiguous github.com identities.
+  The App session binds token minting, refresh, and GitHub routing to that identity.
+  CLI provenance uses `gh repo view` after session resolution, preserving gh's selected
+  upstream for forks, supported hosts, and SSH aliases with that session's authentication.
+  Explicit `pr_repo` wins; local provenance is a fallback when gh discovery is unavailable.
+  Embedded runs resolve provenance locally without implicit remote repository discovery.
+  CLI-requested branch PR discovery uses session auth on the original checkout before detached workspace creation.
+  Direct runner callers retain flow-owned PR discovery.
 - Call agents through `agent.run_agent()`, never directly through a backend/SDK
   from phases. Fan-out uses parallel calls under
   `anyio.CapacityLimiter(effective_fanout_concurrency(ceiling, backend))` and

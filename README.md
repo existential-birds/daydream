@@ -979,6 +979,23 @@ The behavior notes are:
 - Neither variable set → ambient `gh` identity.
 - Only one set → abort with an error naming the missing one.
 - Posting runs abort if daydream cannot determine owner/repo, or if token minting fails.
+- Repository identity is resolved locally before App authentication: an explicit internal
+  `pr_repo` override, then `GH_REPO`, then the target checkout's `origin` (not the invoking directory).
+  Supported `GH_REPO` forms are `OWNER/REPO`, `github.com/OWNER/REPO`, and
+  `https://github.com/OWNER/REPO` (an optional `.git` URL suffix is removed). Origins support HTTPS, `ssh://git@github.com/OWNER/REPO`,
+  and `git@github.com:OWNER/REPO`, with an optional `.git` suffix.
+- CLI runs use authenticated `gh` repository discovery after session resolution, retaining
+  the selected upstream for forks as well as other hosts and SSH aliases. Explicit internal
+  `pr_repo` overrides win; local identity is a fallback when discovery is unavailable.
+  Embedded runs resolve provenance locally
+  without an implicit remote repository lookup.
+- App runs support only `github.com`; `GH_HOST` must be unset or `github.com`.
+  Malformed or ambiguous identities abort before minting, without falling back to another
+  repository or exposing remote credentials. A valid explicit override wins disagreements.
+- App credentials and repository routing belong to one run, including token refresh.
+  CLI branch PR discovery uses that run's authentication on the original checkout before
+  an isolated detached workspace is created. Direct runner callers retain flow-owned
+  PR discovery. No working ambient GitHub API credential is required.
 - Daydream redacts the private key and minted tokens from logs and trajectory files.
 
 ## Self-hosted review bot

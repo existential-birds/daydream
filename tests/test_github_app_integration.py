@@ -109,8 +109,7 @@ async def test_posting_aborts_when_owner_repo_undeterminable(
     # run must abort rather than let gh fall back to ambient auth.
     config = RunConfig(target=str(feature_branch_repo), non_interactive=True,
                        output_mode="comment", shallow=True, stack="python", quiet=False)
-    with patch("daydream.git_ops.gh_repo_view", return_value=None), \
-         patch("daydream.github_app._mint_installation_token") as mock_mint:
+    with patch("daydream.github_app._mint_installation_token") as mock_mint:
         exit_code = await run(config)
     out = capsys.readouterr().out
     assert exit_code == 1

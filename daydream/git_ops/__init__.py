@@ -134,6 +134,7 @@ from daydream.git_ops.queries import (
     upstream_ahead_count as upstream_ahead_count,
     validate_branch_name as validate_branch_name,
 )
+from daydream.git_ops.repository import resolve_github_repository as resolve_github_repository
 from daydream.git_ops.snapshot import prepare_independent_snapshot as prepare_independent_snapshot
 from daydream.git_ops.state import (
     build_recommended_patch_strict as build_recommended_patch_strict,

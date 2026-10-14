@@ -94,14 +94,15 @@ def list_local_branches(repo: Path) -> dict[str, str]:
 
 
 def remote_url(repo: Path, remote: str = "origin") -> str | None:
-    """Read a configured fetch URL; missing values and Git failures return ``None``."""
+    """Read one unambiguous fetch URL; absent/multiple values and failures return None."""
     try:
-        proc = process._run_git(repo, ["config", "--get", f"remote.{remote}.url"], timeout=5)
+        proc = process._run_git(repo, ["config", "--get-all", f"remote.{remote}.url"], timeout=5)
     except GitError:
         return None
     if proc.returncode != 0:
         return None
-    return proc.stdout.strip() or None
+    urls = proc.stdout.splitlines()
+    return urls[0] if len(urls) == 1 and urls[0] else None
 
 
 def remote_urls(repo: Path) -> dict[str, str]:

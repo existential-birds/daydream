@@ -8,44 +8,11 @@ from typing import Any
 
 from rich.console import Console
 
-from daydream import git_ops
-from daydream.config_file import DaydreamFileConfig, load_file_config
+from daydream.config_file import load_file_config
 from daydream.observability.config import ObservabilityConfig, ObservabilityError, resolve_observability_config
 from daydream.run_config import RunConfig
 from daydream.trajectory import RUN_DOCUMENT_NAME, RUNS_DIRNAME
 from daydream.ui import NEON_THEME
-
-
-def _auto_detect_pr_number(repo: Path) -> int | None:
-    """Find the PR for the target checkout branch, independent of the invoking cwd."""
-    try:
-        data = git_ops.gh_pr_view(repo, None, auth=git_ops.INHERIT_GITHUB_AUTH)
-    except git_ops.GitError:
-        return None
-    if not data:
-        return None
-    number = data.get("number")
-    return int(number) if isinstance(number, int) else None
-
-
-def _detect_repo_slug(repo: Path) -> str | None:
-    """Detect owner/repo from the target checkout so archives and trajectories retain its provenance."""
-    try:
-        slug = git_ops.gh_repo_view(repo, auth=git_ops.INHERIT_GITHUB_AUTH)
-    except git_ops.GitError:
-        return None
-    if slug is None:
-        return None
-    owner, name = slug
-    return f"{owner}/{name}"
-
-
-def _resolve_target_provenance(target: str | None) -> tuple[Path, str | None, DaydreamFileConfig]:
-    """Return the target repository, slug, and low-precedence file policy; never infer from invoking cwd."""
-    target_repo = Path(target) if target else Path.cwd()
-    pr_repo = _detect_repo_slug(target_repo)
-    file_config = load_file_config(target_repo)
-    return target_repo, pr_repo, file_config
 
 
 def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = True) -> None:
@@ -239,18 +206,22 @@ def _dispatch_namespace(argv: list[str], subverbs: dict[str, Callable[[list[str]
 def config_from_args(
     parser: argparse.ArgumentParser, args: argparse.Namespace, *, detect_pr: bool = False, **overrides: Any,
 ) -> RunConfig:
-    """Copy only RunConfig destinations; resolve operator settings before target provenance.
-    Command-specific transformations stay at callers and parser-only flags never enter runtime
-    policy.
+    """Copy RunConfig destinations and resolve operator settings and target file policy.
+    Repository discovery waits for session authentication in the runner. Command-specific
+    transformations stay at callers and parser-only flags never enter runtime policy.
     """
     observability = _resolve_cli_observability(parser, args)
-    target_repo, pr_repo, file_config = _resolve_target_provenance(args.target)
+    target_repo = Path(args.target) if args.target else Path.cwd()
+    file_config = load_file_config(target_repo)
     values = {item.name: getattr(args, item.name) for item in fields(RunConfig) if hasattr(args, item.name)}
     if args.dataset_store_path is not None:
         values["dataset_capture"] = True
     if args.dataset_capture_disabled:
         values["dataset_capture"] = False
     if detect_pr:
-        values["pr_number"] = args.pr_number if args.pr_number is not None else _auto_detect_pr_number(target_repo)
-    values.update(observability=observability, file_config=file_config, pr_repo=pr_repo, archive=not args.no_archive)
+        values["pr_number"] = args.pr_number
+    values.update(
+        observability=observability, file_config=file_config,
+        archive=not args.no_archive, discover_github_provenance=True,
+    )
     return RunConfig(**(values | overrides))
