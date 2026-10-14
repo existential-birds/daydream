@@ -381,6 +381,12 @@ _BACKEND_LIFECYCLE_FIELDS = frozenset({
     "generation_started_s", "last_progress_s", "last_progress_age_s", "raw_line_count",
     "native_event_count", "generation_count", "text_delta_count", "thinking_delta_count",
     "toolcall_delta_count", "tool_progress_count", "active_tool_count", "generation_open",
+    "read_observation", "stream_idle_timeout_s", "terminal_drain_timeout_s", "process_reap_timeout_s",
+    "cleanup_timeout_s", "last_raw_line_s", "last_native_event_s", "last_native_event_kind",
+    "terminal_received_s", "stdout_eof_s", "process_exit_s", "process_returncode", "teardown_started_s",
+    "teardown_completed_s", "expiry_stage", "cleanup_expired", "adapter_yield_count", "last_adapter_yield_s",
+    "consumer_request_count", "consumer_event_count", "last_consumer_request_s", "last_consumer_event_s",
+    "recorder_event_count", "last_recorder_event_s", "loop_sample_count", "last_loop_sample_s", "loop_max_lag_s",
 })
 
 

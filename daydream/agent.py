@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from contextlib import nullcontext
 from pathlib import Path
 from types import TracebackType
@@ -21,6 +22,7 @@ from daydream.agent_output import StructuredOutputFailure as StructuredOutputFai
 from daydream.agent_retry import _plan_retry_delay, _resolve_retry_settings, _retry_hint, _RetryTelemetry
 from daydream.artifact_visibility import ArtifactVisibilityError, artifact_session_active, assert_model_cwd_clean
 from daydream.backends import (
+    AgentEvent,
     AgentEventStream,
     Backend,
     ContinuationToken,
@@ -142,6 +144,7 @@ class _EventStreamScope:
         try:
             await self.aclose()
         finally:
+            await self._lifecycle.stop_sampling()
             # No await/yield between freezing and handing evidence to the scopes
             # that finalize next. GeneratorExit/cancellation cannot drop this.
             try:
@@ -151,13 +154,27 @@ class _EventStreamScope:
             finally:
                 self._lifecycle.reset(self._lifecycle_token)
 
+    async def events(self) -> AsyncIterator[AgentEvent]:
+        """Observe demand separately from adapter yields and recorder delivery."""
+        while True:
+            self._lifecycle.consumer_requested()
+            try:
+                event = await anext(self.event_iter)
+            except StopAsyncIteration:
+                return
+            self._lifecycle.consumer_event()
+            yield event
+
     async def aclose(self) -> None:
         """Close the invocation once without masking its outcome."""
         if self._closed:
             return
         self._closed = True
         try:
-            await self.event_iter.aclose()
+            with anyio.move_on_after(BUDGET_CLEANUP_GRACE_S, shield=True) as scope:
+                await self.event_iter.aclose()
+            if scope.cancel_called:
+                self._lifecycle.expiry("cleanup")
         except Exception:  # noqa: BLE001 - cleanup must not mask the invocation outcome
             pass
 
@@ -651,7 +668,7 @@ async def _run_agent(
                         )
 
                         with wall_scope:
-                            async for event in event_iter:
+                            async for event in event_stream_scope.events():
                                 if investigation_budget is not None and isinstance(event, ToolStartEvent):
                                     investigation_budget.observed_tool_starts += 1
                                     tool_calls += 1
@@ -954,6 +971,10 @@ async def _run_agent(
             # hostile exception message cannot paint or escape the operator's
             # terminal in the fatal path.
             print_error(console, "Backend Execution Error", sanitize_verbose_message(diagnostic))
+            raise
+        except asyncio.CancelledError:
+            # The attempt stream already closed during unwinding. Cancellation
+            # of one fanout task must not terminate a shared backend's siblings.
             raise
         except BaseException:
             # Shutdown path: SIGINT (KeyboardInterrupt) / task cancellation

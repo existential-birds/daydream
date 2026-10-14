@@ -79,6 +79,15 @@ def _parsed_nonnegative_float(
     return value
 
 
+def _parsed_positive_float(environment: Mapping[str, str], name: str, default: float) -> float:
+    """Parse a mandatory finite allowance; zero cannot disable lifecycle cleanup."""
+    value = _parsed_nonnegative_float(environment, name, default)
+    if value == 0:
+        logger.warning("%s must be positive; using default %g", name, default)
+        return default
+    return value
+
+
 def _parsed_positive_int(
     environment: Mapping[str, str], name: str, default: int
 ) -> int:
@@ -105,11 +114,18 @@ class BackendExecutionInput:
     pi_agent_dir: Path | None
     stream_idle_timeout_s: float | None
     pi_response_idle_timeout_s: float | None
+    codex_terminal_drain_timeout_s: float = 5.0
+    codex_process_reap_timeout_s: float = 5.0
+    codex_cleanup_timeout_s: float = 10.0
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "_environment", MappingProxyType(dict(self._environment))
         )
+        for allowance in (self.codex_terminal_drain_timeout_s, self.codex_process_reap_timeout_s,
+                          self.codex_cleanup_timeout_s):
+            if type(allowance) not in {int, float} or not math.isfinite(allowance) or allowance <= 0:
+                raise ValueError("Codex lifecycle allowances must be finite and positive")
 
     @classmethod
     def from_environment(
@@ -117,6 +133,7 @@ class BackendExecutionInput:
     ) -> BackendExecutionInput:
         """Parse one complete environment without consulting process globals."""
         from daydream.backends._subprocess import (
+            DEFAULT_CODEX_STREAM_IDLE_TIMEOUT_S,
             DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S,
             DEFAULT_STREAM_IDLE_TIMEOUT_S,
         )
@@ -135,7 +152,8 @@ class BackendExecutionInput:
         )
         fanout_default = 10 if backend == "pi" else 8
         idle = _parsed_nonnegative_float(
-            copied, "DAYDREAM_STREAM_IDLE_TIMEOUT_S", DEFAULT_STREAM_IDLE_TIMEOUT_S
+            copied, "DAYDREAM_STREAM_IDLE_TIMEOUT_S",
+            DEFAULT_CODEX_STREAM_IDLE_TIMEOUT_S if backend == "codex" else DEFAULT_STREAM_IDLE_TIMEOUT_S
         )
         response_idle = _parsed_nonnegative_float(
             copied,
@@ -180,6 +198,9 @@ class BackendExecutionInput:
             pi_agent_dir,
             None if idle == 0 else idle,
             None if response_idle == 0 else response_idle,
+            _parsed_positive_float(copied, "DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S", 5.0),
+            _parsed_positive_float(copied, "DAYDREAM_CODEX_PROCESS_REAP_TIMEOUT_S", 5.0),
+            _parsed_positive_float(copied, "DAYDREAM_CODEX_CLEANUP_TIMEOUT_S", 10.0),
         )
 
     def child_environment(self) -> dict[str, str]:

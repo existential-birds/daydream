@@ -24,7 +24,7 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
-from daydream.backends.lifecycle import BackendLifecycleSnapshot
+from daydream.backends.lifecycle import BackendLifecycleSnapshot, current_backend_lifecycle
 from daydream.redaction import redact_value as redact_value
 from daydream.trajectory.generation import _GenerationLedger
 from daydream.trajectory.types import DaydreamPhase as DaydreamPhase
@@ -287,6 +287,9 @@ class Invocation:
         The local catch does not suppress failures in the caller’s event loop."""
         try:
             self._dispatch(event)
+            lifecycle = current_backend_lifecycle()
+            if lifecycle is not None:
+                lifecycle.recorder_event()
         except Exception as exc:  # noqa: BLE001 - recording must never crash a run (Architecture Q7)
             ui.print_warning(_console, f"Trajectory recording: {type(exc).__name__}: {exc}")
 

@@ -2,6 +2,8 @@
 
 import asyncio
 import os
+import signal
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -57,6 +59,39 @@ async def test_terminate_process_is_idempotent() -> None:
     proc = await _spawn_holder()
     await terminate_process(proc)
     await terminate_process(proc)  # must not raise
+
+
+async def test_terminate_process_does_not_wait_for_escaped_pipe_writer() -> None:
+    """Actual direct-child exit bounds cleanup even when an escaped writer retains stdout."""
+    child = (
+        "import signal, subprocess, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "writer = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+        "start_new_session=True)\n"
+        "print(writer.pid, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", child, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT, start_new_session=True,
+    )
+    assert proc.stdout is not None
+    async with asyncio.timeout(5):
+        writer_pid = int(await proc.stdout.readline())
+    cleanup = asyncio.create_task(terminate_process(proc, timeout=0.05))
+    try:
+        async with asyncio.timeout(1):
+            await asyncio.shield(cleanup)
+        assert proc.returncode == -signal.SIGKILL
+    finally:
+        # The escaped session intentionally cannot be cleaned by killpg(proc.pid).
+        # Release it even when the baseline remains blocked in proc.wait().
+        try:
+            os.killpg(writer_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        async with asyncio.timeout(5):
+            await cleanup
 
 async def test_cancel_processes_kills_groups_and_releases_fds() -> None:
     """cancel_processes reaps every tracked process group, not just direct children."""

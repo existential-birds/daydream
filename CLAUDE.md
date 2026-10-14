@@ -169,11 +169,22 @@ transformations. Adding a backend means producing that stream correctly — phas
 recorder are backend-agnostic. `Diagnostic` is recorder-only parser/transport evidence: the recorder
 normalizes and redacts it into JSON-safe `Step.extra.backend_diagnostics`, while observability exports
 only scrubbed diagnostic codes and counts on the enclosing attempt span.
-Pi startup and interrupted native progress use a separate typed, content-free attempt collector.
+Pi startup/native progress and Codex stream/process boundaries use a typed, content-free attempt collector.
 The runner freezes its host-monotonic observations synchronously after stream cleanup and before
 invocation/span finalization. Trajectory invocation summaries retain `backend_lifecycle`; existing
 attempt spans export its fixed scalar fields as `daydream.backend_lifecycle.*`. This evidence does
-not change deadlines, idle windows, retries, native generation completion, or billing ownership.
+not own deadlines, idle windows, retries, native generation completion, or billing ownership.
+Codex success requires the latest public turn to complete, stdout EOF, and an independently observed zero
+exit. Its preterminal silence window defaults to 600 seconds (`DAYDREAM_STREAM_IDLE_TIMEOUT_S`,
+zero disables only silence detection). Absolute terminal drain, EOF-to-exit reap, and cleanup
+allowances default to 5/5/10 seconds; positive finite `DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S`,
+`DAYDREAM_CODEX_PROCESS_REAP_TIMEOUT_S`, and `DAYDREAM_CODEX_CLEANUP_TIMEOUT_S` override them.
+Frozen `BackendExecutionInput` owns these settings when supplied. Completion timing begins
+before metric/cost yields and repeated terminal events cannot extend it. Duplicate public completion
+within a turn does not charge usage again; a genuine `turn.started` permits distinct-turn accounting
+without restarting the tail allowance. Postterminal expiry
+prohibits automatic replay of a potentially completed mutating turn. Attempt cancellation closes
+only its own stream; backend-wide cancellation belongs to run shutdown.
 Adapters emit assistant text and genuine transport/native payloads; `agent_output.py` owns final-turn selection
 and validation. Staged contract 10 accepts bounded, complete, unambiguous prose/fence/single-wrapper packaging;
 `ReviewInvestigation._admit` owns domain admission before result presentation. Native lifecycle stays in adapters,
@@ -219,7 +230,7 @@ CLI subprocess env also sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` and lifts 
 | `DEFAULT_TOOL_CALL_BUDGET` | `None` | unlimited; per-call `tool_call_budget` still accepted |
 | `DEFAULT_GROUP_MAX_WALL_S` / `_SERIAL_ITEMS` | 600s / 6 | cumulative over all fix calls for one file group |
 | `EXPLORATION_MAX_TURNS` | 50 | exploration specialists — the only `max_turns` call site |
-| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | 600s / 2700s | pi response silence / active-tool and codex silence before the subprocess is killed |
+| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | 600s / 2700s | Pi response/Codex silence / Pi active-tool and Osprey silence before the subprocess is killed |
 
 - Failed/truncated/malformed reviews retain admitted evidence and incomplete coverage; read README.md#review-budgets.
 - Deep sharding retains explicit RunConfig/file-config precedence and aggregate scale4 activation.
@@ -408,7 +419,7 @@ Full contract: `docs/extensions.md`.
 | `PI_API_KEY` | Pi | Copied into the child's provider-native var (e.g. `ZAI_API_KEY`), **never onto argv**; warns and ignores if the provider has no mapped var |
 | `DAYDREAM_PI_RETRY_ATTEMPTS` / `_BASE_DELAY_S` / `_MAX_DELAY_S` | Retry | Attempts default 20, all backends |
 | `DAYDREAM_FANOUT_CONCURRENCY` | Claude / Codex | Parallel `execute()` hint (default 8; bad value warns). Pi uses `DAYDREAM_PI_FANOUT_CONCURRENCY` (default 10) |
-| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | Pi / Codex | Stdout-silence kill (pi response default 600; active-tool/codex default 2700; `0` disables) |
+| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | Pi / Codex | Stdout-silence kill (Pi response/Codex default 600; Pi active-tool default 2700; `0` disables) |
 | `DAYDREAM_REVIEW_API_KEY` / `DAYDREAM_JUDGE_API_KEY` | Benchmark | Harbor reviewer/judge OpenRouter keys; read from the launching env, never written into the workspace or task. `daydream/benchmark/harbor/env_policy.py` is the single declaration of which environment names are let through and which are scrubbed. |
 
 Plain path overrides: `DAYDREAM_PRICES_FILE`, `DAYDREAM_ARCHIVE_DIR`, `PI_CODING_AGENT_DIR` (`~/.pi/agent`), `CLAUDE_CONFIG_DIR` (`~/.claude`).
