@@ -19,48 +19,10 @@ from tests.harness.git_helpers import (
     git as _git,
     seed_feature_branch as _seed_feature_branch,
 )
+from tests.harness.remote_ci import NoCIRemote
 from tests.harness.stub_backend import StubBackend
 from tests.test_deep_orchestrator import MakeConfig, _silence
 
-
-async def _run_real_fix_flow(
-    tmp_path: Path, make_config: MakeConfig, monkeypatch: pytest.MonkeyPatch, *, test_command: str = "true",
-) -> int:
-    """Run a real fix and green host test to the caller's commit-evidence spy."""
-    repo = tmp_path / "evidence-reuse-flow"
-    _seed_feature_branch(repo, base={"api.py": "A = 1\n"}, feature={"api.py": "A = 2\n"})
-
-    backend = StubBackend(repo)
-    backend.fix_edit_line = "# repaired\n"
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_a, **_k: backend)
-    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
-    _silence(monkeypatch)
-    return await run(make_config(repo, assume="yes", output_mode="loop", test_command=test_command))
-
-@pytest.mark.asyncio
-async def test_the_retained_test_evidence_reaches_the_commit_gate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
-) -> None:
-    """Real fix flow: the identity produced by finalize is the offer the commit phase sees."""
-    observed: list[TestAttemptEvidence | None] = []
-    retained_keys: list[str | None] = []
-    real_phase = phase_commit_push
-
-    async def spy(*args: Any, **kwargs: Any) -> Any:
-        observed.append(kwargs.get("evidence"))
-        retained_keys.append(kwargs.get("retained_tree_key"))
-        return await real_phase(*args, **kwargs)
-
-    monkeypatch.setattr("daydream.deep.fix_steps.phase_commit_push", spy)
-
-    await _run_real_fix_flow(tmp_path, make_config, monkeypatch)
-
-    assert observed, "the commit step must call phase_commit_push"
-    evidence = observed[0]
-    assert evidence is not None and evidence.identity is not None
-    assert evidence.identity.outcome == "passed"
-    assert evidence.identity.output_tree_key  # bound to the retained tree
-    assert retained_keys[0] == evidence.identity.output_tree_key
 
 @pytest.mark.asyncio
 async def test_a_half_formed_offer_is_refused(tmp_path: Path, make_work: Any, make_config: MakeConfig) -> None:
@@ -92,7 +54,7 @@ async def test_a_tree_key_mismatch_is_refused(tmp_path: Path, make_work: Any, ma
 
 @pytest.mark.asyncio
 async def test_real_flow_skips_the_pre_push_suite_run_but_still_runs_the_hook(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, no_ci_remote: NoCIRemote,
 ) -> None:
     """Reuse skips the redundant proactive suite run while the hook and real push execute.
 
@@ -101,12 +63,13 @@ async def test_real_flow_skips_the_pre_push_suite_run_but_still_runs_the_hook(
     repo = tmp_path / "hook-reuse-flow"
     _seed_feature_branch(repo, base={"api.py": "A = 1\n"}, feature={"api.py": "A = 2\n"})
     remote = _bare_remote(tmp_path / "origin.git")
-    _git(repo, "remote", "add", "origin", str(remote))
+    no_ci_remote.connect(repo, remote)
 
     hook_log = tmp_path / "hooks.log"
     hook = repo / ".git" / "hooks" / "pre-push"
-    hook.write_text(f"#!/bin/sh\necho pre-push >> '{hook_log}'\nexit 0\n")
-    hook.chmod(0o755)
+    # Preserve the seeding hook's SHA publication and ready-state verification.
+    with hook.open("a") as stream:
+        stream.write(f"echo pre-push >> '{hook_log}'\n")
 
     counter = tmp_path / "host-runs"
     script = tmp_path / "record.py"
@@ -116,14 +79,27 @@ async def test_real_flow_skips_the_pre_push_suite_run_but_still_runs_the_hook(
         "path.write_text(str(int(path.read_text()) + 1) if path.exists() else '1')\n"
     )
 
+    observed: list[TestAttemptEvidence | None] = []
+    retained_keys: list[str | None] = []
+    real_phase = phase_commit_push
+
+    async def spy(*args: Any, **kwargs: Any) -> Any:
+        observed.append(kwargs.get("evidence"))
+        retained_keys.append(kwargs.get("retained_tree_key"))
+        return await real_phase(*args, **kwargs)
+
+    monkeypatch.setattr("daydream.deep.fix_steps.phase_commit_push", spy)
+
     backend = StubBackend(repo)
     backend.fix_edit_line = "# repaired\n"
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_a, **_k: backend)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     _silence(monkeypatch)
 
-    await run(make_config(repo, assume="yes", output_mode="loop", test_command=f"{sys.executable} {script} {counter}",)
-    )
+    assert await run(make_config(
+        repo, assume="yes", output_mode="loop", test_command=f"{sys.executable} {script} {counter}",
+        pr_number=no_ci_remote.pr_number, pr_repo=no_ci_remote.base_repository,
+    )) == 0
 
     assert counter.read_text() == "1", ("the TEST phase is the only orchestrator suite run; the commit gate "
         "reused the matching evidence instead of re-running it"
@@ -131,29 +107,12 @@ async def test_real_flow_skips_the_pre_push_suite_run_but_still_runs_the_hook(
     assert hook_log.read_text().splitlines() == ["pre-push"]
     assert _git(remote, "rev-parse", "refs/heads/feature") == _git(repo, "rev-parse", "HEAD")
 
-@pytest.mark.asyncio
-async def test_the_pre_push_reuse_decision_is_persisted_in_the_real_flow(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
-) -> None:
-    """SH1/SH2: the real flow's pre-push gate writes its reuse decision to the
-    published artifact, naming the gate and that reuse used the post-commit
-    verification."""
-    repo = tmp_path / "reuse-audit-flow"
-    _seed_feature_branch(repo, base={"api.py": "A = 1\n"}, feature={"api.py": "A = 2\n"})
-    remote = _bare_remote(tmp_path / "audit-origin.git")
-    _git(repo, "remote", "add", "origin", str(remote))
-
-    hook = repo / ".git" / "hooks" / "pre-push"
-    hook.write_text("#!/bin/sh\nexit 0\n")
-    hook.chmod(0o755)
-
-    backend = StubBackend(repo)
-    backend.fix_edit_line = "# repaired\n"
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_a, **_k: backend)
-    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
-    _silence(monkeypatch)
-
-    await run(make_config(repo, assume="yes", output_mode="loop", test_command="true"))
+    assert len(observed) == 1, "one finalized fix reaches the commit gate"
+    evidence = observed[0]
+    assert evidence is not None and evidence.identity is not None
+    assert evidence.identity.outcome == "passed"
+    assert evidence.identity.output_tree_key
+    assert retained_keys == [evidence.identity.output_tree_key]
 
     record = json.loads(DeepArtifact.EVIDENCE_REUSE.at(repo / ".daydream" / "deep").read_text())
     gate = record["gates"]["pre-push"]

@@ -34,14 +34,15 @@ def _stage(root: Path) -> dict[str, Path]:
 
 def _run_eval(paths: dict[str, Path], *, model: str, base_url: str | None, backend: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    argv = ["uv", "run", "eval", "@", "configs/eval-stub.toml", "-m", model, "--no-rich", "-o", str(paths["out"]),
-        "--harness.repo-path", str(paths["repo"]), "--harness.archive-root", str(paths["archive"]), "--harness.home",
+    argv = ["uv", "run", "vf-eval", "@", "configs/eval-stub.toml", "-m", model, "--no-rich", "-o", str(paths["out"]),
+        "--env.agent.harness.repo-path", str(paths["repo"]),
+        "--env.agent.harness.archive-root", str(paths["archive"]), "--env.agent.harness.home",
         str(paths["home"]),
     ]
     if base_url is not None:
         argv += ["--client.base-url", base_url]
     if backend is not None:
-        argv += ["--harness.backend", backend]
+        argv += ["--env.agent.harness.backend", backend]
     return subprocess.run(argv, cwd=PROJECT_ROOT, capture_output=True, text=True, check=False)
 
 
@@ -54,13 +55,17 @@ def _assert_reward_bounds(trace: dict[str, Any]) -> None:
 
 
 def _sole_trace(paths: dict[str, Path]) -> dict[str, Any]:
-    # verifiers 0.2.1 appends one full trace per line (no Episode wrapper)
+    # Each evaluation line contains an episode with its named agent traces.
     out = paths["out"]
     traces = sorted(out.rglob("traces.jsonl"))
     assert traces, f"no traces.jsonl under {out}"
     lines = traces[0].read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1, f"expected one rollout, got {len(lines)}"
-    return dict(json.loads(lines[0]))
+    episode = json.loads(lines[0])
+    assert episode["ok"] is True, episode.get("errors")
+    assert episode["errors"] == []
+    assert len(episode["traces"]) == 1, episode["traces"]
+    return dict(episode["traces"][0])
 
 
 @pytest.mark.skipif(shutil.which("claude") is None, reason="the claude CLI is not on PATH")

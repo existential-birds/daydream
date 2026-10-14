@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -25,16 +24,10 @@ from daydream.deep.orchestrator import (
 from daydream.deep.sharding import shard_stacks
 from daydream.review_budget import review_scale_for_diff
 from daydream.run_config import RunConfig
-from daydream.runner import run
 from tests.deep_orchestrator.test_review_completion import ReviewRun, scopes
 from tests.harness.git_helpers import git, seed_feature_branch
-from tests.harness.stub_backend import install_stub_backend, review_stage_state
-from tests.test_deep_orchestrator import (
-    _install_model_capturing_stubs,
-    _profile_with_pipeline,
-    _run_deep,
-    _silence,
-)
+from tests.harness.stub_backend import review_stage_state
+from tests.test_deep_orchestrator import _profile_with_pipeline
 
 
 @pytest.mark.parametrize('shape', ['fitting', 'singleton', 'cap-coarsened', 'explicit-false'])
@@ -226,6 +219,14 @@ async def test_resolved_sharding_controls_publish_actual_review_scopes(
     assert Counter(path for name, scope in inventory.items() if name != 'structure'
                    for path in scope['files']) == Counter(changed)
     assert all(scope['status'] == 'complete' for scope in inventory.values())
+    if overrides.get('output_mode') != 'loop':
+        # The published reviewer files match the resolved scopes exactly,
+        # including the absence of shard artifacts when explicitly disabled.
+        deep = shard_many_python_target / '.daydream/deep'
+        assert {path.name for path in deep.glob('stack-python*-review.md')} == {
+            f'stack-{name}-review.md' for name in expected_python}
+        assert {path.name for path in deep.glob('stack-python*-records.json')} == {
+            f'stack-{name}-records.json' for name in expected_python}
 
 
 async def test_oversized_singleton_retains_intact_primary_assignment(
@@ -290,80 +291,6 @@ def test_deep_shard_max_files_resolves_and_coerces(tmp_path: Path) -> None:
     fc = DaydreamFileConfig(deep_shard_max_files=7)
     cfg = RunConfig(target=str(tmp_path), file_config=fc)
     assert _deep_shard_max_files(cfg) == 7
-
-async def test_deep_large_diff_produces_review_and_record_shards(
-    shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, install_backend: Callable[[object], object],
-) -> None:
-
-    install_stub_backend(monkeypatch, shard_many_python_target)
-    # Sharding enabled, tiny file bound -> the python stack shards.
-    rc = await run(RunConfig(
-            target=str(shard_many_python_target), cleanup=False, deep_shard_enabled=True, deep_shard_max_files=1,
-            deep_shard_max_bytes=10**9,
-        )
-    )
-    assert rc == 0
-    deep = shard_many_python_target / ".daydream" / "deep"
-    shards = sorted(p for p in deep.glob("stack-python#*-review.md"))
-    assert len(shards) >= 2  # >1 review task for one language stack
-    records = sorted(p for p in deep.glob("stack-python#*-records.json"))
-    assert records
-
-async def test_deep_sharding_off_keeps_single_agent_per_stack(
-    shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, install_backend: Callable[[object], object],
-) -> None:
-    install_stub_backend(monkeypatch, shard_many_python_target)
-    rc = await run(RunConfig(target=str(shard_many_python_target), cleanup=False,
-            deep_shard_enabled=False,  # explicit sharding-off
-            deep_shard_max_files=1,
-        )
-    )  # bound ignored when off
-    assert rc == 0
-    deep = shard_many_python_target / ".daydream" / "deep"
-    assert not list(deep.glob("stack-python#*-review.md"))  # exactly one agent per stack, as today
-
-async def test_no_parse_phase_and_records_from_output_schema(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """AC4: no parse-<stack> fork exists; records come from output_schema."""
-    _silence(monkeypatch)
-    prompts = _install_model_capturing_stubs(monkeypatch, multi_stack_target)
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-
-    # (1) No parse-<stack> phase: the phase_parse_feedback prompt never fires.
-    assert not any("extract only actionable issues" in c["prompt"].lower() for c in prompts), (
-        "a parse phase prompt fired; parse-* stage must be removed"
-    )
-    assert not any("parse" in str(c.get("model", "")).lower() for c in prompts)
-
-    # (2) Per-stack records files exist and hold the reviewer's structured
-    # output. Each lens is checked against its own stub wording ("Sample issue"
-    # for the language stacks, a distinct description for the structural
-    # meta-stack), so the assertion cannot depend on glob ordering.
-    deep_dir_path = multi_stack_target / ".daydream" / "deep"
-    records = sorted(deep_dir_path.glob("stack-*-records.json"))
-    assert records, "expected per-stack records written by the reviewer"
-    language = [p for p in records if p.name != "stack-structure-records.json"]
-    assert language, "expected at least one language-stack records file"
-    loaded = json.loads(language[0].read_text())
-    assert loaded["issues"][0]["description"] == "Sample issue"
-    structural = deep_dir_path / "stack-structure-records.json"
-    assert structural.is_file(), "expected the structural meta-stack records file"
-    assert json.loads(structural.read_text())["issues"][0]["description"] == "Structural maintainability concern"
-
-
-    # Review requests keep the persisted changed-line authority.
-    language_prompts = [c["prompt"] for c in prompts if (stage := review_stage_state(c["prompt"])) is not None
-                        and stage["stage"] == "first_pass"]
-    assert language_prompts
-    for prompt in language_prompts:
-        from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
-        state = review_stage_state(prompt)
-        assert state is not None
-        supporting = supporting_contents(prompt)
-        assert set(json.loads(supporting['hunk-index'])) == set(state['assigned_files'])
-        assert all(f'diff --git a/{path} b/{path}' in supporting['diff'] for path in state['assigned_files'])
-
 
 async def test_default_cap_coarsens_only_enough_and_preserves_scope_qualified_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

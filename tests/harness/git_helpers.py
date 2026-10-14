@@ -109,6 +109,16 @@ def init_repo(repo: Path) -> None:
     configure_identity(repo)
 
 
+def _write_and_stage_files(repo: Path, files: dict[str, str]) -> None:
+    """Stage the supplied paths together after writing one fixture revision."""
+    for name, content in files.items():
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    if files:
+        git(repo, "add", "--", *files)
+
+
 def seed_feature_branch(repo: Path, *, base: dict[str, str], feature: dict[str, str], base_message: str = "base",
     feature_message: str = "feature", base_ref: str | None = None,
 ) -> str:
@@ -118,14 +128,12 @@ def seed_feature_branch(repo: Path, *, base: dict[str, str], feature: dict[str, 
     review config resolves ``--base`` against a literal ref rather than a SHA.
     """
     init_repo(repo)
-    for name, content in base.items():
-        write_and_stage(repo, name, content)
+    _write_and_stage_files(repo, base)
     commit(repo, base_message)
     if base_ref is not None:
         git(repo, "branch", base_ref)
     git(repo, "checkout", "-b", "feature")
-    for name, content in feature.items():
-        write_and_stage(repo, name, content)
+    _write_and_stage_files(repo, feature)
     return commit(repo, feature_message)
 
 
@@ -194,6 +202,8 @@ def install_diff_base_git_shim(
         "    print('PRIVATE_MERGE_SENTINEL')\n"
         "    raise SystemExit(0)\n"
         "if mode == 'timeout-preference' and is_preference:\n"
+        "    with open(os.path.join(os.path.dirname(sys.argv[0]), 'timeout-probes'), 'a') as probes:\n"
+        "        probes.write('started\\n')\n"
         "    time.sleep(30)\n"
         "if mode == 'remove-after-preference' and is_preference:\n"
         "    result = subprocess.run([real, *args])\n"
@@ -230,8 +240,7 @@ def seed_base_support_files(repo: Path, files: dict[str, str]) -> None:
     """Add existing dependency sources to main and merge them into a fixture branch."""
     branch = git(repo, 'branch', '--show-current')
     git(repo, 'checkout', 'main')
-    for path, content in files.items():
-        write_and_stage(repo, path, content)
+    _write_and_stage_files(repo, files)
     commit(repo, 'fixture: existing dependency sources')
     git(repo, 'checkout', branch)
     git(repo, 'merge', 'main', '-m', 'fixture: merge existing dependency sources')

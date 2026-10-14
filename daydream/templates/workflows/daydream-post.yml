@@ -43,7 +43,7 @@ jobs:
       - name: Install daydream
         # Pinned to the same immutable reviewed commit as analysis so this phase
         # can validate and post the diagram artifact that analysis produces.
-        run: uv tool install git+https://github.com/existential-birds/daydream@8077f10ededfd9b1f6e1fcb74c47250aaa365caf
+        run: uv tool install --python 3.14 git+https://github.com/existential-birds/daydream@8077f10ededfd9b1f6e1fcb74c47250aaa365caf
 
       - name: Mint posting token
         id: token

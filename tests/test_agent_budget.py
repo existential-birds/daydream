@@ -610,15 +610,15 @@ async def test_pi_attempt_preamble_tracks_preparation_and_retry_spend(
     source = tmp_path / "assigned.py"
     source.write_text("answer = 42\n")
     prepared = prepare_sanctioned_inputs(backend, tmp_path, {"assigned": source}, read_only=True)
-    real_stat = Path.stat
+    real_lstat = Path.lstat
 
-    def delayed_stat(path: Path, *args: Any, **kwargs: Any) -> Any:
-        result = real_stat(path, *args, **kwargs)
+    def delayed_lstat(path: Path, *args: Any, **kwargs: Any) -> Any:
+        result = real_lstat(path, *args, **kwargs)
         if path == source:
             fake.advance(3)  # Real input revalidation consumes time before dispatch.
         return result
 
-    monkeypatch.setattr(Path, "stat", delayed_stat)
+    monkeypatch.setattr(Path, "lstat", delayed_lstat)
     prompts: list[str] = []
 
     async def spawn(*args: str, **kwargs: Any) -> Any:
@@ -665,15 +665,15 @@ async def test_sanctioned_input_preparation_expiry_never_dispatches_pi(
     source = tmp_path / "assigned.py"
     source.write_text("answer = 42\n")
     prepared = prepare_sanctioned_inputs(backend, tmp_path, {"assigned": source}, read_only=True)
-    real_stat = Path.stat
+    real_lstat = Path.lstat
 
-    def delayed_stat(path: Path, *args: Any, **kwargs: Any) -> Any:
-        result = real_stat(path, *args, **kwargs)
+    def delayed_lstat(path: Path, *args: Any, **kwargs: Any) -> Any:
+        result = real_lstat(path, *args, **kwargs)
         if path == source:
             fake.advance(5)
         return result
 
-    monkeypatch.setattr(Path, "stat", delayed_stat)
+    monkeypatch.setattr(Path, "lstat", delayed_lstat)
     prompts: list[str] = []
 
     async def spawn(*args: str, **kwargs: Any) -> Any:

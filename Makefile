@@ -1,15 +1,18 @@
 .PHONY: install lint typecheck test actionlint rl-check check lockcheck hooks deadcode coverage-report check-naming
 
+# CI can overlap I/O-heavy Git/subprocess tests while local runs use CPU count.
+PYTEST_WORKERS ?= auto
+
 install:
 	# All extras so `make check` runs the full suite (benchmark objective tests
 	# need the harbor package from the benchmark extra).
 	uv sync --all-extras
 
 lint:
-	uv run ruff check daydream tests
+	uv run ruff check daydream tests scripts/ci_plan.py
 
 typecheck:
-	uv run mypy daydream tests
+	uv run mypy daydream tests scripts/ci_plan.py
 
 # Whole-project dead-code detection (#935). Both projects' scans live in their
 # own [tool.vulture]; pass --config explicitly so each project's pyproject.toml
@@ -23,10 +26,10 @@ deadcode:
 # `uv run pytest tests/foo.py` stay plain and never trip the floor enforced by
 # [tool.coverage.report] fail_under in pyproject.toml (#336).
 # CI reaches these flags through `make test`; xdist parallelism stays via
-# -n auto. No --no-cov-on-fail so coverage.xml survives
+# the PYTEST_WORKERS override (auto locally). No --no-cov-on-fail so coverage.xml survives
 # a failed run for the coverage-report / CI artifact upload.
 test:
-	uv run pytest -n auto --cov --cov-branch --cov-report=term-missing --cov-report=xml
+	uv run pytest -n $(PYTEST_WORKERS) --cov --cov-branch --cov-report=term-missing --cov-report=xml
 
 # Machine-readable coverage report for humans who want the XML locally; the
 # terminal term-missing report + coverage floor enforcement already happen inside
@@ -84,7 +87,7 @@ lockcheck:
 #
 # `rl-check` is deliberately NOT a dependency, mirroring that job: the standalone
 # RL project is separately locked and has its own ci.yml job (own runner, own
-# `uv sync`, Python 3.12), and one of its e2e tests drives the real `claude` CLI
+# `uv sync`, Python 3.14), and one of its e2e tests drives the real `claude` CLI
 # — present on a developer machine, absent on that runner, where the test's own
 # `shutil.which` guard skips it. As a `check` dependency it therefore failed the
 # pre-push gate on changes that never touch rl/. Run `make rl-check` when you

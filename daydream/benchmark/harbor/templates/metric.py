@@ -5,7 +5,7 @@ or unavailable scorer fails without output or placeholder metrics; the CLI accep
 and -o paths.
 """
 # /// script
-# requires-python = ">=3.12"
+# requires-python = ">=3.14"
 # dependencies = []
 # ///
 

@@ -381,8 +381,11 @@ async def test_pi_wall_timeout_retains_lifecycle_on_disk_and_wire(
     stage: str,
 ) -> None:
     """Wall-first expiry distinguishes unfinished launch, silence, and interrupted native response."""
+    # The overall wall deadline includes recorder/OTel initialization. Allow
+    # those real paths to reach the selected backend stage under parallel load;
+    # the hanging backend still expires well before its 600s idle deadline.
     _flow(ext_dir, _SINGLE_AGENT_BODY.replace(
-        'phase=DaydreamPhase.REVIEW,', 'phase=DaydreamPhase.REVIEW, wall_budget_s=0.05,'
+        'phase=DaydreamPhase.REVIEW,', 'phase=DaydreamPhase.REVIEW, wall_budget_s=1.0,'
     ).replace('"output": str(output)', '"output": str(output), "aborted": aborted'))
     backend = PiBackend()
     install_backend(backend)

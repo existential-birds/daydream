@@ -1,5 +1,64 @@
 # Daydream review bot — repository dogfood workflows
 
+## CI spend policy
+
+`ci.yml` keeps Blacksmith runners for speed and retains the required `check`
+status on every PR and main/master push. Superseded PR runs are cancelled;
+push runs remain independent. `make check` and the Git hooks always run the
+complete local gate.
+
+A PR runs lock verification, dependency installation, lint, naming checks, and
+workflow lint only when GitHub's effective
+active branch rules require both the merge queue and the Actions `check` status.
+The originating queue rulesets, including inherited rulesets, must also be active
+and explicitly report an empty bypass-actor list. Until those rules are active,
+or if their identity or bypass evidence cannot be verified, every PR runs the
+complete root gate. GitHub omits bypass actors when the caller lacks write access
+to the ruleset; that omitted evidence also keeps the complete gate. This workflow
+does not increase token permissions to obtain it.
+Documentation and RL-only changes follow the same rule; no path allowlist skips
+the queue gate.
+
+`merge_group: checks_requested` runs the complete root suite with branch
+coverage and its existing enforced floor on `blacksmith-4vcpu-ubuntu-2404`, with
+four pytest workers. Typechecking and the root dead-code scan also run in full
+here. A failing required `check` prevents the queue from merging
+the group. Manual dispatches and direct pushes also run the complete gate.
+Local Git hooks remain complete regardless of remote queue state.
+
+Only a successful full merge-group job uploads `ci-proof`. Its versioned proof
+binds the repository, run, queue head ref and actual checkout SHA/tree to the
+captured base ref, commit, and tree. Git verifies the base is an earlier ancestor;
+no fixed parent shape is assumed for groups containing multiple PRs. PR basic
+checks and legacy PR proofs cannot authorize reuse. A main/master push can
+reuse only a successful matching merged-PR push whose entire tree matches that
+verified queue checkout and whose previous branch tip belongs to its tested
+history. Direct pushes, cross-branch evidence, changed trees, unavailable Git
+objects, missing/expired/corrupt proofs and API failures run the complete gate.
+The job summary links any reused run. Proof artifacts expire after 14 days.
+Each full rerun replaces its coverage report, including failed-suite diagnostics;
+coverage retention stays unchanged. A successful full queue rerun replaces the
+previous proof artifact only after all gates pass.
+
+Queue activation is a separate repository setting change, performed after this
+workflow reaches the default branch. The required check name remains `check`.
+Queue rules must have no bypass actors; administrators use the same verified
+merge path. This workflow never writes repository settings.
+
+Automatic `rl-check` is paused by maintainer choice because no RL work is active.
+Its complete lockcheck, lint, typecheck, dead-code, and Docker test gate remains
+available through **Run workflow → run_rl**, or:
+
+```bash
+gh workflow run ci.yml --ref main -f run_rl=true
+```
+
+Use `--ref YOUR_BRANCH` to check another revision. The root gate also runs in
+full on a manual dispatch. `make rl-check` remains the local RL gate. Both
+projects and all workflow tool installations use Python 3.14. The standalone
+project uses verifiers 0.4.0; Prime-RL training integration is paused because
+its Python 3.12 workspace cannot install the migrated package.
+
 These three workflows are this repository's own **repository-only Codex dogfood configuration**
 — maintained for this repository and intentionally differing from the packaged workflow templates.
 
@@ -51,8 +110,7 @@ commit SHA — enforced by
 its lockcheck-first ordering is what catches `uv.lock` / `pyproject.toml`
 drift. CI installs codex at the version read from the tracked
 `.github/workflows/package.json`, so an npm block bump PR updates CI end-to-end
-with no parallel edit; `tests/test_dependabot_config.py` fails if the workflow
-reintroduces a hardcoded pin instead of reading the manifest.
+with no parallel edit.
 
 **Ownership.** Reviewers are auto-requested via the single-rule `CODEOWNERS`
 (`* @existential-birds @anderskev`); no per-path entries were added.

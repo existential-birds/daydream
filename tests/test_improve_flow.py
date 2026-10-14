@@ -1362,29 +1362,6 @@ async def test_repo_with_no_test_files_still_receives_a_plan(
     assert _plan_write_dispositions(improve_monorepo_target) == ["success"]
 
 @pytest.mark.anyio
-async def test_capable_improve_stub_retains_commands_and_avoids_provider_overload(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    make_config: MakeConfig,
-) -> None:
-    _force_interactive(monkeypatch)
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *args, **kwargs: "1-5",)
-    backend = ProductionPathBackend(improve_monorepo_target)
-    install_capable_improve_backend(monkeypatch, backend)
-
-    code = await _run_improve(make_config, improve_monorepo_target, non_interactive=False)
-    recon = _load_improve_json(improve_monorepo_target, "recon.json")
-    plan_files = sorted((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
-    console_output = capsys.readouterr().out
-    observables = [console_output, *_improve_observable_texts(improve_monorepo_target),]
-
-    assert code == 0
-    assert recon["commands"]
-    assert recon["command_rejections"] == [{"code": "RECON_MALFORMED_COMMAND", "pointer": "/commands/42/command",}]
-    assert plan_files
-    assert all(backend.recon_secret not in text for text in observables)
-    assert all(backend.planner_secret not in text for text in observables)
-
-@pytest.mark.anyio
 async def test_capable_improve_stub_partial_failure_is_successful_and_safe(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     make_config: MakeConfig,
@@ -1395,6 +1372,7 @@ async def test_capable_improve_stub_partial_failure_is_successful_and_safe(
     install_capable_improve_backend(monkeypatch, backend)
 
     code = await _run_improve(make_config, improve_monorepo_target, non_interactive=False)
+    recon = _load_improve_json(improve_monorepo_target, "recon.json")
     plan_files = sorted((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     diagnostics_text = improve_artifact(improve_monorepo_target, "plan-write-diagnostics.json",
     ).read_text(encoding="utf-8")
@@ -1404,6 +1382,8 @@ async def test_capable_improve_stub_partial_failure_is_successful_and_safe(
     observables = [console_output, *_improve_observable_texts(improve_monorepo_target),]
 
     assert code == 0
+    assert recon["commands"]
+    assert recon["command_rejections"] == [{"code": "RECON_MALFORMED_COMMAND", "pointer": "/commands/42/command",}]
     assert len(plan_files) == 1
     assert len(failed) == 1
     assert failed[0]["finding"]["title"] == "Production finding 01"

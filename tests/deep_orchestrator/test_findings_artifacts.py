@@ -36,6 +36,20 @@ from tests.test_deep_orchestrator import (
 )
 
 
+def _coverage_metadata_keys(value: object) -> set[str]:
+    """Find coverage metadata fields without treating command/path strings as metrics."""
+    keys: set[str] = set()
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if isinstance(key, str) and "coverage" in key.casefold():
+                keys.add(key)
+            keys.update(_coverage_metadata_keys(child))
+    elif isinstance(value, list):
+        for child in value:
+            keys.update(_coverage_metadata_keys(child))
+    return keys
+
+
 async def _post_forbidden(*_args: Any, **_kwargs: Any) -> None:
     raise AssertionError("--findings-out must not post to the PR")
 
@@ -133,7 +147,8 @@ async def test_test_verdict_persists_actual_suite_outcome_and_operator_override(
     for name, value in host.items():
         monkeypatch.setattr(f"daydream.remote_ci.artifacts.platform.{name}", lambda value=value: value)
     stub = _install_stub_backend(monkeypatch, tiny_diff_target)
-    command = host_test_command(tiny_diff_target.parent / "suite", mode="pass" if passed else "all")
+    suite_dir = tiny_diff_target.parent / "Linux-coverage-suite"
+    command = host_test_command(suite_dir, mode="pass" if passed else "all")
     if ignored:
         _add_bare_remote(tiny_diff_target)
     mute_side_effects(heal=False, commit=not ignored)
@@ -146,11 +161,12 @@ async def test_test_verdict_persists_actual_suite_outcome_and_operator_override(
     verdict = json.loads(path.read_text())
     assert verdict["passed"] is passed and verdict["retries"] == retries and verdict["ignored"] is ignored
     assert verdict["local_host"] == host
-    assert "Linux" not in json.dumps(verdict) and "coverage" not in json.dumps(verdict).lower()
+    assert verdict["attempts"][0]["command"][-1] == str(suite_dir / "suite.py")
+    assert not _coverage_metadata_keys(verdict), "host verdict must not claim unmeasured coverage"
     if ignored:
         assert _git(tiny_diff_target, "rev-parse", "HEAD") == head_before
         assert not (tiny_diff_target / ".fixed-api_py").exists()
-        assert (tiny_diff_target.parent / "suite/suite-count.txt").read_text() == "1"
+        assert (suite_dir / "suite-count.txt").read_text() == "1"
         assert stub.test_suite_calls == 0
 
 

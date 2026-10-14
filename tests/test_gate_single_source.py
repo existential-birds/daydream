@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from tests.test_workflow_templates import job_steps, load_workflow
+from tests.test_workflow_templates import _wf_triggers, job_steps, load_workflow
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -103,12 +103,19 @@ _CHECK_JOB = "check"
 # the one-line reason. Keep this list small and reasoned; a step that is
 # neither declared here nor a gate invocation fails the guard.
 _CI_ONLY_STEPS: dict[str, str] = {"Run vulture": (
-        "root project only — the standalone RL scan runs in the separate rl-check job, "
+        "root project only — the standalone RL scan runs in the manual rl-check job, "
         "so the local gate's wider dead-code scope is not restated here"
     ),
     "Install Pi for native output contract tests": (
         "provision the native CLI on the disposable CI runner — the local gate exercises installed tools "
         "without globally installing or replacing a contributor's optional backend runtimes"
+    ),
+    "Plan CI gate": (
+        "remote evidence determines whether CI needs to repeat a gate; local hooks always run the full gate"
+    ),
+    "Record successful merge-group tree": (
+        "publish the verified queue checkout only after the complete remote gate passes; "
+        "local gates publish no CI proof"
     ),
 }
 
@@ -185,7 +192,7 @@ def test_ci_check_job_is_represented_by_the_declared_gate() -> None:
 
 def test_guard_rejects_a_restated_gate_command() -> None:
     """An inlined gate command is caught, and names the step that owns it."""
-    steps = [{"name": "Lint with ruff", "run": "uv run ruff check daydream tests"}]
+    steps = [{"name": "Lint with ruff", "run": "uv run ruff check daydream tests scripts/ci_plan.py"}]
     violations = _gate_violations(steps, set(_gate_steps()), _observed_gate_commands(), {})
 
     assert violations and "lint" in violations[0], violations
@@ -218,3 +225,27 @@ def test_pinned_actionlint_image_has_one_owner() -> None:
     owners = [rel for rel in _GATE_FILES if _ACTIONLINT_DIGEST_RE.search((_ROOT / rel).read_text(encoding="utf-8"))]
 
     assert owners == ["Makefile"], owners
+
+
+def test_merge_queue_workflow_keeps_complete_gate_and_blacksmith_runners() -> None:
+    """Queue/manual checks retain all full gates; PR basic never publishes proof."""
+    workflow = load_workflow(_CI_WORKFLOW)
+    triggers = _wf_triggers(workflow)
+    assert triggers["merge_group"]["types"] == ["checks_requested"]
+    assert all(job["runs-on"] == "blacksmith-4vcpu-ubuntu-2404" for job in workflow["jobs"].values())
+    assert workflow["jobs"]["check"]["env"]["PYTEST_WORKERS"] == "4"
+    steps = {step["name"]: step for step in job_steps(workflow, "check")}
+    for name in ("Set up uv", "Verify uv.lock is in sync", "Install dependencies", "Lint with ruff"):
+        assert steps[name]["if"] == "steps.plan.outputs.mode != 'reuse'"
+    for name in ("Set up Node for native Pi contract tests", "Install Pi for native output contract tests",
+                 "Run vulture", "Type check with mypy", "Run tests"):
+        assert steps[name]["if"] == "steps.plan.outputs.full == 'true'"
+    assert steps["Run tests"]["run"] == "make test"
+    for name in ("Record successful merge-group tree", "Upload successful merge-group tree"):
+        assert steps[name]["if"] == "github.event_name == 'merge_group' && steps.plan.outputs.full == 'true'"
+    assert steps["Upload successful merge-group tree"]["with"]["retention-days"] == 14
+    assert steps["Upload successful merge-group tree"]["with"]["overwrite"] is True
+    assert steps["Upload coverage report"]["with"]["overwrite"] is True
+    assert "always()" in steps["Upload coverage report"]["if"]
+    assert "steps.plan.outputs.full == 'true'" in steps["Upload coverage report"]["if"]
+    assert workflow["jobs"]["rl-check"]["if"] == "github.event_name == 'workflow_dispatch' && inputs.run_rl"

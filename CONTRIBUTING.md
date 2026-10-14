@@ -13,7 +13,7 @@ CLAUDE.md describes, update both.
 
 Required for any contribution:
 
-- **Python ≥ 3.12.13**
+- **Python ≥ 3.14**
 - **[`uv`](https://docs.astral.sh/uv/)** — installs and manages the virtualenv and runs every gate tool
 - **Claude Code CLI** ([claude.ai/code](https://claude.ai/code)) — the default review backend; the test suite exercises it
 
@@ -81,15 +81,15 @@ The focused targets, all run from the repo root:
 
 | Command | What it does |
 |---|---|
-| `make lint` | Ruff over `daydream tests` (120 cols, `E F I W`, py312; `daydream/atif/**` is lint-exempt as vendored code) |
-| `make typecheck` | mypy over `daydream tests` |
+| `make lint` | Ruff over `daydream tests scripts/ci_plan.py` (120 cols, `E F I W`, py314; `daydream/atif/**` is lint-exempt as vendored code) |
+| `make typecheck` | mypy over `daydream tests scripts/ci_plan.py` |
 | `make test` | `pytest -n auto` with coverage; the branch-coverage floor (`fail_under` in `pyproject.toml`) is enforced here, not in global addopts — a bare or targeted `pytest` run stays plain |
 | `make deadcode` | vulture dead-code scan over the root project and the RL package |
 | `make coverage-report` | checks that `coverage.xml` exists after `make test`; the measurement + ratchet procedure is in [docs/coverage.md](docs/coverage.md) |
 | `make actionlint` | Docker-pinned actionlint over `.github/workflows/*.yml` plus the packaged workflow templates; without `ACTIONLINT_REQUIRE_DOCKER`, a missing daemon skips with a note (exit 0); with it set, a missing daemon fails |
 | `make lockcheck` | `uv lock --check` — fails if `uv.lock` is out of sync with `pyproject.toml` |
 | `make check-naming` | naming-convention check over the repo (`scripts/check-naming.sh`) |
-| `make rl-check` | the RL project's own lockcheck + ruff + mypy + pytest suite, run with a scoped git identity as process env. **This is explicitly not part of `make check`** — it mirrors `ci.yml`, where RL is a separate job (its e2e test drives the `claude` CLI that CI's `check` job never installs). Run it by hand whenever you change `rl/daydream_review`. |
+| `make rl-check` | the RL project's own lockcheck + ruff + mypy + pytest suite, run with a scoped git identity as process env. **This is explicitly not part of `make check`** — it mirrors `ci.yml`, where RL is a manually dispatched job while RL work is paused (its e2e test drives the `claude` CLI that CI's `check` job never installs). Run it by hand whenever you change `rl/daydream_review`. |
 
 The required gate:
 
@@ -103,13 +103,13 @@ which runs, in order:
 lockcheck install lint deadcode typecheck test actionlint coverage-report check-naming
 ```
 
-This is the same set of steps the `check` job in `.github/workflows/ci.yml` runs —
+This is the same set of steps a full `check` job in `.github/workflows/ci.yml` runs —
 `rl-check` is the only CI job the gate deliberately omits. One scope difference:
 `make deadcode` also runs vulture over `rl/daydream_review/`, which CI's `check`
-job does not include — that scan happens in the separate `rl-check` job — so the
+job does not include — that scan happens in the manual `rl-check` job — so the
 local gate is the stricter one. The pre-push hook runs `make check` after
 verifying signatures, so a green local `make check` is what keeps your push from
-being rejected.
+being rejected. CI runs the full gate before a queued merge and reuses only a verified merge-group tree afterward. PR updates run basic checks only while effective branch rules enforce the queue and required `check`; otherwise they run in full. See the [CI spend policy](.github/workflows/README.md#ci-spend-policy). The local gate always runs in full.
 
 ## Testing policy
 
@@ -142,11 +142,11 @@ implementations of the real-path standard:
 
 ## Conventions
 
-- **Ruff** — 120 columns, rule set `E F I W`, target Python 3.12.
+- **Ruff** — 120 columns, rule set `E F I W`, target Python 3.14.
   `daydream/atif/**` is lint-exempt as vendored Harbor code (see
   [daydream/atif/NOTICE](daydream/atif/NOTICE)); make only mechanical edits
   there.
-- **mypy** — configured in `pyproject.toml`, run over `daydream tests`;
+- **mypy** — configured in `pyproject.toml`, run over `daydream tests scripts/ci_plan.py`;
   hand-written stubs live in `mypy_stubs/`.
 - **Dependencies** — declared in `pyproject.toml`; keep `uv.lock` in sync (`uv
   lock`) or `make check` fails at its first step (`lockcheck`).

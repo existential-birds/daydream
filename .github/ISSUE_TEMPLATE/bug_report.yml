@@ -54,7 +54,7 @@ body:
       description: Include relevant details about your setup.
       placeholder: |
         - OS: macOS 14.2
-        - Python: 3.12.1
+        - Python: 3.14
         - Daydream version: x.x.x
         - Backend: claude|codex|pi|osprey
         - Provider: <provider>

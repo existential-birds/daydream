@@ -19,7 +19,7 @@ _OK_ENVELOPE = {"is_error": False, "subtype": "success", "type": "result", "resu
 
 @contextmanager
 def _http_backoff(sr: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[list[float]]:
-    """Record fake HTTP backoff while yielding the real loop without wall-clock delay."""
+    """Record HTTP/CLI retry backoff while retaining real loop deadlines and cancellation."""
     real_asyncio = sr.asyncio
     real_sleep = real_asyncio.sleep
     delays: list[float] = []
@@ -1256,9 +1256,11 @@ async def test_claude_cli_timeout_kills_child_every_attempt(sr_module: Any, monk
     monkeypatch.setattr(sr, "_REQUEST_TIMEOUT", 0.05)
     client = sr.ClaudeCliJudgeClient(model="m", runner=_proc_runner(
         lambda: _ScriptedChild(_hang_read, wait=_hang, on_kill=lambda: kills.append(1))))
-    with pytest.raises(sr.VerifierError) as e:
-        await client.complete_json(user="u")
-    assert "timeout" in str(e.value)
+    with _http_backoff(sr, monkeypatch) as delays:
+        with pytest.raises(sr.VerifierError) as e:
+            await client.complete_json(user="u")
+        assert "timeout" in str(e.value)
+    assert delays == [1, 2]
     # Every hung attempt kills the child (once inside _claude_cli_stdout and
     # again by the caller's backstop), so a retry or the next concurrent pair
     # never sees a leftover claude process consuming quota/egress.
@@ -1346,9 +1348,11 @@ async def test_claude_cli_post_eof_wait_timeout_kills_child(sr_module: Any, monk
     client = sr.ClaudeCliJudgeClient(model="m", runner=_proc_runner(
         lambda: _ScriptedChild([json.dumps(_OK_ENVELOPE).encode("utf-8")], wait=_hang,
             on_kill=lambda: killed.append(1))))
-    with pytest.raises(sr.VerifierError) as e:
-        await client.complete_json(user="u")
-    assert "timeout" in str(e.value)
+    with _http_backoff(sr, monkeypatch) as delays:
+        with pytest.raises(sr.VerifierError) as e:
+            await client.complete_json(user="u")
+        assert "timeout" in str(e.value)
+    assert delays == [1, 2]
     # Killed in _claude_cli_stdout's wait() deadline path and again by the
     # caller's backstop on each of the _MAX_RETRIES attempts -- mirrors the
     # hanging-read timeout test.

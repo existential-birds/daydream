@@ -19,7 +19,8 @@ uses — one scorer, so an online reward and an offline label cannot disagree ab
 the same run.
 
 - Taskset id / module: `daydream-review` / `daydream_review`
-- Pins: `verifiers==0.2.1`, prime-rl `v0.7.0` (see `../train/README.md`)
+- Python: 3.14; verifier pin: `verifiers==0.4.0` (public v1 API).
+- Prime-RL training integration is paused (see `../train/README.md`).
 
 ```bash
 cd rl/daydream_review
@@ -155,17 +156,17 @@ rewards, about ten seconds:
 uv run python -m daydream_review.fixture /tmp/daydream-rl-smoke/repo
 mkdir -p /tmp/daydream-rl-smoke/archive /tmp/daydream-rl-smoke/home
 uv run python -m daydream_review.stub_upstream --port 8399 &
-uv run eval @ configs/eval-stub.toml
+uv run vf-eval @ configs/eval-stub.toml
 ```
 
 Docker runtime, the real rollout shape:
 
 ```bash
 uv run python images/build_images.py --only existential-birds/daydream-rl-fixture
-uv run eval @ configs/eval-docker.toml -m <your policy model id> --client.base-url <your endpoint>
+uv run vf-eval @ configs/eval-docker.toml -m <your policy model id> --client.base-url <your endpoint>
 ```
 
-**Two flags are not optional offline.** `uv run eval` defaults to `push = true`
+**Two flags are not optional offline.** `uv run vf-eval` defaults to `push = true`
 (it uploads the run to Prime's platform) and to an upstream of
 `https://api.pinference.ai/api/v1`, so any offline run must set `push = false`
 and an explicit `--client.base-url`. The URL must keep its `/v1` suffix: the
@@ -206,27 +207,15 @@ eval-docker; the explicit `--client.base-url` is in `configs/eval-stub.toml`
 - **Rollout cost is real.** A deep run is minutes and dollars. The task caps the
   harness at 5400s; daydream bounds each phase at 1800s of its own.
 
-## Vendored-verifiers skew (AC10)
+## Training workspace compatibility
 
-**The skew:** this env pins `verifiers==0.2.1`, but prime-rl `v0.7.0` vendors
-**verifiers 0.2.0** (submodule `deps/verifiers`). Task 0's spike validated that
-the API surface this env uses is compatible across 0.2.0/0.2.1 in both
-directions (env suite: 172 passed against the vendored copy; `rl` dry run green
-against 0.2.1), so the resolution is **pin discipline** — no fork, no version
-relaxation.
+The environment now runs on Python 3.14 with verifiers 0.4.0. Prime-RL's
+Python 3.12 workspace and its old vendored verifier are incompatible with this
+package. Training integration is paused; the old 0.2.0/0.2.1 compatibility
+measurements do not establish compatibility with the migrated environment.
 
-**Resolution:** keep `verifiers==0.2.1` pinned exactly in
-`rl/daydream_review/pyproject.toml` and `uv.lock`. The gate test
-`tests/test_vendored_verifiers_suite.py` re-runs the env suite with the vendored
-0.2.0 copy shadowing the pin via `PYTHONPATH` precedence (no venv mutation).
-
-**Running the gate:**
-
-```bash
-export PRIME_RL_VENDORED_VERIFIERS=<prime-rl>/deps/verifiers
-cd rl/daydream_review && uv run pytest tests/test_vendored_verifiers_suite.py -q
-```
-
-Expected: PASS. When `PRIME_RL_VENDORED_VERIFIERS` is unset the gate skips
-LOUDLY with instructions — never silently. A training claim is only valid when
-this gate has run green.
+The standalone manual gate remains available with `make rl-check` or the
+repository's `CI` workflow dispatch (`run_rl=true`). Before resuming training,
+choose a Python 3.14-compatible training workspace and run the complete
+standalone suite in that workspace. Do not shadow the 0.4.0 pin with an older
+verifier or bypass Python dependency constraints.

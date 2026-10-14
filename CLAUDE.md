@@ -22,8 +22,8 @@ Review exports follow the [terminal findings contract](README.md#terminal-review
 ```bash
 make install   # uv sync
 make hooks     # install pre-push hook
-make lint       # ruff check daydream tests
-make typecheck  # mypy daydream tests
+make lint       # ruff over daydream, tests, and the CI policy script
+make typecheck  # mypy over daydream, tests, and the CI policy script
 make deadcode   # whole-project dead-code detection (vulture)
 make test       # pytest -n auto
 make actionlint # actionlint over live + packaged workflows (Docker)
@@ -382,8 +382,8 @@ Full contract: `docs/extensions.md`.
   Re-vendor wholesale on Harbor updates; no local patches. **No `harbor` runtime dep** — ATIF construction belongs in
   `daydream/trajectory/` only. **Module-bloat ban**: no ATIF construction in `phases/` or `ui/`.
 - Deps live in `pyproject.toml`; keep `uv.lock` in sync via `uv lock` or `make check` fails at step one.
-- **`make check`** = root `uv lock --check` + install + ruff over `daydream tests` + vulture dead-code scan over `daydream tests` and the RL package + mypy over `daydream tests` + pytest + actionlint (Docker) + coverage-report existence check + naming-convention check; `scripts/hooks/pre-push` verifies signatures then delegates to it. `rl-check` is **not** part of it, mirroring `ci.yml`, whose `check` job carries no RL gate either — the RL project has its own job (own runner, own `uv sync`, Python 3.12) and one of its e2e tests drives the real `claude` CLI that runner never installs, so as a `check` dependency it failed the pre-push gate on changes that never touch `rl/`. Run `make rl-check` when you change `rl/daydream_review`.
-- Ruff: 120 cols, `E F I W`, py312. `daydream/atif/**` is lint-exempt (vendored, mechanical edits only).
+- **`make check`** = root `uv lock --check` + install + ruff over `daydream tests scripts/ci_plan.py` + vulture dead-code scan over `daydream tests` and the RL package + mypy over `daydream tests scripts/ci_plan.py` + pytest + actionlint (Docker) + coverage-report existence check + naming-convention check; `scripts/hooks/pre-push` verifies signatures then delegates to it. `rl-check` is **not** part of it, mirroring `ci.yml`, whose `check` job carries no RL gate either — the paused RL project retains a manual-dispatch job (own runner, own `uv sync`, Python 3.14) and one of its e2e tests drives the real `claude` CLI that runner never installs, so as a `check` dependency it failed the pre-push gate on changes that never touch `rl/`. Run `make rl-check` when you change `rl/daydream_review`. Remote CI runs full checks before queued merges, falls back to full PR checks until the queue is enforced, and verifies merge-group tree proofs before post-merge reuse. CI spend routing and remote RL dispatch are documented in `.github/workflows/README.md#ci-spend-policy`; local Git hooks always run the full root gate.
+- Ruff: 120 cols, `E F I W`, py314. `daydream/atif/**` is lint-exempt (vendored, mechanical edits only).
 - Root `.editorconfig` declares editor-side defaults (UTF-8/LF/final newline,
   4-space Python, 2-space YAML, 4-space TOML, Makefile tabs, `*.md` trailing-whitespace
   preserved); the `daydream/atif/**` carve-out declares no indent/trim keys
@@ -426,4 +426,4 @@ Plain path overrides: `DAYDREAM_PRICES_FILE`, `DAYDREAM_ARCHIVE_DIR`, `PI_CODING
 
 ## Platform requirements
 
-Python ≥3.12.13 + uv; `git` and `gh` on `$PATH`; `codex`/`pi` CLIs only for their backends; pre-push hook via `make hooks`.
+Python ≥3.14 + uv; `git` and `gh` on `$PATH`; `codex`/`pi` CLIs only for their backends; pre-push hook via `make hooks`.

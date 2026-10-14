@@ -26,6 +26,7 @@ from tests.deep_orchestrator.support import (
     _silence_gate_noise,
 )
 from tests.harness.git_helpers import seed_base_support_files
+from tests.harness.stub_backend import review_stage_state
 from tests.test_deep_orchestrator import (
     PR_SENTINEL,
     MakeConfig,
@@ -35,6 +36,7 @@ from tests.test_deep_orchestrator import (
     _assert_authoritative_rule_gated,
     _fix_prompts,
     _force_interactive,
+    _install_model_capturing_stubs,
     _install_stub_backend,
     _intent_calls,
     _intent_prompt,
@@ -54,7 +56,7 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     deep.mkdir(parents=True)
     stale = deep / "obsolete-artifact.txt"
     stale.write_text("stale")
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    calls = _install_model_capturing_stubs(monkeypatch, multi_stack_target)
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
     assert not stale.exists()
@@ -62,7 +64,7 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
 
     # Alt checked before intent: the alt prompt embeds the intent summary text.
     order: list[str] = []
-    for call in stub.calls:
+    for call in calls:
         pl = call["prompt"].lower()
         if "would you have done this differently" in pl or "evaluate the implementation" in pl:
             order.append("alternatives")
@@ -80,9 +82,9 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     assert "parse" not in {name.lower() for name in order}
 
     # At minimum: intent + four reviews (including structural design review) + merge.
-    assert len(stub.calls) >= 6
+    assert len(calls) >= 6
     # Each stage fires a distinct execute call -- prompts must be unique.
-    prompts = [c["prompt"] for c in stub.calls]
+    prompts = [c["prompt"] for c in calls]
     assert len(set(prompts)) == len(prompts)
 
     deep = multi_stack_target / ".daydream" / "deep"
@@ -92,9 +94,15 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     records_files = list(deep.glob("stack-*-records.json"))
     assert review_files, "expected at least one stack-*-review.md"
     assert records_files, "expected at least one stack-*-records.json"
+    language_records = [path for path in records_files if path.name != "stack-structure-records.json"]
+    assert language_records
+    assert json.loads(language_records[0].read_text())["issues"][0]["description"] == "Sample issue"
+    assert json.loads((deep / "stack-structure-records.json").read_text())["issues"][0]["description"] == (
+        "Structural maintainability concern"
+    )
     assert (deep / "dedup-candidates.json").exists()
 
-    per_stack_prompts = [c["prompt"] for c in stub.calls if "you are reviewing the" in c["prompt"].lower()]
+    per_stack_prompts = [c["prompt"] for c in calls if "you are reviewing the" in c["prompt"].lower()]
     assert per_stack_prompts, "expected per-stack prompts"
     # Each prompt should mention its own stack's file but NOT foreign files.
     python_prompt = next((p for p in per_stack_prompts if "api.py" in p and "the python stack" in p.lower()), None,)
@@ -109,23 +117,34 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     assert "App.tsx" not in python_scope_files_line
 
     # Every execute call must have agents=None per D-38.
-    assert all(c["agents"] is None for c in stub.calls)
+    assert all(c["agents"] is None for c in calls)
 
     for p in per_stack_prompts:
         from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
-        assert supporting_contents(p)["intent"] == (deep / "intent.md").read_text()
+        supporting = supporting_contents(p)
+        assert supporting["intent"] == (deep / "intent.md").read_text()
         # Folded design review has no independent alternatives to consume.
         assert "alternatives.json" not in p
+
+    first_pass_prompts = [p for p in per_stack_prompts
+                          if (stage := review_stage_state(p)) is not None and stage["stage"] == "first_pass"]
+    assert first_pass_prompts
+    for p in first_pass_prompts:
+        state = review_stage_state(p)
+        assert state is not None
+        supporting = supporting_contents(p)
+        assert set(json.loads(supporting["hunk-index"])) == set(state["assigned_files"])
+        assert all(f'diff --git a/{path} b/{path}' in supporting["diff"] for path in state["assigned_files"])
 
     # The fixture's diff is mixed, so the generic bucket is NOT docs-only (no
     # notice). Contract: a generic-fallback prompt is emitted for README.md.
     fallback_prompts = [
-        c["prompt"] for c in stub.calls if "you are reviewing the generic-fallback stack" in c["prompt"].lower()
+        c["prompt"] for c in calls if "you are reviewing the generic-fallback stack" in c["prompt"].lower()
     ]
     assert fallback_prompts
     assert any("README.md" in p for p in fallback_prompts)
 
-    parse_calls = [c for c in stub.calls if "extract only actionable issues" in c["prompt"].lower()]
+    parse_calls = [c for c in calls if "extract only actionable issues" in c["prompt"].lower()]
     assert parse_calls == [], "parse-* stage must be removed (issue #745)"
     # One records file per per-stack review, plus the structural meta-stack.
     assert len(records_files) >= len(per_stack_prompts)
@@ -153,7 +172,7 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
 
 
     # Merge inputs retain deterministic record ordering.
-    merge_prompts = [c["prompt"] for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
+    merge_prompts = [c["prompt"] for c in calls if "cross-stack merge agent" in c["prompt"].lower()]
     assert merge_prompts, "merge agent was not invoked"
     prompt = merge_prompts[0]
 
@@ -176,9 +195,9 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
 
 
     # Generated evidence remains resumable while the source diff is unchanged.
-    resumed_stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    resumed_calls = _install_model_capturing_stubs(monkeypatch, multi_stack_target)
     assert await _run_deep(multi_stack_target, start_at="merge") == 0
-    assert any("cross-stack merge agent" in c["prompt"].lower() for c in resumed_stub.calls)
+    assert any("cross-stack merge agent" in c["prompt"].lower() for c in resumed_calls)
 
 async def test_pr_body_reaches_intent_prompt(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,

@@ -140,8 +140,9 @@ class FakeRuntime(vf.Runtime):
         self.programs.append((argv, env))
         return vf.ProgramResult(exit_code=self.exit_code, stdout="", stderr="")
 
-    async def read(self, path: str) -> bytes:
-        return self.files[path]
+    async def _read(self, path: str, max_bytes: int | None = None) -> bytes:
+        data = self.files[path]
+        return data if max_bytes is None else data[:max_bytes]
 
     async def write(self, path: str, data: bytes) -> None:
         self.writes[path] = data

@@ -9,151 +9,30 @@ Three configs live here:
   (daydream-private, passed at launch via `RftConfig` to
   `daydream.training.rft.run_rft()`; the file is reference-only, not prime-rl).
 
-All are
-config only — no package, no lockfile — because **prime-rl cannot be consumed as a
-dependency**. At v0.7.0 prime-rl resolves verifiers from an editable path source
-pointing at its own submodule (`[tool.uv.sources] verifiers = { path = "deps/verifiers" }`),
-so a `prime-rl @ git+…` line in a pyproject does not resolve. The supported shape
-is a prime-rl workspace checkout that you install our environment package into.
+## Integration paused
 
-## Workspace setup
+These recipes are retained as reference configurations. The Daydream package
+and standalone RL environment require Python 3.14; the environment pins
+verifiers 0.4.0. Prime-RL v0.7.0 and the latest v0.10.0 require Python 3.12,
+so their workspace setup cannot install this Daydream release. The previous
+workspace installation and dry-run instructions have been retired. Do not
+force an install with ignored dependency or interpreter constraints.
 
-```bash
-git clone --recurse-submodules https://github.com/PrimeIntellect-ai/prime-rl
-cd prime-rl
-git checkout v0.7.0
-
-# Three of the four submodules are declared with `git@github.com:` URLs, so on a
-# machine with no SSH key to GitHub the recursive clone above silently leaves
-# deps/verifiers empty — and a `uv sync` against an empty path source fails in a
-# way that does not mention submodules. They are public repositories, so point
-# them at HTTPS for this checkout. (A `url.<base>.insteadOf` rewrite is NOT
-# enough here; set the submodule URLs themselves.)
-for m in verifiers renderers research-environments; do
-  git config "submodule.$m.url" "https://github.com/PrimeIntellect-ai/$m.git"
-done
-git submodule update --init --recursive
-
-uv sync --all-packages
-uv pip install -e /abs/path/to/daydream/rl/daydream_review
-```
-
-The loader needs nothing more than an importable top-level module whose name is
-the taskset id with underscores — no entry points, no registry. Dropping the
-package under `deps/verifiers/environments/` works too (it is inside prime-rl's
-workspace glob), but an editable install is less surprising.
-
-## Validate before spending a GPU-hour
+Standalone environment validation remains supported:
 
 ```bash
-uv run rl @ /abs/path/to/daydream/rl/train/rl.toml --dry-run
+cd /abs/path/to/daydream
+make rl-check
 ```
 
-Stage-1 dataset SFT uses the separate `sft` verb (see `sft.toml`):
+Resume training only after selecting a compatible training workspace,
+validating these reference configs with its real dry-run entrypoint, and
+passing the complete environment suite inside that workspace. Earlier
+vendored-verifier and training dry-run measurements apply to the previous
+Python 3.12 / verifier 0.2.x environment.
 
-```bash
-uv run sft @ /abs/path/to/daydream/rl/train/sft.toml --dry-run
-uv run sft @ /abs/path/to/daydream/rl/train/sft.toml \
-    --output-dir /data/daydream-rl/outputs-sft-<run> \
-    --data.name /abs/path/to/sft-corpus
-```
-
-The corpus-side dataset is written by the training coordinator's Stage-1
-materialization (`daydream train`): gold-positive (`accepted`) completions as
-prompt/completion JSONL — the loader's accepted shape (`messages` column, or
-`prompt` + `completion` columns) — with gold/silver tier counts reported in the
-stage manifest.
-
-Stage-2 deterministic RFT is offline GPU-free replay (see `rft.toml` for the
-reference parameters), run with
-the training CLI, not prime-rl:
-
-```bash
-uv run python -c "from daydream.training.rft import RftConfig, run_rft; run_rft(RftConfig( \
-    inputs='/abs/path/to/rft-inputs.jsonl', seed=11, rubric_version='2026.08.29-1', \
-    output_dir='/abs/path/to/rft-out', model_id='<model>'))"
-```
-
-The winners filter is a breakdown-shaped spec (`min_breakdown={"composite": 0.6, ...}`),
-never a bare scalar (M12). Same-input reruns are byte-identical (M11).
-
-`--output-dir` must be a **fresh, unique-per-experiment** directory: prime-rl
-raises `FileExistsError` if it already contains checkpoints and
-`--clean-output-dir` is not set. The SFT run uses the `default` renderer — do
-not switch to `qwen3`, whose empty `<think></think>` block corrupts the
-loss.
-
-`--dry-run` runs every pydantic validator — renderer resolution, the
-LoRA/weight-broadcast interlock, the batch-size/group-size divisibility check —
-and is GPU-free (it needs no GPU query/driver). Resolved
-configs land in `<output_dir>/configs/`; check that `inference.toml` came back
-with `enable_lora = true` and `max_lora_rank = 16`, which prime-rl derives from
-the trainer's LoRA block rather than taking from the file.
-
-**On macOS the `uv sync` above will not work.** prime-rl v0.7.0's lockfile
-declares only `linux` x86_64/aarch64 environments (it resolves vllm, flash-attn,
-deep-gemm), and `uv sync --all-packages` refuses outright:
-
-```text
-error: The current Python platform is not compatible with the lockfile's
-supported environments
-```
-
-Training runs on Linux, so that is not a problem in itself — but it does mean the
-dry-run gate has to be reached another way when validating a config change from a
-Mac. prime-rl ships `packages/prime-rl-configs`, its own "slim config schema, no
-GPU/ML deps" package, which installs anywhere:
-
-```bash
-uv venv --python 3.12 .venv-cfg
-uv pip install --python .venv-cfg/bin/python \
-    -e deps/verifiers -e deps/renderers -e deps/pydantic-config
-uv pip install --python .venv-cfg/bin/python --no-deps -e packages/prime-rl-configs -e .
-uv pip install --python .venv-cfg/bin/python pynvml tomli-w loguru psutil
-uv pip install --python .venv-cfg/bin/python -e /abs/path/to/daydream
-uv pip install --python .venv-cfg/bin/python --no-deps -e /abs/path/to/daydream/rl/daydream_review
-
-.venv-cfg/bin/python -c "
-import sys; sys.argv = ['rl', '@', '/abs/path/to/daydream/rl/train/rl.toml', '--dry-run']
-from prime_rl.entrypoints.rl import main; main()"
-```
-
-That reaches the same `Dry run complete.` and writes the same resolved configs —
-every validator runs, only the GPU stack is absent.
-
-## The verifiers skew you must check
-
-prime-rl v0.7.0 vendors verifiers at fork commit `6c64ce6`, which **predates the
-`0.2.1` this environment develops against**. Two different verifiers, one package.
-Before trusting any training claim, run the environment's own suite inside the
-prime-rl workspace venv, not just in `rl/daydream_review`:
-
-```bash
-cd prime-rl
-uv run pytest /abs/path/to/daydream/rl/daydream_review/tests
-```
-
-Nothing in `daydream_review` may import verifiers internals beyond the
-documented v1 surface (`Taskset`, `Task`, `TaskData`, `TaskConfig`,
-`TasksetConfig`, `Harness`, `HarnessConfig`, `Runtime`, `Trace`, `reward`,
-`metric`, `ProgramResult`, `TaskTimeout`, `ModelContext`, `State`). If something
-is missing under the older submodule, pin a newer submodule in a prime-rl fork or
-align to the intersection — never paper over it with `try`/`except ImportError`,
-which would let a silently-degraded rollout train.
-
-## What the recipe deliberately does not pin
-
-- **The base model.** `[model] name` is a placeholder that exists only because
-  prime-rl requires the key. The real model is chosen by criteria and passed at
-  launch: `--model.name <id>` (SPEC C1). Same for `sft.toml`.
-- **`target_modules`.** SPEC C2 requires prime-rl's default list, so both
-  recipes omit the key rather than restating it.
-- **The algorithm.** GRPO is prime-rl's default at this tag, so `rl.toml` has
-  no `[orchestrator.algo]` block. Valid types are `grpo|echo|max_rl|opd|opsd|
-  sft`; there is no `custom` algorithm — a custom *loss* is `[trainer.loss]
-  type = "custom"`. `sft.toml` has no orchestrator at all: dataset SFT is a
-  separate entrypoint and must never be routed through the live-teacher
-  `[orchestrator.algo] type = "sft"` variant.
+Stage-2 deterministic RFT remains available through Daydream's offline,
+GPU-free `daydream train` path; it does not require Prime-RL.
 
 ## Manifests
 

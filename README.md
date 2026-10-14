@@ -10,7 +10,7 @@ The goal of daydream is an open-weight code-review model. Daydream trains this m
 
 Daydream requires the following tools:
 
-- Python 3.12.13 or newer
+- Python 3.14 or newer
 - [uv](https://docs.astral.sh/uv/)
 - The [Claude Code](https://claude.ai/code) command line interface
 

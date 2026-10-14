@@ -427,7 +427,7 @@ def test_docker_skip_is_per_test_not_module_wide() -> None:
         )
 
 @pytest.mark.parametrize("required_literal",
-    [pytest.param("FROM python:3.12.13-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36",
+    [pytest.param("FROM python:3.14.6-slim@sha256:7bec7ddcddeff7975d6ba9b4be7dd6f6b2f55e7491539145e2978f7f97ce9144",
             id="python-base-index-digest",
         ),
         pytest.param(("FROM ghcr.io/astral-sh/uv:0.11.29@"

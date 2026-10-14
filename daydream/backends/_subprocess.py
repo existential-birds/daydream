@@ -128,7 +128,11 @@ async def terminate_process(
                             pass
                         # Close inherited pipes before joining: an escaped
                         # writer must not keep asyncio's exit waiter alive.
-                        _close_process_io(proc)
+                        # Closing the whole subprocess transport here calls
+                        # Popen.poll(), which can reap the killed child before
+                        # asyncio's child watcher and turn its status into 255.
+                        # Release only the pipes until the watcher observes exit.
+                        _close_process_io(proc, close_transport=False)
                         await observe_process_exit(proc)
                 _kill_process_group(proc, signal.SIGKILL)
                 # Known returncode means asyncio's Process.wait returns
@@ -152,11 +156,19 @@ def _kill_process_group(proc: asyncio.subprocess.Process, sig: int) -> None:
             pass
 
 
-def _close_process_io(proc: asyncio.subprocess.Process) -> None:
+def _close_process_io(proc: asyncio.subprocess.Process, *, close_transport: bool = True) -> None:
     """Close the fd-owning transport and stdin, even without StreamReader EOF."""
     transport = getattr(proc, "_transport", None)
     if transport is not None:
-        transport.close()
+        if close_transport:
+            transport.close()
+        else:
+            get_pipe = getattr(transport, "get_pipe_transport", None)
+            if get_pipe is not None:
+                for fd in (0, 1, 2):
+                    pipe = get_pipe(fd)
+                    if pipe is not None:
+                        pipe.close()
     if proc.stdin is not None:
         proc.stdin.close()
 

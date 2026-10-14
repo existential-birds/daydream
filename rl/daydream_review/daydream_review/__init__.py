@@ -3,7 +3,7 @@
 The loader resolves a third-party taskset by importing the top-level module whose
 name equals the taskset id with hyphens turned into underscores, then picking the
 single ``Taskset`` subclass and the single ``Harness`` subclass out of ``__all__``
-(verifiers v0.2.1 ``verifiers/v1/loaders.py:33-72``). Exporting the config classes
+(verifiers 0.4.0 public v1 loaders). Exporting the config classes
 alongside them is fine — they subclass neither base.
 """
 
