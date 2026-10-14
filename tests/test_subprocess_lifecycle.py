@@ -78,9 +78,12 @@ async def test_terminate_process_does_not_wait_for_escaped_pipe_writer() -> None
     assert proc.stdout is not None
     async with asyncio.timeout(5):
         writer_pid = int(await proc.stdout.readline())
-    cleanup = asyncio.create_task(terminate_process(proc, timeout=0.05))
+    # Short TERM grace forces escalation; give the real OS child watcher a
+    # separate cleanup allowance under parallel coverage instrumentation. The
+    # escaped writer's 60s lifetime still exceeds both bounded waits below.
+    cleanup = asyncio.create_task(terminate_process(proc, timeout=0.05, cleanup_timeout_s=1))
     try:
-        async with asyncio.timeout(1):
+        async with asyncio.timeout(3):
             await asyncio.shield(cleanup)
         assert proc.returncode == -signal.SIGKILL
     finally:
