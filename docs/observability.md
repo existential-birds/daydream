@@ -479,7 +479,7 @@ Operator note: `LANGSMITH_WORKSPACE_ID` must be the LangSmith *workspace*
 id — a project id yields HTTP 403 because it is forwarded as
 `x-tenant-id`.
 
-### Codex lifecycle evidence
+## Codex lifecycle evidence
 
 Codex attempt summaries retain bounded `backend_lifecycle` scalars and attempt spans export
 an explicit allowlist under `daydream.backend_lifecycle.*`. Milestones cover request/spawn,
