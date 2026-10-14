@@ -79,9 +79,16 @@ stands alone in the new session:
   failures that predate this work: fix them on the branch and retry, or report
   the blocker. Use the repository's `pr` skill for an issue-linked PR body and
   open a ready-for-review PR after the applicable checks pass.
-- **PR review loop:** after opening the PR, run exactly
-  `daydream . --backend codex --comment --non-interactive` from the implementation
-  checkout and record the reviewed HEAD and command result. Use
+- **PR review loop:** after opening the PR, verify its selected base/head
+  repositories, refs, and SHAs, and use the implementation checkout bound to that
+  head. Run `daydream . --backend codex --comment --non-interactive` by default.
+  Confirm its comparison base resolves to the verified PR base SHA; if the
+  default is wrong or stale, including for a non-default PR target,
+  append only `--base <verified ref/SHA>`. Fetch the required base if needed
+  without disturbing user work, and verify any chosen ref resolves to that exact
+  PR base SHA. Record the actual command, selected base/head SHAs, resolved review
+  comparison/merge-base, and command result. Refresh moved PR refs before review.
+  Use
   `fetch-pr-feedback` with `--include-author --include-self`, then
   `receive-feedback`, then `respond-pr-feedback` to fetch, evaluate, address, and
   reply to the results. Fetch posted evidence even if Daydream partially fails;

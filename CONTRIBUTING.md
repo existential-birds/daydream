@@ -197,6 +197,11 @@ After opening the PR, run the available Daydream reviewer from its checkout:
 daydream . --backend codex --comment --non-interactive
 ```
 
+Verify the selected PR's base/head first. If the default comparison base differs
+from its verified base, append `--base <verified ref/SHA>`; the
+[prepare-implement skill](.agents/skills/prepare-implement/SKILL.md) explains how
+to resolve and record the exact review target.
+
 Then use [fetch-pr-feedback](.agents/skills/fetch-pr-feedback/SKILL.md),
 [receive-feedback](.agents/skills/receive-feedback/SKILL.md), and
 [respond-pr-feedback](.agents/skills/respond-pr-feedback/SKILL.md) to collect all
