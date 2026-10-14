@@ -15,10 +15,12 @@ Use [finding-template.md](finding-template.md) as the canonical finding schema,
 including its validation comments and the evidence rules below. Read
 `improve_curated/AGENTS.md` for additional collection guidance when that file is
 present; its absence does not block capture. Create `improve_curated/` if needed.
-The schema is shared with `create-improve-issue` and `create-improve-pr`; preserve
-its field names, existing extensions, and any issue/PR links. After capture, the user can
-invoke `create-improve-issue` to queue implementation in a future session. Do not
-create that issue automatically as part of capture.
+Preserve the schema's field names, existing extensions, and any issue/PR links.
+After capture, the user can hand the finding directly to a later implementation
+session, then use `create-improve-pr` to publish the scoped fix. An implementation
+issue is optional: the user can invoke the separately installed
+`create-improve-issue` skill when available, or supply an existing issue. Capture
+does not create an issue or expand the agreed implementation scope.
 
 ## Capture procedure
 

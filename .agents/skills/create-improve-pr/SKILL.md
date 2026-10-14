@@ -5,7 +5,7 @@ description: "Implement or finish a curated improvement and publish a focused dr
 
 # Create an Improve fix PR
 
-Turn selected `improve_curated/` findings into a focused, reviewable **draft PR by default**. The normal workflow is capture → issue → implementation in a later session → this skill. When the implementation session has already completed the fix, verify and publish that work without restarting implementation. Preserve enough evidence to later evaluate blind discovery of the original improvement. This skill can finish remaining scoped work; it does not authorize merging.
+Turn selected `improve_curated/` findings into a focused, reviewable **draft PR by default**. The normal workflow is capture → implementation in a later session → this skill. An issue is an optional handoff: use an existing issue when provided, or the separately installed `create-improve-issue` skill when available and requested; otherwise hand the finding directly to the implementation session. When the implementation session has already completed the fix, verify and publish that work without restarting implementation. Preserve enough evidence to later evaluate blind discovery of the original improvement. This skill can finish remaining scoped work; it does not authorize merging.
 
 ## Inputs and authority
 
