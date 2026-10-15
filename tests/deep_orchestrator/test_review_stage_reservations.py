@@ -18,6 +18,7 @@ from tests.deep_orchestrator.test_review_investigation import (
     read_events,
     stage_ends,
 )
+from tests.harness.review_result import saved_coverage
 
 
 class NativeStageBackend(StagedBackend, PiBackend):
@@ -172,9 +173,14 @@ async def test_initial_native_structure_exhaustion_keeps_unsent_work_and_folded_
     assert metadata['admitted'] is False and metadata['admitted_candidate_count'] == 0
     assert scopes(data)['structure']['partial_evidence'] is False
     alternatives, = [phase for phase in data['terminal_result']['phase_outcomes'] if phase['phase'] == 'alternatives']
-    assert alternatives['status'] == 'failed'
+    assert alternatives['status'] == 'incomplete'
+    assert alternatives['noop'] is False
     assert alternatives['reason_codes'] == scopes(data)['structure']['reason_codes']
     assert alternatives['usable_evidence'] is False
+    persisted = saved_coverage(review.repo / '.daydream/deep')
+    assert persisted.phases['alternatives'] == alternatives
+    assert 'folded into Structure' in persisted.diagnostics['phases']['alternatives']
+    assert persisted.diagnostics['scopes']['structure'] in persisted.diagnostics['phases']['alternatives']
 
 
 async def test_completed_unresolved_triage_chunk_does_not_reserve_another_round(

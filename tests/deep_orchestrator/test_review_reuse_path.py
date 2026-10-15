@@ -478,19 +478,24 @@ async def test_resume_rejects_missing_or_mismatched_coverage(
 
 
 @pytest.mark.parametrize("recovery", ["resume", "cache"])
+@pytest.mark.parametrize("scope", ["python", "structure"])
 async def test_successful_scope_rerun_clears_prior_failure_for_same_revision(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recovery: str,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recovery: str, scope: str,
 ) -> None:
     """Unfinished scopes require successful investigation before resume or cache reuse."""
     from daydream.backends import AgentEvent, ResultEvent
     from tests.deep_orchestrator.test_review_completion import ReviewRun
-    from tests.harness.stub_backend import review_stage_result
+    from tests.harness.git_helpers import git
+    from tests.harness.stub_backend import review_stage_result, review_stage_state
 
     review = ReviewRun(multi_stack_target, tmp_path, monkeypatch)
     backend = review.backend
 
-    def unfinished_python(prompt: str) -> list[AgentEvent] | None:
-        if "python stack" not in prompt.lower():
+    source = {name: (review.repo / name).read_bytes() for name in git(review.repo, "ls-files").splitlines()}
+
+    def unfinished_scope(prompt: str) -> list[AgentEvent] | None:
+        stage = review_stage_state(prompt)
+        if stage is None or stage["scope_id"] != scope:
             return None
         result = review_stage_result(prompt, [])
         for target in result["targets"]:
@@ -498,31 +503,70 @@ async def test_successful_scope_rerun_clears_prior_failure_for_same_revision(
         return [ResultEvent(structured_output=result, continuation=None)]
 
     if recovery == "cache":
-        backend.responder = unfinished_python
+        backend.responder = unfinished_scope
     else:
-        backend.fail_stack = "python"
+        backend.fail_stack = scope
     options: dict[str, Any] = {"review_cache_enabled": recovery == "cache"}
     assert await review.run(**options) == 0
-    first = review.load()["terminal_result"]
+    first_data = review.load()
+    first = first_data["terminal_result"]
+    assert first_data["findings"] == []
     deep = multi_stack_target / ".daydream/deep"
+    persisted = saved_coverage(deep)
+    assert persisted.to_dict()["phase_outcomes"] == first["phase_outcomes"]
+    if scope == "structure":
+        alternatives = persisted.phases["alternatives"]
+        assert alternatives["status"] == ("incomplete" if recovery == "cache" else "failed")
+        assert alternatives["reason_codes"] == persisted.scopes[scope]["reason_codes"]
+        assert alternatives["noop"] is alternatives["usable_evidence"] is False
+        if recovery == "cache":
+            assert persisted.scopes[scope]["partial_evidence"] is True
+        assert "folded into Structure" in persisted.diagnostics["phases"]["alternatives"]
+        assert persisted.diagnostics["scopes"][scope] in persisted.diagnostics["phases"]["alternatives"]
     assert first["analysis_state"] == "incomplete"
-    assert first["failed_stacks"] == ([] if recovery == "cache" else ["python"])
+    assert first["failed_stacks"] == ([] if recovery == "cache" else [scope])
     if recovery == "cache":
-        assert saved_coverage(deep).unfinished_scopes.keys() == {"python"}
-        assert _entry_count_for_unit(deep, "shard:python") == 0
-        assert _entry_count_for_unit(deep, "shard:structure") == 1
+        assert saved_coverage(deep).unfinished_scopes.keys() == {scope}
+        assert _entry_count_for_unit(deep, f"shard:{scope}") == 0
+        sibling = "structure" if scope == "python" else "python"
+        assert _entry_count_for_unit(deep, f"shard:{sibling}") == 1
     else:
+        backend.calls.clear()
+        assert await review.run(**options, start_at="merge") == 0
+        resumed = review.load()
+        assert resumed["findings"] == first_data["findings"]
+        for field in ("analysis_state", "failed_stacks", "phase_outcomes", "stack_outcomes"):
+            assert resumed["terminal_result"][field] == first[field]
+        assert saved_coverage(deep).diagnostics == persisted.diagnostics
+        assert _review_surface_prompts(backend.calls) == []
+        assert not any(review_stage_state(call["prompt"]) is not None for call in backend.calls)
         options["start_at"] = "per-stack"
     backend.fail_stack = backend.responder = None
     backend.calls.clear()
     assert await review.run(**options) == 0
-    second = review.load()["terminal_result"]
+    second_data = review.load()
+    second = second_data["terminal_result"]
+    assert second_data["findings"] == first_data["findings"]
+    current = saved_coverage(deep)
+    assert current.to_dict()["phase_outcomes"] == second["phase_outcomes"]
+    assert current.phases["alternatives"]["status"] == "complete"
+    assert current.phases["alternatives"]["noop"] is True
+    assert current.phases["alternatives"]["reason_codes"] == []
+    assert "alternatives" not in current.diagnostics["phases"]
+    assert _count_unit_prompts(backend.calls, _WONDER_DISCRIMINATOR) == 0
+    if recovery == "resume":
+        assert {stage["scope_id"] for call in backend.calls
+                if (stage := review_stage_state(call["prompt"])) is not None} == {
+                    "python", "react", "generic", "structure"}
+    assert {name: (review.repo / name).read_bytes() for name in source} == source
     assert second["analysis_state"] == "complete" and second["failed_stacks"] == []
     assert "backend_failure" not in second["reason_codes"]
     assert first["analyzed_revision"] == second["analyzed_revision"]
     if recovery == "cache":
-        assert _reviewed_stacks(backend.calls) == {"python"}
-        assert _entry_count_for_unit(deep, "shard:python") == 1
+        stages = [stage for call in backend.calls
+                  if (stage := review_stage_state(call["prompt"])) is not None]
+        assert {stage["scope_id"] for stage in stages} == {scope}
+        assert _entry_count_for_unit(deep, f"shard:{scope}") == 1
         assert saved_coverage(deep).unfinished_scopes == {}
         backend.calls.clear()
         assert await review.run(**options) == 0
