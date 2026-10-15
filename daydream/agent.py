@@ -611,6 +611,8 @@ async def _run_agent(
                             max(0.0, effective_deadline - dispatch_time) if effective_deadline is not None else None
                         )
                         execute_kwargs["tool_call_budget"] = remaining_calls
+                        if getattr(backend, "supports_live_wall_budget", False):
+                            execute_kwargs["wall_budget_started_at"] = dispatch_time
                     attempt_prompt = prompt
                     if investigation_budget is not None and attempt > 0:
                         retry_budget_update = (

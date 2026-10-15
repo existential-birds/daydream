@@ -52,6 +52,7 @@ from daydream.backends.pi import (
     _render_tool_result,
 )
 from daydream.config_file import DaydreamFileConfig
+from daydream.findings import load_findings_artifact
 from daydream.phases.schemas import PER_STACK_RECORD_SCHEMA
 from daydream.retry_policy import classify_failure
 from daydream.runner import run
@@ -74,6 +75,7 @@ from tests.harness.stub_backend import (
     stage_result,
 )
 from tests.harness.trajectory import make_recorder
+from tests.test_deep_orchestrator import _pin_findings_pr, _record
 
 
 @pytest.mark.parametrize("kind", ["text", "thinking", "toolcall", "tool", "diagnostic"])
@@ -698,6 +700,7 @@ async def test_zai_provider_with_fallback_model_warns(
 def _capture_pi_subprocess(
     monkeypatch: pytest.MonkeyPatch, captured: list[list[str]],
     response: Callable[[list[str]], MagicMock] | None = None,
+    *, packets: list[dict[str, Any]] | None = None,
 ) -> None:
     """Intercept only pi spawns, record argv, and replay a no-op session.
 
@@ -709,6 +712,9 @@ def _capture_pi_subprocess(
         if args and args[0] == "pi":
             argv = [str(a) for a in args]
             captured.append(argv)
+            environment = kwargs.get("env")
+            if packets is not None and isinstance(environment, dict) and "DAYDREAM_PI_OUTPUT_PACKET" in environment:
+                packets.append(json.loads(Path(environment["DAYDREAM_PI_OUTPUT_PACKET"]).read_text()))
             return response(argv) if response else make_mock_process_from_fixture("simple_text.jsonl")
         return cast(MagicMock, await real_exec(*args, **kwargs))
     monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", _fake_exec)
@@ -720,20 +726,21 @@ def _assert_pi_model_and_provider(captured: list[list[str]], *, model: str, prov
         assert argv[argv.index("--provider") + 1] == provider
 
 @pytest.mark.parametrize(
-    ("ambient", "cli_effort", "file_global", "file_phase", "expected", "env_provider", "expected_provider"), [
-        (None, None, None, None, "medium", None, "nous"),
-        ("high", None, None, None, "medium", "custom-proxy", "custom-proxy"),
-        ("high", None, "low", None, "low", None, "nous"),
-        ("high", None, "low", "xhigh", "xhigh", "custom-proxy", "custom-proxy"),
-        ("high", "low", "high", "xhigh", "low", None, "nous"),
-    ], ids=["default", "ambient-high", "file-global", "file-phase", "cli-global"],
+    ("ambient", "cli_effort", "file_global", "file_phase", "expected", "env_provider", "expected_provider", "cutoff"), [
+        (None, None, None, None, "medium", None, "nous", False),
+        ("high", None, None, None, "medium", "custom-proxy", "custom-proxy", False),
+        ("high", None, "low", None, "low", None, "nous", False),
+        ("high", None, "low", "xhigh", "xhigh", "custom-proxy", "custom-proxy", False),
+        ("high", "low", "high", "xhigh", "low", None, "nous", False),
+        (None, None, None, None, "medium", None, "nous", True),
+    ], ids=["default", "ambient-high", "file-global", "file-phase", "cli-global", "wall-cutoff-retains-finding"],
 )
 async def test_runner_pi_stack_review_effort_reaches_native_submission(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     ambient: str | None, cli_effort: str | None, file_global: str | None, file_phase: str | None, expected: str,
-    env_provider: str | None, expected_provider: str,
+    env_provider: str | None, expected_provider: str, cutoff: bool,
 ) -> None:
-    """Built-in effort precedence and default/override provider/model reach native Pi argv."""
+    """Runner settings reach native packets; a later host cutoff retains admitted public findings."""
     _silence(monkeypatch)
     if ambient is None:
         monkeypatch.delenv("PI_THINKING", raising=False)
@@ -744,10 +751,15 @@ async def test_runner_pi_stack_review_effort_reaches_native_submission(
     else:
         monkeypatch.setenv("PI_PROVIDER", env_provider)
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    monkeypatch.setenv("DAYDREAM_PI_FANOUT_CONCURRENCY", "1")
     captured: list[list[str]] = []
+    packets: list[dict[str, Any]] = []
     reviewer_args: list[list[str]] = []
     wall_allowances: list[float] = []
     fake = FakeClock(monotonic_value=1000).install(monkeypatch)
+    finding = _record(description="Previously admitted defect", line=2, confidence="HIGH", evidence="api.py:2")
+    stopped_stages: list[str] = []
+    merge_sources: list[dict[str, Any]] = []
 
     def response(argv: list[str]) -> MagicMock:
         prompt = Path(argv[-1][1:]).read_text()
@@ -765,7 +777,34 @@ async def test_runner_pi_stack_review_effort_reaches_native_submission(
             match = re.search(r"effective wall allowance is ([0-9.]+) seconds", system)
             assert match is not None
             wall_allowances.append(float(match.group(1)))
+            wall = packets[-1]["wall_time"]
+            assert wall["elapsed_s"] == 0
+            assert wall["remaining_s"] == float(match.group(1))
+            assert fake.monotonic() + wall["remaining_s"] <= 1308
         payload = stage_result(stage) if stage is not None else {"issues": []}
+        if cutoff and stage is not None and stage["scope_id"] == "python":
+            if stage["stage"] == "first_pass":
+                candidate = {"candidate_id": "", "file": "api.py", "line": 2,
+                             "trigger": "Calling hello()", "consequence": finding["description"],
+                             "grounds": finding["evidence"], "disposition": "confirmed", "finding": finding}
+                payload["candidates"] = [candidate, dict(candidate, trigger="A second caller uses hello()",
+                                                        disposition="open", finding=None)]
+            else:
+                assert stage["stage"] == "triage"
+                stopped_stages.append(stage["stage"])
+                payload["candidates"] = [dict(candidate, disposition="rejected", finding=None)
+                                         for candidate in stage["candidates"]
+                                         if candidate["candidate_id"] in stage["assigned_candidate_ids"]]
+                # Expire the original discovery deadline after an earlier stage submitted successfully.
+                fake.advance(packets[-1]["wall_time"]["remaining_s"] + 0.1)
+        elif cutoff and "items" in packets[-1]["output_schema"].get("properties", {}):
+            # Echo only real admitted inputs supplied to this native merge invocation.
+            # Recreating the fixture finding here could hide loss before merge.
+            for path_str in re.findall(r"  - (\S+-records\.json)", prompt):
+                merge_sources.extend(json.loads(Path(path_str).read_text())["issues"])
+            payload = {"items": [dict({key: value for key, value in record.items() if key != "uid"},
+                                     lens="per-stack", related_files=None, source_uids=[record["uid"]])
+                                 for record in merge_sources]}
         call = {"type": "toolCall", "id": "submit", "name": "structured_output", "arguments": payload}
         assistant = {"role": "assistant", "content": [call], "stopReason": "toolUse"}
         tool_result = {"content": [{"type": "text", "text": "Submitted."}], "details": payload}
@@ -783,16 +822,19 @@ async def test_runner_pi_stack_review_effort_reaches_native_submission(
             {"type": "agent_end", "messages": []}, {"type": "agent_settled"},
         ]])
 
-    _capture_pi_subprocess(monkeypatch, captured, response)
+    _capture_pi_subprocess(monkeypatch, captured, response, packets=packets)
     phases = {"per_stack_review": {"reasoning_effort": file_phase}} if file_phase else {}
     profile = independent_alternatives_profile()
     profile = replace(profile, profile=replace(profile.profile,
         pipeline=replace(profile.profile.pipeline, review_wall_budget_s=385)))
+    findings_path = tmp_path / "native-findings.json"
+    pr = _pin_findings_pr(monkeypatch, multi_stack_target) if cutoff else None
     config = make_config(multi_stack_target, backend="pi", reasoning_effort=cli_effort,
         file_config=DaydreamFileConfig(reasoning_effort=file_global, phases=phases),
         output_mode="review", assume="yes", diagram="off", latency_profile="forensic",
         review_profile=profile,
-        shallow_fanout_threshold=0, review_cache_enabled=False, run_eval=False)
+        shallow_fanout_threshold=0, review_cache_enabled=False, run_eval=False,
+        findings_out=str(findings_path) if cutoff else None, pr_number=7 if cutoff else None)
     assert await run(config) == 0
     _assert_pi_model_and_provider(captured, model="deepseek/deepseek-v4-flash-0731", provider=expected_provider)
     assert reviewer_args
@@ -801,7 +843,29 @@ async def test_runner_pi_stack_review_effort_reaches_native_submission(
     assert {(argv[argv.index("--thinking") + 1] if "--thinking" in argv else None)
             for argv in reviewer_args} == {expected}
     coverage = json.loads((multi_stack_target / ".daydream/deep/review-coverage.json").read_text())
-    assert {scope["status"] for scope in coverage["stack_outcomes"]} == {"complete"}
+    if cutoff:
+        assert stopped_stages == ["triage"]
+        scope = next(scope for scope in coverage["stack_outcomes"] if scope["scope_id"] == "python")
+        assert scope["status"] == "incomplete" and scope["partial_evidence"] is True
+        assert scope["reason_codes"] == ["host_pipeline_budget_exhaustion"]
+        assert pr is not None
+        retained = dict(finding, uid="python:1")
+        assert merge_sources == [retained]
+        records = json.loads((multi_stack_target / ".daydream/deep/stack-python-records.json").read_text())
+        assert records["issues"] == [retained] and records["incomplete"] is True
+        assert records["analyzed_revision"]["head_sha"] == pr.head_sha
+        assert records["analyzed_revision"]["merge_base_sha"] == pr.base_sha
+        merged = json.loads((multi_stack_target / ".daydream/deep/merged-items.json").read_text())["items"]
+        assert len(merged) == 1 and merged[0]["source_uids"] == [retained["uid"]]
+        assert merged[0]["description"] == retained["description"]
+        artifact = load_findings_artifact(findings_path, expected_repo="o/r", expected_pr_number=7,
+                                         expected_head_sha=pr.head_sha)
+        assert [finding.title for finding in artifact.findings] == ["Previously admitted defect"]
+        assert artifact.terminal_result is not None and artifact.terminal_result["analysis_state"] == "incomplete"
+        assert artifact.terminal_result["analyzed_revision"] == records["analyzed_revision"]
+        assert artifact.terminal_result["run_id"] == records["originating_run_id"]
+    else:
+        assert {scope["status"] for scope in coverage["stack_outcomes"]} == {"complete"}
     assert (multi_stack_target / ".review-output.md").is_file()
     # The independently dispatched wonder keeps ambient effort under the forensic route.
     other_args = [argv for argv in captured if argv not in reviewer_args]

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import tempfile
@@ -23,6 +24,7 @@ from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any
 
+from daydream import clock
 from daydream.backends import (
     AgentEvent,
     BackendExecutionInput,
@@ -516,6 +518,7 @@ class PiBackend:
     supports_tools_disabled = True
     supports_review_instructions = True
     supports_budget_preamble = True
+    supports_live_wall_budget = True
     # Validation opt-out selects text transport for downstream partial-object validation.
     supports_structured_output_opt_out = True
     concise_fix_prompts = True  # DeepSeek produces verbose reasoning in fix prompts
@@ -579,6 +582,7 @@ class PiBackend:
         validate_structured_output: bool = True,
         wall_budget_s: float | None = DEFAULT_WALL_BUDGET_S,
         tool_call_budget: int | None = None,
+        wall_budget_started_at: float | None = None,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Yield Pi events; a turn error raises PiError and nonempty agents are unsupported.
 
@@ -595,6 +599,8 @@ class PiBackend:
         Stdout silence raises retryable StreamStalledError; run_agent starts a fresh
         subprocess for each retry.
         """
+        # This origin is Python-local, never compared directly with Node clocks.
+        wall_origin = clock.monotonic() if wall_budget_started_at is None else wall_budget_started_at
         if self._execution_input is not None:
             response_idle_timeout_s = self._execution_input.pi_response_idle_timeout_s
             tool_idle_timeout_s = self._execution_input.stream_idle_timeout_s
@@ -854,6 +860,17 @@ class PiBackend:
                 packet: dict[str, Any] = {"output_schema": output_schema}
                 if tool_call_budget is not None:
                     packet["tool_call_budget"] = tool_call_budget
+                if wall_budget_s is None:
+                    packet["wall_time"] = None
+                elif (type(wall_budget_s) in {float, int} and math.isfinite(wall_budget_s) and wall_budget_s >= 0
+                      and type(wall_origin) in {float, int} and math.isfinite(wall_origin)):
+                    # Sample the epoch before monotonic: sampling overhead can only
+                    # overcharge the advisory bridge. Attachments, spawn and native
+                    # loading after this point are charged on the native side.
+                    sent_unix_ms = int(time.time() * 1000)
+                    elapsed_s = max(0.0, clock.monotonic() - wall_origin)
+                    packet["wall_time"] = {"remaining_s": max(0.0, wall_budget_s - elapsed_s),
+                                           "elapsed_s": elapsed_s, "sent_unix_ms": sent_unix_ms}
                 packet_text = json.dumps(packet, ensure_ascii=False)
                 packet_path = _write_prompt_attachment(packet_text, attachments)
                 child_env["DAYDREAM_PI_OUTPUT_PACKET"] = str(packet_path)

@@ -742,7 +742,18 @@ current invocation's allocation; the reviewer need not subtract them again.
 The host stops before dispatch if the current stage's minimum input-read and submission needs cannot fit. Reservations
 do not guarantee model completion: observed tool starts can arrive after execution, and a stage that spends its own
 allowance without submitting remains incomplete. Before each bounded native Pi model request, one refreshed note
-shows the backend attempt's remaining tool calls, including final submission. Each individual call counts, including
+shows the backend attempt's remaining tool calls, including final submission, and a refreshed wall-time estimate.
+The host passes its effective dispatch allowance and a Python-local monotonic origin. Python preparation is deducted
+before a private packet samples Unix time; native Pi charges attachment/startup delay through that epoch bridge,
+then counts down on its own monotonic clock. Independent monotonic epochs are never compared. Elapsed time never
+decreases and remaining time never increases or falls below zero. Clock shifts during the handoff can distort the
+startup estimate and cause earlier host cutoff; the note labels this uncertainty and host deadline/cancellation
+remain authoritative. Later wall-clock adjustments do not reset the native countdown. Invalid or unavailable optional
+time metadata omits wall guidance; unbounded calls receive no invented finite allowance. An estimated zero grants
+neither extra time nor submission capacity and never implies completed coverage. The
+[matched wall-guidance evaluation](docs/pi-live-wall-guidance.md) preserves quality on its controls but establishes
+no latency benefit; the candidate was slower in all four matched pairs.
+Each individual call counts, including
 failed tools, parallel batch members and structured submissions. The native counter starts anew for each transport
 retry against its effective allowance; cumulative host accounting remains unchanged. Use the refreshed count rather
 than recounting history. Keep one call for `structured_output`, continue concrete unresolved assigned checks while

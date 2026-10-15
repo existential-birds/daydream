@@ -934,6 +934,10 @@ class Backend(Protocol):
     - supports_budget_preamble: accepts wall_budget_s/tool_call_budget so the
       backend's own system prompt can state this turn's real allowances rather
       than its module defaults. The host enforces the bound either way.
+    - supports_live_wall_budget: accepts wall_budget_started_at, the Python
+      process-local monotonic dispatch origin for the supplied wall_budget_s.
+      Requires supports_budget_preamble so the matching duration is supplied.
+      Preparation spends that duration; native clocks need an explicit bridge.
     - reasoning_effort: native level fixed at construction; None defers to the driver.
       Backend instances are cached by kind, model, effort, and audit root.
     """

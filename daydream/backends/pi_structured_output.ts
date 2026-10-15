@@ -20,19 +20,45 @@ export default function (pi: ExtensionAPI) {
     if (!packet.output_schema || typeof packet.output_schema !== "object" || Array.isArray(packet.output_schema)) {
       throw new Error("Output schema unavailable");
     }
+    let allowance: number | undefined;
     if ("tool_call_budget" in packet) {
       if (!Number.isSafeInteger(packet.tool_call_budget) || packet.tool_call_budget < 0) {
         throw new Error("Tool allowance unavailable");
       }
-      const allowance = packet.tool_call_budget;
+      allowance = packet.tool_call_budget;
+    }
+    // Only durations cross the monotonic-clock boundary. Unix time estimates
+    // attachment/spawn/load delay once, then Node's independent monotonic clock
+    // drives the countdown. Clock shifts during that bridge are unknowable;
+    // this is advisory context, never the host's enforced deadline.
+    const wall = packet.wall_time;
+    const receivedUnixMs = Date.now();
+    const nativeOrigin = process.hrtime.bigint();
+    const validWall = wall && typeof wall === "object" && !Array.isArray(wall)
+      && [wall.remaining_s, wall.elapsed_s, wall.sent_unix_ms].every(
+        (value) => typeof value === "number" && Number.isFinite(value) && value >= 0)
+      && wall.sent_unix_ms <= receivedUnixMs;
+    const transitS = validWall ? (receivedUnixMs - wall.sent_unix_ms) / 1000 : 0;
+    let nativeElapsedS = 0;
+    if (allowance !== undefined || validWall) {
       const noteType = "daydream_native_tool_budget";
       let starts = 0;
       // Native starts include failed/invalid calls and every member of a parallel batch.
       // The Python host receives these asynchronously and remains the hard-limit authority.
       pi.on("tool_execution_start", () => { starts += 1; });
       pi.on("context", (event) => {
-        const remaining = Math.max(0, allowance - starts);
-        const guidance = remaining > 1
+        const remaining = allowance === undefined ? undefined : Math.max(0, allowance - starts);
+        nativeElapsedS = Math.max(nativeElapsedS, Number(process.hrtime.bigint() - nativeOrigin) / 1e9);
+        const wallRemaining = validWall ? Math.max(0, wall.remaining_s - transitS - nativeElapsedS) : undefined;
+        const wallNote = validWall
+          ? `Wall estimate: ${Math.floor(wall.elapsed_s + transitS + nativeElapsedS)}s elapsed since dispatch; `
+            + `${Math.floor(wallRemaining!)}s remaining. Epoch bridge then native monotonic; clock shifts during `
+            + "handoff may cause earlier host cutoff. Host deadline/cancellation remain authoritative. "
+          : wall === null ? "Wall allowance is unbounded. " : "";
+        const guidance = wallRemaining === 0
+          ? "Estimated wall allowance is exhausted; no extra time or submission capacity is granted. "
+            + "Unfinished assigned work remains incomplete."
+          : remaining === undefined || remaining > 1
           ? "Keep one call for structured_output. Continue concrete unresolved checks for assigned work while tool/time "
             + "capacity permits; submit when those checks settle. Unused capacity is expected."
           : remaining === 1
@@ -44,10 +70,12 @@ export default function (pi: ExtensionAPI) {
           messages: [...event.messages.filter((message) => message.role !== "custom" || message.customType !== noteType), {
             role: "custom" as const,
             customType: noteType,
-            content: `Live native Pi attempt budget: This attempt has ${remaining} tool calls remaining`
-              + (remaining > 0 ? ", including final submission. " : ". ")
-              + "Each individual call counts, including failures and parallel batch members. "
-              + "Use this refreshed count without recounting history. " + guidance,
+            content: "Live native Pi attempt budget: " + (remaining === undefined
+              ? "Tool-call allocation is uncapped. "
+              : `This attempt has ${remaining} tool calls remaining`
+                + (remaining > 0 ? ", including final submission. " : ". ")
+                + "Each individual call counts, including failures and parallel batch members. "
+                + "Use this refreshed count without recounting history. ") + wallNote + guidance,
             display: false,
             timestamp: Date.now(),
           }],

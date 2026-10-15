@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ import pytest
 from daydream.agent import run_agent
 from daydream.backends import (
     AgentEvent,
+    RequestEvent,
     ResultEvent,
     RetryPolicy,
     TextEvent,
@@ -28,6 +30,7 @@ from daydream.retry_policy import derive_retry_summary
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import DaydreamPhase
+from daydream.ui.agent_stream import AgentDisplay
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
 from tests.harness.pi_replay import make_mock_process, make_mock_process_from_fixture
@@ -599,7 +602,7 @@ async def test_a_fresh_run_starts_closed(tmp_path: Path) -> None:
 async def test_pi_attempt_preamble_tracks_preparation_and_retry_spend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bounded: bool,
 ) -> None:
-    """The shipped Pi system prompt describes enforcement, including a healthy retry."""
+    """Native request allowances charge preparation/UI delay and retries to one host deadline."""
     fake = FakeClock(monotonic_value=1000).install(monkeypatch)
     patch_retry_sleep(monkeypatch, fake)
     monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
@@ -620,10 +623,21 @@ async def test_pi_attempt_preamble_tracks_preparation_and_retry_spend(
 
     monkeypatch.setattr(Path, "lstat", delayed_lstat)
     prompts: list[str] = []
+    packets: list[dict[str, Any]] = []
+    real_observe = AgentDisplay.observe
+
+    async def delayed_request(display: AgentDisplay, event: AgentEvent) -> None:
+        await real_observe(display, event)
+        if isinstance(event, RequestEvent):
+            fake.advance(7)  # The consumer can suspend the adapter before its packet is written.
+
+    monkeypatch.setattr(AgentDisplay, "observe", delayed_request)
+    output = {"verdict": "complete"}
 
     async def spawn(*args: str, **kwargs: Any) -> Any:
         system_arg = args[args.index("--append-system-prompt") + 1]
         prompts.append(Path(system_arg).read_text() if system_arg.startswith("/") else system_arg)
+        packets.append(json.loads(Path(kwargs["env"]["DAYDREAM_PI_OUTPUT_PACKET"]).read_text()))
         if len(prompts) == 1:
             fake.advance(20)
             return make_mock_process([json.dumps(row) for row in [
@@ -633,26 +647,46 @@ async def test_pi_attempt_preamble_tracks_preparation_and_retry_spend(
             ]])
         # The recovery allowance restricts the retry ladder, not healthy execution.
         fake.advance(100)
-        return make_mock_process_from_fixture("simple_text.jsonl")
+        call = {"type": "toolCall", "id": "submit", "name": "structured_output", "arguments": output}
+        assistant = {"role": "assistant", "content": [call], "stopReason": "toolUse"}
+        result = {"content": [{"type": "text", "text": "Submitted."}], "details": output}
+        return make_mock_process([json.dumps(row) for row in [
+            {"type": "session", "sessionId": "retry-fixture"}, {"type": "turn_start"},
+            {"type": "message_end", "message": assistant},
+            {"type": "tool_execution_start", "toolCallId": "submit", "toolName": "structured_output", "args": output},
+            {"type": "tool_execution_end", "toolCallId": "submit", "toolName": "structured_output",
+             "isError": False, "result": result},
+            {"type": "message_end", "message": {"role": "toolResult", "toolCallId": "submit",
+             "toolName": "structured_output", "isError": False, **result}},
+            {"type": "turn_end", "message": assistant}, {"type": "agent_settled"},
+        ]])
 
     monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", spawn)
     budget = ReviewInvestigationBudget(ReviewLimits(960, 120, 96), deadline=1306.749)
+    before_ms = int(time.time() * 1000)
     result, _, reason = await run_agent(
         backend, tmp_path, "Assigned work", phase=DaydreamPhase.DEEP, read_only=True,
+        output_schema={"type": "object", "additionalProperties": False,
+                       "properties": {"verdict": {"type": "string"}}, "required": ["verdict"]},
         sanctioned_inputs=prepared, retry_recovery_allowance_s=10,
         wall_budget_s=3600 if bounded else None,
         investigation_budget=budget if bounded else None,
         deadline=1300 if bounded else None,  # Caller deadline wins over the staged 306.749s bound.
     )
-    assert reason is None and result
+    after_ms = int(time.time() * 1000)
+    assert reason is None and result == output
     assert len(prompts) == 2
     if bounded:
-        # Revalidation takes 3s each time; failed attempt + backoff takes another 25s.
+        # Revalidation takes 3s each time; UI + failed attempt + backoff spends another 32s.
         assert "effective wall allowance is 297 seconds" in prompts[0]
-        assert "effective wall allowance is 269 seconds" in prompts[1]
+        assert "effective wall allowance is 262 seconds" in prompts[1]
+        assert [packet["wall_time"]["remaining_s"] for packet in packets] == [290, 255]
+        assert [packet["wall_time"]["elapsed_s"] for packet in packets] == [7, 7]
+        assert all(before_ms <= packet["wall_time"]["sent_unix_ms"] <= after_ms for packet in packets)
     else:
         assert all("wall allowance is unbounded" in system for system in prompts)
         assert all("1800 seconds" not in system for system in prompts)
+        assert [packet["wall_time"] for packet in packets] == [None, None]
 
 
 async def test_sanctioned_input_preparation_expiry_never_dispatches_pi(
