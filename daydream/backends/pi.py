@@ -28,6 +28,7 @@ from daydream.backends import (
     BackendExecutionInput,
     ContinuationToken,
     CostEvent,
+    DiagnosticEvent,
     GenerationEndEvent,
     GenerationStartEvent,
     MetricsEvent,
@@ -66,12 +67,26 @@ from daydream.backends._transport import (
 )
 from daydream.backends.lifecycle import current_backend_lifecycle
 from daydream.config import DEFAULT_PI_MODEL, DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
+from daydream.redaction import redact_structured_text
 from daydream.retry_policy import classify_failure, parse_message_retry_hint
 
 # Mirror Codex's generous stdout cap so large JSONL events (big file reads,
 # patch payloads) do not trip asyncio's "chunk is longer than limit" guard.
 _PI_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
 _PI_FINAL_PAYLOAD_MAX_BYTES = 128 * 1024
+_PI_ERROR_MESSAGE_MAX_CHARS = 4096
+_PI_RAW_STOP_REASON_MAX_CHARS = 256
+
+
+def _pi_diagnostic_text(value: str, limit: int) -> tuple[str, bool]:
+    """Redact before bounding; diagnostic failures cannot replace the native error."""
+    try:
+        redacted = redact_structured_text(value)
+        if not isinstance(redacted, str):
+            raise TypeError("diagnostic redactor returned non-text")
+    except Exception:  # noqa: BLE001 - fixed marker only, never raw fallback
+        redacted = "[DIAGNOSTIC_REDACTION_FAILED]"
+    return redacted[:limit], len(redacted) > limit
 
 # Known AgentSessionEvent types. Used to decide whether the first
 # stdout line — the session header — also carries a dispatchable event type.
@@ -735,6 +750,7 @@ class PiBackend:
         # native_generation_interval class). One open generation per
         # assistant message; user/tool-result lifecycle never creates one.
         open_generation_id: str | None = None
+        last_generation_id: str | None = None
         # Host receipt of assistant message_start (Unix ns, host clock).
         generation_start_ns: int | None = None
 
@@ -918,6 +934,7 @@ class PiBackend:
                 elif event_type == "turn_start":
                     saw_turn_start = True
                     saw_finish_reason = False
+                    last_generation_id = None
 
                 elif event_type == "message_start":
                     msg = event.get("message") or {}
@@ -927,6 +944,7 @@ class PiBackend:
                         # request start; the native start comes from the
                         # completed message's Unix-ms timestamp at message_end.
                         open_generation_id = _new_generation_id()
+                        last_generation_id = open_generation_id
                         generation_start_ns = time.time_ns()
                         if lifecycle is not None:
                             lifecycle.generation_started()
@@ -1141,6 +1159,41 @@ class PiBackend:
                         )
                     # Use native stopReason/model/provider when exposed. Pi has no message
                     # id; keep it empty and retain host-observed timing.
+                    if stop_reason == "error":
+                        supplied_error = msg.get("errorMessage")
+                        native_error = supplied_error if isinstance(supplied_error, str) and supplied_error else None
+                        error_msg = native_error or "Unknown Pi error"
+                        category = _pi_error_category(error_msg)
+                        retryable = _pi_retryable_for(category=category, message=error_msg)
+                        # Redact whole fields before clipping, so a bound cannot turn a
+                        # complete credential/PEM block into an unrecognizable fragment.
+                        diagnostic_message, message_truncated = (
+                            _pi_diagnostic_text(native_error, _PI_ERROR_MESSAGE_MAX_CHARS)
+                            if native_error is not None else ("", False)
+                        )
+                        diagnostic_metadata: dict[str, Any] = {
+                            "category": category, "retryable": retryable, "finish_reason": "error",
+                            "message_source": "native" if native_error is not None else "unavailable",
+                        }
+                        if message_truncated:
+                            diagnostic_metadata["message_truncated"] = True
+                        raw_stop_reason = msg.get("rawStopReason")
+                        if isinstance(raw_stop_reason, str) and raw_stop_reason:
+                            redacted_stop, stop_truncated = _pi_diagnostic_text(
+                                raw_stop_reason, _PI_RAW_STOP_REASON_MAX_CHARS,
+                            )
+                            diagnostic_metadata["raw_stop_reason"] = redacted_stop
+                            if stop_truncated:
+                                diagnostic_metadata["raw_stop_reason_truncated"] = True
+                        if last_generation_id is not None:
+                            diagnostic_metadata["generation_id"] = last_generation_id
+                        # Observe before TurnEnd/Result close the assistant step. The
+                        # recorder applies its existing JSON normalization/redaction too.
+                        yield DiagnosticEvent(
+                            code="pi_terminal_error",
+                            message=diagnostic_message,
+                            metadata=diagnostic_metadata,
+                        )
                     yield TurnEndEvent(
                         message_id="",
                         finish_reason=stop_reason if stop_reason is not None else None,
@@ -1152,11 +1205,9 @@ class PiBackend:
                     if stop_reason == "error":
                         for terminal in terminal_events():
                             yield terminal
-                        error_msg = msg.get("errorMessage") or "Unknown Pi error"
-                        category = _pi_error_category(error_msg)
                         raise PiError(
                             error_msg,
-                            retryable=_pi_retryable_for(category=category, message=error_msg),
+                            retryable=retryable,
                             category=category,
                             retry_after=parse_message_retry_hint(error_msg),
                         )

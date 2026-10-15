@@ -22,6 +22,7 @@ from daydream.backends import (
     BackendExecutionInput,
     ContinuationToken,
     CostEvent,
+    DiagnosticEvent,
     MetricsEvent,
     PiRequestConfig,
     RequestEvent,
@@ -1023,25 +1024,127 @@ def test_is_retryable_exit_code(code: Any, expected: Any) -> None:
 # Error turn uses retryable classifier
 
 @pytest.mark.parametrize(
-    ("error_message", "expected_retryable"),
+    ("error_message", "expected_retryable", "expected_category"),
     [
-        ("429 Too Many Requests - rate limit exceeded", True), ("502 status code (no body)", True),
-        ("authentication required", False),
-    ], ids=["429-retryable", "502-retryable", "auth-non-retryable"],
+        ("429 Too Many Requests - rate limit exceeded", True, "RATE_LIMIT"),
+        ("502 status code (no body)", True, "SERVER_ERROR"),
+        ("authentication required", False, "AUTH_CONFIG"),
+        ("Provider finish_reason: error", False, "UNKNOWN"),
+    ], ids=["429-retryable", "502-retryable", "auth-non-retryable", "opaque-finish-error"],
 )
-async def test_error_turn_sets_retryable_via_classifier(error_message: Any, expected_retryable: Any) -> None:
+async def test_error_turn_sets_retryable_via_classifier(
+    error_message: str, expected_retryable: bool, expected_category: str,
+) -> None:
+    """Public terminal errors retain diagnosis without altering classification or totals."""
     backend = PiBackend(model="glm-5.2")
     lines = [
         '{"type":"session","sessionId":"pi_ses_err"}', '{"type":"agent_start"}', '{"type":"turn_start"}',
         '{"type":"turn_end","message":{"role":"assistant","content":[],'
-        f'"stopReason":"error","errorMessage":{json.dumps(error_message)}}}}}',
+        f'"stopReason":"error","rawStopReason":"error","errorMessage":{json.dumps(error_message)},'
+        '"usage":{"input":100,"output":10,"cost":{"total":0.01}}}}',
     ]
     mock_proc = make_mock_process(lines)
-    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
+    events = []
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as spawn:
         with pytest.raises(PiError) as exc_info:
-            async for _ in backend.execute(Path("/tmp"), "p"):
-                pass
+            async for event in backend.execute(Path("/tmp"), "p"):
+                events.append(event)
     assert exc_info.value.retryable is expected_retryable
+    assert exc_info.value.category == expected_category
+    assert spawn.call_count == 1
+    diagnostics = [event for event in events if isinstance(event, DiagnosticEvent)]
+    assert len(diagnostics) == 1 and diagnostics[0].message == error_message
+    assert diagnostics[0].metadata == {
+        "category": expected_category, "retryable": expected_retryable, "finish_reason": "error",
+        "raw_stop_reason": "error", "message_source": "native",
+    }
+    assert events.index(diagnostics[0]) < next(i for i, event in enumerate(events) if isinstance(event, TurnEndEvent))
+    totals = [event for event in events if isinstance(event, CostEvent)]
+    assert len(totals) == 1 and totals[0].input_tokens == 100 and totals[0].output_tokens == 10
+    assert totals[0].cost_usd == 0.01
+    assert mock_proc.returncode is not None
+
+
+@pytest.mark.parametrize("native", [
+    {}, {"errorMessage": None, "rawStopReason": {"not": "a string"}},
+    {"errorMessage": ["invalid"], "rawStopReason": 7},
+    {"errorMessage": 'failure: -----BEGIN PRIVATE KEY-----\n' + 'x' * 5000
+     + '\n-----END PRIVATE KEY-----\n' + 'safe ' * 2000,
+     "rawStopReason": 'TOKEN=hidden-secret; ' + 'reason ' * 1000},
+], ids=["absent", "null", "malformed", "oversized-secret"])
+async def test_pi_terminal_diagnostic_is_bounded_and_redacted_before_persistence(
+    tmp_path: Path, native: dict[str, Any],
+) -> None:
+    """Public optional fields cannot crash error handling or leak cut-off secret fragments."""
+    backend = PiBackend(model="fixture-model")
+    backend.retry_attempts = 0
+    message = {"role": "assistant", "content": [], "stopReason": "error", **native}
+    recorder = make_recorder(tmp_path)
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=make_mock_process([
+        json.dumps({"type": "turn_end", "message": message}),
+    ])) as spawn:
+        async with recorder:
+            with pytest.raises(PiError) as failure:
+                await run_agent(backend, tmp_path, "Review", phase=DaydreamPhase.REVIEW,
+                                progress_callback=lambda _: None)
+    assert failure.value.category == "UNKNOWN" and failure.value.retryable is False
+    assert spawn.call_count == 1
+    document = json.loads(recorder.path.read_text())
+    diagnostics = [diagnostic for step in document["steps"]
+                   for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])]
+    assert len(diagnostics) == 1
+    diagnostic = diagnostics[0]
+    assert len(diagnostic["message"]) <= 4096
+    if isinstance(native.get("errorMessage"), str):
+        assert diagnostic["metadata"]["message_source"] == "native"
+        assert diagnostic["metadata"]["message_truncated"] is True
+        assert "[REDACTED_PEM_KEY]" in diagnostic["message"]
+        assert "x" * 20 not in json.dumps(diagnostics) and "hidden-secret" not in json.dumps(diagnostics)
+        assert "[REDACTED_ENV_VAR]" in diagnostic["metadata"]["raw_stop_reason"]
+        assert len(diagnostic["metadata"]["raw_stop_reason"]) == 256
+        assert diagnostic["metadata"]["raw_stop_reason_truncated"] is True
+    else:
+        assert diagnostic["message"] == "" and diagnostic["metadata"]["message_source"] == "unavailable"
+        assert "raw_stop_reason" not in diagnostic["metadata"]
+
+
+@pytest.mark.parametrize("redaction_fault", ["raises", "nontext"])
+async def test_pi_diagnostic_redaction_fault_preserves_native_failure_and_terminal_usage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, redaction_fault: str,
+) -> None:
+    """A failed evidence sanitizer must neither replace PiError nor lose terminal billing."""
+    def broken_redactor(_: str) -> Any:
+        if redaction_fault == "raises":
+            raise RuntimeError("redactor unavailable")
+        return None
+
+    monkeypatch.setattr("daydream.backends.pi.redact_structured_text", broken_redactor)
+    backend = PiBackend(model="fixture-model")
+    backend.retry_attempts = 0
+    recorder = make_recorder(tmp_path)
+    native = {"role": "assistant", "stopReason": "error", "errorMessage": "Provider finish_reason: error",
+              "rawStopReason": "TOKEN=never-persist", "usage": {"input": 100, "output": 10,
+                                                                     "cost": {"total": 0.01}}}
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=make_mock_process([
+        json.dumps({"type": "turn_end", "message": native}),
+    ])) as spawn:
+        async with recorder:
+            with pytest.raises(PiError) as failure:
+                await run_agent(backend, tmp_path, "Review", phase=DaydreamPhase.REVIEW,
+                                progress_callback=lambda _: None)
+    assert failure.value.category == "UNKNOWN" and failure.value.retryable is False
+    assert spawn.call_count == 1
+    document = json.loads(recorder.path.read_text())
+    diagnostics = [diagnostic for step in document["steps"]
+                   for diagnostic in step.get("extra", {}).get("backend_diagnostics", [])]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["message"] == "[DIAGNOSTIC_REDACTION_FAILED]"
+    assert diagnostics[0]["metadata"]["raw_stop_reason"] == "[DIAGNOSTIC_REDACTION_FAILED]"
+    assert "never-persist" not in json.dumps(document)
+    assert document["final_metrics"]["total_prompt_tokens"] == 100
+    assert document["final_metrics"]["total_completion_tokens"] == 10
+    assert document["final_metrics"]["total_cost_usd"] == 0.01
+
 
 async def test_error_turn_carries_structured_retry_hint_from_the_provider_payload() -> None:
     """The serialized OpenRouter 429 decodes to 10.0 on the backend's error hint.
