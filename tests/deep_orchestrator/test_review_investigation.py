@@ -622,7 +622,7 @@ async def test_integration_retains_admitted_findings_and_cumulative_spend(
     phases = {phase['phase']: phase for phase in data['terminal_result']['phase_outcomes']}
     metadata = [event['metadata'] for event in stage_ends(review, 'structure')]
     if fault == 'syntax':
-        assert phases['alternatives']['status'] == 'failed'
+        assert phases['alternatives']['status'] == 'incomplete'
         assert phases['alternatives']['reason_codes'] == ['malformed_output']
         event, = metadata
         assert event['attempt'] == 1 and event['observed_tool_starts'] == 0
@@ -630,7 +630,7 @@ async def test_integration_retains_admitted_findings_and_cumulative_spend(
         coverage = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
         assert coverage['diagnostics']['scopes']['structure'] in coverage['diagnostics']['phases']['alternatives']
     else:
-        assert phases['alternatives']['status'] == ('failed' if cutoff else 'complete')
+        assert phases['alternatives']['status'] == ('incomplete' if cutoff else 'complete')
         assert len(observations) == (97 if cutoff else integration_starts)
         assert metadata[-1]['observed_tool_starts'] == (97 if cutoff else integration_starts)
         assert metadata[-1]['remaining_tool_calls'] == (0 if cutoff else 96 - integration_starts)

@@ -282,11 +282,16 @@ async def test_snapshot_boundaries(review: ReviewRun, request: pytest.FixtureReq
             'mod0.py', 'mod1.py', 'mod2.py', 'README.md'}
 
 
-@pytest.mark.parametrize('budget', ['tool', 'wall', 'model'])
-@pytest.mark.parametrize('nonempty', [False, True, None])
-async def test_unsuccessful_stage_discards_checkpoints(review: ReviewRun, budget: str, nonempty: bool | None) -> None:
+@pytest.mark.parametrize(('budget', 'nonempty', 'structure_only'), [
+    *[(budget, nonempty, False) for budget in ('tool', 'wall', 'model') for nonempty in (False, True, None)],
+    *[(budget, nonempty, True) for budget in ('tool', 'backend') for nonempty in (False, True)],
+])
+async def test_unsuccessful_stage_discards_checkpoints(
+    review: ReviewRun, budget: str, nonempty: bool | None, structure_only: bool,
+) -> None:
     from tests.deep_orchestrator.test_review_capture_and_retry import supporting_contents
 
+    source = git(review.repo, 'diff', 'HEAD')
     fake = FakeClock().install(review.patch)
     intent = 'PRESERVE_AUTHOR_INTENT'
     review.patch.setattr(git_ops, 'gh_pr_view', lambda *_a, **_k: {
@@ -308,7 +313,9 @@ async def test_unsuccessful_stage_discards_checkpoints(review: ReviewRun, budget
             if nonempty is not None:
                 yield ResultEvent(structured_output=review_stage_result(prompt, [record()] if nonempty else []),
                                   continuation=None)
-            if budget == 'model':
+            if budget == 'backend':
+                yield RuntimeError('structural provider unavailable')
+            elif budget == 'model':
                 yield MaxTurnsError('spent turns')
             else:
                 for index in range(state['remaining_tool_calls'] + 1):
@@ -316,38 +323,71 @@ async def test_unsuccessful_stage_discards_checkpoints(review: ReviewRun, budget
                         fake.advance(601)
                     yield ToolStartEvent(id=f'budget-{index}', name='Read', input={'file_path': 'api.py'})
     review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
-        responder=lambda p: response(p) if reviewer(p) or 'understand the intent' in p.lower() else None)
+        review_by_stack={'python': [record()]} if structure_only else {},
+        responder=lambda p: response(p) if (reviewer(p) and (not structure_only or
+            'you are the structural reviewer' in p.lower())) or 'understand the intent' in p.lower() else None)
     review.backend.merge_echo_records = True
     assert await review.run(review_profile=_profile_with_pipeline(review_wall_budget_s=99999)) == 0
     data = review.load()
     result = data['terminal_result']
-    reason = 'model_budget_exhaustion' if budget == 'model' else f'host_{budget}_budget_exhaustion'
-    assert result['analysis_state'] == 'failed' and result['completed_stacks'] == []
-    assert reason in result['reason_codes'] and data['findings'] == []
+    reason = ('backend_failure' if budget == 'backend' else 'model_budget_exhaustion'
+              if budget == 'model' else f'host_{budget}_budget_exhaustion')
+    assert result['analysis_state'] == ('incomplete' if structure_only else 'failed')
+    assert result['completed_stacks'] == (['generic', 'python', 'react'] if structure_only else [])
+    assert reason in result['reason_codes']
+    assert [f['title'] for f in data['findings']] == (['Grounded defect'] if structure_only else [])
     stages = [state for call in review.backend.calls if (state := review_stage_state(call['prompt'])) is not None]
     assert [stage['stage'] for stage in stages if stage['scope_id'] == 'structure'] == ['integration']
     assert not any(call['prompt'].startswith('INVESTIGATION HAS ENDED.') for call in review.backend.calls)
+    assert {stage['scope_id'] for stage in stages} == {'python', 'react', 'generic', 'structure'}
+    assert not any('would you have done this differently' in call['prompt'].lower()
+                   or 'evaluate the implementation' in call['prompt'].lower() for call in review.backend.calls)
+    assert git(review.repo, 'diff', 'HEAD') == source
+    folded = next(p for p in result['phase_outcomes'] if p['phase'] == 'alternatives')
+    assert (folded['status'], folded['reason_codes'], folded['noop'], folded['usable_evidence']) == (
+        'failed' if budget == 'backend' else 'incomplete', [reason], False, False)
+    persisted = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
+    assert persisted['phase_outcomes'] == result['phase_outcomes']
+    assert persisted['stack_outcomes'] == result['stack_outcomes']
+    assert 'folded into Structure' in persisted['diagnostics']['phases']['alternatives']
     for name, scope in scopes(data).items():
-        saved = json.loads((review.repo / f'.daydream/deep/stack-{name}-records.json').read_text())
-        assert saved['issues'] == [] and saved['incomplete'] is True
-        assert (scope['status'], scope['partial_evidence']) == ('incomplete', False)
+        if structure_only and name != 'structure':
+            assert scope['status'] == 'complete'
+            continue
+        records_path = review.repo / f'.daydream/deep/stack-{name}-records.json'
+        if budget == 'backend':
+            assert not records_path.exists()
+        else:
+            saved = json.loads(records_path.read_text())
+            assert saved['issues'] == [] and saved['incomplete'] is True
+        assert (scope['status'], scope['partial_evidence']) == (
+            'failed' if budget == 'backend' else 'incomplete', False)
         assert scope['reason_codes'] == [reason]
 
 
-@pytest.mark.parametrize('fault', ['missing', 'corrupt', 'shape', 'revision', 'scope', 'origin'])
-async def test_loaded_artifact_faults(review: ReviewRun, fault: str) -> None:
+@pytest.mark.parametrize(('fault', 'owner'), [
+    *[(fault, 'python') for fault in ('missing', 'corrupt', 'shape', 'revision', 'scope', 'origin')],
+    *[(fault, 'structure') for fault in ('missing', 'corrupt', 'shape', 'duplicate')],
+])
+async def test_loaded_artifact_faults(review: ReviewRun, fault: str, owner: str) -> None:
+    source = git(review.repo, 'diff', 'HEAD')
+    artifact_name = f'stack-{owner}-records.json'
     write, read = Path.write_text, Path.read_text
     malformed = '{invalid' if fault == 'corrupt' else '{"issues": "invalid"}'
     def faulty_write(path: Path, text: str, *args: Any, **kwargs: Any) -> int:
-        if path.name == 'stack-python-records.json' and fault in {'corrupt', 'shape'}:
+        if path.name == artifact_name and fault in {'corrupt', 'shape'}:
             text = malformed
+        if path.name == artifact_name and fault == 'duplicate':
+            payload = json.loads(text)
+            payload['issues'].append(dict(payload['issues'][0]))
+            text = json.dumps(payload)
         count = write(path, text, *args, **kwargs)
-        if path.name == 'stack-python-records.json' and fault == 'missing':
+        if path.name == artifact_name and fault == 'missing':
             path.unlink()
         return count
     def faulty_read(path: Path, *args: Any, **kwargs: Any) -> str:
         text = read(path, *args, **kwargs)
-        if path.name == 'stack-python-records.json' and fault in {'revision', 'scope', 'origin'}:
+        if path.name == artifact_name and fault in {'revision', 'scope', 'origin'}:
             data = json.loads(text)
             if fault == 'revision':
                 data['analyzed_revision']['head_sha'] = 'foreign-head'
@@ -359,14 +399,16 @@ async def test_loaded_artifact_faults(review: ReviewRun, fault: str) -> None:
         return text
     review.patch.setattr(Path, 'write_text', faulty_write)
     review.patch.setattr(Path, 'read_text', faulty_read)
-    if fault in {'missing', 'corrupt', 'shape'}:
+    if fault in {'missing', 'corrupt', 'shape', 'duplicate'}:
         review.backend.review_by_stack = {'react': [_record(
             description='Surviving sibling defect', file='App.tsx', line=1)]}
+    if fault == 'duplicate':
+        review.backend.review_by_stack['structure'] = [record()]
     assert await review.run(dataset_capture=True, dataset_store_path=review.tmp / 'records') == 1
     if fault in {'corrupt', 'shape'}:
         raw = read_records(LocalRecordStore(review.tmp / 'records')).runs[0]
         assert raw['outcome'] == 'failed' and raw['completeness']['artifact_acquisition'] == 'failed'
-        diagnostic = raw['provenance']['collection_diagnostics']['stack-python-records.json']
+        diagnostic = raw['provenance']['collection_diagnostics'][artifact_name]
         assert diagnostic['reason'] == ('malformed_json' if fault == 'corrupt' else 'malformed_shape')
         assert diagnostic.get('raw_text' if fault == 'corrupt' else 'raw_json') == (
             malformed if fault == 'corrupt' else {'issues': 'invalid'})
@@ -378,15 +420,26 @@ async def test_loaded_artifact_faults(review: ReviewRun, fault: str) -> None:
     result, inventory = data['terminal_result'], scopes(data)
     reason = 'missing_artifact' if fault == 'missing' else 'malformed_artifact'
     assert (result['pipeline_state'], result['analysis_state'], result['projection_valid']) == (
-        'failed', 'incomplete', True)
+        'failed', 'incomplete' if fault != 'duplicate' else 'failed', fault != 'duplicate')
     assert set(inventory) == {'python', 'react', 'generic', 'structure'} and reason in result['reason_codes']
-    assert {n: s['status'] for n, s in inventory.items()} == dict.fromkeys(inventory, 'complete') | {'python': 'failed'}
-    assert inventory['python']['reason_codes'] == [reason]
+    assert {n: s['status'] for n, s in inventory.items()} == dict.fromkeys(inventory, 'complete') | {owner: 'failed'}
+    assert inventory[owner]['reason_codes'] == [reason]
     if fault in {'missing', 'corrupt', 'shape'}:
         assert [(f['title'], f['placement']) for f in data['findings']] == [('Surviving sibling defect', 'inline')]
     else:
         assert data['findings'] == []
     assert not any('cross-stack merge agent' in c['prompt'].lower() for c in review.backend.calls)
+    assert git(review.repo, 'diff', 'HEAD') == source
+    if owner == 'structure':
+        folded = next(p for p in result['phase_outcomes'] if p['phase'] == 'alternatives')
+        assert (folded['status'], folded['reason_codes'], folded['noop'], folded['usable_evidence']) == (
+            'failed', [reason], False, False)
+        persisted = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
+        assert persisted['phase_outcomes'] == result['phase_outcomes']
+        assert persisted['stack_outcomes'] == result['stack_outcomes']
+        assert 'folded into Structure' in persisted['diagnostics']['phases']['alternatives']
+        assert not any('would you have done this differently' in c['prompt'].lower()
+                       or 'evaluate the implementation' in c['prompt'].lower() for c in review.backend.calls)
 
 
 @pytest.mark.parametrize(('phase', 'reason'), [('intent', 'backend_failure'), ('intent-empty', 'missing_output'),

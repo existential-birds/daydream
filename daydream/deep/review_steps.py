@@ -459,6 +459,24 @@ def _fold_default_alternatives(ctx: FlowContext) -> bool:
     )
 
 
+def _sync_folded_alternatives(ctx: FlowContext) -> None:
+    """Refresh delegated coverage only when this run investigates Structure."""
+    coverage = DeepState(ctx.data).review_coverage
+    if "alternatives" not in coverage.phases:
+        return
+    if ctx.config.start_at in ("merge", "fix") or not _fold_default_alternatives(ctx):
+        return
+    structural = coverage.scopes.get(STRUCTURE_STACK_NAME)
+    if structural is not None and structural["status"] == "complete":
+        coverage.record_phase("alternatives", "complete", noop=True)
+        return
+    status = "failed" if structural is not None and structural["status"] == "failed" else "incomplete"
+    reasons = structural["reason_codes"] if structural is not None else [ReasonCode.COVERAGE_UNKNOWN]
+    cause = coverage.diagnostics["scopes"].get(STRUCTURE_STACK_NAME, "")
+    coverage.record_phase("alternatives", status, reasons=reasons,
+        diagnostic=f"Default design duty folded into Structure; {cause or 'Structure did not complete.'}")
+
+
 async def _wonder(ctx: FlowContext) -> None:
     """TTT alternative-review routed by the latency profile + its artifact write.
 
@@ -598,15 +616,7 @@ async def _step_wonder_and_per_stack(ctx: FlowContext) -> None:
             tg.start_soon(_wonder_guarded)
         await _per_stack_body(ctx, include_alternatives=not concurrent and not (run_wonder and folded))
 
-    if run_wonder and folded:
-        structural = deep_state.review_coverage.scopes.get(STRUCTURE_STACK_NAME)
-        if structural is not None and structural["status"] == "complete":
-            deep_state.review_coverage.record_phase("alternatives", "complete", noop=True)
-        else:
-            reasons = structural['reason_codes'] if structural is not None else [ReasonCode.EVIDENCE_INCOMPLETE]
-            cause = deep_state.review_coverage.diagnostics['scopes'].get(STRUCTURE_STACK_NAME, '')
-            deep_state.review_coverage.record_phase("alternatives", "failed", reasons=reasons,
-                diagnostic=f"Default design duty folded into Structure; {cause or 'Structure did not complete.'}")
+    _sync_folded_alternatives(ctx)
     from daydream.deep.artifacts import persist_review_coverage
     persist_review_coverage(deep_state.dd, deep_state.review_coverage)
     if holder["exc"] is not None:
@@ -723,6 +733,7 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
             if any(stack_name_from_uid(uid) == stack.stack_name for uid in duplicate_uids):
                 deep_state.review_coverage.record_scope(stack.stack_name, "failed",
                                                        reasons=(ReasonCode.MALFORMED_ARTIFACT,))
+        _sync_folded_alternatives(ctx)
         from daydream.deep.artifacts import persist_review_coverage
         persist_review_coverage(dd, deep_state.review_coverage)
         loaded_names = ", ".join(sorted(path.name for path in paths.values()))
@@ -738,6 +749,7 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         )
         return Stop(1)
 
+    _sync_folded_alternatives(ctx)
     from daydream.deep.artifacts import persist_review_coverage
     persist_review_coverage(dd, deep_state.review_coverage)
     _log_reuse_summary(ctx)
