@@ -59,7 +59,7 @@ from daydream.phases import (
 )
 from daydream.phases.review import valid_record_artifact
 from daydream.phases.schemas import ALTERNATIVE_REVIEW_SCHEMA
-from daydream.review_budget import ReviewBudgetExceeded
+from daydream.review_budget import ReviewBudgetExceeded, ReviewLimits
 from daydream.review_result import ReasonCode, reason_for_budget
 from daydream.trajectory import (
     DaydreamPhase,
@@ -665,6 +665,7 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 allow_standalone=ctx.allow_standalone_artifacts,
                 reuse_cache=reuse_cache,
                 phase_identity=phase_identity,
+                review_limits=ReviewLimits(investigation_s=ctx.pipeline().reviewer_investigation_budget_s),
                 coverage=deep_state.review_coverage,
             )
     else:

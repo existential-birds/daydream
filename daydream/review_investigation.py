@@ -85,7 +85,7 @@ class ReviewInvestigation:
     """Admit successful stage assertions; observed spend belongs to the host."""
 
     def __init__(self, stack: StackAssignment, full_diff: str, revision: dict[str, Any], *,
-                 assignment_batches: list[list[dict[str, Any]]]) -> None:
+                 assignment_batches: list[list[dict[str, Any]]], limits: ReviewLimits | None = None) -> None:
         self.scope_id = stack.stack_name
         self.files = sorted(stack.files)
         self.revision = revision
@@ -97,7 +97,11 @@ class ReviewInvestigation:
                 self.required_targets[part['file']].append(part['target_id'])
         self.target_progress: dict[str, dict[str, Any]] = {}
         self.handoff: dict[str, list[Any]] = {name: [] for name in ('progress', 'notes', 'candidates')}
-        self.budget = ReviewInvestigationBudget.from_limits(ReviewLimits())
+        self._base_limits = limits if limits is not None else ReviewLimits()
+        self.budget = ReviewInvestigationBudget.from_limits(self._base_limits)
+        self._effective_allowance_s = 0.0
+        self._deadline_bound = ('pipeline_budget' if self.budget.deadline == self.budget.shared_deadline
+                                else 'reviewer_investigation_budget')
         self.reason: str | None = None
         self.admitted_stages = 0
         self.failed_invocation = False
@@ -112,6 +116,19 @@ class ReviewInvestigation:
     ) -> tuple[dict[str, Any], str | None]:
         """Fresh calls share hard bounds; advisory targets cannot abort useful work."""
         self._source_root = cwd
+        # One invocation clamp covers preparation, every stage and all retries.
+        # Passing only a relative wall allowance to run_agent would renew it after
+        # preparation and again for each later stage.
+        started = clock.monotonic()
+        for bound, label in ((agent_kwargs.get('deadline'), 'caller_deadline'),
+                             (started + agent_kwargs['wall_budget_s']
+                              if agent_kwargs.get('wall_budget_s') is not None else None,
+                              'invocation_wall_budget')):
+            if bound is not None and bound < self.budget.deadline:
+                self.budget.deadline = bound
+                self._deadline_bound = label
+        self._effective_allowance_s = max(0.0, self.budget.deadline - started)
+        agent_kwargs = {**agent_kwargs, 'deadline': self.budget.deadline}
         # Preserve the scope failure independently of each later attempt's status.
         # Full diagnostics for every attempt remain in their phase evidence.
         failure: tuple[str | None, bool, str | None, str | None] | None = None
@@ -181,14 +198,19 @@ class ReviewInvestigation:
         """Only ordinary invocation failures permit a later independent batch."""
         return self.failed_invocation and self.reason == 'backend_failure' and self._continuable_failure
 
+    def _budget_stop_reason(self) -> str | None:
+        """Use the original controlling bound when classifying an exhausted reviewer."""
+        if self.budget.remaining_tool_calls <= 0:
+            return 'tool_call_budget_exceeded'
+        if clock.monotonic() >= self.budget.deadline:
+            return ('pipeline_budget_exceeded' if self.budget.deadline == self.budget.shared_deadline
+                    else 'wall_budget_exceeded')
+        return None
+
     def _continuation_admitted(self, agent_kwargs: dict[str, Any]) -> bool:
         """A new batch cannot evade shared stopping conditions after an invocation failure."""
-        if self.budget.remaining_tool_calls <= 0:
-            reason = 'tool_call_budget_exceeded'
-        elif clock.monotonic() >= self.budget.deadline:
-            reason = ('pipeline_budget_exceeded' if self.budget.shared_deadline is not None
-                      and clock.monotonic() >= self.budget.shared_deadline else 'wall_budget_exceeded')
-        else:
+        reason = self._budget_stop_reason()
+        if reason is None:
             context = resolve_run_context(agent_kwargs.get('run_context'))
             if context.outage_circuit.admit_retry(clock.monotonic()).allowed:
                 return True
@@ -236,10 +258,10 @@ class ReviewInvestigation:
         self.reason = None
         self.failure_diagnostic, self.failed_invocation, self.failure_class = None, False, None
         self._continuable_failure = False
-        if self.budget.remaining_tool_calls <= 0:
-            self.reason = 'tool_call_budget_exceeded'
+        self.reason = self._budget_stop_reason()
+        if self.reason is not None:
             self.failure_class = 'quantitative_exhaustion'
-            self.failure_diagnostic = 'Review limit exhausted: tool_call_budget_exceeded'
+            self.failure_diagnostic = f'Review limit exhausted: {self.reason}'
             return False
         candidate_ids = candidate_ids or []
         assignment_parts = assignment_parts or []
@@ -363,6 +385,10 @@ class ReviewInvestigation:
                         self.failure_diagnostic = f"{label}: {self.reason}"
                     transition.extra.update(
                         review_scope_id=self.scope_id, observed_tool_starts=self.budget.observed_tool_starts,
+                        investigation_base_budget_s=self._base_limits.investigation_s,
+                        investigation_scaled_budget_s=self.budget.limits.investigation_s,
+                        investigation_effective_allowance_s=self._effective_allowance_s,
+                        investigation_limit=self._deadline_bound,
                         remaining_tool_calls=self.budget.remaining_tool_calls,
                         hard_tool_call_allowance=state['hard_tool_call_allowance'],
                         advisory_tool_call_target=state['advisory_tool_call_target'],

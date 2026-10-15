@@ -18,6 +18,7 @@ from daydream import git_ops
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep import reuse_store
 from daydream.phases import build_commit_message
+from daydream.review_profile import resolve_profile
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _arbiter_stacks,
@@ -191,6 +192,39 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
             os.close(report_fd)
     finally:
         os.close(parent_fd)
+
+async def test_configured_reviewer_policy_invalidates_reuse_and_records_resolved_identity(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+) -> None:
+    """A local-policy change must not serve a completed review under incompatible limits."""
+    from tests.harness.stub_backend import review_stage_state
+
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    profile_path = tmp_path / 'review-profile.toml'
+    digests = []
+    deep = multi_stack_target / '.daydream' / 'deep'
+    for index, seconds in enumerate((480, 900, 900)):
+        profile_path.write_text(f'[pipeline]\nreviewer_investigation_budget_s = {seconds}\n')
+        resolved = resolve_profile(explicit_path=str(profile_path))
+        trajectory_path = tmp_path / f'policy-{index}.json'
+        stub.calls.clear()
+        assert await run(make_config(multi_stack_target, review_profile_path=profile_path,
+                                    trajectory_path=trajectory_path)) == 0
+        extra = json.loads(trajectory_path.read_text())['extra']
+        assert extra['profile_digest'] == resolved.digest
+        assert extra['profile_source_kind'] == 'explicit'
+        digests.append(extra['profile_digest'])
+        reviewed_scopes = {stage['scope_id'] for call in stub.calls
+                           if (stage := review_stage_state(call['prompt'])) is not None}
+        if index < 2:
+            assert reviewed_scopes == {'python', 'react', 'generic', 'structure'}
+            assert _reused_stacks(deep) == set()
+        else:
+            assert reviewed_scopes == set()
+            assert _reused_stacks(deep) == {'python', 'react', 'generic', 'structure'}
+        assert saved_coverage(deep).unfinished_scopes == {}
+    assert digests[0] != digests[1] == digests[2]
+
 
 async def test_identical_rerun_reviews_no_stack_and_a_leaf_edit_invalidates_bound_coverage(
     shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,

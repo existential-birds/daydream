@@ -98,6 +98,7 @@ class Pipeline:
     arbitration: Arbitration = field(default_factory=Arbitration)
     suppression: Suppression = field(default_factory=Suppression)
     review_wall_budget_s: int = 2700
+    reviewer_investigation_budget_s: int = 480
 
 
 @dataclass(frozen=True)
@@ -480,6 +481,7 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
     _PIPELINE_KEYS = frozenset(
         {
             "review_wall_budget_s",
+            "reviewer_investigation_budget_s",
             "structural_enabled",
             "arbitration_enabled",
             "arbitration_min_severity",
@@ -558,6 +560,9 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
 
     return Pipeline(
         review_wall_budget_s=_int("review_wall_budget_s", defaults.review_wall_budget_s),
+        reviewer_investigation_budget_s=_int(
+            "reviewer_investigation_budget_s", defaults.reviewer_investigation_budget_s
+        ),
         structural_enabled=_bool("structural_enabled", defaults.structural_enabled),
         arbitration=arbitration,
         suppression=suppression,

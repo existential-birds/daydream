@@ -18,6 +18,28 @@ def test_review_deadline_is_profiled_and_validated() -> None:
     with pytest.raises(rp.ProfileError):
         _profile("[pipeline]\nreview_wall_budget_s = -1")
 
+
+@pytest.mark.parametrize("seconds", [0, 900])
+def test_reviewer_investigation_budget_is_independent_and_changes_identity(seconds: int) -> None:
+    base = _profile()
+    configured = _profile(f"[pipeline]\nreviewer_investigation_budget_s = {seconds}")
+    assert base.pipeline.reviewer_investigation_budget_s == 480
+    assert configured.pipeline.reviewer_investigation_budget_s == seconds
+    assert configured.pipeline.review_wall_budget_s == base.pipeline.review_wall_budget_s == 2700
+    assert configured.to_canonical_dict() != base.to_canonical_dict()
+    assert configured.digest != base.digest
+
+
+@pytest.mark.parametrize("value", ["-1", "true", "false", "1.5", '"480"', "[]"])
+def test_invalid_reviewer_investigation_budget_names_field_and_source(value: str) -> None:
+    source = "/tmp/reviewer-profile.toml"
+    with pytest.raises(rp.ProfileError) as error:
+        _profile(f"[pipeline]\nreviewer_investigation_budget_s = {value}", source=source)
+    assert error.value.source == source
+    assert source in str(error.value)
+    assert "pipeline.reviewer_investigation_budget_s" in str(error.value)
+
+
 # Task 2 (R4): canonical serialization + deterministic digest.
 def test_digest_is_order_whitespace_comment_path_independent(tmp_path: Path) -> None:
     a = _profile('''[strategies.intent]
@@ -39,14 +61,20 @@ source = "copied: a"''')
 content = "X"
 source = "copied: a"
 [pipeline]
-structural_enabled = true''')   # default value spelled out
+structural_enabled = true
+reviewer_investigation_budget_s = 480''')   # default values spelled out
+    assert implicit.to_canonical_dict() == explicit.to_canonical_dict()
     assert implicit.digest == explicit.digest
 
 # Task 3 (R3): fail-closed validation.
-def test_unknown_key_fails_closed_naming_source() -> None:
+@pytest.mark.parametrize(("body", "unknown_key"), [
+    ("bogus = 1", "bogus"),
+    ("[pipeline]\nreviewer_investigation_budget_seconds = 480", "reviewer_investigation_budget_seconds"),
+])
+def test_unknown_key_fails_closed_naming_source(body: str, unknown_key: str) -> None:
     with pytest.raises(rp.ProfileError) as e:
-        _profile("bogus = 1", source="/tmp/profile.toml")
-    assert "/tmp/profile.toml" in str(e.value) and "bogus" in str(e.value)
+        _profile(body, source="/tmp/profile.toml")
+    assert "/tmp/profile.toml" in str(e.value) and unknown_key in str(e.value)
 
 def test_unsupported_schema_version_fails_closed() -> None:
     with pytest.raises(rp.ProfileError) as e:
