@@ -68,15 +68,15 @@ remain retained until their evidence is sufficient.
 ## 4. Layer plan per lane
 
 Review the ledger in a second read-only pass to identify redundant layers.
-Name the keeper for each contract and unique cases to move. Prefer production
-runner/CLI paths with scripted external boundaries to suites that mock the
-orchestrator, registry, recorder, or store whose behavior they claim to prove.
-Preserve unit tests with distinct edge cases and backend-specific transport
-contracts.
+Name the keeper for each contract and unique cases to move. Choose the boundary
+that owns the observable behavior or independent contract, using unit,
+integration, or end-to-end tests according to behavior and risk. Exercise the
+orchestrator, registry, recorder, or store when its behavior is the contract;
+script external boundaries as needed. Preserve distinct backend transport cases.
 
-Explicitly map every user-visible behavior to its real-path keeper. Removing an
-integration layer in favor of helper tests violates Daydream's testing standard
-even if measured coverage stays constant. Identify removable production seams
+Map each retained contract to its keeper. Preserve real filesystem, Git, and
+event-loop behavior when those are part of the contract; a helper test that
+omits them cannot replace that proof. Identify removable production seams
 separately from legitimate extension/external/fault-injection boundaries.
 
 Done when each lane names retired files/layers, a keeper per contract, assertions
@@ -121,8 +121,8 @@ restored contract catches its mutation, and no mutation remains in the change.
 Reproduce retained baseline failures and classify environment, harness, or
 product causes. Repair relevant product defects at their owner within authorized
 scope, separating them from pruning (and into a separate commit if committing
-is authorized). Run the real user flow with a control that removes the fix and
-shows the old failure, then the candidate with the same harness and inputs.
+is authorized). Exercise the owning boundary with a control that removes the fix
+and shows the old failure, then the candidate with the same harness and inputs.
 
 Keep unrelated discrepancies outside the campaign's edits; report them as
 remaining work or blockers. A retained failure is never a reason to delete its

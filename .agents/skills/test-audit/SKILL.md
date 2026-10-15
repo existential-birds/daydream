@@ -12,13 +12,13 @@ one subsystem's whole test surface. Before a campaign, read
 deletion count.
 
 Read [AGENTS.md](../../../AGENTS.md), [CONTRIBUTING.md](../../../CONTRIBUTING.md),
-and applicable scoped agent instructions first. Their real-path testing standard
-is mandatory: every user-visible behavior retains a test through `runner.run`
-or the CLI, using real temporary Git worktrees, filesystem, and event loop,
-with only external network/API boundaries stubbed. Assert observable outcomes;
-unit tests supplement this proof. A smaller helper test cannot replace it.
+and applicable scoped agent instructions first. AGENTS.md's testing standard is
+authoritative: choose the boundary that owns the observable behavior or independent
+contract. Unit, integration, and end-to-end tests are valid according to behavior
+and risk. Preserve real filesystem, Git, and event-loop behavior when those are
+part of the contract, and assert observable outcomes.
 For terminal findings, inject faults at actual filesystem read/write/install
-operations as required by CONTRIBUTING.md; preserve the real path around the
+operations as required by AGENTS.md; preserve the real path around the
 fault rather than replacing the publication pipeline with a mock.
 
 ## Authoring gate
@@ -28,7 +28,7 @@ Before adding or changing a test, answer:
 1. What observable behavior, invariant, or independent contract does it protect?
 2. What credible regression makes it fail?
 3. Why does existing coverage miss that regression? Name the primary owner test
-   at the strongest boundary. Another layer needs a distinct risk, such as
+   at the owning boundary. Another layer needs a distinct risk, such as
    transport decoding, cancellation, or persistence failure. Prefer extending
    `pytest.mark.parametrize` or an existing fixture over duplicating setup.
 4. Does it require a production export, flag, wrapper, or injection hook solely
