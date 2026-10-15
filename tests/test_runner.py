@@ -33,6 +33,7 @@ from daydream.backends import (
     ResultEvent,
     TextEvent,
 )
+from daydream.backends.pi import PiError, _pi_error_category, _pi_retryable_for
 from daydream.cli import _signal_handler
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.config_file import DaydreamFileConfig
@@ -1607,3 +1608,53 @@ async def test_overlapping_posting_runs_keep_their_own_github_auth(
         assert configs[name].identity == f"{name}-app[bot]"
     assert configs["reader"].identity == "personal-user"
     assert all(token is None for name, _command, token in requests if name == "reader")
+
+
+async def test_runner_recovers_pi_temporary_capacity_and_retains_review(
+    feature_branch_repo: Path, make_config: Callable[..., RunConfig], install_backend: Callable[[object], object],
+    tmp_path: Path,
+) -> None:
+    """A real review retries the provider failure and publishes its admitted findings."""
+    message = "Upstream error from Wafer: The model is temporarily at capacity. Please retry shortly."
+    _git(feature_branch_repo, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")))
+    _git(feature_branch_repo, "push", "-u", "origin", "main")
+    successful = StubBackend(feature_branch_repo)
+    calls: list[Path] = []
+
+    async def respond(cwd: Path, prompt: str, *args: Any) -> AsyncIterator[AgentEvent]:
+        calls.append(cwd)
+        assert (cwd / ".git").is_file(), "the backend must execute in the real temporary worktree"
+        assert (cwd / "main.py").read_text() == "def hello():\n    return 'universe'\n"
+        if len(calls) == 1:
+            category = _pi_error_category(message)
+            raise PiError(message, category=category, retryable=_pi_retryable_for(category=category, message=message))
+        async for event in successful.execute(cwd, prompt, *args):
+            yield event
+
+    backend = ScriptedBackend(responder=respond, retry_attempts=1, retry_base_delay_s=0.0, retry_max_delay_s=0.0)
+    install_backend(backend)
+    trajectory_path = tmp_path / "trajectory.json"
+    head_before = _git(feature_branch_repo, "rev-parse", "HEAD")
+    result = await runner.run(make_config(
+        feature_branch_repo, base="main", backend="pi", shallow=True, output_mode="review", force_worktree=True,
+        trajectory_path=trajectory_path,
+    ))
+    assert result == 0
+    assert _git(feature_branch_repo, "rev-parse", "HEAD") == head_before
+    assert "Sample issue" in (feature_branch_repo / REVIEW_OUTPUT_FILE).read_text()
+    assert calls[0] == calls[1] != feature_branch_repo.resolve()
+    trajectory = json.loads(trajectory_path.read_text())
+    attempts = [step for step in trajectory["steps"]
+                if step["source"] == "agent" and step.get("extra", {}).get("daydream_phase") == "intent"]
+    assert len(attempts) == 2
+    assert attempts[0]["extra"]["error_subtype"] == "PiError"
+    assert attempts[0]["extra"]["error"] is True
+    assert not attempts[1]["extra"].get("error", False)
+    assert attempts[1]["message"] == "The PR updates greetings across stacks."
+    deep_dir = feature_branch_repo / ".daydream" / "deep"
+    retained = json.loads((deep_dir / "merged-items.json").read_text())["items"]
+    assert any(item["description"] == "Sample issue" and item["file"] == "main.py" for item in retained)
+    coverage = json.loads((deep_dir / "review-coverage.json").read_text())
+    assert coverage["analyzed_revision"]["head_sha"] == head_before
+    assert coverage["stack_outcomes"]
+    assert all(scope["status"] == "complete" for scope in coverage["stack_outcomes"])

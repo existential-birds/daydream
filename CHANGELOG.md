@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **pi:** recover from affirmative temporary at-capacity provider errors through the existing bounded retry policy, while preserving permanent and negated diagnostic handling ([#1506](https://github.com/existential-birds/daydream/issues/1506)).
+
 - **review:** keep folded design-alternatives coverage aligned with structural failures, record validation, and successful per-stack reruns; preserve unfinished coverage on merge/fix-only resumes ([#1500](https://github.com/existential-birds/daydream/issues/1500)).
 - **preflight:** label sharded work as review assignments, show the structural reviewer, and remove obsolete parse agents from the scoped review estimate, including only the applicable conditional arbiter allowance ([#1494](https://github.com/existential-birds/daydream/issues/1494)).
 
