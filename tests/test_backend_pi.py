@@ -52,6 +52,7 @@ from daydream.backends.pi import (
 )
 from daydream.config_file import DaydreamFileConfig
 from daydream.phases.schemas import PER_STACK_RECORD_SCHEMA
+from daydream.retry_policy import classify_failure
 from daydream.runner import run
 from daydream.trajectory import DaydreamPhase
 from tests.conftest import ExtDir
@@ -876,15 +877,39 @@ def test_pierror_retryable_default_and_kwarg_and_message() -> None:
         ("synthetic opaque failure", "UNKNOWN"), ("model not found: gpt-5 (503)", "AUTH_CONFIG"),
         ("response failed JSON schema validation: additionalProperties", "SCHEMA"),
         ("provider rate limit", "RATE_LIMIT"),
+        ("Upstream error from Wafer: The model is temporarily at capacity. Please retry shortly.", "SERVER_ERROR"),
+        ("The MODEL is TEMPORARILY\nAT CAPACITY.", "SERVER_ERROR"),
+        ("The model is not temporarily at capacity.", "UNKNOWN"),
+        ("The model isn't temporarily at capacity.", "UNKNOWN"),
+        ("The model is not at capacity.", "UNKNOWN"),
+        ("Capacity planning: the model is temporarily at capacity.", "UNKNOWN"),
+        ("The model is permanently at capacity.", "UNKNOWN"),
+        ("If the model is temporarily at capacity, retry later", "UNKNOWN"),
+        ("Check whether the model is temporarily at capacity", "UNKNOWN"),
+        ("The model is temporarily at capacity?", "UNKNOWN"),
+        ("The model is temporarily at capacity if demand rises.", "UNKNOWN"),
+        ("Authentication required: the model is temporarily at capacity.", "AUTH_CONFIG"),
+        ("Invalid configuration: the model is temporarily at capacity.", "AUTH_CONFIG"),
+        ("Model not found: the model is temporarily at capacity.", "AUTH_CONFIG"),
+        ("JSON schema validation failed: the model is temporarily at capacity.", "SCHEMA"),
     ],
     ids=[
         "rate-limit", "server-error-502", "server-error-503", "server-error-service-unavailable", "timeout",
         "stream-drop", "process-exit", "auth-config", "unknown", "permanent-beats-transient",
-        "provider-noun-is-not-permanent", "schema",
+        "schema", "provider-noun-is-not-permanent", "wafer-temporary-capacity", "temporary-capacity-case-space",
+        "negated-temporary-capacity", "contracted-negated-capacity", "not-at-capacity", "capacity-planning",
+        "permanent-capacity", "hypothetical-capacity-if", "capacity-check-whether",
+        "capacity-question", "capacity-postfixed-condition",
+        "capacity-auth-precedence", "capacity-config-precedence",
+        "capacity-model-precedence", "capacity-schema-precedence",
     ],
 )
 def test_pi_error_categories_are_stable_host_codes(message: str, expected: str) -> None:
-    assert _pi_error_category(message) == expected
+    category = _pi_error_category(message)
+    assert category == expected
+    retryable = _pi_retryable_for(category=category, message=message)
+    assert retryable is (expected in {"RATE_LIMIT", "SERVER_ERROR", "TIMEOUT", "STREAM_DROP"})
+    assert classify_failure(PiError(message, category=category, retryable=retryable)).retries_allowed is retryable
 
 @pytest.mark.parametrize("message", ["Service is currently overloaded", "capacity exceeded", "Request throttled"])
 def test_overload_throttle_and_capacity_messages_stay_retryable(message: str) -> None:

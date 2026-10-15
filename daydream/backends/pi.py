@@ -318,6 +318,8 @@ _NEGATED_OVERLOAD_RE = re.compile(r"\bnot\s+overloaded\b|\bcapacity\s+planning\b
 _OVERLOAD_RE = re.compile(r"\boverloaded?\b|\boverload(?:ed|ing)?\b")
 _CAPACITY_RE = re.compile(
     r"\bcapacity\s+(?:unavailable|exceeded|limit|limited|full|reached)\b"
+    # Require an affirmative sentence, not a negation, question or conditional.
+    r"|(?:^|[.:!?])\s*(?:the\s+)?(?:model|service|provider)\s+is\s+temporarily\s+at\s+capacity(?=[.!]|$)"
 )
 _THROTTLE_RE = re.compile(r"\bthrottl(?:e|ed|ing)\b")
 
