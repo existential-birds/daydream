@@ -234,6 +234,18 @@ raw-line and native-progress counters distinguish transport activity from genuin
 text, thinking, tool-call, and tool-execution updates and boundaries. Blank lines and diagnostic
 output count as transport receipt without becoming model progress.
 
+Public Pi `turn_end` errors also retain a recorder-only `pi_terminal_error`
+diagnostic in trajectory `backend_diagnostics` and frozen run records. It contains
+the supplied error message, the existing category/retryability decision, normalized
+finish reason, and a valid public `rawStopReason` when available. The diagnostic
+stays with the failed invocation and references its host generation correlator only
+when observed; missing native fields remain unavailable. Whole strings pass through
+shared credential redaction before message/raw-stop-reason bounds of 4,096/256
+characters, with explicit truncation flags. Recorder normalization/redaction remains
+fail-closed. Normal review summaries keep generic failure text; tracing exports
+only diagnostic codes/counts, never these message or metadata fields. Preserving
+this evidence does not change retry policy or establish a provider root cause.
+
 All lifecycle times are host observations in monotonic seconds since attempt
 dispatch (`clock=monotonic_elapsed`, `timestamp_source=host_observed`). Optional
 milestone fields remain absent from spans until observed; zero values are retained.

@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Keep runner and Harbor tests out of operator JSONL datasets and live uploads by isolating the test store and HF boundary ([#1511](https://github.com/existential-birds/daydream/issues/1511)).
+- **pi:** retain bounded, redacted native terminal error diagnostics in trajectories and frozen run records while preserving retry decisions and generic review summaries ([#1540](https://github.com/existential-birds/daydream/issues/1540)).
 
 - **pi:** recover from affirmative temporary at-capacity provider errors through the existing bounded retry policy, while preserving permanent and negated diagnostic handling ([#1506](https://github.com/existential-birds/daydream/issues/1506)).
 
