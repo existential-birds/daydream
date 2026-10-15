@@ -1007,7 +1007,8 @@ async def _run_agent(
             review_evidence.checkpoint = None
     output = resolve_output(
         structured_result, raw, native_output=native_output, text_overflow=text_overflow,
-        output_schema=output_schema, validate_structured_output=validate_structured_output,
+        output_schema=(review_evidence.schema if investigation_budget is not None and review_evidence is not None
+                       else output_schema), validate_structured_output=validate_structured_output,
         require_full_schema=require_full_schema, staged=investigation_budget is not None,
         schema_rejection_guard=schema_rejection_guard,
     )

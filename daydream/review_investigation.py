@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from daydream import agent
+from daydream import agent, clock
 from daydream.backends import Backend
 from daydream.backends.pi import PiBackend
 from daydream.config import STRUCTURE_STACK_NAME
@@ -16,21 +16,23 @@ from daydream.deep.detection import StackAssignment
 from daydream.deep.sharding import file_change_bytes
 from daydream.json_utils import SchemaRejection, validates_schema
 from daydream.phases.review_prompts import build_review_stage_system_instruction
-from daydream.phases.schemas import review_stage_schema
+from daydream.phases.schemas import review_stage_admission_schema, review_stage_schema
 from daydream.prompt_budget import (
     PreparedSanctionedInputs,
     SanctionedInputTransport,
     SanctionedInputUnavailable,
     truncate_utf8_to_budget,
 )
+from daydream.repository_paths import InvalidRepositoryFilePath, canonicalize_repository_file_path
+from daydream.retry_policy import FailureClass, classify_failure
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.review_evidence import ReviewEvidence
-from daydream.review_result import reason_for_exception
+from daydream.review_result import ReasonCode, reason_for_budget, reason_for_exception
 from daydream.run_context import resolve_run_context
 from daydream.trajectory import DaydreamPhase, LifecycleReasonCode, LifecycleStatus, phase_scope
 from daydream.ui.agent_stream import present_result
 
-STAGED_REVIEW_CONTRACT = 10
+STAGED_REVIEW_CONTRACT = 11
 HANDOFF_MAX_BYTES = 64 * 1024
 HANDOFF_MAX_ITEMS = 128
 
@@ -44,6 +46,30 @@ def _candidate_source_files(candidates: list[dict[str, Any]]) -> set[str]:
                 and isinstance(finding.get('file'), str)):
             files.add(finding['file'])
     return files
+
+
+def _closed_decisions(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Render reviewer assertions identically for dispatch and semantic bounds."""
+    decisions = []
+    for candidate in candidates:
+        disposition = candidate.get('disposition')
+        if not isinstance(disposition, str) or disposition not in {'confirmed', 'rejected'}:
+            continue
+        conclusion = candidate['grounds']
+        finding = candidate.get('finding')
+        if isinstance(finding, dict):
+            conclusion = f"{finding.get('description', '')}: {conclusion}"
+        decisions.append({
+            'candidate_id': candidate['candidate_id'], 'file': candidate['file'], 'line': candidate.get('line'),
+            'disposition': candidate['disposition'], 'judgment_origin': 'reviewer',
+            'conclusion': truncate_utf8_to_budget(conclusion, 512, '[conclusion clipped]')})
+    return decisions
+
+
+def _note_context(notes: list[Any]) -> list[dict[str, Any]]:
+    """Add attribution without changing API 8 builders' notes:list[str] contract."""
+    return [{'note_index': index, **{key: value for key, value in note.items() if key != 'text'}}
+            for index, note in enumerate(notes)]
 
 
 @dataclass(frozen=True)
@@ -76,30 +102,68 @@ class ReviewInvestigation:
         self.failed_invocation = False
         self.failure_diagnostic: str | None = None
         self.failure_class: str | None = None
+        self.failure_reasons: list[ReasonCode] = []
+        self._source_root: Path | None = None
+        self._continuable_failure = False
 
     async def run(self, backend: Backend, cwd: Path, prompt_builder: Callable[[dict[str, Any]], str], *,
         stage_inputs: Callable[[dict[str, Any]], PreparedSanctionedInputs], **agent_kwargs: Any,
     ) -> tuple[dict[str, Any], str | None]:
         """Fresh calls share hard bounds; advisory targets cannot abort useful work."""
+        self._source_root = cwd
+        # Preserve the scope failure independently of each later attempt's status.
+        # Full diagnostics for every attempt remain in their phase evidence.
+        failure: tuple[str | None, bool, str | None, str | None] | None = None
+        stopping_failure: tuple[str | None, bool, str | None, str | None] | None = None
+        stopped = False
         if self.scope_id == STRUCTURE_STACK_NAME:
-            await self._stage(backend, cwd, prompt_builder, 'integration', [f'integration:{self.scope_id}'],
-                              self.files, agent_kwargs, stage_inputs=stage_inputs)
+            if not await self._stage(backend, cwd, prompt_builder, 'integration', [f'integration:{self.scope_id}'],
+                                     self.files, agent_kwargs, stage_inputs=stage_inputs):
+                failure = self._failure()
+                stopped = not self._isolated_failure()
         else:
             for index, batch in enumerate(self.assignment_batches):
+                if failure is not None and not self._continuation_admitted(agent_kwargs):
+                    stopping_failure = self._failure()
+                    stopped = True
+                    break
                 targets = [part['target_id'] for part in batch]
                 files = sorted({part['file'] for part in batch})
                 if not await self._stage(backend, cwd, prompt_builder, 'first_pass', targets, files,
                                          agent_kwargs, stage_inputs=stage_inputs, assignment_parts=batch,
                                          future_batches=len(self.assignment_batches) - index - 1):
-                    break
+                    failure = failure or self._failure()
+                    if not self._isolated_failure():
+                        stopping_failure = self._failure()
+                        stopped = True
+                        break
         unsettled_ids = [candidate['candidate_id'] for candidate in self.handoff['candidates']
                          if candidate['disposition'] in {'open', 'unresolved'}]
         for index in range(0, len(unsettled_ids), 8):
-            if self.reason is not None:
+            if stopped:
                 break
-            await self._stage(backend, cwd, prompt_builder, 'triage', [], [], agent_kwargs,
+            if failure is not None and not self._continuation_admitted(agent_kwargs):
+                stopping_failure = self._failure()
+                break
+            if not await self._stage(backend, cwd, prompt_builder, 'triage', [], [], agent_kwargs,
                               stage_inputs=stage_inputs, candidate_ids=unsettled_ids[index:index + 8],
-                              future_triage_stages=(len(unsettled_ids) - index - 1) // 8)
+                              future_triage_stages=(len(unsettled_ids) - index - 1) // 8):
+                failure = failure or self._failure()
+                stopped = not self._isolated_failure()
+                if stopped:
+                    stopping_failure = self._failure()
+        if failure is not None:
+            self.reason, self.failed_invocation, self.failure_diagnostic, self.failure_class = (
+                stopping_failure or failure)
+            self.failed_invocation = self.failed_invocation or failure[1]
+            for reason in dict.fromkeys((failure[0], self.reason)):
+                if reason is not None:
+                    try:
+                        self.failure_reasons.append(ReasonCode(reason))
+                    except ValueError:
+                        self.failure_reasons.append(reason_for_budget(reason))
+            self.failure_diagnostic = '\n'.join(dict.fromkeys(
+                diagnostic for diagnostic in (failure[2], self.failure_diagnostic) if diagnostic)) or None
         if self.reason is None and (any(target['status'] != 'reviewed' for target in self.handoff['progress'])
                                     or any(candidate['disposition'] in {'open', 'unresolved'}
                                            for candidate in self.handoff['candidates'])):
@@ -109,25 +173,41 @@ class ReviewInvestigation:
         return {'issues': [candidate['finding'] for candidate in self.handoff['candidates']
                            if candidate['disposition'] == 'confirmed']}, self.reason
 
+    def _failure(self) -> tuple[str | None, bool, str | None, str | None]:
+        return self.reason, self.failed_invocation, self.failure_diagnostic, self.failure_class
+
+    def _isolated_failure(self) -> bool:
+        """Only ordinary invocation failures permit a later independent batch."""
+        return self.failed_invocation and self.reason == 'backend_failure' and self._continuable_failure
+
+    def _continuation_admitted(self, agent_kwargs: dict[str, Any]) -> bool:
+        """A new batch cannot evade shared stopping conditions after an invocation failure."""
+        if self.budget.remaining_tool_calls <= 0:
+            reason = 'tool_call_budget_exceeded'
+        elif clock.monotonic() >= self.budget.deadline:
+            reason = ('pipeline_budget_exceeded' if self.budget.shared_deadline is not None
+                      and clock.monotonic() >= self.budget.shared_deadline else 'wall_budget_exceeded')
+        else:
+            context = resolve_run_context(agent_kwargs.get('run_context'))
+            if context.outage_circuit.admit_retry(clock.monotonic()).allowed:
+                return True
+            reason = 'backend_failure'
+        self.reason = reason
+        self.failed_invocation = False
+        self.failure_class = 'quantitative_exhaustion' if reason != 'backend_failure' else 'outage_circuit'
+        self.failure_diagnostic = (f'Review limit exhausted: {reason}' if reason != 'backend_failure' else
+                                   'Review stopped: provider outage circuit denied a later batch.')
+        return False
+
     def _stage_state(self, stage: str, targets: list[str], files: list[str],
                      candidate_ids: list[str], assignment_parts: list[dict[str, Any]]) -> dict[str, Any]:
         candidates = [candidate for candidate in self.handoff['candidates']
                       if candidate['candidate_id'] in candidate_ids]
         candidate_files = _candidate_source_files(candidates)
         relevant_files = candidate_files | set(files)
-        notes = [note['text'] for note in self.handoff['notes']
+        notes = [note for note in self.handoff['notes']
                  if relevant_files.intersection(note['files'])]
-        closed_decisions = []
-        for candidate in self.handoff['candidates']:
-            if candidate['disposition'] not in {'confirmed', 'rejected'}:
-                continue
-            conclusion = candidate['grounds']
-            if candidate['finding'] is not None:
-                conclusion = f"{candidate['finding']['description']}: {conclusion}"
-            closed_decisions.append({
-                'candidate_id': candidate['candidate_id'], 'file': candidate['file'], 'line': candidate['line'],
-                'disposition': candidate['disposition'], 'judgment_origin': 'reviewer',
-                'conclusion': truncate_utf8_to_budget(conclusion, 512, '[conclusion clipped]')})
+        closed_decisions = _closed_decisions(self.handoff['candidates'])
         target = (max(4, 3 * len(candidate_ids)) if stage == 'triage' else
                   max(8, len(files)) if stage == 'integration' else max(4, 2 * len(files)))
         return {'contract_version': STAGED_REVIEW_CONTRACT, 'scope_id': self.scope_id,
@@ -136,7 +216,8 @@ class ReviewInvestigation:
             'completed_target_ids': [target for target, progress in self.target_progress.items()
                                      if progress['status'] == 'reviewed'],
             'assigned_files': sorted(candidate_files) if stage == 'triage' else files,
-            'progress': self.handoff['progress'] if stage != 'triage' else [], 'notes': notes, 'candidates': candidates,
+            'progress': self.handoff['progress'] if stage != 'triage' else [],
+            'notes': [note['text'] for note in notes], 'note_context': _note_context(notes), 'candidates': candidates,
             'closed_decisions': closed_decisions,
             'closed_candidate_ids': [decision['candidate_id'] for decision in closed_decisions],
             'assigned_candidate_ids': candidate_ids,
@@ -151,6 +232,9 @@ class ReviewInvestigation:
         stage_inputs: Callable[[dict[str, Any]], PreparedSanctionedInputs],
         candidate_ids: list[str] | None = None, assignment_parts: list[dict[str, Any]] | None = None,
         future_batches: int = 0, future_triage_stages: int | None = None) -> bool:
+        self.reason = None
+        self.failure_diagnostic, self.failed_invocation, self.failure_class = None, False, None
+        self._continuable_failure = False
         if self.budget.remaining_tool_calls <= 0:
             self.reason = 'tool_call_budget_exceeded'
             self.failure_class = 'quantitative_exhaustion'
@@ -166,11 +250,11 @@ class ReviewInvestigation:
             schema = review_stage_schema(targets, candidate_ids, triage=stage == "triage")
             state["response_contract"] = {"schema": schema, "skeleton": {
                 "targets": [{"target_id": target, "status": "reviewed", "reason": ""} for target in targets],
-                "notes": "", "candidates": [{
+                "notes": "", "supporting_files": [], "candidates": [{
                     "candidate_id": candidate["candidate_id"], "file": candidate["file"], "line": candidate["line"],
                     "trigger": "", "consequence": "", "grounds": "", "disposition": "unresolved", "finding": None,
                 } for candidate in state["candidates"]] if stage == "triage" else [], "contradictions": []}}
-            evidence = ReviewEvidence(schema)
+            evidence = ReviewEvidence(review_stage_admission_schema(schema))
             self.assertion_failure_class: str | None = None
             syntax_error: dict[str, int] | None = None
             retry_rejection: SchemaRejection | None = None
@@ -234,6 +318,8 @@ class ReviewInvestigation:
                 except Exception as exc:  # noqa: BLE001 -- retain successful-stage progress after ordinary failures
                     self.reason = reason_for_exception(exc).value
                     self.failed_invocation = True
+                    self._continuable_failure = classify_failure(exc).failure_class not in {
+                        FailureClass.AUTH_CONFIG, FailureClass.SCHEMA, FailureClass.TOOL_POLICY, FailureClass.PERMANENT}
                     self.failure_diagnostic = f"{type(exc).__name__}: review invocation failed ({self.reason})."
                 else:
                     actual_rejection = output.rejection if isinstance(output, agent.StructuredOutputFailure) else None
@@ -303,6 +389,26 @@ class ReviewInvestigation:
             rejection = retry_rejection
             self.reason = None
         return False
+
+    def _supporting_files(self, output: dict[str, Any]) -> list[str]:
+        """Optional relevance references grant no access or source-read authority."""
+        if self._source_root is None:
+            return []
+        files: set[str] = set()
+        references = output.get('supporting_files')
+        if not isinstance(references, list):
+            return []
+        for raw in references:
+            try:
+                path = canonicalize_repository_file_path(self._source_root, raw)
+                # Generated artifacts and Git metadata are not supporting source.
+                if path.split('/')[0] in {'.git', '.daydream', '.review-output.md'}:
+                    continue
+                if (self._source_root / path).is_file():
+                    files.add(path)
+            except (InvalidRepositoryFilePath, OSError):
+                continue
+        return sorted(files)
 
     def _assessment(self, output: dict[str, Any], stage: str, targets: list[str],
                     candidate_ids: list[str], *, files: list[str],
@@ -391,15 +497,23 @@ class ReviewInvestigation:
                                for target in required)
                 progress.append({'target_id': path, 'status': 'reviewed' if complete else 'not_reviewed',
                                  'reason': '' if complete else 'Required assignment parts remain incomplete.'})
+        supporting = self._supporting_files(output)
         handoff = {
             'progress': progress,
             'notes': self.handoff['notes'] + [{
-                'files': sorted(set(files) | _candidate_source_files(decisions)), 'text': output['notes'],
+                'files': sorted(set(files) | _candidate_source_files(decisions) | set(supporting)),
+                'supporting_files': supporting, 'text': output['notes'],
+                'origin': {'scope_id': self.scope_id, 'stage': stage, 'sequence': self.admitted_stages + 1,
+                           'judgment_origin': 'reviewer', 'analyzed_revision': self.revision},
             }],
             'candidates': candidates,
         }
-        if (len(handoff['notes']) + len(handoff['candidates']) > HANDOFF_MAX_ITEMS
-                or len(json.dumps(handoff, ensure_ascii=False).encode('utf-8')) > HANDOFF_MAX_BYTES):
+        if (len(handoff['notes']) + len(handoff['candidates'])
+                + sum(len(note['supporting_files']) for note in handoff['notes']) > HANDOFF_MAX_ITEMS
+                or len(json.dumps({**handoff, 'notes': [note['text'] for note in handoff['notes']],
+                                  'note_context': _note_context(handoff['notes']),
+                                  'closed_decisions': _closed_decisions(candidates)},
+                                  ensure_ascii=False).encode('utf-8')) > HANDOFF_MAX_BYTES):
             self.assertion_failure_class = 'admission_failure'
             return None, 'evidence_incomplete'
         return _AdmissionPlan(handoff, target_progress), None

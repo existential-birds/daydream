@@ -34,7 +34,8 @@ def review_stage_state(prompt: str) -> dict[str, Any] | None:
 def stage_result(stage: dict[str, Any], *, candidates: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     return {"targets": [{"target_id": target, "status": "reviewed", "reason": ""}
                     for target in stage["assigned_target_ids"]],
-        "notes": "Assigned changed behavior reviewed", "candidates": candidates or [], "contradictions": []}
+        "notes": "Assigned changed behavior reviewed", "supporting_files": [],
+        "candidates": candidates or [], "contradictions": []}
 
 
 def review_stage_result(prompt: str, issues: list[dict[str, Any]]) -> dict[str, Any]:

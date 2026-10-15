@@ -104,7 +104,9 @@ async def test_structure_keeps_interaction_review_when_optional_projections_exce
     if limit == 'all-omitted':
         @review.backend.script('python')
         def unfinished_language(stage: dict[str, Any], output: dict[str, Any]) -> None:
-            raise RuntimeError('Language reviewer unavailable in this Structure-only fixture.')
+            # This fixture owns Structure projections, not recovery of the 131
+            # unrelated language batches. Ordinary invocation failures continue.
+            raise RuntimeError('Language reviewer not configured in this Structure-only fixture.')
     catalog_seen = False
 
     @review.backend.script('structure')

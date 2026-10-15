@@ -275,7 +275,11 @@ remains the built-in function.
 The host calls `per-stack`, `structural`, or `generic-fallback` anew for each stage,
 passing `review_stage`, a mapping of host-owned assignment and admitted state.
 Overrides are always invoked. Extension API 8 is separate from internal stage
-contract 10, which invalidates contract-9 review caches.
+contract 11, which invalidates older review caches. The stage response now includes `supporting_files: []` alongside
+`targets`, `notes`, `candidates` and `contradictions`; builders must preserve this supplied strict response contract.
+Native transports require `supporting_files` as an array or null. The host admission schema differs only for this
+optional metadata: absent, null or malformed references supply no usable association and never repair or invalidate
+otherwise valid primary target/finding judgments. Transport request schemas remain strict.
 
 | Host field group | Contract |
 | --- | --- |
@@ -286,6 +290,7 @@ contract 10, which invalidates contract-9 review caches.
 | Residual work: `remaining_work` | Estimated residual assignments, files and stages; native Pi also exposes current submission/total start floors, remaining submission floor and reserved future starts. |
 | Budget: `advisory_tool_call_target`, `remaining_tool_calls`, `hard_tool_call_allowance` | Dispatch-time snapshots: suggested pace, remaining reviewer cumulative allowance and the current invocation's hard allocation. Future-stage reserves are already excluded from that allocation. |
 | Context: `context_inputs`, `context_transport`, `context_statuses`, `canonical_input_identities` | Admitted supporting inputs, transport/availability and original artifact identities. Omitted optional context is advisory; corrupted required inputs block admission. |
+| Semantic notes: `notes`, `note_context` | `notes` preserves API 8's string list. Aligned context entries identify `note_index`, validated `supporting_files`, source anchors in `files` and host `origin` (scope, stage, sequence, reviewer judgment origin and analyzed revision). These are attributed assertions, never completion/read/test evidence. |
 
 The owning artifact session projects frozen diff/index inputs. Required
 assignment bytes take priority over bounded shared context and optional Structure
@@ -299,6 +304,11 @@ and findings, meaningful claims, and nonempty `not_reviewed` reasons. The host
 checks revision/input hashes, complete transport, backend/cwd/mode, confinement,
 and unchanged captures. Failures, exhausted bounds, corrupted required inputs,
 handoff overflow, and unfinished decisions remain unsuccessful or incomplete.
+Optional `supporting_files` are repository-relative source associations for the submitted notes. The host normalizes
+safe references and excludes unavailable files, symlinks, Git metadata and generated review artifacts without vetoing
+otherwise valid target/finding decisions. Associations grant neither read access nor reviewed coverage; no source-read
+receipt is required. Relevance metadata, attribution and rendered decisions count toward the shared 64 KiB/128-item
+semantic handoff. Closed decisions and host target acknowledgements retain their independent authority.
 Findings and snapshot-bound typed coverage are
 [atomically published](../README.md#terminal-review-findings-contract).
 
@@ -308,6 +318,12 @@ may investigate further. Closed decisions retain `judgment_origin: reviewer`;
 host admission validates their contract, not semantic correctness. Unresolved
 triage and source-supported contradictions keep affected coverage incomplete
 without reopening closed decisions or discarding admitted findings.
+An isolated backend invocation failure leaves its batch unfinished and retains its diagnostic in the scope outcome
+and attempt trajectory. Later independent assignment/triage batches may continue under the original cumulative
+bounds and outage admission. Later success cannot clear prior failure evidence or settle a failed candidate group;
+admission failures and shared stopping conditions still stop further work.
+The scope's existing reason codes and diagnostics retain both the first failure and any later stopping failure,
+including a cumulative budget or outage refusal before another stage starts; per-stage trajectories retain other attempts.
 
 The host selects text from the final assistant turn, including explicit empty
 turns and bounded overflow. Staged text accepts prose, closed JSON Markdown
