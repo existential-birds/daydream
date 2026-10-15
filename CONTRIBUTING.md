@@ -119,6 +119,13 @@ when writing, changing, or reviewing tests. Run affected checks during implement
 and the [required gate](#everyday-commands-and-the-required-gate) before publication.
 Record commands, results, and any skips in the PR's Test Plan.
 
+The shared pytest harness redirects the home JSONL-store fallback into a per-test
+store and replaces the dataset uploader's HF adapter with an offline substitute.
+Capture tests should pass an explicit temporary `dataset_store_path`; upload
+failure tests should inject an offline adapter. Ambient Hub destinations and
+`HF_TOKEN` are removed before each test, so enabling capture in one test cannot
+select the operator's dataset or credentials. Production defaults are unchanged.
+
 ## Conventions
 
 - **Ruff** — 120 columns, rule set `E F I W`, target Python 3.14.

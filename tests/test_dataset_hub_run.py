@@ -1,6 +1,7 @@
 """Real review lifecycle retains new JSONL evidence across offline HF publication."""
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -167,3 +168,15 @@ async def test_hostile_checkout_config_cannot_enable_record_uploads(
     assert not config.dataset_store_path.exists()
     assert hub.commits == []
     assert (target / ".review-output.md").is_file()
+
+
+async def test_ambient_capture_uses_isolated_store_and_offline_upload(
+    config: RunConfig, operator_dataset_sentinel: Path, dataset_store: Path, dataset_hub: Any,
+) -> None:
+    """The real runner must never commit through the operator home fallback."""
+    assert await run(replace(config, dataset_store_path=None, trajectory_hub_repo=None)) == 0
+    records = read_records(LocalRecordStore(dataset_store))
+    assert len(records.runs) == 1 and records.runs[0]["outcome"] == "success"
+    assert records.runs[0]["trajectories"]["status"] == "available"
+    assert dataset_hub.commits
+    assert len(list((operator_dataset_sentinel / "runs").glob("*.jsonl"))) == 1
