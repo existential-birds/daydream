@@ -30,6 +30,9 @@ REVIEW_STAGE_SCHEMA = strict_object({
         "reason": {"type": "string"},
     })},
     "notes": {"type": "string"},
+    # Optional associations are confined by the host; an unusable reference
+    # cannot invalidate otherwise valid target/candidate decisions.
+    "supporting_files": {"type": ["array", "null"], "items": {"type": "string"}},
     "candidates": {"type": "array", "items": strict_object({
         "candidate_id": {"type": "string"},
         "file": REPOSITORY_FILE_PATH_SCHEMA,
@@ -55,6 +58,18 @@ def review_stage_schema(target_ids: list[str], candidate_ids: list[str], *, tria
     if triage:
         candidates.update(minItems=len(candidate_ids), maxItems=len(candidate_ids))
         candidates['items']['properties']['disposition']['enum'] = ['confirmed', 'rejected', 'unresolved']
+    return schema
+
+
+def review_stage_admission_schema(transport_schema: dict[str, Any]) -> dict[str, Any]:
+    """Optional relevance cannot invalidate required primary stage judgments.
+
+    Native transports retain their strict array-or-null field; host admission
+    ignores absent or unusable supporting metadata without repairing decisions.
+    """
+    schema = copy.deepcopy(transport_schema)
+    schema['required'].remove('supporting_files')
+    schema['properties']['supporting_files'] = {}
     return schema
 
 ALTERNATIVE_REVIEW_SCHEMA = result_array_schema("issues", {

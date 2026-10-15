@@ -20,6 +20,7 @@ from daydream.backends import (
     PiRequestConfig,
     RequestEvent,
     ResultEvent,
+    RetryPolicy,
     TextEvent,
     ToolResultEvent,
     ToolStartEvent,
@@ -28,8 +29,8 @@ from daydream.backends import (
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
 from tests.deep_orchestrator.test_review_completion import ReviewRun, record, scopes
-from tests.harness.fake_clock import FakeClock
-from tests.harness.git_helpers import seed_feature_branch
+from tests.harness.fake_clock import FakeClock, patch_retry_sleep
+from tests.harness.git_helpers import git, seed_feature_branch
 from tests.harness.stub_backend import review_stage_state, stage_result
 from tests.test_deep_orchestrator import _profile_with_pipeline, _sanctioned_inputs
 
@@ -40,6 +41,7 @@ class StagedBackend(EmptyReviewBackend):
     """A provider that remembers nothing beyond the current request."""
 
     supports_review_instructions = True
+    retry_policy: RetryPolicy | None = None
 
     def __init__(self, repo: Path) -> None:
         super().__init__(repo, forbid_merge=False, forbid_supervise=False)
@@ -127,7 +129,8 @@ def read_events(repo: Path, path: str, *, event_id: str) -> Iterable[AgentEvent]
     ('unknown', 'malformed_output'), ('duplicate', 'malformed_output'),
     ('omitted', 'malformed_output'), ('read-all', 'malformed_output'),
     ('handoff-bytes', 'evidence_incomplete'), ('handoff-items', 'evidence_incomplete'),
-    ('missing-grounds', 'evidence_incomplete'), ('truncated-tool-output', None),
+    ('missing-grounds', 'evidence_incomplete'), ('invalid-disposition', 'malformed_output'),
+    ('truncated-tool-output', None),
     ('unmatched-tool-result', None), ('optional-failures', None)])
 async def test_invalid_decisions_fail_but_optional_tool_events_do_not_veto_valid_output(
     investigation: InvestigationRun, fault: str, reason: str) -> None:
@@ -146,6 +149,8 @@ async def test_invalid_decisions_fail_but_optional_tool_events_do_not_veto_valid
             output['candidates'] = [concrete] * (129 if fault == 'handoff-items' else 1)
             if fault == 'missing-grounds':
                 concrete['grounds'] = ''
+            elif fault == 'invalid-disposition':
+                concrete['disposition'] = []
         if fault in {'read-all', 'truncated-tool-output'}:
             yield ToolStartEvent(id='read', name='Read', input={'file_path': 'api.py'})
             yield ToolResultEvent(id='read', output=(investigation.repo / 'api.py').read_text(), is_error=False,
@@ -178,17 +183,242 @@ def stage_ends(review: ReviewRun, scope_id: str) -> list[dict[str, Any]]:
 
 
 def many_file_review(tmp_path: Path, patch: pytest.MonkeyPatch, *, count: int = 17,
-                     lines: int = 1, docs_count: int = 4, feature_message: str = 'feature') -> InvestigationRun:
+                     lines: int = 1, docs_count: int = 4, feature_message: str = 'feature',
+                     feature_overrides: dict[str, str] | None = None) -> InvestigationRun:
     before = {'api.py': "def hello():\n    return 'world'\n"}
     before.update({f'module_{i:02}.py': 'VALUE = 0\n' for i in range(count - 1)})
     before.update({f'00_guide_{i}.md': '# Guide\nExisting behavior\n' for i in range(docs_count)})
     after = {name: content + ''.join(f'# changed {i}\n' for i in range(lines)) for name, content in before.items()}
+    after.update(feature_overrides or {})
     repo = tmp_path / 'many_files'
     seed_feature_branch(repo, base=before, feature=after, feature_message=feature_message)
     review = InvestigationRun(repo, tmp_path, patch)
     # These journeys exercise serial stages under one cumulative reviewer allowance.
     review.config = replace(review.config, deep_shard_enabled=False)
     return review
+
+
+@pytest.mark.parametrize('seeded_defect', [False, True], ids=['clean', 'contradictory-changed-code'])
+@pytest.mark.parametrize('transport', ['exact', 'inline', 'native'])
+async def test_successful_supporting_dependency_notes_reach_only_relevant_later_assignments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seeded_defect: bool, transport: str) -> None:
+    """A clean cross-file conclusion survives disjoint batches without deciding later work."""
+    review = many_file_review(tmp_path, monkeypatch, count=9, feature_overrides={
+        'api.py': "from module_03 import VALUE\n\ndef hello():\n    return 'world' if VALUE == 0 else None\n",
+        'module_03.py': f'VALUE = {1 if seeded_defect else 0}\n# Assigned shared dependency\n',
+    })
+    review.backend.sandbox = transport == 'inline'
+    finding = dict(record(1), file='module_03.py', description='Later changed-code defect',
+                   evidence='module_03.py:1 changes VALUE to 1, making api.hello return None')
+    if transport == 'inline':
+        # Existing inline synthesis provider has no private artifact-path access.
+        review.backend.merge_echo_records = False
+        review.backend.merge_items = (
+            [dict(finding, lens='per-stack', source_uids=['python:1'])] if seeded_defect else [])
+        review.backend.responder = lambda prompt: [ResultEvent(structured_output={'verdicts': [{
+            'id': 1, 'action': 'allow', 'reason': 'Source-supported changed-code defect.',
+            'severity': None, 'confidence': None, 'description': None, 'rationale': None, 'evidence': None,
+        }]}, continuation=None)] if 'supervisor adjudication' in prompt.lower() else None
+    conclusion = 'The shared VALUE declaration is compatible with the first batch consumer.'
+    received: list[dict[str, Any]] = []
+
+    @review.backend.script('python')
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        if transport == 'native':
+            yield RequestEvent(prompt=review.backend.calls[-1]['prompt'],
+                               output_schema=stage['response_contract']['schema'],
+                               config=PiRequestConfig(schema_emulated=False, no_tools=False))
+        if 'api.py' in stage['assigned_files']:
+            output.update(notes=conclusion, supporting_files=['./module_03.py'])
+        elif 'module_03.py' in stage['assigned_files']:
+            received.extend(stage['note_context'])
+            assert len(stage['notes']) == 1
+            assert stage['notes'] == [conclusion]
+            note, = stage['note_context']
+            assert note['note_index'] == 0
+            assert note['supporting_files'] == ['module_03.py']
+            assert note['origin']['stage'] == 'first_pass'
+            assert note['origin']['scope_id'] == 'python'
+            assert note['origin']['sequence'] == 1
+            assert note['origin']['judgment_origin'] == 'reviewer'
+            assert note['origin']['analyzed_revision'] == stage['analyzed_revision']
+            assert 'module_03.py' not in stage['completed_target_ids']
+            assert stage['candidates'] == stage['closed_decisions'] == []
+            if seeded_defect:
+                assert (review.repo / 'module_03.py').read_text().startswith('VALUE = 1\n')
+                output['candidates'] = [candidate(disposition='confirmed', file='module_03.py', line=1,
+                    finding=finding, grounds=finding['evidence'])]
+        else:
+            assert conclusion not in stage['notes']
+        if transport == 'native':
+            yield ToolStartEvent(id='submit', name='structured_output', input=output)
+            yield ToolResultEvent(id='submit', output='Submitted.', is_error=False)
+
+    data = await review.finish('python', findings=('Later changed-code defect',) if seeded_defect else ())
+    assert len(received) == 1
+    assert data['terminal_result']['analysis_state'] == 'complete'
+    saved = json.loads((review.repo / '.daydream/deep/stack-python-records.json').read_text())
+    assert [item['description'] for item in saved['issues']] == ([finding['description']] if seeded_defect else [])
+
+
+async def test_optional_supporting_paths_are_confined_without_rejecting_valid_decisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unavailable references do not veto findings or acquire source/review authority."""
+    review = many_file_review(tmp_path, monkeypatch, count=9)
+    outside = tmp_path / 'outside.py'
+    outside.write_text('PRIVATE_OUTSIDE_SOURCE\n')
+    (review.repo / 'linked.py').symlink_to(outside)
+    git(review.repo, 'add', 'linked.py')
+    git(review.repo, 'commit', '-m', 'Add an outward symlink source control')
+    review = InvestigationRun(review.repo, tmp_path, monkeypatch)
+    review.config = replace(review.config, deep_shard_enabled=False)
+    notes: list[dict[str, Any]] = []
+
+    @review.backend.script('python')
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        if 'api.py' in stage['assigned_files']:
+            output.update(notes='Supporting paths are optional model declarations.', supporting_files=[
+                './module_03.py', 'module_03.py', '../outside.py', str(outside),
+                'linked.py', 'missing.py', '.git/config', '.daydream/deep/stack-python-records.json',
+                'module_03.py\n', 'module_03.py/../api.py'])
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+        elif 'module_03.py' in stage['assigned_files']:
+            notes.extend(stage['note_context'])
+            assert stage['candidates'] == []
+            assert 'module_03.py' not in stage['completed_target_ids']
+
+    await review.finish('python', findings=('Grounded defect',))
+    note, = notes
+    assert note['supporting_files'] == ['module_03.py']
+    assert 'api.py' in note['files']
+    assert all('PRIVATE_OUTSIDE_SOURCE' not in call['prompt'] for call in review.backend.calls)
+
+
+@pytest.mark.parametrize(('references', 'native'), [
+    ('missing', False), (None, True), ('unusable-container', False), ([None, 42, '../outside.py'], True)])
+async def test_unavailable_optional_reference_metadata_preserves_primary_stage_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, references: Any, native: bool) -> None:
+    """Legacy/malformed optional metadata cannot erase valid findings or trigger fresh stages."""
+    review = many_file_review(tmp_path, monkeypatch, count=9)
+
+    @review.backend.script('python')
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        if native:
+            yield RequestEvent(prompt=review.backend.calls[-1]['prompt'],
+                               output_schema=stage['response_contract']['schema'],
+                               config=PiRequestConfig(schema_emulated=False, no_tools=False))
+        if 'api.py' in stage['assigned_files']:
+            output['notes'] = 'Optional association is unavailable.'
+            if references == 'missing':
+                output.pop('supporting_files')
+            else:
+                output['supporting_files'] = references
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+        else:
+            assert 'Optional association is unavailable.' not in stage['notes']
+            assert stage['note_context'] == []
+        if native:
+            yield ToolStartEvent(id='submit', name='structured_output', input=output)
+            yield ToolResultEvent(id='submit', output='Submitted.', is_error=False)
+
+    await review.finish('python', findings=('Grounded defect',))
+    ends = stage_ends(review, 'python')
+    assert len(ends) == 3 and all(event['metadata']['admitted'] for event in ends)
+    assert all(event['metadata']['attempt'] == 1 for event in ends)
+
+
+async def test_supporting_relevance_metadata_counts_toward_the_semantic_handoff_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    review = many_file_review(tmp_path, monkeypatch, count=129)
+
+    @review.backend.script('python')
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        output['supporting_files'] = ['api.py', *[f'module_{i:02}.py' for i in range(128)]]
+
+    await review.finish('python', reason='evidence_incomplete')
+    ends = stage_ends(review, 'python')
+    assert len(ends) == 1 and ends[0]['metadata']['admitted'] is False
+    assert ends[0]['metadata']['failure_class'] == 'admission_failure'
+
+
+@pytest.mark.parametrize('stop', ['wall', 'outage-circuit', 'permanent'])
+async def test_isolated_failure_continuation_respects_shared_deadline_and_outage_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str) -> None:
+    review = many_file_review(tmp_path, monkeypatch, count=9)
+    review.backend.fanout_concurrency = 1
+    review.backend.retry_policy = RetryPolicy(attempts=1, base_delay_s=0, max_delay_s=0)
+    timer = FakeClock(monotonic_value=clock.monotonic()).install(monkeypatch)
+    patch_retry_sleep(monkeypatch, timer)
+    monkeypatch.setattr('daydream.config.RETRY_CIRCUIT_FAILURE_THRESHOLD', 1)
+    attempts: list[list[str]] = []
+
+    class TemporaryFailure(RuntimeError):
+        retryable = True
+
+    @review.backend.script('python')
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        if 'api.py' in stage['assigned_files']:
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+        elif 'module_03.py' in stage['assigned_files']:
+            attempts.append(stage['assigned_files'])
+            if stop == 'wall':
+                timer.advance(61)
+                raise RuntimeError('isolated failure after the shared deadline')
+            if stop == 'permanent':
+                raise RuntimeError('Invalid API key')
+            raise TemporaryFailure('isolated provider outage')
+        else:
+            pytest.fail('Later assignment dispatched despite a shared stopping condition')
+
+    assert await review.run(review_profile=_profile_with_pipeline(review_wall_budget_s=60)) == 0
+    data = review.load()
+    assert [finding['title'] for finding in data['findings']] == ['Grounded defect']
+    assert scopes(data)['python']['reason_codes'] == ['backend_failure']
+    assert len(attempts) == (2 if stop == 'outage-circuit' else 1)
+    assert scopes(data)['python']['partial_evidence'] is True
+    assert [event['metadata']['admitted'] for event in stage_ends(review, 'python')] == [True, False]
+
+
+async def test_isolated_first_pass_and_triage_failures_preserve_later_independent_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Failed batches cannot discard prior findings, suppress later batches or decide failed triage."""
+    review = many_file_review(tmp_path, monkeypatch, count=9)
+
+    @review.backend.script('python')
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        if stage['stage'] == 'triage':
+            if stage['assigned_candidate_ids'][0] == 'python:candidate:2':
+                raise RuntimeError('first triage group unavailable')
+            assert stage['closed_candidate_ids'] == ['python:candidate:1', 'python:candidate:11']
+            output['candidates'] = [dict(item, disposition='rejected') for item in stage['candidates']]
+        elif 'api.py' in stage['assigned_files']:
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+            output['candidates'] += [candidate() for _ in range(9)]
+        elif 'module_03.py' in stage['assigned_files']:
+            output['notes'] = 'FAILED_STAGE_POISON'
+            raise RuntimeError('middle first-pass batch unavailable')
+        else:
+            assert all('FAILED_STAGE_POISON' not in note for note in stage['notes'])
+            assert not set(stage['completed_target_ids']).intersection(
+                {'module_03.py', 'module_04.py', 'module_05.py', 'module_06.py'})
+            finding = dict(record(1), file='module_07.py', description='Later admitted defect',
+                           evidence='module_07.py:1')
+            output['candidates'] = [candidate(disposition='confirmed', finding=finding,
+                                             file='module_07.py', line=1, grounds=finding['evidence'])]
+
+    data = await review.finish('python', reason='backend_failure',
+                               findings=('Grounded defect', 'Later admitted defect'))
+    stages = [stage for stage in review.backend.stages if stage['scope_id'] == 'python']
+    assert [stage['stage'] for stage in stages] == ['first_pass'] * 3 + ['triage'] * 2
+    assert [len(stage['assigned_candidate_ids']) for stage in stages[-2:]] == [8, 1]
+    ends = stage_ends(review, 'python')
+    assert [event['metadata']['admitted'] for event in ends] == [True, False, True, False, True]
+    assert ends[-1]['metadata']['retained_findings'] == 2
+    assert ends[-1]['metadata']['admitted_candidate_count'] == 11
+    assert scopes(data)['python']['partial_evidence'] is True
+    assert data['terminal_result']['analysis_state'] == 'incomplete'
+    coverage = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
+    assert 'RuntimeError: review invocation failed (backend_failure).' in coverage['diagnostics']['scopes']['python']
 
 
 @pytest.mark.parametrize('unfinished_target', [False, True], ids=['complete', 'unfinished-first-target'])
@@ -278,6 +508,7 @@ async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
         "from daydream.deep.prompts import build_per_stack_prompt, build_structural_prompt\n"
         "def wrap(builder, kw):\n"
         "    state = kw['review_stage']\n"
+        "    assert isinstance(' '.join(state['notes']), str)\n"
         "    assert kw['files'] == state['assigned_files']\n"
         "    return builder(**kw) + '\\nBuilder stage arguments:\\n' + json.dumps({\n"
         "        'files': kw['files'], 'diff': kw.get('inline_diff'), 'stage': state['stage']})\n"
@@ -297,7 +528,8 @@ async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         call = review.backend.calls[-1]
         prose = call['prompt'].split('Host review stage:\n')[0]
-        assert set(call['output_schema']['properties']) == {'targets', 'notes', 'candidates', 'contradictions'}
+        assert set(call['output_schema']['properties']) == {
+            'targets', 'notes', 'supporting_files', 'candidates', 'contradictions'}
         assert 'with issues' not in prose
         assert 'AI-generated code' not in prose
         assert 'Be strict' not in prose
@@ -442,17 +674,19 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
         if stop == 'deadline' else {}
     )
     data = await review.finish('python', reason=reason, findings=('Grounded defect',), **overrides)
-    admitted, stopped = stage_ends(review, 'python')
+    admitted, *stops = stage_ends(review, 'python')
+    stopped = stops[0]
     assert admitted['status'] == 'succeeded'
     assert admitted['metadata']['observed_tool_starts'] > 0
     assert stopped['metadata']['observed_tool_starts'] == (
         49 if stop == 'tool' else admitted['metadata']['observed_tool_starts']
         + (0 if stop in {'builder', 'deadline'} else 1))
     assert scopes(data)['python']['partial_evidence'] is True
-    assert (stopped['status'], stopped.get('reason_code')) == (
-        ('timed_out', 'timed_out') if stop == 'deadline' else ('failed', 'domain_failure'))
+    assert all((event['status'], event.get('reason_code')) == (
+        ('timed_out', 'timed_out') if stop == 'deadline' else ('failed', 'domain_failure')) for event in stops)
+    assert len(stops) == (4 if stop in {'builder', 'backend'} else 1)
     assert [stage['stage'] for stage in backend.stages if stage['scope_id'] == 'python'] == (
-        ['first_pass'] if stop == 'builder' else ['first_pass'] * 2)
+        ['first_pass'] if stop == 'builder' else ['first_pass'] * (5 if stop == 'backend' else 2))
     if stop == 'deadline':
         assert no_tool_turns > 1
         assert stopped['metadata']['native_output'] is True

@@ -13,8 +13,9 @@ from typing import Any
 from daydream import clock
 
 STAGED_REVIEW_GUIDANCE = """Staged review contract:
-Return exactly REVIEW_STAGE_SCHEMA: targets, notes, candidates, contradictions. The host publishes terminal findings.
-The Host review stage's response_contract.schema specializes identities and counts; start with its four-key
+Return exactly REVIEW_STAGE_SCHEMA: targets, notes, supporting_files, candidates, contradictions.
+The host publishes terminal findings.
+The Host review stage's response_contract.schema specializes identities and counts; start with its five-key
 skeleton, filling required judgments rather than copying placeholder decisions. Otherwise use REVIEW_STAGE_SCHEMA.
 The host assignment and invocation schema govern scope and output over generic operator instructions.
 Use the backend-selected structured-result transport; do not write artifacts or a separate markdown report.
@@ -44,6 +45,12 @@ hunk-index is changed-line authority: it establishes anchors, not completed targ
 Use supplied diff/context and retained semantic notes first. End dependency, configuration and test traces when
 their concrete assigned candidate is resolved. Apply test-quality, configuration-flow, trust and wire-contract
 checks only to assigned changed behavior and supporting evidence; no speculative extra audit is required.
+In supporting_files, list repository-relative source paths supporting your compact notes, or [] when unavailable.
+Do not list private review artifacts or Git metadata. These optional references associate relevance only: they
+are not read receipts, reviewed targets, independent corroboration, test results or permission to access a path.
+Retained notes remain strings; aligned note_context entries identify note_index, source references, originating
+reviewer, stage and captured revision. They remain model assertions;
+judge current assigned changed behavior independently and preserve findings supported by contradictory source evidence.
 Match dependency evidence to the repository's pinned version before tracing cached modules. Restrict repository
 searches to relevant source paths; exclude .git metadata and prior review/trajectory artifacts from code evidence.
 Discovery candidates use empty candidate_id for host assignment; open and unresolved concerns receive bounded triage.

@@ -49,6 +49,7 @@ from daydream.backends.codex import (
     display_shell_command,
 )
 from daydream.extensions import Registry, ToolDecision, set_registry
+from daydream.retry_policy import FailureClass, classify_failure
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.trajectory import DaydreamPhase
 from tests.harness.codex_replay import (
@@ -1085,6 +1086,60 @@ def test_parser_label_redacts_complete_value_before_64_character_cap() -> None:
     assert len(bounded) <= 64
     assert "ghp_" not in bounded
     assert "[REDACTED" in bounded
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_retry"),
+    [
+        pytest.param(
+            {"message": "Selected model is at capacity. Please try a different model."}, True, id="observed-text",
+        ),
+        pytest.param(
+            {"message": "Try again later", "codex_error_info": "server_overloaded"}, True, id="structured-info",
+        ),
+        pytest.param(
+            {"message": "Try again later", "code": "server_overloaded"}, True, id="structured-code",
+        ),
+        pytest.param(
+            {"message": "Invalid API key", "codex_error_info": "server_overloaded"}, False, id="permanent-message",
+        ),
+        *[
+            pytest.param(
+                {"message": "Selected model is at capacity. Please try a different model.", "code": code},
+                False, id=f"explicit-{code}",
+            )
+            for code in ("unauthorized", "schema_validation", "tool_policy", "unknown_error")
+        ],
+        pytest.param({"message": "The model has capacity planning advice."}, False, id="unknown-text"),
+        pytest.param({"message": "Try again later", "code": {"server_overloaded": True}}, False, id="malformed-code"),
+    ],
+)
+async def test_public_turn_failure_preserves_metadata_and_normalizes_only_overload(
+    tmp_path: Path, error: dict[str, Any], expected_retry: bool,
+) -> None:
+    """Public JSONL decoding must admit capacity retries without making unknown failures retryable."""
+    process = make_mock_process([json.dumps({"type": "turn.failed", "error": error})])
+    backend = CodexBackend(model="fixture-model")
+    with pytest.raises(CodexError) as failure:
+        await replay_process(backend, process, tmp_path, "review")
+    decision = classify_failure(failure.value)
+    assert decision.retries_allowed is expected_retry
+    if expected_retry:
+        assert decision.failure_class is FailureClass.SERVER_ERROR
+    assert failure.value.error_metadata == error
+    assert str(failure.value) == error["message"]
+    assert backend._transports == []
+
+
+async def test_public_overload_after_completion_cannot_replay_completed_work(tmp_path: Path) -> None:
+    process = make_mock_process([
+        json.dumps({"type": "turn.completed", "usage": {}}),
+        json.dumps({"type": "turn.failed", "error": {"message": "busy", "code": "server_overloaded"}}),
+    ])
+    with pytest.raises(CodexError) as failure:
+        await replay_process(CodexBackend(model="fixture-model"), process, tmp_path, "apply the fix")
+    assert classify_failure(failure.value).retries_allowed is False
+
 
 @pytest.mark.parametrize("error_code", [None, "model_error"])
 async def test_turn_failed_flushes_current_aggregate_without_waiting_for_stdout(error_code: str | None) -> None:

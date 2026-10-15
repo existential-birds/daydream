@@ -752,6 +752,18 @@ invocation fails strict schema validation and passes the domain rejection guard;
 carries over, never rejected output. Syntax, envelope, ambiguity and native-output failures are terminal. Other
 admission failures are terminal. Failed attempts admit no semantic state, and later failure preserves findings from
 successful stages while marking unfinished work incomplete.
+An isolated backend invocation failure stops only its assigned batch after eligible retries. Later independent
+first-pass and triage batches may continue with the same cumulative tool allowance and absolute deadline, subject to
+outage admission. Successful later batches cannot erase earlier failures, finish failed targets or settle candidates
+from a failed triage batch. Shared exhaustion, cancellation, permanent policy/authentication failures and admission
+failures retain their stopping behavior.
+
+Successful stages may declare optional `supporting_files` for their compact notes. The host retains only normalized,
+available repository source references and includes relevant notes in later assignments with their reviewer, stage and
+snapshot attribution. Unsafe, missing or unavailable references grant no relevance or source access and do not veto
+otherwise valid decisions. These notes remain model assertions, not source-read receipts or completion evidence;
+concrete contradictory changed-code findings remain eligible. Notes, references, provenance and rendered decisions
+share the bounded semantic handoff (64 KiB and 128 items); overflow keeps coverage incomplete.
 
 Pi receives the remaining enforced wall allowance at each attempt, including time
 spent preparing or retrying the invocation. Unbounded turns are described as unbounded.
@@ -765,7 +777,7 @@ recorded and charged, but do not authenticate claims or establish completion. Fi
 snapshot-bound and atomically published. `complete` requires success or explicit host no-op for every planned scope and
 required phase; it does not guarantee exhaustive defect discovery. The
 [stage contract](docs/extensions.md#stage-aware-review-builders-api-8) specifies identity/capture checks, triage state,
-backend transports and native output rules. Stage contract 10 invalidates older cached reviews; extension API 8 requires
+backend transports and native output rules. Stage contract 11 invalidates older cached reviews; extension API 8 requires
 staged builders.
 
 Carried closed decisions are attributed reviewer judgments, not independent host

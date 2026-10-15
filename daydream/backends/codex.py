@@ -397,10 +397,22 @@ def _parser_diagnostics(
 
 
 class CodexError(Exception):
-    """Codex failure: category=None for turn.failed, PROCESS_EXIT for a nonzero CLI exit."""
+    """Codex failure retaining public error facts and narrow overload normalization."""
 
-    def __init__(self, message: str, *, category: str | None = None, retryable: bool | None = None):
+    def __init__(
+        self, message: str, *, category: str | None = None, retryable: bool | None = None,
+        error_metadata: Mapping[str, Any] | None = None,
+    ):
         super().__init__(message)
+        self.error_metadata = dict(error_metadata or {})
+        codes = [self.error_metadata[key] for key in ("codex_error_info", "code")
+                 if self.error_metadata.get(key) is not None]
+        # Only positively identified public overloads opt in. An explicit other
+        # code (including malformed metadata) vetoes the text-only fallback.
+        overloaded = all(code == "server_overloaded" for code in codes) if codes else (
+            message == "Selected model is at capacity. Please try a different model.")
+        if category is None and overloaded:
+            category = "SERVER_ERROR"
         self.category = category
         if retryable is not None:
             self.retryable = retryable
@@ -1114,7 +1126,10 @@ class CodexBackend:
                     )
                     for diagnostic in _take_final_diagnostics():
                         yield diagnostic
-                    raise CodexError(str(message))
+                    raise CodexError(
+                        str(message), error_metadata=error if isinstance(error, dict) else None,
+                        retryable=False if terminal_deadline is not None else None,
+                    )
 
                 elif event_type == "turn.started":
                     current_turn_completed = False

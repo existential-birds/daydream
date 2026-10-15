@@ -124,7 +124,8 @@ def _response(prompt: str) -> tuple[str, str | None]:
             candidates = []
         return json.dumps({"targets": [{"target_id": target, "status": "reviewed", "reason": ""}
                                        for target in state["assigned_target_ids"]],
-                           "notes": "Synthetic assigned review complete", "candidates": candidates,
+                           "notes": "Synthetic assigned review complete", "supporting_files": [],
+                           "candidates": candidates,
                            "contradictions": []}), None
     if "cross-stack merge agent" in lower:
         items = []
