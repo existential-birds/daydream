@@ -44,6 +44,8 @@ async def test_run_isolates_three_codex_fixers_and_retains_terminal_evidence(
         "App.tsx": "healthy", "api.py": worker_mode, "README.md": "terminal_eof_live_child",
     })
     monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
+    # This synthetic barrier needs three live fixers even when the host caps real fan-out.
+    monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", "3")
     # Allow a healthy child's EOF to be scheduled under parallel suite load;
     # the stalled fixture modes hold stdout open until the host tears them down.
     monkeypatch.setenv("DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S", "1")
