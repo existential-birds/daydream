@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.console import Console
 
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.extensions import Registry
@@ -19,13 +21,14 @@ from daydream.prompts.authorial_intent import (
 )
 from daydream.run_context import current_run_context
 from daydream.runner import run
+from daydream.ui.summary import print_preflight_notice
 from tests.deep_orchestrator.support import (
     _capture_warnings,
     _forbidden_input,
     _make_record_issue,
     _silence_gate_noise,
 )
-from tests.harness.git_helpers import seed_base_support_files
+from tests.harness.git_helpers import seed_base_support_files, seed_feature_branch
 from tests.harness.stub_backend import review_stage_state
 from tests.test_deep_orchestrator import (
     PR_SENTINEL,
@@ -446,50 +449,115 @@ async def test_fix_gate_runs_when_all_canonical_findings_are_outside_reviewed_di
     assert any("notes.txt" in prompt for prompt in fix_prompts)
     assert any("docs/elsewhere.md" in prompt for prompt in fix_prompts)
 
-@pytest.mark.parametrize("custom_builder", [False, True])
-async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, custom_builder: bool,
+@pytest.mark.parametrize(("shape", "custom_builder", "expected_count"), [
+    ("normal", False, 7), ("normal", True, 8), ("no-arbiter", False, 7),
+    ("tiny", False, 3), ("shallow", False, 3), ("sharded", False, 20),
+])
+async def test_preflight_notice(
+    multi_stack_target: Path, tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig, shape: str, custom_builder: bool, expected_count: int,
 ) -> None:
-    """D-30: pre-flight notice lists stages, stacks, and agent count."""
+    """Rendered estimates must follow executed review roles, not obsolete parse calls or raw turns."""
     if custom_builder:
-
         registry = Registry()
         register_builtins(registry)
-        registry.override_prompt("structural", lambda **_: "CUSTOM STRUCTURAL BUILDER")
+        original = registry.prompt("structural")
+        assert original is not None
+
+        def custom_structural(**kwargs: Any) -> str:
+            return original(**kwargs)
+
+        registry.override_prompt("structural", custom_structural)
         monkeypatch.setattr("daydream.deep.orchestrator.get_registry", lambda: registry)
-    captured: list[dict[str, Any]] = []
+    target = tiny_diff_target if shape == "tiny" else multi_stack_target
+    options: dict[str, Any] = {"diagram": "off"}
+    if shape == "shallow":
+        options["shallow"] = True
+    if shape == "sharded":
+        target = tmp_path / "sharded-notice"
+        base = {f"part{index}.go": "package main\n" for index in range(14)}
+        base.update({f"notes{index}.md": "# Notes\n" for index in range(2)})
+        changed = {path: body + ("// changed\n" if path.endswith(".go") else "Updated.\n")
+                   for path, body in base.items()}
+        seed_feature_branch(target, base=base, feature=changed)
+        options.update(deep_shard_enabled=True, deep_shard_max_files=1, deep_shard_fanout_cap=32)
+    rendered: list[str] = []
     progress_calls: list[tuple[int, int, str]] = []
 
-    def _capture_progress(console: Any, current: Any, total: Any, name: Any) -> None:
+    def capture_notice(_console: Any, **kwargs: Any) -> None:
+        output = StringIO()
+        print_preflight_notice(Console(file=output, width=180, color_system=None), **kwargs)
+        rendered.append(output.getvalue())
+
+    def capture_progress(_console: Any, current: int, total: int, name: str) -> None:
         progress_calls.append((current, total, name))
 
-    def _capture(console: Any, *, stages: Any, stack_lines: Any, agent_count: Any, exploration_available: Any,
-    ) -> None:
-        captured.append({"stages": stages, "stack_lines": stack_lines, "agent_count": agent_count,
-                "exploration_available": exploration_available,
-            }
-        )
-
-    monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", _capture_progress)
-    monkeypatch.setattr("daydream.deep.merge_steps.print_stage_progress", _capture_progress)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", _capture)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", capture_notice)
+    monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", capture_progress)
+    monkeypatch.setattr("daydream.deep.merge_steps.print_stage_progress", capture_progress)
     monkeypatch.setattr("daydream.run_context._prompt_user", _accept_intent_decline_other)
-    _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _install_stub_backend(monkeypatch, target)
+    # Make the advertised conditional arbiter observable on the multi-stack paths.
+    stub.parse_severity = "low" if shape == "no-arbiter" else "high"
+    assert await run(make_config(target, **options)) == 0
+    assert len(rendered) == 1
+    notice = rendered[0]
+    assert "Review assignments:" in notice
+    assert "Detected stacks:" not in notice
+    assert "Total agents:" not in notice
+    assert f"Estimated review agents: {expected_count}" in notice
+    assert "Excludes exploration and optional phases" in notice
+    assert "Not a concurrency limit" in notice
+    assert "parse" not in notice.lower()
 
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-    assert len(captured) == 1, "pre-flight notice must fire exactly once"
-    notice = captured[0]
-    assert notice["stages"] == ["TTT intent",
-        "TTT alternative-review" if custom_builder else "design alternatives (included in structural review)",
-        "per-stack reviews", "structural review (parallel with per-stack reviews)", "cross-stack merge",
-        "optional fix gate",
-    ]
-    # Folding default alternatives removes one invocation from the legacy estimate.
-    assert notice["agent_count"] == (12 if custom_builder else 11)
-    assert notice["stack_lines"] == ["python: 1 file(s)", "react: 1 file(s)", "generic: 1 file(s)"]
-    stage_numbers = {c[0] for c in progress_calls}
-    assert stage_numbers == {1, 2, 3, 4, 5}
-    assert all(c[1] == 5 for c in progress_calls)
+    prompts = [str(call["prompt"]) for call in stub.calls]
+    states = [state for prompt in prompts if (state := review_stage_state(prompt)) is not None]
+    scopes = {state["scope_id"] for state in states}
+    assignment_lines = [line.strip().removeprefix("- ") for line in notice.splitlines()
+                        if line.strip().startswith("- ")]
+    assert len(assignment_lines) == len(scopes)
+    assert sum(line.startswith("structure:") for line in assignment_lines) == 1
+    assert {line.split(":", 1)[0] for line in assignment_lines} == scopes
+    roles = set()
+    for prompt in prompts:
+        lower = prompt.lower()
+        # Alternatives embed intent, so recognize that role before intent.
+        if "would you have done this differently" in lower or "evaluate the implementation" in lower:
+            roles.add("alternatives")
+        elif "understand the intent of these changes" in lower:
+            roles.add("intent")
+        elif "cross-stack merge agent" in lower:
+            roles.add("merge")
+        elif "you are the arbiter" in lower:
+            roles.add("arbiter")
+    assert ("alternatives" in roles) is custom_builder
+    assert "intent" in roles
+    assert all("extract only actionable issues" not in prompt.lower() for prompt in prompts)
+    assert expected_count == len(scopes) + len(roles) + (shape == "no-arbiter")
+    if shape in {"tiny", "shallow"}:
+        assert roles.isdisjoint({"merge", "arbiter"})
+        assert "no merge or arbiter allowance" in notice
+    else:
+        assert "merge" in roles
+        assert ("arbiter" in roles) is (shape != "no-arbiter")
+        assert "1 conditional arbiter allowance" in notice
+    if shape == "sharded":
+        assert len([scope for scope in scopes if scope.startswith("go#")]) == 14
+        assert len([scope for scope in scopes if scope.startswith("generic#")]) == 2
+    if shape == "normal":
+        stage_lines = notice.split("Stages:\n", 1)[1].split("Review assignments:", 1)[0].splitlines()
+        assert [line.strip() for line in stage_lines if line.strip()] == [
+            "1. TTT intent",
+            "2. TTT alternative-review" if custom_builder else
+            "2. design alternatives (included in structural review)",
+            "3. per-stack reviews", "4. structural review (parallel with per-stack reviews)",
+            "5. cross-stack merge", "6. optional fix gate",
+        ]
+        assert assignment_lines == [
+            "python: 1 file(s)", "react: 1 file(s)", "generic: 1 file(s)", "structure: 3 file(s)",
+        ]
+        assert {current for current, _, _ in progress_calls} == {1, 2, 3, 4, 5}
+        assert all(total == 5 for _, total, _ in progress_calls)
 
 async def test_resume_per_stack_reruns_all(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-34: --start-at per-stack re-runs ALL per-stack reviews (after priming TTT artifacts)."""

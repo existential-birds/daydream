@@ -95,11 +95,11 @@ if TYPE_CHECKING:
 
 
 def total_agent_count(stack_count: int) -> int:
-    """Estimate two TTT calls, review/parse per stack, merge and conditional arbiter.
+    """Estimate two TTT calls, one reviewer per assignment, merge and conditional arbiter.
 
     Always budget the arbiter in preflight; user-gated fix agents are excluded.
     """
-    return 2 + stack_count + stack_count + 1 + 1
+    return 2 + stack_count + 1 + 1
 
 
 # Tiny diffs collapse language fan-out and bypass merge/arbiter.
@@ -107,8 +107,8 @@ DEFAULT_SHALLOW_FANOUT_THRESHOLD = 2
 
 
 def _single_stack_agent_count(stack_count: int) -> int:
-    """Estimate two TTT calls plus review/parse per surviving stack, without merge or arbiter."""
-    return 2 + stack_count + stack_count
+    """Estimate two TTT calls plus one reviewer per surviving assignment, without merge or arbiter."""
+    return 2 + stack_count
 
 
 def _config_pipeline(config: RunConfig) -> Pipeline:
@@ -181,7 +181,7 @@ def _collapse_stacks_for_tiny_diff(
 
 
 def _stack_preflight_line(stack: StackAssignment) -> str:
-    """Format one detected-stack line for the pre-flight notice (skill-free, M2)."""
+    """Format one review-assignment line for the pre-flight notice (skill-free, M2)."""
     docs_suffix = " (docs-only)" if stack.is_docs_only else ""
     return f"{stack.stack_name}: {len(stack.files)} file(s){docs_suffix}"
 
@@ -726,7 +726,6 @@ async def run_deep(
         stack_lines = [
             _stack_preflight_line(stack)
             for stack in stacks
-            if stack.stack_name != STRUCTURE_STACK_NAME
         ]
         notice_agent_count = (
             _single_stack_agent_count(len(stacks))
@@ -742,10 +741,8 @@ async def run_deep(
         )
         if folded_alternatives:
             notice_agent_count -= 1
-        # Issue #1113: the notice hardcodes "Deep-review pipeline pre-flight",
-        # the five deep pipeline stages and a 2+2N+2 agent estimate. A two-step
-        # diagram flow executes none of that, so printing it would be a lie
-        # about what the run is doing.
+        # Issue #1113: a diagram-only flow does not execute the review pipeline,
+        # so its preamble must not display the review stages or agent estimate.
         if mode != "diagram":
             print_preflight_notice(
                 console,
@@ -753,6 +750,7 @@ async def run_deep(
                 stack_lines=stack_lines,
                 agent_count=notice_agent_count,
                 exploration_available=review_steps.EXPLORATION_AVAILABLE,
+                conditional_arbiter=not single_stack_mode,
             )
 
         # Risk describes the captured change, independently of prompt retention.
