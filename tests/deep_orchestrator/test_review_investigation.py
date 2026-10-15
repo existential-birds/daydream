@@ -20,7 +20,6 @@ from daydream.backends import (
     PiRequestConfig,
     RequestEvent,
     ResultEvent,
-    RetryPolicy,
     TextEvent,
     ToolResultEvent,
     ToolStartEvent,
@@ -41,7 +40,6 @@ class StagedBackend(EmptyReviewBackend):
     """A provider that remembers nothing beyond the current request."""
 
     supports_review_instructions = True
-    retry_policy: RetryPolicy | None = None
 
     def __init__(self, repo: Path) -> None:
         super().__init__(repo, forbid_merge=False, forbid_supervise=False)
@@ -346,7 +344,9 @@ async def test_isolated_failure_continuation_respects_shared_deadline_and_outage
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str) -> None:
     review = many_file_review(tmp_path, monkeypatch, count=9)
     review.backend.fanout_concurrency = 1
-    review.backend.retry_policy = RetryPolicy(attempts=1, base_delay_s=0, max_delay_s=0)
+    monkeypatch.setenv('DAYDREAM_PI_RETRY_ATTEMPTS', '1')
+    monkeypatch.setenv('DAYDREAM_PI_RETRY_BASE_DELAY_S', '0')
+    monkeypatch.setenv('DAYDREAM_PI_RETRY_MAX_DELAY_S', '0')
     timer = FakeClock(monotonic_value=clock.monotonic()).install(monkeypatch)
     patch_retry_sleep(monkeypatch, timer)
     monkeypatch.setattr('daydream.config.RETRY_CIRCUIT_FAILURE_THRESHOLD', 1)
