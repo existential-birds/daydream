@@ -10,6 +10,7 @@ from typing import Any
 
 from daydream import agent, clock
 from daydream.backends import Backend
+from daydream.backends.codex import codex_lifecycle_diagnostic
 from daydream.backends.pi import PiBackend
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import StackAssignment
@@ -320,7 +321,8 @@ class ReviewInvestigation:
                     self.failed_invocation = True
                     self._continuable_failure = classify_failure(exc).failure_class not in {
                         FailureClass.AUTH_CONFIG, FailureClass.SCHEMA, FailureClass.TOOL_POLICY, FailureClass.PERMANENT}
-                    self.failure_diagnostic = f"{type(exc).__name__}: review invocation failed ({self.reason})."
+                    self.failure_diagnostic = (codex_lifecycle_diagnostic(exc)
+                        or f"{type(exc).__name__}: review invocation failed ({self.reason}).")
                 else:
                     actual_rejection = output.rejection if isinstance(output, agent.StructuredOutputFailure) else None
                     syntax_error = output.syntax_error if isinstance(output, agent.StructuredOutputFailure) else None

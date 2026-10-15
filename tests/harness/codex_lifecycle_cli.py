@@ -18,6 +18,7 @@ from typing import Any, Literal
 LifecycleMode = Literal[
     "healthy", "terminal_open_stdout", "terminal_eof_live_child", "descendant_stdout",
     "nonzero_exit", "preterminal_silence", "repeated_terminal", "unfinished_next_turn",
+    "completed_next_turn", "delayed_shutdown", "completed_chatter",
 ]
 _FIXTURE_CONFIG: dict[str, Any] = globals().get("_FIXTURE_CONFIG", {})
 FIX_MARKER = "\n# synthetic lifecycle fix\n"
@@ -51,11 +52,13 @@ class CodexLifecycleCli:
 
 def install_codex_lifecycle_cli(
     root: Path, *, mode: LifecycleMode = "healthy", fix_modes: dict[str, LifecycleMode] | None = None,
+    structure_mode: LifecycleMode | None = None, shutdown_delay_s: float = 0.0,
 ) -> CodexLifecycleCli:
     root = root.resolve()
     for name in ("bin", "observations", "controls", "fix_started"):
         (root / name).mkdir(parents=True)
-    config = {"root": str(root), "mode": mode, "fix_modes": fix_modes or {}}
+    config = {"root": str(root), "mode": mode, "fix_modes": fix_modes or {},
+              "structure_mode": structure_mode, "shutdown_delay_s": shutdown_delay_s}
     executable = root / "bin" / "codex"
     executable.write_text(
         f"#!{sys.executable}\n_FIXTURE_CONFIG = {config!r}\n" + Path(__file__).read_text(), encoding="utf-8",
@@ -162,6 +165,8 @@ def _run() -> int:
     prompt = sys.stdin.read()
     text, file = _response(prompt)
     mode = _FIXTURE_CONFIG["fix_modes"].get(file, _FIXTURE_CONFIG["mode"])
+    if "you are the structural reviewer" in prompt.lower() and _FIXTURE_CONFIG["structure_mode"]:
+        mode = _FIXTURE_CONFIG["structure_mode"]
     if file and _FIXTURE_CONFIG["fix_modes"]:
         started = Path(_FIXTURE_CONFIG["root"]) / "fix_started"
         (started / file).touch()
@@ -197,6 +202,16 @@ def _run() -> int:
     if mode == "unfinished_next_turn":
         _emit({"type": "turn.started"})
         _observe("unfinished_turn_exit", mode=mode, file=file)
+    elif mode == "completed_next_turn":
+        _emit({"type": "turn.started"})
+        _emit({"type": "item.completed", "item": {"type": "agent_message", "id": "next-final",
+                                                   "text": "Latest public turn", "phase": "final_answer"}})
+        _emit(terminal)
+    elif mode == "delayed_shutdown":
+        time.sleep(_FIXTURE_CONFIG["shutdown_delay_s"])
+    elif mode == "completed_chatter":
+        for _ in range(1100):
+            _emit({"type": "fixture.chatter"})
     elif mode == "descendant_stdout":
         descendant = subprocess.Popen([sys.executable, __file__, "--fixture-descendant"])
         deadline = time.monotonic() + 5

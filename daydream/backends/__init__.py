@@ -98,6 +98,12 @@ def _parsed_positive_int(
     return value
 
 
+# Codex 0.162.1 can await two sequential 45s native shutdown fallbacks after
+# public completion. Retain 5s host headroom; this is a policy, not a native bound.
+# docs/observability.md documents the pinned evidence and unbounded unsubscribe.
+DEFAULT_CODEX_TERMINAL_DRAIN_TIMEOUT_S = 95.0
+
+
 @dataclass(frozen=True)
 class BackendExecutionInput:
     """Run-owned native process settings for one backend kind.
@@ -114,7 +120,7 @@ class BackendExecutionInput:
     pi_agent_dir: Path | None
     stream_idle_timeout_s: float | None
     pi_response_idle_timeout_s: float | None
-    codex_terminal_drain_timeout_s: float = 5.0
+    codex_terminal_drain_timeout_s: float = DEFAULT_CODEX_TERMINAL_DRAIN_TIMEOUT_S
     codex_process_reap_timeout_s: float = 5.0
     codex_cleanup_timeout_s: float = 10.0
 
@@ -198,7 +204,8 @@ class BackendExecutionInput:
             pi_agent_dir,
             None if idle == 0 else idle,
             None if response_idle == 0 else response_idle,
-            _parsed_positive_float(copied, "DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S", 5.0),
+            _parsed_positive_float(copied, "DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S",
+                                   DEFAULT_CODEX_TERMINAL_DRAIN_TIMEOUT_S),
             _parsed_positive_float(copied, "DAYDREAM_CODEX_PROCESS_REAP_TIMEOUT_S", 5.0),
             _parsed_positive_float(copied, "DAYDREAM_CODEX_CLEANUP_TIMEOUT_S", 10.0),
         )

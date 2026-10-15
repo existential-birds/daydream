@@ -18,6 +18,94 @@ from tests.harness.processes import wait_for_process_group_gone
 from tests.harness.trajectory import make_recorder
 
 
+@pytest.mark.parametrize("mode,category,expected_metrics", [
+    ("healthy", None, 1), ("completed_next_turn", None, 2),
+    ("unfinished_next_turn", "TRANSPORT", 1), ("nonzero_exit", "PROCESS_EXIT", 1),
+])
+async def test_delayed_consumer_drains_finished_child_without_skipping_latest_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: LifecycleMode,
+    category: str | None, expected_metrics: int,
+) -> None:
+    """Consumer latency cannot invent drain failure or hide buffered latest-turn events."""
+    fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode=mode)
+    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S", "0.2")
+    seen: list[AgentEvent] = []
+    error: CodexError | None = None
+    collector = BackendLifecycleCollector(attempt=1, started_at=asyncio.get_running_loop().time(),
+                                          wall_allowance_s=None, deadline=None)
+    token = collector.bind()
+    try:
+        async with asyncio.timeout(3):
+            try:
+                async for event in CodexBackend(model="fixture-model").execute(tmp_path, "synthetic lifecycle request"):
+                    seen.append(event)
+                    if isinstance(event, MetricsEvent) and sum(isinstance(row, MetricsEvent) for row in seen) == 1:
+                        await asyncio.sleep(0.5)
+            except CodexError as exc:
+                error = exc
+    finally:
+        await collector.stop_sampling()
+        snapshot = collector.finalize()
+        collector.reset(token)
+    assert (error.category if error else None) == category
+    assert snapshot is not None and snapshot.process_returncode == (7 if mode == "nonzero_exit" else 0)
+    assert snapshot.stdout_eof_s is not None and snapshot.expiry_stage is None
+    assert len([row for row in seen if isinstance(row, MetricsEvent)]) == expected_metrics
+    assert len([row for row in seen if isinstance(row, CostEvent)]) == expected_metrics
+    assert len([row for row in seen if isinstance(row, ResultEvent)]) == (1 if category is None else 0)
+    if mode == "completed_next_turn":
+        assert any(isinstance(row, TextEvent) and row.text == "Latest public turn" for row in seen)
+
+
+async def test_default_tail_permits_supported_native_shutdown_after_public_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real healthy child may outlive the old five-second cutoff before EOF and zero exit."""
+    fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode="delayed_shutdown", shutdown_delay_s=5.2)
+    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.delenv("DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S", raising=False)
+    async with asyncio.timeout(10):
+        seen = [event async for event in CodexBackend(model="fixture-model").execute(tmp_path, "shutdown request")]
+    assert len([event for event in seen if isinstance(event, ResultEvent)]) == 1
+
+
+async def test_caller_deadline_still_bounds_native_shutdown_opportunity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The host shutdown policy cannot spend beyond the invocation's wall allowance."""
+    fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode="terminal_open_stdout")
+    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.delenv("DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S", raising=False)
+    started = asyncio.get_running_loop().time()
+    async with asyncio.timeout(3):
+        _, _, reason = await run_agent(CodexBackend(model="fixture-model"), tmp_path,
+                                       "shutdown request", phase=DaydreamPhase.FIX, wall_budget_s=0.5)
+    assert reason == "wall_budget_exceeded"
+    assert asyncio.get_running_loop().time() - started < 2
+    for observation in fixture.observations():
+        await wait_for_process_group_gone(observation["pid"], timeout_s=5)
+
+
+async def test_finished_child_postdeadline_chatter_cannot_remove_the_drain_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even a zero-exit child cannot force unlimited buffered event processing after expiry."""
+    fixture = install_codex_lifecycle_cli(tmp_path / "cli", mode="completed_chatter")
+    monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S", "0.2")
+    seen: list[AgentEvent] = []
+    async with asyncio.timeout(3):
+        with pytest.raises(CodexError, match="terminal_drain") as failure:
+            async for event in CodexBackend(model="fixture-model").execute(tmp_path, "synthetic lifecycle request"):
+                seen.append(event)
+                if isinstance(event, MetricsEvent):
+                    await asyncio.sleep(0.5)
+    assert failure.value.retryable is False
+    assert "child exit 0 observed" in str(failure.value)
+    assert not any(isinstance(event, ResultEvent) for event in seen)
+
+
 @pytest.mark.parametrize("mode,stage", [
     ("terminal_open_stdout", "terminal_drain"),
     ("terminal_eof_live_child", "process_reap"),
@@ -43,6 +131,9 @@ async def test_completed_codex_turn_has_bounded_failure_and_retains_evidence(
     assert failure.value.category == "TIMEOUT"
     assert failure.value.retryable is False
     assert stage in str(failure.value)
+    assert "timeout after 0.15s" in str(failure.value)
+    assert ("stdout EOF was not observed" if stage == "terminal_drain"
+            else "actual child exit was not observed") in str(failure.value)
     assert asyncio.get_running_loop().time() - started < 2
     assert any(isinstance(event, TextEvent) and "Synthetic lifecycle response" in event.text for event in seen)
     metrics = [event for event in seen if isinstance(event, MetricsEvent)]
