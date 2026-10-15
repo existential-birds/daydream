@@ -1,7 +1,9 @@
 """The routing record: one artifact, one writer, one meaning (issue #732)."""
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
@@ -15,8 +17,11 @@ from daydream.deep.routing_record import read_routing_record, write_routing_reco
 from daydream.eval.analyzer import analyze_routing
 from daydream.review_profile import ResolvedProfile
 from daydream.runner import run
+from tests.deep_orchestrator.empty_synthesis_support import empty_review_config
+from tests.deep_orchestrator.precision_overlap_support import PrecisionOverlapBackend
 from tests.deep_orchestrator.support import _arbiter_stacks, _merged_items
 from tests.harness.review_profile import independent_alternatives_profile
+from tests.harness.review_result import saved_coverage
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 from tests.test_deep_orchestrator import MakeConfig, Mute
 
@@ -328,3 +333,171 @@ async def test_no_target_completion_reruns_when_selection_policy_changes(
     assert await run(make_config(multi_stack_target, start_at='merge', latency_profile='balanced',
                                  review_profile=changed)) == 0
     assert any('you are the arbiter' in call['prompt'].lower() for call in stub.calls)
+
+
+async def test_precision_overlap_reuses_successful_shard_after_real_sibling_failure(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partial concurrent pass must retain shard evidence without claiming whole-pass completion.
+
+    Existing shard-resume tests do not run suppression beside the failing fan-out,
+    so they cannot detect premature whole-pass publication or suppression shifting identities.
+    """
+    backend = PrecisionOverlapBackend(multi_stack_target, blocked=True)
+    backend.fanout_concurrency = 4
+    execute = backend.execute
+    fail_docs = True
+    arbiter_paths: list[Path] = []
+    failed_path: Path | None = None
+
+    async def provider(cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+        nonlocal failed_path
+        arbiter = "you are the arbiter" in prompt.lower()
+        if arbiter:
+            match = re.search(r"listed in (\S*arbiter[-\w]*-input\.json)", prompt)
+            assert match is not None
+            path = Path(match.group(1))
+            arbiter_paths.append(path)
+            if fail_docs and any(row["file"] == "README.md" for row in json.loads(path.read_text())):
+                failed_path = path
+                backend.calls.append({"cwd": cwd, "prompt": prompt, **kwargs})
+                raise RuntimeError("docs arbiter provider unavailable")
+        async for event in execute(cwd, prompt, *args, **kwargs):
+            if arbiter and isinstance(event, ResultEvent):
+                assert isinstance(event.structured_output, dict)
+                # Keep surviving arbiter targets eligible on resume, so completed
+                # group evidence must actually be loaded rather than bypassed.
+                event = replace(event, structured_output={"findings": [dict(row, severity="high")
+                    for row in event.structured_output["findings"]]})
+            yield event
+
+    monkeypatch.setattr(backend, "execute", provider)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+    config = empty_review_config(multi_stack_target, tmp_path / "partial-overlap.json", precision_mode=True,
+        latency_profile="balanced", review_profile=independent_alternatives_profile(), review_cache_enabled=True)
+    async def drive() -> None:
+        assert await run(config) == 0
+
+    with anyio.fail_after(60):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(drive)
+            await backend.started["arbiter"].wait()
+            await backend.started["suppression"].wait()
+            live = backend.input_paths["suppression"].parent
+            backend.release["arbiter"].set()
+            await backend.closed["arbiter"].wait()
+            await anyio.wait_all_tasks_blocked()
+            assert failed_path is not None
+            assert not (live / "adjudication-complete.marker").exists()
+            assert not backend.closed["suppression"].is_set()
+            backend.release["suppression"].set()
+
+    deep = multi_stack_target / ".daydream/deep"
+    first = read_routing_record(deep)["arbiter"]
+    assert first["sharded"] is True and len(first["groups"]) == 2
+    assert len(first["failed_groups"]) == 1
+    failed = first["failed_groups"][0]
+    successful = next(group["group_id"] for group in first["groups"] if group["group_id"] != failed)
+    assert (deep / f"{successful}-complete.marker").is_file()
+    assert not (deep / f"{failed}-complete.marker").exists()
+    assert not (deep / "adjudication-complete.marker").exists()
+    assert saved_coverage(deep).phases["suppression"]["status"] == "complete"
+    assert all(json.loads(path.read_text())["unit"] != "arbiter"
+               for path in (deep.parent / "review-cache/entries").glob("*/manifest.json"))
+    records = [row for path in deep.glob("stack-*-records.json")
+               for row in json.loads(path.read_text())["issues"]]
+    assert {row["uid"] for row in records} >= {"generic:1", "python:1", "react:2"}
+    assert not {"python:2", "react:1"} & {row["uid"] for row in records}
+
+    fail_docs = False
+    arbiter_paths.clear()
+    assert await run(replace(config, start_at="merge", trajectory_path=tmp_path / "resumed-overlap.json")) == 0
+    assert [path.name for path in arbiter_paths] == [f"{failed}-input.json"]
+    resumed = read_routing_record(deep)["arbiter"]
+    assert resumed["failed_groups"] == []
+    assert {group["group_id"]: group["reused"] for group in resumed["groups"]} == {
+        failed: False, successful: True,
+    }
+    assert (deep / "adjudication-complete.marker").is_file()
+    assert saved_coverage(deep).phases["arbiter"]["status"] == "complete"
+
+
+@pytest.mark.parametrize("stop", ["cancel", "deadline"])
+async def test_precision_overlap_closes_both_streams_without_publishing_completion(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str,
+) -> None:
+    """Cancellation and inherited deadlines must unwind both live provider streams.
+
+    Existing reviewer-cancellation coverage does not enter the new adjudication
+    fan-out, where a leaked sibling could continue writing after run finalization.
+    """
+    backend = PrecisionOverlapBackend(multi_stack_target, blocked=True)
+    backend.fanout_concurrency = 2
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+    profile = independent_alternatives_profile()
+    if stop == "deadline":
+        setattr(backend, "supports_budget_preamble", True)
+        execute = backend.execute
+
+        async def budget_provider(cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            if not ("you are the arbiter" in prompt.lower()
+                    or "you are the suppression reviewer" in prompt.lower()):
+                # Only the adjudication fixture consumes live budget fields;
+                # its inherited provider for other phases has a smaller API.
+                kwargs.pop("wall_budget_s", None)
+                kwargs.pop("tool_call_budget", None)
+            async for event in execute(cwd, prompt, *args, **kwargs):
+                yield event
+
+        monkeypatch.setattr(backend, "execute", budget_provider)
+        # Adjudication reserves 60 seconds for finalization. This leaves a real
+        # four-second shared investigation allowance without mocking host clocks.
+        profile = replace(profile, profile=replace(profile.profile,
+            pipeline=replace(profile.profile.pipeline, review_wall_budget_s=64)))
+    config = empty_review_config(multi_stack_target, tmp_path / f"{stop}-overlap.json", precision_mode=True,
+        latency_profile="forensic", review_profile=profile, review_cache_enabled=True)
+
+    async def wait_for_overlap() -> None:
+        await backend.started["arbiter"].wait()
+        await backend.started["suppression"].wait()
+
+    task = asyncio.create_task(run(config))
+    ready = asyncio.create_task(wait_for_overlap())
+    try:
+        with anyio.fail_after(60):
+            done, _pending = await asyncio.wait((task, ready), return_when=asyncio.FIRST_COMPLETED)
+            if task in done and ready not in done:
+                await task
+                pytest.fail("Runner exited before both adjudication streams started")
+            await ready
+        live = backend.input_paths["suppression"].parent
+        assert not (live / "adjudication-complete.marker").exists()
+        if stop == "cancel":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            with anyio.fail_after(15):
+                assert await task == 0
+    finally:
+        if not ready.done():
+            ready.cancel()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, ready, return_exceptions=True)
+    assert all(event.is_set() for event in backend.closed.values())
+    assert not any(event.is_set() for event in backend.release.values())
+    assert backend.completed == []
+    deep = multi_stack_target / ".daydream/deep"
+    assert not (live / "adjudication-complete.marker").exists()
+    assert not (deep / "adjudication-complete.marker").exists()
+    assert all(json.loads(path.read_text())["unit"] != "arbiter"
+               for path in (deep.parent / "review-cache/entries").glob("*/manifest.json"))
+    if stop == "deadline":
+        coverage = saved_coverage(deep)
+        assert all(coverage.phases[phase]["status"] == "incomplete" for phase in ("arbiter", "suppression"))
+        allowances = [call["wall_budget_s"] for call in backend.calls
+                      if "you are the arbiter" in call["prompt"].lower()
+                      or "you are the suppression reviewer" in call["prompt"].lower()]
+        assert len(allowances) == 2 and all(0 < allowance <= 4 for allowance in allowances)
+        assert allowances[0] == pytest.approx(allowances[1], abs=0.25)

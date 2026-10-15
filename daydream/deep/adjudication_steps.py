@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -366,6 +368,7 @@ async def _run_arbiter(
     *,
     effort_pin: str | None,
     targets_by_group: dict[str, list[int]],
+    limiter: anyio.CapacityLimiter | None = None,
 ) -> tuple[dict[int, dict[str, Any]], dict[str, bool], list[str]]:
     """Fan one arbiter call per incomplete group out under the run's ceiling.
 
@@ -396,7 +399,8 @@ async def _run_arbiter(
 
     if not plan.sharded:
         async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
-            return await invoke(plan.groups[0]), {plan.groups[0].group_id: False}, []
+            async with limiter if limiter is not None else nullcontext():
+                return await invoke(plan.groups[0]), {plan.groups[0].group_id: False}, []
 
     dd = deep_state.dd
     group_verdicts: dict[str, dict[int, dict[str, Any]]] = {}
@@ -421,7 +425,9 @@ async def _run_arbiter(
     if pending:
         recorder = get_current_recorder()
         arbiter_backend = ctx.backend_for("arbiter")
-        limiter = anyio.CapacityLimiter(effective_fanout_concurrency(10, arbiter_backend))
+        limiter = limiter if limiter is not None else anyio.CapacityLimiter(
+            effective_fanout_concurrency(10, arbiter_backend)
+        )
         descriptors = tuple(f"deep-{group.group_id}" for group in pending)
         async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
             async with dispatch_scope(
@@ -565,10 +571,11 @@ async def _step_arbiter(ctx: FlowContext) -> None:
     """Scoped arbiter over high-severity/contested findings (#168).
 
     Two shapes: the unsharded path (forensic, or a selection that fits one
-    co-located group) is today's single serial call at ``xhigh``; the sharded
+    co-located group) uses one call at ``xhigh``; the sharded
     path fans one call per planned group out under the run's fan-out ceiling,
     applies one merged verdict mapping, and persists per-group artifacts so a
-    resume reruns only the incomplete groups.
+    resume reruns only the incomplete groups. Precision suppression overlaps
+    arbitration over a disjoint original selection, before serial reconciliation.
     """
     deep_state = DeepState(ctx.data)
     if ctx.pipeline().arbitration.enabled:
@@ -583,7 +590,9 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         adjudication_marker = DeepArtifact.ADJUDICATION_COMPLETE.at(dd)
         if ctx.pipeline().arbitration.enabled:
             structural_path = pool.structural_path
-            adjudicated = pool.records
+            # Both passes see the original records; host reconciliation starts only
+            # after their calls join, and must not mutate the pool's source envelopes.
+            adjudicated = deepcopy(pool.records)
             structural_ids = {record_uid(record) for record in pool.structural}
             rewrite_paths = list(pool.paths.values())
             structural_range = range(len(pool.language), len(adjudicated))
@@ -611,6 +620,31 @@ async def _step_arbiter(ctx: FlowContext) -> None:
             # Suppression exclusions use durable UIDs; indices shift and locations can collide.
             # Unidentified records are handled explicitly at the exclusion site.
             arbitrated_ids = {uid for i in arbiter_targets if (uid := record_uid(adjudicated[i]))}
+            suppression_targets: list[int] = []
+            if precision_mode:
+                # Structural findings and unidentified records cannot be suppressed.
+                # Snapshot this disjoint selection before arbitration can drop or revise.
+                suppression_exclude = [
+                    i for i, record in enumerate(adjudicated)
+                    if not (uid := record_uid(record)) or uid in arbitrated_ids or uid in structural_ids
+                ]
+                suppression_targets = select_suppression_targets(
+                    adjudicated, suppression_exclude,
+                    severity_classes=ctx.pipeline().suppression.severity_classes,
+                    confidence_classes=ctx.pipeline().suppression.confidence_classes,
+                )
+            suppression_uids = [record_uid(adjudicated[i]) for i in suppression_targets]
+            sup_verdicts: dict[int, dict[str, Any]] = {}
+
+            async def suppress(limiter: anyio.CapacityLimiter | None = None) -> dict[int, dict[str, Any]]:
+                async with limiter if limiter is not None else nullcontext():
+                    async with phase_scope(DaydreamPhase.DEEP, stage="suppression"):
+                        return await phase_suppression_review(
+                            ctx.backend_for("suppression"), ctx.work,
+                            selected_records=[adjudicated[i] for i in suppression_targets],
+                            **_review_context_kwargs(ctx, deep_state, strategy=ctx.strategy("suppression")),
+                        )
+
             arbiter_slice: dict[str, Any] = {
                 "sharded": False,
                 "reason": "no arbiter targets selected",
@@ -622,6 +656,9 @@ async def _step_arbiter(ctx: FlowContext) -> None:
             # Capture the subject before host reconciliation changes any records.
             arbiter_unit: ReviewReuseUnit | None = None
             plan: ArbiterPlan | None = None
+            verdicts: dict[int, dict[str, Any]] = {}
+            reused: dict[str, bool] = {}
+            failed_groups: list[str] = []
             if arbiter_targets:
                 route = deep_state.latency_route or PROFILE_ROUTES[FAIL_SAFE_LATENCY_PROFILE]
                 # Only sharded routes partition; an unsharded route may have a zero group bound.
@@ -683,10 +720,52 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                         if precision_mode:
                             deep_state.review_coverage.record_phase("suppression", "complete")
                         return
-                verdicts, reused, failed_groups = await _run_arbiter(
-                    ctx, deep_state, plan, arbiter_targets, adjudicated,
-                    effort_pin=effort_pin, targets_by_group=targets_by_group,
-                )
+                if suppression_targets:
+                    # The arbiter's individual shards share this capacity with
+                    # suppression; the parent arbiter task holds no extra slot.
+                    limiter = anyio.CapacityLimiter(min(
+                        effective_fanout_concurrency(10, ctx.backend_for("arbiter")),
+                        effective_fanout_concurrency(10, ctx.backend_for("suppression")),
+                    ))
+                    recorder = get_current_recorder()
+                    errors: dict[str, Exception] = {}
+
+                    async def arbitrate() -> None:
+                        nonlocal verdicts, reused, failed_groups
+                        assert plan is not None
+                        try:
+                            async with maybe_fork(recorder, "deep-arbiter", dispatch=dispatch):
+                                verdicts, reused, failed_groups = await _run_arbiter(
+                                    ctx, deep_state, plan, arbiter_targets, adjudicated,
+                                    effort_pin=effort_pin, targets_by_group=targets_by_group, limiter=limiter,
+                                )
+                        except Exception as exc:  # noqa: BLE001 -- preserve the phase's original exception below
+                            errors["arbiter"] = exc
+
+                    async def suppress_one() -> None:
+                        nonlocal sup_verdicts
+                        try:
+                            async with maybe_fork(recorder, "deep-suppression", dispatch=dispatch):
+                                sup_verdicts = await suppress(limiter)
+                        except Exception as exc:  # noqa: BLE001 -- preserve the phase's original exception below
+                            errors["suppression"] = exc
+
+                    async with dispatch_scope(
+                        recorder, phase=DaydreamPhase.DEEP, descriptors=("deep-arbiter", "deep-suppression"),
+                    ) as dispatch:
+                        async with anyio.create_task_group() as tg:
+                            tg.start_soon(arbitrate)
+                            tg.start_soon(suppress_one)
+                        # Preserve domain exception types while letting the dispatch
+                        # scope record failure; cancellation still propagates directly.
+                        for phase in ("arbiter", "suppression"):
+                            if phase in errors:
+                                raise errors[phase]
+                else:
+                    verdicts, reused, failed_groups = await _run_arbiter(
+                        ctx, deep_state, plan, arbiter_targets, adjudicated,
+                        effort_pin=effort_pin, targets_by_group=targets_by_group,
+                    )
                 adjudication_complete = not failed_groups
                 adjudicated, arbiter_outcomes = _apply_adjudication_verdicts(
                     adjudicated, arbiter_targets, verdicts,
@@ -724,28 +803,13 @@ async def _step_arbiter(ctx: FlowContext) -> None:
             # findings, dropping any it cannot confirm (fail-CLOSED). Excludes the
             # arbiter's targets; one batched call via the cheaper `suppression` key.
             if precision_mode:
-                # Exclude structural records (high-conviction by construction,
-                # #1103) and any record with no uid: suppression is fail-CLOSED, so
-                # unidentifiable records must be kept rather than droppable.
-                suppression_exclude = [
-                    i
-                    for i, r in enumerate(adjudicated)
-                    if not (uid := record_uid(r)) or uid in arbitrated_ids or uid in structural_ids
-                ]
-                suppression_targets = select_suppression_targets(
-                    adjudicated,
-                    suppression_exclude,
-                    severity_classes=ctx.pipeline().suppression.severity_classes,
-                    confidence_classes=ctx.pipeline().suppression.confidence_classes,
-                )
                 if suppression_targets:
-                    async with phase_scope(DaydreamPhase.DEEP, stage="suppression"):
-                        sup_verdicts = await phase_suppression_review(
-                            ctx.backend_for("suppression"),
-                            ctx.work,
-                            selected_records=[adjudicated[i] for i in suppression_targets],
-                            **_review_context_kwargs(ctx, deep_state, strategy=ctx.strategy("suppression")),
-                        )
+                    if not arbiter_targets:
+                        sup_verdicts = await suppress()
+                    # Arbiter dismissals may have compacted the list. Bind each
+                    # original suppression ordinal to its surviving UID, in order.
+                    positions = {record_uid(record): i for i, record in enumerate(adjudicated)}
+                    suppression_targets = [positions[uid] for uid in suppression_uids]
                     adjudicated, suppression_outcomes = _apply_adjudication_verdicts(
                         adjudicated, suppression_targets, sup_verdicts,
                         pass_name="suppression",

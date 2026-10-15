@@ -11,6 +11,7 @@ import stat
 from pathlib import Path
 from typing import Any, cast
 
+import anyio
 import pytest
 
 import daydream
@@ -20,6 +21,8 @@ from daydream.deep import reuse_store
 from daydream.phases import build_commit_message
 from daydream.review_profile import resolve_profile
 from daydream.runner import run
+from tests.deep_orchestrator.empty_synthesis_support import empty_review_config
+from tests.deep_orchestrator.precision_overlap_support import PrecisionOverlapBackend
 from tests.deep_orchestrator.support import (
     _arbiter_stacks,
     _count_merge_prompts,
@@ -192,6 +195,61 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
             os.close(report_fd)
     finally:
         os.close(parent_fd)
+
+
+async def test_precision_overlap_publishes_only_joined_whole_unit_and_restores_both_passes(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A warm precision run must restore the joined result without either adjudicator.
+
+    Existing whole-arbiter reuse coverage has no suppression sibling, so an entry
+    published as soon as arbitration finishes could silently restore unsuppressed records.
+    """
+    backend = PrecisionOverlapBackend(multi_stack_target, blocked=True)
+    backend.fanout_concurrency = 4
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+    config = empty_review_config(multi_stack_target, tmp_path / "cached-overlap.json", precision_mode=True,
+        latency_profile="balanced", review_profile=independent_alternatives_profile(), review_cache_enabled=True)
+
+    async def drive() -> None:
+        assert await run(config) == 0
+
+    with anyio.fail_after(60):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(drive)
+            await backend.started["arbiter"].wait()
+            await backend.started["suppression"].wait()
+            live = backend.input_paths["suppression"].parent
+            backend.release["arbiter"].set()
+            await backend.closed["arbiter"].wait()
+            await anyio.wait_all_tasks_blocked()
+            assert not backend.closed["suppression"].is_set()
+            assert not (live / "adjudication-complete.marker").exists()
+            assert _entry_count_for_unit(live, "arbiter") == 0
+            backend.release["suppression"].set()
+
+    deep = multi_stack_target / ".daydream/deep"
+    canonical = _records_bytes(multi_stack_target)
+    completion = (deep / "adjudication-complete.marker").read_bytes()
+    records = [row for name, content in canonical.items() if name.startswith("stack-")
+               for row in json.loads(content)["issues"]]
+    uids = {row["uid"] for row in records}
+    assert {"python:1", "react:2"} <= uids
+    assert not {"generic:1", "python:2", "react:1"} & uids
+    assert _entry_count_for_unit(deep, "arbiter") == 1
+    assert sorted(deep.glob("arbiter-group-*-complete.marker"))
+
+    backend.calls.clear()
+    backend.inputs.clear()
+    assert await run(config) == 0
+    assert backend.inputs == {}, "a whole-unit hit must skip both precision adjudicators"
+    assert _count_arbiter_prompts(backend.calls) == 0
+    assert _count_unit_prompts(backend.calls, "you are the suppression reviewer") == 0
+    assert _records_bytes(multi_stack_target) == canonical
+    assert (deep / "adjudication-complete.marker").read_bytes() == completion
+    assert cast(dict[str, Any], _latest_provenance(deep)["units"])["arbiter"]["outcome"] == "hit"
+    coverage = saved_coverage(deep)
+    assert all(coverage.phases[phase]["status"] == "complete" for phase in ("arbiter", "suppression"))
 
 async def test_configured_reviewer_policy_invalidates_reuse_and_records_resolved_identity(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,

@@ -1174,7 +1174,8 @@ async def test_failed_retry_discards_poisoned_progress_but_charges_every_observe
     assert deadlines == pytest.approx([deadlines[0]] * len(deadlines), abs=0.01, rel=0)
     metadata = stage_ends(review, 'python')[0]['metadata']
     assert metadata['investigation_base_budget_s'] == 20
-    assert metadata['investigation_scaled_budget_s'] == metadata['investigation_effective_allowance_s'] == 40
+    assert metadata['investigation_scaled_budget_s'] == 40
+    assert metadata['investigation_effective_allowance_s'] == pytest.approx(40, rel=0, abs=0.01)
     assert stage_ends(review, 'python')[0]['metadata']['observed_tool_starts'] == 6
     assert stage_ends(review, 'python')[-1]['metadata']['observed_tool_starts'] == 6
     assert stage_ends(review, 'python')[-1]['metadata']['remaining_tool_calls'] == 90

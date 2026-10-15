@@ -522,6 +522,12 @@ latency_profile = "fast"
 
 Per-stack review sharding follows the independent [review-budget rules](#review-budgets).
 
+In precision mode, disjoint arbitration and suppression calls can overlap under
+the shared backend fan-out ceiling, including pending arbiter shards. Targets
+come from the original records; results are joined and applied by stable record
+UID before publishing adjudicated records. With capacity for only one call,
+the passes serialize.
+
 A profile sets an effort *floor*, never a ceiling: a security-, concurrency-,
 persistence-, interface-, or migration-shaped diff raises the route, so a
 sensitive diff is never routed cheap. An unrecognised name **fails safe upward**
