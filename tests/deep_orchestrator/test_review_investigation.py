@@ -40,6 +40,7 @@ class StagedBackend(EmptyReviewBackend):
     """A provider that remembers nothing beyond the current request."""
 
     supports_review_instructions = True
+    supports_budget_preamble = False
 
     def __init__(self, repo: Path) -> None:
         super().__init__(repo, forbid_merge=False, forbid_supervise=False)
@@ -76,6 +77,8 @@ class StagedBackend(EmptyReviewBackend):
             yield ResultEvent(structured_output=output, continuation=None)
             return
         kwargs.pop('review_instructions', None)
+        kwargs.pop('wall_budget_s', None)
+        kwargs.pop('tool_call_budget', None)
         async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
@@ -819,6 +822,128 @@ async def test_unsuccessful_later_stage_retains_only_prior_admitted_findings(
         assert timer.monotonic() >= dispatch_deadlines[0]
 
 
+@pytest.mark.parametrize(('local_s', 'pipeline_s', 'reason', 'bound'), [
+    (480, 2000, 'host_wall_budget_exhaustion', 'local'),
+    (900, 2000, None, 'local'),
+    (900, 600, 'host_pipeline_budget_exhaustion', 'pipeline'),
+])
+async def test_configured_investigation_time_changes_completion_without_renewing_stage_deadlines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_s: int, pipeline_s: int,
+    reason: str | None, bound: str,
+) -> None:
+    """The same two-stage work distinguishes local configuration from the shared pipeline cap."""
+    review = many_file_review(tmp_path, monkeypatch, count=5)
+    review.backend.fanout_concurrency = 1
+    timer = FakeClock(monotonic_value=clock.monotonic()).install(monkeypatch)
+    deadlines: list[float] = []
+
+    @review.backend.script('python')
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        allowance = re.search(r'Reviewer dispatch-time snapshot: hard wall allowance: ([\d.e+-]+) seconds',
+                              review.backend.calls[-1]['prompt'])
+        assert allowance is not None
+        deadlines.append(timer.monotonic() + float(allowance[1]))
+        if not stage['progress']:
+            assert stage['remaining_tool_calls'] == 48
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+        else:
+            assert stage['closed_decisions'][0]['conclusion'].startswith('Grounded defect: ')
+            assert stage['remaining_tool_calls'] < 48
+        yield from read_events(review.repo, stage['assigned_files'][0], event_id=f'read-{len(deadlines)}')
+        timer.advance(300)
+        yield TextEvent(text='Assigned source investigation completed.')
+
+    assert await review.run(review_profile=_profile_with_pipeline(
+        reviewer_investigation_budget_s=local_s, review_wall_budget_s=pipeline_s)) == 0
+    data = review.load()
+    assert [finding['title'] for finding in data['findings']] == ['Grounded defect']
+    scope = scopes(data)['python']
+    assert scope['status'] == ('incomplete' if reason else 'complete')
+    assert scope['reason_codes'] == ([reason] if reason else [])
+    assert scope['partial_evidence'] is bool(reason)
+    assert len(deadlines) == 2
+    assert deadlines[1] == pytest.approx(deadlines[0], abs=0.01)
+    if bound == 'local':
+        assert all(scope['status'] == 'complete' for name, scope in scopes(data).items() if name != 'python')
+    events = stage_ends(review, 'python')
+    assert [event['metadata']['admitted'] for event in events] == [True, reason is None]
+    for event in events:
+        metadata = event['metadata']
+        assert metadata['investigation_base_budget_s'] == metadata['investigation_scaled_budget_s'] == local_s
+        assert metadata['investigation_limit'] == (
+            'reviewer_investigation_budget' if bound == 'local' else 'pipeline_budget')
+        assert metadata['investigation_effective_allowance_s'] == pytest.approx(
+            local_s if bound == 'local' else pipeline_s * 0.8)
+    saved = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
+    assert next(item for item in saved['stack_outcomes'] if item['scope_id'] == 'python') == scope
+    if reason:
+        assert ('pipeline_budget_exceeded' if bound == 'pipeline' else 'wall_budget_exceeded') in (
+            saved['diagnostics']['scopes']['python'])
+        assert events[-1]['metadata']['retained_findings'] == 1
+
+
+async def test_zero_configured_investigation_time_dispatches_no_review_and_reports_incomplete_coverage(
+    investigation: InvestigationRun, ext_dir: ExtDir,
+) -> None:
+    """Zero disables staged investigation rather than silently restoring its default allowance."""
+    ext_dir.write_module(
+        "def forbidden(**kw): raise AssertionError('Zero allowance dispatched a review prompt builder')\n"
+        "def register(r): r.override_prompt('per-stack', forbidden)\n"
+    )
+    assert await investigation.run(review_profile=_profile_with_pipeline(reviewer_investigation_budget_s=0)) == 0
+    data = investigation.load()
+    assert investigation.backend.stages == []
+    assert data['findings'] == [] and data['review_warnings']
+    assert data['terminal_result']['analysis_state'] == 'failed'
+    assert all(scope['status'] == 'incomplete' and scope['partial_evidence'] is False
+               and scope['reason_codes'] == ['host_wall_budget_exhaustion'] for scope in scopes(data).values())
+    assert 'Review incomplete' in (investigation.repo / '.review-output.md').read_text()
+
+
+async def test_stage_preparation_cannot_renew_the_original_invocation_wall_clamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir,
+) -> None:
+    """An extension's preparation time spends the same invocation cap as dispatched investigation."""
+    review = many_file_review(tmp_path, monkeypatch, count=5)
+    review.backend.fanout_concurrency = 1
+    elapsed = tmp_path / 'preparation-elapsed.txt'
+    elapsed.write_text('0')
+    timer = FakeClock(monotonic_value=clock.monotonic())
+    monkeypatch.setattr(clock, 'monotonic', lambda: timer.monotonic() + float(elapsed.read_text()))
+    ext_dir.write_module(
+        "from pathlib import Path\n"
+        "from daydream.deep.prompts import build_per_stack_prompt\n"
+        "def scoped(**kw):\n"
+        "    if kw['review_stage']['scope_id'] == 'python':\n"
+        f"        elapsed = Path({str(elapsed)!r})\n"
+        "        elapsed.write_text(str(float(elapsed.read_text()) + 2000))\n"
+        "    return build_per_stack_prompt(**kw)\n"
+        "def register(r): r.override_prompt('per-stack', scoped)\n"
+    )
+
+    @review.backend.script('python')
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        assert stage['progress'] == [], 'A later stage dispatched after preparation spent the original cap'
+        assert 'hard wall allowance: 1600 seconds' in review.backend.calls[-1]['prompt']
+        yield from read_events(review.repo, 'api.py', event_id='admitted-read')
+        output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+
+    data = await review.finish('python', reason='host_wall_budget_exhaustion', findings=('Grounded defect',),
+                              review_profile=_profile_with_pipeline(
+                                  reviewer_investigation_budget_s=10000, review_wall_budget_s=10000))
+    assert float(elapsed.read_text()) == 4000
+    assert len([stage for stage in review.backend.stages if stage['scope_id'] == 'python']) == 1
+    events = stage_ends(review, 'python')
+    assert [event['metadata']['admitted'] for event in events] == [True, False]
+    for event in events:
+        assert event['metadata']['investigation_effective_allowance_s'] == pytest.approx(3600, rel=0, abs=0.01)
+        assert event['metadata']['investigation_limit'] == 'invocation_wall_budget'
+    assert events[-1]['metadata']['retained_findings'] == 1
+    assert scopes(data)['python']['partial_evidence'] is True
+    saved = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
+    assert 'wall_budget_exceeded' in saved['diagnostics']['scopes']['python']
+
+
 @pytest.mark.parametrize('decision', ['rejected', 'confirmed', 'unresolved'])
 async def test_unresolved_discovery_reaches_triage_with_spare_capacity_and_retains_confirmed_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decision: str) -> None:
@@ -1000,6 +1125,10 @@ async def test_failed_retry_discards_poisoned_progress_but_charges_every_observe
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     review = many_file_review(tmp_path, monkeypatch, lines=70)
     backend = review.backend
+    backend.supports_budget_preamble = True
+    timer = FakeClock(monotonic_value=clock.monotonic()).install(monkeypatch)
+    patch_retry_sleep(monkeypatch, timer)
+    deadlines: list[float] = []
     monkeypatch.setenv('DAYDREAM_PI_RETRY_ATTEMPTS', '1')
     monkeypatch.setenv('DAYDREAM_PI_RETRY_BASE_DELAY_S', '0')
     monkeypatch.setenv('DAYDREAM_PI_RETRY_MAX_DELAY_S', '0')
@@ -1010,6 +1139,9 @@ async def test_failed_retry_discards_poisoned_progress_but_charges_every_observe
 
     def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
         nonlocal attempts
+        if stage['scope_id'] == 'python':
+            deadlines.append(timer.monotonic() + backend.calls[-1]['wall_budget_s'])
+            timer.advance(5)
         if stage['scope_id'] == 'python' and not stage['progress']:
             attempts += 1
             # Starts arrive together before any completion, as parallel members may.
@@ -1035,8 +1167,14 @@ async def test_failed_retry_discards_poisoned_progress_but_charges_every_observe
             assert stage['candidates'] == []
 
     backend.stage_response = response
-    await review.finish('python')
+    await review.finish('python', review_profile=_profile_with_pipeline(
+        reviewer_investigation_budget_s=20, review_wall_budget_s=2000))
     assert attempts == 2
+    assert len(deadlines) > 2
+    assert deadlines == pytest.approx([deadlines[0]] * len(deadlines), abs=0.01, rel=0)
+    metadata = stage_ends(review, 'python')[0]['metadata']
+    assert metadata['investigation_base_budget_s'] == 20
+    assert metadata['investigation_scaled_budget_s'] == metadata['investigation_effective_allowance_s'] == 40
     assert stage_ends(review, 'python')[0]['metadata']['observed_tool_starts'] == 6
     assert stage_ends(review, 'python')[-1]['metadata']['observed_tool_starts'] == 6
     assert stage_ends(review, 'python')[-1]['metadata']['remaining_tool_calls'] == 90

@@ -11,6 +11,7 @@ from daydream.agent import run_agent
 from daydream.backends import AgentEvent, ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent, TurnEndEvent
 from daydream.prompt_budget import SanctionedInputUnavailable, inline_context_file, prepare_sanctioned_inputs
 from daydream.review_budget import (
+    ReviewInvestigationBudget,
     ReviewLimits,
     review_deadline,
     review_deadline_scope,
@@ -46,12 +47,23 @@ def test_large_diff_expands_review_allowances_without_changing_small_reviews() -
     with review_deadline_scope(2700, diff=small, scale_deadline=True):
         assert review_limits_for_scope(ReviewLimits()) == ReviewLimits()
 
-def test_explicit_review_deadline_remains_exact_for_large_diff(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(('base_s', 'invocation_s', 'expected_s'), [
+    (2, 20, 8), (9, 20, 12), (9, 5, 5), (0, 20, 0),
+])
+def test_explicit_review_deadline_remains_exact_for_large_diff(
+    monkeypatch: pytest.MonkeyPatch, base_s: int, invocation_s: int, expected_s: int,
+) -> None:
+    """A configured local base scales once while explicit pipeline and caller clamps stay exact."""
     clock = FakeClock().install(monkeypatch)
     large = "+line\n" * 6_500
     with review_deadline_scope(15, diff=large, scale_deadline=False):
-
         assert review_deadline(discovery=False) == clock.monotonic() + 15
+        assert review_deadline(discovery=True) == clock.monotonic() + 12
+        budget = ReviewInvestigationBudget.from_limits(
+            ReviewLimits(investigation_s=base_s), deadline=clock.monotonic() + invocation_s)
+        assert budget.limits.investigation_s == base_s * 4
+        assert budget.limits.tool_calls == budget.remaining_tool_calls == 192
+        assert budget.deadline == clock.monotonic() + expected_s
 
 async def test_large_review_can_complete_after_old_time_and_tool_caps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

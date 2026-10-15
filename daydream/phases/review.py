@@ -426,6 +426,7 @@ async def phase_per_stack_reviews(
     run_context: RunContext | None = None,
     reuse_cache: ReuseCache | None = None,
     phase_identity: PhaseIdentity | None = None,
+    review_limits: ReviewLimits | None = None,
     coverage: ReviewCoverage,
 ) -> tuple[dict[str, Path], dict[str, str]]:
     """Run scoped per-stack reviews under the backend fan-out limit and record each result.
@@ -582,7 +583,7 @@ async def phase_per_stack_reviews(
                         recorder, f"deep-{stack_name}", dispatch=dispatch,
                     ):
                         investigation = ReviewInvestigation(stack, input_factory.full_diff, coverage.revision.to_dict(),
-                            assignment_batches=input_factory.assignment_batches)
+                            assignment_batches=input_factory.assignment_batches, limits=review_limits)
                         with stack_scope(base_stack):
                             structured, budget_reason = await investigation.run(backend, work.repo, build_stage_prompt,
                                 stage_inputs=input_factory.prepare,

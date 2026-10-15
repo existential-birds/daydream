@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **review:** configure each staged reviewer's investigation time through `pipeline.reviewer_investigation_budget_s` in a review profile, retaining the 480-second default, existing tool allowances and shared deadline limits; zero skips investigation with incomplete coverage ([#1535](https://github.com/existential-birds/daydream/issues/1535)).
+
 ### Security
 
 - Publish the supported-version, private vulnerability reporting, and coordinated disclosure policy ([#933](https://github.com/existential-birds/daydream/issues/933)).

@@ -724,9 +724,21 @@ See [overloaded-stack activation evidence](docs/overloaded-stack-sharding.md) fo
 exact frozen plans, repeated live quality/latency comparisons, aggregate allowances
 and measurement limitations.
 
-Per-stack reviewers share eight minutes and 48 observed tool starts across stages and retries. Language/generic
-assignments prefer nearby complete files, at most four per batch, within 24,576 bytes for exact paths or 12,288 bytes
-inline, including wrappers, scoped diff/index and snapshot bindings. Exact assignment pointers do not consume the
+Each staged per-stack reviewer, including Structure, has a base investigation allowance of 480 seconds and 48
+observed tool starts shared across its stages and retries. Set `pipeline.reviewer_investigation_budget_s` in the
+review-profile TOML to a non-negative integer to change investigation time independently of the whole-review
+`pipeline.review_wall_budget_s`. Omission keeps 480 seconds; zero dispatches no investigation and records incomplete
+coverage. The workload multiplier above applies exactly once to this base investigation allowance and the unchanged
+48-start base allowance, including with an explicit profile. The resulting reviewer deadline remains clamped by
+invocation limits and the shared pipeline deadline, including its synthesis reserve. An explicit profile's
+whole-review budget remains its exact configured value. Preparation, stages and retries share the original absolute
+reviewer deadline; increasing its allowance cannot extend an earlier pipeline deadline.
+The canonical profile and its digest include this setting, so changing it invalidates incompatible completed-review
+reuse. Stage trajectory metadata records the base and scaled investigation budgets, the effective allowance at
+reviewer start and its controlling limit; request diagnostics report the remaining enforced allowance at dispatch.
+
+Language/generic assignments prefer nearby complete files, at most four per batch, within 24,576 bytes for exact paths
+or 12,288 bytes inline, including wrappers, scoped diff/index and snapshot bindings. Exact assignment pointers do not consume the
 separate inline allowance for shared bytes and their wrappers. Oversized files split into hunks and ordered
 continuations with old/new ranges and exact fragment offsets; every required part must succeed for its file to be
 complete. Required assignments take priority over separately bounded context.
