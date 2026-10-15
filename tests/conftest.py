@@ -432,7 +432,7 @@ def dataset_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     @wraps(initialize)
     def isolated_store(self: LocalRecordStore, root: Path, **kwargs: Any) -> None:
-        if root.expanduser().resolve() == (Path.home() / ".daydream" / "dataset").resolve():
+        if Path(root).expanduser().absolute() == (Path.home() / ".daydream" / "dataset").absolute():
             root = destination
         initialize(self, root, **kwargs)
 
