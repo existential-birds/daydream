@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from daydream.deep import artifacts
 from daydream.deep.artifacts import (
+    DeepArtifact,
     check_deep_artifacts,
 )
 
@@ -61,16 +63,75 @@ def test_check_deep_artifacts_rejects_mismatched_diff_key(deep_artifacts_dir: Pa
         check_deep_artifacts("merge", deep_artifacts_dir,
                              record_paths=[deep_artifacts_dir / "stack-python-records.json"], current_diff_sha="bbbb")
 
-def test_check_deep_artifacts_rejects_prerequisites_older_than_matching_key(deep_artifacts_dir: Path,) -> None:
-    """A matching key cannot validate artifacts left from an earlier run."""
-    _seed_merge_stage(deep_artifacts_dir)
-    key_file = deep_artifacts_dir / "diff-key"
+def _seed_fresh_resume_artifacts(deep_dir: Path) -> int:
+    """Seed every resume stage with artifacts exactly as new as its matching key."""
+    _seed_merge_stage(deep_dir)
+    (deep_dir / "merged-items.json").write_text('{"items": []}')
+    key_file = deep_dir / "diff-key"
     key_file.write_text("bbbb")
-    key_mtime = key_file.stat().st_mtime_ns + 1_000_000_000
-    os.utime(key_file, ns=(key_mtime, key_mtime))
-    with pytest.raises(FileNotFoundError, match="different diff"):
-        check_deep_artifacts("merge", deep_artifacts_dir,
-                             record_paths=[deep_artifacts_dir / "stack-python-records.json"], current_diff_sha="bbbb")
+    key_mtime = 1_700_000_000_000_000_000
+    for path in deep_dir.iterdir():
+        os.utime(path, ns=(key_mtime, key_mtime))
+    return key_mtime
+
+
+@pytest.mark.parametrize(("stage", "stale_name"), [
+    ("per-stack", "intent.md"),
+    ("per-stack", "alternatives.json"),
+    ("merge", "intent.md"),
+    ("merge", "alternatives.json"),
+    ("merge", "stack-python-records.json"),
+    ("fix", "merged-items.json"),
+])
+def test_check_deep_artifacts_rejects_prerequisites_older_than_matching_key(
+    deep_artifacts_dir: Path, stage: str, stale_name: str,
+) -> None:
+    """Each predecessor must be current even when the key and every sibling are fresh."""
+    key_mtime = _seed_fresh_resume_artifacts(deep_artifacts_dir)
+    stale_path = deep_artifacts_dir / stale_name
+    os.utime(stale_path, ns=(key_mtime - 1_000_000_000, key_mtime - 1_000_000_000))
+    record_paths = [deep_artifacts_dir / "stack-python-records.json"]
+    with pytest.raises(FileNotFoundError, match="prerequisite artifacts predate") as excinfo:
+        check_deep_artifacts(stage, deep_artifacts_dir, record_paths=record_paths, current_diff_sha="bbbb")
+    assert f"  - prerequisite artifacts predate {deep_artifacts_dir / 'diff-key'}" in str(excinfo.value)
+    assert "Re-run without --start-at to regenerate them." in str(excinfo.value)
+
+    os.utime(stale_path, ns=(key_mtime, key_mtime))
+    check_deep_artifacts(stage, deep_artifacts_dir, record_paths=record_paths, current_diff_sha="bbbb")
+
+
+@pytest.mark.parametrize(("stage", "earlier"), [
+    ("ttt", "ttt"),
+    ("per-stack", "ttt"),
+    ("merge", "per-stack"),
+    ("fix", "merge"),
+])
+def test_check_deep_artifacts_added_prerequisite_requires_presence_and_freshness(
+    deep_artifacts_dir: Path, monkeypatch: pytest.MonkeyPatch, stage: str, earlier: str,
+) -> None:
+    """Declaring a predecessor must gate resume without a second freshness inventory."""
+    key_mtime = _seed_fresh_resume_artifacts(deep_artifacts_dir)
+    monkeypatch.setitem(
+        artifacts._DEEP_STAGE_PREREQS, stage, [*artifacts._DEEP_STAGE_PREREQS[stage], DeepArtifact.DIAGRAM],
+    )
+    prerequisite = deep_artifacts_dir / "diagram.json"
+    record_paths = [deep_artifacts_dir / "stack-python-records.json"]
+    with pytest.raises(FileNotFoundError) as excinfo:
+        check_deep_artifacts(stage, deep_artifacts_dir, record_paths=record_paths, current_diff_sha="bbbb")
+    assert str(excinfo.value) == (
+        f"Cannot resume at stage '{stage}' -- missing artifacts:\n\n"
+        f"  - {prerequisite}\n\n"
+        f"Re-run from an earlier stage:\n"
+        f"  daydream --start-at {earlier}"
+    )
+
+    prerequisite.write_text("{}")
+    os.utime(prerequisite, ns=(key_mtime - 1_000_000_000, key_mtime - 1_000_000_000))
+    with pytest.raises(FileNotFoundError, match="prerequisite artifacts predate"):
+        check_deep_artifacts(stage, deep_artifacts_dir, record_paths=record_paths, current_diff_sha="bbbb")
+
+    os.utime(prerequisite, ns=(key_mtime, key_mtime))
+    check_deep_artifacts(stage, deep_artifacts_dir, record_paths=record_paths, current_diff_sha="bbbb")
 
 def test_check_deep_artifacts_without_sha_skips_the_freshness_gate(deep_artifacts_dir: Path,) -> None:
     """Omitting current_diff_sha preserves the presence-only behavior."""
