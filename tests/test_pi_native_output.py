@@ -95,7 +95,9 @@ async def test_native_pi_live_budget_counts_batch_failures_and_replaces_generati
     monkeypatch.setenv('PI_CODING_AGENT_DIR', str(config))
     for name in ('PI_API_KEY', 'NOUS_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'ANTHROPIC_API_KEY'):
         monkeypatch.delenv(name, raising=False)
-    (tmp_path / 'source.txt').write_text('Captured source\n')
+    source = 'Captured source\n'
+    (tmp_path / 'source.txt').write_text(source)
+    prompt = 'Investigate the supplied source and submit the result.'
     requests: list[dict[str, Any]] = []
     output = {'verdict': 'complete', 'findings': []}
     batches: list[list[tuple[str, str, dict[str, Any]]]] = [
@@ -134,11 +136,19 @@ async def test_native_pi_live_budget_counts_batch_failures_and_replaces_generati
                         'contextWindow': 32768, 'maxTokens': 8192}]}}}))
         monkeypatch.setenv('PI_PROVIDER', 'output-fixture')
         events = [event async for event in PiBackend(model='output-model').execute(
-            tmp_path, 'Investigate the supplied source and submit the result.', output_schema=_SCHEMA,
+            tmp_path, prompt, output_schema=_SCHEMA,
             read_only=True, persist_session=False, tool_call_budget=allowance)]
 
     assert len(requests) == 4
-    for request, spent in zip(requests, [0, 3, 4, 6], strict=True):
+    for index, (request, spent) in enumerate(zip(requests, [0, 3, 4, 6], strict=True)):
+        assert any(prompt in json.dumps(message) for message in request['messages'] if message['role'] == 'user')
+        history = {message['tool_call_id']: message['content'] for message in request['messages']
+                   if message['role'] == 'tool'}
+        previous = [call for batch in batches[:index] for call in batch]
+        assert set(history) == {call_id for call_id, _, _ in previous}
+        for call_id, name, arguments in previous:
+            if name == 'read' and arguments['path'] == 'source.txt':
+                assert history[call_id] == source
         notes = [message for message in request['messages']
                  if 'Live native Pi attempt budget:' in json.dumps(message)]
         assert len(notes) == (0 if allowance is None else 1)
