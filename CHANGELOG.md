@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Publish the supported-version, private vulnerability reporting, and coordinated disclosure policy ([#933](https://github.com/existential-birds/daydream/issues/933)).
+
 ### Fixed
 
 - **phases:** restore historical prompt-helper imports through `daydream.phases`, preserving the canonical prompt and schema objects for forks ([#1230](https://github.com/existential-birds/daydream/issues/1230)).
