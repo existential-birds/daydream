@@ -544,7 +544,10 @@ def _capturing_env(executed: Executed) -> type:
     return Env
 
 
-def test_local_harbor_task_with_fake_backend(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,) -> None:
+def test_local_harbor_task_with_fake_backend(
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
+    operator_dataset_sentinel: Path, dataset_store: Path, dataset_hub: Any,
+) -> None:
     """Compile and run a local Harbor trial through the real agent and entrypoint.
 
     The fake environment executes setup and passes the allowlisted child mapping
@@ -588,8 +591,16 @@ def test_local_harbor_task_with_fake_backend(tmp_path: Path, fake_gh: FakeGh, mo
     }
     _assert_host_secrets_absent(executed.child, claude=False)  # fail-closed: host secrets never reach the child
 
+    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "fixture/ambient-trajectories")
     rc = asyncio.run(entrypoint.main(executed.child))
     assert rc == 0
+    from daydream.dataset import LocalRecordStore
+    from tests.harness.dataset import read_records
+
+    records = read_records(LocalRecordStore(dataset_store))
+    assert len(records.runs) == 1 and records.runs[0]["outcome"] == "success"
+    assert dataset_hub.commits
+    assert len(list((operator_dataset_sentinel / "runs").glob("*.jsonl"))) == 1
 
     artifact = json.loads((tmp_path / "logs" / "artifacts" / "review.json").read_text())
     parsed = _assert_published_artifact(artifact, key)
@@ -615,7 +626,10 @@ def test_local_harbor_task_with_fake_backend(tmp_path: Path, fake_gh: FakeGh, mo
         for f in copied_gold
     ] == [(f.finding_id, f.title, f.body, f.severity, f.path, f.start_line, f.end_line) for f in host_gold]
 
-def test_agent_run_accepts_claude_and_invokes_entrypoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_agent_run_accepts_claude_and_invokes_entrypoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    operator_dataset_sentinel: Path, dataset_store: Path, dataset_hub: Any,
+) -> None:
     """Claude's allowed credential survives into a successful entrypoint review.
 
     The captured child mapping is executed directly, exposing incorrect backend scrubbing.
@@ -662,8 +676,16 @@ def test_agent_run_accepts_claude_and_invokes_entrypoint(tmp_path: Path, monkeyp
     assert executed.child["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
     _assert_host_secrets_absent(executed.child, claude=True)
 
+    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "fixture/ambient-trajectories")
     rc = asyncio.run(entrypoint.main(executed.child))
     assert rc == 0
+    from daydream.dataset import LocalRecordStore
+    from tests.harness.dataset import read_records
+
+    records = read_records(LocalRecordStore(dataset_store))
+    assert len(records.runs) == 1 and records.runs[0]["outcome"] == "success"
+    assert dataset_hub.commits
+    assert len(list((operator_dataset_sentinel / "runs").glob("*.jsonl"))) == 1
 
     artifact = json.loads((tmp_path / "logs" / "artifacts" / "review.json").read_text())
     _assert_published_artifact(artifact, case_id)

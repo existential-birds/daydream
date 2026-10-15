@@ -6,6 +6,7 @@ import sys
 import tempfile
 import tomllib
 from collections.abc import Callable, Iterator
+from functools import wraps
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -414,6 +415,62 @@ def _isolate_github_cli_env(
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("GH_CONFIG_DIR", str(tmp_path / "gh-config"))
+
+
+@pytest.fixture(autouse=True)
+def dataset_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect only the home-store fallback; explicit test stores stay real.
+
+    Patch the existing store constructor so aliases imported during collection
+    are covered too. Keep the runner's capture selection and serialization real.
+    A sibling stays outside temporary repositories rooted at tmp_path itself.
+    """
+    from daydream.dataset import LocalRecordStore
+
+    destination = tmp_path.parent / f"{tmp_path.name}-dataset"
+    initialize = LocalRecordStore.__init__
+
+    @wraps(initialize)
+    def isolated_store(self: LocalRecordStore, root: Path, **kwargs: Any) -> None:
+        if Path(root).expanduser().absolute() == (Path.home() / ".daydream" / "dataset").absolute():
+            root = destination
+        initialize(self, root, **kwargs)
+
+    monkeypatch.setattr(LocalRecordStore, "__init__", isolated_store)
+    return destination
+
+
+@pytest.fixture(autouse=True)
+def dataset_hub(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Do not inherit capture destinations or credentials; upload only offline.
+
+    Tests can explicitly select a fake destination or replace this adapter with
+    their own offline failure injection. SDK contract tests patch _load_hf.
+    """
+    from tests.harness.dataset_hub import FakeDatasetHub
+
+    monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    hub = FakeDatasetHub()
+    monkeypatch.setattr("daydream.dataset_hub.HfDatasetHub", lambda: hub)
+    return hub
+
+
+@pytest.fixture
+def operator_dataset_sentinel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """A valid temporary operator store must retain exactly its original bytes."""
+    from daydream.dataset import LocalRecordStore
+    from tests.harness.dataset import run_record
+
+    home = tmp_path / "operator-home"
+    sentinel = home / ".daydream" / "dataset"
+    # Seed before changing home, so the harness does not redirect this store.
+    LocalRecordStore(sentinel).commit_run(run_record("operator-sentinel"))
+    original = {path.relative_to(sentinel): path.read_bytes() for path in sentinel.rglob("*") if path.is_file()}
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "fixture/ambient-trajectories")
+    yield sentinel
+    assert {path.relative_to(sentinel): path.read_bytes() for path in sentinel.rglob("*") if path.is_file()} == original
 
 
 @pytest.fixture(autouse=True)
