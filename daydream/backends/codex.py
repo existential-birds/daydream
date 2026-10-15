@@ -26,6 +26,7 @@ from typing import Any
 
 from daydream import git_ops
 from daydream.backends import (
+    DEFAULT_CODEX_TERMINAL_DRAIN_TIMEOUT_S,
     AgentEvent,
     BackendExecutionInput,
     CodexRequestConfig,
@@ -54,7 +55,13 @@ from daydream.backends._transport import (
     teardown,
     write_temp_json_schema,
 )
-from daydream.backends.lifecycle import CodexPublicEventKind, LifecycleStage, current_backend_lifecycle
+from daydream.backends.lifecycle import (
+    BackendLifecycleFailure,
+    CodexPublicEventKind,
+    LifecycleStage,
+    current_backend_lifecycle,
+    lifecycle_failure_diagnostic,
+)
 from daydream.pricing import ModelPrice, compute_cost_from_totals, load_user_prices, resolve_prices
 from daydream.trajectory import redact_structured_text
 
@@ -422,6 +429,24 @@ class CodexError(Exception):
             self.retryable = retryable
 
 
+class CodexLifecycleError(CodexError):
+    """Host lifecycle failure with a trusted closed-field review projection."""
+
+    def __init__(self, failure: BackendLifecycleFailure):
+        self.lifecycle_failure = failure
+        super().__init__(lifecycle_failure_diagnostic(failure) or "Codex lifecycle diagnostic unavailable",
+                         category="TIMEOUT",
+                         retryable=not failure.terminal_received if failure.stage == "process_reap" else False)
+
+
+def codex_lifecycle_diagnostic(error: BaseException) -> str | None:
+    """Project only this adapter's exact host error; reject polymorphic payloads."""
+    try:
+        return lifecycle_failure_diagnostic(error.lifecycle_failure) if type(error) is CodexLifecycleError else None
+    except Exception:  # noqa: BLE001 - malformed diagnostic state must not replace a handled backend failure
+        return None
+
+
 def _file_change_events(
     item: dict[str, Any],
     execution_cwd: Path,
@@ -515,7 +540,8 @@ class CodexBackend:
         self.reasoning_effort = reasoning_effort
         self._execution_input = execution_input
         self._terminal_drain_timeout_s = execution_input.codex_terminal_drain_timeout_s if execution_input else (
-            _parsed_positive_float(os.environ, "DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S", 5.0))
+            _parsed_positive_float(os.environ, "DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S",
+                                   DEFAULT_CODEX_TERMINAL_DRAIN_TIMEOUT_S))
         self._process_reap_timeout_s = execution_input.codex_process_reap_timeout_s if execution_input else (
             _parsed_positive_float(os.environ, "DAYDREAM_CODEX_PROCESS_REAP_TIMEOUT_S", 5.0))
         self._cleanup_timeout_s = execution_input.codex_cleanup_timeout_s if execution_input else (
@@ -618,13 +644,22 @@ class CodexBackend:
         terminal_deadline: float | None = None
         current_turn_completed = False
         cleaned_up = False
+        observed_stdout_eof = False
+
+        def _stdout_eof() -> None:
+            nonlocal observed_stdout_eof
+            observed_stdout_eof = True
+            if lifecycle is not None:
+                lifecycle.stdout_eof()
+
+        def _lifecycle_error(stage: LifecycleStage, allowance_s: float) -> CodexLifecycleError:
+            return CodexLifecycleError(BackendLifecycleFailure(
+                stage, allowance_s, terminal_deadline is not None, observed_stdout_eof,
+                transport.returncode if transport is not None else None))
 
         def _line_timeout() -> float | None:
             if terminal_deadline is not None:
-                remaining = terminal_deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    raise StreamStalledError("codex", self._terminal_drain_timeout_s)
-                return remaining
+                return max(0.0, terminal_deadline - asyncio.get_running_loop().time())
             return idle_timeout_s
         non_json_lines: list[str] = []  # redacted/capped process-exit excerpts
         unmatched_seq = 0  # monotonic source for orphaned tool-result ids
@@ -821,13 +856,13 @@ class CodexBackend:
                 spawn_pending=lifecycle.spawn_pending if lifecycle is not None else None,
                 spawn_completed=lifecycle.spawn_completed if lifecycle is not None else None,
                 raw_line_received=lifecycle.raw_line_received if lifecycle is not None else None,
-                stdout_eof=lifecycle.stdout_eof if lifecycle is not None else None,
+                stdout_eof=_stdout_eof,
                 process_exited=lifecycle.process_exited if lifecycle is not None else None,
             )
             self._transports.append(transport)
             await transport.start()
 
-            async for raw_line in transport.lines(_line_timeout):
+            async for raw_line in transport.lines(_line_timeout, drain_ready_on_expiry=True):
                 try:
                     event = json.loads(raw_line)
                 except json.JSONDecodeError:
@@ -1156,8 +1191,7 @@ class CodexBackend:
             except TimeoutError as exc:
                 if lifecycle is not None:
                     lifecycle.expiry("process_reap")
-                raise CodexError("Codex process_reap allowance expired before actual child exit",
-                                 category="TIMEOUT", retryable=terminal_deadline is None) from exc
+                raise _lifecycle_error("process_reap", self._process_reap_timeout_s) from exc
 
             for diagnostic in _take_final_diagnostics():
                 yield diagnostic
@@ -1185,7 +1219,7 @@ class CodexBackend:
             except TimeoutError as exc:
                 if lifecycle is not None:
                     lifecycle.expiry("cleanup")
-                raise CodexError("Codex cleanup allowance expired", category="TIMEOUT", retryable=False) from exc
+                raise _lifecycle_error("cleanup", self._cleanup_timeout_s) from exc
             finally:
                 cleaned_up = True
             if lifecycle is not None:
@@ -1198,8 +1232,7 @@ class CodexBackend:
             if lifecycle is not None:
                 lifecycle.expiry(stage)
             if terminal_deadline is not None:
-                raise CodexError("Codex terminal_drain allowance expired before stdout EOF",
-                                 category="TIMEOUT", retryable=False) from exc
+                raise _lifecycle_error("terminal_drain", self._terminal_drain_timeout_s) from exc
             raise
         finally:
             primary = sys.exception()
@@ -1213,8 +1246,7 @@ class CodexBackend:
                     if lifecycle is not None:
                         lifecycle.expiry("cleanup")
                     if primary is None:
-                        cleanup_error = CodexError(
-                            "Codex cleanup allowance expired", category="TIMEOUT", retryable=False)
+                        cleanup_error = _lifecycle_error("cleanup", self._cleanup_timeout_s)
                         cleanup_error.__cause__ = exc
                 else:
                     if lifecycle is not None:

@@ -11,6 +11,8 @@ import anyio
 import pytest
 
 from daydream import runner as _runner
+from daydream.backends.codex import CodexLifecycleError
+from daydream.backends.lifecycle import BackendLifecycleFailure
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep import dedup as _dedup, detection as _detection, prompts as _prompts
@@ -97,13 +99,31 @@ async def test_cold_structural_only_merge_preserves_identity_and_supervises_find
     assert structural["description"] in (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
 
 
-@pytest.mark.parametrize("budget_stop", [False, True], ids=["provider-failure", "incomplete-coverage"])
+@pytest.mark.parametrize("budget_stop,diagnostic_fault", [
+    (False, None), (True, None), (False, "foreign"), (False, "raises"), (False, "subclass"),
+], ids=["provider-failure", "incomplete-coverage", "foreign-diagnostic", "raising-diagnostic", "error-subclass"])
 async def test_cold_empty_merge_preserves_failed_stack_diagnostics(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-    capsys: pytest.CaptureFixture[str], budget_stop: bool,
+    capsys: pytest.CaptureFixture[str], budget_stop: bool, diagnostic_fault: str | None,
 ) -> None:
     backend = EmptyReviewBackend(multi_stack_target, fail_stack=None if budget_stop else "python",
                                  incomplete_stack="python" if budget_stop else None)
+    if diagnostic_fault:
+        class ForeignDiagnostic:
+            def diagnostic(self) -> str:
+                if diagnostic_fault == "raises":
+                    raise RuntimeError("review provider unavailable")
+                return "review provider unavailable"
+
+        class ExternalLifecycleError(CodexLifecycleError):
+            pass
+
+        evidence = BackendLifecycleFailure("terminal_drain", 5.0, True, False, None)
+        failure = (ExternalLifecycleError(evidence) if diagnostic_fault == "subclass"
+                   else CodexLifecycleError(evidence))
+        if diagnostic_fault != "subclass":
+            failure.lifecycle_failure = ForeignDiagnostic()  # type: ignore[assignment]
+        backend.stack_error = failure
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
 
     policy = DaydreamFileConfig(supervisor="llm", tool_supervisor="rules", tool_bash_deny=["blocked-review-tool"])
@@ -138,6 +158,9 @@ async def test_cold_empty_merge_preserves_failed_stack_diagnostics(
         assert "tool_vetoed" in failures["python"] and "budget exhausted" not in failures["python"]
     else:
         assert "backend_failure" in failures["python"] and "review provider unavailable" not in failures["python"]
+        if diagnostic_fault:
+            assert "Codex terminal_drain" not in failures["python"]
+            assert failures["python"].startswith(f"{type(failure).__name__}: review invocation failed")
 
 
 @pytest.mark.parametrize("input_kind", ["language", "alternatives", "custom"])

@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **pi:** retain bounded, redacted native terminal error diagnostics in trajectories and frozen run records while preserving retry decisions and generic review summaries ([#1540](https://github.com/existential-birds/daydream/issues/1540)).
 - **review:** preserve bounded, attributed supporting-dependency notes across staged assignments, and continue independent batches after isolated invocation failures without erasing failed coverage, later stopping diagnostics or shared budgets ([#1522](https://github.com/existential-birds/daydream/issues/1522), [#1530](https://github.com/existential-birds/daydream/issues/1530)).
 - **codex:** classify recognized public capacity/overload failures through bounded retry recovery and stop on known login-required failures, while retaining public error metadata and non-retryable postcompletion failures ([#1530](https://github.com/existential-birds/daydream/issues/1530)).
+- **codex:** honor bounded native shutdown after public completion, consume already-finished buffered output after slow consumers, and retain trusted lifecycle failure details in incomplete-review warnings ([#1556](https://github.com/existential-birds/daydream/issues/1556)).
 
 - **pi:** recover from affirmative temporary at-capacity provider errors through the existing bounded retry policy, while preserving permanent and negated diagnostic handling ([#1506](https://github.com/existential-birds/daydream/issues/1506)).
 

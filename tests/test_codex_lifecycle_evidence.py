@@ -3,7 +3,12 @@ from __future__ import annotations
 
 import pytest
 
-from daydream.backends.lifecycle import BackendLifecycleCollector, BackendLifecycleSnapshot
+from daydream.backends.lifecycle import (
+    BackendLifecycleCollector,
+    BackendLifecycleFailure,
+    BackendLifecycleSnapshot,
+    lifecycle_failure_diagnostic,
+)
 
 
 @pytest.mark.parametrize("returncode", [0, -9])
@@ -38,3 +43,35 @@ async def test_closed_collector_cannot_change_frozen_evidence() -> None:
     assert frozen.raw_line_count == 0
     lifecycle.raw_line_received()
     assert lifecycle.finalize() == frozen
+
+
+@pytest.mark.parametrize("stage,unmet", [
+    ("terminal_drain", "stdout EOF was not observed"),
+    ("process_reap", "actual child exit was not observed"),
+    ("cleanup", "process-group cleanup did not complete"),
+])
+def test_trusted_lifecycle_warning_reports_only_checked_host_facts(stage: str, unmet: str) -> None:
+    """This public warning projection has a separate privacy contract from scalar persistence."""
+    failure = BackendLifecycleFailure(stage, 5.0, True, stage != "terminal_drain", None)  # type: ignore[arg-type]
+    warning = lifecycle_failure_diagnostic(failure)
+    assert warning is not None
+    assert f"Codex {stage} timeout after 5s" in warning and unmet in warning
+    assert "turn.completed received" in warning and "child exit not observed" in warning
+    assert "Automatic retry disabled after completion" in warning
+
+
+def test_trusted_lifecycle_warning_redacts_and_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neither invalid content-bearing fields nor a broken redactor can leak a raw fallback."""
+    monkeypatch.setenv("FIXTURE_SECRET", "turn.completed")
+    failure = BackendLifecycleFailure("terminal_drain", 5.0, True, False, None)
+    warning = lifecycle_failure_diagnostic(failure)
+    assert warning is not None
+    assert "turn.completed" not in warning and "[REDACTED" in warning
+    invalid = BackendLifecycleFailure("secret\x1b[31m" * 300, 5.0, True, False, None)  # type: ignore[arg-type]
+    assert lifecycle_failure_diagnostic(invalid) is None
+
+    def broken_redactor(_text: str) -> str:
+        raise ValueError("private raw payload")
+
+    monkeypatch.setattr("daydream.backends.lifecycle.sanitize_verbose_message", broken_redactor)
+    assert lifecycle_failure_diagnostic(failure) is None

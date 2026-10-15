@@ -501,6 +501,33 @@ id — a project id yields HTTP 403 because it is forwarded as
 
 ## Codex lifecycle evidence
 
+Codex success requires the latest public `turn.completed`, stdout EOF, an independently
+observed zero child exit, and bounded cleanup. Public completion starts one absolute
+95-second drain allowance, frozen at backend construction; repeated terminal events never
+restart it. `DAYDREAM_CODEX_TERMINAL_DRAIN_TIMEOUT_S` overrides that positive finite policy.
+The caller's remaining wall allowance always wins. EOF then permits at most 5 seconds for
+actual child exit (`DAYDREAM_CODEX_PROCESS_REAP_TIMEOUT_S`), followed by at most 10 seconds
+for cleanup (`DAYDREAM_CODEX_CLEANUP_TIMEOUT_S`). Postcompletion expiry disables automatic retry.
+
+The drain policy gives supported Codex 0.162.1's graceful shutdown an opportunity to finish:
+its pinned [exec ordering](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/exec/src/lib.rs)
+places unsubscribe and client shutdown after completion; its [client shutdown](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/app-server-client/src/lib.rs)
+has two sequential 45-second fallback waits. Daydream reserves 90 seconds for those waits
+and retains 5 seconds of host headroom. This is a finite host policy, not proof that all
+native shutdown work is bounded by 95 seconds: unsubscribe and command dispatch may stall.
+No evidence identifies which native await caused the captured incident or proves a longer
+wait would have recovered it. The real synthetic CLI tests establish delayed shutdown,
+zero exit, caller-budget enforcement, and bounded failure without making provider requests.
+
+After a delayed consumer resumes beyond the absolute drain deadline, an already-exited
+child can supply only immediately available buffered lines/EOF: at most 1024 lines and
+10 MiB. The host processes all admitted lines in order, including later public turns;
+it never waits for more output or extends the clock. A live child, unavailable EOF,
+descendant-held pipe, or excessive chatter still fails closed. Trusted public review
+warnings report the stage, effective allowance and observed unmet condition from closed
+host fields. Arbitrary provider exception prose stays excluded; warnings are redacted
+before bounding and fail closed if diagnostic formatting fails.
+
 Codex attempt summaries retain bounded `backend_lifecycle` scalars and attempt spans export
 an explicit allowlist under `daydream.backend_lifecycle.*`. Milestones cover request/spawn,
 raw line reads, recognized public event kinds, adapter yields, consumer demand/delivery,

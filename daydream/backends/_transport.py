@@ -18,6 +18,7 @@ from typing import Any
 import anyio
 
 from daydream.backends._subprocess import (
+    StreamStalledError,
     cancel_processes,
     observe_process_exit,
     readline_with_idle_timeout,
@@ -97,6 +98,7 @@ class CliTransport:
         # decoded with errors="replace" and must keep doing so (see the
         # backend's ``decode_errors="replace"`` construction below).
         self._decode_errors = decode_errors
+        self._limit = limit
         self._drain_task: asyncio.Task[None] | None = None
         self.processes: list[asyncio.subprocess.Process] = []
         self._proc: asyncio.subprocess.Process | None = None
@@ -178,27 +180,45 @@ class CliTransport:
         return self._proc.returncode
 
     async def lines(
-        self, timeout_for_line: Callable[[], float | None]
+        self, timeout_for_line: Callable[[], float | None], *, drain_ready_on_expiry: bool = False,
     ) -> AsyncIterator[str]:
         """Yield decoded, stripped lines under per-line idle windows.
 
         Re-evaluate the timeout for each line to support response/tool-active windows.
         Propagate StreamStalledError and oversized-line ValueError; decoding is strict
-        unless the adapter requests replacement.
+        unless the adapter requests replacement. An opted-in completed child may
+        drain at most 1024 ready lines / one stream limit after expiry. Zero-time
+        reads never wait for a descendant's pipe or extend the original deadline.
         """
         if self._proc is None:
             raise RuntimeError("transport not started; call start() first")
         stdout = self._proc.stdout
         if stdout is None:  # pragma: no cover - stdout is always PIPE
             return
+        expired_lines = expired_bytes = 0
         while True:
+            timeout_s = timeout_for_line()
+            expired = timeout_s is not None and timeout_s <= 0
+            if expired and drain_ready_on_expiry:
+                # A delayed consumer may resume after exit with EOF and later
+                # public-turn events already buffered. Process those events in
+                # order, but never wait on a live child or unbounded chatter.
+                if self.returncode is None or (
+                    not stdout.at_eof() and (expired_lines >= 1024 or expired_bytes >= self._limit)
+                ):
+                    raise StreamStalledError(self._cli, 0)
             raw = await readline_with_idle_timeout(
-                stdout, cli=self._cli, timeout_s=timeout_for_line()
+                stdout, cli=self._cli, timeout_s=timeout_s
             )
             if not raw:
                 if self._stdout_eof is not None:
                     self._stdout_eof()
                 return
+            if expired and drain_ready_on_expiry:
+                expired_lines += 1
+                expired_bytes += len(raw)
+                if expired_bytes > self._limit:
+                    raise StreamStalledError(self._cli, 0)
             if self._raw_line_received is not None:
                 self._raw_line_received()
             yield raw.decode(errors=self._decode_errors).strip()

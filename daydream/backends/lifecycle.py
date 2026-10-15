@@ -17,6 +17,7 @@ from typing import Any, Literal
 import anyio
 
 from daydream import clock
+from daydream.diagnostics import sanitize_verbose_message
 
 _MAX_COUNT = 2_147_483_647
 LifecycleState = Literal["preparation", "prepared", "spawn_pending", "launched", "native_event", "generating"]
@@ -26,6 +27,46 @@ CodexPublicEventKind = Literal[
     "turn_completed", "turn_failed", "error", "unknown",
 ]
 ProgressKind = Literal["text", "thinking", "toolcall", "tool"]
+
+
+@dataclass(frozen=True)
+class BackendLifecycleFailure:
+    """Closed host facts eligible for a public review warning; never provider prose."""
+
+    stage: LifecycleStage
+    allowance_s: float
+    terminal_received: bool
+    stdout_eof: bool
+    process_returncode: int | None
+
+
+def lifecycle_failure_diagnostic(failure: object) -> str | None:
+    """Admit exact host records/scalars only; never dispatch a supplied formatter."""
+    try:
+        if type(failure) is not BackendLifecycleFailure:
+            return None
+        if (type(failure.stage) is not str or failure.stage not in {"terminal_drain", "process_reap", "cleanup"}
+                or type(failure.allowance_s) not in {int, float}
+                or not math.isfinite(failure.allowance_s) or failure.allowance_s <= 0
+                or type(failure.terminal_received) is not bool or type(failure.stdout_eof) is not bool
+                or (failure.process_returncode is not None
+                    and (type(failure.process_returncode) is not int or abs(failure.process_returncode) > _MAX_COUNT))):
+            return None
+        milestones = ["turn.completed received" if failure.terminal_received else "turn.completed not observed",
+                      "stdout EOF observed" if failure.stdout_eof else "stdout EOF not observed",
+                      "child exit not observed" if failure.process_returncode is None
+                      else f"child exit {failure.process_returncode} observed"]
+        unmet = {"terminal_drain": "stdout EOF was not observed",
+                 "process_reap": "actual child exit was not observed",
+                 "cleanup": "process-group cleanup did not complete"}[failure.stage]
+        text = (f"Codex {failure.stage} timeout after {failure.allowance_s:g}s: {unmet}; "
+                f"{', '.join(milestones)}; review incomplete.")
+        if failure.terminal_received:
+            text += " Automatic retry disabled after completion."
+        safe = sanitize_verbose_message(text)
+        return safe[:1024] if type(safe) is str and safe else None
+    except Exception:  # noqa: BLE001 - formatting must never expose a raw fallback or replace the primary error
+        return None
 
 
 @dataclass(frozen=True)
