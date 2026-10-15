@@ -93,6 +93,45 @@ def test_public_content_parser_requires_exact_keys(copied_verifier: ModuleType, 
         with pytest.raises(module.VerifierError):
             module.parse_finding_content(raw)
 
+
+def test_duplicate_candidate_ids_match_writer_oracle_and_deployed_verifier(copied_verifier: ModuleType) -> None:
+    key = "case-duplicate-parity"
+    merged = {"file": "src/cache.py", "line": 3, "description": "Tenant omitted",
+              "rationale": "Responses cross tenants", "severity": None}
+    items = [merged, merged | {"line": 9}, merged, merged | {"severity": "high"}, merged]
+    content = {"title": "Tenant omitted", "body": "Tenant omitted\n\nResponses cross tenants",
+               "severity": None, "path": "src/cache.py", "start_line": 3, "end_line": 3}
+    contents = [content, content | {"start_line": 9, "end_line": 9}, content,
+                content | {"severity": "high",
+                           "body": "Tenant omitted\n\n**Severity:** high\n\nResponses cross tenants"}, content]
+    # Pin the wire digest independently of the shared ID helper: SHA-256 of
+    # case + six normalized fields + per-content ordinal, separated by U+001F.
+    ids = [
+        "68587eee851b3a501c605f0242008091c9ee96c81001fd606a7b5d3e2af0c60e",
+        "c5cacb603930b20bddec2ba95a24776eff021250f6877480662907b1c38038a9",
+        "9fcc3e4f2c4112e7caf94304443871ad21f47470a4101348cf42f125536bdfe2",
+        "1891968a3bb21fdef649b0d3bc5b6ba093113d96539cb5ff77f7306256492cb2",
+        "8e18769de9011786087653da835f980d56f010eeb792f1c7c510ebc9c3f52f5d",
+    ]
+    expected_findings = [entry | {"candidate_id": cid} for entry, cid in zip(contents, ids, strict=True)]
+    expected = {"schema_version": 1, "case_id": key, "base_ref": "base", "head_ref": "head",
+                "findings": expected_findings}
+    authored = [
+        {"finding_id": f"{i:064x}", "title": entry["title"], "body": entry["body"],
+         "severity": entry["severity"],
+         "location": {"path": entry["path"], "start_line": entry["start_line"], "end_line": entry["end_line"]}}
+        for i, entry in enumerate(contents, 1)
+    ]
+    # Writer order is merged order; Oracle order is authoring-ID order, even
+    # when its input is reversed. Interleaved duplicates retain ordinals 0/1/2.
+    assert candidate.build_candidate_artifact(
+        key, candidate.build_candidate_findings(items, case_id=key)
+    ) == expected
+    assert build.build_oracle_artifact(key, authored[::-1]) == expected
+    for module in (verifier_core, copied_verifier):
+        assert [asdict(f) for f in module.validate_candidate_artifact(expected)] == expected_findings
+
+
 def test_host_built_artifacts_match_copied_verifier(copied_verifier: ModuleType) -> None:
     key = "case-validation-parity"
     merged = {"file": "src/cache.py", "line": 3, "description": "Tenant omitted",
