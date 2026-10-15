@@ -6,6 +6,8 @@ Daydream is an automated code-review agent. It reviews a code change, applies fi
 
 The goal of daydream is an open-weight code-review model. Daydream trains this model on immutable JSONL run records and their observation history. Training is a staged recipe: reward construction, then SFT cold-start, then RFT (rejection fine-tuning), then online RL. Daydream benchmarks the model against commercial code-review bots on a held-out PR replay corpus.
 
+For supported versions and private vulnerability reports, read the [security policy](SECURITY.md).
+
 ## Requirements
 
 Daydream requires the following tools:
