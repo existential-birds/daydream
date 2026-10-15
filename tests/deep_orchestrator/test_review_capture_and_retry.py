@@ -91,6 +91,8 @@ async def test_structure_keeps_interaction_review_when_optional_projections_exce
     review = InvestigationRun(repo, tmp_path, monkeypatch)
     if limit != 'files':
         native = PiBackend(model=review.backend.model)
+        # Scripted execution exercises Pi's stage transport without a native clock bridge.
+        monkeypatch.setattr(native, 'supports_live_wall_budget', False)
 
         async def execute(self: PiBackend, cwd: Path, prompt: str, *args: Any,
                           **kwargs: Any) -> AsyncIterator[AgentEvent]:
