@@ -43,6 +43,10 @@ from daydream.phases.review import (
     phase_understand_intent as phase_understand_intent,
 )
 from daydream.phases.review_prompts import (
+    _confidence_and_convention_instructions as _confidence_and_convention_instructions,
+    _dependency_impact_instructions as _dependency_impact_instructions,
+    _exploration_pointer as _exploration_pointer,
+    _settled_decisions_block as _settled_decisions_block,
     build_alternative_review_prompt as build_alternative_review_prompt,
     build_intent_prompt as build_intent_prompt,
 )
