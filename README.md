@@ -757,6 +757,8 @@ first-pass and triage batches may continue with the same cumulative tool allowan
 outage admission. Successful later batches cannot erase earlier failures, finish failed targets or settle candidates
 from a failed triage batch. Shared exhaustion, cancellation, permanent policy/authentication failures and admission
 failures retain their stopping behavior.
+Saved coverage retains the first isolated failure alongside a later stopping reason and its safe host diagnostic,
+including shared budget or outage refusals that prevent another batch from dispatching.
 
 Successful stages may declare optional `supporting_files` for their compact notes. The host retains only normalized,
 available repository source references and includes relevant notes in later assignments with their reviewer, stage and

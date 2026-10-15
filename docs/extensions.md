@@ -322,6 +322,8 @@ An isolated backend invocation failure leaves its batch unfinished and retains i
 and attempt trajectory. Later independent assignment/triage batches may continue under the original cumulative
 bounds and outage admission. Later success cannot clear prior failure evidence or settle a failed candidate group;
 admission failures and shared stopping conditions still stop further work.
+The scope's existing reason codes and diagnostics retain both the first failure and any later stopping failure,
+including a cumulative budget or outage refusal before another stage starts; per-stage trajectories retain other attempts.
 
 The host selects text from the final assistant turn, including explicit empty
 turns and bounded overflow. Staged text accepts prose, closed JSON Markdown

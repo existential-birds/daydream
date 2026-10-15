@@ -24,10 +24,11 @@ from tests.harness.stub_backend import review_stage_state, stage_result
 class CodexReviewProvider:
     """Answer stdin requests as public JSONL at the external process boundary."""
 
-    def __init__(self, repo: Path, *, exhausted: bool) -> None:
+    def __init__(self, repo: Path, *, exhausted: bool, error: dict[str, Any] | None = None) -> None:
         self.fallback = EmptyReviewBackend(repo, forbid_merge=False, forbid_supervise=False)
         self.fallback.merge_echo_records = True
         self.exhausted = exhausted
+        self.error = error
         self.batches: list[tuple[str, ...]] = []
         self.attempts: Counter[tuple[str, ...]] = Counter()
         self.models: list[str] = []
@@ -51,7 +52,7 @@ class CodexReviewProvider:
                 self.attempts[key] += 1
                 failed_index = 1 if self.exhausted else 0
                 if index == failed_index and (self.exhausted or self.attempts[key] == 1):
-                    return [json.dumps({'type': 'turn.failed', 'error': {
+                    return [json.dumps({'type': 'turn.failed', 'error': self.error or {
                         'message': 'Selected model is at capacity. Please try a different model.',
                         'codex_error_info': 'server_overloaded',
                     }})]
@@ -136,3 +137,42 @@ async def test_codex_overload_recovery_and_later_independent_batches(
         assert not set(failed_key).intersection(provider.stages[-1]['completed_target_ids'])
         coverage = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
         assert 'CodexError: review invocation failed (backend_failure).' in coverage['diagnostics']['scopes']['python']
+
+
+@pytest.mark.parametrize('process_exit', [False, True], ids=['turn-failed', 'process-exit'])
+async def test_codex_permanent_public_failures_stop_later_independent_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_exit: bool,
+) -> None:
+    """Native permanent failures stop the scope while retaining an earlier admitted finding."""
+    seeded = many_file_review(tmp_path, monkeypatch, count=13, docs_count=0)
+    review = ReviewRun(seeded.repo, tmp_path, monkeypatch)
+    monkeypatch.setattr(runner, 'create_backend', create_backend)
+    review.config = replace(seeded.config, backend='codex', model='capacity-test-model')
+    monkeypatch.setenv('DAYDREAM_PI_RETRY_ATTEMPTS', '1')
+    monkeypatch.setenv('DAYDREAM_PI_RETRY_BASE_DELAY_S', '0')
+    monkeypatch.setenv('DAYDREAM_PI_RETRY_MAX_DELAY_S', '0')
+    class AuthenticationProvider(CodexReviewProvider):
+        async def response(self, process: MagicMock, argv: tuple[str, ...]) -> list[str]:
+            lines = await super().response(process, argv)
+            if process_exit and json.loads(lines[0])['type'] == 'turn.failed':
+                process.returncode = 1
+                process.wait.return_value = 1
+                return ['Error: authentication required. Run `codex login` to authenticate.']
+            return lines
+
+    provider = AuthenticationProvider(review.repo, exhausted=True, error={
+        'message': 'authentication required. Run `codex login` to authenticate'})
+    monkeypatch.setattr('daydream.backends._transport.asyncio.create_subprocess_exec', provider.spawn)
+
+    assert await review.run() == 0
+    data = review.load()
+    assert len(provider.batches) == 2
+    assert all(attempts == 1 for attempts in provider.attempts.values())
+    assert [finding['title'] for finding in data['findings']] == ['Early defect']
+    scope = scopes(data)['python']
+    assert scope['status'] == 'incomplete' and scope['partial_evidence'] is True
+    assert scope['reason_codes'] == ['authentication_failure']
+    assert [event['metadata']['admitted'] for event in stage_ends(review, 'python')] == [True, False]
+    coverage = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
+    diagnostic = coverage['diagnostics']['scopes']['python']
+    assert 'authentication_failure' in diagnostic and 'codex login' not in diagnostic

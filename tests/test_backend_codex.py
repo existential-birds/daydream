@@ -357,7 +357,8 @@ async def test_nonzero_exit_raises_with_captured_output() -> None:
     assert events[1].code == "codex_parser_coverage"
     msg = str(exc_info.value)
     assert "authentication required" in msg
-    assert exc_info.value.category == "PROCESS_EXIT"
+    assert exc_info.value.category == "AUTH_CONFIG"
+    assert classify_failure(exc_info.value).failure_class is FailureClass.AUTH_CONFIG
 
 async def test_nonzero_exit_with_no_output_still_informative() -> None:
     backend = CodexBackend(model="fixture-model")
@@ -1129,6 +1130,32 @@ async def test_public_turn_failure_preserves_metadata_and_normalizes_only_overlo
     assert failure.value.error_metadata == error
     assert str(failure.value) == error["message"]
     assert backend._transports == []
+
+
+async def test_public_authentication_failure_is_known_permanent(tmp_path: Path) -> None:
+    """The public exec error has message only; auth rejection must stop staged continuation."""
+    message = "authentication required. Run `codex login` to authenticate."
+    process = make_mock_process([json.dumps({"type": "turn.failed", "error": {"message": message}})])
+    backend = CodexBackend(model="fixture-model")
+    with pytest.raises(CodexError) as failure:
+        await replay_process(backend, process, tmp_path, "review")
+    decision = classify_failure(failure.value)
+    assert decision.failure_class is FailureClass.AUTH_CONFIG
+    assert decision.retries_allowed is False
+    assert str(failure.value) == message
+    assert failure.value.error_metadata == {"message": message}
+    assert backend._transports == []
+
+
+@pytest.mark.parametrize("retryable", [None, False, True])
+def test_codex_authentication_diagnostic_precedes_transient_retry_hints(retryable: bool | None) -> None:
+    error = CodexError(
+        "authentication required. Run codex login to authenticate", retryable=retryable,
+        category="SERVER_ERROR", error_metadata={"codex_error_info": "server_overloaded"},
+    )
+    decision = classify_failure(error)
+    assert decision.failure_class is FailureClass.AUTH_CONFIG
+    assert decision.retries_allowed is False
 
 
 async def test_public_overload_after_completion_cannot_replay_completed_work(tmp_path: Path) -> None:

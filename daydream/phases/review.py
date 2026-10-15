@@ -602,11 +602,11 @@ async def phase_per_stack_reviews(
                         reason = reason_for_budget(budget_reason)
                     status = "incomplete"
                     if investigation.admitted_stages == 0:
-                        if budget_reason == "pipeline_budget_exceeded":
-                            status = "uncovered"
-                        elif investigation.failed_invocation and reason is not ReasonCode.MODEL_BUDGET_EXHAUSTION:
+                        if investigation.failed_invocation and reason is not ReasonCode.MODEL_BUDGET_EXHAUSTION:
                             status = "failed"
-                    coverage.record_scope(stack_name, status, reasons=(reason,),
+                        elif budget_reason == "pipeline_budget_exceeded":
+                            status = "uncovered"
+                    coverage.record_scope(stack_name, status, reasons=investigation.failure_reasons or (reason,),
                                           partial_evidence=investigation.admitted_stages > 0,
                                           diagnostic=(investigation.failure_diagnostic
                                                       or f"review stopped: {reason.value}"))

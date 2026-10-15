@@ -27,7 +27,7 @@ from daydream.repository_paths import InvalidRepositoryFilePath, canonicalize_re
 from daydream.retry_policy import FailureClass, classify_failure
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.review_evidence import ReviewEvidence
-from daydream.review_result import reason_for_exception
+from daydream.review_result import ReasonCode, reason_for_budget, reason_for_exception
 from daydream.run_context import resolve_run_context
 from daydream.trajectory import DaydreamPhase, LifecycleReasonCode, LifecycleStatus, phase_scope
 from daydream.ui.agent_stream import present_result
@@ -102,6 +102,7 @@ class ReviewInvestigation:
         self.failed_invocation = False
         self.failure_diagnostic: str | None = None
         self.failure_class: str | None = None
+        self.failure_reasons: list[ReasonCode] = []
         self._source_root: Path | None = None
         self._continuable_failure = False
 
@@ -113,6 +114,7 @@ class ReviewInvestigation:
         # Preserve the scope failure independently of each later attempt's status.
         # Full diagnostics for every attempt remain in their phase evidence.
         failure: tuple[str | None, bool, str | None, str | None] | None = None
+        stopping_failure: tuple[str | None, bool, str | None, str | None] | None = None
         stopped = False
         if self.scope_id == STRUCTURE_STACK_NAME:
             if not await self._stage(backend, cwd, prompt_builder, 'integration', [f'integration:{self.scope_id}'],
@@ -122,6 +124,7 @@ class ReviewInvestigation:
         else:
             for index, batch in enumerate(self.assignment_batches):
                 if failure is not None and not self._continuation_admitted(agent_kwargs):
+                    stopping_failure = self._failure()
                     stopped = True
                     break
                 targets = [part['target_id'] for part in batch]
@@ -131,20 +134,36 @@ class ReviewInvestigation:
                                          future_batches=len(self.assignment_batches) - index - 1):
                     failure = failure or self._failure()
                     if not self._isolated_failure():
+                        stopping_failure = self._failure()
                         stopped = True
                         break
         unsettled_ids = [candidate['candidate_id'] for candidate in self.handoff['candidates']
                          if candidate['disposition'] in {'open', 'unresolved'}]
         for index in range(0, len(unsettled_ids), 8):
-            if stopped or (failure is not None and not self._continuation_admitted(agent_kwargs)):
+            if stopped:
+                break
+            if failure is not None and not self._continuation_admitted(agent_kwargs):
+                stopping_failure = self._failure()
                 break
             if not await self._stage(backend, cwd, prompt_builder, 'triage', [], [], agent_kwargs,
                               stage_inputs=stage_inputs, candidate_ids=unsettled_ids[index:index + 8],
                               future_triage_stages=(len(unsettled_ids) - index - 1) // 8):
                 failure = failure or self._failure()
                 stopped = not self._isolated_failure()
+                if stopped:
+                    stopping_failure = self._failure()
         if failure is not None:
-            self.reason, self.failed_invocation, self.failure_diagnostic, self.failure_class = failure
+            self.reason, self.failed_invocation, self.failure_diagnostic, self.failure_class = (
+                stopping_failure or failure)
+            self.failed_invocation = self.failed_invocation or failure[1]
+            for reason in dict.fromkeys((failure[0], self.reason)):
+                if reason is not None:
+                    try:
+                        self.failure_reasons.append(ReasonCode(reason))
+                    except ValueError:
+                        self.failure_reasons.append(reason_for_budget(reason))
+            self.failure_diagnostic = '\n'.join(dict.fromkeys(
+                diagnostic for diagnostic in (failure[2], self.failure_diagnostic) if diagnostic)) or None
         if self.reason is None and (any(target['status'] != 'reviewed' for target in self.handoff['progress'])
                                     or any(candidate['disposition'] in {'open', 'unresolved'}
                                            for candidate in self.handoff['candidates'])):
@@ -163,10 +182,22 @@ class ReviewInvestigation:
 
     def _continuation_admitted(self, agent_kwargs: dict[str, Any]) -> bool:
         """A new batch cannot evade shared stopping conditions after an invocation failure."""
-        if self.budget.remaining_tool_calls <= 0 or clock.monotonic() >= self.budget.deadline:
-            return False
-        context = resolve_run_context(agent_kwargs.get('run_context'))
-        return context.outage_circuit.admit_retry(clock.monotonic()).allowed
+        if self.budget.remaining_tool_calls <= 0:
+            reason = 'tool_call_budget_exceeded'
+        elif clock.monotonic() >= self.budget.deadline:
+            reason = ('pipeline_budget_exceeded' if self.budget.shared_deadline is not None
+                      and clock.monotonic() >= self.budget.shared_deadline else 'wall_budget_exceeded')
+        else:
+            context = resolve_run_context(agent_kwargs.get('run_context'))
+            if context.outage_circuit.admit_retry(clock.monotonic()).allowed:
+                return True
+            reason = 'backend_failure'
+        self.reason = reason
+        self.failed_invocation = False
+        self.failure_class = 'quantitative_exhaustion' if reason != 'backend_failure' else 'outage_circuit'
+        self.failure_diagnostic = (f'Review limit exhausted: {reason}' if reason != 'backend_failure' else
+                                   'Review stopped: provider outage circuit denied a later batch.')
+        return False
 
     def _stage_state(self, stage: str, targets: list[str], files: list[str],
                      candidate_ids: list[str], assignment_parts: list[dict[str, Any]]) -> dict[str, Any]:

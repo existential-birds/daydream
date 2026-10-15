@@ -339,7 +339,7 @@ async def test_supporting_relevance_metadata_counts_toward_the_semantic_handoff_
     assert ends[0]['metadata']['failure_class'] == 'admission_failure'
 
 
-@pytest.mark.parametrize('stop', ['wall', 'outage-circuit', 'permanent'])
+@pytest.mark.parametrize('stop', ['wall', 'pipeline', 'outage-circuit', 'permanent'])
 async def test_isolated_failure_continuation_respects_shared_deadline_and_outage_admission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str) -> None:
     review = many_file_review(tmp_path, monkeypatch, count=9)
@@ -361,8 +361,8 @@ async def test_isolated_failure_continuation_respects_shared_deadline_and_outage
             output['candidates'] = [candidate(disposition='confirmed', finding=record())]
         elif 'module_03.py' in stage['assigned_files']:
             attempts.append(stage['assigned_files'])
-            if stop == 'wall':
-                timer.advance(61)
+            if stop in {'wall', 'pipeline'}:
+                timer.advance(481 if stop == 'wall' else 61)
                 raise RuntimeError('isolated failure after the shared deadline')
             if stop == 'permanent':
                 raise RuntimeError('Invalid API key')
@@ -370,13 +370,24 @@ async def test_isolated_failure_continuation_respects_shared_deadline_and_outage
         else:
             pytest.fail('Later assignment dispatched despite a shared stopping condition')
 
-    assert await review.run(review_profile=_profile_with_pipeline(review_wall_budget_s=60)) == 0
+    assert await review.run(review_profile=_profile_with_pipeline(
+        review_wall_budget_s=1000 if stop == 'wall' else 60)) == 0
     data = review.load()
     assert [finding['title'] for finding in data['findings']] == ['Grounded defect']
-    assert scopes(data)['python']['reason_codes'] == ['backend_failure']
+    expected_reasons = ['backend_failure']
+    if stop in {'wall', 'pipeline'}:
+        expected_reasons.append(f'host_{stop}_budget_exhaustion')
+    assert scopes(data)['python']['reason_codes'] == expected_reasons
     assert len(attempts) == (2 if stop == 'outage-circuit' else 1)
     assert scopes(data)['python']['partial_evidence'] is True
     assert [event['metadata']['admitted'] for event in stage_ends(review, 'python')] == [True, False]
+    coverage = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
+    diagnostic = coverage['diagnostics']['scopes']['python']
+    assert 'review invocation failed (backend_failure)' in diagnostic
+    if stop in {'wall', 'pipeline'}:
+        assert f'{stop}_budget_exceeded' in diagnostic
+    elif stop == 'outage-circuit':
+        assert 'provider outage circuit denied a later batch' in diagnostic
 
 
 async def test_isolated_first_pass_and_triage_failures_preserve_later_independent_work(
@@ -419,6 +430,117 @@ async def test_isolated_first_pass_and_triage_failures_preserve_later_independen
     assert data['terminal_result']['analysis_state'] == 'incomplete'
     coverage = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
     assert 'RuntimeError: review invocation failed (backend_failure).' in coverage['diagnostics']['scopes']['python']
+
+
+@pytest.mark.parametrize('failed_stage', ['first_pass', 'triage'])
+@pytest.mark.parametrize(('stop', 'reason', 'diagnostic'), [
+    ('auth', 'authentication_failure', 'AuthenticationFailure: review invocation failed'),
+    ('admission', 'evidence_incomplete', 'Stage evidence admission failed'),
+    ('wall', 'host_wall_budget_exhaustion', 'wall_budget_exceeded'),
+    ('pipeline', 'host_pipeline_budget_exhaustion', 'pipeline_budget_exceeded'),
+    ('tools', 'host_tool_budget_exhaustion', 'tool_call_budget_exceeded'),
+])
+async def test_later_stopping_failure_retains_original_failure_and_stopping_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_stage: str,
+    stop: str, reason: str, diagnostic: str,
+) -> None:
+    """Saved coverage must explain both lost work and why no further batch was admitted."""
+    review = many_file_review(tmp_path, monkeypatch, count=13, docs_count=0)
+    review.backend.fanout_concurrency = 1
+    timer = FakeClock(monotonic_value=clock.monotonic()).install(monkeypatch)
+    patch_retry_sleep(monkeypatch, timer)
+    attempts = 0
+
+    class AuthenticationFailure(RuntimeError):
+        category = 'AUTH_CONFIG'
+
+    @review.backend.script('python')
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        nonlocal attempts
+        if stage['stage'] == 'first_pass' and 'api.py' in stage['assigned_files']:
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+            if failed_stage == 'triage':
+                output['candidates'] += [candidate() for _ in range(17)]
+            return
+        if stage['stage'] != failed_stage:
+            return
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError('PRIVATE_INITIAL_PROVIDER_DETAIL')
+        assert attempts == 2, 'Dispatch continued after a stopping failure'
+        if stop == 'auth':
+            raise AuthenticationFailure('PRIVATE_AUTH_PROVIDER_DETAIL')
+        if stop == 'admission':
+            if stage['stage'] == 'triage':
+                output['candidates'] = [dict(item, disposition='rejected') for item in stage['candidates']]
+            output['notes'] = 'x' * (64 * 1024)
+        elif stop in {'wall', 'pipeline'}:
+            timer.advance(481 if stop == 'wall' else 61)
+        else:
+            for index in range(50):
+                yield from read_events(review.repo, 'api.py', event_id=f'exhaust-{index}')
+
+    assert await review.run(review_profile=_profile_with_pipeline(
+        review_wall_budget_s=1000 if stop == 'wall' else 60)) == 0
+    data = review.load()
+    assert attempts == 2
+    assert [finding['title'] for finding in data['findings']] == ['Grounded defect']
+    scope = scopes(data)['python']
+    assert scope['status'] == 'incomplete' and scope['partial_evidence'] is True
+    assert scope['reason_codes'] == sorted(['backend_failure', reason])
+    assert set(data['terminal_result']['reason_codes']) >= {'backend_failure', reason}
+    coverage = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
+    saved_diagnostic = coverage['diagnostics']['scopes']['python']
+    assert 'RuntimeError: review invocation failed (backend_failure).' in saved_diagnostic
+    assert diagnostic in saved_diagnostic
+    assert 'PRIVATE_' not in saved_diagnostic
+    assert stage_ends(review, 'python')[-1]['metadata']['admitted'] is False
+
+
+@pytest.mark.parametrize('stop', ['wall', 'pipeline', 'outage-circuit', 'tools'])
+async def test_unadmitted_backend_failure_remains_failed_after_a_shared_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str,
+) -> None:
+    """A refused later batch cannot relabel attempted failed work as unattempted coverage."""
+    review = many_file_review(tmp_path, monkeypatch, count=9, docs_count=0)
+    review.backend.fanout_concurrency = 1
+    monkeypatch.setenv('DAYDREAM_PI_RETRY_ATTEMPTS', '1')
+    monkeypatch.setenv('DAYDREAM_PI_RETRY_BASE_DELAY_S', '0')
+    monkeypatch.setenv('DAYDREAM_PI_RETRY_MAX_DELAY_S', '0')
+    monkeypatch.setattr('daydream.config.RETRY_CIRCUIT_FAILURE_THRESHOLD', 1)
+    timer = FakeClock(monotonic_value=clock.monotonic()).install(monkeypatch)
+    patch_retry_sleep(monkeypatch, timer)
+    attempts = 0
+
+    class TemporaryFailure(RuntimeError):
+        retryable = True
+
+    @review.backend.script('python')
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> Iterable[AgentEvent]:
+        nonlocal attempts
+        attempts += 1
+        if stop in {'wall', 'pipeline'}:
+            timer.advance(481 if stop == 'wall' else 61)
+        if stop == 'outage-circuit':
+            raise TemporaryFailure('PRIVATE_PROVIDER_DETAIL')
+        if attempts == 1:
+            raise RuntimeError('PRIVATE_PROVIDER_DETAIL')
+        assert stop == 'tools' and attempts == 2
+        for index in range(50):
+            yield from read_events(review.repo, 'api.py', event_id=f'exhaust-{index}')
+
+    assert await review.run(review_profile=_profile_with_pipeline(
+        review_wall_budget_s=1000 if stop == 'wall' else 60)) == 0
+    data = review.load()
+    assert attempts == (2 if stop in {'outage-circuit', 'tools'} else 1)
+    scope = scopes(data)['python']
+    assert scope['status'] == 'failed' and scope['partial_evidence'] is False
+    expected_reasons = ['backend_failure']
+    if stop != 'outage-circuit':
+        expected_reasons.append(f"host_{'tool' if stop == 'tools' else stop}_budget_exhaustion")
+    assert scope['reason_codes'] == expected_reasons
+    assert data['findings'] == []
+    assert all(event['metadata']['admitted'] is False for event in stage_ends(review, 'python'))
 
 
 @pytest.mark.parametrize('unfinished_target', [False, True], ids=['complete', 'unfinished-first-target'])

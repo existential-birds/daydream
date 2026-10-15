@@ -413,6 +413,10 @@ class CodexError(Exception):
             message == "Selected model is at capacity. Please try a different model.")
         if category is None and overloaded:
             category = "SERVER_ERROR"
+        if category not in {"AUTH_CONFIG", "SCHEMA"} and (
+            "authentication required. run codex login to authenticate" in message.casefold().replace("`", "")
+        ):
+            category = "AUTH_CONFIG"
         self.category = category
         if retryable is not None:
             self.retryable = retryable
