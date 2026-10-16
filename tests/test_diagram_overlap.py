@@ -2,8 +2,8 @@
 
 Existing grounded-diagram tests protect rendering and repair. These cases own
 entrypoint defaults, optional-work scheduling, and the lifetime of concurrent
-writers. Provider fixtures retain real filesystem behavior; the checkpoint fault
-case fails only its actual marker rename.
+writers. Provider fixtures retain real filesystem behavior; checkpoint fault
+cases fail only their exact marker operations.
 """
 
 from __future__ import annotations
@@ -384,6 +384,53 @@ async def test_checkpoint_publication_failure_keeps_review_complete_and_resume_r
     assert resumed.diagram_turns == {"sequence": 1}
     assert (target / ".daydream/deep/diagram-complete.json").is_file()
     assert_attached(target)
+
+
+@pytest.mark.parametrize("eligible", [True, False], ids=["eligible", "ineligible"])
+async def test_checkpoint_invalidation_failure_preserves_review_and_diagram_eligibility(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, eligible: bool,
+) -> None:
+    """A denied recovery-marker unlink cannot fail generation or omission.
+
+    The rename-fault keeper covers publication after generation. This fault
+    reaches the earlier invalidation operation, including the no-eligible path.
+    """
+    if eligible:
+        target = dr.build_cross_module_repo(tmp_path)
+    else:
+        target = tmp_path / "docs-only"
+        seed_feature_branch(target, base={"README.md": "# Before\n"}, feature={"README.md": "# After\n"})
+    backend = DiagramBarrierBackend(target)
+    install_provider(monkeypatch, backend, 4)
+    private_base = tmp_path / "private"
+    roots = private_root_locations(base=private_base)
+    real_unlink = Path.unlink
+    attempted: list[Path] = []
+
+    def fail_marker_unlink(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path.name == "diagram-complete.json" and path.is_relative_to(private_base):
+            attempted.append(path)
+            raise PermissionError("fixture: checkpoint marker unlink denied")
+        real_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(Path, "unlink", fail_marker_unlink)
+        assert await runner.run(config_for(target, diagram="auto"), private_roots=roots) == 0
+    assert attempted
+    assert not list(private_base.rglob("diagram-complete.json"))
+    assert not (target / ".daydream/deep/diagram-complete.json").exists()
+    coverage = json.loads((target / ".daydream/deep/review-coverage.json").read_text())
+    assert coverage["schema_version"] == 1
+    assert all(scope["status"] == "complete" for scope in coverage["stack_outcomes"])
+    if eligible:
+        assert backend.diagram_turns == {"sequence": 1}
+        assert_attached(target)
+    else:
+        assert backend.diagram_turns == {}
+        artifact = dr.load_diagram_artifact(target)
+        assert all(result["status"] == "skipped" for result in artifact["results"].values())
+        for path in (target / ".review-output.md", target / ".daydream/deep/review-output.md"):
+            assert "sequenceDiagram" not in path.read_text()
 
 
 @pytest.mark.parametrize("changed", ["model", "threshold"])

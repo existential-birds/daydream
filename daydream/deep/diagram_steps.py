@@ -660,7 +660,12 @@ async def _run_diagram_step(
         _persist_diagrams(ctx, restored)
         print_info(console, "Grounded diagrams: restored completed generation for this snapshot")
         return None
-    DeepArtifact.DIAGRAM_COMPLETE.at(dd).unlink(missing_ok=True)
+    try:
+        DeepArtifact.DIAGRAM_COMPLETE.at(dd).unlink(missing_ok=True)
+    except OSError as exc:
+        checkpoint_key = None
+        print_warning(console, f"Diagram recovery checkpoint could not be cleared ({type(exc).__name__}); "
+                      "generation will continue without recovery metadata.")
 
     results: dict[str, DiagramResult | None] = {}
     for kind in DIAGRAM_KINDS:
