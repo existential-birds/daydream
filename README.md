@@ -23,6 +23,38 @@ The following tools are optional:
 - [Pi CLI](https://pi.dev) for the `pi` backend
 - Osprey CLI for the `osprey` backend
 
+## Repository search scope
+
+Review and exploration begin at assigned files and relevant source roots, widening
+only for a concrete caller, dependency, test, or configuration question. The shared
+guidance also reaches custom strategies and registered review prompt overrides.
+Search paths are relative to the active worktree cwd, never its shared Git directory.
+
+```bash
+daydream search 'literal symbol' services/api/src .github
+# Inspect a named ignored dependency/generated path when the candidate needs it:
+daydream search 'literal symbol' services/api/src --expand node_modules/pkg/dist --reason 'trace the changed caller'
+```
+
+`search` is fixed-string, requires explicit roots, and works without `rg`. It searches
+Git's tracked files (including dotfiles and tracked ignored paths) plus nonignored
+untracked files in those roots. Ignore rules exclude ordinary untracked dependency,
+build and cache trees. Explicit expansion includes ignored files only under the
+named paths and records the reason in JSON output. Other tools, including `grep`
+and regex-capable `rg`, remain supported with the same scoped file set; `rg` defaults
+alone may omit tracked hidden or ignored evidence.
+
+Each Git inventory query has one five-second attempt (two queries when expanding).
+The scan is bounded to five additional seconds, 2,000 files, 1 MiB per file,
+16 MiB total, 100 matches and 16 KiB of match JSON. Lines are excerpted to 240 bytes.
+Output includes enumerated/visited counts and bytes read. Binary files are not text
+searched; symlinks, absent paths and nonregular files are skipped and counted. Roots
+outside cwd and Git metadata are rejected. Exit 0 means a completed text search
+(with or without matches); exit 2 reports invalid, incomplete or skipped scope.
+A limit or skipped file is not evidence of absence: narrow the question and inspect
+necessary evidence explicitly. This helper guides investigation; it is not a backend
+sandbox or a guarantee that every model tool invocation follows the guidance.
+
 ## Quick start
 
 Clone the repository and install the `daydream` command:

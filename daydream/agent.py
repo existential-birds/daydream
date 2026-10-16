@@ -42,7 +42,7 @@ from daydream.extensions import get_registry
 from daydream.observability.spans import agent_scope, attempt_scope
 from daydream.outage_circuit import CIRCUIT_CLOSED, CIRCUIT_HALF_OPEN
 from daydream.prompt_budget import PreparedSanctionedInputs
-from daydream.prompts.grounding import REVIEW_STOPPING_GUIDANCE
+from daydream.prompts.grounding import REPOSITORY_SEARCH_GUIDANCE, REVIEW_STOPPING_GUIDANCE
 from daydream.retry_policy import (
     FailureClass,
     RetryRecoveryBudget,
@@ -320,6 +320,16 @@ async def run_agent(
         review_instructions = "\n\n".join(
             item for item in (review_system_instructions, budget_instructions) if item
         )
+    search_turn = read_only or review_limits is not None or investigation_budget is not None
+    if search_turn and not tools_disabled and phase in {
+        DaydreamPhase.REVIEW, DaydreamPhase.DEEP, DaydreamPhase.EXPLORATION,
+        DaydreamPhase.INTENT, DaydreamPhase.ALTERNATIVES, DaydreamPhase.VERIFY,
+    }:
+        # Host composition also covers wholesale extension prompt overrides.
+        if REPOSITORY_SEARCH_GUIDANCE not in prompt:
+            prompt += "\n\n" + REPOSITORY_SEARCH_GUIDANCE
+        if review_instructions and REPOSITORY_SEARCH_GUIDANCE not in review_instructions:
+            review_instructions += "\n\n" + REPOSITORY_SEARCH_GUIDANCE
     if sanctioned_inputs is not None:
         prompt = sanctioned_inputs.render_prompt(prompt)
     backend_name = type(backend).__name__.removesuffix("Backend").lower()

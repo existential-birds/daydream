@@ -755,6 +755,22 @@ def changed_paths_z(
     return list(unique)
 
 
+def search_files(repo: Path, roots: Sequence[str], *, include_ignored: bool = False) -> list[str]:
+    """Enumerate literal cwd-relative roots, retaining tracked hidden/ignored paths.
+
+    Ordinary untracked files follow Git's ignore rules; explicit expansion can
+    include ignored files. Never derive paths from the shared Git directory.
+    Callers bound scanning/output separately; inventory has one five-second attempt.
+    """
+    args = ["ls-files", "-z", "--cached", "--others"]
+    if not include_ignored:
+        args.append("--exclude-standard")
+    args.extend(["--", *(_literal_pathspec(root) for root in roots)])
+    proc = process._run_git(repo, args, timeout=5, retries=0, capture_bytes=True,
+        error_context="search file enumeration failed")
+    return list(dict.fromkeys(_decode_nul_paths(proc.stdout)))
+
+
 def ls_files(repo: Path, *, strict: bool = False) -> list[str]:
     """Read tracked paths with NUL separation and filesystem decoding.
 

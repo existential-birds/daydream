@@ -13,6 +13,7 @@ from daydream.output_schema import result_array_schema, strict_object
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget
 from daydream.prompts.grounding import (
     CWD_GROUNDING_INSTRUCTION,
+    REPOSITORY_SEARCH_GUIDANCE,
     UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
 )
 from daydream.prompts.schema_block import schema_block
@@ -182,6 +183,8 @@ review or search for defects. Stop when the requested conventions, dependencies,
 or test mappings are established; unresolved mappings may be omitted truthfully.
 
 {instructions_block}{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}
+
+{REPOSITORY_SEARCH_GUIDANCE}
 
 <affected_files>
 {files_block}

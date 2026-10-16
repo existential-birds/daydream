@@ -32,6 +32,7 @@ from daydream.backends.codex import CodexBackend, CodexError
 from daydream.backends.pi import PiBackend
 from daydream.dataset import LocalRecordStore
 from daydream.observability.config import ObservabilityConfig
+from daydream.prompts.grounding import REPOSITORY_SEARCH_GUIDANCE
 from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
@@ -688,7 +689,9 @@ await run_agent(
     assert "traceloop.entity.input" not in metadata
     agent = _kind(collector.spans, "agent")[0]
     assert attempt["parentSpanId"] == agent["spanId"]
-    assert json.loads(attributes(agent)["traceloop.entity.input"])["prompt"] == "original logical prompt"
+    assert json.loads(attributes(agent)["traceloop.entity.input"])["prompt"] == (
+        "original logical prompt\n\n" + REPOSITORY_SEARCH_GUIDANCE
+    )
 
 
 # ============================================================================

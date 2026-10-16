@@ -53,6 +53,8 @@ async def test_fork_prompt_override_reaches_backend(
     # per-stack strategy, now that built-in stacks are skill-free, M2) -- the
     # wholesale-override contract.
     assert "RO-STACK " in review_prompts[0]
+    from daydream.prompts.grounding import REPOSITORY_SEARCH_GUIDANCE
+    assert REPOSITORY_SEARCH_GUIDANCE in review_prompts[0]
 
 async def test_shallow_without_skill_keeps_detected_language_skill(
     feature_branch_repo: Path, make_config: Callable[..., RunConfig], install_backend: Callable[[object], object],

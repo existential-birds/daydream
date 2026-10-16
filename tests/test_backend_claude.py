@@ -294,6 +294,13 @@ async def test_max_turns_result_raises_typed_error(patch_sdk: Any) -> None:
 @pytest.mark.parametrize("cmd,allowed", [
     ("git log --oneline -5", True), ("git blame -L 10,10 daydream/phases.py", True),
     ("git show 648a327 -- daydream/phases.py", True), ("git diff main..HEAD -- daydream/phases.py", True),
+    ("daydream search symbol src .github", True),
+    ("daydream search symbol src --expand deps/pkg --reason 'trace caller'", True),
+    ("git ls-files -z --cached --others --exclude-standard -- src", True),
+    ("daydream search symbol src > evidence.json", False),
+    ("daydream search symbol src && daydream setup", False),
+    ("daydream setup", False),
+    ("daydream search-other symbol src", False),
     ("cat README.md", True), ("git status", True), ("ls -la", True), ("git commit -m x", False), ("git add -A", False),
     ("git checkout -- f.py", False), ("rm -rf build", False), ("touch newfile", False),
     ("git status && rm x", False),       # chain into mutating token

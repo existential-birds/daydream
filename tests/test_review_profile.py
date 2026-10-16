@@ -96,3 +96,21 @@ def test_forbidden_host_fields_rejected() -> None:
         with pytest.raises(rp.ProfileError) as e:
             _profile(f'{field} = "x"', source="y")
         assert "host-owned" in str(e.value).lower() or field in str(e.value)
+
+
+@pytest.mark.parametrize("kind", ["per_stack", "structural", "generic_fallback"])
+@pytest.mark.parametrize("custom", [False, True])
+def test_composed_review_search_guidance_is_independent_of_strategy(tmp_path: Path, kind: str, custom: bool) -> None:
+    # Shipped builder contract: strategies tune judgment without removing shared
+    # search scope. Existing profile parsing tests cannot prove prompt composition.
+    from daydream.deep import prompts
+    from daydream.prompts.grounding import REPOSITORY_SEARCH_GUIDANCE
+    from tests.harness.review_profile import prompt_paths
+
+    strategy = ("Custom judgment policy" if custom
+        else rp.build_default_profile().strategies[f"discovery.{kind}"].content)
+    kwargs = {"stack_name": "python"} if kind == "per_stack" else {}
+    builder = getattr(prompts, f"build_{kind}_prompt")
+    prompt = builder(strategy=strategy, files=["src/main.py"], **prompt_paths(tmp_path), **kwargs)
+    assert strategy in prompt
+    assert REPOSITORY_SEARCH_GUIDANCE in prompt
