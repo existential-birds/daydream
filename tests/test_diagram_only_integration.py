@@ -779,7 +779,7 @@ async def test_review_findings_artifact_carries_diagrams_and_phase_b_renders_the
     stub.diagram_specs = {"sequence": [dr.sequence_spec()]}
     artifact_path = tmp_path / "review-findings.json"
 
-    exit_code = await run(make_config(target, findings_out=str(artifact_path), pr_number=7))
+    exit_code = await run(make_config(target, findings_out=str(artifact_path), pr_number=7, diagram="auto"))
     assert exit_code == 0
 
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))

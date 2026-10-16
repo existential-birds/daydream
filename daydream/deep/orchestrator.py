@@ -33,6 +33,7 @@ from daydream.deep.artifacts import (
 from daydream.deep.dependency import build_import_graph
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, base_stack_name, detect_stacks
 from daydream.deep.diagram_steps import _diagram_mode_for, _resolved_diagram_mode, _step_diagram, _step_post_diagram
+from daydream.deep.diagram_work import diagram_work_scope
 from daydream.deep.diff import _diff_changed_files, bound_deep_diff
 from daydream.deep.fix_steps import (
     _perform_cleanup,
@@ -902,7 +903,11 @@ async def run_deep(
                 scale_deadline=config.review_profile is not None
                 and config.review_profile.source_kind == "default",
             ):
-                exit_code = await run_flow(ctx.registry, _flow_name_for_mode(mode), ctx)
+                if mode == "diagram":
+                    exit_code = await run_flow(ctx.registry, "diagram", ctx)
+                else:
+                    async with diagram_work_scope(ctx):
+                        exit_code = await run_flow(ctx.registry, _flow_name_for_mode(mode), ctx)
         except Exception as exc:
             if coverage is not None and not coverage.is_finalized:
                 coverage.require_phase("pipeline")

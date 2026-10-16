@@ -150,10 +150,25 @@ and resume checks precede all steps; the first insertion point is `exploration`.
   verdicts warn and persist in `fix-outcomes.json`; `regressed` stops the run.
   Tests/healing that change the tree trigger verification again; newly actionable
   findings stop publication. Commit messages list only verified resolutions.
-- `diagram` records deterministic eligibility, authors eligible kinds read-only
-  (at most one repair each), and verifies against the head tree. It is disabled
-  by diagram mode `off` and `--start-at fix`; when no kind is eligible, it makes
-  no agent calls.
+- Diagrams are disabled by default. `--diagram auto`, a named kind, or repository
+  diagram `mode = "auto"` enables generation; `--start-at fix` skips it.
+  Compatible deep flows start generation alongside independent review work when
+  capacity permits, admitting primary reviewers first. The final `diagram` step
+  joins generation and idempotently attaches its blocks after synthesis and
+  supervision. It retains standalone generation for custom flows and diagram-only
+  runs. Generation records deterministic eligibility, authors eligible kinds
+  read-only (at most one repair each), and verifies against the head tree; when no
+  kind is eligible, it makes no agent calls.
+  Early scheduling requires the unchanged built-in prefix through `diagram`;
+  inserted/replaced phases in that prefix retain serial generation. Observers
+  after `diagram` see completed and attached results. Completed packaged-builder
+  generation is restored on per-stack/merge resume only when the snapshot,
+  eligibility/settings, author inputs and model contract match its checkpoint.
+  Shared admission considers enabled model phases only and ends at the final
+  diagram step, preserving later fix and custom phase capacity.
+  Deterministic eligibility precedes backend resolution; ineligible generation
+  needs no model backend. Capacity planning failures retain serial dispatch so
+  optional overlap cannot move later phase construction errors ahead of review.
 - `.review-output.md` cleanup runs after successful `run_flow`, subject to mode
   and `config.findings_out is None`; it is not an insertable step.
 

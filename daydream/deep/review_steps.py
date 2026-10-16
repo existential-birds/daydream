@@ -611,6 +611,12 @@ async def _step_wonder_and_per_stack(ctx: FlowContext) -> None:
     if run_wonder and not concurrent:
         await _wonder(ctx)
 
+    from daydream.deep.diagram_work import diagram_work_for
+
+    diagram_work = diagram_work_for(ctx)
+    if diagram_work is not None and ctx.config.start_at not in ("merge", "fix"):
+        diagram_work.start(ctx, primary_count=len(deep_state.stacks) + int(concurrent))
+
     async with anyio.create_task_group() as tg:
         if concurrent:
             tg.start_soon(_wonder_guarded)

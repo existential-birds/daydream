@@ -74,8 +74,8 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
     parser.add_argument(
         "--diagram",
         choices=["auto", "sequence", "flowchart", "both", "off"],
-        help="Control grounded diagrams in the review paths (default: auto -- render "
-             "every eligible kind). Use --diagram-only for the diagram-only mode."
+        help="Control grounded diagrams in the review paths (default: off). "
+             "Use auto to render every eligible kind, or --diagram-only for the diagram-only mode."
         if full_help else argparse.SUPPRESS,
     )
 

@@ -23,6 +23,11 @@ from daydream.config import (
 )
 from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.detection import detect_stacks
+from daydream.deep.diagram_checkpoint import (
+    complete_diagram_checkpoint,
+    diagram_checkpoint_key,
+    restore_diagram_checkpoint,
+)
 from daydream.deep.diagram_grounding import RepoSymbols, ground_flowchart, ground_sequence
 from daydream.deep.diagram_prompts import build_diagram_repair_prompt
 from daydream.deep.diagram_render import render_diagram_blocks, render_flowchart_mermaid, render_sequence_mermaid
@@ -41,7 +46,7 @@ from daydream.deep.state import DeepState
 from daydream.extensions import get_registry
 from daydream.extensions.api import Stop
 from daydream.flows.engine import FlowContext
-from daydream.json_utils import atomic_write_json
+from daydream.json_utils import atomic_write_bytes, atomic_write_json
 from daydream.prompt_budget import (
     INLINE_DIFF_BUDGET_BYTES,
     AdvisoryCandidate,
@@ -85,15 +90,24 @@ class DiagramSettings:
     service_roots: list[str]
 
 
+@dataclass(frozen=True)
+class DiagramInputs:
+    """Deterministic drawing inputs, prepared once before provider admission."""
+
+    settings: DiagramSettings
+    eligibility: Eligibility
+    hunk_ranges: dict[str, list[tuple[int, int]]]
+
+
 def _diagram_mode_for(config: RunConfig, mode: str) -> str:
-    """Resolve CLI > file > auto; diagram-only explicitly overrides a file off switch."""
+    """Resolve CLI > file > off; diagram-only explicitly overrides a file off switch."""
     if config.diagram in DIAGRAM_MODES:
         return str(config.diagram)
     if mode == "diagram":
         return "auto"
     file_config = config.file_config
     file_mode = file_config.diagram_mode if file_config is not None else None
-    return file_mode if file_mode in DIAGRAM_MODES else "auto"
+    return file_mode if file_mode in DIAGRAM_MODES else "off"
 
 
 def _resolved_diagram_mode(ctx: FlowContext) -> str:
@@ -561,19 +575,35 @@ async def _step_diagram(ctx: FlowContext) -> Stop | None:
     Kind failures warn and leave reviews running. Diagram-only failures return 1
     after writing the artifact.
     """
-    async with phase_scope(DaydreamPhase.DIAGRAM, stage="diagram") as phase:
-        return await _run_diagram_step(ctx, phase=phase)
+    from daydream.deep.diagram_work import diagram_work_for
+
+    work = diagram_work_for(ctx)
+    result = None
+    if work is not None and work.started:
+        await work.join()
+    else:
+        result = await _generate_diagrams(ctx, inputs=work.inputs if work is not None else None)
+    diagrams = DeepState(ctx.data).diagrams
+    if diagrams and diagrams["blocks"] and DeepState(ctx.data).mode != "diagram":
+        _apply_diagrams_to_report(ctx, diagrams["blocks"])
+    if work is not None:
+        work.capacity.enabled = False
+    return result
 
 
-async def _run_diagram_step(
-    ctx: FlowContext, *, phase: "PhaseScopeHandle"
+async def _generate_diagrams(
+    ctx: FlowContext, *, concurrency: int | None = None, inputs: DiagramInputs | None = None,
 ) -> Stop | None:
-    """Run the durable diagram step inside its identified phase scope."""
+    """Generate only private diagram artifacts; report writers remain serial."""
+    async with phase_scope(DaydreamPhase.DIAGRAM, stage="diagram") as phase:
+        return await _run_diagram_step(ctx, phase=phase, concurrency=concurrency, inputs=inputs)
+
+
+def _prepare_diagram_inputs(ctx: FlowContext) -> DiagramInputs:
+    """Decide eligibility without constructing any model backend."""
     deep_state = DeepState(ctx.data)
     settings = _diagram_settings(ctx)
-    mode = deep_state.mode
     target_dir = ctx.work.repo
-    dd: Path = deep_state.dd
 
     from daydream.hunk_index import head_side_ranges_by_file, load_hunk_index
     from daydream.run_config import _file_config_or_empty
@@ -606,8 +636,37 @@ async def _run_diagram_step(
         thresholds=settings.thresholds,
         force=settings.mode,
     )
+    return DiagramInputs(settings, eligibility, hunk_ranges)
+
+
+async def _run_diagram_step(
+    ctx: FlowContext, *, phase: "PhaseScopeHandle", concurrency: int | None = None,
+    inputs: DiagramInputs | None = None,
+) -> Stop | None:
+    """Run the durable diagram step inside its identified phase scope."""
+    deep_state = DeepState(ctx.data)
+    prepared = inputs if inputs is not None else _prepare_diagram_inputs(ctx)
+    settings, eligibility, hunk_ranges = prepared.settings, prepared.eligibility, prepared.hunk_ranges
+    mode = deep_state.mode
+    target_dir = ctx.work.repo
+    dd = deep_state.dd
 
     kinds = eligibility.eligible_kinds()
+    checkpoint_key = (
+        diagram_checkpoint_key(ctx, settings=settings, eligibility=eligibility.to_dict()) if kinds else None
+    )
+    restored = restore_diagram_checkpoint(ctx, checkpoint_key)
+    if restored is not None:
+        _persist_diagrams(ctx, restored)
+        print_info(console, "Grounded diagrams: restored completed generation for this snapshot")
+        return None
+    try:
+        DeepArtifact.DIAGRAM_COMPLETE.at(dd).unlink(missing_ok=True)
+    except OSError as exc:
+        checkpoint_key = None
+        print_warning(console, f"Diagram recovery checkpoint could not be cleared ({type(exc).__name__}); "
+                      "generation will continue without recovery metadata.")
+
     results: dict[str, DiagramResult | None] = {}
     for kind in DIAGRAM_KINDS:
         if kind in kinds:
@@ -624,7 +683,7 @@ async def _run_diagram_step(
         # files, and every method on it is synchronous, so the two sibling
         # tasks cannot interleave inside one lookup.
         symbols = RepoSymbols(target_dir)
-        limiter = anyio.CapacityLimiter(effective_fanout_concurrency(2, backend))
+        limiter = anyio.CapacityLimiter(concurrency or effective_fanout_concurrency(2, backend))
         descriptors = tuple(f"diagram-{kind}" for kind in kinds)
         async with dispatch_scope(
             recorder, phase=DaydreamPhase.DIAGRAM, descriptors=descriptors
@@ -664,17 +723,10 @@ async def _run_diagram_step(
 
 
     ordered: dict[str, DiagramResult | None] = {kind: results.get(kind) for kind in DIAGRAM_KINDS}
-    blocks = render_diagram_blocks(ordered)
     payload: dict[str, Any] = {"eligibility": eligibility.to_dict(), "results": ordered}
-    atomic_write_json(DeepArtifact.DIAGRAM.at(dd), payload)
-    DeepArtifact.DIAGRAM_MARKDOWN.at(dd).write_text(
-        f"{blocks}\n" if blocks else "", encoding="utf-8"
-    )
-    deep_state.diagrams = {
-        "blocks": blocks,
-        "payload": _diagram_payload_without_mermaid(payload),
-        "results": ordered,
-    }
+    _persist_diagrams(ctx, payload)
+    if kinds and not failures:
+        complete_diagram_checkpoint(ctx, checkpoint_key)
 
     if not kinds:
         phase.finish(LifecycleStatus.SKIPPED, LifecycleReasonCode.NO_ELIGIBLE_WORK)
@@ -684,11 +736,19 @@ async def _run_diagram_step(
     consequence = "the run fails" if mode == "diagram" else "the review continues"
     for kind, detail in sorted(failures.items()):
         print_warning(console, f"Diagram kind {kind} failed ({consequence}): {detail}")
-    if blocks and mode != "diagram":
-        _apply_diagrams_to_report(ctx, blocks)
     if failures and mode == "diagram":
         return Stop(1)
     return None
+
+
+def _persist_diagrams(ctx: FlowContext, payload: dict[str, Any]) -> None:
+    """Write generation's private artifacts and state, never either shared report."""
+    state = DeepState(ctx.data)
+    ordered = payload["results"]
+    blocks = render_diagram_blocks(ordered)
+    atomic_write_json(DeepArtifact.DIAGRAM.at(state.dd), payload)
+    atomic_write_bytes(DeepArtifact.DIAGRAM_MARKDOWN.at(state.dd), (f"{blocks}\n" if blocks else "").encode())
+    state.diagrams = {"blocks": blocks, "payload": _diagram_payload_without_mermaid(payload), "results": ordered}
 
 
 async def _step_post_diagram(ctx: FlowContext) -> Stop:

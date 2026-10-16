@@ -314,7 +314,7 @@ async def test_current_api_stable_keys_share_state_and_reparse_filtered_items(
     fake_gh.serve_open_pr(multi_stack_target)
     _git(multi_stack_target, "remote", "add", "origin", str(bare_remote(tmp_path / "origin.git")),)
 
-    rc = await runner.run(make_config(multi_stack_target, pr_number=7, assume="yes"))
+    rc = await runner.run(make_config(multi_stack_target, pr_number=7, assume="yes", diagram="auto"))
     probe_paths = list((multi_stack_target / ".daydream" / "runs").glob("*/stable-key-probe.json"))
     assert len(probe_paths) == 1
     probe = json.loads(probe_paths[0].read_text())
