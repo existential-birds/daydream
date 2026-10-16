@@ -616,6 +616,7 @@ class ManifestReadingBackend(ImproveStubBackend):
         reads = {path: self._read_snapshot(cwd, path) for path in primary}
         group, _ = group_scope(prompt)
         record: dict[str, Any] = {"category": category, "group": group, "primary_files": primary,
+            "primary_sha256": {path: hashlib.sha256(raw).hexdigest() for path, raw in reads.items()},
             "primary_bytes": sum(map(len, reads.values())), "context_files": [], "context_bytes": 0,
             "manifest_path": manifest_path, "manifest_pages": manifest_pages, "deleted_files": deleted, "cwd": cwd,
             "submodule_references": submodules,

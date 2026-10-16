@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -1799,40 +1800,76 @@ async def test_branch_focus_scopes_audit_to_merge_base_diff_and_tags_provenance(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("replacement", ["symlink-to-file", "file-to-symlink", "file-to-gitlink"])
 async def test_branch_focus_manifest_retains_deleted_paths_without_reading_missing_files(
-    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
+    replacement: str,
 ) -> None:
-    """A branch deletion cannot turn every otherwise readable assignment into failure.
+    """Only final deletions are diff-only assignments; type replacements survive.
 
-    Existing branch tests contain only edits, so requiring every primary path
-    to be a present regular file incorrectly passed their snapshot checks.
+    Git emits separate deletion/addition blocks for a type change. The same
+    real branch also keeps text/binary deletions to distinguish the two cases.
     """
     repo = improve_branch_target
     deleted = "web/App.tsx"
     binary = "web/logo.png"
+    replaced = "apps/billing/replaced.py"
+    target = "apps/billing/replacement-target.py"
+    (repo / target).write_text("NEW_TARGET_CONTENT = True\n")
+    if replacement == "symlink-to-file":
+        (repo / replaced).symlink_to("replacement-target.py")
+    else:
+        (repo / replaced).write_text("OLD_REGULAR_CONTENT = True\n")
     (repo / binary).write_bytes(b"\x89PNG\x00binary payload")
-    git(repo, "add", binary)
-    commit(repo, "add binary before the branch")
+    git(repo, "add", binary, replaced, target)
+    commit(repo, "seed binary and replacement before the branch")
     git(repo, "branch", "-f", "main", "HEAD")
+    (repo / replaced).unlink()
+    reference = None
+    if replacement == "symlink-to-file":
+        (repo / replaced).write_text("SURVIVING_REGULAR_CONTENT = 12345\n")
+    elif replacement == "file-to-symlink":
+        (repo / replaced).symlink_to("replacement-target.py")
+    else:
+        nested = tmp_path / "replacement-origin"
+        init_repo(nested)
+        (nested / "nested.py").write_text("NESTED_CONTENT_NOT_CAPTURED = True\n")
+        git(nested, "add", "nested.py")
+        nested_commit = commit(nested, "seed replacement submodule")
+        git(repo, "rm", "--cached", "--", replaced)
+        git(repo, "-c", "protocol.file.allow=always", "submodule", "add", str(nested), replaced)
+        reference = {"path": replaced, "commit": nested_commit}
     (repo / "apps/billing/api.py").write_text('def service_name():\n    return "billing-v3"\n')
-    git(repo, "add", "apps/billing/api.py")
+    git(repo, "add", "apps/billing/api.py", replaced)
     git(repo, "rm", deleted, binary)
-    commit(repo, "remove a frontend file on the audited branch")
-    before = (head_sha(repo), _git_status_porcelain(repo))
+    commit(repo, "replace tracked type and remove frontend files on the audited branch")
+    source_bytes = (repo / replaced / "nested.py").read_bytes() if reference else (repo / replaced).read_bytes()
+    before = (head_sha(repo), _git_status_porcelain(repo), git(repo, "ls-files", "--stage"))
     backend = install_capable_improve_backend(monkeypatch, ManifestReadingBackend(repo))
 
     assert await _run_improve(make_config, repo, improve_focus="branch") == 0
 
     assert len(backend.assignment_reads) == len(AUDIT_CATEGORIES)
+    ordinary = [".gitmodules", "apps/billing/api.py"] if reference else ["apps/billing/api.py", replaced]
     for assignment in backend.assignment_reads:
-        assert assignment["primary_files"] == ["apps/billing/api.py"]
+        assert assignment["primary_files"] == ordinary
         assert assignment["deleted_files"] == sorted([deleted, binary])
+        assert assignment["submodule_references"] == ([reference] if reference else [])
+        if not reference:
+            assert assignment["primary_sha256"][replaced] == hashlib.sha256(source_bytes).hexdigest()
     coverage = _load_improve_json(repo, "coverage.json")
-    assert coverage["groups"][0]["primary_files"] == ["apps/billing/api.py", deleted, binary]
-    assert coverage["groups"][0]["file_count"] == 3
+    assert coverage["groups"][0]["primary_files"] == sorted(
+        ordinary + [deleted, binary] + ([replaced] if reference else [])
+    )
+    assert coverage["groups"][0]["file_count"] == len(ordinary) + 2 + bool(reference)
+    assert coverage["groups"][0]["submodule_reference_count"] == bool(reference)
     assert coverage["groups"][0]["status"] == "audited"
     assert coverage["not_audited"] == coverage["partially_audited"] == []
-    assert (head_sha(repo), _git_status_porcelain(repo)) == before
+    assert (head_sha(repo), _git_status_porcelain(repo), git(repo, "ls-files", "--stage")) == before
+    assert (
+        (repo / replaced / "nested.py").read_bytes() if reference else (repo / replaced).read_bytes()
+    ) == source_bytes
+    assert (repo / replaced).is_symlink() is (replacement == "file-to-symlink")
 
 
 @pytest.mark.anyio

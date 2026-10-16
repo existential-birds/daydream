@@ -126,10 +126,17 @@ async def _run_audit_assignments(
     failures: dict[str, str] = {}
     repo = _audit_repo(ctx)
     directory: Path = ctx.data["improve_dir"]
-    deleted_paths = frozenset(
-        path for path, block in iter_diff_blocks(ctx.data["branch_diff"])
-        if "\n+++ /dev/null\n" in block or "\ndeleted file mode " in block
-    ) if branch_focus else frozenset()
+    deletions: set[str] = set()
+    surviving: set[str] = set()
+    if branch_focus:
+        for path, block in iter_diff_blocks(ctx.data["branch_diff"]):
+            if "\n+++ /dev/null\n" in block or "\ndeleted file mode " in block:
+                deletions.add(path)
+            else:
+                surviving.add(path)
+    # Git emits deletion/addition blocks for one type-changed path. Any
+    # surviving post-state keeps that path readable or reference-assigned.
+    deleted_paths = frozenset(deletions - surviving)
     manifests: dict[str, dict[str, Any]] = {}
     descriptors: dict[str, Path] = {}
     preparation_errors: dict[str, str] = {}
