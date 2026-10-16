@@ -977,7 +977,7 @@ Which diagram and why:
 
 A forced kind still goes through grounding and may still be omitted. Forcing changes eligibility, never verification.
 
-On the built-in review flow, generation starts after exploration and intent when the provider has spare capacity beyond the entire primary reviewer fan-out (including an independent alternatives pass). Otherwise it runs at the final diagram step. Overlapping calls share the most conservative configured capacity hint, and queued primary calls have priority. Generation writes only its own artifacts; the final step joins it and attaches once after synthesis and supervision. Cancellation joins child work before evidence is finalized.
+On the built-in review flow, generation starts after exploration and intent when the provider has spare capacity beyond the entire primary reviewer fan-out (including an independent alternatives pass). Otherwise it runs at the final diagram step. Overlapping calls share the most conservative capacity hint among enabled review phases, and queued primary calls have priority. Generation writes only its own artifacts; the final step joins it and attaches once after synthesis and supervision, then releases shared admission before later fix or custom work. Cancellation joins child work before evidence is finalized.
 
 Completed generation has a snapshot/configuration/model-bound checkpoint. A `--start-at per-stack` or `--start-at merge` resume restores matching diagram artifacts without another model call; incomplete or mismatched generation is rerun. Custom diagram prompt builders regenerate on resume. Flows that change or insert steps before the final diagram step keep serial generation so extension ordering remains authoritative.
 

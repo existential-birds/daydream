@@ -24,6 +24,7 @@ class AgentCapacity:
 
     def __init__(self, capacity: int) -> None:
         self.capacity = capacity
+        self.enabled = True
         self._active = 0
         self._waiting_primary = 0
         self._condition = anyio.Condition()
@@ -69,7 +70,7 @@ def admit_agent(function: Callable[_P, Coroutine[Any, Any, _T]]) -> Callable[_P,
     @wraps(function)
     async def admitted(*args: _P.args, **kwargs: _P.kwargs) -> _T:
         capacity = _capacity.get()
-        if capacity is None:
+        if capacity is None or not capacity.enabled:
             return await function(*args, **kwargs)
         await capacity.acquire(optional=_optional.get())
         try:

@@ -577,6 +577,8 @@ async def _step_diagram(ctx: FlowContext) -> Stop | None:
     diagrams = DeepState(ctx.data).diagrams
     if diagrams and diagrams["blocks"] and DeepState(ctx.data).mode != "diagram":
         _apply_diagrams_to_report(ctx, diagrams["blocks"])
+    if work is not None:
+        work.capacity.enabled = False
     return result
 
 

@@ -8,6 +8,7 @@ writers; only the model-provider boundary is replaced.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -18,12 +19,14 @@ from typing import Any
 import anyio
 import pytest
 
-from daydream import cli, runner
+from daydream import cli, git_ops, runner
 from daydream.artifact_visibility import private_root_locations
-from daydream.backends import AgentEvent
+from daydream.backends import AgentEvent, BackendExecutionInput, ResultEvent, create_backend as real_create_backend
 from daydream.config_file import DaydreamFileConfig
+from daydream.github_app import GitHubExecutionInput
 from daydream.run_config import RunConfig
 from tests.harness import diagram_repos as dr
+from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import bare_remote, git
 from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.stub_backend import StubBackend, review_stage_state
@@ -432,3 +435,104 @@ async def test_matched_diagram_workload(
         "provider_intervals": [{"role": key, "start_s": start - started, "end_s": end - started}
                                for key, start, end in backend.intervals if key != "other"],
     }, sort_keys=True))
+
+
+async def test_embedded_review_does_not_construct_unused_osprey_supervisor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rule supervision cannot make a valid Codex execution input unsupported."""
+    target = dr.build_cross_module_repo(tmp_path)
+    backend = DiagramBarrierBackend(target)
+    monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", "4")
+    environment = {
+        "PATH": os.environ["PATH"], "HOME": str(tmp_path / "embedded-home"),
+        "GH_CONFIG_DIR": str(tmp_path / "embedded-gh"), "DAYDREAM_FANOUT_CONCURRENCY": "4",
+    }
+    backend_input = BackendExecutionInput.from_environment(environment, backend="codex")
+    execution = runner.RunnerExecutionInput(
+        backend_input, GitHubExecutionInput(git_ops.StaticGitHubAuth(environment)),
+    )
+    created: list[str] = []
+
+    def create_backend(name: str, *args: Any, **kwargs: Any) -> Any:
+        created.append(name)
+        if name == "codex":
+            assert kwargs["execution_input"] is backend_input
+            return backend
+        # Keep unsupported/unused backend construction real: the regression
+        # fails at its actual execution-input guard rather than a test sentinel.
+        return real_create_backend(name, *args, **kwargs)
+
+    monkeypatch.setattr(runner, "create_backend", create_backend)
+    config = config_for(target, diagram="auto", file_config=DaydreamFileConfig(
+        backend="codex", supervisor="rules", phases={"supervise": {"backend": "osprey"}},
+    ))
+    assert await runner.run(config, execution=execution) == 0
+    assert set(created) == {"codex"}
+    assert backend.calls
+    assert_attached(target)
+
+
+async def test_post_diagram_custom_phase_regains_its_own_provider_capacity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any,
+) -> None:
+    """The review's smaller admission pool must end at the final diagram join."""
+    target = dr.build_cross_module_repo(tmp_path)
+    review_backend = DiagramBarrierBackend(target, capacity=2)
+    entered = anyio.Event()
+    release = anyio.Event()
+    active = 0
+    maximum = 0
+
+    async def respond(*_args: Any, **_kwargs: Any) -> list[ResultEvent]:
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        if active == 4:
+            entered.set()
+        try:
+            await release.wait()
+            return [ResultEvent(structured_output=None, continuation=None)]
+        finally:
+            active -= 1
+
+    later_backend = ScriptedBackend(responder=respond, fanout_concurrency=4)
+    monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", "4")
+    monkeypatch.setattr(runner, "create_backend", lambda _name, model=None, **_kwargs:
+                        later_backend if model == "later-fixture" else review_backend)
+    ext_dir.write_module(
+        "import anyio\n"
+        "from daydream.agent import run_agent\n"
+        "from daydream.extensions import FlowStep\n"
+        "from daydream.trajectory import DaydreamPhase, get_current_recorder, maybe_fork\n"
+        "async def fanout(ctx):\n"
+        "    async def child(index):\n"
+        "        async with maybe_fork(get_current_recorder(), f'post-diagram-{index}'):\n"
+        "            await run_agent(ctx.backend_for('later'), ctx.work.repo, 'POST_DIAGRAM_FANOUT',\n"
+        "                            phase=DaydreamPhase.REVIEW, read_only=True, run_context=ctx.run_context)\n"
+        "    async with anyio.create_task_group() as group:\n"
+        "        for index in range(4):\n"
+        "            group.start_soon(child, index)\n"
+        "    (ctx.data['dd'] / 'post-diagram-fanout.txt').write_text('four provider streams completed')\n"
+        "def register(registry):\n"
+        "    registry.register_phase(FlowStep(name='post-diagram-fanout', run=fanout))\n"
+        "    registry.insert_after('deep', anchor='diagram', step='post-diagram-fanout')\n"
+    )
+    config = config_for(target, diagram="auto", file_config=DaydreamFileConfig(
+        phases={"later": {"model": "later-fixture"}},
+    ))
+    result: list[int] = []
+
+    async def invoke() -> None:
+        result.append(await runner.run(config))
+
+    with anyio.fail_after(30):
+        async with anyio.create_task_group() as group:
+            group.start_soon(invoke)
+            await entered.wait()
+            assert active == 4
+            release.set()
+    assert result == [0] and maximum == 4 and active == 0
+    assert len(later_backend.calls) == 4
+    assert (target / ".daydream/deep/post-diagram-fanout.txt").read_text() == "four provider streams completed"
+    assert_attached(target)

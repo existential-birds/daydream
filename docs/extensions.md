@@ -164,6 +164,8 @@ and resume checks precede all steps; the first insertion point is `exploration`.
   after `diagram` see completed and attached results. Completed packaged-builder
   generation is restored on per-stack/merge resume only when the snapshot,
   eligibility/settings, author inputs and model contract match its checkpoint.
+  Shared admission considers enabled model phases only and ends at the final
+  diagram step, preserving later fix and custom phase capacity.
 - `.review-output.md` cleanup runs after successful `run_flow`, subject to mode
   and `config.findings_out is None`; it is not an insertable step.
 
