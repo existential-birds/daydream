@@ -227,7 +227,7 @@ The report names whatever a bound leaves out. The file `.daydream/improve/covera
 | `security` | Audit only security |
 | `performance` | Audit only performance |
 | `tests` | Audit only test coverage |
-| `branch` | Audit the merge-base diff. Label each finding as introduced or inherited. |
+| `branch` | Audit all categories against the merge-base diff, preserving the effort tier and backend concurrency limit. Label each finding as introduced or inherited. |
 
 Use `--scope SERVICE_OR_GLOB` to restrict the audit to matching detected services. The glob matches a
 service's root path itself, so `apps/billing` selects `apps/billing` while `apps/billing/*` matches nothing.

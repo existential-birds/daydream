@@ -88,12 +88,18 @@ def assert_dispatch_children(target_dir: Path, dispatch: dict[str, Any], phase: 
         for summary in root["extra"]["subtrajectories"]
         if summary.get("dispatch_id") == dispatch["extra"]["dispatch_id"]
     ]
-    assert [summary["descriptor"] for summary in summaries] == descriptors
+    # Summaries land when each child finalizes; dispatch refs retain planned
+    # order. Bind these independent representations by document identity.
+    assert len(summaries) == expected_count
+    summaries_by_id = {summary["trajectory_id"]: summary for summary in summaries}
+    assert set(summaries_by_id) == {ref["trajectory_id"] for ref in refs}
     assert all("invocation_id" not in summary for summary in summaries)
 
     children: list[dict[str, Any]] = []
     identities: set[tuple[str, str]] = set()
-    for descriptor, ref, summary in zip(descriptors, refs, summaries, strict=True):
+    for descriptor, ref in zip(descriptors, refs, strict=True):
+        summary = summaries_by_id[ref["trajectory_id"]]
+        assert summary["descriptor"] == descriptor
         assert Path(ref["trajectory_path"]).name.startswith(f"{descriptor}--")
         child = cast(
             dict[str, Any], json.loads((target_dir / ".daydream" / ref["trajectory_path"]).read_text(encoding="utf-8")),
