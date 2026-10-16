@@ -64,6 +64,7 @@ from daydream.observability.config import (
     resolve_observability_config,
 )
 from daydream.observability.runtime import trace_run
+from daydream.observability.spans import step_scope
 from daydream.phases.inputs import (
     _detect_default_branch,
     _git_branch,
@@ -559,7 +560,9 @@ async def _run_workspace(
                             interrupted=primary is not None and not isinstance(primary, Exception),
                         )
                         with anyio.CancelScope(shield=True):
-                            await anyio.to_thread.run_sync(finalize)
+                            with step_scope("artifact-finalization", stack=dispatch_config.stack) as observed:
+                                await anyio.to_thread.run_sync(finalize)
+                                observed.finish()
                     except BaseException as exc:
                         if primary is None:
                             raise

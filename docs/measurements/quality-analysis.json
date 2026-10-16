@@ -1,0 +1,434 @@
+{
+  "baseline_commit": "724e771791cdd775854f54be72016a4af4cce89a",
+  "python": "3.14.3",
+  "platform": "macOS-26.6.1-arm64-arm-64bit-Mach-O",
+  "method": "One warm-up and five unprofiled samples per scenario, serial, fixed git archive input; profiles are separate runs.",
+  "scoped_files": 759,
+  "parsed_files": 759,
+  "results": {
+    "baseline": {
+      "repository": {
+        "sha256": "b9c541f0498ca367e76344d07604649c54e50ad705430556c8d58bbb7abf4e18",
+        "samples": [
+          {
+            "elapsed": 8.479781166002795,
+            "cpu": 8.478015000000001
+          },
+          {
+            "elapsed": 8.485555874998681,
+            "cpu": 8.484593
+          },
+          {
+            "elapsed": 8.51078654199955,
+            "cpu": 8.510030999999998
+          },
+          {
+            "elapsed": 8.547944541001925,
+            "cpu": 8.545762000000003
+          },
+          {
+            "elapsed": 8.553232374993968,
+            "cpu": 8.552500000000002
+          }
+        ],
+        "median_elapsed": 8.51078654199955,
+        "median_cpu": 8.510030999999998,
+        "profile": {
+          "total_seconds": 20.931681166000004,
+          "functions": {
+            "read_bytes": {
+              "calls": 1518,
+              "self_seconds": 0.0008919310000000001,
+              "cumulative_seconds": 0.022546172
+            },
+            "_iter_tree": {
+              "calls": 16227897,
+              "self_seconds": 3.427534219,
+              "cumulative_seconds": 5.1261642730000005
+            },
+            "_iter_function": {
+              "calls": 21625837,
+              "self_seconds": 4.878023612000001,
+              "cumulative_seconds": 7.184696833
+            },
+            "_count_later_references": {
+              "calls": 28904,
+              "self_seconds": 0.007553879,
+              "cumulative_seconds": 7.726775913000001
+            },
+            "<built-in method posix.scandir>": {
+              "calls": 234,
+              "self_seconds": 0.0025327490000000004,
+              "cumulative_seconds": 0.0025327490000000004
+            },
+            "_repeated_block_rows": {
+              "calls": 760,
+              "self_seconds": 2.392837825,
+              "cumulative_seconds": 3.454960797
+            }
+          }
+        }
+      },
+      "candidate": {
+        "sha256": "ef264539eb8579d2cc9bbd0f76f57bc088bb444d5291ed78746766f1be8d1007",
+        "samples": [
+          {
+            "elapsed": 1.547808041999815,
+            "cpu": 1.5476839999999967
+          },
+          {
+            "elapsed": 1.5265063749975525,
+            "cpu": 1.526372000000002
+          },
+          {
+            "elapsed": 1.5150454999966314,
+            "cpu": 1.5149029999999968
+          },
+          {
+            "elapsed": 1.5054834999973536,
+            "cpu": 1.505353999999997
+          },
+          {
+            "elapsed": 1.5059434159993543,
+            "cpu": 1.5058089999999993
+          }
+        ],
+        "median_elapsed": 1.5150454999966314,
+        "median_cpu": 1.5149029999999968,
+        "profile": {
+          "total_seconds": 2.642592542000001,
+          "functions": {
+            "read_bytes": {
+              "calls": 1518,
+              "self_seconds": 0.000939101,
+              "cumulative_seconds": 0.029434538000000003
+            },
+            "_iter_tree": {
+              "calls": 40769,
+              "self_seconds": 0.008287260000000001,
+              "cumulative_seconds": 0.012631718
+            },
+            "_iter_function": {
+              "calls": 45507,
+              "self_seconds": 0.010588638000000001,
+              "cumulative_seconds": 0.015549978
+            },
+            "_count_later_references": {
+              "calls": 105,
+              "self_seconds": 2.83e-05,
+              "cumulative_seconds": 0.015785544000000002
+            },
+            "<built-in method posix.scandir>": {
+              "calls": 234,
+              "self_seconds": 0.002639413,
+              "cumulative_seconds": 0.002639413
+            },
+            "_repeated_block_rows": {
+              "calls": 2,
+              "self_seconds": 1.2804589350000002,
+              "cumulative_seconds": 1.838339876
+            }
+          }
+        }
+      },
+      "empty": {
+        "sha256": "42eca8433896a16756a3c992166355b2a927fcdc00d5b2fdd2ce6c6f2500b129",
+        "samples": [
+          {
+            "elapsed": 0.0002925000007962808,
+            "cpu": 0.0002939999999966858
+          },
+          {
+            "elapsed": 0.00017891699826577678,
+            "cpu": 0.00018000000000029104
+          },
+          {
+            "elapsed": 0.0001621249975869432,
+            "cpu": 0.00016299999999347392
+          },
+          {
+            "elapsed": 0.0001565830025356263,
+            "cpu": 0.00015700000000151704
+          },
+          {
+            "elapsed": 0.00015920800069579855,
+            "cpu": 0.00016099999999852344
+          }
+        ],
+        "median_elapsed": 0.0001621249975869432,
+        "median_cpu": 0.00016299999999347392,
+        "profile": {
+          "total_seconds": 0.0005435829999999997,
+          "functions": {}
+        }
+      },
+      "excluded": {
+        "sha256": "68f003e8406514897284afdd47f18df6a30c3a17e8df79e278dfc5bc8fa0f7b1",
+        "samples": [
+          {
+            "elapsed": 0.07821737499762094,
+            "cpu": 0.07820899999999398
+          },
+          {
+            "elapsed": 0.07975550000264775,
+            "cpu": 0.07968800000000442
+          },
+          {
+            "elapsed": 0.07961166600580327,
+            "cpu": 0.07952799999999627
+          },
+          {
+            "elapsed": 0.07772949999343837,
+            "cpu": 0.07772400000000346
+          },
+          {
+            "elapsed": 0.08293262499500997,
+            "cpu": 0.0824349999999967
+          }
+        ],
+        "median_elapsed": 0.07961166600580327,
+        "median_cpu": 0.07952799999999627,
+        "profile": {
+          "total_seconds": 0.1882425419999999,
+          "functions": {
+            "read_bytes": {
+              "calls": 2,
+              "self_seconds": 3.0420000000000003e-06,
+              "cumulative_seconds": 3.5458000000000005e-05
+            },
+            "_iter_tree": {
+              "calls": 132,
+              "self_seconds": 3.1676e-05,
+              "cumulative_seconds": 4.8751e-05
+            },
+            "_iter_function": {
+              "calls": 55,
+              "self_seconds": 1.4113e-05,
+              "cumulative_seconds": 2.0834e-05
+            },
+            "_count_later_references": {
+              "calls": 1,
+              "self_seconds": 4.16e-07,
+              "cumulative_seconds": 1.3458e-05
+            },
+            "<built-in method posix.scandir>": {
+              "calls": 4004,
+              "self_seconds": 0.031982748000000005,
+              "cumulative_seconds": 0.031982748000000005
+            },
+            "_repeated_block_rows": {
+              "calls": 2,
+              "self_seconds": 2.1882e-05,
+              "cumulative_seconds": 3.0375000000000003e-05
+            }
+          }
+        }
+      }
+    },
+    "optimized": {
+      "repository": {
+        "sha256": "b9c541f0498ca367e76344d07604649c54e50ad705430556c8d58bbb7abf4e18",
+        "samples": [
+          {
+            "elapsed": 5.684735416005424,
+            "cpu": 5.6842559999999995
+          },
+          {
+            "elapsed": 5.691545458001201,
+            "cpu": 5.690441999999999
+          },
+          {
+            "elapsed": 5.7509089579980355,
+            "cpu": 5.750059
+          },
+          {
+            "elapsed": 5.780714000000444,
+            "cpu": 5.780182999999997
+          },
+          {
+            "elapsed": 5.790911249998317,
+            "cpu": 5.790139
+          }
+        ],
+        "median_elapsed": 5.7509089579980355,
+        "median_cpu": 5.750059,
+        "profile": {
+          "total_seconds": 13.667599957999998,
+          "functions": {
+            "read_bytes": {
+              "calls": 759,
+              "self_seconds": 0.00048716300000000004,
+              "cumulative_seconds": 0.01395698
+            },
+            "_iter_tree": {
+              "calls": 16227897,
+              "self_seconds": 3.399435623,
+              "cumulative_seconds": 5.0808021750000005
+            },
+            "_iter_function": {
+              "calls": 4528694,
+              "self_seconds": 1.184824026,
+              "cumulative_seconds": 1.6771854560000001
+            },
+            "<built-in method posix.scandir>": {
+              "calls": 115,
+              "self_seconds": 0.001662084,
+              "cumulative_seconds": 0.001662084
+            },
+            "_repeated_block_rows": {
+              "calls": 760,
+              "self_seconds": 2.4070042970000003,
+              "cumulative_seconds": 3.4733085750000003
+            }
+          }
+        }
+      },
+      "candidate": {
+        "sha256": "ef264539eb8579d2cc9bbd0f76f57bc088bb444d5291ed78746766f1be8d1007",
+        "samples": [
+          {
+            "elapsed": 1.5222155829978874,
+            "cpu": 1.522071000000004
+          },
+          {
+            "elapsed": 1.5049682919998304,
+            "cpu": 1.504835
+          },
+          {
+            "elapsed": 1.4991871250022086,
+            "cpu": 1.499057999999998
+          },
+          {
+            "elapsed": 1.5121654169997782,
+            "cpu": 1.5120450000000005
+          },
+          {
+            "elapsed": 1.512178999997559,
+            "cpu": 1.5120310000000003
+          }
+        ],
+        "median_elapsed": 1.5121654169997782,
+        "median_cpu": 1.5120310000000003,
+        "profile": {
+          "total_seconds": 2.6047854580000007,
+          "functions": {
+            "read_bytes": {
+              "calls": 759,
+              "self_seconds": 0.000482048,
+              "cumulative_seconds": 0.016071986
+            },
+            "_iter_tree": {
+              "calls": 40769,
+              "self_seconds": 0.008199085,
+              "cumulative_seconds": 0.01254767
+            },
+            "_iter_function": {
+              "calls": 11951,
+              "self_seconds": 0.003081903,
+              "cumulative_seconds": 0.004407919000000001
+            },
+            "<built-in method posix.scandir>": {
+              "calls": 115,
+              "self_seconds": 0.001738291,
+              "cumulative_seconds": 0.001738291
+            },
+            "_repeated_block_rows": {
+              "calls": 2,
+              "self_seconds": 1.28596057,
+              "cumulative_seconds": 1.84593025
+            }
+          }
+        }
+      },
+      "empty": {
+        "sha256": "42eca8433896a16756a3c992166355b2a927fcdc00d5b2fdd2ce6c6f2500b129",
+        "samples": [
+          {
+            "elapsed": 0.00026954100030707195,
+            "cpu": 0.00027200000000249247
+          },
+          {
+            "elapsed": 0.00017645899788476527,
+            "cpu": 0.00017700000000075988
+          },
+          {
+            "elapsed": 0.00016062500071711838,
+            "cpu": 0.00016099999999852344
+          },
+          {
+            "elapsed": 0.00016962499648798257,
+            "cpu": 0.00017100000000169757
+          },
+          {
+            "elapsed": 0.00015583299682475626,
+            "cpu": 0.0001560000000040418
+          }
+        ],
+        "median_elapsed": 0.00016962499648798257,
+        "median_cpu": 0.00017100000000169757,
+        "profile": {
+          "total_seconds": 0.0005427500000000002,
+          "functions": {}
+        }
+      },
+      "excluded": {
+        "sha256": "68f003e8406514897284afdd47f18df6a30c3a17e8df79e278dfc5bc8fa0f7b1",
+        "samples": [
+          {
+            "elapsed": 0.0003165419984725304,
+            "cpu": 0.00031900000000462114
+          },
+          {
+            "elapsed": 0.0002952499999082647,
+            "cpu": 0.00029600000000584714
+          },
+          {
+            "elapsed": 0.0002742079959716648,
+            "cpu": 0.00027399999999744296
+          },
+          {
+            "elapsed": 0.000277541003015358,
+            "cpu": 0.0002780000000015548
+          },
+          {
+            "elapsed": 0.0002900830004364252,
+            "cpu": 0.0002899999999996794
+          }
+        ],
+        "median_elapsed": 0.0002900830004364252,
+        "median_cpu": 0.0002899999999996794,
+        "profile": {
+          "total_seconds": 0.0008072080000000004,
+          "functions": {
+            "read_bytes": {
+              "calls": 1,
+              "self_seconds": 1.458e-06,
+              "cumulative_seconds": 1.2542000000000001e-05
+            },
+            "_iter_tree": {
+              "calls": 132,
+              "self_seconds": 3.084e-05,
+              "cumulative_seconds": 4.8506000000000006e-05
+            },
+            "_iter_function": {
+              "calls": 34,
+              "self_seconds": 1.0288e-05,
+              "cumulative_seconds": 1.4834e-05
+            },
+            "<built-in method posix.scandir>": {
+              "calls": 1,
+              "self_seconds": 1.2125e-05,
+              "cumulative_seconds": 1.2125e-05
+            },
+            "_repeated_block_rows": {
+              "calls": 2,
+              "self_seconds": 1.8547e-05,
+              "cumulative_seconds": 2.6708000000000002e-05
+            }
+          }
+        }
+      }
+    }
+  },
+  "input_sha256": "f08fa1b1b54b61c9c1bdff39555b053799924e0a1714e955ceb3195a3e260dce"
+}

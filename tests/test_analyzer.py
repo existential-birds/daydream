@@ -1,6 +1,7 @@
 """Trajectory resolution, finding/location arithmetic, and source-quality metrics."""
 import json
 import math
+import os
 import uuid
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -449,6 +450,37 @@ def test_quality_erosion_zero_when_no_high_cc(tmp_path: Path) -> None:
             round(1 / 3, 4), id="single-use-variable",
         ),
         pytest.param(
+            "def compute(x):\n    intermediate = x + 1; return intermediate * 2\n",
+            0.0, id="same-row-reference-is-not-later",
+        ),
+        pytest.param(
+            "def compute(x):\n    intermediate = x + 1; print(intermediate)\n    return intermediate * 2\n",
+            round(1 / 3, 4), id="same-row-reference-does-not-add-to-later-count",
+        ),
+        pytest.param(
+            "def compute(x):\n    intermediate = x + 1\n    intermediate = x + 2\n    return intermediate * 2\n",
+            1 / 4, id="later-assignment-target-counts-as-reference",
+        ),
+        pytest.param(
+            "def compute(x):\n    intermediate = x + 1\n"
+            "    def nested(default=intermediate):\n        return intermediate\n    return intermediate * 2\n",
+            1 / 5, id="nested-signature-and-body-do-not-add-outer-references",
+        ),
+        pytest.param(
+            "def compute(x):\n    intermediate = x + 1\n    def nested(y):\n"
+            "        intermediate = y + 2\n        return intermediate * 2\n    return intermediate * 3\n",
+            round(2 / 6, 4), id="nested-assignments-have-independent-reference-counts",
+        ),
+        pytest.param(
+            "def compute(x):\n    intermediate = x + 1\n    @decorate(intermediate)\n"
+            "    def nested():\n        return intermediate\n    return intermediate * 2\n",
+            0.0, id="nested-decorator-counts-as-outer-reference",
+        ),
+        pytest.param(
+            "def compute(x):\n    intermediate = (\n        x + intermediate\n    )\n    return x * 2\n",
+            1 / 5, id="later-row-rhs-reference-counts-within-assignment",
+        ),
+        pytest.param(
             "def inner(x, y):\n    return x + y\n\ndef outer(x, y):\n    return inner(x, y)\n",
             2 / 4, id="trivial-wrapper",
         ),
@@ -504,18 +536,40 @@ def test_quality_returns_none_when_no_python_files(tmp_path: Path) -> None:
     assert result["per_file"] == {}
     assert result["calibration"] == {"human_verbosity": 0.19, "human_erosion": 0.34, "paper": "arXiv:2603.24755"}
 
-def test_quality_excludes_vendored_and_internal_dirs(tmp_path: Path) -> None:
-    result = _quality(tmp_path,
+def test_quality_excludes_vendored_and_internal_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Excluded trees cannot consume traversal work, even when scanning them would fail."""
+    ws = _quality_workspace(tmp_path,
         {
             "app.py": "def f(x):\n    return x\n",
             ".daydream/deep/fixture.py": "def g(x):\n    return x\n",
             "node_modules/pkg/index.py": "def h(x):\n    return x\n",
             "sub/venv/lib/x.py": "def i(x):\n    return x\n",
+            "daydream/atif/models.py": "def j(x):\n    return x\n",
+            "sub/vendor/lib/x.py": "def k(x):\n    return x\n",
+            "vendorish/mod.py": "VALUE = 1\n",
+            "eligible.py/child.py": "CHILD = 2\n",
         },
     )
+    outside = tmp_path / "external"
+    outside.mkdir()
+    (outside / "external.py").write_text("EXTERNAL = 3\n")
+    (ws / "linked.py").symlink_to(outside, target_is_directory=True)
+    (ws / "linked_file.py").symlink_to(outside / "external.py")
+    excluded = {ws / ".daydream", ws / "node_modules", ws / "sub/venv", ws / "daydream/atif", ws / "sub/vendor"}
+    excluded.add(ws / "linked.py")
+    scandir = os.scandir
 
-    assert result["scoped_files"] == 1
-    assert list(result["per_file"]) == ["app.py"]
+    def scan(path: Any) -> Any:
+        if isinstance(path, (str, bytes, os.PathLike)) and Path(os.fsdecode(path)) in excluded:
+            raise AssertionError(f"excluded subtree must be pruned before traversal: {path!r}")
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", scan)
+    result = analyze_quality(ws / ".daydream")
+
+    assert result["scoped_files"] == 4
+    assert list(result["per_file"]) == ["app.py", "eligible.py/child.py", "linked_file.py", "vendorish/mod.py"]
+    assert result["per_file"]["linked_file.py"]["sloc"] == 1
 
 def test_quality_monotone_across_eroding_fix(tmp_path: Path) -> None:
     clean = _quality(tmp_path, {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)}, name="clean",)
@@ -618,18 +672,68 @@ def test_quality_verbosity_flags_clones_across_files(tmp_path: Path) -> None:
 
 def test_quality_candidate_scope_indexes_valid_peers_for_clones(tmp_path: Path,) -> None:
     block = "    if x > 1:\n        return 1\n    return 0\n"
-    result = _quality(tmp_path,
+    ws = _quality_workspace(tmp_path,
         {
             "app.py": "def a():\n" + block,
             "peer.py": "def b():\n" + block,  # clone source, NOT a candidate
             "other.py": "def c():\n    return 3\n",  # neither candidate nor peer source
-        }, candidate_paths={"app.py"},
+        },
     )
+    result = analyze_quality(ws / ".daydream", candidate_paths={"app.py"})
 
     assert result["scoped_files"] == 1
     assert set(result["per_file"]) == {"app.py"}
-    assert result["per_file"]["app.py"]["verbosity"] > 0  # clone from peer.py indexed
+    assert result["per_file"]["app.py"]["verbosity"] == 0.75
     assert result["erosion"] is not None
+    (ws / "peer.py").write_text("def b(y):\n    return y * 2\n")
+    changed = analyze_quality(ws / ".daydream", candidate_paths={"app.py"})
+    assert changed["scoped_files"] == 1
+    assert set(changed["per_file"]) == {"app.py"}
+    assert changed["per_file"]["app.py"]["verbosity"] == 0.0
+
+
+@pytest.mark.parametrize("candidate_paths", [None, {"app.py"}], ids=["workspace", "candidate"])
+def test_quality_reuses_eligibility_bytes_for_parsing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, candidate_paths: set[str] | None,
+) -> None:
+    """Eligibility and parsing share one read, including peers and failed inputs."""
+    block = "    if x > 1:\n        return 1\n    return 0\n"
+    ws = _quality_workspace(tmp_path, {
+        "app.py": "def a():\n" + block,
+        "peer.py": "def b():\n" + block,
+        "broken.py": "def broken(:\n" + block,
+        "gen_tool.py": "# Code generated by protoc. DO NOT EDIT.\ndef c():\n    return 3\n",
+        "denied.py": "def denied():\n    return 4\n",
+    })
+    (ws / "undecodable.py").write_bytes(b'def byte_string():\n    return "\xff"\n')
+    opens: dict[str, int] = {}
+    open_path = Path.open
+
+    def open_source(path: Path, *args: Any, **kwargs: Any) -> Any:
+        if path.parent == ws and path.suffix == ".py":
+            opens[path.name] = opens.get(path.name, 0) + 1
+            if path.name == "denied.py":
+                raise PermissionError("source is unreadable")
+        return open_path(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_source)
+    result = analyze_quality(ws / ".daydream", candidate_paths=candidate_paths)
+
+    assert opens == {name: 1 for name in (
+        "app.py", "peer.py", "broken.py", "gen_tool.py", "denied.py", "undecodable.py",
+    )}
+    assert result["scoped_files"] == (4 if candidate_paths is None else 1)
+    expected_paths = ["app.py", "peer.py", "undecodable.py"] if candidate_paths is None else ["app.py"]
+    assert list(result["per_file"]) == expected_paths
+    assert result["per_file"]["app.py"] == {
+        "erosion": 0.0, "verbosity": 0.75, "sloc": 4, "functions": 1, "high_cc_functions": 0,
+    }
+    assert result["erosion"] == 0.0
+    assert result["verbosity"] == (0.6 if candidate_paths is None else 0.75)
+    if candidate_paths is None:
+        assert result["per_file"]["undecodable.py"] == {
+            "erosion": 0.0, "verbosity": 0.0, "sloc": 2, "functions": 1, "high_cc_functions": 0,
+        }
 
 def test_quality_candidate_none_preserves_whole_workspace_result(tmp_path: Path,) -> None:
     ws = _quality_workspace(tmp_path, {"app.py": "def a():\n    return 1\n", "b.py": "def b(y):\n    return y * 2\n"},)
@@ -733,6 +837,31 @@ def test_quality_syntax_error_file_excluded_from_aggregates(tmp_path: Path) -> N
     assert result["scoped_files"] == 2
     assert list(result["per_file"]) == ["good.py"]
     assert result["verbosity"] == 0.0
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "empty-tree", "exception"])
+def test_quality_parser_failure_keeps_scope_without_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    """Binding failure excludes metrics without pretending the eligible source was absent."""
+    class FailedParser:
+        def parse(self, _source: bytes) -> None:
+            if failure == "exception":
+                raise ValueError("native parser failed")
+            return None
+
+    parser = None if failure == "unavailable" else FailedParser()
+    monkeypatch.setattr(quality_mod, "_quality_python_parser", lambda: parser)
+    result = _quality(tmp_path, {"app.py": "def f(x):\n    return x\n"})
+
+    assert result == {
+        "erosion": None,
+        "verbosity": None,
+        "per_file": {},
+        "calibration": {"human_verbosity": 0.19, "human_erosion": 0.34, "paper": "arXiv:2603.24755"},
+        "scoped_files": 1,
+    }
+
 
 def test_quality_unparseable_file_does_not_contaminate_cross_file_clones(tmp_path: Path,) -> None:
     block = "    if x > 1:\n        return 1\n    return 0\n"

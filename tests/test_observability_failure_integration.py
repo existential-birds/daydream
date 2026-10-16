@@ -355,10 +355,18 @@ async def test_runner_cancellation_reaches_caller_and_flushes_root_and_active_to
     assert cancellation_reached_caller and backend.cancelled and backend.finished
     assert not (feature_branch_repo / _RESULT_FILE).exists()
     spans = collector.spans
-    assert len(spans) == 5
-    assert all(span["status"]["code"] == "STATUS_CODE_ERROR" for span in spans)
-    root = _kind(spans, "run")[0]
-    tool = _kind(spans, "tool")[0]
+    root, = _kind(spans, "run")
+    tool, = _kind(spans, "tool")
+    attempt, = _kind(spans, "attempt")
+    agent, = _kind(spans, "agent")
+    review, = [span for span in _kind(spans, "step") if attributes(span)["daydream.step"] == "trace-failures"]
+    review_chain = (root, review, agent, attempt, tool)
+    assert all(span["status"]["code"] == "STATUS_CODE_ERROR" for span in review_chain)
+    for parent, child in zip(review_chain, review_chain[1:]):
+        assert child["parentSpanId"] == parent["spanId"]
+    finalization, = [span for span in spans if attributes(span).get("daydream.step") == "artifact-finalization"]
+    assert finalization["parentSpanId"] == root["spanId"]
+    assert finalization["status"]["code"] == "STATUS_CODE_OK"
     assert attributes(root)["daydream.outcome"] == "cancelled"
     assert attributes(tool)["daydream.outcome"] == "cancelled"
     assert tool["status"]["message"] == "cancelled"
@@ -596,15 +604,24 @@ async def test_runner_partial_outcome_preserves_veto_and_budget_reasons(
         "output": "partial response before interruption", "aborted": reason,
     }
     spans = collector.spans
-    assert len(spans) == 5
-    assert all(span["status"]["code"] == "STATUS_CODE_ERROR" for span in spans)
-    tool = _kind(spans, "tool")[0]
+    root, = _kind(spans, "run")
+    tool, = _kind(spans, "tool")
+    attempt, = _kind(spans, "attempt")
+    agent, = _kind(spans, "agent")
+    review, = [span for span in _kind(spans, "step") if attributes(span)["daydream.step"] == "trace-failures"]
+    review_chain = (root, review, agent, attempt, tool)
+    assert all(span["status"]["code"] == "STATUS_CODE_ERROR" for span in review_chain)
+    for parent, child in zip(review_chain, review_chain[1:]):
+        assert child["parentSpanId"] == parent["spanId"]
+    finalization, = [span for span in spans if attributes(span).get("daydream.step") == "artifact-finalization"]
+    assert finalization["parentSpanId"] == root["spanId"]
+    assert finalization["status"]["code"] == "STATUS_CODE_OK"
     assert attributes(tool)["daydream.outcome"] == reason.split(":")[0]
     assert tool["status"]["message"] == reason.split(":")[0]
     assert tool["events"][-1]["name"] == "exception"
-    assert attributes(_kind(spans, "attempt")[0])["gen_ai.usage.input_tokens"] == 5
-    assert attributes(_kind(spans, "attempt")[0])["gen_ai.usage.cost"] == 0.005
-    assert attributes(_kind(spans, "run")[0])["daydream.exit_code"] == 1
+    assert attributes(attempt)["gen_ai.usage.input_tokens"] == 5
+    assert attributes(attempt)["gen_ai.usage.cost"] == 0.005
+    assert attributes(root)["daydream.exit_code"] == 1
 
 @pytest.mark.parametrize("terminal_result", [False, True])
 @pytest.mark.parametrize("last_duration_source", ["tool", "message"])
@@ -764,12 +781,17 @@ async def test_runner_default_non_loop_generation_omits_optional_scope_attribute
     lifecycle = _read_subtrajectory(feature_branch_repo)
     assert [draft["generation_id"] for draft in lifecycle["drafts"]] == ["gen-default"]
     spans = collector.spans
-    by_kind = {kind: _kind(spans, kind) for kind in ("run", "step", "agent", "attempt", "generation")}
+    by_kind = {kind: _kind(spans, kind) for kind in ("run", "agent", "attempt", "generation")}
     assert all(len(values) == 1 for values in by_kind.values())
     assert by_kind["run"][0]["status"]["code"] == "STATUS_CODE_OK"
     assert attributes(by_kind["generation"][0])["daydream.generation.id"] == "gen-default"
-    for child, parent in (("step", "run"), ("agent", "step"), ("attempt", "agent"), ("generation", "attempt")):
-        assert by_kind[child][0]["parentSpanId"] == by_kind[parent][0]["spanId"]
+    review, = [span for span in _kind(spans, "step") if attributes(span)["daydream.step"] == "trace-failures"]
+    review_chain = (by_kind["run"][0], review, *(by_kind[kind][0] for kind in ("agent", "attempt", "generation")))
+    for parent, child in zip(review_chain, review_chain[1:]):
+        assert child["parentSpanId"] == parent["spanId"]
+    finalization, = [span for span in spans if attributes(span).get("daydream.step") == "artifact-finalization"]
+    assert finalization["parentSpanId"] == by_kind["run"][0]["spanId"]
+    assert finalization["status"]["code"] == "STATUS_CODE_OK"
     for span in spans:
         attrs = attributes(span)
         assert "daydream.stack" not in attrs

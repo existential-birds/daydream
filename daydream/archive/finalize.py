@@ -18,6 +18,8 @@ from daydream.archive.git_context import capture_git_context
 from daydream.archive.index import upsert_run
 from daydream.archive.manifest import build_manifest_from_snapshot
 from daydream.archive.pipeline import _manifest_state
+from daydream.observability.runtime import current_session
+from daydream.observability.spans import SpanScope
 from daydream.run_snapshot import ArchiveRunSnapshot
 from daydream.trajectory import (
     RUNS_DIRNAME,
@@ -122,14 +124,20 @@ def finalize_archive_run(
             try:
                 from daydream.eval.analyzer import analyze_session
 
-                evaluation = analyze_session(
-                    target_dir / ".daydream",
-                    write_snapshot=write_snapshot,
-                    artifact_provenance=artifact_provenance,
-                    code_workspace=work.repo if work is not None else artifact_provenance.public_source,
-                )
-                if "error" in evaluation:
-                    raise ValueError("evaluation returned an incomplete result")
+                # Omit optional labels so this worker inherits selected-stack attribution.
+                with SpanScope(
+                    current_session(), "daydream.step.evaluation-analysis", "step",
+                    {"daydream.step": "evaluation-analysis", "daydream.phase": "evaluation-analysis"},
+                ) as observed:
+                    evaluation = analyze_session(
+                        target_dir / ".daydream",
+                        write_snapshot=write_snapshot,
+                        artifact_provenance=artifact_provenance,
+                        code_workspace=work.repo if work is not None else artifact_provenance.public_source,
+                    )
+                    if "error" in evaluation:
+                        raise ValueError("evaluation returned an incomplete result")
+                    observed.finish()
             except Exception as exc:
                 _validate_frozen_artifacts(artifacts)
                 raise ArchiveFinalizationError("evaluation finalization failed") from exc

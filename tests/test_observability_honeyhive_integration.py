@@ -61,7 +61,13 @@ async def test_honeyhive_native_mapping_is_isolated_from_generic_export(
 
     assert json.loads((feature_branch_repo / ".daydream/observability-result.json").read_text()) == {"answer": "safe"}
     generic_spans = {span["spanId"]: span for span in generic.spans}
-    assert len(honeyhive.spans) == len(generic_spans) == 5
+    assert len(honeyhive.spans) == len(generic_spans)
+    assert {span["spanId"] for span in honeyhive.spans} == set(generic_spans)
+    root, = [span for span in generic.spans if not span.get("parentSpanId")]
+    finalization, = [span for span in generic.spans
+                     if attributes(span).get("daydream.step") == "artifact-finalization"]
+    assert finalization["parentSpanId"] == root["spanId"]
+    assert finalization["status"]["code"] == "STATUS_CODE_OK"
     type_mapping = {"run": "chain", "step": "chain", "agent": "chain", "attempt": "chain", "tool": "tool"}
     trajectory_paths = list((feature_branch_repo / ".daydream/runs").glob("*/trajectory.json"))
     assert len(trajectory_paths) == 1
@@ -137,7 +143,12 @@ async def test_honeyhive_outage_preserves_result_and_generic_export(
         monkeypatch.setenv("HH_API_URL", honeyhive.base_url)
         assert await runner.run(make_config(feature_branch_repo, flow_name="trace-probe")) == 0
     assert json.loads((feature_branch_repo / ".daydream/observability-result.json").read_text()) == {"answer": "safe"}
-    assert len(honeyhive.spans) == len(generic.spans) == 4
+    assert {span["spanId"] for span in honeyhive.spans} == {span["spanId"] for span in generic.spans}
+    root, = [span for span in generic.spans if not span.get("parentSpanId")]
+    finalization, = [span for span in generic.spans
+                     if attributes(span).get("daydream.step") == "artifact-finalization"]
+    assert finalization["parentSpanId"] == root["spanId"]
+    assert finalization["status"]["code"] == "STATUS_CODE_OK"
     assert all(attributes(span)["honeyhive_event_type"] for span in honeyhive.spans)
     assert "Failed to export" in caplog.text
     assert _SECRET not in caplog.text

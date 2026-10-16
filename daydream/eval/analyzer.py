@@ -16,6 +16,8 @@ from daydream.deep.records import record_issues_or_empty
 from daydream.deep.routing_record import read_routing_record
 from daydream.eval.quality import _QUALITY_CALIBRATION, analyze_quality as analyze_quality
 from daydream.hunk_index import load_hunk_index, parse_hunks, range_distance
+from daydream.observability.runtime import current_session
+from daydream.observability.spans import SpanScope
 from daydream.timeutil import parse_iso_timestamp
 from daydream.trajectory import (
     RUN_DOCUMENT_NAME,
@@ -811,7 +813,13 @@ def analyze_session(
     timing = analyze_timing(trajectories, write_snapshot)
     training = analyze_training_signals(trajectories)
     try:
-        quality = analyze_quality(daydream_dir, code_workspace=code_workspace)
+        # Omit optional labels to retain the enclosing host scope's explicit attribution.
+        with SpanScope(
+            current_session(), "daydream.step.quality-analysis", "step",
+            {"daydream.step": "quality-analysis", "daydream.phase": "quality-analysis"},
+        ) as observed:
+            quality = analyze_quality(daydream_dir, code_workspace=code_workspace)
+            observed.finish()
     except TreeSitterBadVersionError as exc:
         # issue #1087: a known-bad tree-sitter install refuses native analysis
         # (assert_tree_sitter_safe at analyze_quality entry). Degrade only the

@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **eval:** prune excluded Python subtrees before traversal, share eligibility and parsing reads, and index function references once while preserving whole-workspace and candidate quality metrics; trace finalization, evaluation, and quality analysis separately ([#1402](https://github.com/existential-birds/daydream/issues/1402)).
+
 - **review:** scope ordinary searches to relevant tracked and nonignored untracked files; preserve tracked hidden/ignored evidence, bound the new fixed-string `daydream search` helper, and require named, explained ignored-file expansion ([#1400](https://github.com/existential-birds/daydream/issues/1400)).
 
 - **deep:** disable review diagrams by default; retain explicit CLI/repository opt-in and diagram-only mode, overlap enabled grounded generation with independent review when capacity permits, and attach diagrams after synthesis without starving primary reviewers ([#1401](https://github.com/existential-birds/daydream/issues/1401)).
