@@ -190,6 +190,17 @@ and the scope of captured data.
 
 The `improve` command audits a whole repository. It verifies each candidate finding, prioritizes the findings by impact, and writes self-contained implementation plans. Every model turn runs against an independent, disposable Git snapshot outside the target and uses Claude's strict tool-root guard. Daydream writes only host-owned run artifacts under `.daydream/` and advisory plans under `daydream_plans/`. It does not modify tracked source files. These `.daydream/` paths are finalized output in the source checkout; during the run the live artifacts stay in private source-owned storage ([Output files](#output-files) describes the lifecycle).
 
+Default Improve and description-based plan runs collect conventions, guidelines,
+active languages/frameworks, intent documents and verification candidates in one
+bounded, read-only discovery investigation. It reuses the host's tracked inventory
+and service roots. The host still enumerates Makefile/manifest commands and
+validates every candidate against snapshot evidence; discovery never runs them.
+`recon.json` retains the admitted facts and identifies `combined` discovery.
+Custom `exploration.repository_survey` strategy text uses the compatible
+`survey-recon` two-pass path and preserves its guidance for audit and planning.
+Malformed fields degrade independently; recon invocation failures still stop the
+run, while custom surveys retain their best-effort failure policy.
+
 Improve currently requires the `claude` backend for all of its model phases. Codex, Pi, and Osprey improve configurations are refused before a model executable starts until those drivers can prove an equivalent root-confinement capability. Other review flows retain support for all four backends. The independent repository prevents shared Git refs, objects, indexes, and remotes; the Claude hook separately mediates model tool access. Neither a detached worktree nor a disposable clone by itself is a filesystem sandbox, and this tool-layer policy is not an OS sandbox.
 
 Snapshot preparation refuses inherited Git repository, external-diff, trace, executable-path, or arbitrary configuration overrides, including empty values. Well-formed indexed `commit.gpgsign` and `core.excludesFile` settings and the exact default `GIT_EXEC_PATH` that Git itself exports to hook processes are the only exceptions and pass through unchanged. Unsupported overrides fail before creating the snapshot; caller settings and hooks are never silently changed. This also applies to Codex's disposable read-only snapshots; ordinary Git commands retain their existing environment behavior.

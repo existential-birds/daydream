@@ -10,13 +10,15 @@ from typing import TYPE_CHECKING, Any
 from daydream import git_ops, trajectory
 from daydream.agent import console, run_agent
 from daydream.config import (
+    DEFAULT_TOOL_CALL_BUDGET,
+    DEFAULT_WALL_BUDGET_S,
     EffortTier,
 )
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.deep.diff import _diff_changed_files
-from daydream.exploration import EXPLORATION_SECTION_PREFIX
-from daydream.exploration_runner import repo_scan
+from daydream.exploration import EXPLORATION_SECTION_PREFIX, ExplorationContext
+from daydream.exploration_runner import EXPLORATION_MAX_TURNS, _sample_paths, repo_scan
 from daydream.extensions.api import Stop
 from daydream.improve import artifacts
 from daydream.improve.command_contract import (
@@ -34,9 +36,13 @@ from daydream.improve.prompts import (
     RECON_COMMAND_CONTRACT_BULLET,
 )
 from daydream.improve.repo_commands import enumerate_repository_commands
-from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+from daydream.prompts.grounding import (
+    REPOSITORY_SEARCH_GUIDANCE,
+    UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
+)
 from daydream.redaction import redact_value
 from daydream.repository_paths import canonicalize_working_directory
+from daydream.review_profile import build_default_profile
 from daydream.services import (
     Service,
     enumerate_services,
@@ -71,6 +77,52 @@ RECON_SCHEMA: dict[str, Any] = {
 }
 
 
+# Keep the standalone recon contract for custom survey compatibility. The default
+# investigation also returns guidelines instead of relying on a second model to
+# relay them from an exploration summary.
+DISCOVERY_SCHEMA: dict[str, Any] = {
+    **RECON_SCHEMA,
+    "required": [*RECON_SCHEMA["required"], "guidelines"],
+    "properties": {
+        **RECON_SCHEMA["properties"],
+        "guidelines": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+
+def _build_discovery_prompt(
+    repo: Path, services: list[Service], groups: list[PartitionGroup], tracked: list[str],
+) -> str:
+    sample = _sample_paths(tracked, 500)
+    sample_block = "\n".join(f"- {path}" for path in sample) or "- (no tracked files)"
+    return _build_recon_prompt(repo, services, groups, "") + f"""
+Combined repository discovery (survey and reconnaissance in one investigation):
+Survey the repository's steady-state conventions as well as reconnaissance facts.
+Read root and applicable nested AGENTS.md / CLAUDE.md and house-style configuration.
+Where configuration is silent, inspect representative source to infer conventions.
+Return conventions with their descriptions and source paths in `conventions`;
+return applicable project instructions in `guidelines`. Include active frameworks
+in `languages` and intent-document paths in `intent_docs`. These facts go directly
+to audit and plan writers; no later survey will fill gaps.
+Do not execute any discovered command candidate. Reuse each file read for all facts.
+
+Host inventory sample: {len(sample)} of {len(tracked)} tracked files.
+This is a starting point, not complete investigation coverage. Inspect real source
+directories beyond the sample when necessary using read-only file tools. The host
+has already enumerated the tracked inventory; no second Git enumeration is needed.
+<tracked_file_sample>
+{sample_block}
+</tracked_file_sample>
+
+{REPOSITORY_SEARCH_GUIDANCE}
+
+This Improve snapshot permits only Read/Glob/Grep inspection tools; Bash and
+command execution are unavailable. The shell examples above describe search scope
+only: reuse the host inventory, use scoped Glob and Grep on explicit regular files,
+and do not execute helper, Git, or discovered commands.
+"""
+
+
 def _build_recon_prompt(
     repo: Path,
     services: list[Service],
@@ -91,6 +143,7 @@ def _build_recon_prompt(
     summary_prefix = EXPLORATION_SECTION_PREFIX
     if exploration_summary.startswith(summary_prefix):
         exploration_summary = exploration_summary.removeprefix(summary_prefix)
+    scan_section = f"Existing repository scan:\n{exploration_summary}" if exploration_summary else ""
     return f"""IMPROVE_RECON
 
 {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}
@@ -113,8 +166,7 @@ directory it actually runs in, and set `applicability.scope` to
 `in-scope-paths` naming the subtrees it governs whenever it does not genuinely
 govern the whole repository.
 
-Existing repository scan:
-{exploration_summary or "No additional conventions detected."}
+{scan_section}
 """
 
 
@@ -249,6 +301,16 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
     ctx.data["branch_diff"] = branch_diff
     ctx.data["branch_files"] = branch_files
 
+    # Survey remains repository-wide even for branch/scoped/description runs.
+    # Reuse this inventory for partitioning instead of having repo_scan query it.
+    try:
+        repository_files = git_ops.ls_files(target)
+    except Exception:
+        # In branch/description modes the old optional survey alone owned this
+        # query and degraded to an empty sample. Full audits require inventory.
+        if not (branch_focus or description_mode):
+            raise
+        repository_files = []
     stacks: list[StackAssignment] = []
     partitions: list[Partition] = []
     groups: list[PartitionGroup] = []
@@ -256,7 +318,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
     if not description_mode:
         # Availability is resolved once in runner.run and threaded via config;
         # None flows through to detect_stacks' optimistic default.
-        tracked = branch_files if branch_focus else git_ops.ls_files(target)
+        tracked = branch_files if branch_focus else repository_files
         stacks = detect_stacks(
             tracked,
             registry=ctx.registry,
@@ -278,29 +340,39 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         )
 
     backend = ctx.backend_for("recon")
-    async with trajectory.phase_scope(trajectory.DaydreamPhase.RECON):
-        async with trajectory.phase_scope(
-            trajectory.DaydreamPhase.EXPLORATION, stage="repo-survey"
-        ):
-            exploration = await repo_scan(backend, target, run_context=ctx.run_context)
+    survey_key = "exploration.repository_survey"
+    survey_strategy = ctx.strategy(survey_key)
+    combined = survey_strategy == build_default_profile().strategies[survey_key].content
+    exploration = ExplorationContext()
+    mode = "combined" if combined else "survey-recon"
+    async with trajectory.phase_scope(trajectory.DaydreamPhase.RECON, stage=mode):
+        if not combined:
+            async with trajectory.phase_scope(
+                trajectory.DaydreamPhase.EXPLORATION, stage="repo-survey"
+            ):
+                exploration = await repo_scan(
+                    backend, target, strategies={survey_key: survey_strategy}, run_context=ctx.run_context,
+                )
         recon, _, _ = await run_agent(
             backend,
             target,
-            _build_recon_prompt(
-                target, services, groups, exploration.to_prompt_section()
-            ),
+            _build_discovery_prompt(target, services, groups, repository_files)
+            if combined else _build_recon_prompt(target, services, groups, exploration.to_prompt_section()),
             phase=trajectory.DaydreamPhase.RECON,
-            output_schema=RECON_SCHEMA,
+            output_schema=DISCOVERY_SCHEMA if combined else RECON_SCHEMA,
             read_only=True,
             persist_session=False,
             validate_structured_output=False,
+            max_turns=EXPLORATION_MAX_TURNS if combined else None,
+            wall_budget_s=DEFAULT_WALL_BUDGET_S if combined else None,
+            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             run_context=ctx.run_context,
         )
 
     total_candidates = 0
     valid_commands: list[dict[str, Any]] = []
     command_errors: list[str] = []
-    model_fields: dict[str, Any] = {}
+    model_fields: dict[str, Any] = {field: [] for field in ("languages", "conventions", "intent_docs", "guidelines")}
     safe_recon = redact_value(recon)
     if isinstance(safe_recon, dict):
         raw_commands = safe_recon.get("commands")
@@ -314,10 +386,18 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
             if isinstance((value := safe_recon.get(field)), list)
             and all(isinstance(item, str) for item in value)
             else []
-            for field in ("languages", "conventions", "intent_docs")
+            for field in ("languages", "conventions", "intent_docs", "guidelines")
         }
     else:
         command_errors = ["RECON_CONTAINER_INVALID@/"]
+
+    # A custom survey is best-effort, but its admitted guidance must not depend
+    # on the recon model remembering to repeat it. Redact before persistence.
+    model_fields["conventions"].extend(redact_value([
+        f"{item.name}: {item.description}" + (f" (source: {item.source})" if item.source else "")
+        for item in exploration.conventions
+    ]))
+    model_fields["guidelines"].extend(redact_value(exploration.guidelines))
 
     # Make targets and manifest scripts are host-enumerated, not model-cited:
     # the recon prompt forbids reporting them, so without this the only
@@ -334,6 +414,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
 
     recon_data: dict[str, Any] = {
         "artifact_type": "daydream.improve-recon",
+        "discovery_mode": mode,
         **model_fields,
         "commands": valid_commands,
         "command_rejections": [

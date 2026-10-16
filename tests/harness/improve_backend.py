@@ -389,7 +389,7 @@ class ImproveStubBackend:
                             "name": "OpenAPI First", "description": "openapi.yaml is the HTTP contract",
                             "source": "AGENTS.md",
                         }
-                    ], "guidelines": [],
+                    ], "guidelines": ["Keep API examples synchronized with openapi.yaml."],
                 }, continuation=None,
             )
             return
@@ -402,8 +402,11 @@ class ImproveStubBackend:
             commands = [*commands, *self.recon_commands_extra]
             yield ResultEvent(structured_output={"languages": (self.recon_languages_override
                         if self.recon_languages_override is not None
-                        else ["python", "typescript"]
-                    ), "commands": commands, "conventions": ["OpenAPI First"], "intent_docs": ["README.md"],
+                        else ["python", "typescript", "FastAPI"]
+                    ), "commands": commands,
+                    "conventions": ["OpenAPI First: openapi.yaml is the HTTP contract (source: AGENTS.md)"],
+                    "guidelines": ["Keep API examples synchronized with openapi.yaml."],
+                    "intent_docs": ["README.md"],
                 }, continuation=None,
             )
             return
@@ -623,7 +626,7 @@ class ProductionPathBackend(ImproveStubBackend):
             self._record_call(cwd, prompt, "recon", **turn_kwargs)
             return [ResultEvent(structured_output={
                         "languages": ["python", "typescript"], "commands": self._recon_commands(),
-                        "conventions": ["OpenAPI First"], "intent_docs": ["README.md"],
+                        "conventions": ["OpenAPI First"], "guidelines": [], "intent_docs": ["README.md"],
                     }, continuation=None,
                 )
             ]
