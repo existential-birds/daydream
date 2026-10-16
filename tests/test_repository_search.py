@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -40,6 +43,51 @@ def test_search_preserves_git_membership_and_requires_named_ignored_expansion(gi
     assert expanded["expansion"] == {"paths": ["deps/package"], "reason": "trace generated caller"}
     with pytest.raises(ValueError, match="requires a concrete"):
         search_repository(repo, "needle", roots, expand=["deps/package"], reason=" ")
+
+
+@pytest.mark.parametrize(("prefix", "needle", "suffix", "omissions"), [
+    pytest.param(b"x" * 500, "needle", b"y" * 500, (True, True), id="middle"),
+    pytest.param(b"", "needle", b"y" * 500, (False, True), id="start"),
+    pytest.param(b"x" * 500, "needle", b"", (True, False), id="end"),
+    pytest.param("é".encode() * 250, "針🔍", "🙂".encode() * 250, (True, True), id="utf8"),
+    pytest.param(b"\xff" * 500, "needle", b"y" * 500, (True, True), id="invalid-utf8"),
+    pytest.param(b"x" * 500, "n" * 234, b"y" * 500, (True, True), id="full-budget-hit"),
+    pytest.param(b"", "n" * 237, b"y" * 500, (False, True), id="full-budget-start"),
+    pytest.param(b"x" * 500, "n" * 237, b"", (True, False), id="full-budget-end"),
+    pytest.param(b"", "針" * 80, b"", (False, False), id="short-utf8-line"),
+    pytest.param(b"x" * 500, "針" * 100, b"y" * 500, (True, True), id="oversized-hit"),
+])
+def test_search_cli_excerpts_retain_literal_hits_with_bounded_omissions(
+    git_repo: Path, prefix: bytes, needle: str, suffix: bytes, omissions: tuple[bool, bool],
+) -> None:
+    # Owner: CLI match evidence. Existing cap tests match at byte zero and miss
+    # an excerpt that hides the actual hit in a minified expanded dependency.
+    (git_repo / ".gitignore").write_text("deps/\n")
+    generated = git_repo / "deps/pkg/generated.js"
+    generated.parent.mkdir(parents=True)
+    generated.write_bytes(prefix + needle.encode() + suffix + b"\n")
+    completed = subprocess.run(
+        [sys.executable, "-m", "daydream", "search", needle, ".", "--expand", "deps/pkg",
+         "--reason", "inspect the generated caller"],
+        cwd=git_repo, capture_output=True, text=True, timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert len(result["matches"]) == 1
+    hit = result["matches"][0]
+    assert (hit["path"], hit["line"]) == ("deps/pkg/generated.js", 1)
+    text = hit["text"]
+    if len(needle.encode()) <= 240 - 3 * sum(omissions):
+        assert needle in text
+    else:
+        assert needle.startswith(text[3:-3]) and text[3:-3]
+    assert len(text.encode("utf-8")) <= 240
+    assert (text.startswith("..."), text.endswith("...")) == omissions
+    if omissions == (True, True) and len(needle.encode()) < 234:
+        before, after = text.split(needle)
+        assert len(before) > 3 and len(after) > 3
+    if not any(omissions):
+        assert text == needle
 
 
 @pytest.mark.parametrize("escape", ["../sibling", ".git", "outward"])

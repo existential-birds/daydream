@@ -46,7 +46,9 @@ alone may omit tracked hidden or ignored evidence.
 
 Each Git inventory query has one five-second attempt (two queries when expanding).
 The scan is bounded to five additional seconds, 2,000 files, 1 MiB per file,
-16 MiB total, 100 matches and 16 KiB of match JSON. Lines are excerpted to 240 bytes.
+16 MiB total, 100 matches and 16 KiB of match JSON. Line excerpts center on the first
+literal hit within 240 UTF-8 bytes, including `...` markers for omitted text. A hit
+longer than the available excerpt budget is itself truncated.
 Output includes enumerated/visited counts and bytes read. Binary files are not text
 searched; symlinks, absent paths and nonregular files are skipped and counted. Roots
 outside cwd and Git metadata are rejected. Exit 0 means a completed text search

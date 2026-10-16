@@ -23,6 +23,23 @@ _MAX_OUTPUT_BYTES = 16384
 _SCAN_SECONDS = 5
 
 
+def _excerpt(line: bytes, needle: bytes) -> str:
+    # Normalize invalid UTF-8 before budgeting so replacement characters count.
+    position = len(line[:line.find(needle)].decode("utf-8", errors="replace").encode("utf-8"))
+    line = line.decode("utf-8", errors="replace").encode("utf-8")
+    if len(line) <= 240:
+        return line.decode("utf-8")
+    start = max(0, position - max(0, (234 - len(needle)) // 2))
+    if start <= 3:
+        start, end = 0, 237
+    elif len(line) - start <= 237:
+        start, end = len(line) - 237, len(line)
+    else:
+        end = start + 234
+    text = line[start:end].decode("utf-8", errors="ignore")
+    return ("..." if start else "") + text + ("..." if end < len(line) else "")
+
+
 def _relative_root(cwd: Path, value: str) -> str:
     path = cwd / value
     resolved = path.resolve()
@@ -90,7 +107,7 @@ def search_repository(cwd: Path, pattern: str, roots: list[str], *, expand: list
         for number, line in enumerate(data.splitlines(), 1):
             if needle not in line:
                 continue
-            match = {"path": name, "line": number, "text": line[:240].decode("utf-8", errors="replace")}
+            match = {"path": name, "line": number, "text": _excerpt(line, needle)}
             size = len(json.dumps(match).encode("utf-8"))
             if len(result["matches"]) >= _MAX_MATCHES or output_bytes + size > _MAX_OUTPUT_BYTES:
                 result["incomplete"].append("match/output limit")
