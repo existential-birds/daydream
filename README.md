@@ -246,9 +246,10 @@ Quick and branch audits keep one whole-surface group per category.
 `.daydream/improve/primary-manifests/` preserves the complete repository-relative
 assignments without temporary snapshot paths. Every run rebuilds manifests from
 its captured inventory; plan reuse never reuses an expired snapshot pointer.
-The report and `.daydream/improve/coverage.json` distinguish owned file counts,
+`.daydream/improve/coverage.json` distinguishes owned file counts,
 available contextual files (not measured reads), group-ceiling omissions, and
-failed category assignments. `context_file_count` counts nonowned eligible files
+failed category assignments. The report summarizes omissions and failed
+assignments. `context_file_count` counts nonowned eligible files
 in a group's member partitions; dependency reads can also reach elsewhere in the
 snapshot. It does not measure files actually read. A successful sibling category
 does not cover a failed one. Coverage means the assignment completed at the selected tier's breadth, not
