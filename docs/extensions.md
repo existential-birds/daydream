@@ -196,6 +196,16 @@ captured as results of the diagram-only run.
 | 6 | `publish-improve-issues` | `recon` |
 | 7 | `improve-report` | `recon` |
 
+The default `recon` step combines survey and reconnaissance in one bounded
+model investigation, reusing host inventory and service discovery. Its admitted
+`recon_summary` includes conventions (with descriptions/source paths), guidelines,
+languages/frameworks, intent documents and host-validated command records.
+A changed `exploration.repository_survey` strategy retains the two-pass
+repository-survey/recon compatibility path; a partial profile that leaves this
+strategy unchanged uses combined discovery. Independent `repo_scan` calls keep
+their existing contract. Recon lifecycle metadata and `recon.json` identify
+`combined` or `survey-recon`; only the fallback emits a `repo-survey` phase.
+
 Configuration includes `improve_effort`, `improve_focus`, `improve_scope`, and
 `improve_plan_description`. Issue publication requires
 `[tool.daydream.improve.github] publish_issues = true`.

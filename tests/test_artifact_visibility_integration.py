@@ -664,7 +664,9 @@ def _install_improve_strict_boundary(monkeypatch: pytest.MonkeyPatch) -> list[di
             if "you are the **repo-survey** specialist" in lowered:
                 structured: Any = {"conventions": [], "guidelines": []}
             elif "IMPROVE_RECON" in prompt:
-                structured = {"languages": ["python"], "commands": [], "conventions": [], "intent_docs": []}
+                structured = {"languages": ["python"], "commands": [], "conventions": [],
+                    "intent_docs": [], "guidelines": [],
+                }
             elif "read-only improve audit specialist" in prompt:
                 structured = {"findings": []}
             elif "AUDIT VISIBILITY PROBE" in prompt:
@@ -742,6 +744,7 @@ async def test_runner_improve_claude_strict_uses_audit_root_and_inline_sanctione
         if "you are the **repo-survey** specialist" in prompt.lower():
             classified["survey"] += 1
         elif "IMPROVE_RECON" in prompt:
+            assert "Combined repository discovery" in prompt
             classified["recon"] += 1
         elif "AUDIT VISIBILITY PROBE" in prompt:
             classified["probe"] += 1
@@ -774,9 +777,9 @@ async def test_runner_improve_claude_strict_uses_audit_root_and_inline_sanctione
             assert str(private_base) not in value
             assert str(repo.resolve()) not in value
 
-    # The no-finding route still exercised the real recon and every audit
+    # The no-finding route exercises one combined discovery and every audit
     # category plus the bounded probe turn.
-    assert classified["survey"] == 1
+    assert classified["survey"] == 0
     assert classified["recon"] == 1
     assert classified["probe"] == 1
     assert classified["audit"] >= 1

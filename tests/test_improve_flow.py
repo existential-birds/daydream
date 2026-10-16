@@ -52,7 +52,10 @@ from daydream.improve.prompts import (
     build_audit_prompt,
     build_vet_prompt,
 )
-from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+from daydream.prompts.grounding import (
+    REPOSITORY_SEARCH_GUIDANCE,
+    UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
+)
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from daydream.services import Service, enumerate_services
@@ -171,6 +174,176 @@ async def test_unsupported_improve_backend_fails_atomic_preflight(
     assert len(output) < 5_000
     assert head_sha(improve_monorepo_target) == before_head
     assert _git_status_porcelain(improve_monorepo_target) == before_status
+
+
+@pytest.mark.parametrize("intent_profile", [False, True], ids=["packaged-profile", "intent-only-profile"])
+def test_improve_cli_discovers_nested_workspace_and_preserves_downstream_facts(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, cli_runner: Any,
+    tmp_path: Path, intent_profile: bool,
+) -> None:
+    """One CLI discovery must retain guidance and nested command evidence downstream."""
+    repo = improve_monorepo_target
+    nested = repo / "platform" / "payments" / "ui"
+    nested.mkdir(parents=True)
+    (repo / "package.json").write_text(json.dumps({"workspaces": ["platform/*/ui"]}) + "\n")
+    (nested / "package.json").write_text(json.dumps({"scripts": {"test": "touch candidate-command-ran"}}, indent=2))
+    (nested / "App.tsx").write_text("export const App = () => <div/>;\n")
+    (nested / "AGENTS.md").write_text("Preserve payment accessibility conventions.\n")
+    git(repo, "add", "package.json", "platform")
+    commit(repo, "add nested workspace")
+    before_head = head_sha(repo)
+
+    class NestedDiscoveryBackend(ImproveStubBackend):
+        async def _pre_execute(self, cwd: Path, prompt: str, **kwargs: Any) -> list[AgentEvent] | None:
+            if "IMPROVE_RECON" in prompt:
+                guidance_path = "platform/payments/ui/AGENTS.md"
+                guidance = (cwd / guidance_path).read_text(encoding="utf-8").strip()
+                self.recon_output_override = {
+                    "languages": ["python", "typescript", "FastAPI"], "commands": stub_recon_commands(),
+                    "conventions": ["OpenAPI First: openapi.yaml is the HTTP contract (source: AGENTS.md)"],
+                    "guidelines": ["Keep API examples synchronized with openapi.yaml.",
+                        f"{guidance} (source: {guidance_path})"],
+                    "intent_docs": ["README.md"],
+                }
+            return None
+
+    backend = install_capable_improve_backend(monkeypatch, NestedDiscoveryBackend(repo, n_findings=1))
+    argv = ["improve", str(repo), "--non-interactive", "--no-archive", "--no-eval"]
+    if intent_profile:
+        profile = tmp_path / "intent-only.toml"
+        profile.write_text(
+            'schema_version = 1\nname = "intent-only"\n'
+            '[strategies.intent]\ncontent = "Inspect product intent."\nsource = "test"\n'
+        )
+        argv.extend(["--review-profile", str(profile)])
+    result = cli_runner.invoke(argv)
+
+    assert result.exit_code == 0
+    discovery = [call for call in backend.calls if call["marker"] in {"repo-scan", "recon"}]
+    assert len(discovery) == 1
+    assert discovery[0]["marker"] == "recon"
+    assert "Combined repository discovery" in discovery[0]["prompt"]
+    assert discovery[0]["prompt"].count(REPOSITORY_SEARCH_GUIDANCE) == 1
+    assert "only Read/Glob/Grep inspection tools; Bash and\ncommand execution are unavailable" in discovery[0]["prompt"]
+    assert "do not execute helper, Git, or discovered commands" in discovery[0]["prompt"]
+    assert "platform/payments/ui/AGENTS.md" in discovery[0]["prompt"]
+    assert "platform/payments/ui" in discovery[0]["prompt"]
+    recon = _load_improve_json(repo, "recon.json")
+    command = next(item for item in recon["commands"] if item["command"] == "npm run test")
+    assert command["working_directory"] == "platform/payments/ui"
+    assert command["applicability"]["scope"] == {"kind": "in-scope-paths", "paths": ["platform/payments/ui"]}
+    assert command["evidence"]["source_path"] == "platform/payments/ui/package.json"
+    assert command["evidence"]["kind"] == "host-derived"
+    assert recon["discovery_mode"] == "combined"
+    nested_guidance = "Preserve payment accessibility conventions. (source: platform/payments/ui/AGENTS.md)"
+    assert nested_guidance in recon["guidelines"]
+    for marker in ("audit", "plan-writer"):
+        calls = [call for call in backend.calls if call["marker"] == marker]
+        assert calls
+        for call in calls:
+            assert "openapi.yaml is the HTTP contract (source: AGENTS.md)" in call["prompt"]
+            assert "Keep API examples synchronized with openapi.yaml." in call["prompt"]
+            assert nested_guidance in call["prompt"]
+            assert '"FastAPI"' in call["prompt"]
+            assert '"README.md"' in call["prompt"]
+            assert '"npm run test"' in call["prompt"]
+            assert '"platform/payments/ui"' in call["prompt"]
+    assert improve_artifact(repo, "report.md").is_file()
+    assert list((repo / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
+    assert all(call["read_only"] for call in backend.calls)
+    assert not (nested / "candidate-command-ran").exists()
+    assert head_sha(repo) == before_head
+    assert _git_status_porcelain(repo) == ""
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("survey_fails", [False, True], ids=["guidance-retained", "survey-best-effort"])
+async def test_custom_improve_survey_uses_compatible_two_pass_fallback(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
+    survey_fails: bool,
+) -> None:
+    """A custom survey still runs, and its guidance survives a recon that omits it."""
+    repo = improve_monorepo_target
+    profile = tmp_path / "custom-survey.toml"
+    profile.write_text(
+        'schema_version = 1\nname = "custom-survey"\n'
+        '[strategies."exploration.repository_survey"]\n'
+        'content = "You are the **repo-survey** specialist. CUSTOM_SURVEY_INSTRUCTION"\nsource = "test"\n'
+    )
+
+    class CustomSurveyBackend(ImproveStubBackend):
+        async def _pre_execute(self, cwd: Path, prompt: str, **kwargs: Any) -> list[AgentEvent] | None:
+            if survey_fails and "CUSTOM_SURVEY_INSTRUCTION" in prompt:
+                self._record_call(cwd, prompt, "repo-scan", **kwargs)
+                raise RuntimeError("survey unavailable")
+            return None
+
+    backend = install_capable_improve_backend(monkeypatch, CustomSurveyBackend(repo, n_findings=1))
+    backend.recon_output_override = {
+        "languages": ["python"], "commands": stub_recon_commands(), "conventions": [], "intent_docs": [],
+    }
+    assert await _run_improve(make_config, repo, review_profile_path=profile) == 0
+    discovery = [call for call in backend.calls if call["marker"] in {"repo-scan", "recon"}]
+    assert [call["marker"] for call in discovery] == ["repo-scan", "recon"]
+    assert "CUSTOM_SURVEY_INSTRUCTION" in discovery[0]["prompt"]
+    assert "Combined repository discovery" not in discovery[1]["prompt"]
+    recon = _load_improve_json(repo, "recon.json")
+    assert recon["discovery_mode"] == "survey-recon"
+    if survey_fails:
+        assert recon["conventions"] == []
+        assert recon["guidelines"] == []
+    else:
+        for text in ("openapi.yaml is the HTTP contract", "Keep API examples synchronized with openapi.yaml."):
+            assert text in discovery[1]["prompt"]
+            assert text in json.dumps(recon)
+            for marker in ("audit", "plan-writer"):
+                calls = [call for call in backend.calls if call["marker"] == marker]
+                assert calls
+                assert all(text in call["prompt"] for call in calls)
+    events = _root_run_trajectory(repo)["extra"]["phase_events"]
+    assert any(event["phase"] == "exploration" and event["metadata"] == {"stage": "repo-survey"} for event in events)
+    assert all(not Path(call["cwd"]).exists() for call in backend.calls)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("terminal", ["cancelled", "failed"])
+async def test_combined_discovery_terminal_closes_lifecycle_and_snapshot(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, terminal: str,
+) -> None:
+    """Discovery teardown must close the real snapshot before any audit starts."""
+    repo = improve_monorepo_target
+    started = anyio.Event()
+
+    class TerminalDiscoveryBackend(ImproveStubBackend):
+        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            self._record_call(cwd, prompt, "recon", **kwargs)
+            yield TextEvent(text="repository discovery started")
+            started.set()
+            if terminal == "failed":
+                raise RuntimeError("discovery provider failed")
+            await anyio.sleep_forever()
+
+    backend = install_capable_improve_backend(monkeypatch, TerminalDiscoveryBackend(repo))
+    before_head = head_sha(repo)
+    before_status = _git_status_porcelain(repo)
+    if terminal == "failed":
+        with pytest.raises(RuntimeError, match="discovery provider failed"):
+            await _run_improve(make_config, repo)
+    else:
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(_run_improve, make_config, repo)
+            await started.wait()
+            tasks.cancel_scope.cancel()
+    assert len(backend.calls) == 1
+    assert not Path(backend.calls[0]["cwd"]).exists()
+    assert head_sha(repo) == before_head
+    assert _git_status_porcelain(repo) == before_status
+    events = _root_run_trajectory(repo)["extra"]["phase_events"]
+    ends = [event for event in events if event["event"] == "phase_end" and event["phase"] == "recon"]
+    assert len(ends) == 1
+    assert ends[0]["metadata"] == {"stage": "combined"}
+    assert ends[0]["status"] == terminal
+    assert not improve_artifact(repo, "report.md").exists()
 
 @pytest.mark.anyio
 async def test_improve_git_environment_refusal_names_key_without_value(
@@ -889,11 +1062,12 @@ async def test_audit_fans_out_per_partition_group_on_scaled_monorepo(
     assert "Return the per-subtree build, test, and lint commands" in prompt
     assert "`in-scope-paths`" in prompt
     assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in prompt
-    assert prompt.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < prompt.index("Existing repository scan:")
+    assert prompt.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < prompt.index("Combined repository discovery")
     # The exploration summary embedded below the recon header already opened with
     # the boundary; dedup must leave exactly one occurrence in the full prompt.
     assert prompt.count(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) == 1
-    assert "apps/svc00/api.py" not in prompt
+    assert "<tracked_file_sample>" in prompt
+    assert "apps/svc00/api.py" in prompt
     # Service roots are printed anchored at the audit snapshot (the model's
     # cwd), never as bare relative paths a model could resolve against the
     # live target, so resolving a service root reads the snapshot.
@@ -1281,15 +1455,24 @@ async def test_host_enumeration_failure_is_visible_and_keeps_model_commands(
 async def test_unrelated_recon_container_error_preserves_valid_commands(
     improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    stub.recon_languages_override = {"secret-model-prose": "must not persist"}
+    stub.recon_output_override = {
+        "languages": {"secret-model-prose": "must not persist"},
+        "conventions": ["Preserve HTTP semantics (source: AGENTS.md)"],
+        "guidelines": {"private-guideline-prose": "must not persist"},
+        "intent_docs": ["README.md"], "commands": stub_recon_commands(),
+    }
     code = await _run_improve(make_config, improve_monorepo_target)
 
     assert code == 0
     assert [call for call in stub.calls if call["marker"] == "audit"]
     recon_text = improve_artifact(improve_monorepo_target, "recon.json").read_text()
     assert "secret-model-prose" not in recon_text
+    assert "private-guideline-prose" not in recon_text
     recon = json.loads(recon_text)
     assert recon["languages"] == []
+    assert recon["guidelines"] == []
+    assert recon["conventions"] == ["Preserve HTTP semantics (source: AGENTS.md)"]
+    assert recon["intent_docs"] == ["README.md"]
     assert len(recon["commands"]) == 2
     assert all(command["evidence"]["verbatim_excerpt"]
         in {'test-command = "uv run pytest"', 'scope-command = "git diff --exit-code"',}
@@ -1298,14 +1481,15 @@ async def test_unrelated_recon_container_error_preserves_valid_commands(
     assert recon["command_rejections"] == []
 
 @pytest.mark.anyio
-async def test_non_array_commands_preserve_diagnostics_and_continue_audit(
+@pytest.mark.parametrize("invalid_container", [False, True], ids=["non-array-commands", "non-object-discovery"])
+async def test_malformed_discovery_preserves_diagnostics_and_continues_audit(
     improve_monorepo_target: Path, stub: ImproveStubBackend, capsys: pytest.CaptureFixture[str],
-    make_config: MakeConfig,
+    make_config: MakeConfig, invalid_container: bool,
 ) -> None:
     secret = "OPENAI_API_KEY=sk-secret123456"
     model_prose = "private arbitrary model explanation"
     rejected_command = "uv run pytest --private-selection"
-    stub.recon_output_override = {
+    stub.recon_output_override = [secret, rejected_command] if invalid_container else {
         "languages": [model_prose], "commands": {"command": rejected_command, "verbatim_excerpt": secret,},
         "conventions": [model_prose], "intent_docs": [model_prose],
     }
@@ -1319,7 +1503,8 @@ async def test_non_array_commands_preserve_diagnostics_and_continue_audit(
     recon_text = improve_artifact(improve_monorepo_target, "recon.json").read_text()
     recon = json.loads(recon_text)
     assert recon["commands"] == []
-    assert recon["command_rejections"] == [{"code": "RECON_COMMANDS_INVALID", "pointer": "/commands"}]
+    assert recon["command_rejections"] == ([{"code": "RECON_CONTAINER_INVALID", "pointer": "/"}]
+        if invalid_container else [{"code": "RECON_COMMANDS_INVALID", "pointer": "/commands"}])
     # `model_prose` is legitimate recon prose and stays; the rejected
     # candidate's own content must never reach the persisted artifact.
     for private_value in (secret, rejected_command, "verbatim_excerpt"):
@@ -2582,23 +2767,21 @@ async def test_improve_timing_completeness_preserves_p09_audit_isolation(
         for index, event in enumerate(events)
         if event["event"] == "phase_start" and event["phase"] == "recon"
     )
-    survey_start = next(index
-        for index, event in enumerate(events)
-        if event["event"] == "phase_start"
-        and event["phase"] == "exploration"
-        and event["metadata"] == {"stage": "repo-survey"}
-    )
-    survey_end = next(index
-        for index, event in enumerate(events)
-        if event["event"] == "phase_end"
-        and event["phase"] == "exploration"
-        and event["metadata"] == {"stage": "repo-survey"}
-    )
     recon_end = next(index
         for index, event in enumerate(events)
         if event["event"] == "phase_end" and event["phase"] == "recon"
     )
-    assert recon_start < survey_start < survey_end < recon_end
+    assert recon_start < recon_end
+    assert events[recon_start]["metadata"] == {"stage": "combined"}
+    assert events[recon_end]["metadata"] == {"stage": "combined"}
+    assert not any(event["phase"] == "exploration" for event in events)
+    discovery = [call for call in stub.calls if call["marker"] in {"repo-scan", "recon"}]
+    assert len(discovery) == 1
+    assert discovery[0]["marker"] == "recon"
+    assert discovery[0]["max_turns"] == 50
+    assert discovery[0]["persist_session"] is False
+    recon = _load_improve_json(repo, "recon.json")
+    assert recon["discovery_mode"] == "combined"
 
     audit_descriptors = [f"audit-{category}-group-{group:02d}"
         for category in AUDIT_CATEGORIES
