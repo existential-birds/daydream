@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import os
+import threading
 from collections.abc import Callable
+from datetime import datetime
 from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from daydream import runner
@@ -25,7 +30,8 @@ from daydream.commands import review as cli_review
 from daydream.observability.config import ObservabilityConfig
 from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
-from tests.harness.backend import ScriptedBackend
+from tests.harness.backend import Responder, ScriptedBackend
+from tests.harness.git_helpers import bare_remote, git
 from tests.harness.otlp import TraceCollector, attributes, otlp_collector
 
 _SECRET = "opaque-observability-credential-73951"
@@ -59,7 +65,7 @@ def register(r):
 '''
 
 
-def _backend() -> ScriptedBackend:
+def _backend(*, responder: Responder | None = None) -> ScriptedBackend:
     return ScriptedBackend(events=[
         RequestEvent(prompt=_PROMPT, system_prompt=_SYSTEM, output_schema=_SCHEMA,
                      model_name="observed-model", provider_name="observed-provider"),
@@ -74,7 +80,7 @@ def _backend() -> ScriptedBackend:
                   measurement_source="terminal"),
         ResultEvent(structured_output={"answer": "safe"}, continuation=None, model_name="observed-model",
                     provider_name="observed-provider", session_id="native-session-one", finish_reason="stop"),
-    ])
+    ], responder=responder)
 
 
 def _configure(monkeypatch: pytest.MonkeyPatch, base_url: str, destination: str) -> None:
@@ -86,6 +92,125 @@ def _configure(monkeypatch: pytest.MonkeyPatch, base_url: str, destination: str)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", base_url)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
     monkeypatch.setenv("DAYDREAM_TRACE_TO", destination)
+
+@pytest.mark.parametrize("reader_delay_s", [0, 6])
+async def test_cli_worktree_archive_traces_analysis_after_frozen_trajectory(
+    ext_dir: ExtDir, feature_branch_repo: Path, archive_dir: Path, tmp_path: Path,
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch, reader_delay_s: int,
+) -> None:
+    """Finalization keeps worker trace context without extending frozen lifecycle evidence."""
+    ext_dir.write_module(_FLOW)
+    remote = bare_remote(tmp_path / "origin.git")
+    git(feature_branch_repo, "remote", "add", "origin", str(remote))
+    git(feature_branch_repo, "push", "origin", "main", "feature")
+    head = git(feature_branch_repo, "rev-parse", "HEAD")
+    reader_ready = threading.Event()
+    release_writer = threading.Event()
+    writer_outcomes: list[bool | Exception] = []
+    writer: threading.Thread | None = None
+
+    async def seed_source_fifo(cwd: Path, *_args: Any) -> None:
+        nonlocal writer
+        source = cwd / "main.py"
+        content = source.read_bytes()
+        source.unlink()
+        os.mkfifo(source)
+
+        def write_source() -> None:
+            descriptor: int | None = None
+            try:
+                while not release_writer.is_set():
+                    try:
+                        descriptor = os.open(source, os.O_WRONLY | os.O_NONBLOCK)
+                        break
+                    except OSError as exc:
+                        if exc.errno != errno.ENXIO:
+                            raise
+                        release_writer.wait(0.01)
+                if descriptor is None:
+                    if not source.is_fifo():
+                        return
+                    # Cleanup must also release a reader racing with replacement.
+                    descriptor = os.open(source, os.O_RDWR | os.O_NONBLOCK)
+                # The current reader owns the FIFO fd; later reads see ordinary
+                # source bytes, including the pre-optimization repeated-read path.
+                replacement = cwd / "source-ready"
+                replacement.write_bytes(content)
+                os.replace(replacement, source)
+                reader_ready.set()
+                writer_outcomes.append(release_writer.wait(5))
+                os.write(descriptor, content)
+            except Exception as exc:
+                writer_outcomes.append(exc)
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+                reader_ready.set()
+
+        writer = threading.Thread(target=write_source, daemon=True)
+        writer.start()
+        await anyio.sleep(reader_delay_s)
+
+    async def release_from_event_loop() -> None:
+        if await anyio.to_thread.run_sync(reader_ready.wait, reader_delay_s + 10):
+            release_writer.set()
+
+    backend = _backend(responder=seed_source_fifo)
+    install_backend(backend)
+    try:
+        with otlp_collector() as receiver:
+            _configure(monkeypatch, receiver.base_url, "otlp")
+            config = cli_review._parse_args([
+                str(feature_branch_repo), "--flow", "trace-probe", "--base", "main", "--worktree", "--non-interactive",
+                "--stack", "python",
+            ])
+            async with anyio.create_task_group() as tasks:
+                tasks.start_soon(release_from_event_loop)
+                assert await runner.run(config) == 0
+    finally:
+        release_writer.set()
+        if writer is not None:
+            await anyio.to_thread.run_sync(writer.join, 6)
+
+    assert writer is not None and not writer.is_alive()
+    assert writer_outcomes == [True], "quality analysis blocked the event loop until the FIFO writer timed out"
+    assert backend.call_count == 1
+    worktree = backend.calls[0]["cwd"]
+    assert worktree != feature_branch_repo.resolve()
+    assert not worktree.exists()
+    assert git(feature_branch_repo, "rev-parse", "HEAD") == head
+    public_trajectory, = (feature_branch_repo / ".daydream/runs").glob("*/trajectory.json")
+    archived_run = archive_dir / "runs" / public_trajectory.parent.name
+    assert public_trajectory.read_bytes() == (archived_run / "trajectory.json").read_bytes()
+    assert json.loads((feature_branch_repo / ".daydream/observability-result.json").read_text()) == {"answer": "safe"}
+    trajectory = json.loads(public_trajectory.read_text())
+    evaluation = json.loads((archived_run / "evaluation.json").read_text())
+    manifest = json.loads((archived_run / "manifest.json").read_text())
+    assert list(evaluation["quality"]["per_file"]) == ["main.py"]
+    assert evaluation["quality"]["scoped_files"] == 1
+    assert evaluation["daydream_dir"] == str(feature_branch_repo.resolve() / ".daydream")
+    started = datetime.fromisoformat(trajectory["extra"]["run_started_at"])
+    ended = datetime.fromisoformat(trajectory["extra"]["run_ended_at"])
+    assert evaluation["timing"]["total_wall_clock_seconds"] == round((ended - started).total_seconds(), 3)
+    assert manifest["metrics"]["wall_clock_seconds"] == evaluation["timing"]["total_wall_clock_seconds"]
+    assert manifest["metrics"]["phase_timings"] == evaluation["timing"]["phase_timings"]
+
+    root, = [span for span in receiver.spans if not span.get("parentSpanId")]
+    steps = {attributes(span).get("daydream.step"): span for span in receiver.spans
+             if attributes(span).get("daydream.span.kind") == "step"}
+    parent = root
+    for name in ("artifact-finalization", "evaluation-analysis", "quality-analysis"):
+        span = steps[name]
+        assert span["parentSpanId"] == parent["spanId"]
+        assert span["traceId"] == root["traceId"]
+        assert attributes(span)["daydream.session.id"] == trajectory["session_id"]
+        assert attributes(span)["daydream.stack"] == "python"
+        assert span["status"]["code"] == "STATUS_CODE_OK"
+        assert int(parent["startTimeUnixNano"]) <= int(span["startTimeUnixNano"])
+        assert int(span["endTimeUnixNano"]) <= int(parent["endTimeUnixNano"])
+        assert int(span["startTimeUnixNano"]) >= int(ended.timestamp() * 1_000_000_000)
+        parent = span
+    assert not set(steps).intersection(evaluation["timing"]["phase_timings"])
 
 @pytest.mark.parametrize("destination", ["otlp", "langsmith", "honeyhive"])
 async def test_runner_exports_complete_portable_trace(
@@ -233,7 +358,6 @@ async def test_runner_redacts_encoded_and_decoded_url_credentials_despite_malfor
     for credential in credentials:
         assert credential not in payload
     spans = receiver.spans
-    assert len(spans) == 5
     by_id = {span["spanId"]: span for span in spans}
     tool = next(span for span in spans if attributes(span).get("daydream.span.kind") == "tool")
     attempt = by_id[tool["parentSpanId"]]
@@ -241,6 +365,8 @@ async def test_runner_redacts_encoded_and_decoded_url_credentials_despite_malfor
     phase = by_id[agent["parentSpanId"]]
     root = by_id[phase["parentSpanId"]]
     assert not root.get("parentSpanId")
+    finalization, = [span for span in spans if attributes(span).get("daydream.step") == "artifact-finalization"]
+    assert finalization["parentSpanId"] == root["spanId"]
     assert len({span["traceId"] for span in spans}) == 1
     assert attributes(attempt)["gen_ai.usage.input_tokens"] == 20
     assert attributes(attempt)["gen_ai.usage.output_tokens"] == 4

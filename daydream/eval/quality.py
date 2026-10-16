@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
@@ -126,37 +127,34 @@ def _count_decision_nodes(node: Any) -> int:
     )
 
 
-def _scoped_python_files(workspace: Path) -> list[tuple[Path, str]]:
-    """Enumerate sorted Python paths, excluding exact directory components and generated files."""
+def _scoped_python_files(workspace: Path) -> Iterator[tuple[Path, str, bytes]]:
+    """Yield sorted eligible Python paths and bytes, pruning excluded directories."""
     files: list[tuple[Path, str]] = []
-    for path in workspace.rglob("*.py"):
-        try:
-            rel = path.relative_to(workspace)
-        except ValueError:
-            continue
-        if any(part in _QUALITY_EXCLUDED_DIRS for part in rel.parts):
-            continue
+    # Like rglob, do not descend through directory symlinks. Real directories
+    # ending in .py remain traversable; reading a directory yields no candidate.
+    for directory, directories, filenames in workspace.walk(top_down=True, follow_symlinks=False):
+        directories[:] = [name for name in directories if name not in _QUALITY_EXCLUDED_DIRS]
+        for name in filenames:
+            if name.endswith(".py"):
+                path = directory / name
+                files.append((path, str(path.relative_to(workspace))))
+    for path, rel in sorted(files, key=lambda item: item[1]):
         try:
             content = path.read_bytes()
         except OSError:
             continue
-        if is_generated_file(str(rel), content):
+        if is_generated_file(rel, content):
             continue
-        files.append((path, str(rel)))
-    return sorted(files, key=lambda item: item[1])
+        yield path, rel, content
 
 
-def _parse_python_file(path: Path) -> tuple[Any, list[str]] | None:
-    """Read/parse once; return None for unreadable, missing, partial, or invalid trees.
+def _parse_python_source(source: bytes) -> tuple[Any, list[str]] | None:
+    """Parse eligible bytes once; return None for partial or invalid trees.
 
     Failed candidates remain in scoped_files but contribute no metrics or clone evidence.
     """
     parser = _quality_python_parser()
     if parser is None:
-        return None
-    try:
-        source = path.read_bytes()
-    except OSError:
         return None
     try:
         tree = parser.parse(source)
@@ -373,24 +371,17 @@ def _empty_list_guard_lines(root: Any) -> set[int]:
     return flagged
 
 
-def _count_later_references(func: Any, name: str, after_row: int) -> int:
-    """Identifier occurrences of *name* after *after_row* inside *func*."""
-    return sum(
-        1
-        for node in _iter_function(func)
-        if node.type == "identifier"
-        and node.text.decode() == name
-        and node.start_point.row > after_row
-    )
-
-
 def _single_use_variable_lines(root: Any) -> set[int]:
     """Flag plain non-private names assigned then referenced once later in their function."""
     flagged: set[int] = set()
     for func in _iter_tree(root):
         if func.type != "function_definition":
             continue
+        references: dict[str, list[int]] = {}
+        assignments: list[tuple[str, int]] = []
         for node in _iter_function(func):
+            if node.type == "identifier":
+                references.setdefault(node.text.decode(), []).append(node.start_point.row)
             if node.type != "assignment":
                 continue
             target = node.child_by_field_name("left")
@@ -399,8 +390,13 @@ def _single_use_variable_lines(root: Any) -> set[int]:
             name = target.text.decode()
             if name.startswith("_"):
                 continue
-            if _count_later_references(func, name, node.start_point.row) == 1:
-                flagged.add(node.start_point.row)
+            assignments.append((name, node.start_point.row))
+        # Depth-first source order keeps each identifier's rows sorted. Preserve
+        # the strict row boundary, including same-row and multiline assignments.
+        for name, row in assignments:
+            rows = references.get(name, [])
+            if len(rows) - bisect_right(rows, row) == 1:
+                flagged.add(row)
     return flagged
 
 
@@ -643,35 +639,30 @@ def analyze_quality(
             "scoped_files": 0,
         }
 
-    scoped_files = _scoped_python_files(workspace)
-    if candidate_paths is None:
-        candidates = scoped_files
-        candidate_path_set: set[Path] | None = None
-    else:
-        # Exact workspace-relative match: a candidate that fails eligibility is
-        # absent from ``scoped_files`` and so is not a candidate (issue #457).
-        candidates = [t for t in scoped_files if t[1] in candidate_paths]
-        candidate_path_set = {path for path, _rel in candidates}
-    scoped = len(candidates)
-
     # Parse and validate each candidate ONCE. Only successfully parsed files
-    # feed the per-file aggregates; a malformed file stays in ``scoped`` but is
+    # feed the per-file aggregates; a malformed file stays in scoped_files but is
     # omitted from the aggregates (Finding #1). In whole-workspace mode every
     # candidate is a scoped file (byte-identical to today). In candidate mode
-    # non-candidate peers join the clone index via ``_parse_python_file``'s
+    # non-candidate peers join the clone index via ``_parse_python_source``'s
     # returned lines without being aggregated, so a candidate's cross-file
     # clone attribution still sees every peer (issue #457). The parse results
     # are reused below, so no file is ever parsed twice.
     parsed: dict[Path, Any] = {}
     parsed_lines: dict[Path, list[str]] = {}
     file_lines: list[tuple[Path, list[str]]] = []
-    for path, _rel in scoped_files:
-        result = _parse_python_file(path)
+    candidates: list[tuple[Path, str]] = []
+    for path, rel, source in _scoped_python_files(workspace):
+        # Eligibility and parsing share these bytes. Exact relative candidate
+        # matches restrict reporting, while every valid peer supplies clones.
+        candidate = candidate_paths is None or rel in candidate_paths
+        if candidate:
+            candidates.append((path, rel))
+        result = _parse_python_source(source)
         if result is None:
             continue
         root, lines = result
         file_lines.append((path, lines))
-        if candidate_path_set is None or path in candidate_path_set:
+        if candidate:
             parsed[path] = root
             parsed_lines[path] = lines
 
@@ -697,5 +688,5 @@ def analyze_quality(
         "verbosity": round(total_flagged / total_loc, 4) if total_loc > 0 else None,
         "per_file": per_file,
         "calibration": dict(_QUALITY_CALIBRATION),
-        "scoped_files": scoped,
+        "scoped_files": len(candidates),
     }

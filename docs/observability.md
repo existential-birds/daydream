@@ -306,6 +306,13 @@ valid way to reconstruct run duration. Unpaired or malformed evidence is diagnos
 not silently counted as complete. Evaluation and manifest totals use the same
 frozen trajectory input.
 
+Trace export also measures host work after the trajectory closes. The
+`artifact-finalization` step includes its worker-thread archive and publication
+work; nested `evaluation-analysis` and `quality-analysis` steps distinguish
+deterministic evaluation from source quality analysis. These spans retain the
+run's trace context and end before trace shutdown. They do not extend the frozen
+trajectory cutoff or change evaluation and manifest lifecycle timing.
+
 A signal flush freezes the root and active children at one `snapshot_at` cutoff.
 Open invocations remain incomplete, without invented end times. If children have
 started before the root has a step, the partial root contains a system snapshot
