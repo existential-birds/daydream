@@ -210,6 +210,18 @@ Configuration includes `improve_effort`, `improve_focus`, `improve_scope`, and
 `improve_plan_description`. Issue publication requires
 `[tool.daydream.improve.github] publish_issues = true`.
 
+Improve audit builders retain their existing keyword arguments. Their `group`
+mapping now includes `primary_manifest` (an exact inline `primary_files` list or a
+snapshot-relative file descriptor with hash, path count, and line count) and
+`primary_manifest_sanctioned`. The latter means `run_agent` supplies the descriptor
+through sanctioned inputs; builders need not duplicate it. Large manifest bytes
+live only in a host-created directory inside the existing audit root, with a
+1 MiB cap and one path per line for paginated native Read access. Durable copies contain ownership paths, never the disposable descriptor.
+Group partition entries count owned slices while retaining original names, roots,
+and services. Context remains available for concrete dependency questions; it is
+not additional ownership. Branch manifests list removed paths in `deleted_files`
+for diff-only investigation, and counts include those changed paths.
+
 ### Agent calls and phase configuration
 
 Use `run_agent()` with `ctx.backend_for(phase_name)`, `ctx.work.repo`, and

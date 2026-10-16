@@ -1,15 +1,15 @@
 """Bounded partition cover and stack-homogeneous grouping for improve audits.
 
-Pure logic: the audit fan-out axis is derived here so every agent's search
-surface is bounded by a file count, and so prompts can carry directory roots
-instead of inlined file lists.
+Pure logic: the audit fan-out axis is derived here so every file has one
+primary stack owner and agent budgets count only the files that owner audits.
+Partition roots remain useful for context discovery across stack boundaries.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import GENERIC_STACK, StackAssignment
@@ -27,7 +27,7 @@ class Partition:
 
     Root ``"."`` is reserved for residue; source is ``service:<Service.source>``,
     ``directory``, or ``residue``. Oversized-service splits retain their service.
-    Sorted member files are host-only and never serialized into prompts.
+    Stack grouping narrows member files while preserving the partition identity.
     """
 
     name: str
@@ -39,15 +39,20 @@ class Partition:
 
 @dataclass(frozen=True)
 class PartitionGroup:
-    """A stack-homogeneous bundle of partitions handed to one audit agent."""
+    """A stack-homogeneous bundle of owned partition slices for one audit agent."""
 
     name: str
     stack: str | None
     partitions: tuple[Partition, ...]
 
     @property
+    def primary_files(self) -> tuple[str, ...]:
+        """Return the sorted files owned by this group, excluding context reads."""
+        return tuple(sorted(path for partition in self.partitions for path in partition.files))
+
+    @property
     def file_count(self) -> int:
-        """Return the total number of files across member partitions."""
+        """Return the owned file count across member partition slices."""
         return sum(len(partition.files) for partition in self.partitions)
 
     @property
@@ -58,7 +63,7 @@ class PartitionGroup:
 
 @dataclass(frozen=True)
 class PartitionStackOmission:
-    """One partition pass omitted from a stack-specific audit group."""
+    """One owned partition slice omitted from a stack-specific audit group."""
 
     partition: Partition
     stack: str
@@ -163,12 +168,19 @@ def group_partitions(
 ) -> tuple[list[PartitionGroup], list[PartitionStackOmission]]:
     """Pack stack-homogeneous groups bounded by ``max_files``, named ``group-01`` onward.
 
-    Return kept groups and one omission per dropped pass when ``max_groups`` binds.
+    Each partition is sliced by its files' primary stack owners before packing;
+    unknown files belong to generic. Slice names, roots, sources, and service
+    identities remain unchanged. Return kept groups and one omission per dropped
+    slice when ``max_groups`` binds. Kept and omitted files together cover the
+    original partitions exactly once.
     """
     buckets: dict[str, list[Partition]] = defaultdict(list)
     for partition in partitions:
-        for stack in sorted({stack_of.get(path, GENERIC_STACK) for path in partition.files}):
-            buckets[stack].append(partition)
+        owned: dict[str, list[str]] = defaultdict(list)
+        for path in partition.files:
+            owned[stack_of.get(path, GENERIC_STACK)].append(path)
+        for stack in sorted(owned):
+            buckets[stack].append(replace(partition, files=tuple(sorted(owned[stack]))))
 
     bins: list[tuple[str, list[Partition]]] = []
     for stack in sorted(buckets):
@@ -179,7 +191,7 @@ def group_partitions(
 
     omissions: list[PartitionStackOmission] = []
     if max_groups is not None and len(bins) > max_groups:
-        ranked = sorted(bins, key=lambda entry: (-sum(len(p.files) for p in entry[1]), entry[1][0].name))
+        ranked = sorted(bins, key=lambda entry: (-sum(len(p.files) for p in entry[1]), entry[1][0].name, entry[0]))
         kept = {id(entry) for entry in ranked[:max_groups]}
         omissions = sorted(
             (

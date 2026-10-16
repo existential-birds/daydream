@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **improve:** assign disjoint primary files to mixed-stack audit specialists, keep cross-stack context available, and report owned counts, omitted files, and failed category coverage with readable snapshot manifests ([#1406](https://github.com/existential-birds/daydream/issues/1406)).
+
 - **improve:** combine default survey and reconnaissance into one bounded discovery pass, reuse host inventory, and retain guidelines alongside admitted commands in audit/plan inputs; custom survey strategies keep the two-pass compatibility path ([#1405](https://github.com/existential-birds/daydream/issues/1405)).
 
 - **eval:** prune excluded Python subtrees before traversal, share eligibility and parsing reads, and index function references once while preserving whole-workspace and candidate quality metrics; trace finalization, evaluation, and quality analysis separately ([#1402](https://github.com/existential-birds/daydream/issues/1402)).

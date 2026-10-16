@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -17,9 +18,11 @@ from daydream.config import (
     VET_BATCH_MAX_FINDINGS,
     EffortTier,
 )
+from daydream.deep.diff import iter_diff_blocks
 from daydream.extensions.api import Stop
 from daydream.improve import artifacts
 from daydream.improve.context import _audit_repo
+from daydream.improve.manifests import prepare_primary_manifest, reset_primary_manifests
 from daydream.improve.partition import (
     Partition,
     PartitionGroup,
@@ -38,6 +41,7 @@ from daydream.improve.prompts import (
     AUDIT_FINDINGS_SCHEMA,
     VET_SCHEMA,
 )
+from daydream.prompt_budget import prepare_sanctioned_inputs
 from daydream.redaction import redact_value
 from daydream.services import (
     Service,
@@ -120,88 +124,141 @@ async def _run_audit_assignments(
     tier: EffortTier = ctx.data["effort_tier"]
     results: dict[str, tuple[_AuditAssignment, list[dict[str, Any]]]] = {}
     failures: dict[str, str] = {}
-    async with anyio.create_task_group() as task_group:
+    repo = _audit_repo(ctx)
+    directory: Path = ctx.data["improve_dir"]
+    deleted_paths = frozenset(
+        path for path, block in iter_diff_blocks(ctx.data["branch_diff"])
+        if "\n+++ /dev/null\n" in block or "\ndeleted file mode " in block
+    ) if branch_focus else frozenset()
+    manifests: dict[str, dict[str, Any]] = {}
+    descriptors: dict[str, Path] = {}
+    preparation_errors: dict[str, str] = {}
+    # Large manifests stay within the existing model read root. Only their
+    # bounded descriptors cross the sanctioned-input transport; paths in durable
+    # manifests remain repository-relative when this temporary snapshot expires.
+    with (
+        tempfile.TemporaryDirectory(prefix=".daydream-audit-inputs-", dir=repo) as temporary,
+        tempfile.TemporaryDirectory(prefix="primary-inputs-", dir=directory) as descriptor_directory,
+    ):
+        try:
+            reset_primary_manifests(directory)
+        except Exception as exc:
+            preparation_errors.update({
+                assignment.group.name: f"{type(exc).__name__}: {exc}" for assignment in assignments
+            })
         for assignment in assignments:
-            scope_note = (
-                f"Audit the {assignment.group.stack} stack in this group."
-                if assignment.group.stack
-                else "Audit this group's surface."
-            )
-            if ctx.config.improve_scope:
-                scope_note += (
-                    f"\nService scope slice: `{ctx.config.improve_scope}`. "
-                    "The slice bounds where the audit searches. Slicing bounds "
-                    "where you search, never what you may read; cross-service "
-                    "boundary findings (traffic and data flow between services) "
-                    "remain in scope."
+            group = assignment.group
+            if group.name in manifests or group.name in preparation_errors:
+                continue
+            try:
+                manifest = prepare_primary_manifest(
+                    repo, directory, Path(temporary), group, deleted_paths=deleted_paths,
                 )
-            if branch_focus:
-                scope_note += (
-                    "\nThis is a branch-focused audit. Limit findings to the "
-                    "changed-file scope above. Tag every finding with "
-                    '`provenance: "introduced"` when the supplied diff is '
-                    "evidence that the branch introduced it; otherwise tag it "
-                    '`provenance: "inherited"`.\n'
-                    "Merge-base diff:\n```diff\n"
-                    f"{ctx.data['branch_diff']}\n```"
+                descriptor = Path(descriptor_directory) / f"primary-input-{group.name}.txt"
+                encoded_descriptor = json.dumps(
+                    manifest, ensure_ascii=True, separators=(",", ":"),
+                ).replace("<", "\\u003c")
+                descriptor.write_text(
+                    "<primary_manifest>\n" + encoded_descriptor
+                    + "\n</primary_manifest>", encoding="utf-8",
                 )
-            prompt = ctx.registry.prompt("audit")(
-                category=assignment.category,
-                strategy=ctx.strategy(f"improve.audit.{assignment.category}"),
-                group=audit_scope._group_dict(assignment.group),
-                scope_note=scope_note,
-                recon_summary=json.dumps(ctx.data["recon"], sort_keys=True),
-                cwd=_audit_repo(ctx),
-                tier=tier,
-            )
-            if branch_focus:
-                prompt += (
-                    "\nFor this branch-focused audit, the structured-output "
-                    "schema additionally requires each finding to include "
-                    '`provenance` as either `"introduced"` or `"inherited"`.'
+                manifests[group.name] = manifest
+                descriptors[group.name] = descriptor
+            except Exception as exc:
+                preparation_errors[group.name] = f"{type(exc).__name__}: {exc}"
+        async with anyio.create_task_group() as task_group:
+            for assignment in assignments:
+                scope_note = (
+                    f"Audit the {assignment.group.stack} stack in this group."
+                    if assignment.group.stack
+                    else "Audit this group's surface."
                 )
+                if ctx.config.improve_scope:
+                    scope_note += (
+                        f"\nService scope slice: `{ctx.config.improve_scope}`. "
+                        "The slice bounds where the audit searches. Slicing bounds "
+                        "where you search, never what you may read; cross-service "
+                        "boundary findings (traffic and data flow between services) "
+                        "remain in scope."
+                    )
+                if branch_focus:
+                    scope_note += (
+                        "\nThis is a branch-focused audit. Limit findings to the "
+                        "changed-file scope above. Tag every finding with "
+                        '`provenance: "introduced"` when the supplied diff is '
+                        "evidence that the branch introduced it; otherwise tag it "
+                        '`provenance: "inherited"`.\n'
+                        "Merge-base diff:\n```diff\n"
+                        f"{ctx.data['branch_diff']}\n```"
+                    )
+                prompt = ctx.registry.prompt("audit")(
+                    category=assignment.category,
+                    strategy=ctx.strategy(f"improve.audit.{assignment.category}"),
+                    group={
+                        **audit_scope._group_dict(assignment.group),
+                        "primary_manifest": manifests.get(assignment.group.name, {}),
+                        "primary_manifest_sanctioned": True,
+                    },
+                    scope_note=scope_note,
+                    recon_summary=json.dumps(ctx.data["recon"], sort_keys=True),
+                    cwd=_audit_repo(ctx),
+                    tier=tier,
+                )
+                if branch_focus:
+                    prompt += (
+                        "\nFor this branch-focused audit, the structured-output "
+                        "schema additionally requires each finding to include "
+                        '`provenance` as either `"introduced"` or `"inherited"`.'
+                    )
 
-            async def _task(
-                current: _AuditAssignment = assignment,
-                task_prompt: str = prompt,
-            ) -> None:
-                descriptor = f"audit-{current.category}-{current.group.name}"
-                async with limiter:
-                    async with trajectory.maybe_fork(
-                        recorder, descriptor, dispatch=dispatch
-                    ):
-                        try:
-                            output, _, _ = await run_agent(
-                                backend,
-                                _audit_repo(ctx),
-                                task_prompt,
-                                phase=trajectory.DaydreamPhase.AUDIT,
-                                output_schema=(
-                                    _schema_with_provenance(AUDIT_FINDINGS_SCHEMA)
-                                    if branch_focus
-                                    else AUDIT_FINDINGS_SCHEMA
-                                ),
-                                read_only=True,
-                                persist_session=False,
-                                run_context=ctx.run_context,
-                            )
-                            raw_findings = (
-                                output.get("findings", [])
-                                if isinstance(output, dict)
-                                else []
-                            )
-                            findings = [
-                                redact_value(finding)
-                                for finding in raw_findings
-                                if isinstance(finding, dict)
-                            ]
-                            results[current.key] = (current, findings)
-                        except Exception as exc:  # noqa: BLE001
-                            failures[current.key] = trajectory.redact_text(
-                                f"{type(exc).__name__}: {exc}"
-                            )
+                async def _task(
+                    current: _AuditAssignment = assignment,
+                    task_prompt: str = prompt,
+                ) -> None:
+                    descriptor = f"audit-{current.category}-{current.group.name}"
+                    async with limiter:
+                        async with trajectory.maybe_fork(
+                            recorder, descriptor, dispatch=dispatch
+                        ):
+                            try:
+                                if current.group.name in preparation_errors:
+                                    raise RuntimeError(preparation_errors[current.group.name])
+                                inputs = prepare_sanctioned_inputs(
+                                    backend, repo, {"primary_manifest": descriptors[current.group.name]},
+                                    read_only=True,
+                                )
+                                output, _, _ = await run_agent(
+                                    backend,
+                                    repo,
+                                    task_prompt,
+                                    phase=trajectory.DaydreamPhase.AUDIT,
+                                    output_schema=(
+                                        _schema_with_provenance(AUDIT_FINDINGS_SCHEMA)
+                                        if branch_focus
+                                        else AUDIT_FINDINGS_SCHEMA
+                                    ),
+                                    read_only=True,
+                                    persist_session=False,
+                                    run_context=ctx.run_context,
+                                    sanctioned_inputs=inputs,
+                                )
+                                raw_findings = (
+                                    output.get("findings", [])
+                                    if isinstance(output, dict)
+                                    else []
+                                )
+                                findings = [
+                                    redact_value(finding)
+                                    for finding in raw_findings
+                                    if isinstance(finding, dict)
+                                ]
+                                results[current.key] = (current, findings)
+                            except Exception as exc:  # noqa: BLE001
+                                failures[current.key] = trajectory.redact_text(
+                                    f"{type(exc).__name__}: {exc}"
+                                )
 
-            task_group.start_soon(_task)
+                task_group.start_soon(_task)
     return results, failures
 
 
@@ -261,7 +318,17 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
                     trajectory.LifecycleReasonCode.NO_ELIGIBLE_WORK,
                 )
 
+    coverage = _record_audit_coverage(
+        directory, partitions, groups, ctx.data["partition_omissions"],
+        failures=failures, assignments=assignments,
+    )
+    ctx.data["audit_coverage"] = coverage
     if assignments and len(failures) == len(assignments):
+        artifacts.write_artifact(
+            directory / "audit-findings.json",
+            {"categories_run": list(categories), "failed": dict(sorted(failures.items())), "findings": []},
+            phase=trajectory.DaydreamPhase.AUDIT,
+        )
         print_error(
             console,
             "Improve audit failed",
@@ -274,10 +341,8 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
     }
     discarded_no_evidence = 0
     dropped_low_confidence = 0
-    # A partition whose files span stacks is bundled into one group per stack, so
-    # the same code is audited more than once and returns byte-identical findings
-    # (same fingerprint). Collapse them here — the first pass keeps the finding;
-    # later ones would otherwise inflate every count and mint a duplicate plan.
+    # Boundary/context investigations and category lenses can still discover
+    # the same defect. Keep the first finding in deterministic assignment order.
     seen_fingerprints: set[str] = set()
     for assignment in assignments:
         result = results.get(assignment.key)
@@ -331,14 +396,6 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
         },
         phase=trajectory.DaydreamPhase.AUDIT,
     )
-    _record_audit_coverage(
-        directory,
-        partitions,
-        groups,
-        ctx.data["partition_omissions"],
-        failures=failures,
-        assignments=assignments,
-    )
     ctx.data["audit"] = combined
     ctx.data["audit_discarded_no_evidence"] = discarded_no_evidence
     ctx.data["audit_dropped_low_confidence"] = dropped_low_confidence
@@ -354,20 +411,16 @@ def _record_audit_coverage(
     *,
     failures: dict[str, str],
     assignments: list[_AuditAssignment],
-) -> None:
-    """Rewrite the coverage ledger with what the audit actually reached."""
-    failed_groups = {
-        assignment.group.name
-        for assignment in assignments
-        if assignment.key in failures
-    }
+) -> dict[str, Any]:
+    """Persist category-specific owned coverage, including all-failed dispatches."""
     ledger = audit_scope._coverage_ledger(
-        partitions, groups, omissions, failed_groups=failed_groups
+        partitions, groups, omissions,
+        categories=tuple(dict.fromkeys(assignment.category for assignment in assignments)),
+        failures=failures,
     )
-    for entry in ledger["groups"]:
-        entry["status"] = "failed" if entry["name"] in failed_groups else "audited"
-    ledger["failed_assignments"] = dict(sorted(failures.items()))
-    artifacts.write_artifact((directory / artifacts.COVERAGE_FILENAME), ledger, phase=trajectory.DaydreamPhase.AUDIT)
+    return artifacts.write_artifact(
+        directory / artifacts.COVERAGE_FILENAME, ledger, phase=trajectory.DaydreamPhase.AUDIT,
+    )
 
 
 def _apply_vet_verdicts(

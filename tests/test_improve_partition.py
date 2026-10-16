@@ -85,6 +85,64 @@ def test_split_service_slices_stay_in_one_group() -> None:
     assert {"big/x", "big/y"} in by_group.values()
 
 
+def test_mixed_service_primary_files_are_disjoint_with_generic_fallback() -> None:
+    # Whole-partition stack duplication passes the existing homogeneous tests,
+    # but charges every specialist for the same files and hides generic ownership.
+    files = [
+        "apps/api/handler.py", "apps/api/pyproject.toml", "apps/api/client.ts",
+        "apps/api/README.md", "apps/api/Dockerfile", "apps/api/events.proto",
+    ]
+    partitions = build_partitions(
+        files, [Service(name="api", root=Path("apps/api"), source="config")], max_files=10,
+    )
+    groups, omissions = group_partitions(partitions, {
+        "apps/api/handler.py": "python", "apps/api/pyproject.toml": "python",
+        "apps/api/client.ts": "react", "apps/api/README.md": "generic",
+    }, max_files=10)
+
+    assert omissions == []
+    assert {group.stack: group.primary_files for group in groups} == {
+        "generic": ("apps/api/Dockerfile", "apps/api/README.md", "apps/api/events.proto"),
+        "python": ("apps/api/handler.py", "apps/api/pyproject.toml"),
+        "react": ("apps/api/client.ts",),
+    }
+    assert [group.file_count for group in groups] == [3, 2, 1]
+    assert sorted(path for group in groups for path in group.primary_files) == sorted(files)
+    assert [(piece.name, piece.root, piece.source, piece.service)
+        for group in groups for piece in group.partitions] == [
+        ("api", "apps/api", "service:config", "api"),
+        ("api", "apps/api", "service:config", "api"),
+        ("api", "apps/api", "service:config", "api"),
+    ]
+    assert partitions[0].files == tuple(sorted(files))
+
+
+def test_group_ceiling_ranks_owned_slices_and_preserves_omitted_files() -> None:
+    # A mixed partition's full size used to make every stack equally large.
+    # The ceiling must retain the larger primary surface and name exact omitted
+    # slices, even though all slices retain the same partition identity.
+    files = ["svc/a.py", "svc/b.py", "svc/c.py", "svc/a.ts", "svc/b.ts", "svc/README.md",
+        "other/a.py", "other/b.py"]
+    partitions = build_partitions(files, [], max_files=10)
+    stack_of = {"svc/a.py": "python", "svc/b.py": "python", "svc/c.py": "python",
+        "svc/a.ts": "react", "svc/b.ts": "react", "other/a.py": "python", "other/b.py": "python"}
+    groups, omissions = group_partitions(partitions, stack_of, max_files=3, max_groups=1)
+
+    assert [(group.name, group.stack, group.file_count, group.primary_files) for group in groups] == [
+        ("group-01", "python", 3, ("svc/a.py", "svc/b.py", "svc/c.py")),
+    ]
+    assert [(item.partition.name, item.partition.root, item.stack, item.partition.files) for item in omissions] == [
+        ("other", "other", "python", ("other/a.py", "other/b.py")),
+        ("svc", "svc", "generic", ("svc/README.md",)),
+        ("svc", "svc", "react", ("svc/a.ts", "svc/b.ts")),
+    ]
+    covered = [path for group in groups for path in group.primary_files]
+    covered.extend(path for item in omissions for path in item.partition.files)
+    assert sorted(covered) == sorted(files)
+    assert group_partitions(list(reversed(partitions)), dict(reversed(list(stack_of.items()))),
+        max_files=3, max_groups=1) == (groups, omissions)
+
+
 
 def test_service_ownership_freezes_nested_and_repo_root_partitioning(tmp_path: Path) -> None:
     repo = _nested_service_repo(tmp_path)
