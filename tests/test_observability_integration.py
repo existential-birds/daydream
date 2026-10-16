@@ -6,7 +6,6 @@ import errno
 import json
 import os
 import threading
-import time
 from collections.abc import Callable
 from datetime import datetime
 from importlib.metadata import version as package_version
@@ -94,9 +93,10 @@ def _configure(monkeypatch: pytest.MonkeyPatch, base_url: str, destination: str)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
     monkeypatch.setenv("DAYDREAM_TRACE_TO", destination)
 
+@pytest.mark.parametrize("reader_delay_s", [0, 6])
 async def test_cli_worktree_archive_traces_analysis_after_frozen_trajectory(
     ext_dir: ExtDir, feature_branch_repo: Path, archive_dir: Path, tmp_path: Path,
-    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch, reader_delay_s: int,
 ) -> None:
     """Finalization keeps worker trace context without extending frozen lifecycle evidence."""
     ext_dir.write_module(_FLOW)
@@ -109,7 +109,7 @@ async def test_cli_worktree_archive_traces_analysis_after_frozen_trajectory(
     writer_outcomes: list[bool | Exception] = []
     writer: threading.Thread | None = None
 
-    def seed_source_fifo(cwd: Path, *_args: Any) -> None:
+    async def seed_source_fifo(cwd: Path, *_args: Any) -> None:
         nonlocal writer
         source = cwd / "main.py"
         content = source.read_bytes()
@@ -119,8 +119,7 @@ async def test_cli_worktree_archive_traces_analysis_after_frozen_trajectory(
         def write_source() -> None:
             descriptor: int | None = None
             try:
-                deadline = time.monotonic() + 5
-                while not release_writer.is_set() and time.monotonic() < deadline:
+                while not release_writer.is_set():
                     try:
                         descriptor = os.open(source, os.O_WRONLY | os.O_NONBLOCK)
                         break
@@ -129,7 +128,10 @@ async def test_cli_worktree_archive_traces_analysis_after_frozen_trajectory(
                             raise
                         release_writer.wait(0.01)
                 if descriptor is None:
-                    return
+                    if not source.is_fifo():
+                        return
+                    # Cleanup must also release a reader racing with replacement.
+                    descriptor = os.open(source, os.O_RDWR | os.O_NONBLOCK)
                 # The current reader owns the FIFO fd; later reads see ordinary
                 # source bytes, including the pre-optimization repeated-read path.
                 replacement = cwd / "source-ready"
@@ -147,9 +149,10 @@ async def test_cli_worktree_archive_traces_analysis_after_frozen_trajectory(
 
         writer = threading.Thread(target=write_source, daemon=True)
         writer.start()
+        await anyio.sleep(reader_delay_s)
 
     async def release_from_event_loop() -> None:
-        if await anyio.to_thread.run_sync(reader_ready.wait, 6):
+        if await anyio.to_thread.run_sync(reader_ready.wait, reader_delay_s + 10):
             release_writer.set()
 
     backend = _backend(responder=seed_source_fifo)
