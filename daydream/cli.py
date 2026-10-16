@@ -10,7 +10,7 @@ from rich.console import Console
 from daydream import git_ops
 from daydream.agent import console
 from daydream.benchmark.cli import _handle_benchmark_command
-from daydream.commands import admin, corpus, improve, review, train
+from daydream.commands import admin, corpus, improve, review, search, train
 from daydream.diagnostics import format_verbose_exception, sanitize_verbose_message
 from daydream.phases import UnconfinedFindingError
 from daydream.run_context import active_backends
@@ -22,6 +22,7 @@ from daydream.ui import ShutdownPanel, get_shutdown_panel, print_error, set_shut
 def _command_handlers() -> dict[str, Callable[[list[str]], int]]:
     """Resolve synchronous commands at call time so overrides remain visible."""
     return {
+        "search": search.handle_search_command,
         "summarize": admin._handle_summarize_command,
         "corpus": corpus._handle_corpus_command,
         "train": train._handle_train_command,

@@ -77,6 +77,11 @@ These boundaries matter across subsystems; module docstrings carry finer detail:
 
 ### Runtime invariants
 
+- Review/exploration search guidance is shared in `prompts/grounding.py` and retained
+  through custom prompt composition. Use relevant roots and tracked plus nonignored
+  untracked file sets; named ignored-file expansion requires a concrete reason.
+  `daydream search` owns the bounded no-rg fallback; see [search scope](README.md#repository-search-scope).
+
 - `git_ops.repository` resolves embedded provenance and App bootstrap locally (explicit `pr_repo`,
   captured `GH_REPO`, then target `origin`), admitting only unambiguous github.com identities.
   The App session binds token minting, refresh, and GitHub routing to that identity.

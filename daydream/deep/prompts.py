@@ -22,7 +22,11 @@ from daydream.phases.review_prompts import (
 from daydream.phases.schemas import REVIEW_STAGE_SCHEMA
 from daydream.prompt_budget import inline_context_file
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
-from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION, UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+from daydream.prompts.grounding import (
+    CWD_GROUNDING_INSTRUCTION,
+    REPOSITORY_SEARCH_GUIDANCE,
+    UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
+)
 from daydream.prompts.wire_contract import (
     WIRE_CONTRACT_GENERIC_INSTRUCTION,
     WIRE_CONTRACT_RUST_INSTRUCTION,
@@ -204,6 +208,7 @@ def _review_context_parts(
     if settled:
         parts.append(settled)
     parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
+    parts.append(REPOSITORY_SEARCH_GUIDANCE)
     parts.append(_context_pointers(
         intent_path=intent_path,
         alternatives_path=alternatives_path,
@@ -280,7 +285,8 @@ def _build_review_stage_prompt(*, strategy: str, stack_name: str, files: list[st
     stage = review_stage["stage"]
     triage = stage == "triage"
     structural = stage == "integration"
-    parts = [UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY, CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)]
+    parts = [UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY, CWD_GROUNDING_INSTRUCTION.format(cwd=cwd),
+        REPOSITORY_SEARCH_GUIDANCE]
     settled = _settled_decisions_block(prior_commits) if not triage else ""
     if settled:
         parts.append(settled)

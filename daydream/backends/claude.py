@@ -64,6 +64,8 @@ READ_ONLY_BASH_ALLOWLIST: tuple[str, ...] = (
     "ls",
     "cat",
     "git status",
+    "git ls-files",
+    "daydream search",
     "git log",
     "git show",
     "git blame",

@@ -123,6 +123,7 @@ from daydream.git_ops.queries import (
     remote_urls as remote_urls,
     resolve_diff_merge_base as resolve_diff_merge_base,
     resolve_pr_merge_base as resolve_pr_merge_base,
+    search_files as search_files,
     show as show,
     split_owner_repo as split_owner_repo,
     staged_patch as staged_patch,
