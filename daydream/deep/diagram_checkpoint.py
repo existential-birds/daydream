@@ -8,12 +8,14 @@ import json
 from dataclasses import asdict
 from typing import Any
 
+from daydream.agent import console
 from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.diagram_prompts import build_flowchart_prompt, build_sequence_diagram_prompt
 from daydream.deep.reuse_key import exploration_digest, phase_identity_for
 from daydream.deep.state import DeepState
 from daydream.flows.engine import FlowContext
 from daydream.json_utils import atomic_write_json
+from daydream.ui import print_warning
 
 
 def diagram_checkpoint_key(ctx: FlowContext, *, settings: Any, eligibility: dict[str, Any]) -> str | None:
@@ -62,10 +64,14 @@ def restore_diagram_checkpoint(ctx: FlowContext, key: str | None) -> dict[str, A
 
 
 def complete_diagram_checkpoint(ctx: FlowContext, key: str | None) -> None:
-    """Publish completion last, after JSON and derived markdown are durable."""
+    """Best-effort recovery metadata must not discard completed diagrams."""
     if key is not None:
         dd = DeepState(ctx.data).dd
-        raw = DeepArtifact.DIAGRAM.at(dd).read_bytes()
-        atomic_write_json(DeepArtifact.DIAGRAM_COMPLETE.at(dd), {
-            "key": key, "sha256": hashlib.sha256(raw).hexdigest(),
-        })
+        try:
+            raw = DeepArtifact.DIAGRAM.at(dd).read_bytes()
+            atomic_write_json(DeepArtifact.DIAGRAM_COMPLETE.at(dd), {
+                "key": key, "sha256": hashlib.sha256(raw).hexdigest(),
+            })
+        except OSError as exc:
+            print_warning(console, f"Diagram recovery checkpoint unavailable ({type(exc).__name__}); "
+                          "completed diagrams remain available.")

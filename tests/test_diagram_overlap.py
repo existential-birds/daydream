@@ -2,7 +2,8 @@
 
 Existing grounded-diagram tests protect rendering and repair. These cases own
 entrypoint defaults, optional-work scheduling, and the lifetime of concurrent
-writers; only the model-provider boundary is replaced.
+writers. Provider fixtures retain real filesystem behavior; the checkpoint fault
+case fails only its actual marker rename.
 """
 
 from __future__ import annotations
@@ -344,6 +345,47 @@ async def test_completed_diagram_survives_cancellation_with_validated_resume(
     assert_attached(target)
 
 
+async def test_checkpoint_publication_failure_keeps_review_complete_and_resume_regenerates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Optional reuse metadata cannot discard a successfully grounded diagram.
+
+    Existing checkpoint tests cover valid, stale and corrupt persisted inputs;
+    this fault targets the actual marker publication after successful generation.
+    """
+    target = dr.build_cross_module_repo(tmp_path)
+    backend = DiagramBarrierBackend(target)
+    install_provider(monkeypatch, backend, 4)
+    config = config_for(target, diagram="auto")
+    private_base = tmp_path / "private"
+    roots = private_root_locations(base=private_base)
+    real_replace = os.replace
+    attempted: list[Path] = []
+
+    def fail_marker_rename(source: Any, destination: Any, *args: Any, **kwargs: Any) -> None:
+        path = Path(destination)
+        if path.name == "diagram-complete.json" and path.is_relative_to(private_base):
+            attempted.append(path)
+            raise OSError("fixture: checkpoint marker rename failed")
+        real_replace(source, destination, *args, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr("daydream.json_utils.os.replace", fail_marker_rename)
+        assert await runner.run(config, private_roots=roots) == 0
+    assert attempted
+    assert backend.diagram_turns == {"sequence": 1}
+    assert not list(private_base.rglob("diagram-complete.json"))
+    assert not (target / ".daydream/deep/diagram-complete.json").exists()
+    assert_attached(target)
+
+    resumed = DiagramBarrierBackend(target)
+    install_provider(monkeypatch, resumed, 4)
+    assert await runner.run(replace(config, start_at="merge"), private_roots=roots) == 0
+    assert resumed.diagram_turns == {"sequence": 1}
+    assert (target / ".daydream/deep/diagram-complete.json").is_file()
+    assert_attached(target)
+
+
 @pytest.mark.parametrize("changed", ["model", "threshold"])
 async def test_diagram_resume_regenerates_when_generation_inputs_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed: str,
@@ -507,7 +549,7 @@ async def test_post_diagram_custom_phase_regains_its_own_provider_capacity(
 ) -> None:
     """The review's smaller admission pool must end at the final diagram join."""
     target = dr.build_cross_module_repo(tmp_path)
-    review_backend = DiagramBarrierBackend(target, capacity=2)
+    review_backend = DiagramBarrierBackend(target, capacity=3)
     entered = anyio.Event()
     release = anyio.Event()
     active = 0
