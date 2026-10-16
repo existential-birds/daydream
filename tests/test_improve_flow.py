@@ -1,7 +1,9 @@
+import hashlib
 import json
 import os
 import re
 import shutil
+from collections import Counter
 from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from pathlib import Path
@@ -74,6 +76,7 @@ from tests.harness.git_helpers import (
 from tests.harness.improve_backend import (
     ImproveStubBackend,
     IncrementalPlanBackend,
+    ManifestReadingBackend,
     OutOfOrderPlanBackend,
     ProductionPathBackend,
     RendezvousImproveBackend,
@@ -1051,7 +1054,7 @@ async def test_audit_fans_out_per_partition_group_on_scaled_monorepo(
     _pin_stack_availability(monkeypatch, tmp_path)
     # Default bound (400): partitions = 12 services + frontend + residue, which
     # pack into exactly 3 stack-homogeneous groups (python / react / generic).
-    stub = install_improve_stub(monkeypatch, improve_scaled_monorepo_target, n_findings=0)
+    stub = install_capable_improve_backend(monkeypatch, ManifestReadingBackend(improve_scaled_monorepo_target))
     code = await _run_improve(make_config, improve_scaled_monorepo_target)
 
     assert code == 0
@@ -1078,14 +1081,180 @@ async def test_audit_fans_out_per_partition_group_on_scaled_monorepo(
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
     assert len(audit_calls) == 3 * len(AUDIT_CATEGORIES)
     assert all("Relevant tracked files" not in call["prompt"] for call in audit_calls)
-    assert all("apps/svc00/api.py" not in call["prompt"] for call in audit_calls)
     assert {group_scope(call["prompt"])[0] for call in audit_calls} == {"group-01", "group-02", "group-03",}
+    tracked = git(improve_scaled_monorepo_target, "ls-files").splitlines()
+    for category in AUDIT_CATEGORIES:
+        owned = [path for read in stub.assignment_reads
+            if read["category"] == category for path in read["primary_files"]
+        ]
+        assert Counter(owned) == Counter(tracked)
     coverage = _load_improve_json(improve_scaled_monorepo_target, "coverage.json")
     assert len(coverage["groups"]) == 3
     assert {entry["name"] for entry in coverage["partitions"]} == {
         *(f"svc{index:02d}" for index in range(12)), "frontend", "residue",
     }
     assert coverage["not_audited"] == []
+    partition_counts = {entry["name"]: entry["file_count"] for entry in coverage["partitions"]}
+    for group in coverage["groups"]:
+        assert group["file_count"] == len(group["primary_files"])
+        assert group["context_file_count"] == sum(partition_counts[name] for name in group["partitions"]) - len(
+            group["primary_files"]
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("fail_shared_docs", [False, True])
+async def test_mixed_service_primary_reads_preserve_boundary_recall_and_generic_fallback(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
+    fail_shared_docs: bool,
+) -> None:
+    """Root-only dispatch passed despite duplicated primary work and unreadable ownership.
+
+    The provider must read the client and its concrete schema dependency to
+    discover the mismatch; a failed sibling category must retain that finding.
+    """
+    repo = improve_monorepo_target
+    _pin_stack_availability(monkeypatch, tmp_path)
+    client = "apps/billing/client.ts"
+    contract = "apps/billing/shared contract.json"
+    unknown = "apps/billing/adapter.grammar"
+    (repo / client).write_text(f'export const responseField = "total_cents";\n// Contract: {contract}\n')
+    (repo / contract).write_text('{"response_field": "total"}\n')
+    (repo / unknown).write_text("response ::= total\n")
+    git(repo, "add", client, contract, unknown)
+    commit(repo, "add mixed service contract mismatch")
+    before = (head_sha(repo), _git_status_porcelain(repo), _untracked(repo))
+    stub = install_capable_improve_backend(monkeypatch, ManifestReadingBackend(repo))
+    if fail_shared_docs:
+        stub.fail_assignments.add(("docs", "group-01"))
+
+    assert await _run_improve(make_config, repo) == 0
+
+    tracked = git(repo, "ls-files").splitlines()
+    for category in AUDIT_CATEGORIES:
+        reads = [record for record in stub.assignment_reads if record["category"] == category]
+        assert Counter(path for record in reads for path in record["primary_files"]) == Counter(tracked)
+    coverage = _load_improve_json(repo, "coverage.json")
+    owners = {path: group["stack"] for group in coverage["groups"] for path in group["primary_files"]}
+    assert {path: owners[path] for path in (client, contract, unknown, "apps/billing/pyproject.toml")} == {
+        client: "react", contract: "generic", unknown: "generic", "apps/billing/pyproject.toml": "python",
+    }
+    client_read = next(record for record in stub.assignment_reads
+        if record["category"] == "correctness" and client in record["primary_files"]
+    )
+    assert client_read["context_files"] == [contract]
+    assert client_read["context_bytes"] == len((repo / contract).read_bytes())
+    findings = _load_improve_json(repo, "audit-findings.json")["findings"]
+    assert len(findings) == 1
+    assert findings[0]["path"] == client
+    assert findings[0]["partition"] == "billing"
+    assert findings[0]["evidence"] == [f"{client}:1", f"{contract}:1"]
+    vetted = _load_improve_json(repo, "vetted-findings.json")["findings"]
+    assert len(vetted) == 1
+    if fail_shared_docs:
+        assert "docs:group-01" in coverage["failed_assignments"]
+        failed_group = next(group for group in coverage["groups"] if group["name"] == "group-01")
+        assert failed_group["status"] == "partial"
+        assert failed_group["categories"] == {
+            category: "failed" if category == "docs" else "audited" for category in AUDIT_CATEGORIES
+        }
+        billing = next(entry for entry in coverage["partially_audited"] if entry["partition"] == "billing")
+        assert billing["missing_by_category"] == {
+            category: [unknown, contract] if category == "docs" else [] for category in AUDIT_CATEGORIES
+        }
+        assert billing["omitted_primary_files"] == [unknown, contract]
+        assert billing["audited_file_count"] == 3
+        assert billing["reached_file_count"] == 5
+        assert "group-failed" in improve_artifact(repo, "report.md").read_text()
+    else:
+        assert coverage["not_audited"] == coverage["partially_audited"] == []
+    assert (head_sha(repo), _git_status_porcelain(repo)) == before[:2]
+    assert set(before[2]) <= set(_untracked(repo))
+    assert all(path.startswith(("daydream_plans/", ".daydream/"))
+        for path in set(_untracked(repo)) - set(before[2])
+    )
+
+
+@pytest.mark.anyio
+async def test_large_primary_manifest_is_readable_from_the_actual_audit_snapshot(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
+) -> None:
+    """Only an actual provider read detects a manifest published outside its snapshot."""
+    repo = improve_monorepo_target
+    _pin_stack_availability(monkeypatch, tmp_path)
+    paths = [f"apps/billing/module_{index:03d}_{'x' * 60}.py" for index in range(140)]
+    for path in paths:
+        (repo / path).write_text("VALUE = 1\n")
+    git(repo, "add", *paths)
+    commit(repo, "add a flat service requiring a bounded manifest reference")
+    stub = install_capable_improve_backend(monkeypatch, ManifestReadingBackend(repo))
+
+    assert await _run_improve(make_config, repo, improve_focus="security") == 0
+
+    referenced = [record for record in stub.assignment_reads if record["manifest_path"] is not None]
+    assert referenced
+    assert all(record["manifest_pages"] > 1 for record in referenced)
+    assert Counter(path for record in stub.assignment_reads for path in record["primary_files"]) == Counter(
+        git(repo, "ls-files").splitlines()
+    )
+    assert all(record["cwd"] != repo and not record["cwd"].exists() for record in referenced)
+    coverage = _load_improve_json(repo, "coverage.json")
+    assert sorted(path for group in coverage["groups"] for path in group["primary_files"]) == sorted(
+        git(repo, "ls-files").splitlines()
+    )
+    assert all(path.startswith(".daydream/") for path in _untracked(repo) if "manifest" in path)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("effort", ["quick", "standard"])
+@pytest.mark.parametrize("initialized", [False, True])
+async def test_submodule_references_do_not_block_owned_files_or_claim_nested_content(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
+    effort: str, initialized: bool,
+) -> None:
+    """Gitlinks are tracked paths, but the independent snapshot has no nested bytes.
+
+    Existing manifest journeys contain only ordinary files. A real local
+    submodule must preserve their audits and expose the unavailable content.
+    """
+    repo = improve_monorepo_target
+    nested = tmp_path / "submodule-origin"
+    init_repo(nested)
+    (nested / "nested.py").write_text("ONLY_IN_SUBMODULE = True\n")
+    git(nested, "add", "nested.py")
+    nested_commit = commit(nested, "seed the local submodule")
+    relative = "apps/billing/vendor"
+    git(repo, "-c", "protocol.file.allow=always", "submodule", "add", str(nested), relative)
+    commit(repo, "track a local submodule")
+    if not initialized:
+        git(repo, "submodule", "deinit", "-f", "--", relative)
+    _pin_stack_availability(monkeypatch, tmp_path)
+    before = (head_sha(repo), _git_status_porcelain(repo))
+    backend = install_capable_improve_backend(monkeypatch, ManifestReadingBackend(repo))
+
+    assert await _run_improve(make_config, repo, improve_effort=effort) == 0
+
+    categories = EFFORT_TIERS[effort].categories or AUDIT_CATEGORIES
+    ordinary = set(git(repo, "ls-files").splitlines()) - {relative}
+    reference = {"path": relative, "commit": nested_commit}
+    for category in categories:
+        assignments = [entry for entry in backend.assignment_reads if entry["category"] == category]
+        assert Counter(path for entry in assignments for path in entry["primary_files"]) == Counter(ordinary)
+        assert [item for entry in assignments for item in entry["submodule_references"]] == [reference]
+    coverage = _load_improve_json(repo, "coverage.json")
+    assert coverage["failed_assignments"] == {}
+    assert coverage["not_audited"] == coverage["partially_audited"] == []
+    assert coverage["unavailable_submodule_contents"] == [{**reference, "file_count": None, "reason": "not-captured"}]
+    assert sum(group["primary_file_count"] for group in coverage["groups"]) == len(ordinary)
+    assert sum(group["submodule_reference_count"] for group in coverage["groups"]) == 1
+    report = improve_artifact(repo, "report.md").read_text()
+    assert "Submodule contents were not audited" in report and f"`{relative}`" in report
+    durable = repo / ".daydream/improve/primary-manifests"
+    documents = [json.loads(path.read_text()) for path in durable.glob("group-*.json")]
+    assert [item for doc in documents for item in doc.get("submodule_references", [])] == [reference]
+    assert (head_sha(repo), _git_status_porcelain(repo)) == before
+    assert (repo / relative / "nested.py").exists() is initialized
+
 
 @pytest.mark.anyio
 async def test_partition_bound_splits_oversized_trees_via_config(
@@ -1102,11 +1271,10 @@ async def test_partition_bound_splits_oversized_trees_via_config(
     assert code == 0
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
     groups = {group_scope(call["prompt"])[0] for call in audit_calls}
-    # frontend/src (12 files) splits into 3 partitions of 4; the 12 two-file
-    # services pack 2-per-group; and the mixed generic/python residue is
-    # routed to both specialists -> 11 groups.
-    assert len(groups) == 11
-    assert len(audit_calls) == 11 * len(AUDIT_CATEGORIES)
+    # The owned Python residue file now fits beside a two-service group;
+    # six Python groups, three frontend groups and one generic group remain.
+    assert len(groups) == 10
+    assert len(audit_calls) == 10 * len(AUDIT_CATEGORIES)
     for call in audit_calls:
         assert sum(group_file_counts(call["prompt"])) <= 5
     coverage = _load_improve_json(improve_scaled_monorepo_target, "coverage.json")
@@ -1128,7 +1296,7 @@ async def test_group_ceiling_reports_full_and_partial_stack_coverage(
 
     assert code == 0
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
-    # Only the largest group (the 24-file python service group) is audited.
+    # Only the largest group (24 service files plus the Python root config) is audited.
     assert len(audit_calls) == len(AUDIT_CATEGORIES)
     assert {group_scope(call["prompt"])[0] for call in audit_calls} == {"group-01"}
     coverage = _load_improve_json(improve_scaled_monorepo_target, "coverage.json")
@@ -1167,6 +1335,16 @@ async def test_audit_dispatch_interval_preserves_isolation_when_all_failed(
 
     assert code == 1
     assert not improve_artifact(improve_monorepo_target, "report.md").exists()
+    coverage = _load_improve_json(improve_monorepo_target, "coverage.json")
+    assert coverage["not_audited"]
+    assert coverage["partially_audited"] == []
+    assert all(group["status"] == "failed" for group in coverage["groups"])
+    assert set(coverage["failed_assignments"]) == {
+        f"{category}:{group['name']}" for category in AUDIT_CATEGORIES for group in coverage["groups"]
+    }
+    audit = _load_improve_json(improve_monorepo_target, "audit-findings.json")
+    assert audit["findings"] == [] and audit["failed"] == coverage["failed_assignments"]
+
     audit_cwds = {call["cwd"] for call in stub.calls if call["marker"] == "audit"}
     assert len(audit_cwds) == 1
     assert improve_monorepo_target not in audit_cwds
@@ -1223,20 +1401,38 @@ async def test_report_names_unaudited_partitions_and_failed_groups(
     section = _not_audited_section(report)
     assert "**frontend**" in section and "group-ceiling" in section
     assert "`frontend/`" in section
-    # residue's only retained group (group-01) failed its docs audit, so the
-    # python stack is not counted as audited: the partition is reported as not
-    # audited, naming both the ceiling-omitted and the failed stacks.
+    # The retained Python group was reached by seven categories, while docs
+    # failed; the generic slice remains omitted by the ceiling for every lens.
     assert "**residue**" in section
     assert "not audited" in section
     assert "omitted: generic, python" in section
-    assert "partially audited" not in section
+    assert "partially audited" in section
     failed = report.split("### Failed audit assignments")[1].split("## ")[0]
     assert "**docs / group-01**" in failed and "apps/svc00/" in failed
     coverage = _load_improve_json(improve_scaled_monorepo_target, "coverage.json")
-    assert {entry["reason"] for entry in coverage["not_audited"]} == {"group-ceiling", "group-failed",}
-    assert coverage["partially_audited"] == []
+    assert {entry["partition"] for entry in coverage["not_audited"]} == {"frontend"}
+    assert coverage["not_audited"][0]["reason"] == "group-ceiling"
+    partial = {entry["partition"]: entry for entry in coverage["partially_audited"]}
+    assert set(partial) == {*(f"svc{index:02d}" for index in range(12)), "residue"}
+    assert partial["residue"]["reason"] == "group-ceiling-and-failed"
+    assert partial["residue"]["audited_file_count"] == 0
+    assert partial["residue"]["reached_file_count"] == 1
+    assert partial["residue"]["missing_by_category"] == {
+        category: ["README.md", "pyproject.toml"] if category == "docs" else ["README.md"]
+        for category in AUDIT_CATEGORIES
+    }
+    for index in range(12):
+        entry = partial[f"svc{index:02d}"]
+        paths = [f"apps/svc{index:02d}/api.py", f"apps/svc{index:02d}/pyproject.toml"]
+        assert entry["missing_by_category"] == {
+            category: paths if category == "docs" else [] for category in AUDIT_CATEGORIES
+        }
+        assert entry["audited_file_count"] == 0 and entry["reached_file_count"] == 2
     assert coverage["groups"] and coverage["partitions"]
-    assert [entry["status"] for entry in coverage["groups"]] == ["failed"]
+    assert [entry["status"] for entry in coverage["groups"]] == ["partial"]
+    assert coverage["groups"][0]["categories"] == {
+        category: "failed" if category == "docs" else "audited" for category in AUDIT_CATEGORIES
+    }
     assert "docs:group-01" in coverage["failed_assignments"]
 
 
@@ -1601,6 +1797,80 @@ async def test_branch_focus_scopes_audit_to_merge_base_diff_and_tags_provenance(
     assert coverage["not_audited"] == []
     vetted = _load_improve_json(improve_branch_target, "vetted-findings.json")
     assert {finding["provenance"] for finding in vetted["findings"]} <= {"introduced", "inherited",}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("replacement", ["symlink-to-file", "file-to-symlink", "file-to-gitlink"])
+async def test_branch_focus_manifest_retains_deleted_paths_without_reading_missing_files(
+    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
+    replacement: str,
+) -> None:
+    """Only final deletions are diff-only assignments; type replacements survive.
+
+    Git emits separate deletion/addition blocks for a type change. The same
+    real branch also keeps text/binary deletions to distinguish the two cases.
+    """
+    repo = improve_branch_target
+    deleted = "web/App.tsx"
+    binary = "web/logo.png"
+    replaced = "apps/billing/replaced.py"
+    target = "apps/billing/replacement-target.py"
+    (repo / target).write_text("NEW_TARGET_CONTENT = True\n")
+    if replacement == "symlink-to-file":
+        (repo / replaced).symlink_to("replacement-target.py")
+    else:
+        (repo / replaced).write_text("OLD_REGULAR_CONTENT = True\n")
+    (repo / binary).write_bytes(b"\x89PNG\x00binary payload")
+    git(repo, "add", binary, replaced, target)
+    commit(repo, "seed binary and replacement before the branch")
+    git(repo, "branch", "-f", "main", "HEAD")
+    (repo / replaced).unlink()
+    reference = None
+    if replacement == "symlink-to-file":
+        (repo / replaced).write_text("SURVIVING_REGULAR_CONTENT = 12345\n")
+    elif replacement == "file-to-symlink":
+        (repo / replaced).symlink_to("replacement-target.py")
+    else:
+        nested = tmp_path / "replacement-origin"
+        init_repo(nested)
+        (nested / "nested.py").write_text("NESTED_CONTENT_NOT_CAPTURED = True\n")
+        git(nested, "add", "nested.py")
+        nested_commit = commit(nested, "seed replacement submodule")
+        git(repo, "rm", "--cached", "--", replaced)
+        git(repo, "-c", "protocol.file.allow=always", "submodule", "add", str(nested), replaced)
+        reference = {"path": replaced, "commit": nested_commit}
+    (repo / "apps/billing/api.py").write_text('def service_name():\n    return "billing-v3"\n')
+    git(repo, "add", "apps/billing/api.py", replaced)
+    git(repo, "rm", deleted, binary)
+    commit(repo, "replace tracked type and remove frontend files on the audited branch")
+    source_bytes = (repo / replaced / "nested.py").read_bytes() if reference else (repo / replaced).read_bytes()
+    before = (head_sha(repo), _git_status_porcelain(repo), git(repo, "ls-files", "--stage"))
+    backend = install_capable_improve_backend(monkeypatch, ManifestReadingBackend(repo))
+
+    assert await _run_improve(make_config, repo, improve_focus="branch") == 0
+
+    assert len(backend.assignment_reads) == len(AUDIT_CATEGORIES)
+    ordinary = [".gitmodules", "apps/billing/api.py"] if reference else ["apps/billing/api.py", replaced]
+    for assignment in backend.assignment_reads:
+        assert assignment["primary_files"] == ordinary
+        assert assignment["deleted_files"] == sorted([deleted, binary])
+        assert assignment["submodule_references"] == ([reference] if reference else [])
+        if not reference:
+            assert assignment["primary_sha256"][replaced] == hashlib.sha256(source_bytes).hexdigest()
+    coverage = _load_improve_json(repo, "coverage.json")
+    assert coverage["groups"][0]["primary_files"] == sorted(
+        ordinary + [deleted, binary] + ([replaced] if reference else [])
+    )
+    assert coverage["groups"][0]["file_count"] == len(ordinary) + 2 + bool(reference)
+    assert coverage["groups"][0]["submodule_reference_count"] == bool(reference)
+    assert coverage["groups"][0]["status"] == "audited"
+    assert coverage["not_audited"] == coverage["partially_audited"] == []
+    assert (head_sha(repo), _git_status_porcelain(repo), git(repo, "ls-files", "--stage")) == before
+    assert (
+        (repo / replaced / "nested.py").read_bytes() if reference else (repo / replaced).read_bytes()
+    ) == source_bytes
+    assert (repo / replaced).is_symlink() is (replacement == "file-to-symlink")
+
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("effort", ["standard", "deep"])

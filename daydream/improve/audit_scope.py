@@ -125,70 +125,115 @@ def _coverage_ledger(
     partitions: list[Partition],
     groups: list[PartitionGroup],
     omissions: list[PartitionStackOmission],
-    failed_groups: set[str] | None = None,
+    *,
+    categories: tuple[str, ...] = (),
+    failures: dict[str, str] | None = None,
+    submodule_references: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Record partition coverage, counting failed group stacks as uncovered."""
-    failed_groups = failed_groups or set()
-    omitted_by_partition: dict[Partition, list[str]] = {}
-    for omission in omissions:
-        omitted_by_partition.setdefault(omission.partition, []).append(omission.stack)
+    """Account for owned files per category; context availability grants no coverage.
+
+    Before dispatch, retained files are planned, not audited. After dispatch a
+    file is fully covered only when every requested category succeeded.
+    """
+    failures = failures or {}
+    group_entries: list[dict[str, Any]] = []
+    for group in groups:
+        failed = [category for category in categories if f"{category}:{group.name}" in failures]
+        originals = [p for p in partitions if any(_same_partition(p, member) for member in group.partitions)]
+        available = {path for p in originals for path in p.files}
+        group_entries.append({
+            "name": group.name,
+            "stack": group.stack,
+            "file_count": group.file_count,
+            "primary_files": list(group.primary_files),
+            "context_file_count": len(available - set(group.primary_files) - set(submodule_references or {})),
+            "partitions": [p.name for p in group.partitions],
+            "status": (
+                "planned" if not categories else
+                "failed" if len(failed) == len(categories) else
+                "partial" if failed else "audited"
+            ),
+            "categories": {
+                category: "failed" if category in failed else "audited"
+                for category in categories
+            },
+        })
+        if submodule_references is not None:
+            reference_count = sum(path in submodule_references for path in group.primary_files)
+            group_entries[-1].update({
+                "primary_file_count": group.file_count - reference_count,
+                "submodule_reference_count": reference_count,
+            })
 
     not_audited: list[dict[str, Any]] = []
     partially_audited: list[dict[str, Any]] = []
-    for partition, omitted_stacks in omitted_by_partition.items():
-        retained_groups = [
-            group for group in groups if partition in group.partitions
-        ]
-        audited_stacks = sorted(
-            {
-                group.stack
-                for group in retained_groups
-                if group.name not in failed_groups and group.stack is not None
-            }
-        )
-        failed_stacks = sorted(
-            {
-                group.stack
-                for group in retained_groups
-                if group.name in failed_groups and group.stack is not None
-            }
-        )
-        entry = {
+    for partition in partitions:
+        retained = [(group, member) for group in groups for member in group.partitions
+                    if _same_partition(partition, member)]
+        dropped = [o for o in omissions if _same_partition(partition, o.partition)]
+        omitted = {path for o in dropped for path in o.partition.files}
+        omitted_stacks = {o.stack for o in dropped}
+        audited_stacks: set[str] = set()
+        reached: set[str] = set()
+        failed_here = False
+        missing_categories: dict[str, list[str]] = {}
+        for category in categories:
+            missing = set(omitted)
+            for group, member in retained:
+                if f"{category}:{group.name}" in failures:
+                    missing.update(member.files)
+                    failed_here = True
+                    if group.stack is not None:
+                        omitted_stacks.add(group.stack)
+                else:
+                    reached.update(member.files)
+                    if group.stack is not None:
+                        audited_stacks.add(group.stack)
+            missing_categories[category] = sorted(missing)
+        missing = omitted | {path for paths in missing_categories.values() for path in paths}
+        if not missing:
+            continue
+        entry: dict[str, Any] = {
             "partition": partition.name,
             "root": partition.root,
+            "service": partition.service,
             "file_count": len(partition.files),
-            "reason": (
-                "group-failed"
-                if retained_groups and not audited_stacks
-                else "group-ceiling"
-            ),
-            "omitted_stacks": sorted(set(omitted_stacks) | set(failed_stacks)),
+            "audited_file_count": len(set(partition.files) - missing) if categories else 0,
+            "reached_file_count": len(reached),
+            "omitted_file_count": len(missing),
+            "omitted_primary_files": sorted(missing),
+            "missing_by_category": missing_categories,
+            "reason": "group-ceiling-and-failed" if dropped and failed_here else
+                      "group-failed" if failed_here else "group-ceiling",
+            "omitted_stacks": sorted(omitted_stacks),
         }
-        if audited_stacks:
-            partially_audited.append({**entry, "audited_stacks": audited_stacks})
+        # At recon time, retained ownership is planned, never claimed audited.
+        if reached:
+            partially_audited.append({**entry, "audited_stacks": sorted(audited_stacks)})
         else:
             not_audited.append(entry)
 
-    return {
+    ledger: dict[str, Any] = {
         "artifact_type": "daydream.improve-coverage",
-        "partitions": [
-            {**_partition_dict(partition), "source": partition.source}
-            for partition in partitions
-        ],
-        "groups": [
-            {
-                "name": group.name,
-                "stack": group.stack,
-                "file_count": group.file_count,
-                "partitions": [
-                    partition.name for partition in group.partitions
-                ],
-            }
-            for group in groups
-        ],
+        "stage": "audited" if categories else "planned",
+        "categories_run": list(categories),
+        "partitions": [{**_partition_dict(p), "source": p.source} for p in partitions],
+        "groups": group_entries,
         "not_audited": not_audited,
         "partially_audited": partially_audited,
+        "failed_assignments": dict(sorted(failures.items())),
     }
+    if submodule_references is not None:
+        ledger["unavailable_submodule_contents"] = [
+            {"path": path, "commit": commit, "file_count": None, "reason": "not-captured"}
+            for path, commit in sorted(submodule_references.items())
+        ]
+    return ledger
+
+
+def _same_partition(left: Partition, right: Partition) -> bool:
+    """Match original partitions to owned slices without comparing their files."""
+    return (left.name, left.root, left.source, left.service) == (right.name, right.root, right.source, right.service)
 
 
 def _owning_services(

@@ -229,7 +229,38 @@ partition_max_files = 400
 max_partition_groups = 8
 ```
 
-The report names whatever a bound leaves out. The file `.daydream/improve/coverage.json` also names it. Coverage is never silently truncated.
+Within each category, every eligible tracked file has one primary stack owner.
+Configuration follows the normal stack detector (for example, `pyproject.toml`
+joins Python when present); unknown files and shared interfaces without a language
+owner use the native generalist. Other specialists may read these files to follow
+callers, contracts, and cross-stack or cross-service dependencies. Those contextual
+reads do not grant primary coverage, and finding deduplication remains in place.
+
+Audits receive exact primary manifests: up to 8 KiB inline, otherwise a hashed,
+line-oriented JSON file inside the independent audit snapshot, capped at 1 MiB per
+group. Its line count enables complete paginated Read access within native tool
+output limits. Unsafe, unavailable, or oversized inputs fail their assignments visibly;
+no list is silently truncated. Branch deletions are assigned as diff-only paths.
+Quick and branch audits keep one whole-surface group per category.
+
+`.daydream/improve/primary-manifests/` preserves the complete repository-relative
+assignments without temporary snapshot paths. Every run rebuilds manifests from
+its captured inventory; plan reuse never reuses an expired snapshot pointer.
+`.daydream/improve/coverage.json` distinguishes owned file counts,
+available contextual files (not measured reads), group-ceiling omissions, and
+failed category assignments. The report summarizes omissions and failed
+assignments. `context_file_count` counts nonowned eligible files
+in a group's member partitions; dependency reads can also reach elsewhere in the
+snapshot. It does not measure files actually read. A successful sibling category
+does not cover a failed one. Coverage means the assignment completed at the selected tier's breadth, not
+proof that every source line was read.
+
+Tracked submodules are assigned as path/commit references from the captured
+index. Their contents are not copied into the snapshot or audited. Final coverage
+separates ordinary file-path assignments (`primary_file_count`, including
+diff-only deletions) from `submodule_reference_count`; `file_count` includes both.
+`unavailable_submodule_contents` records the
+uncaptured contents with an unknown file count, and the report names them.
 
 ### Focus modes
 

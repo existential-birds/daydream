@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **improve:** audit ordinary files alongside tracked submodule references, retain surviving branch type replacements, and explicitly report uncaptured submodule contents ([#1406](https://github.com/existential-birds/daydream/issues/1406)).
+
 - **improve:** honor the selected effort and backend concurrency limits for branch audit and vet tasks while preserving branch scope and finding policies ([#1404](https://github.com/existential-birds/daydream/issues/1404)).
 
 - **phases:** restore historical prompt-helper imports through `daydream.phases`, preserving the canonical prompt and schema objects for forks ([#1230](https://github.com/existential-birds/daydream/issues/1230)).
@@ -32,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **preflight:** label sharded work as review assignments, show the structural reviewer, and remove obsolete parse agents from the scoped review estimate, including only the applicable conditional arbiter allowance ([#1494](https://github.com/existential-birds/daydream/issues/1494)).
 
 ### Changed
+
+- **improve:** assign disjoint primary files to mixed-stack audit specialists, keep cross-stack context available, and report owned counts, omitted files, and failed category coverage with readable snapshot manifests ([#1406](https://github.com/existential-birds/daydream/issues/1406)).
 
 - **improve:** combine default survey and reconnaissance into one bounded discovery pass, reuse host inventory, and retain guidelines alongside admitted commands in audit/plan inputs; custom survey strategies keep the two-pass compatibility path ([#1405](https://github.com/existential-birds/daydream/issues/1405)).
 

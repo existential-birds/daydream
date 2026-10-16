@@ -22,9 +22,11 @@ Subclasses specialize the same dispatch fake for focused production-path checks:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import AsyncIterator, Callable
+from itertools import islice
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -559,6 +561,104 @@ class ImproveStubBackend:
 
     async def cancel(self) -> None:
         pass
+
+
+class ManifestReadingBackend(ImproveStubBackend):
+    """Observe real assignment/source reads at the external provider boundary.
+
+    The tiny contract investigation follows a client reference into another
+    stack's JSON schema. It cannot report the mismatch without opening both
+    repository files, so routing tests do not manufacture the expected recall.
+    """
+
+    def __init__(self, target: Path) -> None:
+        super().__init__(target, n_findings=0)
+        self.assignment_reads: list[dict[str, Any]] = []
+        self.fail_assignments: set[tuple[str, str]] = set()
+
+    async def _pre_execute(self, cwd: Path, prompt: str, **turn_kwargs: Any) -> list[AgentEvent] | None:
+        if "read-only improve audit specialist" not in prompt:
+            return None
+        category = next(name for name, heading in _AUDIT_HEADINGS.items() if heading in prompt)
+        self._record_call(cwd, prompt, "audit", **turn_kwargs)
+        match = re.search(r"<primary_manifest>\s*(.*?)\s*</primary_manifest>", prompt, re.DOTALL)
+        assert match is not None, "provider received no primary ownership manifest"
+        manifest = json.loads(match.group(1))
+        manifest_path: str | None = None
+        manifest_pages = 0
+        if "path" in manifest:
+            manifest_path = manifest["path"]
+            # Preserve actual file I/O while modeling native line-limited Reads.
+            # A whole-file read_bytes fake missed unpageable compact JSON spills.
+            lines: list[bytes] = []
+            with self._snapshot_path(cwd, manifest_path).open("rb") as stream:
+                while page := list(islice(stream, 32)):
+                    lines.extend(page)
+                    manifest_pages += 1
+            raw = b"".join(lines)
+            assert len(lines) >= manifest["file_count"] + 2, "primary manifest cannot be paginated by line"
+            assert len(lines) == manifest["line_count"]
+            assert hashlib.sha256(raw).hexdigest() == manifest["sha256"]
+            document = json.loads(raw)
+            assert (len(document["primary_files"]) + len(document.get("deleted_files", []))
+                    + len(document.get("submodule_references", []))) == manifest["file_count"]
+        else:
+            document = manifest
+        primary = document["primary_files"]
+        deleted = document.get("deleted_files", [])
+        submodules = document.get("submodule_references", [])
+        assert isinstance(primary, list) and all(isinstance(path, str) for path in primary)
+        assert primary == sorted(set(primary))
+        assert deleted == sorted(set(deleted)) and not set(primary) & set(deleted)
+        assert all(not (cwd / path).exists() for path in deleted)
+        assert not set(primary) & {entry["path"] for entry in submodules}
+        assert all(not list((cwd / entry["path"]).glob("*")) for entry in submodules)
+        reads = {path: self._read_snapshot(cwd, path) for path in primary}
+        group, _ = group_scope(prompt)
+        record: dict[str, Any] = {"category": category, "group": group, "primary_files": primary,
+            "primary_sha256": {path: hashlib.sha256(raw).hexdigest() for path, raw in reads.items()},
+            "primary_bytes": sum(map(len, reads.values())), "context_files": [], "context_bytes": 0,
+            "manifest_path": manifest_path, "manifest_pages": manifest_pages, "deleted_files": deleted, "cwd": cwd,
+            "submodule_references": submodules,
+        }
+        self.assignment_reads.append(record)
+        if (category, group) in self.fail_assignments:
+            raise RuntimeError("provider assignment failed after reading its primary manifest")
+        findings = []
+        if category == "correctness":
+            for path, raw in reads.items():
+                text = raw.decode("utf-8")
+                dependency = re.search(r"// Contract: (.+)", text)
+                expected = re.search(r'export const responseField = "([^"]+)"', text)
+                if dependency is None or expected is None:
+                    continue
+                contract_path = dependency.group(1)
+                contract_bytes = reads.get(contract_path)
+                if contract_bytes is None:
+                    contract_bytes = self._read_snapshot(cwd, contract_path)
+                    record["context_files"].append(contract_path)
+                    record["context_bytes"] += len(contract_bytes)
+                contract = json.loads(contract_bytes)
+                if contract["response_field"] != expected.group(1):
+                    findings.append({"title": "Client response field disagrees with shared contract",
+                        "category": category, "path": path, "line": 1,
+                        "body": "The client reads a field absent from the shared response contract.",
+                        "impact": "HIGH", "effort": "S", "risk": "LOW", "confidence": "HIGH",
+                        "evidence": [f"{path}:1", f"{contract_path}:1"], **_neutral_maintenance_fields(),
+                    })
+        return [ResultEvent(structured_output={"findings": findings}, continuation=None)]
+
+    @staticmethod
+    def _snapshot_path(cwd: Path, relative: str) -> Path:
+        path = Path(relative)
+        assert not path.is_absolute() and ".." not in path.parts
+        resolved = (cwd / path).resolve(strict=True)
+        assert resolved.is_relative_to(cwd.resolve())
+        return resolved
+
+    @classmethod
+    def _read_snapshot(cls, cwd: Path, relative: str) -> bytes:
+        return cls._snapshot_path(cwd, relative).read_bytes()
 
 
 class AuditAbsoluteWorkingDirectoryBackend(ImproveStubBackend):

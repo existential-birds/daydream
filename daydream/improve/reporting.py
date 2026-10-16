@@ -26,9 +26,6 @@ if TYPE_CHECKING:
     from daydream.flows.engine import FlowContext
 
 
-from daydream.improve.audit_scope import (
-    _coverage_ledger,
-)
 
 
 def _report_with_provenance(content: str) -> str:
@@ -110,7 +107,8 @@ def _coverage_bullet(entry: dict[str, Any]) -> str:
     """Render one coverage ledger entry as a report bullet."""
     prefix = (
         f"  - **{entry['partition']}** — `{entry['root']}/` "
-        f"({entry['file_count']} files) "
+        f"({entry['file_count']} files; {entry['omitted_file_count']} primary files incomplete; "
+        f"reason: {entry['reason']}) "
     )
     if "audited_stacks" in entry:
         return (
@@ -141,13 +139,9 @@ def _render_report(ctx: FlowContext) -> str:
     plan_write = ctx.data["plan_write"]
     issue_publication = ctx.data.get("issue_publication")
     partitions = ctx.data["partitions"]
-    partition_omissions = ctx.data["partition_omissions"]
     groups = ctx.data["partition_groups"]
     failures = audit.get("failed", {})
-    failed_groups = {key.partition(":")[2] for key in failures}
-    ledger = _coverage_ledger(
-        partitions, groups, partition_omissions, failed_groups=failed_groups
-    )
+    ledger = ctx.data["audit_coverage"]
     not_audited = ledger["not_audited"]
     partially_audited = ledger["partially_audited"]
     service_lines = (
@@ -172,13 +166,18 @@ def _render_report(ctx: FlowContext) -> str:
     ]
     coverage_lines = (
         (
-            "- Partitions not fully audited (reason: group-ceiling; raise "
-            "`max-partition-groups` to include them):\n"
+            "- Partitions not fully audited (group-ceiling or failed category assignments; "
+            "raise `max-partition-groups` for ceiling omissions):\n"
             + "\n".join(coverage_bullets)
         )
         if coverage_bullets
         else f"- All {len(partitions)} partitions were audited."
     )
+    if submodules := ledger.get("unavailable_submodule_contents"):
+        coverage_lines += (
+            "\n- Submodule contents were not audited (file counts unknown; only recorded references were assigned):\n"
+            + "\n".join(f"  - `{entry['path']}` at `{entry['commit']}`" for entry in submodules)
+        )
     tier_bound = {
         "quick": (
             "Recon hotspots only; categories outside correctness, security, tests, and tech debt were not audited."
