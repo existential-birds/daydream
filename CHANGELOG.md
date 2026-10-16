@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **deep:** disable review diagrams by default; retain explicit CLI/repository opt-in and diagram-only mode, overlap enabled grounded generation with independent review when capacity permits, and attach diagrams after synthesis without starving primary reviewers ([#1401](https://github.com/existential-birds/daydream/issues/1401)).
 - **deep:** overlap disjoint precision arbitration and suppression under the shared backend fan-out ceiling, preserving stable record identities, resumable arbiter groups and completed review reuse ([#1407](https://github.com/existential-birds/daydream/issues/1407)).
 - **dependencies:** consolidate the pending runtime, development, RL, and GitHub Actions updates; validate Harbor 0.24 and OpenTelemetry 1.45.1 compatibility and refresh the hash-pinned benchmark runtime dependencies.
 - **agent guidance:** condense AGENTS.md into core contribution, testing, and runtime rules with task-specific references; clarify arbiter sharding, backend guards, merge continuation, and exploration cache behavior against the implementation.

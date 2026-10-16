@@ -40,10 +40,12 @@ _FORENSIC_BASELINE_DEEP_ARTIFACTS = frozenset({
 #: was captured. ``latency-routing.json`` is issue #732's additive routing record
 #: (A12); ``adjudication-provenance.json`` is the host-stamped adjudication ledger
 #: issue #735 adds; ``test-recipe.json`` is the once-resolved test recipe issue
-#: #1408 persists in the preamble. The gate subtracts all three before comparing
-#: against the baseline.
+#: #1408 persists in the preamble; ``diagram-complete.json`` is issue #1401's
+#: snapshot-bound diagram recovery marker. The gate subtracts these additions
+#: before comparing against the baseline.
 _FORENSIC_ADDITIVE_DEEP_ARTIFACTS = frozenset(
-    {"review-coverage.json", "latency-routing.json", "adjudication-provenance.json", "test-recipe.json", "stage-inputs"}
+    {"review-coverage.json", "latency-routing.json", "adjudication-provenance.json", "test-recipe.json", "stage-inputs",
+     "diagram-complete.json"}
 )
 
 #: The pre-#732 ``arbiter-input.json`` for the exact stub records below: the
@@ -75,7 +77,7 @@ async def _run_profile(
     monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute, target: Path, *,
     latency_profile: str, timeout: float = 120, review_profile: ResolvedProfile | None = None,
     parse_severity: str | None = None, parse_by_stack: dict[str, dict[str, Any]] | None = None,
-    merge_echo_records: bool = False,
+    merge_echo_records: bool = False, diagram: str | None = None,
 ) -> tuple[StubBackend, Path]:
     """Run a configured stub profile; optionally echo records to expose adjudication results."""
     silence(monkeypatch)
@@ -84,7 +86,7 @@ async def _run_profile(
     stub.parse_by_stack = parse_by_stack
     stub.merge_echo_records = merge_echo_records
     mute_side_effects()
-    config = make_config(target, latency_profile=latency_profile,
+    config = make_config(target, latency_profile=latency_profile, diagram=diagram,
         review_profile=review_profile if review_profile is not None else independent_alternatives_profile(),
     )
     with anyio.fail_after(timeout):
@@ -133,7 +135,7 @@ async def test_forensic_reproduces_todays_wonder_and_arbiter_artifacts(
     """MH2 + A12: same artifacts, same effort values, same marker meaning."""
     _, deep = await _run_profile(
         monkeypatch, make_config, mute_side_effects, multi_stack_target, latency_profile="forensic",
-        parse_severity="high",
+        parse_severity="high", diagram="auto",
     )
     assert (deep / "adjudication-complete.marker").exists()
     assert not list(deep.glob("arbiter-group-*-input.json"))

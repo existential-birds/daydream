@@ -122,7 +122,7 @@ def captured_post(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh) -> _Captured
 def review_run(monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., Any], silence_console: Callable[..., None],
     captured_post: _CapturedPost,
 ) -> Callable[..., Any]:
-    """Run comment mode with a diagram-scripted backend and captured posting.
+    """Run opted-in comment mode with a diagram-scripted backend and captured posting.
 
     Always install captured_post: an unrelated posting failure would otherwise
     change the exit code under assertion.
@@ -141,6 +141,7 @@ def review_run(monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., Any],
         stub.diagram_session_id = session_id
         stub.diagram_fail = fail
         config_overrides.setdefault("output_mode", "comment")
+        config_overrides.setdefault("diagram", "auto")
         return await run(make_config(target, **config_overrides)), stub
 
     return _run
@@ -171,13 +172,17 @@ def _diagram_calls(stub: StubBackend, kind: str) -> list[dict[str, Any]]:
 
 # --- Spec test 1: sequence auto trigger -------------------------------------
 
+@pytest.mark.parametrize("options", [
+    pytest.param({"diagram": "auto"}, id="cli-auto"),
+    pytest.param({"diagram": None, "file_config": DaydreamFileConfig(diagram_mode="auto")}, id="repository-auto"),
+])
 async def test_sequence_auto_trigger_renders_grounded_diagram(
-    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
+    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost, options: dict[str, Any],
 ) -> None:
     """A cross-module diff renders the sequence diagram and skips the flowchart."""
     target = dr.build_cross_module_repo(tmp_path)
 
-    exit_code, stub = await review_run(target, specs={"sequence": [dr.sequence_spec()]})
+    exit_code, stub = await review_run(target, specs={"sequence": [dr.sequence_spec()]}, **options)
 
     assert exit_code == 0
     artifact = _artifact(target)
@@ -586,8 +591,9 @@ async def test_diagram_flowchart_forced_offers_every_changed_function(tmp_path: 
 
 
 @pytest.mark.parametrize("options", [
+    pytest.param({"diagram": None}, id="default-off"),
     pytest.param({"diagram": "off"}, id="cli-off"),
-    pytest.param({"file_config": DaydreamFileConfig(diagram_mode="off")}, id="repository-off"),
+    pytest.param({"diagram": None, "file_config": DaydreamFileConfig(diagram_mode="off")}, id="repository-off"),
 ])
 async def test_diagram_off_suppresses_a_complex_diff(
     tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost, options: dict[str, Any],
@@ -757,7 +763,7 @@ async def test_diagram_phase_resolves_its_own_configured_model(
     monkeypatch.setattr("daydream.runner.create_backend", factory)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
 
-    exit_code = await run(make_config(target, output_mode="comment",
+    exit_code = await run(make_config(target, output_mode="comment", diagram="auto",
             file_config=DaydreamFileConfig(phases={"diagram": {"model": "diagram-only-model"}}),
         )
     )

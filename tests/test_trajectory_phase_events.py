@@ -381,7 +381,7 @@ async def test_complete_overlapping_deep_run_timing_completeness(
     }
     monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
 
-    assert await run(RunConfig(target=str(target), cleanup=False, non_interactive=True,
+    assert await run(RunConfig(target=str(target), cleanup=False, non_interactive=True, diagram="auto",
         review_profile=independent_exploration_profile(independent_alternatives_profile()),
     )) == 0
     assert backend.finished == {"wonder", "review"}

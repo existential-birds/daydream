@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from rich.text import Text
 
 from daydream import clock, review_budget
+from daydream.agent_capacity import admit_agent
 from daydream.agent_output import StructuredOutputFailure as StructuredOutputFailure, resolve_output
 from daydream.agent_retry import _plan_retry_delay, _resolve_retry_settings, _retry_hint, _RetryTelemetry
 from daydream.artifact_visibility import ArtifactVisibilityError, artifact_session_active, assert_model_cwd_clean
@@ -213,6 +214,7 @@ def is_environmental_failure(test_output: str) -> bool:
     return any(signature in output_lower for signature in infra_signatures)
 
 
+@admit_agent
 async def run_agent(
     backend: Backend,
     cwd: Path,

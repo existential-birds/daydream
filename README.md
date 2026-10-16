@@ -926,13 +926,13 @@ bound.
 
 ### Diagrams
 
-A review can post grounded mermaid diagrams — a sequence diagram, a flowchart, or both — folded into the PR summary comment and into `review-output.md`. The model never writes mermaid. It proposes a structured JSON spec in which every participant, message, node, and edge carries `file:line` evidence (plus a `symbol` where one applies). The host verifies that evidence against the head tree, and a pure renderer draws only what survived. PR comments show the diagrams without evidence tables or audit captions.
+A review can post grounded mermaid diagrams — a sequence diagram, a flowchart, or both — folded into the PR summary comment and into `review-output.md`. Diagrams are disabled by default; enable them with `--diagram auto`, a named kind, or repository `mode = "auto"`. The model never writes mermaid. It proposes a structured JSON spec in which every participant, message, node, and edge carries `file:line` evidence (plus a `symbol` where one applies). The host verifies that evidence against the head tree, and a pure renderer draws only what survived. PR comments show the diagrams without evidence tables or audit captions.
 
 Diagram settings are config-file-only:
 
 | Key | Default | Semantics |
 |-----|---------|-----------|
-| `mode` | `"auto"` | `"auto"` renders every eligible kind; `"off"` disables diagrams. A repo file may enable or suppress, never force a kind — `sequence`, `flowchart`, and `both` are per-invocation and CLI-only. |
+| `mode` | `"off"` | `"auto"` renders every eligible kind; `"off"` disables diagrams. A repo file may enable or suppress, never force a kind — `sequence`, `flowchart`, and `both` are per-invocation and CLI-only. |
 | `min_code_files` | `3` | Changed-code-file floor for the sequence cross-module rule. |
 | `min_modules` | `2` | Distinct-module floor for the sequence cross-module rule. |
 | `min_branch_points` | `3` | Changed-branch-point floor for the flowchart rule. |
@@ -954,6 +954,8 @@ mode = "off"
 
 The diagram author's model and reasoning effort come from `[tool.daydream.phases.diagram]`.
 
+Enabled diagram generation overlaps independent review work when backend capacity permits, with primary reviewers admitted first. The final `diagram` step joins generation and attaches the grounded blocks after synthesis and supervision. At constrained capacity, diagram work waits for reviewer capacity. Diagram-only runs keep their standalone generation and publication flow.
+
 Two flags override the file config for one run:
 
 - `--diagram KIND` selects `auto`, `sequence`, `flowchart`, `both`, or `off` for the review paths. It is on the `--help-all` tier.
@@ -974,6 +976,10 @@ Which diagram and why:
 | `--diagram off` / `mode = "off"` | skipped | skipped |
 
 A forced kind still goes through grounding and may still be omitted. Forcing changes eligibility, never verification.
+
+On the built-in review flow, generation starts after exploration and intent when the provider has spare capacity beyond the entire primary reviewer fan-out (including an independent alternatives pass). Otherwise it runs at the final diagram step. Overlapping calls share the most conservative configured capacity hint, and queued primary calls have priority. Generation writes only its own artifacts; the final step joins it and attaches once after synthesis and supervision. Cancellation joins child work before evidence is finalized.
+
+Completed generation has a snapshot/configuration/model-bound checkpoint. A `--start-at per-stack` or `--start-at merge` resume restores matching diagram artifacts without another model call; incomplete or mismatched generation is rerun. Custom diagram prompt builders regenerate on resume. Flows that change or insert steps before the final diagram step keep serial generation so extension ordering remains authoritative.
 
 **How grounding works.** Generation checks repository paths, source lines, symbols, and definitions directly against the source checkout. Sequence calls must match their participants; flowchart nodes must belong to the chosen function and match their statement kinds. Unsupported elements and their dependents are pruned after one repair turn, then render caps and minimum diagram sizes apply. Diagrams below their minimum size are omitted. `.daydream/deep/diagram.json` stores eligibility, final specs, and omission reasons; `diagram.md` stores the rendered blocks. Posting validates the final specs and immutable head source, then renders safe Mermaid. Per-element audit reports and proposed-spec copies are not persisted.
 
