@@ -255,6 +255,13 @@ snapshot. It does not measure files actually read. A successful sibling category
 does not cover a failed one. Coverage means the assignment completed at the selected tier's breadth, not
 proof that every source line was read.
 
+Tracked submodules are assigned as path/commit references from the captured
+index. Their contents are not copied into the snapshot or audited. Final coverage
+separates ordinary file-path assignments (`primary_file_count`, including
+diff-only deletions) from `submodule_reference_count`; `file_count` includes both.
+`unavailable_submodule_contents` records the
+uncaptured contents with an unknown file count, and the report names them.
+
 ### Focus modes
 
 | Focus | Behavior |

@@ -173,6 +173,11 @@ def _render_report(ctx: FlowContext) -> str:
         if coverage_bullets
         else f"- All {len(partitions)} partitions were audited."
     )
+    if submodules := ledger.get("unavailable_submodule_contents"):
+        coverage_lines += (
+            "\n- Submodule contents were not audited (file counts unknown; only recorded references were assigned):\n"
+            + "\n".join(f"  - `{entry['path']}` at `{entry['commit']}`" for entry in submodules)
+        )
     tier_bound = {
         "quick": (
             "Recon hotspots only; categories outside correctness, security, tests, and tech debt were not audited."

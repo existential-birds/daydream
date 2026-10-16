@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **improve:** audit ordinary files alongside tracked submodule references and explicitly report uncaptured submodule contents ([#1406](https://github.com/existential-birds/daydream/issues/1406)).
+
 - **improve:** honor the selected effort and backend concurrency limits for branch audit and vet tasks while preserving branch scope and finding policies ([#1404](https://github.com/existential-birds/daydream/issues/1404)).
 
 - **phases:** restore historical prompt-helper imports through `daydream.phases`, preserving the canonical prompt and schema objects for forks ([#1230](https://github.com/existential-birds/daydream/issues/1230)).

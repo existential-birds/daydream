@@ -41,6 +41,7 @@ def prepare_primary_manifest(
     group: PartitionGroup,
     *,
     deleted_paths: frozenset[str] = frozenset(),
+    submodule_references: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Persist one bounded ownership manifest and return its model descriptor.
 
@@ -51,6 +52,7 @@ def prepare_primary_manifest(
     """
     if _GROUP_NAME.fullmatch(group.name) is None:
         raise ValueError("invalid primary manifest group name")
+    references = submodule_references or {}
     primary_files = group.primary_files
     for path in primary_files:
         if (
@@ -60,7 +62,7 @@ def prepare_primary_manifest(
             or not (repo / path).resolve().is_relative_to(repo.resolve())
         ):
             raise ValueError("primary manifest contains an unreadable repository path")
-        if path not in deleted_paths:
+        if path not in deleted_paths and path not in references:
             if not (repo / path).is_file():
                 raise ValueError("primary manifest contains an unreadable repository path")
             with (repo / path).open("rb"):
@@ -68,9 +70,13 @@ def prepare_primary_manifest(
 
     # ASCII escapes preserve unusual tracked names as data, including control
     # characters and prompt delimiters, without narrowing Git's path grammar.
-    payload = {"primary_files": [path for path in primary_files if path not in deleted_paths]}
+    payload: dict[str, Any] = {
+        "primary_files": [path for path in primary_files if path not in deleted_paths and path not in references],
+    }
     if deleted := sorted(set(primary_files) & deleted_paths):
         payload["deleted_files"] = deleted
+    if linked := sorted(set(primary_files) & references.keys() - deleted_paths):
+        payload["submodule_references"] = [{"path": path, "commit": references[path]} for path in linked]
     serialized = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).replace("<", "\\u003c")
     encoded = (serialized + "\n").encode("utf-8")
     spill = len(encoded) > PRIMARY_MANIFEST_INLINE_MAX_BYTES

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 
-from daydream import trajectory
+from daydream import git_ops, trajectory
 from daydream.agent import console, run_agent
 from daydream.backends import effective_fanout_concurrency
 from daydream.config import (
@@ -133,6 +133,8 @@ async def _run_audit_assignments(
     manifests: dict[str, dict[str, Any]] = {}
     descriptors: dict[str, Path] = {}
     preparation_errors: dict[str, str] = {}
+    submodule_references: dict[str, str] = {}
+    ctx.data["submodule_references"] = submodule_references
     # Large manifests stay within the existing model read root. Only their
     # bounded descriptors cross the sanctioned-input transport; paths in durable
     # manifests remain repository-relative when this temporary snapshot expires.
@@ -151,8 +153,19 @@ async def _run_audit_assignments(
             if group.name in manifests or group.name in preparation_errors:
                 continue
             try:
+                # Gitlinks have index metadata, not readable file bytes. Query
+                # only nonregular candidates and never enter their worktrees.
+                candidates = [path for path in group.primary_files
+                              if path not in deleted_paths and not (repo / path).is_file()]
+                references = {
+                    state.path: state.digest
+                    for state in git_ops.snapshot_index_paths(repo, candidates)
+                    if state.state == "gitlink" and state.digest is not None
+                }
+                submodule_references.update(references)
                 manifest = prepare_primary_manifest(
                     repo, directory, Path(temporary), group, deleted_paths=deleted_paths,
+                    submodule_references=references,
                 )
                 descriptor = Path(descriptor_directory) / f"primary-input-{group.name}.txt"
                 encoded_descriptor = json.dumps(
@@ -321,6 +334,7 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
     coverage = _record_audit_coverage(
         directory, partitions, groups, ctx.data["partition_omissions"],
         failures=failures, assignments=assignments,
+        submodule_references=ctx.data["submodule_references"],
     )
     ctx.data["audit_coverage"] = coverage
     if assignments and len(failures) == len(assignments):
@@ -411,12 +425,14 @@ def _record_audit_coverage(
     *,
     failures: dict[str, str],
     assignments: list[_AuditAssignment],
+    submodule_references: dict[str, str],
 ) -> dict[str, Any]:
     """Persist category-specific owned coverage, including all-failed dispatches."""
     ledger = audit_scope._coverage_ledger(
         partitions, groups, omissions,
         categories=tuple(dict.fromkeys(assignment.category for assignment in assignments)),
         failures=failures,
+        submodule_references=submodule_references,
     )
     return artifacts.write_artifact(
         directory / artifacts.COVERAGE_FILENAME, ledger, phase=trajectory.DaydreamPhase.AUDIT,

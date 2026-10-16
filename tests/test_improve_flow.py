@@ -1205,6 +1205,57 @@ async def test_large_primary_manifest_is_readable_from_the_actual_audit_snapshot
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("effort", ["quick", "standard"])
+@pytest.mark.parametrize("initialized", [False, True])
+async def test_submodule_references_do_not_block_owned_files_or_claim_nested_content(
+    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
+    effort: str, initialized: bool,
+) -> None:
+    """Gitlinks are tracked paths, but the independent snapshot has no nested bytes.
+
+    Existing manifest journeys contain only ordinary files. A real local
+    submodule must preserve their audits and expose the unavailable content.
+    """
+    repo = improve_monorepo_target
+    nested = tmp_path / "submodule-origin"
+    init_repo(nested)
+    (nested / "nested.py").write_text("ONLY_IN_SUBMODULE = True\n")
+    git(nested, "add", "nested.py")
+    nested_commit = commit(nested, "seed the local submodule")
+    relative = "apps/billing/vendor"
+    git(repo, "-c", "protocol.file.allow=always", "submodule", "add", str(nested), relative)
+    commit(repo, "track a local submodule")
+    if not initialized:
+        git(repo, "submodule", "deinit", "-f", "--", relative)
+    _pin_stack_availability(monkeypatch, tmp_path)
+    before = (head_sha(repo), _git_status_porcelain(repo))
+    backend = install_capable_improve_backend(monkeypatch, ManifestReadingBackend(repo))
+
+    assert await _run_improve(make_config, repo, improve_effort=effort) == 0
+
+    categories = EFFORT_TIERS[effort].categories or AUDIT_CATEGORIES
+    ordinary = set(git(repo, "ls-files").splitlines()) - {relative}
+    reference = {"path": relative, "commit": nested_commit}
+    for category in categories:
+        assignments = [entry for entry in backend.assignment_reads if entry["category"] == category]
+        assert Counter(path for entry in assignments for path in entry["primary_files"]) == Counter(ordinary)
+        assert [item for entry in assignments for item in entry["submodule_references"]] == [reference]
+    coverage = _load_improve_json(repo, "coverage.json")
+    assert coverage["failed_assignments"] == {}
+    assert coverage["not_audited"] == coverage["partially_audited"] == []
+    assert coverage["unavailable_submodule_contents"] == [{**reference, "file_count": None, "reason": "not-captured"}]
+    assert sum(group["primary_file_count"] for group in coverage["groups"]) == len(ordinary)
+    assert sum(group["submodule_reference_count"] for group in coverage["groups"]) == 1
+    report = improve_artifact(repo, "report.md").read_text()
+    assert "Submodule contents were not audited" in report and f"`{relative}`" in report
+    durable = repo / ".daydream/improve/primary-manifests"
+    documents = [json.loads(path.read_text()) for path in durable.glob("group-*.json")]
+    assert [item for doc in documents for item in doc.get("submodule_references", [])] == [reference]
+    assert (head_sha(repo), _git_status_porcelain(repo)) == before
+    assert (repo / relative / "nested.py").exists() is initialized
+
+
+@pytest.mark.anyio
 async def test_partition_bound_splits_oversized_trees_via_config(
     improve_scaled_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
 ) -> None:

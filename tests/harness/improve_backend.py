@@ -600,20 +600,25 @@ class ManifestReadingBackend(ImproveStubBackend):
             assert len(lines) == manifest["line_count"]
             assert hashlib.sha256(raw).hexdigest() == manifest["sha256"]
             document = json.loads(raw)
-            assert len(document["primary_files"]) + len(document.get("deleted_files", [])) == manifest["file_count"]
+            assert (len(document["primary_files"]) + len(document.get("deleted_files", []))
+                    + len(document.get("submodule_references", []))) == manifest["file_count"]
         else:
             document = manifest
         primary = document["primary_files"]
         deleted = document.get("deleted_files", [])
+        submodules = document.get("submodule_references", [])
         assert isinstance(primary, list) and all(isinstance(path, str) for path in primary)
         assert primary == sorted(set(primary))
         assert deleted == sorted(set(deleted)) and not set(primary) & set(deleted)
         assert all(not (cwd / path).exists() for path in deleted)
+        assert not set(primary) & {entry["path"] for entry in submodules}
+        assert all(not list((cwd / entry["path"]).glob("*")) for entry in submodules)
         reads = {path: self._read_snapshot(cwd, path) for path in primary}
         group, _ = group_scope(prompt)
         record: dict[str, Any] = {"category": category, "group": group, "primary_files": primary,
             "primary_bytes": sum(map(len, reads.values())), "context_files": [], "context_bytes": 0,
             "manifest_path": manifest_path, "manifest_pages": manifest_pages, "deleted_files": deleted, "cwd": cwd,
+            "submodule_references": submodules,
         }
         self.assignment_reads.append(record)
         if (category, group) in self.fail_assignments:

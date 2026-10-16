@@ -128,6 +128,7 @@ def _coverage_ledger(
     *,
     categories: tuple[str, ...] = (),
     failures: dict[str, str] | None = None,
+    submodule_references: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Account for owned files per category; context availability grants no coverage.
 
@@ -145,7 +146,7 @@ def _coverage_ledger(
             "stack": group.stack,
             "file_count": group.file_count,
             "primary_files": list(group.primary_files),
-            "context_file_count": len(available - set(group.primary_files)),
+            "context_file_count": len(available - set(group.primary_files) - set(submodule_references or {})),
             "partitions": [p.name for p in group.partitions],
             "status": (
                 "planned" if not categories else
@@ -157,6 +158,12 @@ def _coverage_ledger(
                 for category in categories
             },
         })
+        if submodule_references is not None:
+            reference_count = sum(path in submodule_references for path in group.primary_files)
+            group_entries[-1].update({
+                "primary_file_count": group.file_count - reference_count,
+                "submodule_reference_count": reference_count,
+            })
 
     not_audited: list[dict[str, Any]] = []
     partially_audited: list[dict[str, Any]] = []
@@ -206,7 +213,7 @@ def _coverage_ledger(
         else:
             not_audited.append(entry)
 
-    return {
+    ledger: dict[str, Any] = {
         "artifact_type": "daydream.improve-coverage",
         "stage": "audited" if categories else "planned",
         "categories_run": list(categories),
@@ -216,6 +223,12 @@ def _coverage_ledger(
         "partially_audited": partially_audited,
         "failed_assignments": dict(sorted(failures.items())),
     }
+    if submodule_references is not None:
+        ledger["unavailable_submodule_contents"] = [
+            {"path": path, "commit": commit, "file_count": None, "reason": "not-captured"}
+            for path, commit in sorted(submodule_references.items())
+        ]
+    return ledger
 
 
 def _same_partition(left: Partition, right: Partition) -> bool:

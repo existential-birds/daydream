@@ -221,6 +221,13 @@ Group partition entries count owned slices while retaining original names, roots
 and services. Context remains available for concrete dependency questions; it is
 not additional ownership. Branch manifests list removed paths in `deleted_files`
 for diff-only investigation, and counts include those changed paths.
+Tracked gitlinks appear in `submodule_references` as path/commit metadata, not
+`primary_files`; their nested contents are absent from the snapshot. The manifest
+byte limit and descriptor counts include these references. Completed coverage
+separates `primary_file_count` from `submodule_reference_count` and records
+`unavailable_submodule_contents` with unknown nested file counts. Planned coverage
+does not claim this metadata before the captured index has been inspected.
+`primary_file_count` includes ordinary file-path assignments and diff-only deletions.
 
 ### Agent calls and phase configuration
 
