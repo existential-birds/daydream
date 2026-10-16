@@ -37,10 +37,11 @@ _SHARED_HARNESS_BACKENDS = (
     ("ScriptedBackend", "tests.harness.backend", "ScriptedBackend"),
     ("StubBackend", "tests.harness.stub_backend", "StubBackend"),
     ("PhaseDispatchBackend", "tests.harness.phase_backend", "PhaseDispatchBackend"),
-    # The four ImproveStubBackend subclasses bend one axis via _pre_execute/
-    # _post_execute hooks and inherit the base execute, so they declare no
-    # execute of their own for this parity check to cover.
+    # Most ImproveStubBackend specializations inherit execute through the
+    # pre/post hooks. Rendezvous wraps the stream lifetime for cancellation,
+    # so its separate protocol declaration also needs signature coverage.
     ("ImproveStubBackend", "tests.harness.improve_backend", "ImproveStubBackend"),
+    ("RendezvousImproveBackend", "tests.harness.improve_backend", "RendezvousImproveBackend"),
 )
 
 

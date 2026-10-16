@@ -1,7 +1,9 @@
 import json
 import os
 import re
+import shutil
 from collections.abc import AsyncIterator, Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -71,6 +73,7 @@ from tests.harness.improve_backend import (
     IncrementalPlanBackend,
     OutOfOrderPlanBackend,
     ProductionPathBackend,
+    RendezvousImproveBackend,
     group_file_counts,
     group_roots,
     group_scope,
@@ -84,6 +87,7 @@ from tests.harness.review_profile import default_strategy as _default_strategy
 from tests.harness.stub_backend import force_interactive as _force_interactive
 from tests.harness.trajectory import (
     assert_dispatch_children,
+    dispatch_encloses_children,
     root_trajectory as _root_run_trajectory,
 )
 
@@ -1404,7 +1408,7 @@ async def test_branch_focus_scopes_audit_to_merge_base_diff_and_tags_provenance(
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
     assert all("apps/billing/api.py" in call["prompt"] for call in audit_calls)
     # Branch focus bypasses partitioning: one synthetic group over the changed
-    # files, so the fan-out stays one serial agent per category.
+    # files, so each category receives one audit assignment.
     assert len(audit_calls) == len(AUDIT_CATEGORIES)
     assert all(group_roots(call["prompt"]) == ["."] for call in audit_calls)
     coverage = _load_improve_json(improve_branch_target, "coverage.json")
@@ -1412,6 +1416,179 @@ async def test_branch_focus_scopes_audit_to_merge_base_diff_and_tags_provenance(
     assert coverage["not_audited"] == []
     vetted = _load_improve_json(improve_branch_target, "vetted-findings.json")
     assert {finding["provenance"] for finding in vetted["findings"]} <= {"introduced", "inherited",}
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("effort", ["standard", "deep"])
+async def test_branch_fanout_reverses_completion_without_changing_delivered_results(
+    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
+    effort: str,
+) -> None:
+    """Branch scheduling must retain tier/backend limits and deterministic delivery.
+
+    Existing branch scope and vet batch tests never hold a provider invocation
+    open, so they passed when branch focus silently serialized both phases.
+    """
+    outcomes = []
+    for capacity in (1, 3):
+        repo = tmp_path / f"capacity-{capacity}"
+        shutil.copytree(improve_branch_target, repo)
+        backend = install_capable_improve_backend(monkeypatch,
+            RendezvousImproveBackend(repo, capacity=capacity, expected_concurrency=capacity),
+        )
+        backend.findings_per_category = 45
+        backend.phase_sizes["vet"] = 6
+        backend.vet_reject_titles = {"Security finding 45"}
+        before = (head_sha(repo), git(repo, "for-each-ref", "--format=%(refname) %(objectname)"),
+            git(repo, "ls-files", "--stage"), _git_status_porcelain(repo),
+        )
+        with anyio.fail_after(15):
+            code = await _run_improve(make_config, repo, improve_focus="branch", improve_effort=effort)
+        assert code == 0
+        assert backend.max_active == {"audit": capacity, "vet": capacity}
+        assert backend.active == {"audit": 0, "vet": 0}
+        assert backend.closed == {"audit": 8, "vet": 6}
+        if capacity > 1:
+            assert backend.completion_order["audit"] == [2, 1, 0, 5, 4, 3, 7, 6]
+            assert backend.completion_order["vet"] == [2, 1, 0, 5, 4, 3]
+        audit_calls = [call for call in backend.calls if call["marker"] == "audit"]
+        assert len(audit_calls) == len(AUDIT_CATEGORIES)
+        assert all(("Deep audit:" if effort == "deep" else "Standard audit:") in call["prompt"]
+            for call in audit_calls)
+        assert all(call["read_only"] for call in backend.calls)
+        assert all(not call["persist_session"] for call in backend.calls if call["marker"] in {"audit", "vet"})
+        assert backend.audit_root is not None and not backend.audit_root.exists()
+        assert (head_sha(repo), git(repo, "for-each-ref", "--format=%(refname) %(objectname)"),
+            git(repo, "ls-files", "--stage"), _git_status_porcelain(repo),
+        ) == before
+        trajectory = _root_run_trajectory(repo)
+        _assert_complete_phase_dispatch(repo, trajectory, "audit",
+            [f"audit-{category}-group-01" for category in AUDIT_CATEGORIES])
+        # Batches follow leverage order (security precedes correctness).
+        _assert_complete_phase_dispatch(repo, trajectory, "vet",
+            [f"vet-{category}-{index:02d}" for index, category in enumerate(["security"] * 3 + ["correctness"] * 3)])
+        vet_calls = [call for call in backend.calls if call["marker"] == "vet"]
+        assert [len(json.loads(call["prompt"].split("```json\n")[1].split("```", 1)[0])) for call in vet_calls
+            ] == ([20, 20, 5, 20, 20, 5] if capacity == 1 else [5, 20, 20, 5, 20, 20])
+        audit = _load_improve_json(repo, "audit-findings.json")
+        vetted = _load_improve_json(repo, "vetted-findings.json")
+        assert {finding["provenance"] for finding in vetted["findings"]} == {"introduced", "inherited"}
+        report = improve_artifact(repo, "report.md").read_text()
+        outcomes.append((audit["findings"], vetted["findings"], _load_improve_json(repo, "selected.json")["selected"],
+            json.loads((repo / "daydream_plans" / "rejected.json").read_text()),
+            re.sub(r"Daydream run: `[^`]+`", "Daydream run: <run>", report),
+        ))
+    assert outcomes[0] == outcomes[1]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("effort", "backend_capacity", "tier_capacity"),
+    [("quick", 3, None), ("standard", 1, None), ("deep", 3, 1), ("standard", 3, 2)],
+)
+async def test_branch_fanout_preserves_serial_limits_and_quick_filtering(
+    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    effort: str, backend_capacity: int, tier_capacity: int | None,
+) -> None:
+    """One category group still obeys each independently selected serial ceiling."""
+    if tier_capacity is not None:
+        monkeypatch.setitem(EFFORT_TIERS, effort, replace(EFFORT_TIERS[effort], max_concurrency=tier_capacity))
+    expected = min(EFFORT_TIERS[effort].max_concurrency, backend_capacity)
+    backend = install_capable_improve_backend(monkeypatch,
+        RendezvousImproveBackend(improve_branch_target, capacity=backend_capacity, expected_concurrency=expected,
+            n_findings=None if effort == "quick" else 2),
+    )
+    if effort == "quick":
+        backend.findings_per_category = 3
+        backend.low_confidence_tail = True
+    with anyio.fail_after(15):
+        code = await _run_improve(make_config, improve_branch_target, improve_focus="branch", improve_effort=effort)
+        assert code == 0
+    assert backend.max_active == {"audit": expected, "vet": expected}
+    audited = _load_improve_json(improve_branch_target, "audit-findings.json")
+    assert audited["categories_run"] == list(AUDIT_CATEGORIES)
+    if effort == "quick":
+        assert len(audited["findings"]) == 6
+        assert {finding["confidence"] for finding in audited["findings"]} == {"HIGH"}
+        report = improve_artifact(improve_branch_target, "report.md").read_text()
+        assert "Non-HIGH-confidence findings dropped by tier: 8" in report
+        assert "Lowest-leverage findings dropped by tier cap: 10" in report
+
+
+@pytest.mark.anyio
+async def test_branch_fanout_isolates_failures_and_drops_missing_verdicts(
+    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+) -> None:
+    """A failed sibling or incomplete verdict cannot admit an unconfirmed finding."""
+    backend = install_capable_improve_backend(monkeypatch,
+        RendezvousImproveBackend(improve_branch_target, capacity=3, expected_concurrency=3),
+    )
+    backend.findings_per_category = 45
+    backend.phase_sizes["vet"] = 6
+    backend.fail_categories = {"docs"}
+    backend.fail_vet_titles = {"Correctness finding 41"}
+    backend.omit_vet_title = "Security finding 21"
+    backend.vet_reject_titles = {"Security finding 45"}
+    with anyio.fail_after(15):
+        assert await _run_improve(make_config, improve_branch_target, improve_focus="branch") == 0
+    audit = _load_improve_json(improve_branch_target, "audit-findings.json")
+    assert set(audit["failed"]) == {"docs:group-01"}
+    vetted = _load_improve_json(improve_branch_target, "vetted-findings.json")
+    members = [member for package in vetted["findings"] for member in package.get("members", [package])]
+    titles = {finding["title"] for finding in members}
+    assert len(members) == 83
+    assert "Security finding 40" not in titles  # missing verdict is not confirmation
+    assert "Security finding 45" not in titles  # explicit rejection is durable
+    assert not titles.intersection(f"Correctness finding {number:02d}" for number in range(41, 46))
+    assert {"Security finding 01", "Security finding 44", "Correctness finding 40"} <= titles
+    rejections = json.loads((improve_branch_target / "daydream_plans" / "rejected.json").read_text())
+    assert [entry["title"] for entry in rejections["rejected"]] == ["Security finding 45"]
+    trajectory = _root_run_trajectory(improve_branch_target)
+    for phase in ("audit", "vet"):
+        assert _dispatch_for_phase(trajectory, phase)["extra"]["dispatch_status"] == "partial"
+        assert _phase_end(trajectory, phase)["status"] == "partial"
+    assert backend.closed == {"audit": 8, "vet": 6}
+    assert backend.audit_root is not None and not backend.audit_root.exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("phase", ["audit", "vet"])
+async def test_branch_cancellation_joins_provider_streams_before_snapshot_cleanup(
+    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, phase: str,
+) -> None:
+    """Cancellation with running and queued siblings must close the real run evidence."""
+    repo = improve_branch_target
+    backend = install_capable_improve_backend(monkeypatch,
+        RendezvousImproveBackend(repo, capacity=2, expected_concurrency=2, block_phase=phase,
+            n_findings=3 if phase == "vet" else 2),
+    )
+    before = (head_sha(repo), git(repo, "show-ref"), git(repo, "ls-files", "--stage"), _git_status_porcelain(repo))
+    with anyio.fail_after(15):
+        async with anyio.create_task_group() as tasks:
+            async def run_branch() -> None:
+                await _run_improve(make_config, repo, improve_focus="branch")
+            tasks.start_soon(run_branch)
+            await backend.blocked_ready.wait()
+            tasks.cancel_scope.cancel()
+    assert backend.max_active[phase] == 2
+    assert backend.closed[phase] == 2
+    assert backend.closed_before_cleanup[phase] == [True, True]
+    assert backend.active == {"audit": 0, "vet": 0}
+    assert backend.audit_root is not None and not backend.audit_root.exists()
+    assert (head_sha(repo), git(repo, "show-ref"), git(repo, "ls-files", "--stage"),
+        _git_status_porcelain(repo)) == before
+    assert not improve_artifact(repo, "report.md").exists()
+    trajectory = _root_run_trajectory(repo)
+    dispatch = _dispatch_for_phase(trajectory, phase)
+    assert dispatch["extra"]["dispatch_status"] == "cancelled"
+    assert dispatch["extra"]["attempted_count"] == dispatch["extra"]["completed_count"] == 2
+    assert dispatch["extra"]["planned_count"] > 2
+    assert _phase_end(trajectory, phase)["status"] == "cancelled"
+    # Exact closed child intervals and refs, including cancellation, are durable.
+    descriptors = ([f"audit-{category}-group-01" for category in AUDIT_CATEGORIES[:2]]
+        if phase == "audit" else ["vet-security-00", "vet-correctness-01"])
+    assert [child["content"] for child in dispatch["observation"]["results"]] == [
+        f"Dispatched to {descriptor}" for descriptor in descriptors]
+    assert dispatch_encloses_children(dispatch, repo)
+
 
 @pytest.mark.anyio
 async def test_branch_focus_pins_remote_preferred_merge_base_in_remote_free_snapshot(

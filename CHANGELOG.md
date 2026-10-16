@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **improve:** honor the selected effort and backend concurrency limits for branch audit and vet tasks while preserving branch scope and finding policies ([#1404](https://github.com/existential-birds/daydream/issues/1404)).
+
 - **phases:** restore historical prompt-helper imports through `daydream.phases`, preserving the canonical prompt and schema objects for forks ([#1230](https://github.com/existential-birds/daydream/issues/1230)).
 - Keep runner and Harbor tests out of operator JSONL datasets and live uploads by isolating the test store and HF boundary ([#1511](https://github.com/existential-birds/daydream/issues/1511)).
 - **pi:** retain bounded, redacted native terminal error diagnostics in trajectories and frozen run records while preserving retry decisions and generic review summaries ([#1540](https://github.com/existential-birds/daydream/issues/1540)).

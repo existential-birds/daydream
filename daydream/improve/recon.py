@@ -216,14 +216,11 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         )
     branch_files = _diff_changed_files(branch_diff) if branch_focus else []
     if branch_focus:
-        # Branch focus needs every category over one small diff, run serially —
-        # but the requested --effort tier still owns confidence filtering,
-        # finding caps, and audit depth, or the run silently contradicts the
-        # tier the report claims it used.
+        # Branch focus needs every category over one small diff. The requested
+        # tier still owns concurrency, confidence filtering, finding caps, and
+        # audit depth; audit/vet apply their backend limit when dispatching.
         requested: EffortTier = ctx.data["effort_tier"]
-        ctx.data["effort_tier"] = replace(
-            requested, categories=None, max_concurrency=1
-        )
+        ctx.data["effort_tier"] = replace(requested, categories=None)
 
     all_services = (
         []

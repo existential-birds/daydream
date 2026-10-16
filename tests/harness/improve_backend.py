@@ -7,12 +7,14 @@ marker. Its many public attributes are per-test switches — set them on the
 instance after construction to shape one turn's payload (a rejected vet
 verdict, a schema-invalid enum, a crashing plan writer, an injected credential).
 
-Four subclasses bend one axis each and are otherwise the same fake:
+Subclasses specialize the same dispatch fake for focused production-path checks:
 
 * :class:`AuditAbsoluteWorkingDirectoryBackend` — rewrites the first recon
   command's working directory relative to the actual audit snapshot cwd.
 * :class:`ProductionPathBackend` — Pi-shaped delays, a 42-command recon menu and
   a provider concurrency ceiling, for the full production-path regressions.
+* :class:`RendezvousImproveBackend` — coordinates audit/vet overlap and reversed
+  completion with event barriers, and observes cancellation before snapshot cleanup.
 * :class:`IncrementalPlanBackend` — holds one plan writer open and observes the
   plan directory from inside it (proves plans land as each writer finishes).
 * :class:`OutOfOrderPlanBackend` — makes the first-selected writer finish last.
@@ -668,6 +670,96 @@ def _is_plan_writer_prompt(prompt: str, output_schema: Any) -> bool:
     return "You are writing a self-contained implementation plan" in prompt or (isinstance(output_schema, dict)
         and "false_assumption" in output_schema.get("properties", {})
     )
+
+
+class RendezvousImproveBackend(ImproveStubBackend):
+    """Reverse completion within bounded waves at the real provider boundary.
+
+    All waits are events: a serial scheduler cannot accidentally satisfy the
+    overlap assertion by being slow. Only synthetic invocations advertise the
+    supplied capacity; no provider process or model is launched.
+    """
+
+    def __init__(self, target: Path, *, capacity: int, expected_concurrency: int,
+        block_phase: str | None = None, n_findings: int | None = 2,
+    ) -> None:
+        super().__init__(target, n_findings=n_findings, fanout_concurrency=capacity)
+        self.expected_concurrency = expected_concurrency
+        self.block_phase = block_phase
+        self.blocked_ready = anyio.Event()
+        self.phase_sizes = {"audit": len(AUDIT_CATEGORIES), "vet": 2}
+        self.entered = dict.fromkeys(self.phase_sizes, 0)
+        self.finished: dict[str, list[anyio.Event]] = {phase: [] for phase in self.phase_sizes}
+        self.wave_ready: dict[str, dict[int, anyio.Event]] = {phase: {} for phase in self.phase_sizes}
+        self.active = dict.fromkeys(self.phase_sizes, 0)
+        self.max_active = dict.fromkeys(self.phase_sizes, 0)
+        self.closed = dict.fromkeys(self.phase_sizes, 0)
+        self.closed_before_cleanup: dict[str, list[bool]] = {phase: [] for phase in self.phase_sizes}
+        self.completion_order: dict[str, list[int]] = {phase: [] for phase in self.phase_sizes}
+        self.omit_vet_title: str | None = None
+        self.low_confidence_tail = False
+
+    async def execute(
+        self, cwd: Path, prompt: str, output_schema: Any = None, continuation: Any = None, agents: Any = None,
+        max_turns: Any = None, read_only: bool = False, persist_session: bool = True,
+    ) -> AsyncIterator[AgentEvent]:
+        turn_kwargs = {
+            "output_schema": output_schema, "continuation": continuation, "agents": agents, "max_turns": max_turns,
+            "read_only": read_only, "persist_session": persist_session,
+        }
+        phase = ("audit" if "read-only improve audit specialist" in prompt
+            else "vet" if "You are the improve vet." in prompt else None)
+        if phase is None:
+            async for event in super().execute(cwd, prompt, **turn_kwargs):
+                yield event
+            return
+        rank = self.entered[phase]
+        self.entered[phase] += 1
+        self.finished[phase].append(anyio.Event())
+        self.active[phase] += 1
+        self.max_active[phase] = max(self.max_active[phase], self.active[phase])
+        try:
+            if phase == self.block_phase:
+                if self.active[phase] == self.expected_concurrency:
+                    self.blocked_ready.set()
+                yield TextEvent(text=f"blocked {phase} invocation")
+                await anyio.sleep_forever()
+            wave_start = rank // self.expected_concurrency * self.expected_concurrency
+            wave_end = min(wave_start + self.expected_concurrency, self.phase_sizes[phase])
+            if self.expected_concurrency > 1:
+                arrived = self.wave_ready[phase].setdefault(wave_start, anyio.Event())
+                if rank == wave_end - 1:
+                    arrived.set()
+                await arrived.wait()
+                if wave_start:
+                    await self.finished[phase][wave_start - self.expected_concurrency].wait()
+                for later in range(wave_end - 1, rank, -1):
+                    await self.finished[phase][later].wait()
+            async for event in super().execute(cwd, prompt, **turn_kwargs):
+                if isinstance(event, ResultEvent) and isinstance(event.structured_output, dict):
+                    if phase == "audit":
+                        findings = event.structured_output["findings"]
+                        category = next(name for name, heading in _AUDIT_HEADINGS.items() if heading in prompt)
+                        for index, finding in enumerate(findings):
+                            finding["provenance"] = "introduced" if category == "correctness" else "inherited"
+                            if self.low_confidence_tail and index == len(findings) - 1:
+                                finding["confidence"] = "LOW"
+                    else:
+                        candidates = json.loads(prompt.split("```json\n", 1)[1].split("```", 1)[0])
+                        provenance = {candidate["vet_id"]: candidate["provenance"] for candidate in candidates}
+                        for verdict in event.structured_output["verdicts"]:
+                            verdict["provenance"] = provenance[verdict["vet_id"]]
+                        if self.omit_vet_title is not None and any(
+                            candidate["title"] == self.omit_vet_title for candidate in candidates
+                        ):
+                            event.structured_output["verdicts"] = event.structured_output["verdicts"][:-1]
+                yield event
+        finally:
+            self.active[phase] -= 1
+            self.closed[phase] += 1
+            self.closed_before_cleanup[phase].append(cwd.exists())
+            self.completion_order[phase].append(rank)
+            self.finished[phase][rank].set()
 
 
 class IncrementalPlanBackend(ImproveStubBackend):
