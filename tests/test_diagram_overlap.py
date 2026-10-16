@@ -27,7 +27,7 @@ from daydream.github_app import GitHubExecutionInput
 from daydream.run_config import RunConfig
 from tests.harness import diagram_repos as dr
 from tests.harness.backend import ScriptedBackend
-from tests.harness.git_helpers import bare_remote, git
+from tests.harness.git_helpers import bare_remote, git, seed_feature_branch
 from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.stub_backend import StubBackend, review_stage_state
 
@@ -437,12 +437,18 @@ async def test_matched_diagram_workload(
     }, sort_keys=True))
 
 
-async def test_embedded_review_does_not_construct_unused_osprey_supervisor(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("phase", ["supervise", "diagram", "arbiter"])
+async def test_embedded_review_preserves_backend_dispatch_boundaries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str,
 ) -> None:
-    """Rule supervision cannot make a valid Codex execution input unsupported."""
-    target = dr.build_cross_module_repo(tmp_path)
+    """Optional planning preserves lazy dispatch and primary failure evidence."""
+    if phase == "diagram":
+        target = tmp_path / "docs-only"
+        seed_feature_branch(target, base={"README.md": "# Before\n"}, feature={"README.md": "# After\n"})
+    else:
+        target = dr.build_cross_module_repo(tmp_path)
     backend = DiagramBarrierBackend(target)
+    backend.diagram_specs = {"sequence": [dr.sequence_spec()]}
     monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", "4")
     environment = {
         "PATH": os.environ["PATH"], "HOME": str(tmp_path / "embedded-home"),
@@ -465,12 +471,35 @@ async def test_embedded_review_does_not_construct_unused_osprey_supervisor(
 
     monkeypatch.setattr(runner, "create_backend", create_backend)
     config = config_for(target, diagram="auto", file_config=DaydreamFileConfig(
-        backend="codex", supervisor="rules", phases={"supervise": {"backend": "osprey"}},
+        backend="codex", supervisor="rules", phases={phase: {"backend": "osprey"}},
     ))
-    assert await runner.run(config, execution=execution) == 0
-    assert set(created) == {"codex"}
-    assert backend.calls
-    assert_attached(target)
+    roots = private_root_locations(base=tmp_path / "private")
+    if phase == "arbiter":
+        # This phase really needs its provider. Fail at ordinary dispatch after
+        # preserving primary evidence, rather than during optional preflight.
+        with pytest.raises(ValueError, match="explicit BackendExecutionInput is not supported for osprey"):
+            await runner.run(config, execution=execution, private_roots=roots)
+        deep = target / ".daydream/deep"
+        for scope in ("python", "structure"):
+            records = json.loads((deep / f"stack-{scope}-records.json").read_text())
+            assert records["issues"]
+        coverage = json.loads((deep / "review-coverage.json").read_text())
+        assert coverage["schema_version"] == 1
+        assert coverage["analyzed_revision"]["head_sha"] == git(target, "rev-parse", "HEAD")
+        assert {scope["scope_id"]: scope["status"] for scope in coverage["stack_outcomes"]} == {
+            "python": "complete", "structure": "complete",
+        }
+        assert backend.diagram_turns == {}
+    else:
+        assert await runner.run(config, execution=execution, private_roots=roots) == 0
+        assert backend.calls
+        assert set(created) == {"codex"}
+        if phase == "diagram":
+            artifact = dr.load_diagram_artifact(target)
+            assert all(result["status"] == "skipped" for result in artifact["results"].values())
+            assert backend.diagram_turns == {}
+        else:
+            assert_attached(target)
 
 
 async def test_post_diagram_custom_phase_regains_its_own_provider_capacity(

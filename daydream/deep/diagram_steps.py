@@ -90,6 +90,15 @@ class DiagramSettings:
     service_roots: list[str]
 
 
+@dataclass(frozen=True)
+class DiagramInputs:
+    """Deterministic drawing inputs, prepared once before provider admission."""
+
+    settings: DiagramSettings
+    eligibility: Eligibility
+    hunk_ranges: dict[str, list[tuple[int, int]]]
+
+
 def _diagram_mode_for(config: RunConfig, mode: str) -> str:
     """Resolve CLI > file > off; diagram-only explicitly overrides a file off switch."""
     if config.diagram in DIAGRAM_MODES:
@@ -573,7 +582,7 @@ async def _step_diagram(ctx: FlowContext) -> Stop | None:
     if work is not None and work.started:
         await work.join()
     else:
-        result = await _generate_diagrams(ctx)
+        result = await _generate_diagrams(ctx, inputs=work.inputs if work is not None else None)
     diagrams = DeepState(ctx.data).diagrams
     if diagrams and diagrams["blocks"] and DeepState(ctx.data).mode != "diagram":
         _apply_diagrams_to_report(ctx, diagrams["blocks"])
@@ -582,21 +591,19 @@ async def _step_diagram(ctx: FlowContext) -> Stop | None:
     return result
 
 
-async def _generate_diagrams(ctx: FlowContext, *, concurrency: int | None = None) -> Stop | None:
+async def _generate_diagrams(
+    ctx: FlowContext, *, concurrency: int | None = None, inputs: DiagramInputs | None = None,
+) -> Stop | None:
     """Generate only private diagram artifacts; report writers remain serial."""
     async with phase_scope(DaydreamPhase.DIAGRAM, stage="diagram") as phase:
-        return await _run_diagram_step(ctx, phase=phase, concurrency=concurrency)
+        return await _run_diagram_step(ctx, phase=phase, concurrency=concurrency, inputs=inputs)
 
 
-async def _run_diagram_step(
-    ctx: FlowContext, *, phase: "PhaseScopeHandle", concurrency: int | None = None,
-) -> Stop | None:
-    """Run the durable diagram step inside its identified phase scope."""
+def _prepare_diagram_inputs(ctx: FlowContext) -> DiagramInputs:
+    """Decide eligibility without constructing any model backend."""
     deep_state = DeepState(ctx.data)
     settings = _diagram_settings(ctx)
-    mode = deep_state.mode
     target_dir = ctx.work.repo
-    dd: Path = deep_state.dd
 
     from daydream.hunk_index import head_side_ranges_by_file, load_hunk_index
     from daydream.run_config import _file_config_or_empty
@@ -629,8 +636,25 @@ async def _run_diagram_step(
         thresholds=settings.thresholds,
         force=settings.mode,
     )
+    return DiagramInputs(settings, eligibility, hunk_ranges)
 
-    checkpoint_key = diagram_checkpoint_key(ctx, settings=settings, eligibility=eligibility.to_dict())
+
+async def _run_diagram_step(
+    ctx: FlowContext, *, phase: "PhaseScopeHandle", concurrency: int | None = None,
+    inputs: DiagramInputs | None = None,
+) -> Stop | None:
+    """Run the durable diagram step inside its identified phase scope."""
+    deep_state = DeepState(ctx.data)
+    prepared = inputs if inputs is not None else _prepare_diagram_inputs(ctx)
+    settings, eligibility, hunk_ranges = prepared.settings, prepared.eligibility, prepared.hunk_ranges
+    mode = deep_state.mode
+    target_dir = ctx.work.repo
+    dd = deep_state.dd
+
+    kinds = eligibility.eligible_kinds()
+    checkpoint_key = (
+        diagram_checkpoint_key(ctx, settings=settings, eligibility=eligibility.to_dict()) if kinds else None
+    )
     restored = restore_diagram_checkpoint(ctx, checkpoint_key)
     if restored is not None:
         _persist_diagrams(ctx, restored)
@@ -638,7 +662,6 @@ async def _run_diagram_step(
         return None
     DeepArtifact.DIAGRAM_COMPLETE.at(dd).unlink(missing_ok=True)
 
-    kinds = eligibility.eligible_kinds()
     results: dict[str, DiagramResult | None] = {}
     for kind in DIAGRAM_KINDS:
         if kind in kinds:
@@ -697,7 +720,7 @@ async def _run_diagram_step(
     ordered: dict[str, DiagramResult | None] = {kind: results.get(kind) for kind in DIAGRAM_KINDS}
     payload: dict[str, Any] = {"eligibility": eligibility.to_dict(), "results": ordered}
     _persist_diagrams(ctx, payload)
-    if not failures:
+    if kinds and not failures:
         complete_diagram_checkpoint(ctx, checkpoint_key)
 
     if not kinds:

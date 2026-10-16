@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import anyio
 
+from daydream.agent import console
 from daydream.agent_capacity import AgentCapacity, agent_capacity_scope
 from daydream.backends import effective_fanout_concurrency
 from daydream.deep.latency import (
@@ -24,10 +25,12 @@ from daydream.deep.latency import (
 )
 from daydream.deep.settings import _resolve_opt_in, fresh_ttt
 from daydream.deep.state import DeepState
+from daydream.ui import print_warning
 
 if TYPE_CHECKING:
     from anyio.abc import TaskGroup
 
+    from daydream.deep.diagram_steps import DiagramInputs
     from daydream.flows.engine import FlowContext
 
 
@@ -37,15 +40,30 @@ class DiagramWork:
 
     group: TaskGroup
     capacity: AgentCapacity
+    inputs: DiagramInputs | None = None
     started: bool = False
     done: anyio.Event = field(default_factory=anyio.Event)
     error: Exception | None = None
 
     def start(self, ctx: FlowContext, *, primary_count: int) -> None:
         """Reserve every primary review slot, otherwise defer to the final step."""
-        spare = min(2, self.capacity.capacity - primary_count)
-        if self.started or spare <= 0:
+        from daydream.deep.diagram_steps import _prepare_diagram_inputs
+
+        if self.inputs is not None:
             return
+        self.inputs = _prepare_diagram_inputs(ctx)
+        if not self.inputs.eligibility.eligible_kinds():
+            return
+        try:
+            capacity = _overlap_capacity(ctx)
+        except Exception as exc:  # planning only; real phase construction retains its normal failure path
+            print_warning(console, f"Diagram overlap unavailable ({type(exc).__name__}); generation will run serially.")
+            return
+        spare = min(2, capacity - primary_count)
+        if spare <= 0:
+            return
+        self.capacity.capacity = capacity
+        self.capacity.enabled = True
         self.started = True
 
         async def generate() -> None:
@@ -53,7 +71,7 @@ class DiagramWork:
 
             try:
                 with agent_capacity_scope(self.capacity, optional=True):
-                    await _generate_diagrams(ctx, concurrency=spare)
+                    await _generate_diagrams(ctx, concurrency=spare, inputs=self.inputs)
             except Exception as exc:  # deferred to the owning diagram step
                 self.error = exc
             finally:
@@ -74,24 +92,12 @@ def diagram_work_for(ctx: FlowContext) -> DiagramWork | None:
     return value if isinstance(value, DiagramWork) else None
 
 
-@asynccontextmanager
-async def diagram_work_scope(ctx: FlowContext) -> AsyncIterator[None]:
-    """Own child lifetime only for compatible built-in review registrations."""
+def _overlap_capacity(ctx: FlowContext) -> int:
+    """Resolve conservative capacity only after deterministic eligibility."""
     from daydream.deep.merge_steps import _supervisor_mode
-    from daydream.deep.orchestrator import STEPS, _diagram_enabled, _multi_stack_merge_enabled
+    from daydream.deep.orchestrator import _multi_stack_merge_enabled
     from daydream.deep.review_steps import _fold_default_alternatives
 
-    entries = ctx.registry.flow("deep")
-    prefix = list(STEPS[:next(index for index, step in enumerate(STEPS) if step.name == "diagram") + 1])
-    compatible = (
-        _diagram_enabled(ctx)
-        and ctx.config.start_at not in ("merge", "fix")
-        and entries[:len(prefix)] == [step.name for step in prefix]
-        and all(ctx.registry.phase(step.name) == step for step in prefix)
-    )
-    if not compatible:
-        yield
-        return
     # Resolve only phases this review policy can use. Disabled phase overrides
     # must not require an installed/configurable provider merely to admit work.
     state = DeepState(ctx.data)
@@ -111,7 +117,29 @@ async def diagram_work_scope(ctx: FlowContext) -> AsyncIterator[None]:
         phases.append("supervise")
     # Different configured models may share a provider. Keep one conservative
     # pool until the final diagram step joins generation and releases admission.
-    capacity = AgentCapacity(min(effective_fanout_concurrency(10, ctx.backend_for(phase)) for phase in phases))
+    return min(effective_fanout_concurrency(10, ctx.backend_for(phase)) for phase in phases)
+
+
+@asynccontextmanager
+async def diagram_work_scope(ctx: FlowContext) -> AsyncIterator[None]:
+    """Own child lifetime only for compatible built-in review registrations."""
+    from daydream.deep.orchestrator import STEPS, _diagram_enabled
+
+    entries = ctx.registry.flow("deep")
+    prefix = list(STEPS[:next(index for index, step in enumerate(STEPS) if step.name == "diagram") + 1])
+    compatible = (
+        _diagram_enabled(ctx)
+        and ctx.config.start_at not in ("merge", "fix")
+        and entries[:len(prefix)] == [step.name for step in prefix]
+        and all(ctx.registry.phase(step.name) == step for step in prefix)
+    )
+    if not compatible:
+        yield
+        return
+    # Bind task-local ownership now; actual admission starts only after eligible
+    # generation has spare capacity. Exploration/intent keep their normal path.
+    capacity = AgentCapacity(1)
+    capacity.enabled = False
     error: BaseException | None = None
     async with anyio.create_task_group() as group:
         ctx.data["_diagram_work"] = DiagramWork(group, capacity)

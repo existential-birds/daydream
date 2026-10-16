@@ -166,6 +166,9 @@ and resume checks precede all steps; the first insertion point is `exploration`.
   eligibility/settings, author inputs and model contract match its checkpoint.
   Shared admission considers enabled model phases only and ends at the final
   diagram step, preserving later fix and custom phase capacity.
+  Deterministic eligibility precedes backend resolution; ineligible generation
+  needs no model backend. Capacity planning failures retain serial dispatch so
+  optional overlap cannot move later phase construction errors ahead of review.
 - `.review-output.md` cleanup runs after successful `run_flow`, subject to mode
   and `config.findings_out is None`; it is not an insertable step.
 
