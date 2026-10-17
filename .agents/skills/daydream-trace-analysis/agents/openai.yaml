@@ -1,0 +1,4 @@
+interface:
+  display_name: "Daydream Trace Analysis"
+  short_description: "Mine reviewer traces and diagnose failed runs"
+  default_prompt: "Use $daydream-trace-analysis to mine a recent Daydream review for duplicated work and confusion, with exact evidence and testable improvement hypotheses."

@@ -61,6 +61,7 @@ htmlcov/
 !.agents/skills/create-improve-pr/
 !.agents/skills/publish-improve-finding/
 !.agents/skills/test-audit/
+!.agents/skills/daydream-trace-analysis/
 .hermes/
 /skills-lock.json
 

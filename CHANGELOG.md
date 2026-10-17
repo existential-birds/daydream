@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **agent skills:** add local Daydream trace analysis with bounded evidence retrieval, failure triage, and reviewer inefficiency mining helpers.
+
 - **review:** configure each staged reviewer's investigation time through `pipeline.reviewer_investigation_budget_s` in a review profile, retaining the 480-second default, existing tool allowances and shared deadline limits; zero skips investigation with incomplete coverage ([#1535](https://github.com/existential-birds/daydream/issues/1535)).
 
 ### Security
