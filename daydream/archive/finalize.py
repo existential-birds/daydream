@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -71,6 +72,7 @@ def finalize_archive_run(
     config: RunConfig,
     work: WorkContext | None,
     dump_path: Path | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> None:
     """Strictly archive one immutable run or raise a closed typed error."""
     recorder_provenance = run.recorder_provenance
@@ -96,6 +98,8 @@ def finalize_archive_run(
     try:
         from daydream.archive.provenance import capture_executable_provenance
 
+        if progress is not None:
+            progress("Assembling run archive")
         archive_dir = get_archive_dir()
         run_dir = run_directory(archive_dir, session_id)
         assembly_dir = run_dir.with_name(f".{run_dir.name}.finalizing")
@@ -120,6 +124,8 @@ def finalize_archive_run(
         frozen = snapshot_trajectories(write_snapshot)
         evaluation: dict[str, Any] | None = None
         if config.run_eval and recorder_provenance.run_flow is not DaydreamRunFlow.DIAGRAM:
+            if progress is not None:
+                progress("Evaluating run")
             # Evaluation failure aborts the archive; revalidate its frozen input afterward.
             try:
                 from daydream.eval.analyzer import analyze_session
@@ -163,6 +169,8 @@ def finalize_archive_run(
             encoding="utf-8",
         )
         if config.dump_artifacts:
+            if progress is not None:
+                progress("Preparing artifact dump")
             if dump_path is None:
                 raise ArchivePublicationError("dump finalization path is missing")
             # Mark copying started before I/O so publication failures clean the stage.
@@ -173,6 +181,8 @@ def finalize_archive_run(
                 raise ArchivePublicationError("dump publication failed") from exc
         _validate_frozen_artifacts(artifacts)
 
+        if progress is not None:
+            progress("Publishing run archive")
         os.replace(assembly_dir, run_dir)
         assembly_created = False
         archive_installed = True

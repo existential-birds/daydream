@@ -641,6 +641,57 @@ def test_assert_is_worktree_rejects_missing_path(tmp_path: Path) -> None:
         git_ops.assert_is_worktree(tmp_path / "does-not-exist")
 
 
+def test_git_workspace_detection_distinguishes_nested_linked_and_standalone(repo: Path, tmp_path: Path) -> None:
+    # Owner: Git discovery for bounded inventories. Root-only preflight rejects
+    # nested directories; a .git-directory check loses linked worktrees.
+    nested = repo / "src"
+    nested.mkdir()
+    linked = tmp_path / "linked"
+    _git(repo, "worktree", "add", "--detach", str(linked), "HEAD")
+    try:
+        for directory in (repo, nested, linked):
+            assert git_ops.is_git_workspace(directory)
+        standalone = tmp_path / "standalone"
+        standalone.mkdir()
+        assert not git_ops.is_git_workspace(standalone)
+    finally:
+        _git(repo, "worktree", "remove", str(linked))
+
+
+@pytest.mark.parametrize("kind", ["broken-link", "invalid-gitfile", "bare"])
+def test_git_workspace_detection_refuses_unusable_git_storage(tmp_path: Path, kind: str) -> None:
+    # Owner: fail-closed discovery. A failed rev-parse must not authorize an
+    # unrestricted source walk in damaged Git storage or a bare repository.
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    if kind == "bare":
+        _git(directory, "init", "--bare")
+    elif kind == "broken-link":
+        (directory / ".git").symlink_to(directory / "missing")
+    else:
+        (directory / ".git").write_text("gitdir: missing\n")
+    nested = directory / "src"
+    nested.mkdir()
+    with pytest.raises(GitError):
+        git_ops.is_git_workspace(nested)
+
+
+def test_git_workspace_detection_propagates_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Owner: transport ambiguity. No Git answer means no permission to recurse;
+    # real-repository cases cannot deterministically force a hung subprocess.
+    calls = 0
+
+    def timeout(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+    with pytest.raises(git_ops.GitTimeoutError):
+        git_ops.is_git_workspace(tmp_path)
+    assert calls == 1
+
+
 def test_head_sha_raises_on_empty_repo(tmp_path: Path) -> None:
     repo = tmp_path / "empty"
     _init_repo(repo)

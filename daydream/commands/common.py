@@ -74,7 +74,7 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         action="store_false",
         dest="run_eval",
         help="Skip the deterministic evaluation analysis during archive "
-        "(eval runs by default: it is file-based and cheap)"
+        "(enabled by default; source analysis cost scales with eligible repository files)"
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(

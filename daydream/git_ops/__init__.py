@@ -105,6 +105,7 @@ from daydream.git_ops.queries import (
     head_sha as head_sha,
     init_repository as init_repository,
     is_ancestor as is_ancestor,
+    is_git_workspace as is_git_workspace,
     is_inside_worktree as is_inside_worktree,
     is_unborn_head as is_unborn_head,
     list_local_branches as list_local_branches,
