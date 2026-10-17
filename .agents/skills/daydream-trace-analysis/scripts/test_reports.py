@@ -190,6 +190,79 @@ class ReportCliTests(unittest.TestCase):
         self.source.write_text("\n" + "\n".join(json.dumps(row) for row in self.records) + "\n")
         self.assertIn("changed", self.synthesize(ok=False).lower())
 
+    def test_templates_and_synthesis_recheck_skipped_and_unreported_tail_records(self):
+        # Streaming must still check sources whose runs have no assessable report entry.
+        commands = [("template", self.manifest, self.plan, "--batch", "batch-1"),
+                    ("synthesize", self.manifest, self.plan, self.report)]
+        for command in commands:
+            self.cli(*command)
+        for index in (3, 4):
+            changed = json.loads(json.dumps(self.records))
+            changed[index]["extra"] = "late frozen record changed"
+            self.source.write_text("\n" + "\n".join(json.dumps(row) for row in changed) + "\n")
+            for command in commands:
+                with self.subTest(run=index + 1, command=command[0]):
+                    self.assertIn("changed", self.cli(*command, ok=False))
+        unchanged_prefix = "\n" + "\n".join(json.dumps(row) for row in self.records[:-1]) + "\n"
+        for ending, error in (("", "line"), ("{broken\n", "Expecting")):
+            self.source.write_text(unchanged_prefix + ending)
+            for command in commands:
+                with self.subTest(ending=ending, command=command[0]):
+                    self.assertIn(error, self.cli(*command, ok=False))
+
+    def test_template_and_synthesis_memory_is_bounded_independently_of_corpus_payload(self):
+        # Existing small captures cannot detect retaining every embedded trajectory in memory.
+        padding = 512 * 1024
+        with self.source.open("w", encoding="utf-8") as stream:
+            for number in range(24):
+                record = dict(self.records[0], run_id=f"bulk-{number:02d}", trajectories={
+                    "status": "available", "value": {"documents": [
+                        {"trajectory_id": "root", "steps": [{"message": "x" * padding}]},
+                        {"trajectory_id": "sibling", "steps": [{"message": "retained sibling evidence"}]}]}})
+                stream.write(json.dumps(record) + "\n")
+        selected = subprocess.run([sys.executable, str(self.script.with_name("cohort.py")), "select", str(self.source)],
+                                  capture_output=True, text=True)
+        self.assertEqual(selected.returncode, 0, selected.stderr)
+        manifest = self.write("bulk-manifest.json", json.loads(selected.stdout))
+        planned = subprocess.run([sys.executable, str(self.script.with_name("cohort.py")), "batches", str(manifest),
+                                  "--count", "2", "--question", "Which captured searches recover?"],
+                                 capture_output=True, text=True)
+        self.assertEqual(planned.returncode, 0, planned.stderr)
+        plan = self.write("bulk-plan.json", json.loads(planned.stdout))
+        measure = """import json, runpy, sys, tracemalloc
+from pathlib import Path
+script = sys.argv[1]
+sys.argv = sys.argv[1:]
+sys.path.insert(0, str(Path(script).parent))
+tracemalloc.start()
+try:
+    runpy.run_path(script, run_name="__main__")
+finally:
+    print(json.dumps({"peak_bytes": tracemalloc.get_traced_memory()[1]}), file=sys.stderr)
+"""
+
+        def measured(*args):
+            result = subprocess.run([sys.executable, "-c", measure, str(self.script), *map(str, args)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout), json.loads(result.stderr)["peak_bytes"]
+
+        report, template_peak = measured("template", manifest, plan, "--batch", "batch-1")
+        report.pop("template")
+        for row in report["runs"]:
+            assessment = self.assessment("present", 1)
+            assessment["evidence"] = [{"pointer": "/trajectories/value/documents/1/steps/0/message",
+                                       "excerpt": "retained sibling evidence"}]
+            row.update(status="analyzed", reason="", assessments=[assessment])
+        report_path = self.write("bulk-report.json", report)
+        output, synthesis_peak = measured("synthesize", manifest, plan, report_path)
+        self.assertEqual(output["patterns"][0]["affected_count"], len(report["runs"]))
+        self.assertEqual(len(output["missing_runs"]), 24 - len(report["runs"]))
+        for command, peak in (("template", template_peak), ("synthesize", synthesis_peak)):
+            with self.subTest(command=command):
+                self.assertLess(peak, 12 * padding,
+                                "Inspection must discard captures after checking them, rather than retain the corpus")
+
     def test_unassessed_patterns_and_per_run_limits_stay_explicit(self):
         self.report_value["runs"][1]["assessments"] = []
         self.write("report.json", self.report_value)

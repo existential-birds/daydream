@@ -93,12 +93,19 @@ class TraceCliTests(unittest.TestCase):
         doc["steps"][0]["observation"]["results"][0]["extra"]["native_payload"] = "z" * 10000
         doc["steps"][1]["message"] = "Changed approach after observing usage"
         doc["steps"][1]["reasoning_content"] = "Fresh verification context " + "y" * 10000
+        # The selected range excludes later steps and independent sibling output.
+        excluded = {"step_id": 3, "source": "agent", "tool_calls": [
+            {"tool_call_id": "excluded", "function_name": "shell", "arguments": {"command": "other scope"}}],
+            "observation": {"results": [{"source_call_id": "excluded", "content": "outside-window " * 10000}]}}
+        doc["steps"].append(excluded)
+        self.record["trajectories"]["value"]["documents"][0]["steps"] = [excluded]
         self.path.write_text(json.dumps(self.record))
         anchor = "/trajectories/value/documents/1/steps/0/tool_calls/1"
         report = self.cli("window", "--pointer", anchor, "--before", "2", "--after", "1",
                           "--chars", "50", "--evidence-limit", "1")
         self.assertEqual(report["anchor_pointer"], anchor)
         self.assertEqual(report["total"], 2)
+        self.assertEqual(report["document_step_count"], 3)
         self.assertEqual([row["invocation_id"] for row in report["items"]], ["one", "two"])
         self.assertEqual(report["items"][0]["tools"]["total"], 2)
         self.assertEqual(report["items"][0]["tools"]["remaining"], 1)
@@ -112,6 +119,7 @@ class TraceCliTests(unittest.TestCase):
         self.assertLessEqual(len(report["items"][0]["message"]), 50)
         self.assertLessEqual(len(report["items"][1]["reasoning_content"]), 50)
         self.assertLess(len(json.dumps(report)), 4000)
+        self.assertNotIn("outside-window", json.dumps(report))
         page = self.cli("window", "--pointer", anchor, "--after", "1", "--offset", "1", "--limit", "1")
         self.assertEqual(page["items"][0]["step_id"], 2)
         self.assertEqual(page["remaining"], 0)

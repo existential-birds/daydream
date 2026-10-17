@@ -138,18 +138,29 @@ def load_manifest(path):
     return manifest
 
 
-def load_run(row):
-    """Reload the frozen physical record; reject any changed content or metadata."""
-    source = Path(row["source"])
-    with source.open("rb") as stream:
-        text = next((text for line, text in enumerate(stream, 1) if line == row["line"]), None)
-    if text is None:
-        raise ValueError(f"{source}:{row['line']}: frozen line is missing or changed")
-    record = parse_json(text.decode("utf-8"))
-    current = run_row(record, source, row["line"])
-    if current != row:
-        raise ValueError(f"{source}:{row['line']}: frozen record or metadata changed")
-    return record
+def iter_runs(rows):
+    """Check and yield frozen records in physical order, scanning each source once."""
+    sources = {}
+    for row in rows:
+        sources.setdefault(row["source"], {}).setdefault(row["line"], []).append(row)
+    for path, pending in sources.items():
+        source = Path(path)
+        with source.open("rb") as stream:
+            for line, text in enumerate(stream, 1):
+                selected = pending.pop(line, None)
+                if selected is None:
+                    continue
+                record = parse_json(text.decode("utf-8"))
+                current = run_row(record, source, line)
+                for row in selected:
+                    if current != row:
+                        raise ValueError(f"{source}:{line}: frozen record or metadata changed")
+                    yield row, record
+                del record, current
+                if not pending:
+                    break
+        if pending:
+            raise ValueError(f"{source}:{min(pending)}: frozen line is missing or changed")
 
 
 def exclusion_reason(record, row, filters, since, until):
@@ -246,8 +257,8 @@ def batches(args):
     manifest = load_manifest(args.manifest)
     if not manifest["runs"]:
         raise ValueError("cannot batch an empty cohort")
-    for row in manifest["runs"]:
-        load_run(row)
+    for _, record in iter_runs(manifest["runs"]):
+        del record
     planned = [{"batch_id": f"batch-{n + 1}", "bytes": 0, "run_ids": []}
                for n in range(min(args.count, len(manifest["runs"])))]
     for row in sorted(manifest["runs"], key=lambda row: (-row["bytes"], row["run_id"])):

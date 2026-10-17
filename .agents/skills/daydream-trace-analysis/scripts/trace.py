@@ -122,14 +122,18 @@ def duration(start, end):
         return None
 
 
-def steps(trace, args):
+def steps(trace, args, scope=None):
+    """Yield original references, optionally within (document, start, end)."""
     for di, doc in enumerate(trace["docs"]):
-        if args.doc is not None and args.doc != di:
+        if (args.doc is not None and args.doc != di) or (scope is not None and scope[0] != di):
             continue
         # Only direct invocation rows belong to this document. Fork wrapper
         # invocations are repeated in the sibling document and are not counted.
         invocations = (doc.get("extra") or {}).get("subtrajectories", [])
-        for si, step in enumerate(doc.get("steps", [])):
+        document_steps = doc.get("steps", [])
+        start, end = scope[1:] if scope is not None else (0, len(document_steps))
+        for si in range(start, end):
+            step = document_steps[si]
             phase = (step.get("extra") or {}).get("daydream_phase")
             if args.phase and phase != args.phase:
                 continue
@@ -148,18 +152,22 @@ def failed(result):
             or extra.get("status") in ("failed", "error", "cancelled", "interrupted"))
 
 
+def step_tools(step, ref):
+    results = (step.get("observation") or {}).get("results", [])
+    for ci, call in enumerate(step.get("tool_calls") or []):
+        call_id = call.get("tool_call_id")
+        matched = [(ri, r) for ri, r in enumerate(results)
+                   if call_id is not None and r.get("source_call_id") == call_id]
+        yield {**ref, "pointer": ref["pointer"] + f"/tool_calls/{ci}", "tool_call_id": call_id,
+               "function_name": call.get("function_name"), "arguments": call.get("arguments"),
+               "failed": any(failed(r) for _, r in matched),
+               "results": [{"pointer": ref["pointer"] + f"/observation/results/{ri}",
+                            "content": r.get("content"), "extra": r.get("extra") or {}} for ri, r in matched]}
+
+
 def tools(trace, args):
     for doc, step, ref in steps(trace, args):
-        results = (step.get("observation") or {}).get("results", [])
-        for ci, call in enumerate(step.get("tool_calls") or []):
-            call_id = call.get("tool_call_id")
-            matched = [(ri, r) for ri, r in enumerate(results)
-                       if call_id is not None and r.get("source_call_id") == call_id]
-            yield {**ref, "pointer": ref["pointer"] + f"/tool_calls/{ci}", "tool_call_id": call_id,
-                   "function_name": call.get("function_name"), "arguments": call.get("arguments"),
-                   "failed": any(failed(r) for _, r in matched),
-                   "results": [{"pointer": ref["pointer"] + f"/observation/results/{ri}",
-                                "content": r.get("content"), "extra": r.get("extra") or {}} for ri, r in matched]}
+        yield from step_tools(step, ref)
 
 
 def bounded_rows(rows, limit, anchor_pointer=None):
@@ -183,15 +191,19 @@ def tool_view(row, args, anchor_pointer=None):
                         for r in bounded_rows(row["results"], args.evidence_limit, anchor_pointer)]}
 
 
+def step_unmatched_results(step, ref):
+    ids = {c.get("tool_call_id") for c in step.get("tool_calls") or [] if c.get("tool_call_id") is not None}
+    for ri, result in enumerate((step.get("observation") or {}).get("results", [])):
+        if result.get("source_call_id") not in ids and not result.get("subagent_trajectory_ref"):
+            yield {**ref, "pointer": ref["pointer"] + f"/observation/results/{ri}",
+                   "source_call_id": result.get("source_call_id"), "failed": failed(result),
+                   "extra": result.get("extra") or {}, "content": result.get("content")}
+
+
 def unmatched_results(trace, args):
     for doc, step, ref in steps(trace, args):
-        ids = {c.get("tool_call_id") for c in step.get("tool_calls") or [] if c.get("tool_call_id") is not None}
-        for ri, result in enumerate((step.get("observation") or {}).get("results", [])):
-            if result.get("source_call_id") not in ids and not result.get("subagent_trajectory_ref"):
-                yield {**ref, "pointer": ref["pointer"] + f"/observation/results/{ri}",
-                       "source_call_id": result.get("source_call_id"), "failed": failed(result),
-                       "extra": result.get("extra") or {},
-                       "content": preview(result.get("content"), args.chars)}
+        for row in step_unmatched_results(step, ref):
+            yield {**row, "content": preview(row["content"], args.chars)}
 
 
 def summary(trace, args):
@@ -349,39 +361,41 @@ def show(trace, args):
 def window(trace, args):
     """Keep recorded context around one exact step without guessing causality."""
     resolve_pointer(trace["record"], args.pointer)
-    all_steps = list(steps(trace, args))
-    anchor = next((ref for _, _, ref in all_steps
-                   if args.pointer == ref["pointer"] or args.pointer.startswith(ref["pointer"] + "/")), None)
-    if anchor is None:
+    location = None
+    for di, doc in enumerate(trace["docs"]):
+        prefix = doc_pointer(trace, di) + "/steps/"
+        if args.pointer.startswith(prefix):
+            location = di, doc, int(args.pointer[len(prefix):].split("/", 1)[0])
+            break
+    if location is None:
         raise ValueError("window requires a pointer inside an agent step")
-    document_steps = [(step, ref) for _, step, ref in all_steps if ref["doc"] == anchor["doc"]]
-    index = next(i for i, (_, ref) in enumerate(document_steps) if ref["pointer"] == anchor["pointer"])
-    start, end = max(0, index - args.before), min(len(document_steps), index + args.after + 1)
-    calls = collections.defaultdict(list)
-    unmatched = collections.defaultdict(list)
-    for row in tools(trace, args):
-        bounded = tool_view(row, args, args.pointer)
-        for result in bounded["results"]:
-            result["extra"] = preview(result["extra"], args.chars)
-        calls[row["pointer"].rsplit("/tool_calls/", 1)[0]].append(bounded)
-    for row in unmatched_results(trace, args):
-        key = row["pointer"].rsplit("/observation/results/", 1)[0]
-        unmatched[key].append({**row, "extra": preview(row["extra"], args.chars)})
+    di, doc, index = location
+    document_step_count = len(doc["steps"])
+    start, end = max(0, index - args.before), min(document_step_count, index + args.after + 1)
     rows = []
-    for step, ref in document_steps[start:end]:
-        tool_rows, result_rows = calls[ref["pointer"]], unmatched[ref["pointer"]]
+    for _, step, ref in steps(trace, args, scope=(di, start, end)):
+        tool_rows = list(step_tools(step, ref))
+        result_rows = list(step_unmatched_results(step, ref))
+        bounded_tools = []
+        for row in bounded_rows(tool_rows, args.evidence_limit, args.pointer):
+            bounded = tool_view(row, args, args.pointer)
+            for result in bounded["results"]:
+                result["extra"] = preview(result["extra"], args.chars)
+            bounded_tools.append(bounded)
         rows.append({**ref, "source": step.get("source"),
                      "message": preview(step["message"], args.chars) if step.get("message") is not None else None,
                      "reasoning_content": preview(step["reasoning_content"], args.chars)
                      if step.get("reasoning_content") is not None else None,
-                     "tools": {"total": len(tool_rows),
-                               "items": bounded_rows(tool_rows, args.evidence_limit, args.pointer),
+                     "tools": {"total": len(tool_rows), "items": bounded_tools,
                                "remaining": max(0, len(tool_rows) - args.evidence_limit)},
                      "unmatched_results": {"total": len(result_rows),
-                                           "items": bounded_rows(result_rows, args.evidence_limit, args.pointer),
+                                           "items": [{**row, "content": preview(row["content"], args.chars),
+                                                      "extra": preview(row["extra"], args.chars)} for row in
+                                                     bounded_rows(result_rows, args.evidence_limit, args.pointer)],
                                            "remaining": max(0, len(result_rows) - args.evidence_limit)}})
-    return {**base(trace), "anchor_pointer": args.pointer, "anchor_step_pointer": anchor["pointer"],
-            "document_step_count": len(document_steps), "start_index": start, "end_index": end,
+    return {**base(trace), "anchor_pointer": args.pointer,
+            "anchor_step_pointer": doc_pointer(trace, di) + f"/steps/{index}",
+            "document_step_count": document_step_count, "start_index": start, "end_index": end,
             "interpretation": "Recorded neighbors in one document; invocation and phase changes are explicit. "
                               "Inspect terminal evidence separately; proximity does not establish causality.",
             **page(rows, args)}

@@ -12,7 +12,7 @@ import re
 import sys
 from pathlib import Path
 
-from cohort import canonical, digest, load_manifest, load_run, parse_json
+from cohort import canonical, digest, iter_runs, load_manifest, parse_json
 
 CATEGORIES = {"environment_scope", "investigation_loop", "handoff_loss", "verification_gap",
               "budget_allocation", "finding_quality", "backend_lifecycle", "capture_failure"}
@@ -81,9 +81,7 @@ def load_inputs(manifest_path, plan_path):
         assigned.update(ids)
         batches[batch_id] = batch
     require(assigned == runs.keys(), "plan assignment must cover every cohort run exactly once")
-    # Freeze validation precedes reporting, including missing or skipped assignments.
-    records = {run_id: load_run(row) for run_id, row in runs.items()}
-    return manifest, plan, runs, batches, records
+    return manifest, plan, runs, batches
 
 
 def pointer_value(record, pointer):
@@ -119,7 +117,7 @@ def evidence(rows, record, chars):
         seen.add(identity)
 
 
-def validate_report(report, manifest, plan, batches, records):
+def validate_report(report, manifest, plan, batches):
     require(report.get("schema") == "daydream.trace-report.v1", "unsupported report schema")
     require(not report.get("template"), "report is an unfinished template; fill it and remove template marker")
     require(report.get("cohort_id") == manifest["cohort_id"], "report cohort_id does not match manifest")
@@ -162,8 +160,8 @@ def validate_report(report, manifest, plan, batches, records):
             text(item.get("intervention"), "intervention", empty=verdict != "present")
             require(item.get("confidence") in {"high", "medium", "low"}, "invalid analyst confidence")
             support, counter = item.get("evidence"), item.get("counterevidence")
-            evidence(support, records[run_id], plan["evidence_chars"])
-            evidence(counter, records[run_id], plan["evidence_chars"])
+            require(isinstance(support, list) and isinstance(counter, list),
+                    "evidence and counterevidence must be lists")
             require(len(support) + len(counter) <= MAX_EVIDENCE,
                     f"at most {MAX_EVIDENCE} evidence entries per assessment")
             require(verdict != "present" or support, "present assessment requires evidence")
@@ -173,6 +171,9 @@ def validate_report(report, manifest, plan, batches, records):
 
 def template(manifest, plan, batches, batch_id):
     require(batch_id in batches, "--batch is not in plan")
+    # All frozen sources are checked, including runs assigned to other batches.
+    for _, record in iter_runs(manifest["runs"]):
+        del record
     return {"schema": "daydream.trace-report.v1", "cohort_id": manifest["cohort_id"], "plan_id": plan["plan_id"],
             "batch_id": batch_id, "template": True,
             "runs": [{"run_id": run_id, "status": "skipped", "reason": "TODO: analyze this run",
@@ -212,11 +213,11 @@ def pattern_counts(run_ids, rows, pattern):
             "assessable_count": len(groups["assessable_runs"]), "observed_occurrences": occurrences}
 
 
-def synthesize(manifest, plan, runs, batches, records, paths):
+def synthesize(manifest, plan, runs, batches, paths):
     rows, reported_batches, categories = {}, set(), {}
     for path in paths:
         report = read_json(path)
-        batch_id = validate_report(report, manifest, plan, batches, records)
+        batch_id = validate_report(report, manifest, plan, batches)
         require(batch_id not in reported_batches, f"duplicate report for batch {batch_id}")
         reported_batches.add(batch_id)
         for row in report["runs"]:
@@ -226,6 +227,12 @@ def synthesize(manifest, plan, runs, batches, records, paths):
                 require(pattern not in categories or categories[pattern] == category,
                         f"pattern {pattern} has conflicting categories; reconcile reports before synthesis")
                 categories[pattern] = category
+    # Validate every frozen source once; retain only analyst and manifest metadata.
+    for frozen, record in iter_runs(runs.values()):
+        for item in rows.get(frozen["run_id"], {}).get("assessments", []):
+            evidence(item["evidence"], record, plan["evidence_chars"])
+            evidence(item["counterevidence"], record, plan["evidence_chars"])
+        del record
     strata = {}
     for run_id, row in runs.items():
         context = row["context"]
@@ -325,9 +332,9 @@ def main():
     args = parser.parse_args()
     try:
         if args.command in {"template", "synthesize"}:
-            manifest, plan, runs, batches, records = load_inputs(args.manifest, args.plan)
+            manifest, plan, runs, batches = load_inputs(args.manifest, args.plan)
             output = template(manifest, plan, batches, args.batch) if args.command == "template" else synthesize(
-                manifest, plan, runs, batches, records, args.reports)
+                manifest, plan, runs, batches, args.reports)
         elif args.command == "experiment-template":
             output = experiment_template(read_json(args.synthesis))
         elif args.command == "assessment-template":

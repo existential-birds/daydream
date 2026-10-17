@@ -157,10 +157,36 @@ class CohortCliTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("cohort_helper_test", SCRIPT)
         helper = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(helper)
-        self.assertEqual(helper.load_run(report["runs"][0]), record)
+        self.assertEqual([value for _, value in helper.iter_runs(report["runs"])], [record])
         self.path.write_text(json.dumps(record) + "\n")
         with self.assertRaisesRegex(ValueError, "changed|line"):
-            helper.load_run(report["runs"][0])
+            list(helper.iter_runs(report["runs"]))
+
+    def test_grouped_reload_preserves_physical_records_and_rejects_late_source_changes(self):
+        # A source stream must preserve skipped physical lines, siblings, and checks across files.
+        first = capture("first", "2026-10-17T00:00:00Z")
+        last = capture("last", "2026-10-18T00:00:00Z")
+        other = capture("other", "2026-10-19T00:00:00Z")
+        self.path.write_text("\n" + json.dumps(first) + "\n\n" + json.dumps(last) + "\n")
+        other_path = self.root / "other.jsonl"
+        self.write(other, path=other_path)
+        manifest = self.cli("select", self.root)
+        spec = importlib.util.spec_from_file_location("cohort_stream_test", SCRIPT)
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        loaded = {row["run_id"]: (row, record) for row, record in helper.iter_runs(manifest["runs"])}
+        expected = {record["run_id"]: record for record in (first, last, other)}
+        self.assertEqual({run_id: record for run_id, (_, record) in loaded.items()}, expected)
+        self.assertEqual(loaded["first"][0]["line"], 2)
+        self.assertEqual(loaded["last"][0]["line"], 4)
+        self.assertEqual(loaded["other"][0]["source"], str(other_path.resolve()))
+        last["trajectories"]["value"]["documents"][1]["steps"].append({"message": "changed sibling"})
+        self.path.write_text("\n" + json.dumps(first) + "\n\n" + json.dumps(last) + "\n")
+        with self.assertRaisesRegex(ValueError, "changed"):
+            list(helper.iter_runs(manifest["runs"]))
+        self.path.write_text("\n" + json.dumps(first) + "\n")
+        with self.assertRaisesRegex(ValueError, "missing|line"):
+            list(helper.iter_runs(manifest["runs"]))
 
 
 if __name__ == "__main__":
