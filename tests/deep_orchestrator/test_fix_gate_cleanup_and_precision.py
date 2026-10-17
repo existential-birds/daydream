@@ -37,6 +37,7 @@ from tests.test_deep_orchestrator import (
     _install_model_capturing_stubs,
     _install_stub_backend,
     _prime_merge_resume,
+    _record,
     _record_issues,
     _recording_prompter,
     _run_deep,
@@ -132,6 +133,8 @@ async def test_structural_finding_reaches_fix_loop(
             "description": "Low-severity per-stack issue", "confidence": "MEDIUM", "rationale": "rationale",
             "evidence": "api.py:1",
         },
+        {**_record(id=3, description="Retained structural boundary finding"),
+         "lens": "structural", "source_uids": ["structure:1"]},
     ]
 
     marker = "\n# structural finding fixed\n"

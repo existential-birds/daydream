@@ -89,7 +89,8 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
     language = _record(description="Default Codex configurations fail initialization after empty API keys "
                        "are serialized as redaction markers", severity="high", confidence="HIGH")
     twin = _record(description="Preserve empty API keys across configuration serialization", severity="high",
-                   confidence="HIGH", evidence="api.py:1 Harbor emits **** and revalidation rejects the marker")
+                   confidence="HIGH", evidence="api.py:1 Harbor emits **** and revalidation rejects the marker; "
+                   "App.tsx:1 is the dependent caller")
     distinct = _record(id=2, description="Shared dependency violates whole-file layering", line=0,
                        evidence="The API dependency crosses the documented module boundary")
     omitted = _record(id=3, description="Separate concern omitted after synthesis")
