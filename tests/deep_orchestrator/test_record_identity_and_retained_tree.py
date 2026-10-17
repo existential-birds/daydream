@@ -11,6 +11,7 @@ from daydream import git_ops
 from daydream.deep.artifacts import deep_dir
 from daydream.deep.fix_state import FixCycleState, capture_retained_tree
 from daydream.fix_footprint import AuthorizedFixFootprint
+from daydream.phases.findings import _write_single_stack_merged_items
 from tests.deep_orchestrator.support import (
     _fresh_uid_run,
     _high_record,
@@ -231,8 +232,7 @@ async def test_every_merged_item_carries_source_uids_on_a_multi_stack_run(
         "generic:1", "python:1", "react:1",
     ]
 
-    # (3) The host-appended structural items never see the merge agent, so the
-    # host attributes them -- each to the single record it is.
+    # (3) Independently retained structural synthesis preserves its real source.
     structural = [item for item in items if item.get("lens") == "structural"]
     assert structural, f"no structural item shipped: {items}"
     assert [item["source_uids"] for item in structural] == [["structure:1"]]
@@ -265,12 +265,11 @@ async def test_every_merged_item_carries_source_uids_on_a_multi_stack_run(
     structural = [item for item in items if item.get("lens") == "structural"]
     assert structural, f"no structural item shipped: {items}"
     item = structural[0]
-    # The birth record identity: this item WAS a per-stack record of the
-    # ``structure`` meta-stack, and it never passed through the merge agent.
-    assert item["uid"] == "structure:1", item
+    # Model-owned synthesis has source attribution, not a reviewer birth UID.
+    assert "uid" not in item, item
     # Its own item identity, from the same namespace every shipped item uses.
     assert item["item_uid"].startswith("item:"), item
-    assert item["item_uid"] != item["uid"], f"the item identity collapsed onto the record identity: {item}"
+    assert item["item_uid"] != "structure:1", item
     # Its derivation, which is the record it is -- a list, because an item can
     # be a synthesis of several records even though this one is not.
     assert item["source_uids"] == ["structure:1"], item
@@ -370,24 +369,25 @@ async def test_single_stack_bypass_attributes_items_to_their_own_records(
         assert item["source_uids"] == [item["uid"]], item
 
 @pytest.mark.parametrize("base_evidenced", [True, False], ids=["base-survives", "structure-survives"])
-async def test_structural_fold_survivor_inherits_both_provenances(
+def test_host_bypass_structural_fold_survivor_inherits_both_provenances(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, base_evidenced: bool,
 ) -> None:
-    """Either fold direction preserves both record identities and the structural severity."""
+    """Host-only bypass/salvage folding preserves both identities and structural severity."""
 
     _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    _prime_source_uid_merge_resume(multi_stack_target,
+    deep = _prime_source_uid_merge_resume(multi_stack_target,
         structure=[_record(description=_TWIN_DESCRIPTION, line=5, evidence="api.py:5",
                            severity="high", uid="structure:1")],
     )
-    stub.merge_items = [_provenance_item(
-            1, _TWIN_DESCRIPTION, line=5, evidence="api.py:5" if base_evidenced else "", source_uids=["python:1"],
-        ), _provenance_item(2, "Unrelated react concern", file="App.tsx", source_uids=["react:1"]),
+    language = [_record(
+            id=1, description=_TWIN_DESCRIPTION, line=5,
+            evidence="api.py:5" if base_evidenced else "", uid="python:1",
+        ), _record(id=2, description="Unrelated react concern", file="App.tsx", evidence="App.tsx:1", uid="react:1"),
     ]
 
-    assert await _run_deep(multi_stack_target, start_at="merge") == 0
-    deep = deep_dir(multi_stack_target, allow_standalone=True)
+    _write_single_stack_merged_items(
+        multi_stack_target, deep, language, deep / "stack-structure-records.json", allow_standalone=True,
+    )
     twins = [item for item in _merged_items(deep) if item["description"] == _TWIN_DESCRIPTION]
     assert len(twins) == 1
     survivor = "base" if base_evidenced else "structural"

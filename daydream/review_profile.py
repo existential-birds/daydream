@@ -334,7 +334,8 @@ def build_default_profile() -> ReviewProfile:
                 "You are the cross-stack merge agent. Read every artifact above by path -- "
                 "do NOT re-run any reviews. Return a single JSON object matching the "
                 "structured-output schema: {\"items\": [ ... ]}. Each item is one "
-                "actionable finding. Emit nothing else."
+                "actionable finding. Synthesize every retained language and structural record; "
+                "combine duplicate defects with all contributing UIDs and retain distinct concerns. Emit nothing else."
             ),
             source="copied: daydream.deep.prompts.build_merge_prompt",
         ),

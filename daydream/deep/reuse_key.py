@@ -450,6 +450,7 @@ def merge_key_payload(
     loop grounding is recorded but never keyed.
     """
     components: dict[str, Any] = {
+        "synthesis_policy": "retained-records-authoritative",
         "records": _record_digests(contributing_records),
         "structural": structural_records_present,
         "failed_stacks": sorted(failed_stacks),

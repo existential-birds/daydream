@@ -217,7 +217,7 @@ class StubBackend:
     def _prompt_record_uid_groups(prompt: str) -> list[list[str]]:
         """Read nonempty UID groups from prompted records files in prompt order.
 
-        Structural records are host-appended and absent from the merge prompt.
+        Retained language and structural records both appear in merge prompts.
         Grouping by file supports both per-stack and cross-stack provenance.
         Missing or malformed files contribute nothing, allowing phase tests to
         use unwritten prompt paths.
@@ -510,8 +510,8 @@ class StubBackend:
             yield ResultEvent(structured_output={"findings": sup_findings}, continuation=None)
             return
 
-        # Cross-stack merge -> schema-validated item list; the host appends
-        # structural findings, normalizes ids, and renders review-output.md.
+        # Cross-stack merge -> complete model-authored items; the host validates
+        # evidence/provenance, normalizes ids, and renders review-output.md.
         if "cross-stack merge agent" in pl:
             yield TextEvent(text="")
             if self.merge_emit_str is not None:
@@ -530,7 +530,8 @@ class StubBackend:
                     recs = record_issues_or_empty(loaded)
                     for rec in recs:
                         echoed.append({
-                                "id": next_id, "lens": "per-stack", "file": rec.get("file"), "line": rec.get("line"),
+                                "id": next_id, "lens": "structural" if record_uid(rec).startswith("structure:")
+                                else "per-stack", "file": rec.get("file"), "line": rec.get("line"),
                                 "severity": rec.get("severity", "medium"), "description": rec.get("description"),
                                 "confidence": rec.get("confidence", "MEDIUM"),
                                 "rationale": rec.get("rationale", "rationale"),
@@ -545,10 +546,17 @@ class StubBackend:
             if self.merge_items is not None:
                 yield ResultEvent(structured_output=merge_result(self.merge_items), continuation=None,)
                 return
-            # Default items cite real record UIDs: per-stack items cite their named
-            # stack and cross-stack items cite every stack. Collapsed generic runs
-            # fall back to the first available stack.
-            lead_uids = [group[0] for group in self._prompt_record_uid_groups(prompt)]
+            # Default synthesis retains structural concerns as independent items.
+            structural_items = []
+            for path_str in re.findall(r"  - (\S+-records\.json)", prompt):
+                for rec in record_issues_or_empty(json.loads(Path(path_str).read_text())):
+                    if record_uid(rec).startswith("structure:"):
+                        structural_items.append({
+                            key: rec[key] for key in ("id", "file", "line", "severity", "confidence", "description",
+                                                     "rationale", "evidence") if key in rec
+                        } | {"lens": "structural", "source_uids": [record_uid(rec)]})
+            lead_uids = [group[0] for group in self._prompt_record_uid_groups(prompt)
+                         if not group[0].startswith("structure:")]
             leads_by_stack = {stack_name_from_uid(uid): uid for uid in reversed(lead_uids)}
 
             def _lead(stack: str) -> list[str]:
@@ -567,7 +575,7 @@ class StubBackend:
                             "confidence": "HIGH", "rationale": "rationale", "evidence": "api.py:1",
                             "source_uids": list(lead_uids),
                         },
-                    ]), continuation=None,
+                    ] + structural_items), continuation=None,
             )
             return
 

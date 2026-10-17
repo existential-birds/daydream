@@ -112,6 +112,10 @@ These boundaries matter across subsystems; module docstrings carry finer detail:
   is diagnostic; missing/corrupt routing records must not block execution/resume.
   `forensic` is a latency profile with an unsharded arbiter; per-stack review
   sharding is independent.
+- Model-owned merge receives all retained language and structural records; its
+  validated output is authoritative without structural reappend. Whole-file
+  structural privileges require retained structural source UIDs. Host bypass and
+  failure salvage retain their separate folding policy.
 - Preserve admitted findings and truthful incomplete coverage on review failure.
   Canonical test readiness gates accepted fixes before verify/FIX work; model
   prose or unresolved command candidates cannot authorize tests or publication.
