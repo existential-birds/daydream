@@ -5,8 +5,10 @@
 The local store usually has `~/.daydream/dataset/runs/<digest>.jsonl`. Each
 nonblank line is a `daydream.run.v1` record, frequently hundreds of KB or more.
 Use the record's `run_id`, not the basename. Physical line numbers locate the
-record; JSON pointers locate evidence inside it. Indexes in pointers are
-zero-based; `step_id` is the recorded ID, not its array position.
+record; JSON pointers locate evidence inside it. For a cohort row, pass both its
+`--run-id` and physical `--line` to the trace helper so repeated IDs select the
+frozen record unambiguously. Indexes in pointers are zero-based; `step_id` is
+the recorded ID, not its array position.
 
 | Location | Meaning |
 | --- | --- |
@@ -127,7 +129,7 @@ the owning reducer when a precise latency or billing conclusion needs it.
 ## Helper verification
 
 ```bash
-python3 "$SKILL/scripts/test_trace.py"
+python3 -m unittest discover -s "$SKILL/scripts" -p 'test_*.py'
 ```
 
 Tests use synthetic captures in a temporary directory; private run contents

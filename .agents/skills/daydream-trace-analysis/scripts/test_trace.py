@@ -86,6 +86,85 @@ class TraceCliTests(unittest.TestCase):
         self.assertEqual(len({r["pointer"] for r in pwd["evidence"]}), 3)
         self.assertTrue(any(r["kind"] == "tool_failure" for r in report["items"]))
 
+    def test_window_keeps_decisions_results_and_invocation_boundaries_bounded(self):
+        # Mine identifies calls but cannot show whether a later decision recovered.
+        doc = self.record["trajectories"]["value"]["documents"][1]
+        doc["steps"][0]["message"] = "Investigate the failure " + "x" * 10000
+        doc["steps"][0]["observation"]["results"][0]["extra"]["native_payload"] = "z" * 10000
+        doc["steps"][1]["message"] = "Changed approach after observing usage"
+        doc["steps"][1]["reasoning_content"] = "Fresh verification context " + "y" * 10000
+        # The selected range excludes later steps and independent sibling output.
+        excluded = {"step_id": 3, "source": "agent", "tool_calls": [
+            {"tool_call_id": "excluded", "function_name": "shell", "arguments": {"command": "other scope"}}],
+            "observation": {"results": [{"source_call_id": "excluded", "content": "outside-window " * 10000}]}}
+        doc["steps"].append(excluded)
+        self.record["trajectories"]["value"]["documents"][0]["steps"] = [excluded]
+        self.path.write_text(json.dumps(self.record))
+        anchor = "/trajectories/value/documents/1/steps/0/tool_calls/1"
+        report = self.cli("window", "--pointer", anchor, "--before", "2", "--after", "1",
+                          "--chars", "50", "--evidence-limit", "1")
+        self.assertEqual(report["anchor_pointer"], anchor)
+        self.assertEqual(report["total"], 2)
+        self.assertEqual(report["document_step_count"], 3)
+        self.assertEqual([row["invocation_id"] for row in report["items"]], ["one", "two"])
+        self.assertEqual(report["items"][0]["tools"]["total"], 2)
+        self.assertEqual(report["items"][0]["tools"]["remaining"], 1)
+        selected = report["items"][0]["tools"]["items"][0]
+        self.assertEqual(selected["pointer"], anchor)
+        self.assertEqual(selected["results"][0]["content"], "usage")
+        self.assertTrue(selected["failed"])
+        self.assertLessEqual(len(selected["results"][0]["extra"]), 50)
+        self.assertEqual(report["items"][1]["message"], "Changed approach after observing usage")
+        self.assertEqual(report["items"][1]["phase"], "merge")
+        self.assertLessEqual(len(report["items"][0]["message"]), 50)
+        self.assertLessEqual(len(report["items"][1]["reasoning_content"]), 50)
+        self.assertLess(len(json.dumps(report)), 4000)
+        self.assertNotIn("outside-window", json.dumps(report))
+        page = self.cli("window", "--pointer", anchor, "--after", "1", "--offset", "1", "--limit", "1")
+        self.assertEqual(page["items"][0]["step_id"], 2)
+        self.assertEqual(page["remaining"], 0)
+
+    def test_window_keeps_anchored_matched_and_unmatched_results_in_recorded_order(self):
+        # A later result of a later call needs priority at both bounded levels.
+        step = self.record["trajectories"]["value"]["documents"][1]["steps"][0]
+        step["observation"]["results"].extend([
+            {"source_call_id": "item_2", "content": "late diagnostic", "extra": {"native": "x" * 10000}},
+            {"source_call_id": "missing_1", "content": "earlier orphan"},
+            {"source_call_id": "missing_2", "content": "anchored orphan", "extra": {"native": "y" * 10000}}])
+        self.path.write_text(json.dumps(self.record))
+        prefix = "/trajectories/value/documents/1/steps/0"
+        anchor = prefix + "/observation/results/2/extra/native"
+        report = self.cli("window", "--pointer", anchor, "--before", "0", "--after", "0",
+                          "--chars", "40", "--evidence-limit", "1")
+        selected = report["items"][0]["tools"]["items"][0]
+        self.assertEqual(selected["tool_call_id"], "item_2")
+        self.assertEqual(selected["result_count"], 2)
+        self.assertEqual(selected["results_remaining"], 1)
+        self.assertEqual(selected["results"][0]["content"], "late diagnostic")
+        self.assertLessEqual(len(selected["results"][0]["extra"]), 40)
+        ordered = self.cli("window", "--pointer", anchor, "--evidence-limit", "2")["items"][0]["tools"]["items"]
+        self.assertEqual([row["tool_call_id"] for row in ordered], ["item_1", "item_2"])
+        self.assertEqual([row["content"] for row in ordered[1]["results"]], ["usage", "late diagnostic"])
+        anchor = prefix + "/observation/results/4/content"
+        report = self.cli("window", "--pointer", anchor, "--evidence-limit", "1", "--chars", "40")
+        unmatched = report["items"][0]["unmatched_results"]
+        self.assertEqual(unmatched["total"], 2)
+        self.assertEqual(unmatched["remaining"], 1)
+        self.assertEqual(unmatched["items"][0]["content"], "anchored orphan")
+        self.assertLessEqual(len(unmatched["items"][0]["extra"]), 40)
+
+    def test_window_rejects_nonexistent_nonstep_and_invalid_pointers_and_negative_bounds(self):
+        # A plausible-looking unresolved suffix must not masquerade as evidence.
+        for pointer in ("/trajectories/value/documents/1/steps/0/missing", "/run_id"):
+            with self.subTest(pointer=pointer):
+                self.cli("window", "--pointer", pointer, ok=False)
+        self.cli("window", "--pointer", "/trajectories/value/documents/1/steps/0", "--before", "-1", ok=False)
+        for suffix in ("-1", "00", "+1"):
+            pointer = f"/trajectories/value/documents/1/steps/0/observation/results/{suffix}/content"
+            for command in ("window", "show"):
+                with self.subTest(command=command, pointer=pointer):
+                    self.cli(command, "--pointer", pointer, ok=False)
+
     def test_search_and_show_bound_large_strings_and_support_slices(self):
         self.record["original_task"] = {"status": "available", "value": "a" * 10000 + "needle"}
         self.path.write_text(json.dumps(self.record) + "\n")
@@ -116,6 +195,23 @@ class TraceCliTests(unittest.TestCase):
         self.assertEqual(self.cli("summary", "--run-id", "other")["run_id"], "other")
         self.path.write_text(json.dumps(self.record) + "\n{" )
         self.assertIn(":2", self.cli("summary", ok=False))
+
+    def test_physical_line_selects_duplicate_ids_without_accepting_wrong_or_invalid_records(self):
+        # Cohorts deduplicate identical IDs; run-id selection alone remains ambiguous.
+        encoded = json.dumps(self.record)
+        self.path.write_text("\n" + encoded + "\n" + encoded + "\n")
+        self.assertIn("select", self.cli("summary", "--run-id", "run", ok=False).lower())
+        selected = self.cli("summary", "--run-id", "run", "--line", "3")
+        self.assertEqual((selected["run_id"], selected["line"]), ("run", 3))
+        self.assertEqual(selected["document_count"], 2)
+        self.assertEqual(self.cli("summary", "--line", "2")["line"], 2)
+        self.assertIn("match", self.cli("summary", "--run-id", "other", "--line", "3", ok=False))
+        self.path.write_text("{broken\n" + encoded + "\n\n")
+        self.assertEqual(self.cli("summary", "--run-id", "run", "--line", "2")["line"], 2)
+        self.assertIn(":1", self.cli("summary", "--line", "1", ok=False))
+        for line in ("0", "-1", "3", "4"):
+            with self.subTest(line=line):
+                self.assertIn("line", self.cli("summary", "--line", line, ok=False))
 
     def test_raw_atif_and_unavailable_trajectories_are_distinguished(self):
         root = self.record["trajectories"]["value"]["documents"][1]
