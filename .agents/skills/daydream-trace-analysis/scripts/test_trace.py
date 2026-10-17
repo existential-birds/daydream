@@ -31,7 +31,7 @@ class TraceCliTests(unittest.TestCase):
              "tool_calls": [{"tool_call_id": "item_1", "function_name": "shell",
                              "arguments": {"command": "pwd"}}],
              "observation": {"results": [
-                 {"source_call_id": "item_1", "content": "/repo", "extra": {"exit_code": 0}}]}},
+                 {"source_call_id": "item_1", "content": "/other", "extra": {"exit_code": 0}}]}},
         ]
         root = {"schema_version": "ATIF-v1.7", "trajectory_id": "root", "session_id": "run",
                 "steps": steps, "extra": {"subtrajectories": [
@@ -62,7 +62,12 @@ class TraceCliTests(unittest.TestCase):
         self.assertEqual(rows[0]["results"][0]["content"], "/repo")
         self.assertFalse(rows[0]["failed"])
         self.assertTrue(rows[1]["failed"])
-        self.assertTrue(rows[0]["results"][0]["pointer"].endswith("/observation/results/1"))
+        self.assertEqual([r["result_count"] for r in rows], [1, 1, 1])
+        self.assertEqual(rows[0]["results"][0]["pointer"],
+                         "/trajectories/value/documents/1/steps/0/observation/results/1")
+        self.assertEqual(rows[2]["results"][0]["content"], "/other")
+        self.assertEqual(rows[2]["results"][0]["pointer"],
+                         "/trajectories/value/documents/1/steps/1/observation/results/0")
         self.assertEqual(report["line"], 2)
 
     def test_summary_uses_declared_root_without_adding_fork_billing(self):
@@ -91,6 +96,18 @@ class TraceCliTests(unittest.TestCase):
         shown = self.cli("show", "--pointer", "/original_task/value", "--offset", "9998", "--chars", "8")
         self.assertEqual(shown["text"], "aaneedle")
         self.assertEqual(shown["total_chars"], 10006)
+        # Case folding expands these characters; evidence offsets stay in the source text.
+        for prefix in ("ß" * 100, "İ" * 100):
+            with self.subTest(prefix=prefix[0]):
+                value = prefix + "needle"
+                self.record["original_task"]["value"] = value
+                self.path.write_text(json.dumps(self.record) + "\n")
+                report = self.cli("search", "--query", "NEEDLE", "--chars", "40")
+                row = report["items"][0]
+                self.assertEqual(row["match_offset"], len(prefix))
+                self.assertEqual(row["excerpt_offset"], len(prefix) - 40 // 3)
+                self.assertEqual(row["excerpt"], value[row["excerpt_offset"]:row["excerpt_offset"] + 40])
+                self.assertIn("needle", row["excerpt"])
 
     def test_multiple_records_require_selection_and_bad_json_is_not_silently_skipped(self):
         second = dict(self.record, run_id="other")
@@ -101,8 +118,22 @@ class TraceCliTests(unittest.TestCase):
         self.assertIn(":2", self.cli("summary", ok=False))
 
     def test_raw_atif_and_unavailable_trajectories_are_distinguished(self):
-        self.path.write_text(json.dumps(self.record["trajectories"]["value"]["documents"][1]))
+        root = self.record["trajectories"]["value"]["documents"][1]
+        self.path.write_text(json.dumps(root))
         self.assertEqual(self.cli("summary")["document_count"], 1)
+        # Valid ATIF producers may serialize optional containers as null instead of omitting them.
+        for nullable_path in (("extra",), ("steps", 0, "extra"), ("steps", 0, "tool_calls"),
+                              ("steps", 0, "observation"),
+                              ("steps", 0, "observation", "results", 0, "extra")):
+            raw = json.loads(json.dumps(root))
+            parent = raw
+            for key in nullable_path[:-1]:
+                parent = parent[key]
+            parent[nullable_path[-1]] = None
+            self.path.write_text(json.dumps(raw))
+            for command in ("summary", "tools", "mine", "timeline"):
+                with self.subTest(nullable_path=nullable_path, command=command):
+                    self.assertEqual(self.cli(command)["run_id"], "run")
         self.record["trajectories"] = {"status": "unavailable", "reason": "capture failed", "value": None}
         self.path.write_text(json.dumps(self.record))
         report = self.cli("summary")

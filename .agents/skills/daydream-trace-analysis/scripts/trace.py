@@ -115,9 +115,9 @@ def steps(trace, args):
             continue
         # Only direct invocation rows belong to this document. Fork wrapper
         # invocations are repeated in the sibling document and are not counted.
-        invocations = doc.get("extra", {}).get("subtrajectories", [])
+        invocations = (doc.get("extra") or {}).get("subtrajectories", [])
         for si, step in enumerate(doc.get("steps", [])):
-            phase = step.get("extra", {}).get("daydream_phase")
+            phase = (step.get("extra") or {}).get("daydream_phase")
             if args.phase and phase != args.phase:
                 continue
             matches = [r.get("invocation_id") for r in invocations
@@ -130,15 +130,15 @@ def steps(trace, args):
 
 
 def failed(result):
-    extra = result.get("extra", {})
+    extra = result.get("extra") or {}
     return (extra.get("is_error") is True or extra.get("exit_code") not in (None, 0)
             or extra.get("status") in ("failed", "error", "cancelled", "interrupted"))
 
 
 def tools(trace, args):
     for doc, step, ref in steps(trace, args):
-        results = step.get("observation", {}).get("results", [])
-        for ci, call in enumerate(step.get("tool_calls", [])):
+        results = (step.get("observation") or {}).get("results", [])
+        for ci, call in enumerate(step.get("tool_calls") or []):
             call_id = call.get("tool_call_id")
             matched = [(ri, r) for ri, r in enumerate(results)
                        if call_id is not None and r.get("source_call_id") == call_id]
@@ -146,7 +146,7 @@ def tools(trace, args):
                    "function_name": call.get("function_name"), "arguments": call.get("arguments"),
                    "failed": any(failed(r) for _, r in matched),
                    "results": [{"pointer": ref["pointer"] + f"/observation/results/{ri}",
-                                "content": r.get("content"), "extra": r.get("extra", {})} for ri, r in matched]}
+                                "content": r.get("content"), "extra": r.get("extra") or {}} for ri, r in matched]}
 
 
 def tool_view(row, args):
@@ -160,12 +160,12 @@ def tool_view(row, args):
 
 def unmatched_results(trace, args):
     for doc, step, ref in steps(trace, args):
-        ids = {c.get("tool_call_id") for c in step.get("tool_calls", []) if c.get("tool_call_id") is not None}
-        for ri, result in enumerate(step.get("observation", {}).get("results", [])):
+        ids = {c.get("tool_call_id") for c in step.get("tool_calls") or [] if c.get("tool_call_id") is not None}
+        for ri, result in enumerate((step.get("observation") or {}).get("results", [])):
             if (result.get("source_call_id") not in ids and "subagent_trajectory_ref" not in result):
                 yield {**ref, "pointer": ref["pointer"] + f"/observation/results/{ri}",
                        "source_call_id": result.get("source_call_id"), "failed": failed(result),
-                       "extra": result.get("extra", {}),
+                       "extra": result.get("extra") or {},
                        "content": preview(result.get("content"), args.chars)}
 
 
@@ -178,7 +178,7 @@ def summary(trace, args):
     for di, doc in enumerate(docs):
         own_calls = [r for r in calls if r["doc"] == di]
         rows.append({"doc": di, "pointer": doc_pointer(trace, di), "trajectory_id": doc.get("trajectory_id"),
-                     "backend": doc.get("extra", {}).get("backend"), "agent": doc.get("agent"),
+                     "backend": (doc.get("extra") or {}).get("backend"), "agent": doc.get("agent"),
                      "steps": len(doc.get("steps", [])), "tool_calls": len(own_calls),
                      "failed_calls": sum(r["failed"] for r in own_calls),
                      "result_chars": sum(len(preview(r["content"], sys.maxsize))
@@ -187,7 +187,7 @@ def summary(trace, args):
     diagnostics = [{**ref, "pointer": ref["pointer"] + "/extra/" + key,
                     "excerpt": preview(value, args.chars)}
                    for doc, step, ref in steps(trace, args)
-                   for key, value in step.get("extra", {}).items()
+                   for key, value in (step.get("extra") or {}).items()
                    if "diagnostic" in key or "budget_stop" in key]
     availability = {k: {"status": v.get("status"), "reason": v.get("reason")}
                     for k, v in record.items() if isinstance(v, dict) and "status" in v and "value" in v}
@@ -208,7 +208,7 @@ def timeline(trace, args):
         if args.doc is not None and args.doc != di:
             continue
         dp = doc_pointer(trace, di)
-        extra = doc.get("extra", {})
+        extra = doc.get("extra") or {}
         starts = {}
         for ei, event in enumerate(extra.get("phase_events", [])):
             key = (event.get("session_id"), event.get("scope_id"), event.get("phase"))
@@ -276,8 +276,16 @@ def search(trace, args):
     needle = args.query.casefold()
     for pointer, value in walk(trace["record"]):
         if isinstance(value, str):
-            pos = value.casefold().find(needle)
-            if pos >= 0:
+            folded_pos = value.casefold().find(needle)
+            if folded_pos >= 0:
+                # Case folding can expand characters; report offsets in the original text.
+                pos = 0
+                for char in value:
+                    width = len(char.casefold())
+                    if folded_pos < width:
+                        break
+                    folded_pos -= width
+                    pos += 1
                 start = max(0, pos - args.chars // 3)
                 hits.append({"pointer": pointer, "match_offset": pos, "excerpt_offset": start,
                              "total_chars": len(value), "excerpt": value[start:start + args.chars]})
