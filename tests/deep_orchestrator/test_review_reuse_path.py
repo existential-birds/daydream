@@ -18,6 +18,7 @@ import daydream
 from daydream import git_ops
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep import reuse_store
+from daydream.deep.render import render_report
 from daydream.phases import build_commit_message
 from daydream.review_profile import resolve_profile
 from daydream.runner import run
@@ -34,7 +35,7 @@ from tests.harness.review_profile import (
 )
 from tests.harness.review_result import saved_coverage
 from tests.harness.stub_backend import install_stub_backend
-from tests.test_deep_orchestrator import MakeConfig
+from tests.test_deep_orchestrator import MakeConfig, _merge_item
 
 
 def _records_bytes(target: Path) -> dict[str, bytes]:
@@ -195,6 +196,84 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
             os.close(report_fd)
     finally:
         os.close(parent_fd)
+
+
+async def test_obsolete_completed_synthesis_is_replaced_and_current_output_reused(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+) -> None:
+    """Old host-appended duplicates must miss even when all contributing bytes match.
+
+    The identical-rerun test proves reuse within one contract; it cannot catch a
+    completed result produced before synthesis became authoritative. Keep the
+    old entry valid and complete so only the changed synthesis policy rejects it.
+    """
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    structural_description = "A cache hit retains the previous snapshot's boundary decision"
+    stub.parse_by_stack = {"structure": {
+        "description": structural_description, "severity": "medium", "confidence": "MEDIUM",
+    }}
+    authored = _merge_item(1, "api.py", "medium", desc="Reused state crosses the request ownership boundary")
+    authored["source_uids"] = ["python:1", "structure:1"]
+    stub.merge_items = [authored]
+    config = make_config(multi_stack_target, shallow_fanout_threshold=0)
+    assert await run(config) == 0
+    deep = multi_stack_target / ".daydream" / "deep"
+    assert all(scope["status"] == "complete" for scope in saved_coverage(deep).scopes.values())
+    records = {name: data for name, data in _records_bytes(multi_stack_target).items()
+               if name.startswith("stack-")}
+    structural = json.loads(records["stack-structure-records.json"])["issues"][0]
+    old_items = [dict(authored, item_uid="item:1"),
+                 dict(structural, id=2, item_uid="item:2", lens="structural", source_uids=[structural["uid"]])]
+    old_payload = {
+        "merged-items.json": json.dumps({"items": old_items}, indent=2).encode(),
+        "review-output.md": render_report(old_items).encode(),
+    }
+    entries = deep.parent / "review-cache" / "entries"
+    manifest_path = next(path for path in entries.glob("*/manifest.json")
+                         if json.loads(path.read_text())["unit"] == "merge")
+    manifest = json.loads(manifest_path.read_text())
+    manifest["components"].pop("synthesis_policy", None)
+    old_key = hashlib.sha256(json.dumps({
+        "format": manifest["format"], "unit": manifest["unit"], "components": manifest["components"],
+    }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    manifest["key"] = old_key
+    for name, content in old_payload.items():
+        (manifest_path.parent / name).write_bytes(content)
+        manifest["payload"][name] = hashlib.sha256(content).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+    old_entry = entries / old_key
+    if manifest_path.parent != old_entry:
+        manifest_path.parent.rename(old_entry)
+    assert (old_entry / "complete.marker").is_file()
+    assert manifest["coverage"]["status"] == "complete"
+
+    stub.calls.clear()
+    assert await run(config) == 0
+    assert _count_merge_prompts(stub.calls) == 1, "obsolete completed synthesis was restored"
+    assert {name: (deep / name).read_bytes() for name in records} == records
+    current = json.loads((deep / "merged-items.json").read_text())["items"]
+    assert [item["description"] for item in current] == [authored["description"]]
+    assert structural_description not in (multi_stack_target / ".review-output.md").read_text()
+    canonical = (deep / "merged-items.json").read_bytes()
+    assert cast(dict[str, Any], _latest_provenance(deep)["units"])["merge"]["outcome"] != "hit"
+
+    stub.calls.clear()
+    assert await run(config) == 0
+    assert _review_surface_prompts(stub.calls) == []
+    assert (deep / "merged-items.json").read_bytes() == canonical
+    assert cast(dict[str, Any], _latest_provenance(deep)["units"])["merge"]["outcome"] == "hit"
+
+    # An explicit resume must consume saved reviewer records and overwrite the
+    # obsolete canonical projection rather than resurrect either cache result.
+    for name, content in old_payload.items():
+        (deep / name).write_bytes(content)
+    stub.calls.clear()
+    assert await run(make_config(multi_stack_target, start_at="merge", shallow_fanout_threshold=0)) == 0
+    assert _count_merge_prompts(stub.calls) == 1
+    assert _count_review_prompts(stub.calls) == 0
+    assert {name: (deep / name).read_bytes() for name in records} == records
+    assert (deep / "merged-items.json").read_bytes() == canonical
+    assert structural_description not in (multi_stack_target / ".review-output.md").read_text()
 
 
 async def test_precision_overlap_publishes_only_joined_whole_unit_and_restores_both_passes(

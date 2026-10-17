@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Supply retained structural findings to merge synthesis and publish its validated result without reintroducing absorbed or omitted findings; bind whole-file privileges to structural provenance and invalidate obsolete merge reuse ([#1582](https://github.com/existential-birds/daydream/issues/1582)).
+
 - **eval/runner:** limit quality metrics and clone peers to Git's tracked plus nonignored untracked source, excluding ignored artifact trees, and show finalization stages and elapsed completion or failure in noninteractive runs. Git inventory failures no longer permit recursive fallback; standalone non-Git analysis retains its existing discovery behavior ([#1580](https://github.com/existential-birds/daydream/issues/1580)).
 
 - **improve:** audit ordinary files alongside tracked submodule references, retain surviving branch type replacements, and explicitly report uncaptured submodule contents ([#1406](https://github.com/existential-birds/daydream/issues/1406)).

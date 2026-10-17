@@ -596,7 +596,7 @@ async def test_deep_run_archives_location_and_shipped_duplication_axes(
 ) -> None:
     """Score the near-duplicate pair's original lines 1 and 88 after demotion.
 
-    The harness adds one distinct structural finding to the real deep run.
+    Synthesis retains one distinct structural finding in the real deep run.
     """
     stub = _install_deep_capture_backend(multi_stack_target, monkeypatch)
     stub.fix_edit_line = "# daydream recommended change\n"
@@ -605,7 +605,10 @@ async def test_deep_run_archives_location_and_shipped_duplication_axes(
         **_merge_item(2, "api.py", "medium", desc="The loader fails to validate the config path"), "line": 88,
         "evidence": "api.py:88",
     }
-    stub.merge_items = [anchored, mis_anchored]
+    stub.merge_items = [anchored, mis_anchored,
+        {**_merge_item(3, "api.py", "medium", desc="Structural maintainability concern"),
+         "lens": "structural", "source_uids": ["structure:1"]},
+    ]
     exit_code = await run(_deep_run_config(multi_stack_target))
     assert exit_code == 0
 

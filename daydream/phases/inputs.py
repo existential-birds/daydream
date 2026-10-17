@@ -44,6 +44,7 @@ def _prepare_existing_phase_inputs(
     exploration_dir: Path | None = None,
     read_only: bool = False,
     capture_without_session: bool = False,
+    required_inputs: Mapping[str, Path] | None = None,
 ) -> PreparedSanctionedInputs | None:
     """Capture existing named inputs, shared exploration files, and bounded-review finalization inputs."""
     if not artifact_session_active() and not capture_without_session:
@@ -56,9 +57,9 @@ def _prepare_existing_phase_inputs(
     return prepare_sanctioned_inputs(
         backend,
         work.repo,
-        {label: path for label, path in captured.items() if path is not None and (
+        {**{label: path for label, path in captured.items() if path is not None and (
             path.is_file() or label == "diff" and uses_diff_reference(backend, work.repo, read_only=read_only)
-        )},
+        )}, **(required_inputs or {})},
         read_only=read_only,
     )
 

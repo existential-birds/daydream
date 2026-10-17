@@ -339,9 +339,9 @@ async def test_current_api_stable_keys_share_state_and_reparse_filtered_items(
     filtered_items = json.loads(
         (multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text()
     )["items"]
-    assert [item["description"] for item in filtered_items] == [KEEP_ME, "Structural maintainability concern"]
+    assert [item["description"] for item in filtered_items] == [KEEP_ME]
     assert values["after-fix-gate"]["items"] == {
-        "type": "list", "length": 2, "descriptions": [KEEP_ME, "Structural maintainability concern"],
+        "type": "list", "length": 1, "descriptions": [KEEP_ME],
     }
     assert KEEP_ME in fix_prompts
     assert DROP_ME not in fix_prompts

@@ -1362,16 +1362,19 @@ def test_is_evidenced_gate_branches() -> None:
     assert _is_evidenced(
         {"confidence": "MEDIUM", "rationale": "r", "file": "", "line": 0, "evidence": "see src/util.py:88"}
     ) is True
-    # Host-tagged whole-file findings survive with line 0 and colon-free evidence.
+    # Source-bound whole-file findings survive with line 0 and colon-free evidence.
+    structural_sources = frozenset({"structure:1"})
     assert _is_evidenced({"confidence": "HIGH", "rationale": "r", "lens": "structural",
-         "file": "big.py", "line": 0, "evidence": "big.py is 1200 lines"}
+         "file": "big.py", "line": 0, "evidence": "big.py is 1200 lines", "source_uids": ["structure:1"]},
+         structural_sources,
     ) is True
     # Structural still drops on LOW / blank evidence.
     assert _is_evidenced({"confidence": "LOW", "rationale": "r", "lens": "structural",
-         "file": "big.py", "line": 0, "evidence": "big.py:1"}
+         "file": "big.py", "line": 0, "evidence": "big.py:1", "source_uids": ["structure:1"]}, structural_sources,
     ) is False
     assert _is_evidenced(
-        {"confidence": "HIGH", "rationale": "r", "lens": "structural", "file": "big.py", "line": 0, "evidence": ""}
+        {"confidence": "HIGH", "rationale": "r", "lens": "structural", "file": "big.py", "line": 0, "evidence": "",
+         "source_uids": ["structure:1"]}, structural_sources,
     ) is False
 
 
@@ -2036,10 +2039,11 @@ _MERGE_ITEMS = merge_result([{
     "confidence": "HIGH", "rationale": "r", "evidence": "a.py:1",
 }])
 
-@pytest.mark.parametrize("inline", [False, True])
+@pytest.mark.parametrize(("inline", "structural_bytes"), [(False, 7_880), (True, 7_880), (True, 400)])
 async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
-    tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None, inline: bool,
+    tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None, inline: bool, structural_bytes: int,
 ) -> None:
+    """Structural inputs reach the backend under the same closed transport budget as language records."""
 
     repo = tmp_path / "repo"
     init_repo(repo)
@@ -2057,8 +2061,8 @@ async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
     async with _private_session(tmp_path, work, f"phase-merge-{inline}"):
         deep = artifact_dir_for(repo, allow_standalone=True) / "deep"
         deep.mkdir(parents=True)
-        intent = _write_sized(deep / "intent.md", "intent", 6_361)
-        alternatives = _write_sized(deep / "alternatives.json", "[]", 6_234)
+        intent = _write_sized(deep / "intent.md", "intent", 361)
+        alternatives = _write_sized(deep / "alternatives.json", "[]", 234)
         dedup = _write_sized(deep / "dedup.json", "[]", 60)
         # A transport-budget test needs a model-owned finding to dispatch merge.
         # Keep the same on-disk byte sizes so its exact/inline budget stays fixed.
@@ -2067,7 +2071,12 @@ async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
                                          "evidence": "base.py:1", "uid": "python:1"}]})
         python_records = _write_sized(deep / "python-records.json", records, 7_593)
         generic_records = _write_sized(deep / "generic-records.json", '{"issues": []}', 2_180)
-        structural = _write_sized(deep / "structural-records.json", '{"issues": []}', 7_880)
+        structural_records = json.dumps({"issues": [{"id": 1, "description": "Structural finding", "file": "base.py",
+            "line": 1, "severity": "low", "confidence": "MEDIUM", "rationale": "stub", "evidence": "base.py:1",
+            "uid": "structure:1"}]})
+        structural = _write_sized(deep / "structural-records.json", structural_records, structural_bytes)
+        sibling = deep / "unsanctioned.json"
+        sibling.write_text("UNSANCTIONED_SIBLING_CONTENT", encoding="utf-8")
         exploration = deep / "exploration"
         exploration.mkdir()
         _write_sized(exploration / "summary.md", "summary", 613)
@@ -2078,8 +2087,8 @@ async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
             alternatives_path=alternatives, dedup_candidates_path=dedup, structural_records_path=structural,
             exploration_dir=exploration, allow_standalone=True,
         )
-        if inline:
-            with pytest.raises(SanctionedInputUnavailable, match="byte budget"):
+        if inline and structural_bytes == 7_880:
+            with pytest.raises(SanctionedInputUnavailable, match="structural-records.*byte budget"):
                 await call
             assert backend.call_count == 0
             return
@@ -2087,11 +2096,53 @@ async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
         await call
         assert backend.call_count == 1
         prompt = backend.last_prompt
+        assert str(sibling) not in prompt
+        assert "UNSANCTIONED_SIBLING_CONTENT" not in prompt
+        if inline:
+            assert structural.read_text(encoding="utf-8") in prompt
+            assert python_records.read_text(encoding="utf-8") in prompt
+            assert '<sanctioned-input label="structural-records">' in prompt
+            assert str(deep) not in prompt
+            assert getattr(backend, "audit_root") == repo.resolve()
+            return
         for expected in (intent, alternatives, dedup, python_records, generic_records, exploration / "summary.md",
-            exploration / "affected_files.md",
+            exploration / "affected_files.md", structural,
         ):
             assert str(expected) in prompt
-        assert str(structural) not in prompt
+
+@pytest.mark.parametrize("inline", [False, True])
+@pytest.mark.parametrize("unavailable", ["missing", "symlink"])
+async def test_merge_rejects_unavailable_requested_structural_input(
+    tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None, inline: bool, unavailable: str,
+) -> None:
+    """A requested structural source cannot silently disappear or expand access through a symlink."""
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    work = make_work(repo)
+    backend = _inline_or_exact_backend(repo, inline=inline, events=_structured_turn(_MERGE_ITEMS))
+    async with _private_session(tmp_path, work, f"merge-unavailable-{inline}-{unavailable}"):
+        deep = artifact_dir_for(repo, allow_standalone=True) / "deep"
+        deep.mkdir(parents=True)
+        language = deep / "python-records.json"
+        language.write_text(json.dumps({"issues": [{"id": 1, "description": "Language finding"}]}))
+        intent = deep / "intent.md"
+        intent.write_text("intent")
+        alternatives = deep / "alternatives.json"
+        alternatives.write_text("[]")
+        dedup = deep / "dedup.json"
+        dedup.write_text("[]")
+        structural = deep / "structural-records.json"
+        if unavailable == "symlink":
+            outside = tmp_path / "outside-records.json"
+            outside.write_text('{"issues": []}')
+            structural.symlink_to(outside)
+
+        with pytest.raises(SanctionedInputUnavailable, match="structural"):
+            await phase_cross_stack_merge(
+                backend, work, per_stack_records_paths=[language], intent_path=intent, alternatives_path=alternatives,
+                dedup_candidates_path=dedup, structural_records_path=structural, allow_standalone=True,
+            )
+        assert backend.call_count == 0
 
 @pytest.mark.asyncio
 async def test_phase_understand_intent_inline_exploration_budget_degrades(

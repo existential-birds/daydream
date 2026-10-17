@@ -570,13 +570,14 @@ def build_merge_prompt(
     dedup_candidates_path: Path,
     exploration_dir: Path | None = None,
     failed_stacks: dict[str, str] | None = None,
+    structural_records_path: Path | None = None,
     intent_authoritative: bool = False,
     resumed_from_arbiter: bool = False,
 ) -> str:
     """Merge parsed records and dedup candidates into canonical findings.
 
-    The host appends structural findings after merge, stamps contiguous IDs, and
-    validates source_uids against input records. Failed stacks remain explicit;
+    All retained language and structural records are synthesis inputs. The host
+    validates provenance and evidence and renumbers the authoritative result. Failed stacks remain explicit;
     resuming an arbiter session requires re-reading its rewritten input records.
     """
     records_block = "\n".join(f"  - {p}" for p in per_stack_records_paths)
@@ -592,6 +593,8 @@ def build_merge_prompt(
     if intent_authoritative:
         context_lines.insert(1, AUTHORITATIVE_INTENT_BLOCK)  # right after the intent line
     context_lines.append(f"Per-stack parsed records:\n{records_block}")
+    if structural_records_path is not None:
+        context_lines.append(f"Retained structural records:\n  - {structural_records_path}")
     parts.append("\n".join(context_lines))
     if failed_stacks:
         failed_block = "\n".join(
@@ -629,8 +632,7 @@ def build_merge_prompt(
         "  - id: integer; any value -- the host renumbers contiguously.\n"
         "  - lens: \"per-stack\" for a single-stack finding, \"cross-stack\" for a "
         "concern spanning multiple stacks, and \"wonder\" for an "
-        "alternatives.json-sourced finding. (Structural findings are appended by "
-        "the host -- do NOT emit them yourself.)\n"
+        "alternatives.json-sourced finding. Use \"structural\" for a retained structural concern.\n"
         "  - severity: one level per the rubric below.\n"
         "  - confidence: \"HIGH\" | \"MEDIUM\" | \"LOW\".\n"
         "  - file: the FULL repo-relative path exactly as it appears in the per-stack "
@@ -662,10 +664,15 @@ def build_merge_prompt(
         "`(Sources: ...)` citation still belongs in `rationale` for the reader, "
         "so emit both.\n\n"
         "Rules:\n"
+        "  - Compare ALL retained language and structural records, even without a dedup candidate. "
+        "Combine reports of the same defect into one item with every contributing source_uid, "
+        "grounded evidence, affected files and justified severity. Keep distinct concerns. "
+        "You may omit unsupported or non-actionable concerns under these synthesis rules. "
+        "Your validated item set is authoritative; the host will not append omitted records.\n"
         "  - Each item's `file` contains EXACTLY ONE path. For a concern that spans "
-        "multiple files AND was NOT flagged as a duplicate in "
-        "record_duplicate_pairs, emit a separate item per file. For deduplicated "
-        "findings (same concern across files), emit ONE item with the primary file "
+        "multiple files, emit separate items only for distinct defects. For the "
+        "same defect across files, whether or not a candidate pair was supplied, "
+        "emit ONE item with the primary file "
         "and list every other affected file in the `related_files` array (NOT buried "
         "in the rationale).\n"
         "  - Do not invent findings not supported by the source records.\n\n" + SEVERITY_RUBRIC

@@ -5,6 +5,7 @@ import json
 from collections.abc import Callable
 from contextvars import ContextVar
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -63,6 +64,7 @@ async def test_empty_merge_requires_completed_inputs_and_builtin_contract(
 ) -> None:
     dd, records, alternatives = _empty_merge_inputs(tmp_path)
     strategy: str | None = None
+    structural: Path | None = None
     if input_kind == "nonempty-records":
         records.write_text('[{"id": 1, "description": "review finding"}]')
     elif input_kind == "nonempty-alternatives":
@@ -79,17 +81,31 @@ async def test_empty_merge_requires_completed_inputs_and_builtin_contract(
         strategy = "Perform an independent custom merge inspection."
     elif input_kind == "custom-builder":
         registry = get_registry()
-        registry.override_prompt("merge", lambda **kwargs: build_merge_prompt(**kwargs))
+        structural = dd / "stack-structure-records.json"
+        structural.write_text(json.dumps({"issues": [{
+            "id": 1, "uid": "structure:1", "file": "design.py", "line": 0,
+            "description": "Retained structural concern", "evidence": "Dependency violates the documented boundary",
+            "confidence": "HIGH", "severity": "medium", "rationale": "Module coupling",
+        }]}))
+
+        def custom_builder(**kwargs: Any) -> str:
+            assert kwargs["structural_records_path"] == structural
+            return build_merge_prompt(**kwargs)
+
+        registry.override_prompt("merge", custom_builder)
         monkeypatch.setattr("daydream.extensions.loader._REGISTRY_VAR", ContextVar("merge-registry", default=registry))
     backend = ScriptedBackend(events=[ResultEvent(structured_output={"items": []}, continuation=None)])
 
     await phase_cross_stack_merge(
         backend, make_work(tmp_path), per_stack_records_paths=[] if input_kind == "no-record-paths" else [records],
         intent_path=dd / "intent.md", alternatives_path=alternatives,
-        dedup_candidates_path=dd / "dedup-candidates.json", strategy=strategy, allow_standalone=True,
+        dedup_candidates_path=dd / "dedup-candidates.json", strategy=strategy, structural_records_path=structural,
+        allow_standalone=True,
     )
 
     assert backend.call_count == 1
+    if input_kind == "custom-builder":
+        assert json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text()) == {"items": []}
 
 
 async def test_empty_merge_keeps_structural_findings_and_clears_stale_outputs(

@@ -427,8 +427,12 @@ async def test_fix_gate_runs_when_all_canonical_findings_are_outside_reviewed_di
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     seed_base_support_files(multi_stack_target, {'docs/elsewhere.md': '# Greeting contract\nhello() returns world.\n',
         'notes.txt': 'Calling hello() must preserve the documented world greeting.\n'})
-    stub.merge_items = [_merge_item(1, "notes.txt", "high", desc="out-of-scope finding")]
-    # Route the appended structural finding to another off-diff file; the
+    stub.merge_items = [
+        _merge_item(1, "notes.txt", "high", desc="out-of-scope finding"),
+        {**_merge_item(2, "docs/elsewhere.md", "high", desc="structural finding outside the reviewed diff"),
+         "lens": "structural", "source_uids": ["structure:1"]},
+    ]
+    # Supply a real structural source for the model-retained off-diff finding; the
     # stub's default structural parse emits ``file=api.py``.
     stub.parse_by_stack = {"structure": {
             "severity": "high", "confidence": "HIGH", "file": "docs/elsewhere.md", "line": 1,

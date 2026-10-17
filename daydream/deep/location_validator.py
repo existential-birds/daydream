@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from daydream.deep.records import item_source_uids
 from daydream.hunk_index import range_distance
 from daydream.pr_review import HUNK_TOLERANCE
 
@@ -58,6 +59,8 @@ def validate_records(
     index: dict[str, Any],
     records: list[dict[str, Any]],
     tolerance: int = HUNK_TOLERANCE,
+    *,
+    structural_source_uids: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Snap nearby citations and demote distant ones in place, returning the same list.
 
@@ -74,13 +77,9 @@ def validate_records(
         line = record.get("line")
         if file is None or not isinstance(line, int):
             continue
-        # Structural whole-file findings (``lens="structural"``) carry
-        # ``line: 0`` -- a whole-file citation, not a real changed line.
-        # ``_is_evidenced`` exempts the structural lens from the grounded-citation
-        # requirement for exactly this reason, so the snap/demote must not treat
-        # ``line: 0`` as a citation just because the file is in the hunk index
-        # and snap it to a boundary or demote a whole-file finding (issue #745).
-        if record.get("lens") == "structural" and line == 0:
+        # Whole-file evidence and location privileges share the same retained
+        # structural provenance. A model-controlled lens cannot grant either.
+        if line == 0 and structural_source_uids.intersection(item_source_uids(record)):
             continue
         check = validate_finding(index, file, line)
         if check.distance is None or check.nearest_hunk is None:

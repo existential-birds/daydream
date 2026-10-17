@@ -27,6 +27,7 @@ from daydream.phases.findings import (
     _append_structural_and_write_merged,
     _reset_merged_outputs,
     _validate_agent_source_uids,
+    _write_merged_items,
 )
 from daydream.phases.inputs import _prepare_existing_phase_inputs, append_extended_facts
 from daydream.phases.schemas import MERGED_ITEMS_SCHEMA
@@ -87,12 +88,10 @@ async def phase_cross_stack_merge(
     allow_standalone: bool = False,
     run_context: RunContext | None = None,
 ) -> Path:
-    """Merge language findings, append host-tagged structural records, and publish both formats.
+    """Synthesize retained language and structural records into canonical findings.
 
-    per_stack_records_paths excludes the structural meta-stack; structural_records_path
-    is appended separately, preserving severity and defaulting unlabeled records to
-    high. The normalized list is written as merged-items.json, rendered in deep/,
-    and copied to the repository report path, which is returned.
+    Successful synthesis owns the published item set; only host-only bypass and
+    salvage paths append structural findings independently.
 
     failed_stacks names uncovered scopes. Authoritative intent requires fresh,
     head-matched PR evidence; an absent strategy uses the packaged merge strategy.
@@ -142,6 +141,7 @@ async def phase_cross_stack_merge(
         dedup_candidates_path=dedup_candidates_path,
         exploration_dir=exploration_dir,
         failed_stacks=failed_stacks,
+        structural_records_path=structural_records_path,
         intent_authoritative=intent_authoritative,
         resumed_from_arbiter=continuation is not None,
     )
@@ -157,6 +157,8 @@ async def phase_cross_stack_merge(
     }
     sanctioned_inputs = _prepare_existing_phase_inputs(
         backend, work, merge_inputs, exploration_dir=exploration_dir, capture_without_session=True,
+        required_inputs=({"structural-records": structural_records_path}
+                         if structural_records_path is not None else None),
     )
     ui.print_phase_hero(agent.console, "MERGE", ui.phase_subtitle("MERGE"))
     ui.print_dim(agent.console, f"Model: {backend.model}")
@@ -172,7 +174,7 @@ async def phase_cross_stack_merge(
         finalization_context=FinalizationContext(
             task="Merge completed review records",
             input_priority=tuple(label for label in merge_inputs if label.startswith("stack-records-"))
-            + ("intent", "dedup-candidates"),
+            + ("structural-records", "intent", "dedup-candidates"),
             output_semantics="Return merged items in the required schema, preserving source finding identities and "
             "grounded defects. Empty items is valid only if the supplied completed records establish no findings. "
             "Do not infer clean coverage from absent, incomplete, or omitted records.",
@@ -202,13 +204,9 @@ async def phase_cross_stack_merge(
         )
     agent_items: list[dict[str, Any]] = item_list
 
-    # Validate agent provenance before structural folding unions source UIDs;
-    # otherwise an invented UID could contaminate another item's attribution.
-    # Validation removes bad claims without failing the merge.
-    _validate_agent_source_uids(agent_items, per_stack_records_paths, structural_records_path)
-
-    # Share append/render with the bypass to keep lenses and verifier counts aligned.
-    _append_structural_and_write_merged(
-        agent_items, structural_records_path, items_path, report_path, canonical_path
+    # Clamp attribution before the evidence gate grants source-bound privileges.
+    structural_source_uids = _validate_agent_source_uids(
+        agent_items, per_stack_records_paths, structural_records_path,
     )
+    _write_merged_items(agent_items, items_path, report_path, canonical_path, structural_source_uids)
     return canonical_path

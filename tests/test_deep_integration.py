@@ -82,16 +82,17 @@ class _DeepMockBackend(ScriptedBackend):
             events += [TextEvent(text=""), ResultEvent(structured_output={"issues": []}, continuation=None)]
             return events
 
-        # Backend parity fixtures exercise the model merge with language findings;
+        # Backend parity fixtures synthesize every retained language/structural finding;
         # structural-only fixtures retain the host's deterministic merge path.
         if "cross-stack merge agent" in pl:
             self.stages.append("merge")
-            record_paths = re.findall(r"^- stack-records-\d+: (.+)$", prompt, re.MULTILINE)
+            record_paths = re.findall(r"^- (?:stack-records-\d+|structural-records): (.+)$", prompt, re.MULTILINE)
             assert record_paths, "merge did not receive sanctioned stack records"
             for path in record_paths:
                 self.merge_records.extend(json.loads(Path(path).read_text())["issues"])
             items = [
-                {"id": index, "lens": "per-stack", "source_uids": [finding["uid"]],
+                {"id": index, "lens": "structural" if finding["uid"].startswith("structure:") else "per-stack",
+                 "source_uids": [finding["uid"]],
                  **{key: finding[key] for key in (
                      "description", "file", "line", "severity", "confidence", "rationale", "evidence",
                  )}}
@@ -163,6 +164,7 @@ async def test_claude_shape_backend(multi_stack_target: Path, monkeypatch: pytes
     report = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
     assert [(finding["uid"], finding["description"]) for finding in backend.merge_records] == [
         ("python:1", "Python greeting return changed"),
+        ("structure:1", "Greeting contract changed across modules"),
     ]
     items = json.loads((multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text())
     language_items = [item for item in items["items"] if item["lens"] == "per-stack"]
@@ -182,6 +184,7 @@ async def test_codex_shape_backend(multi_stack_target: Path, monkeypatch: pytest
     report = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
     assert [(finding["uid"], finding["description"]) for finding in backend.merge_records] == [
         ("python:1", "Python greeting return changed"),
+        ("structure:1", "Greeting contract changed across modules"),
     ]
     items = json.loads((multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text())
     language_items = [item for item in items["items"] if item["lens"] == "per-stack"]

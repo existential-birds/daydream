@@ -82,8 +82,8 @@ def normalize_items(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
 _PLACEHOLDER_EVIDENCE: frozenset[str] = frozenset({"n/a", "none", "-"})
 
 
-def _is_evidenced(item: dict[str, Any]) -> bool:
-    """Require concrete evidence and a grounded citation except for host-tagged structural items."""
+def _is_evidenced(item: dict[str, Any], structural_source_uids: frozenset[str] = frozenset()) -> bool:
+    """Require grounding; whole-file privilege belongs only to retained structural sources."""
     # Authored LOW confidence is speculative; location demotion runs after this gate.
     if str(item.get("confidence", "")).upper() == "LOW":
         return False
@@ -103,9 +103,9 @@ def _is_evidenced(item: dict[str, Any]) -> bool:
     # bare symbols such as helper:42; those need explicit file/line grounding.
     has_citation = bool(re.search(r"\S*[./]\S*:\d+", evidence))
 
-    # Host-tagged structural findings may be whole-file (line:0) with colon-free
-    # evidence. Nonblank evidence suffices for this distinct trust class.
-    if item.get("lens") == "structural":
+    # Lens is model-controlled during synthesis. Only validated structural
+    # provenance can establish the whole-file evidence privilege.
+    if structural_source_uids.intersection(item_source_uids(item)):
         return True
 
     return has_file_line or has_citation
@@ -114,6 +114,7 @@ def _is_evidenced(item: dict[str, Any]) -> bool:
 def _evidence_gate_then_validate(
     raw_items: list[dict[str, Any]],
     items_path: Path,
+    structural_source_uids: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Drop speculative findings before location validation can demote retained findings.
 
@@ -124,7 +125,7 @@ def _evidence_gate_then_validate(
     evidenced: list[dict[str, Any]] = []
     dropped: list[dict[str, Any]] = []
     for item in raw_items:
-        (evidenced if _is_evidenced(item) else dropped).append(item)
+        (evidenced if _is_evidenced(item, structural_source_uids) else dropped).append(item)
 
     if dropped:
         sidecar_path = items_path.parent / "dropped-speculative.json"
@@ -156,7 +157,7 @@ def _evidence_gate_then_validate(
         )
 
     index = load_hunk_index(items_path.parent.parent)
-    return validate_records(index, evidenced)
+    return validate_records(index, evidenced, structural_source_uids=structural_source_uids)
 
 
 def severity_sorted(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -174,6 +175,7 @@ def _fold_structural_duplicates(
     Choose the best description match, then the strongest normalized severity,
     then the earliest input position. Record similarity ties for auditability.
     """
+    structural_source_uids = frozenset(uid for item in structural_items for uid in item_source_uids(item))
     surviving: list[dict[str, Any]] = []
     fold_records: list[dict[str, Any]] = []
     for item in structural_items:
@@ -202,7 +204,9 @@ def _fold_structural_duplicates(
         )
         # The evidence gate must not discard both twins. An evidenced structural
         # item survives when its base twin would be dropped as speculative.
-        survivor_is_structural = not _is_evidenced(twin) and _is_evidenced(item)
+        survivor_is_structural = (
+            not _is_evidenced(twin, structural_source_uids) and _is_evidenced(item, structural_source_uids)
+        )
         survivor, absorbed = (item, twin) if survivor_is_structural else (twin, item)
         source_uids = union_source_uids(item_source_uids(survivor), item_source_uids(absorbed))
         survivor[RECORD_SOURCE_UIDS_KEY] = source_uids
@@ -258,8 +262,21 @@ def _append_structural_and_write_merged(
     canonical_path: Path,
 ) -> None:
     """Fold structural twins, gate evidence, validate locations, then publish both views."""
-    structural = _fold_structural_duplicates(base_items, _load_structural_items(structural_records_path), items_path)
-    items = normalize_items(_evidence_gate_then_validate(base_items + structural, items_path))
+    structural_items = _load_structural_items(structural_records_path)
+    structural_source_uids = frozenset(uid for item in structural_items for uid in item_source_uids(item))
+    structural = _fold_structural_duplicates(base_items, structural_items, items_path)
+    _write_merged_items(base_items + structural, items_path, report_path, canonical_path, structural_source_uids)
+
+
+def _write_merged_items(
+    raw_items: list[dict[str, Any]],
+    items_path: Path,
+    report_path: Path,
+    canonical_path: Path,
+    structural_source_uids: frozenset[str],
+) -> None:
+    """Publish the supplied set once after evidence gating and normalization."""
+    items = normalize_items(_evidence_gate_then_validate(raw_items, items_path, structural_source_uids))
     items_path.write_text(json.dumps({"items": items}, indent=2))
     ui.print_info(agent.console, f"Merged into {len(items)} items")
     report = render_report(items)
@@ -323,14 +340,16 @@ def _validate_agent_source_uids(
     agent_items: list[dict[str, Any]],
     per_stack_records_paths: list[Path],
     structural_records_path: Path | None,
-) -> None:
+) -> frozenset[str]:
     """Clamp model source_uids to the run's real language/structural record pool in place.
 
     Unknown claims are discarded without dropping findings. Every dict item receives
     a source_uids list, possibly empty to honestly represent absent provenance.
+    Return the retained structural sources that can authorize whole-file evidence.
     """
     # Unreadable records cannot establish model-owned provenance.
     pool: set[str] = set()
+    structural_source_uids: set[str] = set()
     records_paths = list(per_stack_records_paths)
     if structural_records_path is not None:
         records_paths.append(structural_records_path)
@@ -353,6 +372,8 @@ def _validate_agent_source_uids(
                 uid = record_uid(record)
                 if uid:
                     pool.add(uid)
+                    if records_path == structural_records_path:
+                        structural_source_uids.add(uid)
 
     unknown: dict[str, None] = {}
     unattributed = 0
@@ -383,3 +404,5 @@ def _validate_agent_source_uids(
             f"({shown}); dropped them from item provenance. "
             f"{unattributed} of {len(agent_items)} merged item(s) now carry no record attribution.",
         )
+
+    return frozenset(structural_source_uids)

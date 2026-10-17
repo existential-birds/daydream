@@ -345,8 +345,7 @@ async def test_parallel_fix_footprint_intersection_dispatches_to_one_agent(
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))
     assert exit_code == 0
     # a.py and b.py findings fixed in ONE batched turn (footprint union);
-    # c.py is a separate per-finding turn. (The fixture also dispatches its own
-    # in-scope structural item -- api.py "Sample issue" -- as its own turn.)
+    # c.py is a separate per-finding turn. Only the model-retained set dispatches.
     fix_calls = [c
         for c in stub.calls
         if c["prompt"].lower().startswith("fix this issue") or c["prompt"].lower().startswith("fix these")
@@ -354,7 +353,7 @@ async def test_parallel_fix_footprint_intersection_dispatches_to_one_agent(
     batched = [c for c in fix_calls if "fix these" in c["prompt"].lower()]
     assert len(batched) == 1  # a.py and b.py fixed together, not two per-file turns
     assert "issues in " in batched[0]["prompt"]
-    assert len(fix_calls) == 3  # merged {a,b} group + c.py + fixture structural item
+    assert len(fix_calls) == 2  # merged {a,b} group + c.py
 
 async def test_fix_verify_turn_is_read_only(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
@@ -401,7 +400,11 @@ async def test_fix_verify_writes_outcomes_and_breaks_on_resolved(
     """Spec: every dispatched finding has a recorded terminal outcome; all
     resolved -> BreakLoop on round 1 (one fix pass per group, no re-dispatch)."""
 
-    stub.merge_items = [_merge_item(1, "api.py", "high"), _merge_item(2, "App.tsx", "medium")]
+    stub.merge_items = [
+        _merge_item(1, "api.py", "high"), _merge_item(2, "App.tsx", "medium"),
+        {**_merge_item(3, "api.py", "medium", desc="Retained structural finding"),
+         "lens": "structural", "source_uids": ["structure:1"]},
+    ]
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))
     assert exit_code == 0
     outcomes_p = multi_stack_target / ".daydream" / "deep" / "fix-outcomes.json"

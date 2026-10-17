@@ -314,6 +314,18 @@ remains the built-in function.
 | `vet` | `strategy`, `findings`, `cwd` |
 | `plan-writer` | `finding`, `recon_summary`, `verification_commands`, `cwd` |
 
+Merge builders receive language paths in `per_stack_records_paths` and the retained
+meta-stack through `structural_records_path`. Every model-owned merge receives
+both pools as sanctioned inputs, including resumed arbitration and bounded,
+tools-free finalization. Successful synthesis owns the validated published set;
+the host does not append omitted structural records. Combine duplicate defects
+with all contributing `source_uids`, grounded evidence and affected files; keep
+distinct concerns. Whole-file structural evidence/location privileges require
+retained structural source attribution, not merely `lens="structural"`.
+Structural-only/tiny-diff host bypass and failure salvage retain their host
+folding policy. Completed merge reuse keys include the synthesis policy so
+pre-policy output cannot be restored on fresh runs; merge resume recomputes it.
+
 ### Stage-aware review builders (API 8)
 
 The host calls `per-stack`, `structural`, or `generic-fallback` anew for each stage,

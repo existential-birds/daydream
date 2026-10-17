@@ -11,6 +11,7 @@ import anyio
 import pytest
 
 from daydream import runner as _runner
+from daydream.backends import ResultEvent
 from daydream.backends.codex import CodexLifecycleError
 from daydream.backends.lifecycle import BackendLifecycleFailure
 from daydream.config import REVIEW_OUTPUT_FILE
@@ -31,7 +32,7 @@ from tests.deep_orchestrator.support import (
     _install_post_recorder,
 )
 from tests.harness.review_profile import independent_alternatives_profile
-from tests.harness.review_result import saved_coverage
+from tests.harness.review_result import merge_result, saved_coverage
 from tests.test_deep_orchestrator import (
     _TWIN_DESCRIPTION,
     Mute,
@@ -74,6 +75,126 @@ async def test_cold_empty_builtin_merge_uses_no_provider_and_writes_canonical_re
                      and event.get("metadata", {}).get("stage") == stage]
         assert [event["event"] for event in lifecycle] == ["phase_start", "phase_end"]
         assert lifecycle[-1]["status"] == "succeeded"
+
+
+@pytest.mark.parametrize("resume", [False, True], ids=["fresh", "resume"])
+async def test_synthesis_receives_retained_structural_records_and_owns_publication(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, resume: bool,
+) -> None:
+    """Complete input delivery and exact published output prevent structural resurrection.
+
+    Existing host-fold tests use near-identical titles; the observed same-severity
+    paraphrase and intentionally omitted concern bypass that lexical safeguard.
+    """
+    language = _record(description="Default Codex configurations fail initialization after empty API keys "
+                       "are serialized as redaction markers", severity="high", confidence="HIGH")
+    twin = _record(description="Preserve empty API keys across configuration serialization", severity="high",
+                   confidence="HIGH", evidence="api.py:1 Harbor emits **** and revalidation rejects the marker; "
+                   "App.tsx:1 is the dependent caller")
+    distinct = _record(id=2, description="Shared dependency violates whole-file layering", line=0,
+                       evidence="The API dependency crosses the documented module boundary")
+    omitted = _record(id=3, description="Separate concern omitted after synthesis")
+    combined = {**language, "lens": "cross-stack", "source_uids": ["python:1", "structure:1"],
+                "related_files": ["App.tsx"], "evidence": twin["evidence"]}
+    whole_file = {**distinct, "lens": "structural", "source_uids": ["structure:2"]}
+    expected = [combined, whole_file]
+    supplied: dict[str, dict[str, Any]] = {}
+
+    def respond(prompt: str) -> list[Any] | None:
+        if "cross-stack merge agent" not in prompt.lower():
+            return None
+        import re
+        for path in re.findall(r"(?:  - )?(\S+-records\.json)", prompt):
+            for record in json.loads(Path(path).read_text())["issues"]:
+                supplied[record["uid"]] = record
+        return [ResultEvent(structured_output=merge_result(expected), continuation=None)]
+
+    backend = EmptyReviewBackend(multi_stack_target, forbid_merge=False, forbid_supervise=False,
+        review_by_stack={"python": [language], "structure": [twin, distinct, omitted]}, responder=respond)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+    _pin_findings_pr(monkeypatch, multi_stack_target)
+    published: list[dict[str, Any]] = []
+
+    async def publish(_repo: Path, items_file: Path, **_kwargs: Any) -> None:
+        published.extend(json.loads(items_file.read_text())["items"])
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", publish)
+    config = empty_review_config(multi_stack_target, tmp_path / "synthesis-trajectory.json",
+                                output_mode="comment", pr_number=7)
+    if resume:
+        assert await _runner.run(config) == 0
+        supplied.clear()
+        published.clear()
+        config.start_at = "merge"
+    assert await _runner.run(config) == 0
+    assert set(supplied) == {"python:1", "structure:1", "structure:2", "structure:3"}
+    assert supplied["python:1"]["severity"] == supplied["structure:1"]["severity"] == "high"
+    deep = multi_stack_target / ".daydream/deep"
+    items = json.loads(DeepArtifact.MERGED_ITEMS.at(deep).read_text())["items"]
+    assert items == published
+    assert [item["description"] for item in items] == [item["description"] for item in expected]
+    assert [item["source_uids"] for item in items] == [["python:1", "structure:1"], ["structure:2"]]
+    assert items[0]["related_files"] == ["App.tsx"]
+    assert items[0]["severity"] == "high"
+    report = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
+    assert report == DeepArtifact.MERGED_REPORT.at(deep).read_text()
+    assert all(item["description"] in report for item in expected)
+    assert omitted["description"] not in report and twin["description"] not in report
+    assert not (deep / "folded-structural.json").exists()
+
+
+async def test_synthesis_structural_privilege_requires_retained_source(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Model-controlled lens/unknown and rejected claims cannot authorize whole-file evidence.
+
+    Existing evidence predicates trust host lenses and do not exercise model-owned
+    attribution after real adjudication removes a structural source.
+    """
+    language = _record(description="Language source", severity="high", confidence="HIGH")
+    structural = _record(description="Valid whole-file structural source", line=0,
+                         evidence="Dependency violates the module contract")
+    rejected = _record(id=2, description="Rejected structural source", severity="high", confidence="HIGH")
+    claims = [("legitimate", ["structure:1"], 0), ("spoof", ["python:1"], 0),
+              ("unknown", ["structure:999"], 0), ("rejected", ["structure:2"], 0),
+              ("independently grounded", ["structure:999"], 1),
+              ("citation-only spoof", ["python:1"], 0)]
+    items = [{**language, "description": title, "lens": "structural", "line": line,
+              "evidence": "api.py:1 boundary violated" if title == "citation-only spoof"
+              else "The documented module boundary is violated", "source_uids": uids}
+             for title, uids, line in claims]
+
+    def respond(prompt: str) -> list[Any] | None:
+        if "you are the arbiter" in prompt.lower():
+            import re
+            match = re.search(r"listed in (\S*arbiter[-\w]*input\.json)", prompt)
+            assert match is not None
+            path = Path(match[1])
+            rows = json.loads(path.read_text())
+            return [ResultEvent(structured_output={"findings": [
+                {"arb_id": row["arb_id"], "keep": row["uid"] != "structure:2",
+                 "severity": row["severity"], "confidence": row["confidence"],
+                 "description": row["description"], "rationale": "source verified", "evidence": row["evidence"]}
+                for row in rows]}, continuation=None)]
+        if "cross-stack merge agent" in prompt.lower():
+            return [ResultEvent(structured_output=merge_result(items), continuation=None)]
+        return None
+
+    backend = EmptyReviewBackend(multi_stack_target, forbid_merge=False, forbid_supervise=False,
+        review_by_stack={"python": [language], "structure": [structural, rejected]}, responder=respond)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+    assert await _runner.run(empty_review_config(multi_stack_target, tmp_path / "provenance-trajectory.json")) == 0
+    deep = multi_stack_target / ".daydream/deep"
+    retained = json.loads(per_stack_records_path(deep, "structure").read_text())["issues"]
+    assert [record["uid"] for record in retained] == ["structure:1"]
+    actual = json.loads(DeepArtifact.MERGED_ITEMS.at(deep).read_text())["items"]
+    assert [item["description"] for item in actual] == ["legitimate", "independently grounded", "citation-only spoof"]
+    assert [item["source_uids"] for item in actual] == [["structure:1"], [], ["python:1"]]
+    assert actual[0]["line"] == 0
+    assert actual[2]["location_cited_line"] == 0
+    assert actual[2]["line"] > 0
+    dropped = json.loads((deep / "dropped-speculative.json").read_text())
+    assert [item["description"] for item in dropped["dropped_items"]] == ["spoof", "unknown", "rejected"]
 
 
 async def test_cold_structural_only_merge_preserves_identity_and_supervises_findings(
@@ -632,7 +753,7 @@ async def test_resume_merge_allows_missing_records_for_failed_stacks(
     merge_calls = [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
     assert len(merge_calls) == 1
 
-async def test_orchestrator_partitions_structural_records_from_merge(
+async def test_orchestrator_passes_structural_records_separately_to_merge(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured_merge: dict[str, Any] = {}
@@ -656,12 +777,14 @@ async def test_orchestrator_partitions_structural_records_from_merge(
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
     assert exit_code == 0
 
-    # (1) per_stack_records_paths must NOT include the structural file (the host
-    #     appends it separately).
+    # Language paths remain partitioned; the explicit structural path supplies
+    # the complete retained meta-stack to synthesis.
     per_stack_paths = captured_merge["per_stack_records_paths"]
     assert all(p.name != "stack-structure-records.json" for p in per_stack_paths), (
         f"structural records must be partitioned out: {per_stack_paths}"
     )
+
+    assert captured_merge["structural_records_path"].name == "stack-structure-records.json"
 
     # (2) The structural sentinel record must NOT appear in either dedup input.
     def _has_structure(records: list[dict[str, Any]]) -> bool:
@@ -676,7 +799,7 @@ async def test_orchestrator_partitions_structural_records_from_merge(
     # And the sources list must stay parallel to the filtered records list.
     assert len(captured_record_dedup["sources"]) == len(captured_record_dedup["records"])
 
-async def test_orchestrator_partitions_structural_records_from_merge_fresh_run(
+async def test_orchestrator_passes_structural_records_separately_to_merge_fresh_run(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured_merge: dict[str, Any] = {}
@@ -695,6 +818,8 @@ async def test_orchestrator_partitions_structural_records_from_merge_fresh_run(
         f"structural records must be partitioned out (fresh run): {per_stack_paths}"
     )
 
+    assert captured_merge["structural_records_path"].name == "stack-structure-records.json"
+
     # Fresh-run populates record_sources with stack_name, so the partition drops
     # every entry whose source == 'structure'; sources stay parallel to records.
     assert "structure" not in captured_record_dedup["sources"]
@@ -707,7 +832,12 @@ async def test_structural_language_twin_is_arbitrated_and_reported_once(
     """Same-line and whole-file structural twins collapse to one high-severity finding."""
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.merge_echo_records = True
+    stub.merge_items = [
+        {**_record(description=_TWIN_DESCRIPTION, severity="high", confidence="HIGH"),
+         "lens": "cross-stack", "source_uids": ["python:1", "structure:1"]},
+        {**_record(file="App.tsx", description="React concern"), "lens": "per-stack", "source_uids": ["react:1"]},
+        {**_record(file="README.md", description="Docs concern"), "lens": "per-stack", "source_uids": ["generic:1"]},
+    ]
     stub.parse_by_stack = _twin_parse_by_stack(structural_line=structural_line)
     assert await _run_deep(multi_stack_target) == 0
 
@@ -778,9 +908,10 @@ async def test_precision_suppression_preserves_structural_records_on_resume(
     assert structural[0]["lens"] == "structural"
     assert structural[0]["source_uids"] == ["structure:1"]
 
-async def test_distinct_structural_finding_survives_the_fold(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+async def test_synthesis_retains_a_distinct_structural_finding(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The fold is a duplicate check, not a structural-lens filter."""
+    """A model-retained distinct structural concern reaches the canonical report."""
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_echo_records = True
