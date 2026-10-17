@@ -42,7 +42,9 @@ REPOSITORY_SEARCH_GUIDANCE = (
     "a limited or failed search is not proof of absence. Narrow the question rather than blindly retrying. "
     "Expand to other modules when a concrete dependency question requires them; communicate the named "
     "path and reason. For ignored dependencies/generated files use "
-    "`--expand named/path --reason 'candidate question'`, retaining the same bounds and cwd confinement. "
+    "`daydream search 'literal' named/path --expand named/path --reason 'candidate question'`. "
+    "Positional roots remain required: --expand authorizes ignored-path traversal; it does not replace "
+    "the roots. Retain the same bounds and cwd confinement. "
     "Other search tools, including grep, are allowed with these file-set, scope and budget semantics. "
     "Never derive search roots from shared Git metadata or follow links into another checkout."
 )

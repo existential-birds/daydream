@@ -92,14 +92,38 @@ def test_search_cli_excerpts_retain_literal_hits_with_bounded_omissions(
 
 @pytest.mark.parametrize("escape", ["../sibling", ".git", "outward"])
 def test_search_rejects_roots_outside_cwd_and_git_metadata(git_repo: Path, escape: str) -> None:
+    # Public CLI must retain the same guard for positional roots and expansion paths.
     sibling = git_repo.parent / "sibling"
     sibling.mkdir()
     (sibling / "secret").write_text("needle sibling\n")
     (git_repo / "outward").symlink_to(sibling, target_is_directory=True)
-    with pytest.raises(ValueError, match="outside the working tree or names Git metadata"):
-        search_repository(git_repo, "needle", [escape], expand=[], reason="")
-    with pytest.raises(ValueError, match="outside the working tree or names Git metadata"):
-        search_repository(git_repo, "needle", ["."], expand=[escape], reason="trace caller")
+    for args in ([escape], [".", "--expand", escape, "--reason", "trace caller"]):
+        completed = subprocess.run(
+            [sys.executable, "-m", "daydream", "search", "needle", *args],
+            cwd=git_repo, capture_output=True, text=True, timeout=30,
+        )
+        assert completed.returncode == 2
+        assert "outside the working tree or names Git metadata" in json.loads(completed.stdout)["error"]
+
+
+@pytest.mark.parametrize(("args", "error"), [
+    (["--expand", "deps/pkg", "--reason", "trace caller"], "the following arguments are required: roots"),
+    (["deps/pkg", "--expand", "deps/pkg"], "--expand requires a concrete --reason"),
+    (["deps/pkg", "--expand", "deps/pkg", "--reason", " "], "--expand requires a concrete --reason"),
+])
+def test_search_cli_rejects_incomplete_expansion_requests(git_repo: Path, args: list[str], error: str) -> None:
+    # Parser/dispatch owner: the library-only reason check cannot catch missing
+    # positional roots being silently defaulted or CLI errors being swallowed.
+    (git_repo / ".gitignore").write_text("deps/\n")
+    package = git_repo / "deps/pkg"
+    package.mkdir(parents=True)
+    (package / "generated.py").write_text("needle ignored dependency\n")
+    completed = subprocess.run(
+        [sys.executable, "-m", "daydream", "search", "needle", *args],
+        cwd=git_repo, capture_output=True, text=True, timeout=30,
+    )
+    assert completed.returncode == 2
+    assert error in completed.stderr + completed.stdout
 
 
 @pytest.mark.parametrize("limit", ["matches", "output", "bytes", "files"])

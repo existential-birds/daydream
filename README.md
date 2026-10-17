@@ -40,7 +40,9 @@ daydream search 'literal symbol' services/api/src --expand node_modules/pkg/dist
 Git's tracked files (including dotfiles and tracked ignored paths) plus nonignored
 untracked files in those roots. Ignore rules exclude ordinary untracked dependency,
 build and cache trees. Explicit expansion includes ignored files only under the
-named paths and records the reason in JSON output. Other tools, including `grep`
+named paths and records the reason in JSON output. Positional roots remain required
+with `--expand`: it authorizes ignored-path traversal rather than replacing roots.
+Other tools, including `grep`
 and regex-capable `rg`, remain supported with the same scoped file set; `rg` defaults
 alone may omit tracked hidden or ignored evidence.
 
