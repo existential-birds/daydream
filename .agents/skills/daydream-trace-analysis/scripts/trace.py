@@ -10,6 +10,7 @@ import collections
 import datetime
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -18,13 +19,18 @@ def serialized(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
-def records(path):
+def records(path, selected_line=None):
     """Support pretty JSON documents and streaming JSONL; retain physical lines."""
     with path.open(encoding="utf-8") as stream:
-        first = next(((n, s) for n, s in enumerate(stream, 1) if s.strip()), None)
+        first = next(((n, s) for n, s in enumerate(stream, 1)
+                      if n == selected_line or selected_line is None and s.strip()), None)
         if first is None:
+            if selected_line is not None:
+                raise ValueError(f"{path}:{selected_line}: selected physical line is missing")
             raise ValueError(f"{path}: empty input")
         n, line = first
+        if not line.strip():
+            raise ValueError(f"{path}:{n}: selected physical line is blank")
         if line.strip() == "{":
             # Standalone ATIF is commonly pretty-printed; JSONL remains streamed.
             try:
@@ -37,6 +43,8 @@ def records(path):
                 yield number, json.loads(text)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{path}:{number}: {exc.msg}") from exc
+        if selected_line is not None:
+            return
         for number, text in enumerate(stream, n + 1):
             if text.strip():
                 try:
@@ -49,15 +57,20 @@ def unwrap(value):
     return value.get("value") if isinstance(value, dict) and value.get("status") == "available" else None
 
 
-def load(path, run_id=None):
+def load(path, run_id=None, line=None):
+    if line is not None and (type(line) is not int or line < 1):
+        raise ValueError("--line must be a positive physical line number")
     selected = []
-    for line, record in records(path):
+    for number, record in records(path, line):
         if not isinstance(record, dict):
-            raise ValueError(f"{path}:{line}: expected an object")
-        if run_id is None or record.get("run_id", record.get("session_id")) == run_id:
-            selected.append((line, record))
+            raise ValueError(f"{path}:{number}: expected an object")
+        matches = run_id is None or record.get("run_id", record.get("session_id")) == run_id
+        if line is not None and not matches:
+            raise ValueError(f"{path}:{number}: --run-id does not match selected physical line")
+        if matches:
+            selected.append((number, record))
     if len(selected) != 1:
-        raise ValueError(f"{path}: found {len(selected)} matching records; select one with --run-id")
+        raise ValueError(f"{path}: found {len(selected)} matching records; select one with --run-id or --line")
     line, record = selected[0]
     if record.get("schema_version") == "daydream.run.v1":
         bundle = unwrap(record.get("trajectories")) or {}
@@ -149,13 +162,25 @@ def tools(trace, args):
                                 "content": r.get("content"), "extra": r.get("extra") or {}} for ri, r in matched]}
 
 
-def tool_view(row, args):
+def bounded_rows(rows, limit, anchor_pointer=None):
+    """Keep the anchor within the limit, retaining source order for other rows."""
+    indices = list(range(min(limit, len(rows))))
+    if anchor_pointer is not None:
+        anchor = next((i for i, row in enumerate(rows)
+                       if any(anchor_pointer == pointer or anchor_pointer.startswith(pointer + "/")
+                              for pointer in [row["pointer"], *(r["pointer"] for r in row.get("results", []))])), None)
+        if anchor is not None and anchor not in indices:
+            indices[-1] = anchor
+    return [rows[i] for i in sorted(indices)]
+
+
+def tool_view(row, args, anchor_pointer=None):
     return {**row, "arguments": preview(row["arguments"], args.chars),
             "result_count": len(row["results"]),
             "results_remaining": max(0, len(row["results"]) - args.evidence_limit),
             "results": [{**r, "content_chars": len(preview(r["content"], sys.maxsize)),
                          "content": preview(r["content"], args.chars)}
-                        for r in row["results"][:args.evidence_limit]]}
+                        for r in bounded_rows(row["results"], args.evidence_limit, anchor_pointer)]}
 
 
 def unmatched_results(trace, args):
@@ -292,22 +317,74 @@ def search(trace, args):
     return {**base(trace), "query": args.query, **page(hits, args)}
 
 
-def show(trace, args):
-    value = trace["record"]
-    if args.pointer:
-        if not args.pointer.startswith("/"):
+def resolve_pointer(value, pointer):
+    if pointer:
+        if not pointer.startswith("/"):
             raise ValueError("--pointer must be an RFC 6901 path starting with /, or empty for root")
         try:
-            for part in args.pointer[1:].split("/"):
+            for part in pointer[1:].split("/"):
+                if re.search(r"~(?![01])", part):
+                    raise ValueError("invalid RFC 6901 escape")
                 key = part.replace("~1", "/").replace("~0", "~")
-                value = value[int(key)] if isinstance(value, list) else value[key]
+                if isinstance(value, list):
+                    if not re.fullmatch(r"0|[1-9][0-9]*", key):
+                        raise ValueError("invalid RFC 6901 array index")
+                    value = value[int(key)]
+                else:
+                    value = value[key]
         except (KeyError, IndexError, ValueError, TypeError) as exc:
-            message = f"pointer {args.pointer!r} does not resolve; use a pointer from search/tools/timeline"
+            message = f"pointer {pointer!r} does not resolve; use a pointer from search/tools/timeline"
             raise ValueError(message) from exc
+    return value
+
+
+def show(trace, args):
+    value = resolve_pointer(trace["record"], args.pointer)
     text = value if isinstance(value, str) else serialized(value)
     return {**base(trace), "pointer": args.pointer, "total_chars": len(text), "offset": args.offset,
             "text": text[args.offset:args.offset + args.chars],
             "remaining": max(0, len(text) - args.offset - args.chars)}
+
+
+def window(trace, args):
+    """Keep recorded context around one exact step without guessing causality."""
+    resolve_pointer(trace["record"], args.pointer)
+    all_steps = list(steps(trace, args))
+    anchor = next((ref for _, _, ref in all_steps
+                   if args.pointer == ref["pointer"] or args.pointer.startswith(ref["pointer"] + "/")), None)
+    if anchor is None:
+        raise ValueError("window requires a pointer inside an agent step")
+    document_steps = [(step, ref) for _, step, ref in all_steps if ref["doc"] == anchor["doc"]]
+    index = next(i for i, (_, ref) in enumerate(document_steps) if ref["pointer"] == anchor["pointer"])
+    start, end = max(0, index - args.before), min(len(document_steps), index + args.after + 1)
+    calls = collections.defaultdict(list)
+    unmatched = collections.defaultdict(list)
+    for row in tools(trace, args):
+        bounded = tool_view(row, args, args.pointer)
+        for result in bounded["results"]:
+            result["extra"] = preview(result["extra"], args.chars)
+        calls[row["pointer"].rsplit("/tool_calls/", 1)[0]].append(bounded)
+    for row in unmatched_results(trace, args):
+        key = row["pointer"].rsplit("/observation/results/", 1)[0]
+        unmatched[key].append({**row, "extra": preview(row["extra"], args.chars)})
+    rows = []
+    for step, ref in document_steps[start:end]:
+        tool_rows, result_rows = calls[ref["pointer"]], unmatched[ref["pointer"]]
+        rows.append({**ref, "source": step.get("source"),
+                     "message": preview(step["message"], args.chars) if step.get("message") is not None else None,
+                     "reasoning_content": preview(step["reasoning_content"], args.chars)
+                     if step.get("reasoning_content") is not None else None,
+                     "tools": {"total": len(tool_rows),
+                               "items": bounded_rows(tool_rows, args.evidence_limit, args.pointer),
+                               "remaining": max(0, len(tool_rows) - args.evidence_limit)},
+                     "unmatched_results": {"total": len(result_rows),
+                                           "items": bounded_rows(result_rows, args.evidence_limit, args.pointer),
+                                           "remaining": max(0, len(result_rows) - args.evidence_limit)}})
+    return {**base(trace), "anchor_pointer": args.pointer, "anchor_step_pointer": anchor["pointer"],
+            "document_step_count": len(document_steps), "start_index": start, "end_index": end,
+            "interpretation": "Recorded neighbors in one document; invocation and phase changes are explicit. "
+                              "Inspect terminal evidence separately; proximity does not establish causality.",
+            **page(rows, args)}
 
 
 def inventory(args):
@@ -329,7 +406,7 @@ def inventory(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("list", "summary", "timeline", "tools", "mine", "search", "show"):
+    for command in ("list", "summary", "timeline", "tools", "mine", "search", "show", "window"):
         sub = commands.add_parser(command)
         sub.add_argument("input", help="Capture JSONL or standalone ATIF JSON; directory for list")
         sub.add_argument("--limit", type=int, default=12, help="Maximum rows per table")
@@ -337,6 +414,8 @@ def main():
         sub.add_argument("--offset", type=int, default=0, help="Row offset; character offset for show")
         sub.add_argument("--chars", type=int, default=400, help="Maximum characters per excerpt")
         sub.add_argument("--run-id", help="Select a record in a multi-record JSONL file")
+        if command != "list":
+            sub.add_argument("--line", type=int, help="Select an exact physical record line; cohort row line")
         sub.set_defaults(doc=None, phase=None)
         if command in ("tools", "mine", "timeline"):
             sub.add_argument("--doc", type=int, help="Zero-based embedded document index")
@@ -347,18 +426,23 @@ def main():
             sub.add_argument("--large-chars", type=int, default=12000)
         if command == "search":
             sub.add_argument("--query", required=True, help="Case-insensitive literal string")
-        if command == "show":
+        if command in ("show", "window"):
             sub.add_argument("--pointer", required=True, help="JSON pointer from another command")
+        if command == "window":
+            sub.add_argument("--before", type=int, default=2, help="Preceding steps in the same document")
+            sub.add_argument("--after", type=int, default=2, help="Following steps in the same document")
     args = parser.parse_args()
     if min(args.limit, args.chars, args.evidence_limit) < 1 or args.offset < 0:
         parser.error("--limit/--chars/--evidence-limit must be positive and --offset nonnegative")
+    if args.command == "window" and min(args.before, args.after) < 0:
+        parser.error("--before/--after must be nonnegative")
     try:
         if args.command == "list":
             if not Path(args.input).expanduser().is_dir() or args.recent < 1:
                 raise ValueError("list requires a directory and positive --recent")
             report = inventory(args)
         else:
-            trace = load(Path(args.input).expanduser(), args.run_id)
+            trace = load(Path(args.input).expanduser(), args.run_id, args.line)
             if args.doc is not None and not 0 <= args.doc < len(trace["docs"]):
                 raise ValueError("--doc is outside the embedded document list")
             if args.command == "tools":
@@ -366,7 +450,7 @@ def main():
                           "unmatched_results": page(list(unmatched_results(trace, args)), args)}
             else:
                 report = {"summary": summary, "timeline": timeline, "mine": mine,
-                          "search": search, "show": show}[args.command](trace, args)
+                          "search": search, "show": show, "window": window}[args.command](trace, args)
         print(json.dumps(report, ensure_ascii=False, indent=2))
     except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
         parser.exit(2, f"trace: {exc}\n")
