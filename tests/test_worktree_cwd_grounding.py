@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -71,13 +72,16 @@ def test_pre_scan_grounds_specialists_to_linked_worktree(linked_worktree: tuple[
     assert str(main_repo) not in joined
 
 
+@pytest.mark.parametrize("custom_strategy", [False, True], ids=["built-in", "custom"])
 async def test_runner_search_cli_keeps_linked_scope_and_custom_strategy(
     linked_worktree: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    custom_strategy: bool,
 ) -> None:
     """Runner-owned prompt delivery + installed CLI/file set, only provider doubled.
 
     Existing pre_scan coverage cannot detect a helper that reroots via shared Git
     metadata, loses tracked ignored evidence, or lacks the production CLI dispatch.
+    Execute the delivered expansion example: hardcoded argv missed its absent roots.
     """
     from dataclasses import replace
 
@@ -86,7 +90,7 @@ async def test_runner_search_cli_keeps_linked_scope_and_custom_strategy(
     from daydream.review_profile import ResolvedProfile, build_default_profile
     from tests.deep_orchestrator.empty_synthesis_support import empty_review_config
     from tests.harness.git_helpers import git
-    from tests.harness.stub_backend import review_stage_result
+    from tests.harness.stub_backend import review_stage_result, review_stage_state
 
     main, linked = linked_worktree
     (linked / ".gitignore").write_text("deps/\nbuild/\n")
@@ -95,6 +99,7 @@ async def test_runner_search_cli_keeps_linked_scope_and_custom_strategy(
         ".rules/policy": "search-token linked dotfile\n",
         "deps/tracked.go": "// search-token tracked ignored\n",
         "deps/pkg/generated.go": "// search-token generated\n",
+        "deps/neighbor/generated.go": "// search-token neighboring ignored package\n",
         "build/noise": "search-token misleading\n",
     }
     for name, value in files.items():
@@ -108,15 +113,18 @@ async def test_runner_search_cli_keeps_linked_scope_and_custom_strategy(
     (linked / "services/taste/outside").symlink_to(main / ".rules/policy")
     profile = build_default_profile()
     strategies = dict(profile.strategies)
-    strategies["discovery.per_stack"] = replace(
-        strategies["discovery.per_stack"],
-        content="CUSTOM_SEARCH_STRATEGY " + strategies["discovery.per_stack"].content,
-    )
+    if custom_strategy:
+        strategies["discovery.per_stack"] = replace(
+            strategies["discovery.per_stack"],
+            content="CUSTOM_SEARCH_STRATEGY " + strategies["discovery.per_stack"].content,
+        )
     profile = replace(profile, strategies=strategies)
     observed: list[dict[str, Any]] = []
     def respond(cwd: Path, prompt: str, schema: Any, *args: Any) -> list[Any]:
-        if "CUSTOM_SEARCH_STRATEGY" in prompt and not observed:
+        stage = review_stage_state(prompt)
+        if stage is not None and stage["stage"] == "first_pass" and not observed:
             assert REPOSITORY_SEARCH_GUIDANCE in prompt
+            assert ("CUSTOM_SEARCH_STRATEGY" in prompt) == custom_strategy
             # Remove rg entirely while retaining the real Git executable.
             bin_dir = tmp_path / "git-only-bin"
             bin_dir.mkdir()
@@ -132,6 +140,18 @@ async def test_runner_search_cli_keeps_linked_scope_and_custom_strategy(
                 )
                 assert completed.returncode == 2  # outward symlink is disclosed as skipped
                 observed.append(json.loads(completed.stdout))
+            # Substitute example placeholders only; never supply omitted roots or options.
+            example = next(part for part in prompt.split("`")[1::2] if "--expand" in part)
+            argv = shlex.split(example)
+            assert argv[:2] == ["daydream", "search"], "expansion example must be a complete command"
+            values = {"literal": "search-token", "named/path": "deps/pkg",
+                "candidate question": "trace generated caller"}
+            completed = subprocess.run(
+                [sys.executable, "-m", "daydream", *[values.get(arg, arg) for arg in argv[1:]]],
+                cwd=cwd, env=env, capture_output=True, text=True, timeout=30,
+            )
+            assert completed.returncode == 0, completed.stderr or completed.stdout
+            observed.append(json.loads(completed.stdout))
         return [TextEvent(text="Review complete."),
             ResultEvent(structured_output=review_stage_result(prompt, []) if schema else None, continuation=None)]
     backend = ScriptedBackend(responder=respond)
@@ -140,14 +160,21 @@ async def test_runner_search_cli_keeps_linked_scope_and_custom_strategy(
     config = empty_review_config(linked, trajectory, shallow=True, stack="go",
         review_profile=ResolvedProfile(profile=profile, source_kind="test"))
     assert await runner.run(config, private_roots=private_root_locations(base=tmp_path / "private")) == 0
-    assert len(observed) == 2
-    normal, expanded = observed
+    assert len(observed) == 3
+    normal, expanded, documented = observed
     expected = {"services/taste/untracked.go", ".rules/policy", "deps/tracked.go"}
     assert {hit["path"] for hit in normal["matches"]} == expected
     assert {hit["path"] for hit in expanded["matches"]} == expected | {"deps/pkg/generated.go"}
     assert normal["skipped_files"] == 1
+    assert expanded["skipped_files"] == 1
+    assert normal["incomplete"] == expanded["incomplete"] == []
     assert all("WRONG SIBLING" not in hit["text"] for result in observed for hit in result["matches"])
     assert expanded["expansion"]["reason"] == "trace generated caller"
+    assert documented["roots"] == ["deps/pkg"]
+    assert documented["expansion"] == {"paths": ["deps/pkg"], "reason": "trace generated caller"}
+    assert documented["matches"] == [{"path": "deps/pkg/generated.go", "line": 1, "text": "// search-token generated"}]
+    assert documented["visited_count"] == 1
+    assert documented["incomplete"] == [] and documented["skipped_files"] == 0
     assert trajectory.is_file()
     assert json.loads(trajectory.read_text())["extra"]["profile_digest"] == profile.digest
     assert not (main / ".review-output.md").exists()
