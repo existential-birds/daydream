@@ -347,17 +347,27 @@ async def test_default_cap_coarsens_only_enough_and_preserves_scope_qualified_wo
     assert coverage['stack_outcomes'] == data['terminal_result']['stack_outcomes']
 
 
-@pytest.mark.parametrize('fallback', ['plain-typescript', 'malformed-package', 'conflicting-tsconfig', 'explicit-rule'])
+@pytest.mark.parametrize('fallback', [
+    'plain-typescript', 'malformed-package', 'conflicting-tsconfig', 'explicit-rule',
+    'python-plain-typescript', 'python-angular',
+])
 async def test_automatic_tiny_review_preserves_framework_and_explicit_scopes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, fallback: str,
 ) -> None:
     """Target evidence and fork ownership survive automatic tiny-diff handling."""
     repo = tmp_path / 'framework_routing'
-    component = 'packages/web/src/App.tsx'
+    primary_stack = 'python' if fallback.startswith('python-') else 'react'
+    component = 'api.py' if primary_stack == 'python' else 'packages/web/src/App.tsx'
+    old_component = 'VALUE = "Hello"\n' if primary_stack == 'python' else (
+        'export const App = () => <div>Hello</div>;\n'
+    )
     secondary = 'tools/helper.ts'
     old_secondary, new_secondary = 'export const value = 1;\n', 'export const value = 2;\n'
     secondary_stack = 'generic'
-    if fallback == 'malformed-package':
+    if fallback == 'python-angular':
+        old_secondary = 'import {Component} from "@angular/core"; export const value = 1;\n'
+        new_secondary = old_secondary.replace('1', '2')
+    elif fallback == 'malformed-package':
         secondary, old_secondary, new_secondary = 'tools/package.json', '{}\n', '{broken\n'
     elif fallback == 'conflicting-tsconfig':
         secondary, old_secondary = 'tools/tsconfig.json', '{}\n'
@@ -372,7 +382,7 @@ async def test_automatic_tiny_review_preserves_framework_and_explicit_scopes(
     before = {
         'package.json': '{"dependencies":{"react":"*"}}\n',
         'packages/web/package.json': '{"dependencies":{"react":"*"}}\n',
-        component: 'export const App = () => <div>Hello</div>;\n',
+        component: old_component,
         secondary: old_secondary,
     }
     seed_feature_branch(repo, base=before, feature={
@@ -385,12 +395,12 @@ async def test_automatic_tiny_review_preserves_framework_and_explicit_scopes(
     assert await review.run(shallow_fanout_threshold=None) == 0
     inventory = scopes(review.load())
     assert {name: scope['files'] for name, scope in inventory.items()} == {
-        'react': [component], secondary_stack: [secondary], 'structure': [component, secondary],
+        primary_stack: [component], secondary_stack: [secondary], 'structure': [component, secondary],
     }
     observed: dict[str, set[str]] = {}
     for call in review.backend.calls:
         stage = review_stage_state(call['prompt'])
         if stage is not None and stage['stage'] == 'first_pass':
             observed.setdefault(stage['scope_id'], set()).update(stage['assigned_target_ids'])
-    assert observed == {'react': {component}, secondary_stack: {secondary}}
+    assert observed == {primary_stack: {component}, secondary_stack: {secondary}}
     assert all(scope['status'] == 'complete' for scope in inventory.values())

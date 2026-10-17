@@ -147,9 +147,13 @@ class FrameworkInspection:
     def _read(self, path: Path, limit: int) -> str | None:
         if not self._safe_path(path):
             return None
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        non_block = getattr(os, "O_NONBLOCK", None)
+        if no_follow is None or non_block is None:
+            return None  # Unsupported safe-open capabilities cannot weaken inspection.
         try:
             # Open without following the final component; reject parent symlinks above.
-            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            descriptor = os.open(path, os.O_RDONLY | no_follow | non_block)
             with os.fdopen(descriptor, "rb") as stream:
                 before = os.fstat(stream.fileno())
                 if not path.is_file() or before.st_size > min(limit, _MAX_TOTAL_BYTES - self._bytes):
@@ -176,7 +180,7 @@ class FrameworkInspection:
                         try:
                             parsed = yaml.safe_load(text)
                             value = parsed if isinstance(parsed, dict) else None
-                        except (yaml.YAMLError, RecursionError):
+                        except (yaml.YAMLError, ValueError, RecursionError):
                             pass
                     elif path.name == "package.json":
                         try:
@@ -314,8 +318,6 @@ class FrameworkInspection:
             return "generic"
         evidence: set[str] = set()
         jsx = False
-        pragma_runtime = False
-        pragma_factory = False
         nodes = [tree.root_node]
         while nodes:
             node = nodes.pop()
@@ -323,7 +325,7 @@ class FrameworkInspection:
             if node.type in {"jsx_element", "jsx_self_closing_element", "jsx_fragment"}:
                 jsx = True
             module: Node | None = None
-            if node.type in {"import_statement", "export_statement"}:
+            if node.type in {"import_statement", "import_require_clause", "export_statement"}:
                 module = node.child_by_field_name("source")
             elif node.type == "call_expression":
                 function = node.child_by_field_name("function")
@@ -339,17 +341,12 @@ class FrameworkInspection:
                 for match in _JSX_PRAGMA.finditer(node.text.decode("utf-8")):
                     kind, value = match.groups()
                     if kind == "ImportSource":
-                        pragma_factory = True
                         evidence.add(_runtime(value))
                     elif kind in {None, "Factory"}:
-                        pragma_factory = True
                         evidence.add("react" if value.split(".")[0] == "React" else "other-jsx")
-                    elif value in {"automatic", "classic"}:
-                        pragma_runtime = True
-                    else:
+                    elif value not in {"automatic", "classic"}:
                         evidence.add("other-jsx")
-        if pragma_runtime and not pragma_factory:
-            evidence.add("react")
+                    # A runtime mode alone does not select an import source.
         if evidence:
             return "react" if evidence == {"react"} else "generic"
         if jsx:

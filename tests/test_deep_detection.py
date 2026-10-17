@@ -108,7 +108,20 @@ def test_no_files_dropped() -> None:
     ('export const App = () => <div/>;', {"package.json": {"dependencies": {"react": "*"}}}, "react"),
     ('export const App = () => <div/>;', {"tsconfig.json": {"compilerOptions": {"jsx": "react-jsx"}}}, "react"),
     ('/** @jsxImportSource react */ const App = () => <div/>;', {}, "react"),
-    ('/** @jsxRuntime automatic */ const App = () => <div/>;', {}, "react"),
+    pytest.param('/** @jsxRuntime automatic */ const App = () => <div/>;', {}, "generic",
+                 id="runtime-mode-without-owner"),
+    pytest.param('/** @jsxRuntime automatic */ const App = () => <div/>;',
+                 {"package.json": {"dependencies": {"react": "*"}}}, "react", id="runtime-mode-react-package"),
+    pytest.param('/** @jsxRuntime automatic */ const App = () => <div/>;',
+                 {"tsconfig.json": {"compilerOptions": {"jsx": "react-jsx"}}}, "react", id="runtime-mode-react-config"),
+    pytest.param('/** @jsxRuntime automatic */ const App = () => <div/>;',
+                 {"tsconfig.json": {"compilerOptions": {"jsxImportSource": "preact"}}}, "generic",
+                 id="runtime-mode-preact-config"),
+    pytest.param('import React = require("react");', {}, "react", id="react-import-equals"),
+    pytest.param('import React from "react"; import Vue = require("vue");', {}, "generic",
+                 id="conflicting-import-equals"),
+    pytest.param('import React = require("react"); import Vue = require("vue");', {}, "generic",
+                 id="conflicting-both-import-equals"),
     ('import {Component} from "@angular/core";', {}, "generic"),
     ('import {ref} from "vue";', {}, "generic"),
     ('import {onMount} from "svelte";', {}, "generic"),
@@ -159,7 +172,8 @@ def test_local_packages_and_explicit_config_rules(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("failure", [
-    "deleted", "malformed", "cycle", "external-extends", "escape", "unreadable", "metadata-symlink", "traversal",
+    "deleted", "malformed", "invalid-workspace-date", "cycle", "external-extends", "escape", "unreadable",
+    "metadata-symlink", "traversal",
 ])
 def test_framework_unavailable_evidence_falls_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
@@ -173,6 +187,8 @@ def test_framework_unavailable_evidence_falls_back(
         path.unlink()
     elif failure == "malformed":
         (tmp_path / "package.json").write_text("{broken")
+    elif failure == "invalid-workspace-date":
+        (tmp_path / "pnpm-workspace.yaml").write_text('packages: ["apps/*"]\ninvalid: 2026-99-99\n')
     elif failure == "cycle":
         (tmp_path / "tsconfig.json").write_text('{"extends":"./base.json"}')
         (tmp_path / "base.json").write_text('{"extends":"./tsconfig.json"}')
@@ -206,6 +222,23 @@ def test_framework_unavailable_evidence_falls_back(
     assert scopes["generic"] == [candidate]
     primary = [f for s, paths in scopes.items() if s != "structure" for f in paths]
     assert Counter(primary) == Counter(["react.ts", candidate])
+
+
+@pytest.mark.parametrize("flag", ["O_NOFOLLOW", "O_NONBLOCK"])
+def test_framework_missing_safe_open_capability_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str,
+) -> None:
+    """Unavailable safe-open flags retain generic source/config coverage without unsafe reads."""
+    (tmp_path / "App.tsx").write_text('import React from "react"; const App = () => <div/>;')
+    (tmp_path / "package.json").write_text('{"dependencies":{"react":"*"}}')
+    (tmp_path / "tsconfig.json").write_text('{"compilerOptions":{"jsx":"react-jsx"}}')
+    monkeypatch.delattr(os, flag, raising=False)
+    files = ["App.tsx", "package.json", "tsconfig.json"]
+    result = detect_stacks(files, target_dir=tmp_path)
+    primary = [stack for stack in result if stack.stack_name != "structure"]
+    assert [(stack.stack_name, stack.files) for stack in primary] == [("generic", files)]
+    assert Counter(path for stack in primary for path in stack.files) == Counter(files)
+    assert next(stack.files for stack in result if stack.stack_name == "structure") == files
 
 
 def test_local_tsconfig_extends(tmp_path: Path) -> None:

@@ -169,7 +169,7 @@ def _collapse_stacks_for_tiny_diff(
     # through their own user routing.
     if len(non_structural) >= 2 and any(s.has_explicit_rule for s in non_structural):
         return stacks, False
-    if any(s.stack_name == "react" for s in non_structural) and any(
+    if len(non_structural) >= 2 and any(
         s.stack_name == GENERIC_STACK and any(
             Path(f).suffix.lower() in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
             or Path(f).name in {"package.json", "tsconfig.json"}

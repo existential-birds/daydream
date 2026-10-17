@@ -814,8 +814,8 @@ Inspection follows sorted paths and reads at most 256 source files (256 KiB each
 128 metadata files (64 KiB each), and 4 MiB combined. Metadata is cached per run.
 Missing/deleted, unreadable, malformed, escaped/symlinked, or over-budget input
 receives generic coverage; partial file contents never establish ownership.
-Automatic tiny-diff collapse retains separate React and generic JS/TS or project
-config scopes and preserves explicit stack rules. Explicit shallow/stack choices
+Automatic tiny-diff collapse preserves generic JS/TS and project config scopes
+beside any language scope, along with explicit stack rules. Explicit shallow/stack choices
 still combine scopes as requested. Every changed path has one primary assignment;
 Structure additionally reviews their full union.
 
