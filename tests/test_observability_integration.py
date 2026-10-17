@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import errno
 import json
-import os
 import threading
 from collections.abc import Callable
 from datetime import datetime
@@ -98,64 +96,40 @@ async def test_cli_worktree_archive_traces_analysis_after_frozen_trajectory(
     ext_dir: ExtDir, feature_branch_repo: Path, archive_dir: Path, tmp_path: Path,
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch, reader_delay_s: int,
 ) -> None:
-    """Finalization keeps worker trace context without extending frozen lifecycle evidence."""
+    """Finalization keeps worker trace context without extending frozen lifecycle evidence.
+
+    Gate an actual regular-source read: repository scope now skips FIFO entries,
+    while this owner must still detect analysis accidentally blocking the event loop.
+    """
     ext_dir.write_module(_FLOW)
     remote = bare_remote(tmp_path / "origin.git")
     git(feature_branch_repo, "remote", "add", "origin", str(remote))
     git(feature_branch_repo, "push", "origin", "main", "feature")
     head = git(feature_branch_repo, "rev-parse", "HEAD")
     reader_ready = threading.Event()
-    release_writer = threading.Event()
-    writer_outcomes: list[bool | Exception] = []
-    writer: threading.Thread | None = None
+    release_reader = threading.Event()
+    reader_outcomes: list[bool] = []
+    source: Path | None = None
+    open_path = Path.open
 
-    async def seed_source_fifo(cwd: Path, *_args: Any) -> None:
-        nonlocal writer
+    async def select_source(cwd: Path, *_args: Any) -> None:
+        nonlocal source
         source = cwd / "main.py"
-        content = source.read_bytes()
-        source.unlink()
-        os.mkfifo(source)
-
-        def write_source() -> None:
-            descriptor: int | None = None
-            try:
-                while not release_writer.is_set():
-                    try:
-                        descriptor = os.open(source, os.O_WRONLY | os.O_NONBLOCK)
-                        break
-                    except OSError as exc:
-                        if exc.errno != errno.ENXIO:
-                            raise
-                        release_writer.wait(0.01)
-                if descriptor is None:
-                    if not source.is_fifo():
-                        return
-                    # Cleanup must also release a reader racing with replacement.
-                    descriptor = os.open(source, os.O_RDWR | os.O_NONBLOCK)
-                # The current reader owns the FIFO fd; later reads see ordinary
-                # source bytes, including the pre-optimization repeated-read path.
-                replacement = cwd / "source-ready"
-                replacement.write_bytes(content)
-                os.replace(replacement, source)
-                reader_ready.set()
-                writer_outcomes.append(release_writer.wait(5))
-                os.write(descriptor, content)
-            except Exception as exc:
-                writer_outcomes.append(exc)
-            finally:
-                if descriptor is not None:
-                    os.close(descriptor)
-                reader_ready.set()
-
-        writer = threading.Thread(target=write_source, daemon=True)
-        writer.start()
         await anyio.sleep(reader_delay_s)
+
+    def open_source(path: Path, *args: Any, **kwargs: Any) -> Any:
+        mode = args[0] if args else kwargs.get("mode")
+        if path == source and mode == "rb" and not reader_outcomes:
+            reader_ready.set()
+            reader_outcomes.append(release_reader.wait(5))
+        return open_path(path, *args, **kwargs)
 
     async def release_from_event_loop() -> None:
         if await anyio.to_thread.run_sync(reader_ready.wait, reader_delay_s + 10):
-            release_writer.set()
+            release_reader.set()
 
-    backend = _backend(responder=seed_source_fifo)
+    monkeypatch.setattr(Path, "open", open_source)
+    backend = _backend(responder=select_source)
     install_backend(backend)
     try:
         with otlp_collector() as receiver:
@@ -168,12 +142,9 @@ async def test_cli_worktree_archive_traces_analysis_after_frozen_trajectory(
                 tasks.start_soon(release_from_event_loop)
                 assert await runner.run(config) == 0
     finally:
-        release_writer.set()
-        if writer is not None:
-            await anyio.to_thread.run_sync(writer.join, 6)
+        release_reader.set()
 
-    assert writer is not None and not writer.is_alive()
-    assert writer_outcomes == [True], "quality analysis blocked the event loop until the FIFO writer timed out"
+    assert reader_outcomes == [True], "quality analysis blocked the event loop until the source reader timed out"
     assert backend.call_count == 1
     worktree = backend.calls[0]["cwd"]
     assert worktree != feature_branch_repo.resolve()

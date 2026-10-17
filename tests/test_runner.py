@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -372,11 +373,19 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     exit_code: int, capsys: pytest.CaptureFixture[str],
 ) -> None:
     from daydream.archive import finalize_archive_run
+    from daydream.eval.analyzer import analyze_session
 
     repo = _feature_repo(tmp_path)
     _write_probe_flow(ext_dir, "artifact-probe", exit_code=exit_code)
     backend = _ControlledBackend("block")
     monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: backend)
+    evaluation_entered = anyio.Event()
+    evaluation_release = threading.Event()
+
+    def pause_evaluation(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        anyio.from_thread.run_sync(evaluation_entered.set)
+        assert evaluation_release.wait(timeout=10), "test did not release evaluation"
+        return analyze_session(*args, **kwargs)
 
     def corrupt_identity(**kwargs: Any) -> None:
         kwargs["artifacts"] = replace(kwargs["artifacts"], session_id="foreign-session")
@@ -394,7 +403,9 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
             raise OSError("dump publication failed")
         return copied
 
-    if failure_mode == "evaluation":
+    if failure_mode == "none":
+        monkeypatch.setattr("daydream.eval.analyzer.analyze_session", pause_evaluation)
+    elif failure_mode == "evaluation":
         monkeypatch.setattr("daydream.eval.analyzer.analyze_session", _fail_evaluation)
     elif failure_mode == "identity":
         monkeypatch.setattr("daydream.archive.finalize_archive_run", corrupt_identity)
@@ -419,11 +430,13 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     (repo / ".review-output.md").write_text("prior review")
     config = RunConfig(
         target=str(repo), base="main", flow_name="artifact-probe", trajectory_path=external_trajectory,
-        run_eval=failure_mode in ("evaluation", "frozen_tree"), dump_artifacts=str(dump),
+        run_eval=failure_mode in ("none", "evaluation", "frozen_tree"), dump_artifacts=str(dump),
         archive=True, non_interactive=True, dataset_capture=failure_mode.startswith("dataset"),
         dataset_store_path=store_path,
     )
     result: list[int] = []
+    frozen_trajectory: bytes | None = None
+    active_progress = ""
     async def invoke() -> None:
         result.append(await _run_private(config, tmp_path))
     with anyio.fail_after(20):
@@ -438,6 +451,37 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
                 replacement.write_text("concurrent replacement\n", encoding="utf-8")
                 os.replace(replacement, external_trajectory)
             backend.release.set()
+            if failure_mode == "none":
+                try:
+                    await evaluation_entered.wait()
+                    active = capsys.readouterr()
+                    active_progress = active.err
+                    assert "Finalization" not in active.out
+                    assert "Finalization started." in active_progress
+                    assert "Finalization: Evaluating run." in active_progress
+                    assert "Finalization complete" not in active_progress
+                    assert result == []
+                    assert not (repo / ".daydream").exists()
+                    assert not list((archive_dir / "runs").glob("[!.]*"))
+                    live_trajectories = list(
+                        (tmp_path / "private" / "runtime").glob("*/runs/*/live/.daydream/runs/*/trajectory.json")
+                    )
+                    assert len(live_trajectories) == 1
+                    frozen_trajectory = live_trajectories[0].read_bytes()
+                finally:
+                    evaluation_release.set()
+    captured = capsys.readouterr()
+    progress = active_progress + captured.err
+    assert not re.search(r"Finalization(?: started|:| complete| failed| finished)", captured.out)
+    assert "\x1b[" not in progress and "\r" not in progress
+    assert str(tmp_path / "private") not in progress
+    if failure_mode in ("destination", "identity", "frozen_tree", "dump_publication"):
+        assert re.search(r"Finalization failed after \d+\.\ds", progress)
+    elif failure_mode == "evaluation" or failure_mode.startswith("dataset"):
+        assert re.search(r"Finalization finished with errors after \d+\.\ds", progress)
+    else:
+        assert re.search(r"Finalization complete after \d+\.\ds", progress)
+    assert ("Finalization complete" in progress) is (failure_mode == "none")
     if failure_mode in ("destination", "identity", "frozen_tree", "dump_publication"):
         assert result == [1]
         assert not list((archive_dir / "runs").glob("*"))
@@ -448,7 +492,7 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
         assert (dump / "prior.txt").read_text() == "prior dump"
         return
     assert result == [exit_code]
-    assert ("Data Collection" in capsys.readouterr().out) is (
+    assert ("Data Collection" in captured.out) is (
         failure_mode == "evaluation" or failure_mode.startswith("dataset"))
     if failure_mode == "dataset-symlink":
         assert [path.name for path in unowned.iterdir()] == ["prior.txt"]
@@ -467,6 +511,13 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
         return
     public_run, archived_run = _assert_one_published_run(repo, archive_dir)
     archived_bytes = (archived_run / "trajectory.json").read_bytes()
+    if failure_mode == "none":
+        assert archived_bytes == frozen_trajectory
+        evaluation = json.loads((archived_run / "evaluation.json").read_text())
+        assert evaluation["quality"]["scoped_files"] == 1
+        assert list(evaluation["quality"]["per_file"]) == ["app.py"]
+        assert "Finalization: Publishing run archive." in progress
+        assert "Finalization: Publishing run outputs." in progress
     assert (public_run / "trajectory.json").read_bytes() == archived_bytes
     assert external_trajectory.read_bytes() == archived_bytes
     assert (dump / "trajectory.json").read_bytes() == archived_bytes

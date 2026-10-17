@@ -9,6 +9,7 @@ other registered flow names use the custom-flow preamble.
 import asyncio
 import os
 import sys
+import time
 import uuid
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import anyio
+from rich.console import Console
 from rich.markup import escape as escape_markup
 
 from daydream import git_ops, github_app, pr_review
@@ -90,6 +92,7 @@ from daydream.trajectory import (
     DaydreamRunFlow,
 )
 from daydream.ui import (
+    NEON_THEME,
     phase_subtitle,
     print_dim,
     print_error,
@@ -551,24 +554,45 @@ async def _run_workspace(
                     else capture.partial
                 )
                 finalization_error: Exception | None = capture.validation_error
-                if selected is not None or config.dataset_capture:
+                if selected is not None or config.dataset_capture or finalization_error is not None:
                     successful = primary is None and result == 0 and finalization_error is None
+                    # Durable stderr lines survive pipes/noninteractive runs and keep
+                    # presentation separate from the already frozen trajectory.
+                    progress_console = Console(stderr=True, theme=NEON_THEME)
+                    started = time.monotonic()
+                    print_info(progress_console, "Finalization started.")
+                    def progress(stage: str) -> None:
+                        print_info(progress_console, f"Finalization: {stage}.")
                     try:
                         finalize = partial(
                             _finalize_run_artifacts, run_artifacts, selected=selected,
                             config=dispatch_config, work=work, successful=successful,
                             interrupted=primary is not None and not isinstance(primary, Exception),
+                            progress=progress,
                         )
                         with anyio.CancelScope(shield=True):
                             with step_scope("artifact-finalization", stack=dispatch_config.stack) as observed:
-                                await anyio.to_thread.run_sync(finalize)
+                                collected = await anyio.to_thread.run_sync(finalize)
                                 observed.finish()
                     except BaseException as exc:
+                        print_error(
+                            progress_console, "Finalization",
+                            f"Finalization failed after {time.monotonic() - started:.1f}s ({type(exc).__name__}).",
+                        )
                         if primary is None:
                             raise
                         primary.add_note(
                             f"artifact finalization retained a secondary base failure ({type(exc).__name__})"
                         )
+                    else:
+                        elapsed = time.monotonic() - started
+                        if finalization_error is not None or not collected:
+                            print_error(
+                                progress_console, "Finalization",
+                                f"Finalization finished with errors after {elapsed:.1f}s.",
+                            )
+                        else:
+                            print_success(progress_console, f"Finalization complete after {elapsed:.1f}s.")
 
                 if primary is not None:
                     if isinstance(primary, SystemExit) and primary.code == 2 and capture.validation_error is not None:

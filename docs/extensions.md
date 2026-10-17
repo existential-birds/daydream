@@ -521,6 +521,11 @@ Production/custom flows own an active `ctx.artifacts` session. Generated files
 are private during execution, frozen at finalization, then published as
 `.daydream/` and `.review-output.md` in the source checkout.
 
+Runner finalization reports its active stages and elapsed outcome on stderr,
+including optional evaluation. These presentation messages are separate from
+the frozen evidence and its timing; custom flows must still join artifact
+writers before returning control for finalization.
+
 - Use supplied `ctx.data` paths; write new outputs through the same session.
   Direct public writes can fail the model-cwd check before a later dispatch.
   Working paths expire with the session.

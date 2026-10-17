@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import stat
 from bisect import bisect_right
 from functools import lru_cache
 from pathlib import Path
@@ -9,6 +10,8 @@ from typing import Any, Iterator
 
 from daydream._tree_sitter_safety import TreeSitterBadVersionError, assert_tree_sitter_safe
 from daydream.generated_files import is_generated_file
+from daydream.git_ops import is_git_workspace, search_files
+from daydream.repository_paths import git_observed_path_is_confined
 
 # Quality metrics (issue #316) ----------------------------------------------
 
@@ -128,18 +131,33 @@ def _count_decision_nodes(node: Any) -> int:
 
 
 def _scoped_python_files(workspace: Path) -> Iterator[tuple[Path, str, bytes]]:
-    """Yield sorted eligible Python paths and bytes, pruning excluded directories."""
-    files: list[tuple[Path, str]] = []
-    # Like rglob, do not descend through directory symlinks. Real directories
-    # ending in .py remain traversable; reading a directory yields no candidate.
-    for directory, directories, filenames in workspace.walk(top_down=True, follow_symlinks=False):
-        directories[:] = [name for name in directories if name not in _QUALITY_EXCLUDED_DIRS]
-        for name in filenames:
-            if name.endswith(".py"):
-                path = directory / name
-                files.append((path, str(path.relative_to(workspace))))
-    for path, rel in sorted(files, key=lambda item: item[1]):
+    """Yield eligible Python bytes from Git membership or standalone directory scope.
+
+    Git discovery/inventory failures propagate rather than widening to recursive
+    scanning. Git entries must be confined regular files. Standalone directories
+    retain recursive discovery, exclusions, and leaf-file symlink compatibility;
+    directory symlinks are never traversed and nonregular files are never read.
+    """
+    git_workspace = is_git_workspace(workspace)
+    if git_workspace:
+        relatives = search_files(workspace, ["."])
+    else:
+        relatives = []
+        for directory, directories, filenames in workspace.walk(top_down=True, follow_symlinks=False):
+            directories[:] = [name for name in directories if name not in _QUALITY_EXCLUDED_DIRS]
+            relatives.extend(
+                str((directory / name).relative_to(workspace)) for name in filenames if name.endswith(".py")
+            )
+    for rel in sorted(relatives):
+        if not rel.endswith(".py") or _QUALITY_EXCLUDED_DIRS.intersection(Path(rel).parts[:-1]):
+            continue
+        if git_workspace and not git_observed_path_is_confined(workspace, rel):
+            continue
+        path = workspace / rel
         try:
+            mode = path.lstat().st_mode if git_workspace else path.stat().st_mode
+            if not stat.S_ISREG(mode):
+                continue
             content = path.read_bytes()
         except OSError:
             continue
@@ -613,7 +631,9 @@ def analyze_quality(
     """Measure scoped Python quality in code_workspace, defaulting to daydream_dir.parent.
 
     An explicit empty candidate set skips enumeration. Other candidate sets restrict
-    reporting while all eligible, parseable peers remain clone evidence. Failed parses
+    reporting while all eligible, parseable peers remain clone evidence. Git scope
+    includes tracked and nonignored untracked files for both targets and peers;
+    standalone directories use recursive scope. Failed parses
     stay in scoped_files but are absent from every metric/index. Zero denominators
     yield None ratios. Refuse unsafe tree-sitter versions even for empty scope.
     """

@@ -313,6 +313,13 @@ deterministic evaluation from source quality analysis. These spans retain the
 run's trace context and end before trace shutdown. They do not extend the frozen
 trajectory cutoff or change evaluation and manifest lifecycle timing.
 
+The runner also reports finalization start, active stages (including evaluation),
+and completion or failure with elapsed wall time as durable stderr output.
+This presentation remains available without tracing, a TTY, or interactive mode.
+It contains stage labels rather than private artifact paths, and does not append
+events to frozen trajectories. Optional collection failures are reported as
+finalization finishing with errors without changing the completed review result.
+
 A signal flush freezes the root and active children at one `snapshot_at` cutoff.
 Open invocations remain incomplete, without invented end times. If children have
 started before the root has a step, the partial root contains a system snapshot

@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **eval/runner:** limit quality metrics and clone peers to Git's tracked plus nonignored untracked source, excluding ignored artifact trees, and show finalization stages and elapsed completion or failure in noninteractive runs. Git inventory failures no longer permit recursive fallback; standalone non-Git analysis retains its existing discovery behavior ([#1580](https://github.com/existential-birds/daydream/issues/1580)).
+
 - **improve:** audit ordinary files alongside tracked submodule references, retain surviving branch type replacements, and explicitly report uncaptured submodule contents ([#1406](https://github.com/existential-birds/daydream/issues/1406)).
 
 - **improve:** honor the selected effort and backend concurrency limits for branch audit and vet tasks while preserving branch scope and finding policies ([#1404](https://github.com/existential-birds/daydream/issues/1404)).

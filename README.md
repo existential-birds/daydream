@@ -474,6 +474,21 @@ The evaluation framework has two arms:
 - **Recall.** Compare daydream findings against a human gold baseline. Report inter-annotator agreement (Krippendorff alpha) and PR-level bootstrap confidence intervals.
 - **Quality.** Track erosion and verbosity metrics. The fix-phase quality gate uses these metrics to flag degraded fixes.
 
+In Git workspaces, quality analysis uses tracked plus nonignored untracked Python
+files for both metrics and clone peers, including eligible tracked hidden and
+ignored paths. Generated and vendored exclusions still apply. Symlinks (including
+symlinked ancestors) and nonregular entries are skipped, following repository
+search confinement. Candidate-scoped quality gates report only candidates while
+retaining eligible unchanged files as clone peers. Nested repository directories
+and linked worktrees use their active working directory's inventory.
+
+Intentional non-Git analysis retains recursive discovery with the existing
+directory exclusions and leaf Python symlink behavior; directory symlinks are not
+traversed. Git discovery or inventory errors and timeouts fail analysis rather
+than widening into recursive scanning. Archive evaluation remains enabled by
+default and its cost scales with eligible source; `--no-eval` skips it without
+disabling capture or archival.
+
 Private PR benchmarks run on Harbor. See [docs/benchmark.md](docs/benchmark.md) for the benchmark runbook.
 
 ## Architecture
@@ -1154,6 +1169,14 @@ These paths contain finalized output in the source checkout. Live artifacts stay
 | `~/.daydream/archive/index.db` | Local diagnostic index of finalized run metadata |
 
 Daydream moves existing untracked `.daydream/` and `.review-output.md` artifacts into private storage for the run. It restores or merges them during finalization. Tracked files at these artifact paths cause a preflight refusal; Daydream does not detach tracked source files. If another process changes an output, Daydream retains the competing bytes and reports a conflict instead of overwriting them. Recovery remains tied to the source checkout after temporary worktree cleanup.
+
+Finalization prints durable progress lines to stderr, including in noninteractive
+and piped runs: evidence freezing, enabled capture/upload, archive assembly,
+evaluation, and output publication. Its completion or failure includes elapsed
+wall time; optional collection failures finish with an error status message while
+preserving the review result. These messages do not alter machine-readable
+outputs or extend frozen trajectory timing. A posted review can precede
+finalization; wait for finalization to finish before assuming outputs are ready.
 
 An explicit `--trajectory` path outside the source checkout receives live, atomic full and partial trajectory updates. Other explicit outputs remain deferred until finalization; `--dump-artifacts` merges files without replacing the whole destination directory. External trajectory publication requires the destination filesystem to support the checked atomic operations. An unsupported destination fails before model dispatch; there is no non-atomic fallback.
 
