@@ -59,9 +59,15 @@ def is_git_workspace(repo: Path) -> bool:
     )
     if proc.returncode == 0 and proc.stdout.strip() == "true":
         return True
-    if proc.returncode == 128 and proc.stderr.startswith(
-        "fatal: not a git repository (or any of the parent directories)"
-    ):
+    standalone_error = proc.stderr.rstrip("\n") == (
+        "fatal: not a git repository (or any of the parent directories): .git"
+    )
+    filesystem_boundary_error = re.fullmatch(
+        r"fatal: not a git repository \(or any parent up to mount point [^\n]+\)\n"
+        r"Stopping at filesystem boundary \(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\.\n?",
+        proc.stderr,
+    ) is not None
+    if proc.returncode == 128 and (standalone_error or filesystem_boundary_error):
         # Git uses the same diagnostic for some damaged repositories. lstat
         # retains broken .git symlinks and lets permission errors propagate.
         resolved = repo.resolve(strict=True)

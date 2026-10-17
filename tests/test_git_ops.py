@@ -676,6 +676,64 @@ def test_git_workspace_detection_refuses_unusable_git_storage(tmp_path: Path, ki
         git_ops.is_git_workspace(nested)
 
 
+def test_git_workspace_detection_allows_standalone_mount(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Owner: standalone discovery on a separate filesystem. Ordinary tmp_path
+    # storage does not exercise Git's filesystem-boundary diagnostic.
+    directory = Path("/dev")
+    if not directory.is_mount():
+        pytest.skip("/dev is not a separate filesystem")
+    monkeypatch.delenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", raising=False)
+    monkeypatch.delenv("GIT_CEILING_DIRECTORIES", raising=False)
+    probe = subprocess.run(
+        ["git", "-C", str(directory), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True, text=True, check=False, timeout=5, env={**os.environ, "LC_ALL": "C"},
+    )
+    if probe.returncode != 128 or "Stopping at filesystem boundary" not in probe.stderr:
+        pytest.skip("Git does not report filesystem-boundary discovery for /dev")
+    assert not git_ops.is_git_workspace(directory)
+
+
+@pytest.mark.parametrize("marker", [None, "broken-link", "invalid-gitfile"])
+def test_git_workspace_detection_checks_markers_after_filesystem_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, marker: str | None,
+) -> None:
+    # Owner: fail-closed discovery. The new diagnostic must still inspect real
+    # ancestor markers; existing damaged-storage tests use a different response.
+    if marker == "broken-link":
+        (tmp_path / ".git").symlink_to(tmp_path / "missing")
+    elif marker == "invalid-gitfile":
+        (tmp_path / ".git").write_text("gitdir: missing\n")
+    nested = tmp_path / "src"
+    nested.mkdir()
+    _patch_subprocess_run(
+        monkeypatch, returncode=128,
+        stderr=(
+            "fatal: not a git repository (or any parent up to mount point /mounted volume)\n"
+            "Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n"
+        ),
+    )
+    if marker is None:
+        assert not git_ops.is_git_workspace(nested)
+    else:
+        with pytest.raises(GitError):
+            git_ops.is_git_workspace(nested)
+
+
+@pytest.mark.parametrize("diagnostic", [
+    "fatal: not a git repository: unexpected failure\n",
+    "fatal: not a git repository (or any parent up to mount point /)\n",
+    "fatal: not a git repository (or any of the parent directories) but discovery failed\n",
+])
+def test_git_workspace_detection_rejects_unrecognized_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, diagnostic: str,
+) -> None:
+    # Owner: inventory confinement. Accepting every no-repository prefix would
+    # turn unexpected Git failures into unrestricted recursive source scans.
+    _patch_subprocess_run(monkeypatch, returncode=128, stderr=diagnostic)
+    with pytest.raises(GitError):
+        git_ops.is_git_workspace(tmp_path)
+
+
 def test_git_workspace_detection_propagates_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Owner: transport ambiguity. No Git answer means no permission to recurse;
     # real-repository cases cannot deterministically force a hung subprocess.
