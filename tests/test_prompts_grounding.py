@@ -30,5 +30,5 @@ def test_search_guidance_preserves_evidence_and_bounds_fallback() -> None:
     assert "tracked dotfiles" in REPOSITORY_SEARCH_GUIDANCE
     assert "nonignored untracked" in REPOSITORY_SEARCH_GUIDANCE
     assert "fallback when rg is unavailable" in REPOSITORY_SEARCH_GUIDANCE
-    assert "--expand named/path --reason" in REPOSITORY_SEARCH_GUIDANCE
+    assert "Positional roots remain required" in REPOSITORY_SEARCH_GUIDANCE
     assert "including grep, are allowed" in REPOSITORY_SEARCH_GUIDANCE
