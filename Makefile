@@ -30,6 +30,7 @@ deadcode:
 # a failed run for the coverage-report / CI artifact upload.
 test:
 	uv run pytest -n $(PYTEST_WORKERS) --cov --cov-branch --cov-report=term-missing --cov-report=xml
+	uv run python -m unittest discover -s .agents/skills/daydream-trace-analysis/scripts -p 'test_*.py'
 
 # Machine-readable coverage report for humans who want the XML locally; the
 # terminal term-missing report + coverage floor enforcement already happen inside
