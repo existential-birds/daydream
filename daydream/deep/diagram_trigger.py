@@ -4,8 +4,9 @@ Sequence diagrams require service/module crossings; flowcharts require enough
 changed branch points in one function. Inputs are explicit; filesystem access
 only parses supplied changed files, and the decision is persisted for audit.
 
-Pass fresh, uncollapsed stack detection: tiny-diff collapse can hide languages
-inside generic. Tree-sitter failures yield no branch points and can only suppress
+Pass fresh, uncollapsed stack detection: tiny-diff collapse can hide non-JS/TS
+languages inside generic. JS/TS source remains code regardless of framework routing.
+Tree-sitter failures yield no branch points and can only suppress
 a diagram. CandidateRoot and DiagramThresholds live in diagram_types and are
 re-exported here for eligibility callers.
 """
@@ -21,6 +22,7 @@ from daydream._tree_sitter_safety import TreeSitterBadVersionError
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.detection import GENERIC_STACK, base_stack_name
 from daydream.deep.diagram_types import CandidateRoot, DiagramThresholds
+from daydream.deep.framework_detection import JS_SOURCE_SUFFIXES
 from daydream.repository_paths import is_test_path
 from daydream.services import RepoRootPolicy, ServiceMatch, owning_services
 from daydream.tree_sitter_index import (
@@ -66,8 +68,9 @@ class KindDecision:
 class Eligibility:
     """Persisted eligibility signals and resolved policy.
 
-    code_files excludes tests, generic, and structure. modules maps each file to its
-    service root or top-level directory ("." at root); services omits unowned files.
+    code_files excludes tests, structural scopes, and generic non-JS/TS files.
+    modules maps each file to its service root or top-level directory ("." at root);
+    services omits unowned files.
     Cross-module edges are directed. Candidate roots meet the branch threshold, or
     fall back to every changed function when forced; order is descending branch
     count, then file and line.
@@ -99,14 +102,16 @@ class Eligibility:
 
 
 def _code_files(stacks: list[StackAssignment], changed_files: list[str]) -> list[str]:
-    """Select changed non-test language files, ignoring shard suffixes and meta-stacks."""
+    """Select changed non-test code, retaining JS/TS independently of framework routing."""
     changed = set(changed_files)
     selected: set[str] = set()
     for assignment in stacks:
         base_stack = base_stack_name(assignment.stack_name)
-        if base_stack in (GENERIC_STACK, STRUCTURE_STACK_NAME):
+        if base_stack == STRUCTURE_STACK_NAME:
             continue
         for path in assignment.files:
+            if base_stack == GENERIC_STACK and PurePosixPath(path).suffix.lower() not in JS_SOURCE_SUFFIXES:
+                continue
             if path in changed and not is_test_path(path):
                 selected.add(path)
     return sorted(selected)

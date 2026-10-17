@@ -24,6 +24,7 @@ from daydream.deep.orchestrator import (
 from daydream.deep.sharding import shard_stacks
 from daydream.review_budget import review_scale_for_diff
 from daydream.run_config import RunConfig
+from tests.conftest import ExtDir
 from tests.deep_orchestrator.test_review_completion import ReviewRun, scopes
 from tests.harness.git_helpers import git, seed_feature_branch
 from tests.harness.stub_backend import review_stage_state
@@ -142,13 +143,14 @@ async def test_below_scale4_overloaded_stack_publishes_automatic_shards(
                         'func TestRemoved(t *testing.T) { if Value0() != 0 { t.Fatal("value") } }\n'
                         if language == 'go' else
                         'from module_0 import VALUE\n\ndef test_removed():\n    assert VALUE == 0\n')
-    before.update({'README.md': '# Project\n', 'App.tsx': 'export const App = () => <div/>;\n'})
+    before.update({'README.md': '# Project\n',
+                   'App.tsx': 'import React from "react"; export const App = () => <div/>;\n'})
     comment = '// ' if language == 'go' else '# '
     additions = ''.join(f'{comment}changed {index}: ' + 'x' * 70 + '\n' for index in range(110))
     after = {path: text + additions for path, text in before.items() if path.endswith(suffix) and path != old_test}
     after[new_test] = before[old_test].replace('Removed', 'Added').replace('removed', 'added') + additions
     after.update({'README.md': '# Project\nUpdated contract.\n',
-                  'App.tsx': 'export const App = () => <div>Updated</div>;\n'})
+                  'App.tsx': 'import React from "react"; export const App = () => <div>Updated</div>;\n'})
     repo = tmp_path / language
     seed_feature_branch(repo, base=before, feature=after)
     # seed_feature_branch writes additions/modifications; omissions are not deletions.
@@ -303,8 +305,8 @@ async def test_default_cap_coarsens_only_enough_and_preserves_scope_qualified_wo
 
     before = {f'module_{index:02}.py': 'VALUE = 0\n' for index in range(41)}
     before.update({f'guide_{index}.md': '# Guide\n' for index in range(7)})
-    before.update({'App.tsx': 'export const App = () => <div/>;\n',
-                   'Other.tsx': 'export const Other = () => <div/>;\n'})
+    before.update({'App.tsx': 'import React from "react"; export const App = () => <div/>;\n',
+                   'Other.tsx': 'import React from "react"; export const Other = () => <div/>;\n'})
     after = {path: text + ''.join(f'# changed {index}: ' + 'x' * 75 + '\n' for index in range(155))
              for path, text in before.items() if not path.endswith('.tsx')}
     after.update({path: text + '// Retain component contract.\n'
@@ -343,3 +345,52 @@ async def test_default_cap_coarsens_only_enough_and_preserves_scope_qualified_wo
         assert inline_section_emitted_bytes([(label, len(text.encode())) for label, text in logical]) <= 24 * 1024
     coverage = json.loads((repo / '.daydream/deep/review-coverage.json').read_text())
     assert coverage['stack_outcomes'] == data['terminal_result']['stack_outcomes']
+
+
+@pytest.mark.parametrize('fallback', ['plain-typescript', 'malformed-package', 'conflicting-tsconfig', 'explicit-rule'])
+async def test_automatic_tiny_review_preserves_framework_and_explicit_scopes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, fallback: str,
+) -> None:
+    """Target evidence and fork ownership survive automatic tiny-diff handling."""
+    repo = tmp_path / 'framework_routing'
+    component = 'packages/web/src/App.tsx'
+    secondary = 'tools/helper.ts'
+    old_secondary, new_secondary = 'export const value = 1;\n', 'export const value = 2;\n'
+    secondary_stack = 'generic'
+    if fallback == 'malformed-package':
+        secondary, old_secondary, new_secondary = 'tools/package.json', '{}\n', '{broken\n'
+    elif fallback == 'conflicting-tsconfig':
+        secondary, old_secondary = 'tools/tsconfig.json', '{}\n'
+        new_secondary = '{"compilerOptions":{"jsxImportSource":"preact"}}\n'
+    elif fallback == 'explicit-rule':
+        ext_dir.write_module(
+            'from daydream.extensions import StackRule\n'
+            'def register(registry):\n'
+            '    registry.add_stack(StackRule("python", ("tools/helper.ts",)))\n'
+        )
+        secondary_stack = 'python'
+    before = {
+        'package.json': '{"dependencies":{"react":"*"}}\n',
+        'packages/web/package.json': '{"dependencies":{"react":"*"}}\n',
+        component: 'export const App = () => <div>Hello</div>;\n',
+        secondary: old_secondary,
+    }
+    seed_feature_branch(repo, base=before, feature={
+        component: before[component].replace('Hello', 'Updated'),
+        secondary: new_secondary,
+    })
+    review = ReviewRun(repo, tmp_path, monkeypatch)
+    # ReviewRun disables tiny collapse for most tests. Use the production default:
+    # the two changed files qualify, but their resolved ownership must survive.
+    assert await review.run(shallow_fanout_threshold=None) == 0
+    inventory = scopes(review.load())
+    assert {name: scope['files'] for name, scope in inventory.items()} == {
+        'react': [component], secondary_stack: [secondary], 'structure': [component, secondary],
+    }
+    observed: dict[str, set[str]] = {}
+    for call in review.backend.calls:
+        stage = review_stage_state(call['prompt'])
+        if stage is not None and stage['stage'] == 'first_pass':
+            observed.setdefault(stage['scope_id'], set()).update(stage['assigned_target_ids'])
+    assert observed == {'react': {component}, secondary_stack: {secondary}}
+    assert all(scope['status'] == 'complete' for scope in inventory.values())

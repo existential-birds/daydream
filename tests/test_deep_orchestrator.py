@@ -127,13 +127,13 @@ def _migration_project(tmp_path: Path, name: str) -> tuple[Path, Path]:
     project = _feature_branch_repo(tmp_path, name,
         initial={
             "api.py": "def hello():\n    return 'world'\n",
-            "App.tsx": "export const App = () => <div>hello</div>;\n",
+            "App.tsx": 'import React from "react"; export const App = () => <div>hello</div>;\n',
             "README.md": "# Project\n",
             migration_rel: "SELECT 1;\n",
         },
         changed={
             "api.py": "def hello():\n    return 'universe'\n",
-            "App.tsx": "export const App = () => <div>universe</div>;\n",
+            "App.tsx": 'import React from "react"; export const App = () => <div>universe</div>;\n',
             "README.md": "# Project\n\nUpdated.\n",
             migration_rel: "SELECT 1;\nSELECT 2;\n",
         },

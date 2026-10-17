@@ -156,7 +156,7 @@ def _improve_monorepo(tmp_path: Path, name: str, *, with_web: bool = True, branc
     if with_web:
         web = project / "web"
         web.mkdir()
-        (web / "App.tsx").write_text("export const App = () => <div>daydream</div>;\n")
+        (web / "App.tsx").write_text('import React from "react"; export const App = () => <div>daydream</div>;\n')
     (project / "README.md").write_text("# Improve monorepo\n")
     (project / "pyproject.toml").write_text(
         "[project]\n"
@@ -197,7 +197,7 @@ def improve_scaled_monorepo_target(tmp_path: Path) -> Path:
         pkg = project / "frontend" / "src" / sub
         pkg.mkdir(parents=True)
         for index in range(4):
-            (pkg / f"view{index}.tsx").write_text("export const V = () => <div/>;\n")
+            (pkg / f"view{index}.tsx").write_text('import React from "react"; export const V = () => <div/>;\n')
     (project / "README.md").write_text("# scaled\n")
     (project / "pyproject.toml").write_text(
         '[project]\nname = "improve-scaled"\n\n[tool.daydream]\ntest-command = "uv run pytest"\n'
@@ -225,11 +225,11 @@ def multi_stack_target(tmp_path: Path) -> Path:
     """Feature-branch diff with one Python, React, and Markdown file."""
     return _feature_repo(tmp_path, "multi_stack", {
         "api.py": "def hello():\n    return 'world'\n",
-        "App.tsx": "export const App = () => <div>hello</div>;\n",
+        "App.tsx": 'import React from "react"; export const App = () => <div>hello</div>;\n',
         "README.md": "# Project\n",
     }, {
         "api.py": "def hello():\n    return 'universe'\n",
-        "App.tsx": "export const App = () => <div>universe</div>;\n",
+        "App.tsx": 'import React from "react"; export const App = () => <div>universe</div>;\n',
         "README.md": "# Project\n\nUpdated.\n",
     })
 
@@ -282,10 +282,10 @@ def tiny_diff_target(tmp_path: Path) -> Path:
     """Two-language diff small enough to combine stacks and skip merge/arbiter."""
     return _feature_repo(tmp_path, "tiny_diff", {
         "api.py": "def hello():\n    return 'world'\n",
-        "App.tsx": "export const App = () => <div>hello</div>;\n",
+        "App.tsx": 'import React from "react"; export const App = () => <div>hello</div>;\n',
     }, {
         "api.py": "def hello():\n    return 'universe'\n",
-        "App.tsx": "export const App = () => <div>universe</div>;\n",
+        "App.tsx": 'import React from "react"; export const App = () => <div>universe</div>;\n',
     })
 
 

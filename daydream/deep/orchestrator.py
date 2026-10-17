@@ -164,6 +164,21 @@ def _collapse_stacks_for_tiny_diff(
     non_structural = [s for s in stacks if s.stack_name != STRUCTURE_STACK_NAME]
     structural = [s for s in stacks if s.stack_name == STRUCTURE_STACK_NAME]
 
+    # Automatic collapse must retain explicit fork ownership and framework
+    # fallback decisions. Explicit shallow/stack choices still collapse below
+    # through their own user routing.
+    if len(non_structural) >= 2 and any(s.has_explicit_rule for s in non_structural):
+        return stacks, False
+    if any(s.stack_name == "react" for s in non_structural) and any(
+        s.stack_name == GENERIC_STACK and any(
+            Path(f).suffix.lower() in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
+            or Path(f).name in {"package.json", "tsconfig.json"}
+            for f in s.files
+        )
+        for s in non_structural
+    ):
+        return stacks, False
+
     # Absorb generic files into a sole language; multiple languages collapse to generic.
     if len(non_structural) >= 2:
         combined_files = sorted({f for s in non_structural for f in s.files})
@@ -465,7 +480,7 @@ def _prepare_review_stacks(
     # Stack detection (from diff file list). Built-in detection is
     # registry-independent (M1); fork stack rules still resolve via the
     # registry inside detect_stacks.
-    stacks = detect_stacks(changed_files)
+    stacks = detect_stacks(changed_files, target_dir=target_dir)
     # Apply the resolved structural gate before collapsing or sharding assignments.
     if not _config_pipeline(config).structural_enabled:
         stacks = [s for s in stacks if s.stack_name != STRUCTURE_STACK_NAME]

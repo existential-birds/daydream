@@ -293,6 +293,7 @@ def _stacks_for_services(
                     stack_name=stack.stack_name,
                     files=files,
                     is_docs_only=stack.is_docs_only,
+                    has_explicit_rule=stack.has_explicit_rule,
                 )
             )
     return scoped

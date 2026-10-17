@@ -1,4 +1,7 @@
 """Stack ownership, sharding bounds, and import-graph routing."""
+import json
+import os
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -21,16 +24,23 @@ from daydream.extensions import Registry, StackRule
         pytest.param(["src/main.py", "README.md"], "generic", "README.md", False, id="md-pinned-to-generic"),
     ],
 )
-def test_stack_membership_routing(files: list[str], stack_name: str, member: str, docs_only: bool | None) -> None:
+def test_stack_membership_routing(
+    tmp_path: Path, files: list[str], stack_name: str, member: str, docs_only: bool | None,
+) -> None:
     """detect_stacks routes each file to the owned stack, and docs-only follows the mixed diff."""
-    result = detect_stacks(files)
+    for path in files:
+        if path.endswith(".tsx"):
+            target = tmp_path / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('import React from "react"; export const App = () => <div/>;')
+    result = detect_stacks(files, target_dir=tmp_path)
     stack = next(a for a in result if a.stack_name == stack_name)
     assert member in stack.files
     if docs_only is not None:
         assert stack.is_docs_only is docs_only
 
 
-def test_mixed_frontend_and_repository_infrastructure_routes_separately() -> None:
+def test_mixed_frontend_and_repository_infrastructure_routes_separately(tmp_path: Path) -> None:
     """Shelfspace #2826's Node/CI changes must not inflate the React review."""
     frontend = ["frontend/app/components/modals/__tests__/CreateShelfModal.test.tsx",
         "frontend/app/components/shelf/ShelfNameInput.tsx",
@@ -41,20 +51,29 @@ def test_mixed_frontend_and_repository_infrastructure_routes_separately() -> Non
         "scripts/daydream-workflow.test.mjs", "scripts/github-actions-workflow-policy.mjs",
     ]
     files = frontend + infrastructure
-    stacks = {stack.stack_name: stack.files for stack in detect_stacks(files)}
+    for path in frontend:
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('import React from "react"; export const View = () => <div/>;')
+    stacks = {stack.stack_name: stack.files for stack in detect_stacks(files, target_dir=tmp_path)}
     assert set(stacks["react"]) == set(frontend)
     assert set(stacks["generic"]) == set(infrastructure)
     assert set(stacks["structure"]) == set(files)
 
-def test_infrastructure_defaults_preserve_explicit_and_nested_ownership() -> None:
+def test_infrastructure_defaults_preserve_explicit_and_nested_ownership(tmp_path: Path) -> None:
     registry = Registry()
     registry.add_stack(StackRule("build", ("scripts/custom.cjs",)))
     react_files = ["frontend/App.tsx", "package.json", "tsconfig.json",
-        "frontend/fixtures/data.json", "frontend/Makefile", "frontend/helpers.mjs",
+        "frontend/fixtures/data.json", "frontend/Makefile",
     ]
-    generic_files = ["Makefile", "quality.json", "scripts/check.cjs", "scripts/ci/check.mjs"]
+    generic_files = ["Makefile", "quality.json", "scripts/check.cjs", "scripts/ci/check.mjs", "frontend/helpers.mjs"]
+    (tmp_path / "frontend").mkdir()
+    (tmp_path / "frontend/App.tsx").write_text('import React from "react"; const App = () => <div/>;')
+    (tmp_path / "package.json").write_text('{"dependencies":{"react":"*"}}')
+    (tmp_path / "tsconfig.json").write_text('{"compilerOptions":{"jsx":"react-jsx"}}')
     stacks = {stack.stack_name: stack.files
-        for stack in detect_stacks(react_files + generic_files + ["scripts/custom.cjs"], registry=registry)
+        for stack in detect_stacks(react_files + generic_files + ["scripts/custom.cjs"],
+                                  registry=registry, target_dir=tmp_path)
     }
     assert set(stacks["react"]) == set(react_files)
     assert set(stacks["generic"]) == set(generic_files)
@@ -77,8 +96,194 @@ def test_language_classification(files: list[str], expected: set[str]) -> None:
 def test_no_files_dropped() -> None:
     files = ["src/main.py", "README.md", "config.yaml", "Dockerfile", "src/App.tsx"]
     result = detect_stacks(files)
-    routed = {f for a in result for f in a.files}
-    assert routed == set(files)
+    primary = [f for a in result if a.stack_name != "structure" for f in a.files]
+    assert Counter(primary) == Counter(files)
+    assert next(a.files for a in result if a.stack_name == "structure") == sorted(files)
+
+
+@pytest.mark.parametrize(("source", "metadata", "expected"), [
+    ('import {useState} from "react";', {}, "react"),
+    ('const React = require("react");', {}, "react"),
+    ('import {jsx} from "react/jsx-runtime";', {}, "react"),
+    ('export const App = () => <div/>;', {"package.json": {"dependencies": {"react": "*"}}}, "react"),
+    ('export const App = () => <div/>;', {"tsconfig.json": {"compilerOptions": {"jsx": "react-jsx"}}}, "react"),
+    ('/** @jsxImportSource react */ const App = () => <div/>;', {}, "react"),
+    ('/** @jsxRuntime automatic */ const App = () => <div/>;', {}, "react"),
+    ('import {Component} from "@angular/core";', {}, "generic"),
+    ('import {ref} from "vue";', {}, "generic"),
+    ('import {onMount} from "svelte";', {}, "generic"),
+    ('/** @jsxImportSource preact */ const App = () => <div/>;', {}, "generic"),
+    ('import React from "react"; import {ref} from "vue";', {}, "generic"),
+    ('export const App = () => <div/>;', {"package.json": {"dependencies": {"react": "*", "vue": "*"}}}, "generic"),
+    ('export const App = () => <div/>;', {"tsconfig.json": {"compilerOptions": {"jsxImportSource": "preact"}},
+                                       "package.json": {"dependencies": {"react": "*"}}}, "generic"),
+    ('export const twice = (n: number) => n * 2;', {"package.json": {"dependencies": {"react": "*"}}}, "generic"),
+    ('// import React from "react";\nconst text = `import React from "react"`;', {}, "generic"),
+    ('export const App = () => <div/>;', {}, "generic"),
+])
+def test_framework_source_evidence(tmp_path: Path, source: str, metadata: dict[str, object], expected: str) -> None:
+    """Actual source/runtime evidence owns routing; extensions and co-changes cannot establish React."""
+    (tmp_path / "App.tsx").write_text(source)
+    for path, body in metadata.items():
+        (tmp_path / path).write_text(json.dumps(body))
+    result = detect_stacks(["App.tsx"], target_dir=tmp_path)
+    assert [(s.stack_name, s.files) for s in result if s.stack_name != "structure"] == [(expected, ["App.tsx"])]
+
+
+def test_local_packages_and_explicit_config_rules(tmp_path: Path) -> None:
+    """A sibling React file and root dependency cannot overwrite another package or an explicit rule."""
+    bodies = {
+        "package.json": {"workspaces": ["packages/*"], "dependencies": {"react": "*"}},
+        "packages/react/package.json": {"dependencies": {"react": "*"}},
+        "packages/vue/package.json": {"dependencies": {"vue": "*"}},
+        "packages/node/package.json": {},
+        "packages/react/tsconfig.json": {"compilerOptions": {"jsx": "react-jsx"}},
+        "packages/vue/tsconfig.json": {"compilerOptions": {"jsxImportSource": "vue"}},
+    }
+    files = list(bodies)
+    for path, body in bodies.items():
+        dest = tmp_path / path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json.dumps(body))
+    for package in ("react", "vue", "node"):
+        path = f"packages/{package}/App.tsx"
+        (tmp_path / path).write_text("export const App = () => <div/>;")
+        files.append(path)
+    registry = Registry()
+    registry.add_stack(StackRule("custom", ("packages/react/tsconfig.json", "packages/node/package.json")))
+    scopes = {s.stack_name: s.files for s in detect_stacks(files, target_dir=tmp_path, registry=registry)}
+    assert scopes["react"] == ["package.json", "packages/react/App.tsx", "packages/react/package.json"]
+    assert scopes["custom"] == ["packages/node/package.json", "packages/react/tsconfig.json"]
+    assert scopes["generic"] == sorted(set(files) - set(scopes["react"]) - set(scopes["custom"]))
+    assert Counter(f for s, paths in scopes.items() if s != "structure" for f in paths) == Counter(files)
+
+
+@pytest.mark.parametrize("failure", [
+    "deleted", "malformed", "cycle", "external-extends", "escape", "unreadable", "metadata-symlink", "traversal",
+])
+def test_framework_unavailable_evidence_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    """Unsafe/incomplete input never borrows framework ownership from another changed file."""
+    (tmp_path / "react.ts").write_text('import React from "react";')
+    path = tmp_path / "App.tsx"
+    path.write_text("export const App = () => <div/>;")
+    (tmp_path / "package.json").write_text('{"dependencies":{"react":"*"}}')
+    if failure == "deleted":
+        path.unlink()
+    elif failure == "malformed":
+        (tmp_path / "package.json").write_text("{broken")
+    elif failure == "cycle":
+        (tmp_path / "tsconfig.json").write_text('{"extends":"./base.json"}')
+        (tmp_path / "base.json").write_text('{"extends":"./tsconfig.json"}')
+    elif failure == "external-extends":
+        (tmp_path / "tsconfig.json").write_text('{"extends":"framework-config"}')
+    elif failure == "unreadable":
+        original_open = os.open
+
+        def deny_package(candidate: Path, flags: int) -> int:
+            if candidate == tmp_path / "package.json":
+                raise PermissionError("package unavailable")
+            return original_open(candidate, flags)
+
+        monkeypatch.setattr("daydream.deep.framework_detection.os.open", deny_package)
+    elif failure == "metadata-symlink":
+        outside = tmp_path.parent / f"{tmp_path.name}-package.json"
+        outside.write_text('{"dependencies":{"react":"*"}}')
+        (tmp_path / "package.json").unlink()
+        (tmp_path / "package.json").symlink_to(outside)
+    elif failure == "traversal":
+        path = tmp_path.parent / f"{tmp_path.name}-outside.tsx"
+        path.write_text('import React from "react";')
+    else:
+        outside = tmp_path.parent / f"{tmp_path.name}-outside.tsx"
+        outside.write_text('import React from "react";')
+        path.unlink()
+        path.symlink_to(outside)
+    candidate = f"../{path.name}" if failure == "traversal" else "App.tsx"
+    scopes = {s.stack_name: s.files for s in detect_stacks(["react.ts", candidate], target_dir=tmp_path)}
+    assert scopes["react"] == ["react.ts"]
+    assert scopes["generic"] == [candidate]
+    primary = [f for s, paths in scopes.items() if s != "structure" for f in paths]
+    assert Counter(primary) == Counter(["react.ts", candidate])
+
+
+def test_local_tsconfig_extends(tmp_path: Path) -> None:
+    """Declarative local inheritance establishes JSX while nearer package boundaries stop root defaults."""
+    (tmp_path / "tsconfig.json").write_text('{"compilerOptions":{"jsx":"react-jsx"}}')
+    (tmp_path / "package.json").write_text('{"workspaces":["packages/*"],"dependencies":{"react":"*"}}')
+    (tmp_path / "packages/web").mkdir(parents=True)
+    (tmp_path / "packages/web/package.json").write_text("{}")
+    (tmp_path / "packages/web/tsconfig.json").write_text('{"extends":"../../tsconfig.json"}')
+    (tmp_path / "packages/web/App.tsx").write_text("const App = () => <div/>;")
+    scopes = {s.stack_name: s.files for s in detect_stacks(["packages/web/App.tsx"], target_dir=tmp_path)}
+    assert scopes["react"] == ["packages/web/App.tsx"]
+
+
+
+@pytest.mark.parametrize("limit", ["source-count", "source-bytes", "metadata-count", "metadata-bytes", "total-bytes"])
+def test_framework_inspection_budget_boundaries(tmp_path: Path, limit: str) -> None:
+    """Exact defaults admit complete evidence; the first over-budget file receives generic coverage."""
+    files = []
+    expected_react = []
+    expected_generic = []
+    if limit in {"source-count", "source-bytes", "total-bytes"}:
+        count = 257 if limit == "source-count" else 17 if limit == "total-bytes" else 2
+        for index in range(count):
+            path = f"source{index:03}.ts"
+            text = 'import React from "react";\n'
+            if limit != "source-count":
+                size = 256 * 1024 + (index if limit == "source-bytes" else 0)
+                text += "//" + " " * (size - len(text) - 2)
+            (tmp_path / path).write_text(text)
+            files.append(path)
+        expected_react = files[:-1]
+        expected_generic = files[-1:]
+    else:
+        count = 129 if limit == "metadata-count" else 2
+        for index in range(count):
+            directory = tmp_path / f"pkg{index:03}"
+            directory.mkdir()
+            metadata = '{"dependencies":{"react":"*"}}'
+            if limit == "metadata-bytes":
+                metadata += " " * (64 * 1024 + index - len(metadata))
+            (directory / "package.json").write_text(metadata)
+            (directory / "App.tsx").write_text("const App = () => <div/>;")
+            files.append(f"{directory.name}/App.tsx")
+        expected_react = files[:-1]
+        expected_generic = files[-1:]
+    # Reverse caller input: budgets and output must follow sorted paths.
+    result = detect_stacks(list(reversed(files)), target_dir=tmp_path)
+    scopes = {s.stack_name: s.files for s in result}
+    assert scopes["react"] == expected_react
+    assert scopes["generic"] == expected_generic
+    assert Counter(f for s, paths in scopes.items() if s != "structure" for f in paths) == Counter(files)
+
+
+@pytest.mark.parametrize("workspace", ["package.json", "pnpm-workspace.yaml"])
+def test_declared_workspace_without_local_metadata_does_not_inherit_root(tmp_path: Path, workspace: str) -> None:
+    """Declared package boundaries remain boundaries when package metadata is missing."""
+    root: dict[str, object] = {"dependencies": {"react": "*"}}
+    if workspace == "package.json":
+        root["workspaces"] = ["apps/*"]
+    else:
+        (tmp_path / workspace).write_text('packages: ["apps/*"]\n')
+    (tmp_path / "package.json").write_text(json.dumps(root))
+    (tmp_path / "apps/missing").mkdir(parents=True)
+    (tmp_path / "apps/missing/App.tsx").write_text("const App = () => <div/>;")
+    result = detect_stacks(["apps/missing/App.tsx"], target_dir=tmp_path)
+    assert [(s.stack_name, s.files) for s in result if s.stack_name != "structure"] == [
+        ("generic", ["apps/missing/App.tsx"])]
+
+
+def test_explicit_config_rule_survives_language_promotion() -> None:
+    registry = Registry()
+    registry.add_stack(StackRule("build", ("pyproject.toml", "package.json", "tsconfig.json")))
+    files = ["main.py", "pyproject.toml", "package.json", "tsconfig.json"]
+    scopes = {s.stack_name: s.files for s in detect_stacks(files, registry=registry)}
+    assert scopes["build"] == ["package.json", "pyproject.toml", "tsconfig.json"]
+    assert scopes["python"] == ["main.py"]
+
 
 def test_shard_stacks_fanout_cap_limits_total_tasks() -> None:
     """The fan-out cap includes shards and unsplit stacks; all files remain assigned once."""

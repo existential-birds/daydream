@@ -45,6 +45,7 @@ def pack_file_batches(
                     stack_name=f"{stack.stack_name}#{len(shards)}",
                     files=list(cur),
                     is_docs_only=stack.is_docs_only,
+                    has_explicit_rule=stack.has_explicit_rule,
                     frontier_files=[],
                 )
             )

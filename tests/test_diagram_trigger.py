@@ -141,7 +141,7 @@ def _decide(
     """Call ``decide_eligibility`` with real stacks and a real import graph."""
     return decide_eligibility(
         repo_root=repo, changed_files=changed_files, hunk_ranges=hunk_ranges,
-        stacks=detect_stacks(sorted(changed_files)) if stacks is None else stacks,
+        stacks=detect_stacks(sorted(changed_files), target_dir=repo) if stacks is None else stacks,
         services=[] if services is None else services, import_graph=build_import_graph(sorted(changed_files), repo),
         thresholds=DiagramThresholds() if thresholds is None else thresholds, force=force,
     )
@@ -243,7 +243,7 @@ def test_tests_and_docs_are_not_code_files(tmp_path: Path) -> None:
     eligibility = _decide(repo, changed, ranges)
     assert eligibility.code_files == ["api/handler.py"]
 
-def test_structure_and_generic_stacks_never_contribute_code_files(tmp_path: Path) -> None:
+def test_generic_docs_do_not_contribute_code_files(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     changed, ranges = _diff_repo(repo, {}, {"docs/guide.md": "# guide\n"})
     stacks = detect_stacks(sorted(changed))
@@ -443,21 +443,21 @@ def test_unrecognized_force_behaves_like_auto(tmp_path: Path) -> None:
 def test_decide_eligibility_is_immune_to_the_tiny_diff_stack_collapse(tmp_path: Path,) -> None:
     """Fresh stack detection must precede diagram eligibility.
 
-    Tiny-diff collapse puts two real language files in the generic stack, which
-    would otherwise make the diagram see no code."""
+    Tiny-diff collapse hides Python ownership inside generic. JS/TS stays code
+    independently of framework routing, but Python still needs fresh detection."""
     repo = tmp_path / "repo"
     head = {
         "api/handler.py": "def handle():\n    return 1\n",
-        "web/App.tsx": "export const App = () => <div>hi</div>;\n",
+        "web/App.tsx": 'import React from "react"; export const App = () => <div>hi</div>;\n',
     }
     changed, ranges = _diff_repo(repo, {}, head)
 
-    fresh = detect_stacks(sorted(changed))
+    fresh = detect_stacks(sorted(changed), target_dir=repo)
     collapsed, single_stack_mode = _collapse_stacks_for_tiny_diff(fresh, sorted(changed), threshold=2)
     assert single_stack_mode
     assert {stack.stack_name for stack in collapsed} == {"generic", "structure"}
 
-    assert _decide(repo, changed, ranges, stacks=collapsed).code_files == []
+    assert _decide(repo, changed, ranges, stacks=collapsed).code_files == ["web/App.tsx"]
     assert _decide(repo, changed, ranges).code_files == ["api/handler.py", "web/App.tsx"]
 
 

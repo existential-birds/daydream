@@ -790,6 +790,35 @@ The fix-phase anti-degradation quality gate prevents a fix from degrading a file
 
 The gate is fail-open. A flagged file surfaces as a warning plus a manifest record. It never aborts a run. Daydream clamps the thresholds to finite non-negative numbers. An invalid value degrades to the named default.
 
+### JavaScript and TypeScript routing
+
+Automatic routing inspects source in the target worktree, including dirty files.
+The first matching extension `StackRule` takes precedence. Direct framework imports
+and explicit JSX runtime/import-source declarations establish file ownership;
+conflicting evidence uses generic review. Only React evidence selects the existing
+React reviewer. Angular, Vue, Svelte, other JSX runtimes, and inconclusive files
+use the generic reviewer. JS/TS source still counts as code for diagram eligibility
+when review routing selects generic.
+
+JSX without direct imports can use the nearest local tsconfig JSX settings and
+owning package dependencies. A React dependency alone never makes a plain JS/TS
+utility React. The nearest package stops parent/sibling inheritance; declared
+`package.json` workspaces and `pnpm-workspace.yaml` define boundaries even when
+local metadata is missing. Local tsconfig `extends` stays inside the repository
+with cycle and read-budget protection; package/remote extends and unsupported
+metadata fall back. No dependencies or executable configurations are loaded.
+`package.json` and `tsconfig.json` use their own local, unambiguous ownership,
+independent of other changed files.
+
+Inspection follows sorted paths and reads at most 256 source files (256 KiB each),
+128 metadata files (64 KiB each), and 4 MiB combined. Metadata is cached per run.
+Missing/deleted, unreadable, malformed, escaped/symlinked, or over-budget input
+receives generic coverage; partial file contents never establish ownership.
+Automatic tiny-diff collapse retains separate React and generic JS/TS or project
+config scopes and preserves explicit stack rules. Explicit shallow/stack choices
+still combine scopes as requested. Every changed path has one primary assignment;
+Structure additionally reviews their full union.
+
 ### Review budgets
 
 The review model pipeline defaults to 45 minutes for modest diffs, including
