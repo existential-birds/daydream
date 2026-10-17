@@ -162,7 +162,7 @@ def unmatched_results(trace, args):
     for doc, step, ref in steps(trace, args):
         ids = {c.get("tool_call_id") for c in step.get("tool_calls") or [] if c.get("tool_call_id") is not None}
         for ri, result in enumerate((step.get("observation") or {}).get("results", [])):
-            if (result.get("source_call_id") not in ids and "subagent_trajectory_ref" not in result):
+            if result.get("source_call_id") not in ids and not result.get("subagent_trajectory_ref"):
                 yield {**ref, "pointer": ref["pointer"] + f"/observation/results/{ri}",
                        "source_call_id": result.get("source_call_id"), "failed": failed(result),
                        "extra": result.get("extra") or {},
@@ -232,7 +232,7 @@ def timeline(trace, args):
     rows.sort(key=lambda r: r.get("started_at", r.get("timestamp")) or "")
     # Preserve exact metadata/lifecycle via show, avoiding large nested tables.
     for row in rows:
-        for key in ("metadata", "backend_lifecycle"):
+        for key in ("metadata", "backend_lifecycle", "generation_lifecycle"):
             if key in row:
                 row[key] = preview(row[key], args.chars)
     return {**base(trace), "timing": "Overlapping rows are not additive wall time; no per-tool timing inferred.",

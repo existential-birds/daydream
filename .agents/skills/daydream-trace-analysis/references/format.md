@@ -20,9 +20,10 @@ zero-based; `step_id` is the recorded ID, not its array position.
 
 Wrapper states include `available`, `unavailable`, `unproduced`, `withheld`,
 `failed`. Preserve state and reason. An unavailable section is not an empty
-result; available-null is also possible. Success means the run completed, not
-that every tool succeeded or every finding is correct. Missing correctness
-scoring leaves finding correctness unestablished.
+result. An `available` wrapper requires a non-null `value`; fields inside that
+value may still be null. Success means the run completed, not that every tool
+succeeded or every finding is correct. Missing correctness scoring leaves
+finding correctness unestablished.
 
 Documents have `trajectory_id`, shared `session_id`, `agent`, `steps`, `extra`,
 `final_metrics`. Steps have `step_id`, `timestamp`, `source`, `message`, optional

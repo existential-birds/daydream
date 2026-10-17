@@ -152,18 +152,42 @@ class TraceCliTests(unittest.TestCase):
         value = self.cli("show", "--pointer", row["pointer"], "--chars", "2000")
         self.assertEqual(json.loads(value["text"])["metadata"]["reason"], "x" * 1000)
 
+    def test_timeline_bounds_generation_lifecycle_and_preserves_retrieval(self):
+        # Completed invocations retain model output; phase-only coverage misses this nested payload.
+        doc = self.record["trajectories"]["value"]["documents"][1]
+        doc["extra"]["subtrajectories"][0]["generation_lifecycle"] = {
+            "drafts": [{"generation_id": "generation-1", "choice_parts": [
+                {"type": "text", "text": "x" * 100000}]}]}
+        self.path.write_text(json.dumps(self.record))
+        report = self.cli("timeline", "--doc", "1", "--chars", "40")
+        row = next(r for r in report["items"] if r["invocation_id"] == "one")
+        self.assertLess(len(json.dumps(report)), 3000)
+        self.assertIsInstance(row["generation_lifecycle"], str)
+        self.assertLessEqual(len(row["generation_lifecycle"]), 40)
+        pointer = row["pointer"] + "/generation_lifecycle/drafts/0/choice_parts/0/text"
+        shown = self.cli("show", "--pointer", pointer, "--offset", "99960", "--chars", "40")
+        self.assertEqual(shown["total_chars"], 100000)
+        self.assertEqual(shown["text"], "x" * 40)
+        self.assertEqual(shown["remaining"], 0)
+
     def test_unmatched_interruption_is_visible_and_dispatch_links_are_not_errors(self):
         doc = self.record["trajectories"]["value"]["documents"][1]
         doc["steps"].append({"step_id": 3, "observation": {"results": [
             {"source_call_id": None, "content": "[interrupted]", "extra": {"status": "interrupted"}},
             {"subagent_trajectory_ref": [{"trajectory_id": "child"}]}]}})
-        self.path.write_text(json.dumps(self.record))
-        report = self.cli("tools", "--doc", "1")
-        self.assertEqual(report["unmatched_results"]["total"], 1)
-        row = report["unmatched_results"]["items"][0]
-        self.assertTrue(row["failed"])
-        report = self.cli("mine", "--doc", "1")
-        self.assertTrue(any(r["kind"] == "unmatched_result_failure" for r in report["items"]))
+        result = doc["steps"][-1]["observation"]["results"][0]
+        for references in ({}, {"subagent_trajectory_ref": None}, {"subagent_trajectory_ref": []}):
+            with self.subTest(references=references):
+                result.update(references)
+                self.path.write_text(json.dumps(self.record))
+                report = self.cli("tools", "--doc", "1")
+                self.assertEqual(report["unmatched_results"]["total"], 1)
+                row = report["unmatched_results"]["items"][0]
+                self.assertTrue(row["failed"])
+                self.assertEqual(row["pointer"],
+                                 "/trajectories/value/documents/1/steps/2/observation/results/0")
+                report = self.cli("mine", "--doc", "1")
+                self.assertTrue(any(r["kind"] == "unmatched_result_failure" for r in report["items"]))
 
 
 if __name__ == "__main__":
