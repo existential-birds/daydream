@@ -8,7 +8,7 @@ from typing import Any
 from daydream.deep.artifacts import per_stack_report_context_path
 from daydream.json_utils import atomic_write_json, validates_schema
 from daydream.redaction import redact_structured_text, redact_value
-from daydream.review_rationale import valid_scope_review_context
+from daydream.review_rationale import REPORT_INPUT_MAX_BYTES, valid_scope_review_context
 
 AUTHOR_CONTEXT = "review-author-context.json"
 REPORT_CONTEXT = "review-report-context.json"
@@ -41,7 +41,7 @@ def collect_report_context(
 
     def read_json(path: Path, *, redact: bool = True) -> Any:
         try:
-            if path.stat().st_size > 65536:
+            if path.stat().st_size > REPORT_INPUT_MAX_BYTES:
                 failures.append(path.name)
                 return None
             payload = json.loads(path.read_text(encoding="utf-8"))

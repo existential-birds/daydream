@@ -185,12 +185,15 @@ def stage_ends(review: ReviewRun, scope_id: str) -> list[dict[str, Any]]:
 
 def many_file_review(tmp_path: Path, patch: pytest.MonkeyPatch, *, count: int = 17,
                      lines: int = 1, docs_count: int = 4, feature_message: str = 'feature',
-                     feature_overrides: dict[str, str] | None = None) -> InvestigationRun:
+                     feature_overrides: dict[str, str] | None = None,
+                     supporting_sources: dict[str, str] | None = None) -> InvestigationRun:
     before = {'api.py': "def hello():\n    return 'world'\n"}
     before.update({f'module_{i:02}.py': 'VALUE = 0\n' for i in range(count - 1)})
     before.update({f'00_guide_{i}.md': '# Guide\nExisting behavior\n' for i in range(docs_count)})
     after = {name: content + ''.join(f'# changed {i}\n' for i in range(lines)) for name, content in before.items()}
     after.update(feature_overrides or {})
+    before.update(supporting_sources or {})
+    after.update(supporting_sources or {})
     repo = tmp_path / 'many_files'
     seed_feature_branch(repo, base=before, feature=after, feature_message=feature_message)
     review = InvestigationRun(repo, tmp_path, patch)
@@ -279,30 +282,57 @@ async def test_successful_supporting_dependency_notes_reach_only_relevant_later_
     assert context['notes_omitted'] == 0
 
 
+@pytest.mark.parametrize('path_kind', ['plain', 'multibyte', 'escaped'])
 async def test_persisted_source_assertions_are_bounded_and_redacted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path_kind: str) -> None:
     """Provider stage notes must not become an unbounded or credential-bearing report."""
-    review = many_file_review(tmp_path, monkeypatch, count=65, docs_count=0)
+    prefix = {'plain': '', 'multibyte': ('𐐨' * 43 + '/') * 2,
+              'escaped': ('é' * 84 + '/') * 2}[path_kind]
+    supporting = [prefix + f'dependency_{index}.py' for index in range(5)] if prefix else []
+    count = 65 if path_kind == 'plain' else 33
+    review = many_file_review(tmp_path, monkeypatch, count=count, docs_count=0,
+                              supporting_sources={path: 'VALUE = 0\n' for path in supporting})
 
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         output['notes'] = 'Source-only assertion ghp_1234567890 {"token": "private-value"} ' + 'x' * 700
+        output['supporting_files'] = supporting
 
     review.backend.stage_response = response
-    await review.finish('python')
-    saved = json.loads((review.repo / '.daydream/deep/stack-python-report-context.json').read_text())
+    data = await review.finish('python', review_cache_enabled=True)
+    context_path = review.repo / '.daydream/deep/stack-python-report-context.json'
+    original_bytes = context_path.read_bytes()
+    assert len(original_bytes) <= 65536, 'producer output must fit the exact reader/cache byte cap'
+    saved = json.loads(original_bytes)
     context = saved['review_context']
     admitted = [event for event in stage_ends(review, 'python') if event['metadata']['admitted']]
     assert len(admitted) > 8 and context['admitted_stages'] == len(admitted)
-    assert context['target_decisions'] == {'required': 65, 'reviewed': 65, 'not_reviewed': 0}
-    assert len(context['notes']) == 8 and context['notes_omitted'] == len(admitted) - 8
+    assert context['target_decisions'] == {'required': count, 'reviewed': count, 'not_reviewed': 0}
+    assert 0 < len(context['notes']) <= 8 and context['notes_omitted'] == len(admitted) - len(context['notes'])
+    assert len(context['notes']) == 8 if path_kind == 'plain' else len(context['notes']) < 8
     assert all(len(note['text']) <= 512 and note['text'].endswith('[note clipped]') for note in context['notes'])
     assert all('ghp_1234567890' not in note['text'] and 'private-value' not in note['text']
                and '[REDACTED_API_KEY]' in note['text']
                for note in context['notes'])
+    python_stages = [stage for stage in review.backend.stages if stage['scope_id'] == 'python']
+    for note in context['notes']:
+        source_stage = python_stages[note['origin']['sequence'] - 1]
+        assert note['files'] == sorted(set(source_stage['assigned_files']) | set(supporting))[:32]
+        assert note['supporting_files'] == supporting
+        assert note['origin']['analyzed_revision'] == saved['analyzed_revision']
     structural = json.loads((review.repo / '.daydream/deep/stack-structure-report-context.json').read_text())[
         'review_context']
     assert structural['target_decisions'] == {'required': 1, 'reviewed': 1, 'not_reviewed': 0}
     assert len(structural['notes'][0]['files']) == 32
+    python = next(scope for scope in data['review_context']['scopes'] if scope['scope_id'] == 'python')
+    assert python['review_context'] == context
+    assert saved['originating_run_id'] == data['terminal_result']['run_id']
+    assert saved['analyzed_revision'] == python['analyzed_revision'] == data['terminal_result']['analyzed_revision']
+    stages_before_reuse = len(review.backend.stages)
+    reused = await review.finish('python', review_cache_enabled=True)
+    assert len(review.backend.stages) == stages_before_reuse, 'optional rationale must not elicit another review'
+    assert context_path.read_bytes() == original_bytes
+    restored = next(scope for scope in reused['review_context']['scopes'] if scope['scope_id'] == 'python')
+    assert restored == python and reused['terminal_result']['run_id'] != data['terminal_result']['run_id']
 
 
 async def test_optional_supporting_paths_are_confined_without_rejecting_valid_decisions(

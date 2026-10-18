@@ -1,11 +1,14 @@
 """Bounded persisted reviewer assertions, distinct from host coverage evidence."""
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from daydream.json_utils import validates_schema
 from daydream.output_schema import strict_object
 from daydream.redaction import redact_value
+
+REPORT_INPUT_MAX_BYTES = 64 * 1024
 
 _TEXT = {'type': 'string', 'maxLength': 512}
 _FILES = {'type': 'array', 'maxItems': 32, 'items': _TEXT}
@@ -54,3 +57,17 @@ def valid_scope_review_context(
     except RecursionError:
         # Error formatting can exhaust the stack on deeply nested optional JSON.
         return False
+
+
+def bounded_scope_review_context_bytes(envelope: dict[str, Any]) -> bytes:
+    """Fit the exact JSON writer encoding by omitting whole trailing source notes."""
+    context = {**envelope['review_context'], 'notes': list(envelope['review_context']['notes'])}
+    bounded = {**envelope, 'review_context': context}
+    while True:
+        payload = json.dumps(bounded, indent=2).encode('utf-8')
+        if len(payload) <= REPORT_INPUT_MAX_BYTES:
+            return payload
+        if not context['notes']:
+            raise ValueError('source rationale metadata exceeds report input budget')
+        context['notes'].pop()
+        context['notes_omitted'] += 1

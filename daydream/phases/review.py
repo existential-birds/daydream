@@ -44,7 +44,7 @@ from daydream.deep.reuse_store import ReuseCache, entry_dir
 from daydream.deep.review_reuse import ReviewReuseUnit
 from daydream.extensions import Registry, get_registry
 from daydream.hunk_index import load_hunk_index
-from daydream.json_utils import atomic_write_bytes, atomic_write_json, validates_schema
+from daydream.json_utils import atomic_write_bytes, validates_schema
 from daydream.observability.spans import stack_scope
 from daydream.phases.inputs import (
     _budgeted_exploration_inputs,
@@ -70,7 +70,11 @@ from daydream.review_budget import (
 )
 from daydream.review_evidence import FinalizationContext
 from daydream.review_investigation import ReviewInvestigation
-from daydream.review_rationale import valid_scope_review_context
+from daydream.review_rationale import (
+    REPORT_INPUT_MAX_BYTES,
+    bounded_scope_review_context_bytes,
+    valid_scope_review_context,
+)
 from daydream.review_result import ReasonCode, ReviewCoverage, reason_for_budget, reason_for_exception
 from daydream.review_stage_inputs import StageInputFactory
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
@@ -547,7 +551,7 @@ async def phase_per_stack_reviews(
                         cached_context = hit.payload_dir / context_path.name
                         try:
                             if (stack.stack_name not in unavailable_report_scopes and cached_context.is_file()
-                                    and cached_context.stat().st_size <= 65536):
+                                    and cached_context.stat().st_size <= REPORT_INPUT_MAX_BYTES):
                                 raw_context = cached_context.read_bytes()
                                 if valid_scope_review_context(json.loads(raw_context), scope_id=stack.stack_name,
                                         analyzed_revision=coverage.revision.to_dict(),
@@ -665,10 +669,10 @@ async def phase_per_stack_reviews(
                     return
                 if stack_name not in unavailable_report_scopes:
                     try:
-                        atomic_write_json(context_path, {
+                        atomic_write_bytes(context_path, bounded_scope_review_context_bytes({
                             'scope_id': stack_name, 'analyzed_revision': coverage.revision.to_dict(),
                             'originating_run_id': coverage.run_id, 'review_context': investigation.review_context(),
-                        })
+                        }))
                     except (OSError, ValueError, TypeError) as exc:
                         ui.print_warning(agent.console,
                             f'Source rationale unavailable for {stack_name}: {type(exc).__name__}')
