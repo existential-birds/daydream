@@ -155,9 +155,13 @@ async def test_outcomes(review: ReviewRun, archive_dir: Path, fake_gh: FakeGh,
         else:
             assert len(posts) == 1 and posts[0].payload['event'] == 'COMMENT'
             body = posts[0].payload['body']
-            assert 'No confirmed findings.' in body and f'<code>{state}</code>' in body
-            assert result['run_id'] in body and result['analyzed_revision']['diff_key'] in body
-            assert 'Executable verification unavailable' in body and reason in body
+            assert body.startswith('Actionable comments posted: 0\n\n')
+            assert f'⚠️ **Review {state}.**' in body and 'python:' in body
+            assert f"Run:\n```text\n{result['run_id']}\n```" in body
+            assert all(detail not in body for detail in (
+                'Review outcome', 'No confirmed findings.', 'Executable verification unavailable',
+                result['analyzed_revision']['diff_key'],
+            ))
     if case == 'empty':
         stages = [stage_state for c in review.backend.calls
                   if (stage_state := review_stage_state(c['prompt'])) is not None]

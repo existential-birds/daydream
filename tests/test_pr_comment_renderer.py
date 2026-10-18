@@ -226,7 +226,8 @@ def test_e2e_single_phase_claude_renders_full_block() -> None:
     assert "- **Cost:** $0.13" in out
     assert "- **Tokens:** 12,400 in (8,200 cached, 66% hit) → 1,800 out" in out
     assert "- **Steps / tool calls:** 1 / 2" in out
-    assert "<details><summary>Per-phase breakdown</summary>" in out
+    # Run details owns the only disclosure; phase metrics must be readable after one expansion.
+    assert "<details>" not in out
     assert "| Phase | Model | Tools | Input (cached) | Output | Cost |" in out
     assert out.count("| Review |") == 1
     review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
@@ -240,7 +241,7 @@ def test_e2e_single_phase_claude_renders_full_block() -> None:
 
 def test_e2e_multi_phase_renders_per_phase_table_rows() -> None:
     out = render_run_info_block([_MULTI_PHASE_CLAUDE])
-    assert "</details>" in out
+    assert "</details>" not in out
     assert "- **Model:** claude-sonnet-4-5" in out
     assert "- **Cost:** $0.18" in out
     assert "- **Tokens:** 13,800 in (8,300 cached, 60% hit) → 3,100 out" in out

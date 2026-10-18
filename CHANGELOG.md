@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **review:** simplify GitHub review comments with an actionable-comment total, prominent incomplete-review warnings, a linked reviewed commit, flatter additional findings, concise agent prompts and consolidated run details with a copyable run UUID; retain detailed analysis and evidence in local reports and artifacts.
+
 - **improve:** assign disjoint primary files to mixed-stack audit specialists, keep cross-stack context available, and report owned counts, omitted files, and failed category coverage with readable snapshot manifests ([#1406](https://github.com/existential-birds/daydream/issues/1406)).
 
 - **improve:** combine default survey and reconnaissance into one bounded discovery pass, reuse host inventory, and retain guidelines alongside admitted commands in audit/plan inputs; custom survey strategies keep the two-pass compatibility path ([#1405](https://github.com/existential-birds/daydream/issues/1405)).

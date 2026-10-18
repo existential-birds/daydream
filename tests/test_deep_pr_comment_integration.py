@@ -310,11 +310,12 @@ def _row_cells(row: str) -> list[str]:
 async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
     deep_target: Path, patch_sdk: None, captured_post: _CapturedPost, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Render a deep-run PR comment with real model and nonzero usage/cost.
+    """Post a compact deep-review comment with real model and usage/cost.
 
     Only SDK messages/client, PR lookup, and gh transport are mocked; the
     real API adapter handles its request file and the full pipeline records
-    and renders the results.
+    and renders the results. Renderer-only tests cannot catch the deep flow
+    prepending its verbose local report or nesting the operational details.
     """
     _silence_ui(monkeypatch)
     _answer_prompts(monkeypatch)
@@ -330,6 +331,26 @@ async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
     payload = captured_post.payloads[-1]
     body = payload["body"]
     assert isinstance(body, str)
+
+    # The posted payload, rather than a renderer fragment, owns the reading
+    # order and count: its finding names an unchanged line, so it must remain
+    # in the summary and still contribute to the actionable total.
+    assert payload["comments"] == []
+    assert body.count("<!-- daydream-finding:") == 1
+    assert body.splitlines()[0] == "Actionable comments posted: 1"
+    details = re.search(r"<details>\s*<summary>[^<]*Run details</summary>", body)
+    assert details is not None
+    assert body.index("- **Reviewed commit:**") < details.start()
+    run_details = body[details.end():body.index("</details>", details.end())]
+    assert "<details>" not in run_details
+    assert "| Phase |" in run_details
+    assert re.search(r"```(?:text)?\n[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\n```", run_details)
+    assert len(re.findall(r"<summary>[^<]*Run details</summary>", body)) == 1
+    for removed_label in (
+        "Review outcome", "Recorded analysis", "Recorded scope completion", "Analyzed snapshot",
+        "Recorded verification", "Recorded evidence excerpt", "Code Review Summary", "Reasons:", "Pipeline:", "```json",
+    ):
+        assert removed_label not in body
 
     # M3/M4: deep --comment path names the fixture PR's head SHA.
     assert ("- **Reviewed commit:** [`0000000`]"

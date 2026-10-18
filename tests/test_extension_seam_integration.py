@@ -174,10 +174,6 @@ def _post_context(*, dd: Path, items_file: Path) -> FlowContext:
     )
 
 
-async def _record_path(paths: list[Path], path: Path) -> None:
-    paths.append(path)
-
-
 def _filtered_items() -> list[dict[str, Any]]:
     """Return valid canonical items with distinctive post-filter markers."""
     return [
@@ -213,11 +209,12 @@ async def test_post_review_uses_published_items_path(tmp_path: Path, monkeypatch
         target_dir: Path, merged_items_path: Path, *, console: Any, run_info: str, renderers: pr_review.ReviewRenderers,
         post: bool, approve_on_clean: bool = False, pr_number: int | None = None, diagram_blocks: str | None = None,
         run_context: RunContext | None = None, auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
+        review_summary: str | None = None,
     ) -> None:
         assert run_context is ctx.run_context
         assert isinstance(run_info, str)
         assert isinstance(renderers, pr_review.ReviewRenderers)
-        await _record_path(posted_paths, merged_items_path)
+        posted_paths.append(merged_items_path)
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _record_post)
 

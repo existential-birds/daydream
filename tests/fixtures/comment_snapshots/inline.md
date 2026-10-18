@@ -3,7 +3,7 @@
 B rationale
 
 <details>
-<summary>🔮 Prompt for AI Agents</summary>
+<summary>Fix with an agent</summary>
 
 ```
 Verify each finding against the current code and only fix it if needed.

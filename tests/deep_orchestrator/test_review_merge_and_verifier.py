@@ -127,10 +127,12 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
     pr = _pin_findings_pr(monkeypatch, multi_stack_target)
     published: list[dict[str, Any]] = []
     summaries: list[str | None] = []
+    run_details: list[str] = []
     post = pr_review.post_review_to_pr_from_report
 
     async def publish(_repo: Path, items_file: Path, **_kwargs: Any) -> Any:
         summaries.append(_kwargs.get('review_summary'))
+        run_details.append(_kwargs['run_info'])
         if presentation_fault.endswith('-items') or presentation_fault == 'post':
             return await post(_repo, items_file, **_kwargs)
         published.extend(json.loads(items_file.read_text())["items"])
@@ -143,6 +145,7 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
         supplied.clear()
         published.clear()
         summaries.clear()
+        run_details.clear()
         config.start_at = "merge"
     failed: list[Path] = []
     stage, read = json_utils._stage_bytes, Path.read_text
@@ -176,26 +179,26 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
             return read(path, *args, **kwargs)
         monkeypatch.setattr(Path, 'read_text', fail_items_read)
     elif presentation_fault == 'render':
-        render = review_reporting.render_review_context
-        renders = 0
+        render = review_reporting.render_github_review_context
         def fail_summary_render(*args: Any, **kwargs: Any) -> str:
-            nonlocal renders
-            renders += 1
-            if renders == 2:
-                failed.append(Path('publication-summary'))
-                raise TypeError('optional summary render failed')
-            return render(*args, **kwargs)
-        monkeypatch.setattr(review_reporting, 'render_review_context', fail_summary_render)
+            if args[0] is None:
+                return render(*args, **kwargs)
+            failed.append(Path('publication-summary'))
+            raise TypeError('optional summary render failed')
+        monkeypatch.setattr(review_reporting, 'render_github_review_context', fail_summary_render)
     elif presentation_fault == 'post':
         fake_gh.set_response('POST', '/repos/o/r/pulls/7/reviews', {'__error__': 'HTTP 503 unavailable'})
     assert await _runner.run(config) == (1 if presentation_fault == 'post' else 0)
     if presentation_fault != 'none':
         assert frozen_review_calls and frozen_review_calls[0] > 0
         assert _count_review_prompts(backend.calls) == frozen_review_calls[0]
-    if presentation_fault in {'context', 'render'}:
-        assert failed and summaries == [None], 'unavailable presentation must not publish stale sidecar assertions'
+    if presentation_fault == 'render':
+        assert failed and summaries == ['⚠️ **Review completeness unavailable.**']
     else:
-        assert len(summaries) == 1 and summaries[0] is not None and 'Review outcome' in summaries[0]
+        assert summaries == [''], 'complete review needs no coverage warning or rich context on GitHub'
+        assert len(run_details) == 1 and 'Run:\n```text\n' in run_details[0]
+        assert 'Stale optional publication assertion' not in run_details[0]
+    assert len(run_details) == 1 and 'Run:\n```text\n' in run_details[0]
     assert set(supplied) == {"python:1", "structure:1", "structure:2", "structure:3"}
     assert supplied["python:1"]["severity"] == supplied["structure:1"]["severity"] == "high"
     deep = multi_stack_target / ".daydream/deep"

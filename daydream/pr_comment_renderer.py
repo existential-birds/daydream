@@ -311,18 +311,14 @@ def _rollup_tokens(agg: _PhaseAgg) -> str:
 
 
 def _render_phase_table(agg: _RunAgg) -> list[str]:
-    """Render phases in first-encounter order inside a collapsed details block."""
+    """Render phases in first-encounter order within the caller's run details."""
     rows: list[str] = [
-        "<details><summary>Per-phase breakdown</summary>",
-        "",
         "| Phase | Model | Tools | Input (cached) | Output | Cost | Latency |",
         "|---|---|---|---|---|---|---|",
     ]
     # Forks restart step ids, so preserve first encounter rather than sorting ids.
     for phase in agg.phases.values():
         rows.append(_render_phase_row(phase))
-    rows.append("")
-    rows.append("</details>")
     return rows
 
 
