@@ -23,7 +23,7 @@ from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
 from tests.harness.backend import ScriptedBackend
-from tests.harness.execution import test_execution_identity
+from tests.harness.execution import test_execution_identity as execution_identity
 from tests.harness.review_result import findings_artifact, review_coverage, terminal_result
 
 
@@ -162,7 +162,7 @@ def test_optional_context_fits_remaining_budget_without_changing_findings(
         size = len((json.dumps(artifact, indent=2, ensure_ascii=False) + '\n').encode('utf-8'))
         artifact['run_info'] = 'x' * (MAX_ARTIFACT_BYTES - size + (capacity == 'core-oversized'))
     core = copy.deepcopy(artifact)
-    identity = test_execution_identity(head_sha=artifact['head_sha'])
+    identity = execution_identity(head_sha=artifact['head_sha'])
     verdict = {'attempts': [{'kind': 'host', 'command': list(identity.argv), 'passed': True,
                              'identity': identity.payload()}]}
     artifact['review_context'] = {
