@@ -167,6 +167,74 @@ def test_report_collection_validates_optional_bound_sidecar(tmp_path: Path, cont
                                     scope_id='python', analyzed_revision=coverage.revision.to_dict())
 
 
+@pytest.mark.parametrize('author_kind', [
+    'current', 'foreign-head', 'unknown-head', 'redacted', 'null',
+    'list', 'missing-field', 'extra-field', 'source', 'body-type', 'body-length', 'head-type', 'head-length',
+    'truncated-type', 'nested', 'file-size',
+])
+def test_report_collection_admits_only_valid_author_context(tmp_path: Path, author_kind: str) -> None:
+    """Retained optional prose is shape-checked before it can enter rendering or a canonical handoff."""
+    from daydream.deep.report_context import collect_report_context
+    from daydream.review_reporting import render_review_context
+
+    coverage = review_coverage()
+    record = records_artifact(coverage, 'python')
+    records_path = tmp_path / 'stack-python-records.json'
+    records_path.write_text(json.dumps(record))
+    author: Any = {'source': 'pull_request_body', 'head_sha': coverage.revision.head_sha,
+                   'body': 'Retained author assertion', 'truncated': False}
+    if author_kind == 'foreign-head':
+        author['head_sha'] = 'f' * 40
+    elif author_kind == 'unknown-head':
+        author['head_sha'] = None
+    elif author_kind == 'redacted':
+        author['body'] = 'Retained author assertion {"token":"private-value"}'
+    elif author_kind == 'null':
+        author = None
+    elif author_kind == 'list':
+        author = []
+    elif author_kind == 'missing-field':
+        author.pop('truncated')
+    elif author_kind == 'extra-field':
+        author['invented'] = True
+    elif author_kind == 'source':
+        author['source'] = 'host_execution'
+    elif author_kind == 'body-type':
+        author['body'] = []
+    elif author_kind == 'body-length':
+        author['body'] = 'x' * 4097
+    elif author_kind == 'head-type':
+        author['head_sha'] = 7
+    elif author_kind == 'head-length':
+        author['head_sha'] = 'h' * 513
+    elif author_kind == 'truncated-type':
+        author['truncated'] = 'false'
+    raw = ('[' * 30000 + '0' + ']' * 30000 if author_kind == 'nested' else
+           ' ' * 65536 + 'null' if author_kind == 'file-size' else json.dumps(author))
+    author_path = tmp_path / 'review-author-context.json'
+    author_path.write_text(raw)
+    collected = collect_report_context(tmp_path, coverage.to_dict())
+    retained = collected['author_reported']
+    valid = author_kind in {'current', 'foreign-head', 'unknown-head', 'redacted'}
+    if valid:
+        assert retained['source'] == 'pull_request_body' and retained['head_sha'] == author['head_sha']
+        assert retained['truncated'] is False and 'Retained author assertion' in retained['body']
+        if author_kind == 'redacted':
+            assert 'private-value' not in retained['body'] and retained['body'] != author['body']
+        else:
+            assert retained == author
+        report = render_review_context(collected)
+        assert ('f' * 40 if author_kind == 'foreign-head' else
+                'unavailable' if author_kind == 'unknown-head' else author['head_sha']) in report
+    else:
+        assert retained is None
+        assert 'Author-reported check context unavailable.' in render_review_context(collected)
+    assert collected['scopes'][0]['originating_run_id'] == coverage.run_id
+    assert collected['scopes'][0]['analyzed_revision'] == coverage.revision.to_dict()
+    assert json.loads(records_path.read_text()) == record and author_path.read_text() == raw
+    assert collected['verification'] == {'status': 'unproduced', 'value': None}
+
+
 @pytest.mark.parametrize('shape', ['padding', 'nested-arrays'])
 def test_report_collection_bounds_existing_artifacts_and_prioritizes_test_identity(
     tmp_path: Path, shape: str,

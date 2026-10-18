@@ -70,8 +70,9 @@ def _spy_bound_deep_diff(
         return result
     monkeypatch.setattr(orch_mod, "bound_deep_diff", spy)
 
+@pytest.mark.parametrize('resume', [False, True], ids=['fresh', 'malformed-author-resume'])
 async def test_deep_findings_out_emits_artifact_and_stops(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, tmp_path: Path, resume: bool,
 ) -> None:
     """Real-path: a deep run with ``--findings-out`` writes the PR-pinned findings artifact from the canonical
     merged items and STOPS -- no PR post, no fix."""
@@ -79,15 +80,26 @@ async def test_deep_findings_out_emits_artifact_and_stops(
     _silence_gate_noise(monkeypatch)
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
-    _install_stub_backend(monkeypatch, multi_stack_target)
+    backend = _install_stub_backend(monkeypatch, multi_stack_target)
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)
 
     pr = _pin_findings_pr(monkeypatch, multi_stack_target)
-    out = multi_stack_target / "findings.json"
+    out = tmp_path / "findings.json"
     reviewed_sources = ("api.py", "App.tsx", "README.md")
     source_before = {name: (multi_stack_target / name).read_text() for name in reviewed_sources}
-    rc = await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out)))
+    config = make_config(multi_stack_target, pr_number=7, findings_out=str(out))
+    rc = await run(config)
+    if resume:
+        assert rc == 0
+        review_calls = sum(review_stage_state(call['prompt']) is not None for call in backend.calls)
+        assert review_calls > 0
+        initial = json.loads(out.read_text())
+        deep = multi_stack_target / '.daydream/deep'
+        (deep / 'review-author-context.json').write_text('[]')
+        config.start_at = 'merge'
+        rc = await run(config)
+        assert sum(review_stage_state(call['prompt']) is not None for call in backend.calls) == review_calls
 
     # (b) exit 0
     assert rc == 0
@@ -96,6 +108,14 @@ async def test_deep_findings_out_emits_artifact_and_stops(
     assert data["pr_number"] == 7
     assert data["head_sha"] == pr.head_sha
     assert data["repo"] == "o/r"
+    if resume:
+        assert data['review_context']['author_reported'] is None
+        assert data['terminal_result']['analyzed_revision'] == initial['terminal_result']['analyzed_revision']
+        assert data['terminal_result']['run_id'] != initial['terminal_result']['run_id']
+        assert data['terminal_result']['analysis_state'] == initial['terminal_result']['analysis_state'] == 'complete'
+        assert data['findings'] == initial['findings'] and data['findings']
+        assert (deep / 'review-author-context.json').read_text() == '[]'
+        assert 'Author-reported check context unavailable.' in (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
     assert all(re.fullmatch(r"[0-9a-f]{64}", f["fingerprint"]) for f in data["findings"])
     # (d) no fix applied -- the reviewed source is byte-identical and no fix sentinel
     # exists. This is the real "no fix ran" signal: it ignores daydream's own gitignored

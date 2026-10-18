@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream.deep.artifacts import per_stack_report_context_path
-from daydream.json_utils import atomic_write_json
+from daydream.json_utils import atomic_write_json, validates_schema
 from daydream.redaction import redact_structured_text, redact_value
 from daydream.review_rationale import valid_scope_review_context
 
@@ -93,6 +93,13 @@ def collect_report_context(
         retained_verification[name] = payload
         verification_bytes += size
     author = read_json(deep / AUTHOR_CONTEXT) if not author_unavailable and (deep / AUTHOR_CONTEXT).is_file() else None
+    if author is not None:
+        from daydream.review_reporting import REVIEW_CONTEXT_SCHEMA
+        try:
+            if not validates_schema(author, REVIEW_CONTEXT_SCHEMA['properties']['author_reported']):
+                author = None
+        except RecursionError:
+            author = None
     return {"scopes": scopes, "scopes_omitted": max(0, len(planned) - len(scopes)),
             "verification": {"status": "failed" if verification_failures or omitted else
                              "available" if retained_verification else "unproduced",
