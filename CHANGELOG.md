@@ -55,6 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **dependencies:** update Claude Agent SDK to 0.2.167, Pydantic to 2.14.1, the optional Hugging Face Hub extra to 2.2.0, Ruff to 0.17.1, typing stubs, and the GitHub App token action to 3.3.0; synchronize the RL and benchmark runtime locks. The Hub extra now uses the upstream 2.x HTTP transport.
+
 - **review:** allow 15 minutes for model-driven pre-scan investigation and 75 minutes for the overall review pipeline, giving slow reasoning models more exploration time while preserving the staged reviewers' 40-minute allowance.
 
 - **review:** raise the default staged reviewer investigation allowance from 480 to 2,400 seconds, subject to existing shared pipeline deadlines and tool-call limits.
