@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from daydream.deep.render import without_review_context
 from daydream.training.reward import ScoringInputs
 
 _VERDICTS_FILE = "recommendation-verdicts.json"
@@ -70,5 +71,5 @@ def assemble_scoring_inputs(run_dir: Path) -> ScoringInputs:
     return ScoringInputs(
         verifier_verdicts=verifier_verdicts,
         format_valid=format_valid,
-        length=len(review_text) if review_text is not None else None,
+        length=len(without_review_context(review_text)) if review_text is not None else None,
     )

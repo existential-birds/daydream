@@ -89,6 +89,14 @@ def insert_review_context(
     return '\n'.join(lines).rstrip('\n') + ('\n' if report_text.endswith('\n') else '')
 
 
+def without_review_context(report_text: str) -> str:
+    """Project the existing report without its host-owned summary, retaining legacy bytes."""
+    if not any(line.strip() == '## Review outcome' for line in report_text.split('\n')):
+        return report_text
+    lines = _remove_section(report_text.split('\n'), '## Review outcome')
+    return '\n'.join(lines).rstrip('\n') + ('\n' if report_text.endswith('\n') else '')
+
+
 def render_report(
     items: list[dict[str, Any]], *, review_context: dict[str, Any] | None = None,
     terminal_result: dict[str, Any] | None = None,

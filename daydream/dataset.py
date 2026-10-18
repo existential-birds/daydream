@@ -21,6 +21,7 @@ from pydantic import JsonValue, TypeAdapter
 from daydream.artifacts.filesystem import _create_private_directory, _projection_path
 from daydream.artifacts.models import ArtifactVisibilityError
 from daydream.atif import Trajectory
+from daydream.deep.render import without_review_context
 from daydream.json_utils import atomic_write_bytes, canonical_json
 from daydream.training.adjudication.precedence import effective_adjudication
 from daydream.training.labeler_versions import reply_evidence_digest
@@ -347,7 +348,9 @@ def _validate_run_evidence(run: Record) -> None:
             raise ValueError("reward breakdown format gate differs from scoring input")
         if not {"correctness", "length"} <= scoring["persisted_breakdown"]["axes_present"].keys():
             raise ValueError("reward breakdown requires explicit correctness/length presence")
-        if scoring["review_text"] is not None and scoring["length"] != len(scoring["review_text"]):
+        if scoring["review_text"] is not None and scoring["length"] not in {
+            len(scoring["review_text"]), len(without_review_context(scoring["review_text"])),
+        }:
             provenance = scoring.get("review_text_redaction") or {}
             if not provenance.get("applied") or not provenance.get("policy"):
                 raise ValueError("scoring length differs from retained review text without redaction provenance")

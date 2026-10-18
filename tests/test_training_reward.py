@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import builtins
+import json
+from pathlib import Path
 from typing import cast
 
 import pytest
 
+from daydream.dataset_scoring import assemble_scoring_inputs
+from daydream.deep.render import insert_review_context
 from daydream.training.reward import (
     REWARD_VERSION,
     PosteriorBreakdown,
@@ -27,6 +31,39 @@ def test_intrinsic_composite_is_golden() -> None:
     assert rb.reward_version == REWARD_VERSION
     assert rb.correctness_per_finding == [1.0, 0.5]
     assert rb.composite == 0.7  # correctness 0.75 − 0.2·len_norm(0.25)=0.05
+
+
+@pytest.mark.parametrize('location', ['root', 'deep'])
+def test_archived_host_context_does_not_change_review_length_or_reward(tmp_path: Path, location: str) -> None:
+    """The archive acquisition used by capture and sealed RL scores findings, retaining human bytes."""
+    legacy = ('⚠️ Existing warning.\n\n# Review\n\n## Diagrams\n```mermaid\nA-->B\n```\n\n'
+              '## Issues\n1. [api.py:1] ' + 'Existing finding. ' * 240 +
+              '\n\n## Held Findings\n2. [api.py:2] Existing held finding.\n')
+    deep = tmp_path / 'deep'
+    deep.mkdir()
+    verdicts = [{'issue_id': 1, 'verdict': 'consistent'}]
+    (deep / 'recommendation-verdicts.json').write_text(json.dumps({'verdicts': verdicts}))
+    report = (tmp_path if location == 'root' else deep) / 'review-output.md'
+    report.write_text(legacy)
+    baseline = assemble_scoring_inputs(tmp_path)
+    assert baseline.length == len(legacy)
+    baseline_reward = score_trajectory(baseline)
+    assert baseline_reward.composite is not None and baseline_reward.length_penalty is not None
+    sizes = []
+    for amount in (16, 3000):
+        context = {'scopes': [], 'scopes_omitted': 0,
+            'verification': {'status': 'available', 'value': {'remote-ci-verdict.json': {'notes': 'c' * amount}}},
+            'author_reported': {'source': 'pull_request_body', 'head_sha': None, 'body': 'a' * amount,
+                                'truncated': False}}
+        enriched = insert_review_context(legacy, context)
+        report.write_text(enriched)
+        acquired = assemble_scoring_inputs(tmp_path)
+        assert acquired.length == len(legacy) and acquired == baseline
+        assert score_trajectory(acquired).to_dict() == baseline_reward.to_dict()
+        assert report.read_text() == enriched and '## Review outcome' in enriched
+        assert '## Diagrams' in enriched and '## Held Findings' in enriched
+        sizes.append(len(enriched))
+    assert sizes[0] != sizes[1]
 
 def test_format_invalid_floors_composite() -> None:
     rb = score_trajectory(ScoringInputs(verifier_verdicts=None,  format_valid=False, length=50))
