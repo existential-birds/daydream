@@ -137,12 +137,17 @@ def _review_surface_prompts(calls: list[dict[str, object]],) -> list[dict[str, o
 @pytest.mark.parametrize("unit", [
     "all-units", "independent", "arbiter", "rationale-missing", "rationale-corrupt", "rationale-nested",
     "rationale-directory", "rationale-permission",
-    "author-present", "author-absent",
+    "author-present", "author-absent", "split-inputs",
 ])
 async def test_identical_rerun_restores_completed_units_and_current_run_evidence(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, unit: str, fake_gh: FakeGh,
 ) -> None:
     """Every warm contract retains exact bytes, positive evidence, and no paid review calls."""
+    if unit == 'split-inputs':
+        from tests.harness.git_helpers import git
+        (multi_stack_target / 'api.py').write_text("def hello():\n    return '" + '界' * 11000 + "'\n")
+        git(multi_stack_target, 'add', 'api.py')
+        git(multi_stack_target, 'commit', '-m', 'retain split Unicode source through reuse and resume')
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     options: dict[str, Any] = {}
     author_case = unit.startswith('author-')
@@ -165,6 +170,10 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
     first = json.loads((deep / "review-coverage.json").read_text())
     attribution = {scope['scope_id']: scope['target_decisions'] for scope in first['stack_outcomes']}
     assert all(attribution.values()), 'completed scopes must retain source-attributed target assertions'
+    if unit == 'split-inputs':
+        assert len(attribution['python']) > 1, 'the fixture must require multiple independently bound parts'
+        assert all(ref['source_range'] is None and ref['fragment']['bytes'] > 0
+                   for decision in attribution['python'] for ref in decision['evidence_refs'])
     for scope_id, decisions in attribution.items():
         records = json.loads((deep / f'stack-{scope_id}-records.json').read_text())
         assert 'target_decisions' not in records, 'retained attribution must not inflate later model inputs'
@@ -283,7 +292,7 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
             os.close(report_fd)
     finally:
         os.close(parent_fd)
-    if unit == 'all-units':
+    if unit in {'all-units', 'split-inputs'}:
         stub.calls.clear()
         assert await run(make_config(multi_stack_target, start_at='merge')) == 0
         resumed = saved_coverage(deep)
@@ -679,6 +688,8 @@ async def test_legacy_cache_without_coverage_proof_recomputes_review(
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     config = make_config(multi_stack_target)
     assert await run(config) == 0
+    original_decisions = {name: outcome['target_decisions'] for name, outcome in
+                          saved_coverage(multi_stack_target / '.daydream/deep').scopes.items()}
     entries = multi_stack_target / ".daydream" / "review-cache" / "entries"
     staged_damage = damage in {"unstaged", "prior-staged", "contract-3", "contract-4", "contract-5", "contract-6",
                                "contract-8", "contract-9", "contract-10", "contract-11"}
@@ -756,6 +767,9 @@ async def test_legacy_cache_without_coverage_proof_recomputes_review(
         assert _reused_stacks(multi_stack_target / ".daydream/deep") == set()
     coverage = json.loads((multi_stack_target / ".daydream" / "deep" / "review-coverage.json").read_text())
     assert all(outcome["status"] == "complete" for outcome in coverage["stack_outcomes"])
+    if damage in _ATTRIBUTION_DAMAGE:
+        assert {outcome['scope_id']: outcome['target_decisions'] for outcome in coverage['stack_outcomes']} == (
+            original_decisions), 'every corrupted scope, including Structure, must regain its frozen identities'
 
 
 @pytest.mark.parametrize("damage", ["missing", "corrupt", "head", "diff", "scope", "phase",

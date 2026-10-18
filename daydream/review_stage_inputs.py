@@ -258,7 +258,7 @@ class StageInputFactory:
                     "old_line": old_line, "new_line": new_line, "fragment_line_offset": line_offset}
             # Reserve the descriptor/summary wrappers before choosing bytes. This
             # avoids adding unbudgeted attribution after splitting a full input.
-            probe_bytes = len(inputs.truncate_utf8_to_budget(rest, 256).encode('utf-8'))
+            probe_bytes = len(inputs.truncate_utf8_to_budget(rest[:256], 256).encode('utf-8'))
             probe = self._mapped(_Part({**meta, 'fragment_bytes': probe_bytes}, notice + header), body=source_body)
             allowance = self._remaining_bytes(self._render([probe])) - 1536
             low = len(inputs.truncate_utf8_to_budget(rest, max(0, allowance)))

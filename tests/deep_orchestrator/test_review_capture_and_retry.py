@@ -294,14 +294,6 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         assert stage['stage'] == 'first_pass' and stage['assigned_files'] == ['api.py']
-        part, = stage['assignment_parts']
-        assert part['kind'] == ('file' if medium and not sandbox else 'continuation')
-        if not medium:
-            assert part['part_count'] > 1
-            assert (part['old_start'], part['old_count'], part['new_start'], part['new_count']) == (
-                1, 1, 1, 1 if unicode else 541)
-        assignments.append(part)
-        assert output['targets'][0]['evidence_refs'] == part['source_refs'][:1]
         prompt = review.backend.calls[-1]['prompt']
         if sandbox:
             rendered = prompt[prompt.index('Sanctioned phase inputs (captured verbatim):'):]
@@ -310,24 +302,36 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
             assert 'Sanctioned phase inputs (read only these exact files):' not in prompt
         diff, index = capture(review, stage)
         assert list(index) == ['api.py']
-        assert index['api.py']['assignments'][0]['target_id'] == part['target_id']
-        body = diff.split('\n@@', 1)[1].split('\n', 1)[1].encode()
-        if medium and not sandbox:
-            assert diff == canonical
-            assert '<sanctioned-input label="intent">' in prompt
-            assert 'The PR updates greetings across stacks.' in prompt
-            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
-        else:
-            assert part['fragment_offset'] == sum(map(len, fragments))
-            assert part['fragment_bytes'] == len(body)
-            reference, = output['targets'][0]['evidence_refs']
-            assert reference['source_range'] is None
-            assert reference['fragment'] == {'offset': part['fragment_offset'], 'bytes': len(body),
-                                             'sha256': hashlib.sha256(body).hexdigest()}
-            assert 'never a source line number' in part['fragment_offset_basis']
-        fragments.append(body)
-        if omit_final and part['part_index'] == part['part_count']:
-            output['targets'][0].update(status='not_reviewed', reason='Final continuation remains unexamined.')
+        assert index['api.py']['assignments'] == stage['assignment_parts']
+        notice = '[Ordered continuation: this is a partial hunk; see assignment mapping.]\n'
+        delivered = ([notice + piece for piece in diff.split(notice)[1:]]
+                     if stage['assignment_parts'][0]['kind'] == 'continuation' else [diff])
+        for part, part_diff, target in zip(stage['assignment_parts'], delivered, output['targets'], strict=True):
+            assert part['kind'] == ('file' if medium and not sandbox else 'continuation')
+            if not medium:
+                assert part['part_count'] > 1
+                assert (part['old_start'], part['old_count'], part['new_start'], part['new_count']) == (
+                    1, 1, 1, 1 if unicode else 541)
+            assignments.append(part)
+            assert target['target_id'] == part['target_id']
+            assert target['evidence_refs'] == part['source_refs'][:1]
+            body = part_diff.split('\n@@', 1)[1].split('\n', 1)[1].encode()
+            if medium and not sandbox:
+                assert part_diff == canonical
+                assert '<sanctioned-input label="intent">' in prompt
+                assert 'The PR updates greetings across stacks.' in prompt
+                output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+            else:
+                assert part['fragment_offset'] == sum(map(len, fragments))
+                assert part['fragment_bytes'] == len(body)
+                reference, = target['evidence_refs']
+                assert reference['source_range'] is None
+                assert reference['fragment'] == {'offset': part['fragment_offset'], 'bytes': len(body),
+                                                 'sha256': hashlib.sha256(body).hexdigest()}
+                assert 'never a source line number' in part['fragment_offset_basis']
+            fragments.append(body)
+            if omit_final and part['part_index'] == part['part_count']:
+                target.update(status='not_reviewed', reason='Final continuation remains unexamined.')
         decisions.extend(copy.deepcopy(output['targets']))
 
     data = await review.finish('python', reason='evidence_incomplete' if omit_final else None,
@@ -965,20 +969,27 @@ async def test_continuation_references_cannot_alias_another_fragment_or_a_source
 ) -> None:
     """Byte offsets identify a specific delivered fragment, even when it splits one source line."""
     repo = tmp_path / 'continuation_attribution'
-    seed_feature_branch(repo, base={'api.py': 'VALUE = 0\n'},
+    # Oversized before and after lines leave a real admitted stage before the
+    # second fragment, even when nearby small continuations share a batch.
+    seed_feature_branch(repo, base={'api.py': "VALUE = '" + '古' * 11000 + "'\n"},
                         feature={'api.py': "VALUE = '" + '界' * 11000 + "'\n"})
     review = InvestigationRun(repo, tmp_path, monkeypatch)
     admitted: list[dict[str, Any]] = []
+    injected: list[str] = []
 
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         capture(review, stage)
-        target, = output['targets']
+        if not admitted:
+            assert [part['part_index'] for part in stage['assignment_parts']] == [1]
+            admitted.extend(copy.deepcopy(output['targets']))
+            output['candidates'] = [candidate(disposition='confirmed', finding=record(line=1))]
+            return
+        target = next(target for part, target in zip(stage['assignment_parts'], output['targets'], strict=True)
+                      if part['part_index'] == 2)
         reference, = target['evidence_refs']
         assert reference['source_range'] is None
-        if not admitted:
-            admitted.append(copy.deepcopy(target))
-            return
+        injected.append(target['target_id'])
         assert reference['fragment']['offset'] > 1
         assert reference['part_sha256'] != admitted[0]['evidence_refs'][0]['part_sha256']
         if fault == 'reordered-fragment':
@@ -988,7 +999,8 @@ async def test_continuation_references_cannot_alias_another_fragment_or_a_source
                                          'end': reference['fragment']['offset']}
             reference['fragment'] = None
 
-    data = await review.finish('python', reason='evidence_incomplete')
+    data = await review.finish('python', reason='evidence_incomplete', findings=('Grounded defect',))
+    assert len(injected) == 1 and injected[0] not in {target['target_id'] for target in admitted}
     assert scopes(data)['python']['target_decisions'] == admitted
     events = stage_ends(review, 'python')
     assert [event['metadata']['admitted'] for event in events] == [True, False]
