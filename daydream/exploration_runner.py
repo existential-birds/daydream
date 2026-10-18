@@ -60,9 +60,9 @@ Tier: TypeAlias = Literal["skip", "single", "parallel"]
 
 _SPECIALIST_TIMEOUT_SECONDS = 300  # 5 minutes
 
-# Pi's dependency mapping can still be productive after two minutes. Allow
+# Slow reasoning models can spend several minutes mapping dependencies. Allow
 # synthesis time as well as investigation, with outer grace for stream cleanup.
-_PRE_SCAN_REVIEW_LIMITS = ReviewLimits(300, 120, 16)
+_PRE_SCAN_REVIEW_LIMITS = ReviewLimits(900, 120, 16)
 _PRE_SCAN_TIMEOUT_SECONDS = (
     _PRE_SCAN_REVIEW_LIMITS.investigation_s + _PRE_SCAN_REVIEW_LIMITS.finalization_s + 30
 )

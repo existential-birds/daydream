@@ -824,7 +824,7 @@ Structure additionally reviews their full union.
 
 ### Review budgets
 
-The review model pipeline defaults to 45 minutes for modest diffs, including
+The review model pipeline defaults to 75 minutes for modest diffs, including
 queueing and retries, with the last five minutes reserved for synthesis. Diffs
 over 1,000, 5,000, and 10,000 lines (or 64, 256, and 512 KiB) receive 2×, 4×,
 and 6× review time and per-role tool-call allowances respectively. The 4× and
@@ -854,6 +854,11 @@ concurrency still limit execution; these are neither billing estimates nor guara
 See [overloaded-stack activation evidence](docs/overloaded-stack-sharding.md) for
 exact frozen plans, repeated live quality/latency comparisons, aggregate allowances
 and measurement limitations.
+
+Model-driven pre-scan specialists have a 900-second investigation allowance,
+120 seconds for finalization, and 16 tool calls. Exploration shares the pipeline
+deadline; the default leaves room for this mapping work and the staged reviewers'
+40-minute base investigation allowance before synthesis.
 
 Each staged per-stack reviewer, including Structure, has a base investigation allowance of 2,400 seconds and 48
 observed tool starts shared across its stages and retries. Set `pipeline.reviewer_investigation_budget_s` in the
@@ -955,7 +960,7 @@ backend errors and malformed merge responses retain their failure behavior.
 
 The findings artifact carries optional `review_warnings`. Update both the analyze
 and posting jobs to the same Daydream revision. Leave CI headroom beyond the
-model deadline for setup, host processing, and artifact publication; a 60-minute
+model deadline for setup, host processing, and artifact publication; a 90-minute
 job with the default model budget leaves 15 minutes for those operations. An
 external job cancellation cannot use the graceful budget-exhaustion path.
 For diagnosis, capture `--trajectory PATH` and `--dump-artifacts DIRECTORY`.

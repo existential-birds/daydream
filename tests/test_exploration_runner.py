@@ -29,6 +29,7 @@ from daydream.prompts.grounding import (
     CWD_GROUNDING_INSTRUCTION,
     UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
 )
+from daydream.review_budget import ReviewLimits
 from tests.harness.backend import Responder, ScriptedBackend
 from tests.harness.fake_clock import FakeClock
 from tests.harness.review_profile import default_strategy as _default_strategy, exploration_strategies
@@ -148,13 +149,16 @@ def test_single_tier_dependency_tracer_only(tmp_path: Path) -> None:
     assert "daydream/extra.py" in paths
 
 @pytest.mark.parametrize(("investigation_s", "finalization_s", "completed", "has_dependencies", "calls"),
-    [(180, 0, True, True, 1), (301, 60, False, True, 2), (301, 121, False, False, 2)],
+    [(420, 0, True, True, 1), (901, 60, False, True, 2), (901, 121, False, False, 2)],
 )
 async def test_pre_scan_retains_slow_dependency_mapping_with_bounded_finalization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, investigation_s: float, finalization_s: float, completed: bool,
     has_dependencies: bool, calls: int,
 ) -> None:
-    """Pi can need over two minutes to investigate and over 30s to finalize."""
+    """Retain slow mapping and enforce finalization under explicit test limits."""
+    # Exercise the lifecycle independently of production budget tuning: a slow
+    # successful mapping, salvage after expiry, and an expired finalizer.
+    monkeypatch.setattr(er, "_PRE_SCAN_REVIEW_LIMITS", ReviewLimits(900, 120, 16))
     clock = FakeClock().install(monkeypatch)
     async def responder(*args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
         finalizing = "INVESTIGATION HAS ENDED" in args[1]

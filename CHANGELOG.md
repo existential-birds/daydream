@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **review:** allow 15 minutes for model-driven pre-scan investigation and 75 minutes for the overall review pipeline, giving slow reasoning models more exploration time while preserving the staged reviewers' 40-minute allowance.
+
 - **review:** raise the default staged reviewer investigation allowance from 480 to 2,400 seconds, subject to existing shared pipeline deadlines and tool-call limits.
 
 - **pi:** replace recurring native budget messages with at most one final-submission system warning per attempt, and deliver bounded missing-submission recovery through system instructions. Existing extension API fields, allowances, cumulative host accounting and submission admission remain compatible; no migration is required ([#1595](https://github.com/existential-birds/daydream/issues/1595)).
