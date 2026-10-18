@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from daydream.review_result import (
+    RUN_TARGET_DECISIONS_MAX_BYTES,
     ReasonCode,
     ReviewCoverage,
     reason_for_exception,
@@ -123,6 +124,14 @@ def test_checked_roundtrip_and_immutable_terminal() -> None:
     assert c.scopes['python']['target_decisions'] == retained, 'later failures retain admitted attribution'
     restored = ReviewCoverage.from_dict(c.to_dict())
     assert restored.to_dict() == c.to_dict()
+    legacy = c.to_dict()
+    legacy['stack_outcomes'][0]['target_decisions'][0]['reason'] = 'TOKEN=x'
+    normalized = ReviewCoverage.from_dict(legacy).scopes['python']['target_decisions'][0]
+    assert normalized['reason'] == 'TOKEN=[REDACTED_ENV_VAR]'
+    assert normalized['evidence_refs'] == references
+    legacy['stack_outcomes'][0]['target_decisions'][0]['reason'] = 'TOKEN=x ' * 20000
+    with pytest.raises(ValueError, match='invalid target decisions'):
+        ReviewCoverage.from_dict(legacy)
     corrupted = c.to_dict()
     for name in ("planned_scopes", "stack_outcomes"):
         corrupted[name][0]["files"].reverse()
@@ -144,7 +153,7 @@ def test_checked_roundtrip_and_immutable_terminal() -> None:
         restored.record_scope("python", "failed", reasons=["backend_failure"])
 
 
-@pytest.mark.parametrize('bound', ['references-bytes', 'target-count', 'scope-bytes'])
+@pytest.mark.parametrize('bound', ['references-bytes', 'target-count', 'scope-bytes', 'run-bytes'])
 def test_retained_attribution_bounds_reject_atomically_after_a_valid_control(bound: str) -> None:
     """Storage limits must reject overflow without losing already admitted decisions."""
     c = review_coverage()
@@ -162,6 +171,10 @@ def test_retained_attribution_bounds_reject_atomically_after_a_valid_control(bou
     elif bound == 'target-count':
         valid = [{'target_id': f'a.py:part:{i}', 'status': 'not_reviewed', 'reason': 'Deferred assignment',
                   'evidence_refs': []} for i in range(512)]
+    elif bound == 'run-bytes':
+        valid[0]['reason'] = 'é\u2028' * 25000
+        c.record_scope('structure', 'incomplete', reasons=['evidence_incomplete'], partial_evidence=True,
+                       target_decisions=valid)
     else:
         valid[0]['reason'] = 'é' * 130000
     c.record_scope('python', 'incomplete', reasons=['evidence_incomplete'], partial_evidence=True,
@@ -177,6 +190,23 @@ def test_retained_attribution_bounds_reject_atomically_after_a_valid_control(bou
     elif bound == 'target-count':
         invalid.append({**valid[-1], 'target_id': 'a.py:part:512'})
         expected = 'invalid target decisions'
+    elif bound == 'run-bytes':
+        without_decisions = copy.deepcopy(before)
+        for scope in without_decisions['stack_outcomes']:
+            scope.pop('target_decisions', None)
+        def published_size(value: dict[str, Any]) -> int:
+            return len(json.dumps({'terminal_result': value}, indent=2, ensure_ascii=False).encode('utf-8'))
+        contribution = published_size(before) - published_size(without_decisions)
+        invalid[0]['reason'] += 'x' * (RUN_TARGET_DECISIONS_MAX_BYTES - contribution + 1)
+        assert sum(len(json.dumps(decisions, ensure_ascii=False).encode()) for decisions in [valid, invalid]) < (
+            RUN_TARGET_DECISIONS_MAX_BYTES), 'compact JSON misses the nested whitespace overflow'
+        corrupt = copy.deepcopy(before)
+        corrupt_scope = next(scope for scope in corrupt['stack_outcomes'] if scope['scope_id'] == 'python')
+        corrupt_scope['target_decisions'] = invalid
+        assert published_size(corrupt) - published_size(without_decisions) == RUN_TARGET_DECISIONS_MAX_BYTES + 1
+        with pytest.raises(ValueError, match='run source attribution exceeds retained byte limit'):
+            ReviewCoverage.from_dict(corrupt)
+        expected = 'run source attribution exceeds retained byte limit'
     else:
         invalid[0]['reason'] += 'é' * 1200
         assert len(json.dumps(valid, ensure_ascii=False).encode()) < 256 * 1024

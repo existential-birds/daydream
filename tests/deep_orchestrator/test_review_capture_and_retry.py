@@ -1005,3 +1005,64 @@ async def test_continuation_references_cannot_alias_another_fragment_or_a_source
     events = stage_ends(review, 'python')
     assert [event['metadata']['admitted'] for event in events] == [True, False]
     assert events[-1]['metadata']['failure_class'] == 'source_attribution'
+
+
+async def test_redaction_expansion_rejects_stage_without_losing_admitted_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A secret-heavy reason must not break publication of earlier accepted work."""
+    review = staged_review(tmp_path, monkeypatch)
+    admitted: list[dict[str, Any]] = []
+
+    @review.backend.script('python')
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        if not stage['progress']:
+            admitted.extend(copy.deepcopy(output['targets']))
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+        else:
+            output['targets'][0]['reason'] = 'TOKEN=x ' * 20000
+
+    data = await review.finish('python', reason='evidence_incomplete', findings=('Grounded defect',))
+    assert scopes(data)['python']['target_decisions'] == admitted
+    events = stage_ends(review, 'python')
+    assert [event['metadata']['admitted'] for event in events] == [True, False]
+    assert events[-1]['metadata']['failure_class'] == 'source_attribution'
+    assert 'TOKEN=x' not in review.output.read_text()
+    saved = json.loads((review.repo / '.daydream/deep/stack-python-records.json').read_text())
+    assert [finding['description'] for finding in saved['issues']] == ['Grounded defect']
+
+
+async def test_parallel_scope_attribution_overflow_retains_findings_and_admitted_identities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Individually valid scopes cannot crowd accepted findings out of the bounded handoff."""
+    from daydream.findings import MAX_ARTIFACT_BYTES
+
+    review = staged_review(tmp_path, monkeypatch, files=20)
+    review.config = replace(review.config, deep_shard_enabled=True, deep_shard_max_files=1,
+                            deep_shard_max_bytes=10**9, deep_shard_fanout_cap=32)
+    submitted: dict[str, list[dict[str, Any]]] = {}
+
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        if stage['scope_id'] == 'structure':
+            return
+        if 'api.py' in stage['assigned_files']:
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+        else:
+            output['targets'][0]['reason'] = 'r' * 60000
+        submitted[stage['scope_id']] = copy.deepcopy(output['targets'])
+
+    review.backend.stage_response = response
+    assert await review.run() == 0
+    data = review.load()
+    assert review.output.stat().st_size <= MAX_ARTIFACT_BYTES
+    assert [finding['title'] for finding in data['findings']] == ['Grounded defect']
+    assert data['terminal_result']['analysis_state'] == 'incomplete'
+    outcomes = scopes(data)
+    assert len(submitted) == 20, 'the fixture must exercise independent concurrent reviewer scopes'
+    assert any(scope['reason_codes'] == ['evidence_incomplete'] for scope in outcomes.values())
+    for scope_id, decisions in submitted.items():
+        outcome = outcomes[scope_id]
+        assert outcome['target_decisions'] == (decisions if outcome['status'] == 'complete' else [])
+    coverage = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
+    assert coverage['stack_outcomes'] == data['terminal_result']['stack_outcomes']

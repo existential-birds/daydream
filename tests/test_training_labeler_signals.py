@@ -71,21 +71,35 @@ def test_reviewed_commit_line_does_not_break_daydream_footer_detection() -> None
 
 
 
-def test_fix_applied_signal_captured_recommendation_returns_applied(tmp_path: Path) -> None:
-    """Hunk content from the captured recommendation appears verbatim in a post-head commit
-    on the default branch."""
-    row = _row(recommended_patch=diff_adding("foo = 1"), base_branch="main")
+@pytest.mark.parametrize(
+    ("added_line", "post_content", "verdict", "hunks_applied"),
+    [
+        pytest.param("foo = 1", "foo = 1\n", "applied", 1, id="ordinary"),
+        pytest.param("left\u2028right", "left\u2028right\n", "applied", 1, id="line-separator"),
+        pytest.param("left\u2029right", "left\u2029right\n", "applied", 1, id="paragraph-separator"),
+        pytest.param("left\x85right", "left\x85right\n", "applied", 1, id="next-line"),
+        pytest.param("left\rright", "left\rright\n", "applied", 1, id="carriage-return"),
+        pytest.param("foo = 1", "foo = 1\rbar = 2\n", "not_applied", 0, id="carriage-return-prefix"),
+        pytest.param("", "", "not_applied", 0, id="empty-source"),
+        pytest.param("", "\n", "applied", 1, id="blank-line"),
+    ],
+)
+def test_fix_applied_signal_matches_captured_recommendation_verbatim(
+    tmp_path: Path, added_line: str, post_content: str, verdict: str, hunks_applied: int,
+) -> None:
+    """Git LF lines retain embedded separators; a matching prefix alone has not landed."""
+    row = _row(recommended_patch=diff_adding(added_line), base_branch="main")
     sig = fix_applied_signal(
         row,
         changed_files=["app.py"],
         repo_clone=tmp_path,
         diff_fetcher=lambda repo, base, head: ["app.py"],
         commits_in_window_fetcher=lambda repo, base, head: ["commit1"],
-        file_at_fetcher=lambda repo, path, sha: "foo = 1\n",
+        file_at_fetcher=lambda repo, path, sha: post_content,
     )
     assert isinstance(sig, FixAppliedSignal)
-    assert sig.verdict == "applied"
-    assert sig.hunks_applied == 1
+    assert sig.verdict == verdict
+    assert sig.hunks_applied == hunks_applied
     assert sig.hunks_total == 1
 
 

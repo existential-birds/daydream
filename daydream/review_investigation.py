@@ -35,9 +35,10 @@ from daydream.review_result import (
     TARGET_DECISIONS_MAX_BYTES,
     TARGET_DECISIONS_MAX_ITEMS,
     ReasonCode,
+    ReviewCoverage,
+    preserved_target_decisions,
     reason_for_budget,
     reason_for_exception,
-    validate_target_decisions,
 )
 from daydream.review_source_refs import validate_source_refs
 from daydream.run_context import resolve_run_context
@@ -95,8 +96,10 @@ class ReviewInvestigation:
     """Admit successful stage assertions; observed spend belongs to the host."""
 
     def __init__(self, stack: StackAssignment, full_diff: str, revision: dict[str, Any], *,
-                 assignment_batches: list[list[dict[str, Any]]], limits: ReviewLimits | None = None) -> None:
+                 assignment_batches: list[list[dict[str, Any]]], coverage: ReviewCoverage,
+                 limits: ReviewLimits | None = None) -> None:
         self.scope_id = stack.stack_name
+        self.coverage = coverage
         self.files = sorted(stack.files)
         self.revision = revision
         self.diff_weights = file_change_bytes(full_diff)
@@ -584,21 +587,22 @@ class ReviewInvestigation:
                 {**candidate, 'candidate_id': f'{self.scope_id}:candidate:{len(prior_candidates) + index + 1}'}
                 for index, candidate in enumerate(decisions)]
         target_progress = {**self.target_progress, **{target['target_id']: target for target in output['targets']}}
-        if (len(target_progress) > TARGET_DECISIONS_MAX_ITEMS
-                or len(json.dumps(list(target_progress.values()), ensure_ascii=False).encode())
-                > TARGET_DECISIONS_MAX_BYTES):
+        try:
+            if (len(target_progress) > TARGET_DECISIONS_MAX_ITEMS
+                    or len(json.dumps(list(target_progress.values()), ensure_ascii=False).encode())
+                    > TARGET_DECISIONS_MAX_BYTES):
+                raise ValueError('target decisions exceed retained limits')
+            if admitting:
+                canonical = preserved_target_decisions(list(target_progress.values()))
+                self.coverage.check_target_decisions_budget(self.scope_id, canonical)
+                target_progress = {decision['target_id']: decision for decision in canonical}
+        except ValueError:
             self.assertion_failure_class = 'source_attribution'
             return None, 'evidence_incomplete'
-        if admitting:
-            try:
-                validate_target_decisions(list(target_progress.values()))
-            except ValueError:
-                self.assertion_failure_class = 'source_attribution'
-                return None, 'evidence_incomplete'
         if stage == 'triage':
             progress = self.handoff['progress']
         elif stage == 'integration':
-            progress = output['targets']
+            progress = [target_progress[target['target_id']] for target in output['targets']]
         else:
             progress = []
             for path, required in self.required_targets.items():
@@ -638,6 +642,7 @@ class ReviewInvestigation:
         plan, reason = self._assessment(output, stage, targets, candidate_ids, files=files, admitting=True)
         if plan is None:
             return reason
+        self.coverage.admit_target_decisions(self.scope_id, list(plan.target_progress.values()))
         self.admitted_stages += 1
         self.handoff = plan.handoff
         self.target_progress = plan.target_progress

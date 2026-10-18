@@ -891,8 +891,11 @@ All references validate before a stage commits; invalid references preserve prio
 Optional `supporting_files` relevance metadata remains independent and cannot veto valid primary decisions.
 
 Per-target decisions and attribution survive file folding and terminal persistence. Host retention is bounded to
-512 decisions and 256 KiB per reviewer scope, separately from the unchanged 64 KiB/128-item semantic handoff;
-overflow rejects the stage atomically. Retained identities are not an exhaustive read ledger. A valid reference proves
+512 decisions and 256 KiB per reviewer scope, separately from the unchanged 64 KiB/128-item semantic handoff.
+Reasons are redacted before admission. All scopes share a 256 KiB attribution allowance measured in the exact
+nested, pretty UTF-8 findings encoding, leaving headroom within the unchanged 1 MiB findings artifact cap.
+This allowance bounds attribution's additional bytes; findings and other existing fields retain their own limits.
+Overflow rejects the stage atomically and retains prior admitted decisions and findings with incomplete coverage. Retained identities are not an exhaustive read ledger. A valid reference proves
 correspondence/existence only, not understanding, semantic review coverage, source reads or executable verification.
 
 The [historical paired comparison](docs/measurements/source-attribution.md) observed lower aggregate runner time

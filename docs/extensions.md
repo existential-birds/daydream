@@ -372,7 +372,12 @@ list. References bind artifact and part SHA-256, side-specific revision, true ol
 basis (`supplied_diff`, `source_inspection`, `executed_check`) and role (`assigned`, `supporting`). Broader supporting
 source must exist at the frozen revision and cannot replace assigned work. Basis labels remain reviewer assertions.
 All references validate atomically before admission. Per-target evidence persists through file folding with a separate
-512-decision/256-KiB host retention bound; the model handoff retains its existing semantic bounds. A valid citation proves
+512-decision/256-KiB per-scope host retention bound. Reasons are redacted before admission; all planned scopes also
+share a 256 KiB host allowance measured in their exact nested pretty UTF-8 findings encoding. Stage admission claims
+capacity synchronously, and cache restoration/resume enforce the same allowance. Overflow preserves prior admitted
+identities and findings with incomplete coverage. This leaves headroom within the unchanged 1 MiB findings cap;
+baseline findings and other fields can still independently exhaust that cap. The model handoff retains its existing
+semantic bounds. A valid citation proves
 correspondence/existence only; it is not a read receipt, semantic-quality certificate or executed-check artifact.
 Findings and snapshot-bound typed coverage are
 [atomically published](../README.md#terminal-review-findings-contract).

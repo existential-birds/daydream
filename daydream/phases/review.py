@@ -548,8 +548,9 @@ async def phase_per_stack_reviews(
                         attribution = json.loads(attribution_path.read_text())
                         if not isinstance(attribution, dict) or set(attribution) != {'target_decisions'}:
                             raise ValueError('invalid source attribution payload')
-                        target_decisions = attribution['target_decisions']
+                        target_decisions = preserved_target_decisions(attribution['target_decisions'])
                         input_factory.validate_retained_decisions(target_decisions, complete=True)
+                        coverage.check_target_decisions_budget(stack.stack_name, target_decisions)
                         cache_valid = valid_record_artifact(
                             restored, scope_id=stack.stack_name, analyzed_revision=coverage.revision.to_dict(),
                         ) and restored.get("incomplete") is not True and bool(target_decisions) and all(
@@ -627,7 +628,8 @@ async def phase_per_stack_reviews(
                         recorder, f"deep-{stack_name}", dispatch=dispatch,
                     ):
                         investigation = ReviewInvestigation(stack, input_factory.full_diff, coverage.revision.to_dict(),
-                            assignment_batches=input_factory.assignment_batches, limits=review_limits)
+                            assignment_batches=input_factory.assignment_batches, coverage=coverage,
+                            limits=review_limits)
                         with stack_scope(base_stack):
                             structured, budget_reason = await investigation.run(backend, work.repo, build_stage_prompt,
                                 stage_inputs=input_factory.prepare,
