@@ -329,6 +329,17 @@ async def test_parallel_fix_same_file_no_race(
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))
     assert exit_code == 0
     assert shared.read_text().split() == ["marker-1", "marker-2", "marker-3"]
+    fix_prompts = _fix_prompts(stub)
+    assert len(fix_prompts) == 2
+    batches = [prompt for prompt in fix_prompts if prompt.startswith("Fix these 3 issues")]
+    assert len(batches) == 1
+    assert [line.strip() for line in batches[0].splitlines() if line.strip().startswith(("1. ", "2. ", "3. "))] == [
+        "1. marker-1", "2. marker-2", "3. marker-3",
+    ]
+    singles = [prompt for prompt in fix_prompts if prompt.startswith("Fix this issue:")]
+    assert len(singles) == 1
+    assert singles[0].splitlines()[1] == "other"
+    assert all(marker not in singles[0] for marker in ("marker-1", "marker-2", "marker-3"))
 
 async def test_parallel_fix_footprint_intersection_dispatches_to_one_agent(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,

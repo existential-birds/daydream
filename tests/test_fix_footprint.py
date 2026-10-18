@@ -563,6 +563,9 @@ async def test_parallel_group_fallback_never_restores_index_while_sibling_is_liv
 
     assert failures == {}
     assert a_fallback_calls == 2, backend.prompts
+    assert sum(prompt.startswith("Fix these 2 issues") and "b one" in prompt for prompt in backend.prompts) == 1
+    assert not any(prompt.startswith("Fix this issue:") and "b one" in prompt for prompt in backend.prompts)
+    assert not any(prompt.startswith("Fix this issue:") and "b two" in prompt for prompt in backend.prompts)
     assert b_observed_sibling_index.is_set()
     assert b_cached_while_live == "b.py"
     assert (git_repo / "a.py").read_bytes() == b"A = fixed\n"
@@ -611,6 +614,7 @@ async def test_parallel_fix_cancellation_closes_backend_before_restoring_round_i
 
     assert stream_closed.is_set()
     assert git_ops.snapshot_index(git_repo) == round_index
+    assert (git_repo / "a.py").read_bytes() == b"A = 1\n"
 
 @pytest.mark.asyncio
 async def test_fanout_cancellation_and_index_restore_failure_are_both_reported(git_repo: Path,) -> None:

@@ -29,7 +29,7 @@ from daydream.config import TEST_WALL_BUDGET_S
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.artifacts import DeepArtifact
 from daydream.fix_footprint import AuthorizedFixFootprint
-from daydream.git_ops import GitError, IndexSnapshot, WorktreeRollbackSnapshot
+from daydream.git_ops import GitError, WorktreeRollbackSnapshot
 from daydream.hunk_index import write_hunk_index
 from daydream.phases import (
     TEST_OUTPUT_TAIL_LINES,
@@ -210,82 +210,74 @@ def _unconfined_finding_file(tmp_path: Path, path_kind: str) -> str:
     raise AssertionError(f"unknown path_kind: {path_kind!r}")
 
 @pytest.fixture
-def _quiet_phase_ui(silence_console: Callable[..., None]) -> None:
-    """Silence shared UI only for phase cases that opt into this fixture."""
-    silence_console("daydream.ui")
+def _quiet_phase_ui(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Silence output while preserving UI exports captured by lazy imports."""
+    monkeypatch.setattr("daydream.agent.console.print", lambda *args, **kwargs: None)
 
 
-@pytest.fixture(autouse=True)
-def _supply_test_evidence_contract(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Supply real identity and run-scope defaults to menu/prompt cases; preserve explicit overrides."""
-    implementation = phases.phase_test_and_heal
-    fix_implementation = phases.phase_fix
-    batched_implementation = phases.phase_fix_batched
-    parallel_implementation = phases.phase_fix_parallel
+@pytest.mark.parametrize("missing", ["session_id", "capture_tree_key", "footprint"])
+async def test_test_and_heal_requires_explicit_evidence_contract(
+    tmp_path: Path, make_work: Callable[..., WorkContext], missing: str,
+) -> None:
+    """A caller omission must fail before suite execution or repair dispatch."""
+    backend = ScriptedBackend()
+    contract: dict[str, Any] = {
+        "session_id": "missing-contract", "capture_tree_key": lambda: "unchanged",
+        "footprint": AuthorizedFixFootprint.build(tmp_path, set(), []),
+    }
+    del contract[missing]
+    with pytest.raises(TypeError, match="requires session_id, capture_tree_key, and footprint"):
+        await phases.phase_test_and_heal(backend, make_work(tmp_path), config=None, **contract)
+    assert backend.prompts == []
 
-    async def _with_contract(*args: Any, **kwargs: Any) -> Any:
-        feedback = kwargs.get("feedback_items")
-        paths = frozenset(item["file"]
-            for item in (feedback or [])
-            if isinstance(item, dict) and isinstance(item.get("file"), str)
-        )
-        kwargs.setdefault("session_id", "unit-test-session")
-        kwargs.setdefault("capture_tree_key", lambda: "unit-test-tree")
-        kwargs.setdefault("footprint", AuthorizedFixFootprint(run_allowed_paths=paths, policy_revision=1),)
-        return await implementation(*args, **kwargs)
 
-    monkeypatch.setattr(phases, "phase_test_and_heal", _with_contract)
+@pytest.mark.parametrize("entry_point", ["phase_fix", "phase_fix_batched"])
+@pytest.mark.parametrize("missing", ["edit_scope", "read_scope"])
+async def test_fix_requires_explicit_scopes(
+    tmp_path: Path, make_work: Callable[..., WorkContext], entry_point: str, missing: str,
+) -> None:
+    """Neither fixer entry point may silently grant omitted edit/read authority."""
+    backend = ScriptedBackend()
+    item = {"file": "app.py", "description": "repair"}
+    scopes: dict[str, Any] = {"edit_scope": frozenset({"app.py"}), "read_scope": frozenset({"app.py"})}
+    del scopes[missing]
+    with pytest.raises(TypeError, match="require explicit edit_scope and read_scope"):
+        if entry_point == "phase_fix":
+            await phases.phase_fix(backend, make_work(tmp_path), item, 1, 1, **scopes)
+        else:
+            await phases.phase_fix_batched(backend, make_work(tmp_path), [item], [1], 1, **scopes)
+    assert backend.prompts == []
 
-    def _contract_scope_kwargs(items: list[Any], kwargs: dict[str, Any]) -> None:
-        changed = kwargs.pop("changed_files", None)
-        default_scope = frozenset(item["file"] for item in items if isinstance(item.get("file"), str))
-        edit_scope = frozenset(changed) if changed is not None else default_scope
-        kwargs.setdefault("edit_scope", edit_scope)
-        kwargs.setdefault("read_scope", edit_scope)
 
-    async def _fix_with_contract(*args: Any, **kwargs: Any) -> Any:
-        _contract_scope_kwargs([args[2]], kwargs)
-        return await fix_implementation(*args, **kwargs)
+@pytest.mark.parametrize("missing", ["footprint", "round_snapshot"])
+async def test_parallel_fix_requires_explicit_round_contract(
+    tmp_path: Path, make_work: Callable[..., WorkContext], missing: str,
+) -> None:
+    """Parallel callers must supply both authorization and captured rollback state."""
+    backend = ScriptedBackend()
+    init_repo(tmp_path)
+    (tmp_path / "app.py").write_text("original\n")
+    git(tmp_path, "add", "app.py")
+    git_commit(tmp_path, "round contract baseline")
+    items = [{"item_uid": "item:app", "file": "app.py"}]
+    contract: dict[str, Any] = {
+        "footprint": AuthorizedFixFootprint.build(tmp_path, {"app.py"}, items),
+        "round_snapshot": _round_snapshot(tmp_path, frozenset({"app.py"})),
+    }
+    del contract[missing]
+    with pytest.raises(TypeError, match="requires footprint and round_snapshot"):
+        await phases.phase_fix_parallel(backend, make_work(tmp_path), items, **contract)
+    assert backend.prompts == []
 
-    async def _batched_with_contract(*args: Any, **kwargs: Any) -> Any:
-        _contract_scope_kwargs(args[2], kwargs)
-        return await batched_implementation(*args, **kwargs)
 
-    async def _parallel_with_contract(*args: Any, **kwargs: Any) -> Any:
-        # Use a real Git baseline so parallel storage and recovery remain exercised.
-        repo = args[1].repo
-        if not (repo / ".git").exists():
-            init_repo(repo)
-            (repo / ".phase-fixture").write_text("real Git baseline\n")
-            git(repo, "add", ".phase-fixture")
-            git_commit(repo, "test: parallel phase baseline")
-        original_items = args[2]
-        items = [dict(item, item_uid=item.get("item_uid") or f"item:{n}")
-                 for n, item in enumerate(original_items, start=1)]
-        mutable_args = (*args[:2], items, *args[3:])
-        item_paths = {item["item_uid"]: frozenset(path
-                for path in [item.get("file"), *(item.get("related_files") or [])]
-                if isinstance(path, str)
-            )
-            for item in items
-        }
-        run_paths = frozenset(path for paths in item_paths.values() for path in paths)
-        kwargs.setdefault("footprint",
-            AuthorizedFixFootprint(run_allowed_paths=run_paths, policy_revision=1, _item_paths=item_paths,),
-        )
+def _round_snapshot(repo: Path, paths: frozenset[str]) -> WorktreeRollbackSnapshot:
+    """Capture the caller's real round state without changing findings or authority."""
+    return WorktreeRollbackSnapshot(
+        ref=git_ops.head_sha(repo), index=git_ops.snapshot_index(repo),
+        path_states=git_ops.snapshot_worktree_paths(repo, paths),
+        untracked=git_ops.snapshot_untracked_paths(repo, include_runtime_artifacts=False),
+    )
 
-        kwargs.setdefault("round_snapshot",
-            WorktreeRollbackSnapshot(
-                ref="HEAD", index=IndexSnapshot(tree_sha="unit-test-tree", paths=()), path_states=(), untracked={},
-            ),
-        )
-        return await parallel_implementation(*mutable_args, **kwargs)
-
-    monkeypatch.setattr(phases, "phase_fix", _fix_with_contract)
-    monkeypatch.setattr(phases, "phase_fix_batched", _batched_with_contract)
-    monkeypatch.setattr(phases, "phase_fix_parallel", _parallel_with_contract)
-    monkeypatch.setattr(git_ops, "restore_group_from_snapshot", lambda *args, **kwargs: None)
-    monkeypatch.setattr(git_ops, "restore_index", lambda *args, **kwargs: None)
 
 def _seed_healing_repo(tmp_path: Path, path: str,
     contents: str = "-- original\n",
@@ -786,7 +778,7 @@ def test_test_command_wall_budget_resolves_file_config_override() -> None:
 
 def _footprint(repo: Path) -> AuthorizedFixFootprint:
     """A no-edit-authority footprint: the repair record, not the prompt, carries scope."""
-    return AuthorizedFixFootprint(run_allowed_paths=frozenset(), policy_revision=1)
+    return AuthorizedFixFootprint.build(repo, set(), [])
 
 
 @pytest.mark.parametrize("outcome_case", ["normal", "timeout", "exception"])
@@ -882,6 +874,8 @@ async def test_phase_test_and_heal_aborts_when_generated_restore_fails(
     )
     result = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), config=_host_suite_config(tmp_path), allow_standalone=True,
+        session_id="healing-menu", capture_tree_key=lambda: git_ops.tree_key(()),
+        footprint=_footprint(tmp_path),
     )
     assert (result.passed, result.retries, result.proceed) == (False, 1, False)
     # The rejected tree is not rerun; repair and handoff remain recorded.
@@ -912,7 +906,7 @@ async def test_phase_fix_prompt_enumerates_explicit_edit_scope(
     """The prompt distinguishes exact edit authority from readable context."""
 
 
-    # --- With changed_files: the clause enumerates the allowed file set. -----
+    # The explicit scope clause enumerates the allowed file set.
     backend_with = ScriptedBackend()
     item = {"id": 1, "description": "Off-by-one", "file": "src/handler.py", "line": 42}
     await phases.phase_fix(
@@ -929,7 +923,9 @@ async def test_phase_fix_prompt_enumerates_explicit_edit_scope(
 
     # --- A direct item still receives its own exact scope. ---
     backend_without = ScriptedBackend()
-    await phases.phase_fix(backend_without, make_work(tmp_path), item, 1, 1)
+    await phases.phase_fix(backend_without, make_work(tmp_path), item, 1, 1,
+        edit_scope=frozenset({"src/handler.py"}), read_scope=frozenset({"src/handler.py"}),
+    )
     assert len(backend_without.prompts) == 1
     prompt_without = backend_without.prompts[0]
     assert "Authorized edit scope" in prompt_without
@@ -965,6 +961,7 @@ async def test_bound_phase_fix_transports_only_named_private_inputs(
 
         await phases.phase_fix(backend, work, {"id": 1, "description": "repair", "file": "src/app.py", "line": 1}, 1, 1,
             intent_path=intent, exploration_dir=affected.parent,
+            edit_scope=frozenset({"src/app.py"}), read_scope=frozenset({"src/app.py"}),
         )
 
         prompt = backend.last_prompt
@@ -1019,7 +1016,7 @@ def test_repair_prompt_discloses_truncation() -> None:
 @pytest.mark.parametrize("bad_ref", ["traversal", "absolute", "symlink", "missing"])
 @pytest.mark.asyncio
 async def test_fix_entrypoints_reject_invalid_finding_file_refs(
-    tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None, entry_point: str,
+    git_repo: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None, entry_point: str,
     bad_ref: str,
 ) -> None:
     """Every fix entry point rejects unconfined or missing files.
@@ -1027,18 +1024,29 @@ async def test_fix_entrypoints_reject_invalid_finding_file_refs(
     Batched cases put the bad reference second to exercise the entire preflight loop.
     """
     backend = ScriptedBackend()
-    bad: dict[str, Any] = {"id": 99, "description": "Escape", "line": 1}
+    valid = [
+        {"id": 1, "item_uid": "item:good", "description": "Confined", "file": "src/ok.py", "line": 1},
+        {"id": 99, "item_uid": "item:bad", "file": "src/bad.py"},
+    ]
+    footprint = AuthorizedFixFootprint.build(git_repo, set(), valid)
+    snapshot = _round_snapshot(git_repo, footprint.run_allowed_paths)
+    # Prepare valid authority first; the invalid finding must reach phase preflight.
+    bad: dict[str, Any] = {"id": 99, "item_uid": "item:bad", "description": "Escape", "line": 1}
     if bad_ref != "missing":
-        bad["file"] = _unconfined_finding_file(tmp_path, bad_ref)
-    items = [{"id": 1, "description": "Confined", "file": "src/ok.py", "line": 1}, bad,]
-    work = make_work(tmp_path)
+        bad["file"] = _unconfined_finding_file(git_repo, bad_ref)
+    items = [valid[0], bad]
+    work = make_work(git_repo)
     call: Any
     if entry_point == "phase_fix":
-        call = phases.phase_fix(backend, work, bad, 1, 1)
+        call = phases.phase_fix(backend, work, bad, 1, 1,
+            edit_scope=footprint.run_allowed_paths, read_scope=footprint.run_allowed_paths,
+        )
     elif entry_point == "phase_fix_batched":
-        call = phases.phase_fix_batched(backend, work, items, [1, 2], 2)
+        call = phases.phase_fix_batched(backend, work, items, [1, 2], 2,
+            edit_scope=footprint.run_allowed_paths, read_scope=footprint.run_allowed_paths,
+        )
     else:
-        call = phases.phase_fix_parallel(backend, work, items)
+        call = phases.phase_fix_parallel(backend, work, items, footprint=footprint, round_snapshot=snapshot)
 
     with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
         await call
@@ -1056,7 +1064,9 @@ async def test_phase_fix_batched_prompt_lists_all_findings(
         {"id": 3, "description": "Missing await on coroutine", "file": "src/handler.py", "line": 130},
     ]
 
-    await phases.phase_fix_batched(backend, make_work(tmp_path), items, [1, 2, 3], 3)
+    await phases.phase_fix_batched(backend, make_work(tmp_path), items, [1, 2, 3], 3,
+        edit_scope=frozenset({"src/handler.py"}), read_scope=frozenset({"src/handler.py"}),
+    )
 
     # One file-group -> exactly one run_agent call.
     assert len(backend.prompts) == 1
@@ -1089,7 +1099,9 @@ async def test_phase_fix_batched_includes_verifier_verdicts(
         },
     ]
 
-    await phases.phase_fix_batched(backend, make_work(tmp_path), items, [1, 2], 2)
+    await phases.phase_fix_batched(backend, make_work(tmp_path), items, [1, 2], 2,
+        edit_scope=frozenset({"src/handler.py"}), read_scope=frozenset({"src/handler.py"}),
+    )
 
     assert len(backend.prompts) == 1
     prompt = backend.prompts[0]
@@ -1113,19 +1125,25 @@ async def test_phase_fix_batched_adds_test_map_source_hint(
     test_map = _parse_test_map(test_map_path, tmp_path)
     backend = ScriptedBackend()
     items = [{"file": "tests/test_app.py", "evidence": "tests/test_app.py:10"}]
-    await phases.phase_fix_batched(backend, make_work(tmp_path), items, [1], 1, test_map=test_map)
-    assert any("daydream/app.py" in prompt for prompt in backend.prompts)
+    await phases.phase_fix_batched(backend, make_work(tmp_path), items, [1], 1, test_map=test_map,
+        edit_scope=frozenset({"tests/test_app.py"}), read_scope=frozenset({"tests/test_app.py", "daydream/app.py"}),
+    )
+    assert "This test covers daydream/app.py — read it to understand the expected behavior." in backend.last_prompt
 
 @pytest.mark.asyncio
 async def test_phase_fix_parallel_drops_pointer_when_index_missing(
-    tmp_path: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None,
+    tmp_path: Path, git_repo: Path, make_work: Callable[..., WorkContext], _quiet_phase_ui: None,
 ) -> None:
     """An exploration dir without affected_files.md must not reach fix prompts."""
     backend = ScriptedBackend()
     exploration_dir = tmp_path / "exploration"
     exploration_dir.mkdir()
-    items = [{"file": "src/app.py", "evidence": "tests/test_app.py:10"}]
-    await phases.phase_fix_parallel(backend, make_work(tmp_path), items, exploration_dir=exploration_dir)
+    items = [{"item_uid": "item:app", "file": "src/app.py", "evidence": "tests/test_app.py:10"}]
+    footprint = AuthorizedFixFootprint.build(git_repo, set(), items)
+    snapshot = _round_snapshot(git_repo, footprint.run_allowed_paths)
+    await phases.phase_fix_parallel(backend, make_work(git_repo), items, exploration_dir=exploration_dir,
+        footprint=footprint, round_snapshot=snapshot,
+    )
     assert backend.prompts
     assert not any("affected_files.md" in prompt for prompt in backend.prompts)
 
@@ -1135,7 +1153,9 @@ async def test_phase_fix_batched_prompt_includes_evidence(
 ) -> None:
     backend = ScriptedBackend()
     items = [{"file": "src/app.py", "evidence": "tests/test_app.py:10"}]
-    await phases.phase_fix_batched(backend, make_work(tmp_path), items, [1], 1)
+    await phases.phase_fix_batched(backend, make_work(tmp_path), items, [1], 1,
+        edit_scope=frozenset({"src/app.py"}), read_scope=frozenset({"src/app.py"}),
+    )
     assert any("tests/test_app.py:10" in prompt for prompt in backend.prompts)
 
 class TestBuildFixPrompt:
@@ -1491,6 +1511,8 @@ async def test_approved_investigator_command_stays_host_side(
 
     result = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), config=config, feedback_items=None, allow_standalone=True,
+        session_id="healing-menu", capture_tree_key=lambda: git_ops.tree_key(()),
+        footprint=_footprint(tmp_path),
     )
 
     assert result.passed is True
@@ -1520,6 +1542,8 @@ async def test_approved_investigator_backtick_only_command_is_skipped_not_crash(
 
     result = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), config=config, feedback_items=None, allow_standalone=True,
+        session_id="healing-menu", capture_tree_key=lambda: git_ops.tree_key(()),
+        footprint=_footprint(tmp_path),
     )
 
     assert result.passed is True
@@ -1538,6 +1562,8 @@ async def test_phase_test_and_heal_unavailable_command_reports_no_execution(
     backend = ScriptedBackend(script=[_FIX_TURN])
     result = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), config=config, allow_standalone=True,
+        session_id="healing-menu", capture_tree_key=lambda: git_ops.tree_key(()),
+        footprint=_footprint(tmp_path),
     )
     assert (result.passed, result.retries, result.proceed, result.repairs) == (False, 0, False, ())
     assert backend.call_count == 0
@@ -1565,6 +1591,8 @@ async def test_unreplaced_test_command_retries_original_host_command(
     config = _host_suite_config(tmp_path)
     result = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), config=config, allow_standalone=True,
+        session_id="healing-menu", capture_tree_key=lambda: git_ops.tree_key(()),
+        footprint=_footprint(tmp_path),
     )
     assert result.passed is True
     assert result.retries == 1
@@ -1620,6 +1648,8 @@ async def _run_option4_handoff(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, 
         prepare(backend, fake_recorder)
     result = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), config=_host_suite_config(tmp_path, mode="all"), allow_standalone=True,
+        session_id="healing-menu", capture_tree_key=lambda: git_ops.tree_key(()),
+        footprint=_footprint(tmp_path),
     )
     return backend, result.passed, result.retries
 
@@ -1812,10 +1842,9 @@ async def test_phase_test_and_heal_option4_inlines_body_when_write_fails(
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_yes_bounded_loop_exactly_one_auto_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
-    silence_console: Callable[..., None],
+    _quiet_phase_ui: None,
 ) -> None:
     run_context = RunContext(InteractionPolicy(assume="yes"))
-    silence_console("daydream.ui")
     _install_recorder(monkeypatch, tmp_path)
     # Sentinel: the menu must never be shown in auto mode.
     prompt_sentinel = Mock(side_effect=AssertionError("prompt_user must not be called under --yes"),)
@@ -1825,6 +1854,8 @@ async def test_phase_test_and_heal_yes_bounded_loop_exactly_one_auto_attempt(
     result = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), config=_host_suite_config(tmp_path, mode="all"),
         run_context=run_context, allow_standalone=True,
+        session_id="healing-menu", capture_tree_key=lambda: git_ops.tree_key(()),
+        footprint=_footprint(tmp_path),
     )
     # Loop terminated after exactly one auto fix attempt.
     assert result.passed is False
@@ -1864,6 +1895,8 @@ async def test_phase_test_and_heal_option1_strips_backticks_from_host_command(
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "y")
     result = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), config=_host_suite_config(tmp_path, mode="all"), allow_standalone=True,
+        session_id="healing-menu", capture_tree_key=lambda: git_ops.tree_key(()),
+        footprint=_footprint(tmp_path),
     )
 
     assert result.passed is True
@@ -1900,6 +1933,8 @@ async def test_phase_test_and_heal_option1_shows_suggested_command_before_confir
 
     result = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), config=_host_suite_config(tmp_path), allow_standalone=True,
+        session_id="healing-menu", capture_tree_key=lambda: git_ops.tree_key(()),
+        footprint=_footprint(tmp_path),
     )
     assert result.passed is True
     assert len(result.attempts) == 2
@@ -2235,9 +2270,7 @@ async def test_phase_fix_parallel_restores_whole_group_worktree_before_batch_fal
         {"id": 2, "item_uid": "item:2", "file": "shared.py", "related_files": ["test_a.py"]},
     ]
     footprint = AuthorizedFixFootprint.build(tmp_path, set(), items)
-    snapshot = WorktreeRollbackSnapshot(
-        ref="round-ref", index=IndexSnapshot(tree_sha="round-index", paths=()), path_states=(), untracked={},
-    )
+    snapshot = _round_snapshot(tmp_path, footprint.run_allowed_paths)
     fallback_contents: list[dict[str, str]] = []
 
     async def _fail_batch(*args: Any, **kwargs: Any) -> None:
@@ -2264,6 +2297,7 @@ async def test_phase_fix_parallel_restores_whole_group_worktree_before_batch_fal
     assert (tmp_path / "a.py").read_text() == "successful fallback fix\n"
     assert (tmp_path / "shared.py").read_text() == "successful fallback fix\n"
     assert (tmp_path / "test_a.py").read_text() == "original group content\n"
+    assert git_ops.snapshot_index(tmp_path) == snapshot.index
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_records_each_host_attempt_and_heal_scope(
@@ -2513,7 +2547,7 @@ async def test_strict_commit_blocks_after_commit_hook_mutates_worktree_or_index(
     assert (repo / "app.py").read_text() == expected_worktree
 
 async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failures(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
 ) -> None:
 
     active_files, batched_calls, fix_calls = set(), [], []
@@ -2541,9 +2575,16 @@ async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failu
     monkeypatch.setattr("daydream.phases.fix.phase_fix_batched", _fake_batched)
     monkeypatch.setattr("daydream.phases.fix.phase_fix", _fake_fix)
     items = [
-        {"id": 1, "file": "a.py"}, {"id": 2, "file": "a.py"}, {"id": 3, "file": "b.py"}, {"id": 4, "file": "boom.py"},
+        {"id": 1, "item_uid": "item:a1", "file": "a.py"},
+        {"id": 2, "item_uid": "item:a2", "file": "a.py"},
+        {"id": 3, "item_uid": "item:b", "file": "b.py"},
+        {"id": 4, "item_uid": "item:boom", "file": "boom.py"},
     ]
-    failures = await phases.phase_fix_parallel(cast(Backend, object()), make_work(tmp_path), items)
+    footprint = AuthorizedFixFootprint.build(git_repo, set(), items)
+    snapshot = _round_snapshot(git_repo, footprint.run_allowed_paths)
+    failures = await phases.phase_fix_parallel(cast(Backend, object()), make_work(git_repo), items,
+        footprint=footprint, round_snapshot=snapshot,
+    )
     # a.py has 2 findings -> one batched call. b.py and boom.py have 1 finding
     # each -> direct phase_fix (no batched prompt, no fallback retry).
     assert batched_calls == ["a.py"]
