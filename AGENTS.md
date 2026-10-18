@@ -95,6 +95,12 @@ These boundaries matter across subsystems; module docstrings carry finer detail:
   from phases. Fan-out uses parallel calls under
   `anyio.CapacityLimiter(effective_fanout_concurrency(ceiling, backend))` and
   `TrajectoryRecorder.fork()` for sibling trajectories, not SDK `agents=`.
+- Keep changing budgets, pacing, and progress state authoritative on the host.
+  Do not send orchestration nudges as user messages, including SDK custom messages
+  that serialize as user turns. Put stable policy in system/developer instructions;
+  when a model decision needs current state, provide an existing bounded read-only
+  lookup and explain when to use it. Host enforcement must not depend on polling.
+  Preserve genuine user turns and the native assistant/tool conversation history.
 - Keep ATIF construction in `trajectory/`. Use the vendored models without adding
   Harbor to core runtime dependencies; the benchmark extra is separate. Follow
   [the vendoring policy](daydream/atif/NOTICE): re-vendor wholesale, no local patches.
