@@ -848,7 +848,7 @@ The nonstructural role cap coarsens the largest packed stacks by repeatedly merg
 combined diff-byte weight (leftmost on ties). Final shard names are contiguous and frontiers are recomputed. File/byte
 targets are soft under the cap; files stay indivisible, each stack retains at least one role, and whole-change Structure
 is outside the cap. More groups increase aggregate model opportunity: the captured 81-file Python workload grows from
-one to eight groups, 288 to 2,304 maximum starts, and 48 to 384 nominal role-minutes. Shared pipeline time, queueing and
+one to eight groups, 288 to 2,304 maximum starts, and 240 to 1,920 nominal role-minutes. Shared pipeline time, queueing and
 concurrency still limit execution; these are neither billing estimates nor guarantees of cold review completion.
 
 See [overloaded-stack activation evidence](docs/overloaded-stack-sharding.md) for
