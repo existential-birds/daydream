@@ -52,24 +52,30 @@ def render_github_review_context(
                 if terminal_result is not None else [])
     unfinished = [outcome for outcome in outcomes if outcome['status'] != 'complete']
     unfinished_keys = {outcome.get('scope_id', outcome.get('phase')) for outcome in unfinished}
+    visible_keys = {outcome.get('scope_id', outcome.get('phase')) for outcome in unfinished[:8]}
+    omitted_keys = unfinished_keys - visible_keys
     warnings = tuple(dict.fromkeys(review_warnings))
-    additional = [warning for warning in warnings
-                  if not any(warning.startswith(f'{key}: ') for key in unfinished_keys)]
-    if state == 'complete' and not additional:
+    if state == 'complete' and not warnings:
         return ''
     heading = ('Review completeness unavailable' if state is None else
                f'Review {state}' if state != 'complete' else 'Review incomplete')
     lines = [f'⚠️ **{heading}.**']
+    represented: set[str] = set()
     for outcome in unfinished[:8]:
         key = outcome.get('scope_id', outcome.get('phase'))
-        diagnostic = next((warning for warning in warnings if warning.startswith(f'{key}: ')), None)
+        diagnostic = next((warning for warning in warnings
+                           if warning not in represented and warning.startswith(f'{key}: ')), None)
         if diagnostic is None:
             diagnostic = f"{key}: " + ', '.join(reason.replace('_', ' ') for reason in outcome['reason_codes'])
-        lines.append('- ' + _text(diagnostic, 512))
+        if diagnostic not in represented:
+            lines.append('- ' + _text(diagnostic, 512))
+            represented.add(diagnostic)
     if len(unfinished) > 8:
         lines.append(f'- {len(unfinished) - 8} additional unfinished review steps; see run artifacts.')
     if state not in {None, 'complete'} and not unfinished:
         lines.append('Review did not finish; see run artifacts.')
+    additional = [warning for warning in warnings if warning not in represented
+                  and not any(warning.startswith(f'{key}: ') for key in omitted_keys)]
     lines.extend('- ' + _text(warning, 512) for warning in additional[:8])
     if len(additional) > 8:
         lines.append(f'- {len(additional) - 8} additional notices; see run artifacts.')
