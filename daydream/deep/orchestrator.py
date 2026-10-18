@@ -723,9 +723,6 @@ async def run_deep(
                     config.start_at, dd, current_diff_sha=current_diff_sha,
                     record_paths=[per_stack_records_path(dd, stack.stack_name) for stack in stacks],
                 )
-                if coverage is not None:
-                    from daydream.deep.artifacts import restore_review_coverage
-                    coverage = restore_review_coverage(dd, coverage)
                 if _has_non_daydream_worktree_changes(git_ops.status_porcelain(target_dir)):
                     raise FileNotFoundError(
                         f"Cannot resume at stage '{config.start_at}' -- the worktree has changed "
@@ -875,6 +872,18 @@ async def run_deep(
             },
             allow_standalone_artifacts=allow_standalone,
         )
+
+        if config.start_at in ('per-stack', 'merge', 'fix') and coverage is not None:
+            from daydream.deep.artifacts import restore_review_coverage
+
+            try:
+                coverage = restore_review_coverage(dd, coverage,
+                    backend=ctx.backend_for('per_stack_review'), work=work, stacks=stacks, registry=registry,
+                    artifact_session=artifact_session, allow_standalone=allow_standalone)
+            except ValueError as exc:
+                print_error(console, 'Unusable Deep Artifacts', str(exc))
+                return 1
+            ctx.data['review_coverage'] = coverage
 
         # Publish one cache handle and its root so the next run can reuse completed units.
         ctx.data["reuse_cache"] = build_reuse_cache(ctx)

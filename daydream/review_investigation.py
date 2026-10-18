@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -293,9 +294,15 @@ class ReviewInvestigation:
         if stage == 'integration':
             # Whole-change judgment can cite useful assigned work without a
             # mandatory reference for every file or an exhaustive registry.
-            choices = [ref for part in self.assignments.values() for ref in part.get('source_refs', [])][:4]
+            choices = list(islice(self._expected_source_refs(stage, ''), 4))
             return {target: choices for target in targets}
         return {target: self.assignments.get(target, {}).get('source_refs', []) for target in targets}
+
+    def _expected_source_refs(self, stage: str, target: str) -> Iterable[dict[str, Any]]:
+        """Prompt examples do not narrow the assigned whole-change identity."""
+        parts = (self.assignments.values() if stage == 'integration' else
+                 [self.assignments.get(target, {})])
+        return (ref for part in parts for ref in part.get('source_refs', []))
 
     async def _stage(self, backend: Backend, cwd: Path, prompt_builder: Callable[[dict[str, Any]], str],
         stage: str, targets: list[str], files: list[str], agent_kwargs: dict[str, Any], *,
@@ -559,13 +566,12 @@ class ReviewInvestigation:
                 if len(raw_decisions) + prior > HANDOFF_MAX_ITEMS:
                     return None, 'evidence_incomplete'
             return None, None
-        reference_options = self._reference_options(stage, targets)
         for target in declared_targets:
             # This guard also runs on schema-rejected payloads to prevent a
             # fresh schema retry from disguising an independently invalid citation.
             if 'evidence_refs' not in target:
                 continue
-            if not validate_source_refs(target['evidence_refs'], reference_options.get(target['target_id'], []),
+            if not validate_source_refs(target['evidence_refs'], self._expected_source_refs(stage, target['target_id']),
                     revision=self.revision, source_root=self._source_root,
                     require_assigned=target['status'] == 'reviewed'):
                 self.assertion_failure_class = 'source_attribution'

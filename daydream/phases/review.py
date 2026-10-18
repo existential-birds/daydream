@@ -82,7 +82,6 @@ from daydream.review_result import (
     preserved_target_decisions,
     reason_for_budget,
     reason_for_exception,
-    validate_target_decisions,
 )
 from daydream.review_stage_inputs import StageInputFactory
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
@@ -498,24 +497,16 @@ async def phase_per_stack_reviews(
             prompt_name, strategy_name = {STRUCTURE_STACK_NAME: ("structural", "discovery.structural"),
                 GENERIC_STACK: ("generic-fallback", "discovery.generic_fallback"),
             }.get(base_stack, ("per-stack", "discovery.per_stack"))
-            from daydream.deep.prompts import (
-                build_generic_fallback_prompt,
-                build_per_stack_prompt,
-                build_structural_prompt,
-            )
+            from daydream.deep.prompts import build_structural_prompt
+
             builder = active_registry.prompt(prompt_name)
-            builtin_builders = (build_generic_fallback_prompt, build_per_stack_prompt, build_structural_prompt)
-            bundle_capable = (any(builder is builtin for builtin in builtin_builders)
-                              or getattr(builder, 'review_input_bundle', False) is True)
             shared_paths = {"intent": intent_path, "alternatives": alternatives_path if include_alternatives else None}
             if exploration_dir is not None:
                 shared_paths.update({"exploration-summary": exploration_dir / "summary.md",
                                      "exploration-affected-files": exploration_dir / "affected_files.md"})
-            input_factory = StageInputFactory(backend, work, stack, diff_path=diff_path,
-                hunk_index_path=diff_path.parent / "hunk-index.json", shared_paths=shared_paths,
-                revision=coverage.revision.to_dict(), artifact_session=artifact_session,
-                allow_standalone=allow_standalone, read_only=read_only, bundle_capable=bundle_capable,
-            )
+            input_factory = StageInputFactory.for_review(backend, work, stack, diff_path=diff_path,
+                shared_paths=shared_paths, revision=coverage.revision.to_dict(), registry=active_registry,
+                artifact_session=artifact_session, allow_standalone=allow_standalone)
             reuse_unit: ReviewReuseUnit | None = None
             if reuse_cache is not None and phase_identity is not None:
                 stack_payload = shard_key_payload(
@@ -558,7 +549,7 @@ async def phase_per_stack_reviews(
                         if not isinstance(attribution, dict) or set(attribution) != {'target_decisions'}:
                             raise ValueError('invalid source attribution payload')
                         target_decisions = attribution['target_decisions']
-                        validate_target_decisions(target_decisions, analyzed_revision=coverage.revision.to_dict())
+                        input_factory.validate_retained_decisions(target_decisions, complete=True)
                         cache_valid = valid_record_artifact(
                             restored, scope_id=stack.stack_name, analyzed_revision=coverage.revision.to_dict(),
                         ) and restored.get("incomplete") is not True and bool(target_decisions) and all(

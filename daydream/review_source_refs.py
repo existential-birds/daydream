@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -48,13 +49,15 @@ def lf_lines(text: str) -> list[str]:
     return [piece + '\n' for piece in pieces[:-1]] + ([pieces[-1]] if pieces[-1] else [])
 
 
-def _side_summary(body: str, start: int, end: int, old: int, new: int) -> dict[str, Any]:
+def _side_summary(body: str, start: int, end: int, old: int, new: int, *,
+                  first_line_offset: int = 0) -> dict[str, Any]:
     """Map a byte interval by walking original lines, including split UTF-8 lines."""
     selected: dict[str, dict[str, Any] | None] = {'old': None, 'new': None}
     offset = 0
     for line in lf_lines(body):
         encoded = line.encode('utf-8')
         marker = line[:1]
+        source_offset = first_line_offset if offset == 0 else 0
         left, right = max(start, offset + 1), min(end, offset + len(encoded))
         if marker in {' ', '-', '+'} and left < right:
             for side, line_number in (('old', old), ('new', new)):
@@ -63,9 +66,9 @@ def _side_summary(body: str, start: int, end: int, old: int, new: int) -> dict[s
                 prior = selected[side]
                 selected[side] = {
                     'start': prior['start'] if prior else line_number, 'end': line_number,
-                    'start_byte': prior['start_byte'] if prior else left - offset - 1,
-                    'end_byte': right - offset - 1,
-                    'partial_start': prior['partial_start'] if prior else left > offset + 1,
+                    'start_byte': prior['start_byte'] if prior else left - offset - 1 + source_offset,
+                    'end_byte': right - offset - 1 + source_offset,
+                    'partial_start': prior['partial_start'] if prior else bool(source_offset) or left > offset + 1,
                     'partial_end': right < offset + len(encoded),
                 }
         if marker in {' ', '-'}:
@@ -78,7 +81,7 @@ def _side_summary(body: str, start: int, end: int, old: int, new: int) -> dict[s
 
 def part_source_mapping(diff: str, assignment: dict[str, Any], *, artifact_sha256: str,
                         revision: dict[str, Any], old_path: str, new_path: str,
-                        body: str | None = None) -> dict[str, Any]:
+                        body: str | bytes | None = None) -> dict[str, Any]:
     """Expose exact selectable references and side summaries without source contents."""
     identity = {'artifact_sha256': artifact_sha256, 'part_sha256': _sha(diff),
                 'basis': 'supplied_diff', 'role': 'assigned'}
@@ -87,9 +90,18 @@ def part_source_mapping(diff: str, assignment: dict[str, Any], *, artifact_sha25
     refs: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
     if assignment['kind'] == 'continuation' and body is not None:
+        source = body.encode('utf-8') if isinstance(body, str) else body
         offset, size = assignment['fragment_offset'], assignment['fragment_bytes']
-        fragment = body.encode('utf-8')[offset:offset + size]
-        summary = _side_summary(body, offset, offset + size, assignment['old_start'], assignment['new_start'])
+        fragment = source[offset:offset + size]
+        line_offset = assignment['fragment_line_offset']
+        # Existing continuation cursors locate its first source line. Restore
+        # only a split line's marker, never rescan the preceding/full hunk.
+        selected = (source[offset - line_offset:offset - line_offset + 1] if line_offset else b'') + fragment
+        end = len(selected)
+        if offset + size < len(source) and not fragment.endswith(b'\n'):
+            selected += b'x'  # The original line continues beyond this exact fragment.
+        summary = _side_summary(selected.decode('utf-8'), 0, end,
+            assignment['old_line'], assignment['new_line'], first_line_offset=max(0, line_offset - 1))
         summaries.append(summary)
         for side in ('old', 'new'):
             span = summary[side]
@@ -117,7 +129,8 @@ def part_source_mapping(diff: str, assignment: dict[str, Any], *, artifact_sha25
         offset = 0
         if assignment['kind'] == 'continuation' and body is not None:
             offset = assignment['fragment_offset']
-            metadata = body.encode('utf-8')[offset:offset + assignment['fragment_bytes']]
+            source = body.encode('utf-8') if isinstance(body, str) else body
+            metadata = source[offset:offset + assignment['fragment_bytes']]
         refs.append({**identity, 'revision': revision['head_sha'], 'path': assignment['file'], 'side': 'diff',
                      'source_range': None, 'fragment': {'offset': offset,
                      'bytes': len(metadata), 'sha256': _sha(metadata)}})
@@ -125,7 +138,7 @@ def part_source_mapping(diff: str, assignment: dict[str, Any], *, artifact_sha25
             'fragment_offset_basis': 'UTF-8 bytes in the original diff hunk body; never a source line number'}
 
 
-def validate_source_refs(refs: Any, expected_refs: list[dict[str, Any]], *, revision: dict[str, Any],
+def validate_source_refs(refs: Any, expected_refs: Iterable[dict[str, Any]], *, revision: dict[str, Any],
                          source_root: Path | None = None, require_assigned: bool = True) -> bool:
     """Validate all references before admission; labels assert basis, not execution."""
     if not validates_schema(refs, SOURCE_REFS_SCHEMA):
@@ -136,24 +149,27 @@ def validate_source_refs(refs: Any, expected_refs: list[dict[str, Any]], *, revi
     except UnicodeEncodeError:
         return False
     assigned = False
-    selectors = [{key: value for key, value in ref.items() if key not in {'basis', 'role'}}
-                 for ref in expected_refs]
-    for ref in refs:
+    selectors = [{key: value for key, value in ref.items() if key not in {'basis', 'role'}} for ref in refs]
+    matching = [False] * len(refs)
+    # Whole-change assignments may have many parts. Stream their existing host
+    # identities while retaining only the at-most-four submitted selectors.
+    for expected in expected_refs:
+        for index, selector in enumerate(selectors):
+            bounds = selector['source_range']
+            same_identity = all(value == expected[key] for key, value in selector.items() if key != 'source_range')
+            matching[index] |= same_identity and (
+                isinstance(bounds, dict) and isinstance(expected['source_range'], dict)
+                and expected['source_range']['start'] <= bounds['start'] <= bounds['end']
+                <= expected['source_range']['end']
+                or bounds is None and expected['source_range'] is None)
+        if all(matching):
+            break
+    for index, ref in enumerate(refs):
         path = ref['path']
         if (path.startswith('/') or '\0' in path or len(path.encode('utf-8')) > 4096
                 or any(part in {'', '.', '..'} for part in path.split('/'))):
             return False
-        selector = {key: value for key, value in ref.items() if key not in {'basis', 'role'}}
-        matching = selector in selectors
-        bounds = ref['source_range']
-        if isinstance(bounds, dict):
-            matching = any(
-                isinstance(expected['source_range'], dict)
-                and all(value == expected[key] for key, value in selector.items() if key != 'source_range')
-                and expected['source_range']['start'] <= bounds['start'] <= bounds['end']
-                <= expected['source_range']['end']
-                for expected in selectors)
-        if matching:
+        if matching[index]:
             assigned |= ref['role'] == 'assigned'
             continue
         if (ref['role'] != 'supporting' or ref['basis'] == 'supplied_diff' or source_root is None

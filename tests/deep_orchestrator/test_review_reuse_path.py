@@ -634,16 +634,48 @@ async def test_no_review_cache_disables_the_store_and_bypasses_the_exploration_c
     assert any(v["outcome"] == "disabled" for v in units.values())
 
 
+_ATTRIBUTION_DAMAGE = ["attribution-target", "attribution-path", "attribution-range", "attribution-part",
+                       "attribution-artifact", "attribution-missing-target"]
+
+
+def _damage_source_attribution(decisions: list[dict[str, Any]], damage: str) -> bool:
+    """Corrupt frozen correspondence without relying on shape, revision, or hash rejection."""
+    if damage == "attribution-missing-target":
+        if len(decisions) < 2:
+            return False
+        decisions.pop()
+        return True
+    target = decisions[0]
+    reference = target['evidence_refs'][0]
+    if damage == "attribution-target":
+        target['target_id'] = 'foreign-target.py'
+    elif damage == "attribution-path":
+        reference['path'] = 'foreign-source.py'
+    elif damage == "attribution-range":
+        reference['source_range'] = {'start': 999999, 'end': 999999}
+        reference['fragment'] = None
+    elif damage == "attribution-part":
+        reference['part_sha256'] = 'f' * 64
+    else:
+        reference['artifact_sha256'] = 'f' * 64
+    return True
+
+
 @pytest.mark.parametrize("damage", ["legacy", "corrupt", "incomplete", "head", "diff", "scope", "origin",
                                      "partial_payload", "malformed_payload", "unstaged", "prior-staged",
                                      "contract-3", "contract-4", "contract-5", "contract-6", "contract-8",
                                      "contract-9", "contract-10", "contract-11",
-                                     "missing-attribution", "invalid-attribution"])
+                                     "missing-attribution", "invalid-attribution", *_ATTRIBUTION_DAMAGE])
 async def test_legacy_cache_without_coverage_proof_recomputes_review(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     damage: str,
 ) -> None:
     """Pre-v2 completed bytes cannot establish complete current review coverage."""
+    if damage == "attribution-missing-target":
+        from tests.harness.git_helpers import git
+        (multi_stack_target / 'extra.py').write_text('EXTRA = True\n')
+        git(multi_stack_target, 'add', 'extra.py')
+        git(multi_stack_target, 'commit', '-m', 'add another required Python target')
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     config = make_config(multi_stack_target)
     assert await run(config) == 0
@@ -678,7 +710,7 @@ async def test_legacy_cache_without_coverage_proof_recomputes_review(
             manifest["coverage"]["status"] = "incomplete"
         elif damage == "origin":
             manifest["origin"] = "malformed lineage"
-        elif damage in {"missing-attribution", "invalid-attribution"}:
+        elif damage in {"missing-attribution", "invalid-attribution", *_ATTRIBUTION_DAMAGE}:
             for name in list(manifest['payload']):
                 if not name.endswith('-records-attribution.json'):
                     continue
@@ -689,7 +721,10 @@ async def test_legacy_cache_without_coverage_proof_recomputes_review(
                     manifest['payload'].pop(name)
                 else:
                     payload = json.loads(payload_path.read_text())
-                    payload['target_decisions'][0]['evidence_refs'][0]['revision'] = '0' * 40
+                    if damage == 'invalid-attribution':
+                        payload['target_decisions'][0]['evidence_refs'][0]['revision'] = '0' * 40
+                    else:
+                        _damage_source_attribution(payload['target_decisions'], damage)
                     payload_path.write_text(json.dumps(payload))
                     manifest['payload'][name] = hashlib.sha256(payload_path.read_bytes()).hexdigest()
         elif damage in {"partial_payload", "malformed_payload"}:
@@ -715,7 +750,7 @@ async def test_legacy_cache_without_coverage_proof_recomputes_review(
     assert await run(config) == 0
     assert _count_review_prompts(stub.calls) > 0
     if not staged_damage and damage not in {
-            "partial_payload", "malformed_payload", "missing-attribution", "invalid-attribution"}:
+            "partial_payload", "malformed_payload", "missing-attribution", "invalid-attribution", *_ATTRIBUTION_DAMAGE}:
         assert _count_merge_prompts(stub.calls) > 0
     if staged_damage:
         assert _reused_stacks(multi_stack_target / ".daydream/deep") == set()
@@ -724,13 +759,18 @@ async def test_legacy_cache_without_coverage_proof_recomputes_review(
 
 
 @pytest.mark.parametrize("damage", ["missing", "corrupt", "head", "diff", "scope", "phase",
-                                    "missing-attribution", "invalid-attribution"])
+                                    "missing-attribution", "invalid-attribution", *_ATTRIBUTION_DAMAGE])
 async def test_resume_rejects_missing_or_mismatched_coverage(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, damage: str, tmp_path: Path,
 ) -> None:
     """Resume requires a valid same-snapshot inventory; bytes alone are insufficient."""
     from tests.test_deep_orchestrator import _pin_findings_pr
 
+    if damage == "attribution-missing-target":
+        from tests.harness.git_helpers import git
+        (multi_stack_target / 'extra.py').write_text('EXTRA = True\n')
+        git(multi_stack_target, 'add', 'extra.py')
+        git(multi_stack_target, 'commit', '-m', 'add another required Python target')
     pr = _pin_findings_pr(monkeypatch, multi_stack_target)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     initial = tmp_path / "initial-review.json"
@@ -751,6 +791,10 @@ async def test_resume_rejects_missing_or_mismatched_coverage(
             evidence['stack_outcomes'][0].pop('target_decisions')
         elif damage == 'invalid-attribution':
             evidence['stack_outcomes'][0]['target_decisions'][0]['evidence_refs'][0]['revision'] = '0' * 40
+        elif damage in _ATTRIBUTION_DAMAGE:
+            damaged = [_damage_source_attribution(scope['target_decisions'], damage)
+                       for scope in evidence['stack_outcomes']]
+            assert any(damaged), 'corruption must reach a retained source assertion'
         else:
             evidence["required_phases"].append("unknown-stage")
         path.write_text(json.dumps(evidence))

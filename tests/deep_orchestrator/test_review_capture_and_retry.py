@@ -155,6 +155,54 @@ async def test_structure_keeps_interaction_review_when_optional_projections_exce
     assert data['findings'] == []
 
 
+@pytest.mark.parametrize('invalid_digest', [False, True], ids=['later-part', 'forged-later-part'])
+@pytest.mark.parametrize('sandbox', [False, True], ids=['catalog', 'inline'])
+async def test_structure_can_attribute_a_later_assigned_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_digest: bool, sandbox: bool,
+) -> None:
+    """Bounded examples must not exclude genuine later Structure work from admission."""
+    review = staged_review(tmp_path, monkeypatch)
+    review.backend.sandbox = sandbox
+    submitted: list[dict[str, Any]] = []
+
+    @review.backend.script('structure')
+    def respond(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        offered = stage['source_refs']['integration:structure']
+        assert len(offered) <= 4
+        assert all(ref['path'] != 'module_06.py' for ref in offered)
+        if sandbox:
+            contents = supporting_contents(review.backend.calls[-1]['prompt'])
+            descriptors = [(label.removesuffix('-sources'), json.loads(value))
+                           for label, value in contents.items() if label.endswith('-sources')]
+            label, part = next((label, part) for label, part in descriptors if part['target_id'] == 'module_06.py')
+            source = contents[label].encode()
+        else:
+            pending = [Path(stage['supporting_catalog']['path'])]
+            parts: list[dict[str, Any]] = []
+            while pending:
+                node = json.loads(pending.pop().read_text())
+                pending.extend(Path(child['path']) for child in node.get('catalogs', []))
+                parts.extend(node.get('parts', []))
+            part = next(part for part in parts if part['file'] == 'module_06.py')
+            source = Path(part['path']).read_bytes()
+        reference = next(copy.deepcopy(ref) for ref in part['source_refs'] if ref['side'] == 'new')
+        assert reference['path'] == 'module_06.py'
+        assert reference['revision'] == stage['analyzed_revision']['head_sha']
+        assert reference['part_sha256'] == hashlib.sha256(source).hexdigest()
+        assert reference['source_range'] == {'start': 1, 'end': 1} and reference['fragment'] is None
+        if invalid_digest:
+            reference['part_sha256'] = '0' * 64
+        output['targets'][0]['evidence_refs'] = [reference]
+        submitted.extend(copy.deepcopy(output['targets']))
+
+    data = await review.finish('structure', reason='evidence_incomplete' if invalid_digest else None)
+    scope = scopes(data)['structure']
+    assert scope['target_decisions'] == ([] if invalid_digest else submitted)
+    event, = stage_ends(review, 'structure')
+    assert event['metadata']['admitted'] is not invalid_digest
+    assert event['metadata']['failure_class'] == ('source_attribution' if invalid_digest else None)
+
+
 @pytest.mark.parametrize('outcome', ['success', 'second-rejection'])
 async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_starts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, ext_dir: ExtDir) -> None:
@@ -300,6 +348,10 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
                          if part['source_summary'][0]['new'] is not None]
         assert len(new_summaries) >= 2
         assert all(summary['start'] == summary['end'] == 1 for summary in new_summaries)
+        assert new_summaries[0]['start_byte'] == 0 and not new_summaries[0]['partial_start']
+        assert new_summaries[-1]['end_byte'] == len(required.encode()) and not new_summaries[-1]['partial_end']
+        assert all(left['end_byte'] == right['start_byte'] and left['partial_end'] and right['partial_start']
+                   for left, right in zip(new_summaries, new_summaries[1:]))
         assert assignments[-1]['source_summary'][0]['old'] is None
         assert any(summary['partial_start'] for summary in new_summaries)
         full_index = json.loads((repo / '.daydream/hunk-index.json').read_text())['api.py']
@@ -785,7 +837,9 @@ async def test_mixed_schema_and_admission_rejection_never_retries_or_loses_prior
 
 
 @pytest.mark.parametrize('fault', ['revision', 'artifact-digest', 'part-digest', 'path', 'side', 'range',
-                                  'fragment', 'supporting-only', 'missing-assigned', 'reference-count'])
+                                  'fragment', 'supporting-only', 'missing-assigned', 'reference-count',
+                                  'supporting-digest', 'supporting-missing-path', 'supporting-range',
+                                  'supporting-reversed-range'])
 async def test_invalid_source_reference_preserves_prior_admitted_target_decisions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
 ) -> None:
@@ -821,6 +875,21 @@ async def test_invalid_source_reference_preserves_prior_admitted_target_decision
             reference['role'] = 'supporting'
         elif fault == 'reference-count':
             output['targets'][0]['evidence_refs'] *= 5
+        elif fault.startswith('supporting-'):
+            supporting = {
+                'artifact_sha256': hashlib.sha256((review.repo / 'module_06.py').read_bytes()).hexdigest(),
+                'part_sha256': None, 'revision': stage['analyzed_revision']['head_sha'],
+                'path': 'module_06.py', 'side': 'new', 'source_range': {'start': 1, 'end': 1},
+                'fragment': None, 'basis': 'source_inspection', 'role': 'supporting',
+            }
+            if fault == 'supporting-digest':
+                supporting['artifact_sha256'] = '0' * 64
+            elif fault == 'supporting-missing-path':
+                supporting['path'] = 'missing-frozen.py'
+            else:
+                supporting['source_range'] = ({'start': 2, 'end': 1} if fault == 'supporting-reversed-range'
+                                               else {'start': 2, 'end': 2})
+            output['targets'][0]['evidence_refs'].append(supporting)
         else:
             output['targets'][0]['evidence_refs'] = []
 

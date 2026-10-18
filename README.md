@@ -895,6 +895,9 @@ Per-target decisions and attribution survive file folding and terminal persisten
 overflow rejects the stage atomically. Retained identities are not an exhaustive read ledger. A valid reference proves
 correspondence/existence only, not understanding, semantic review coverage, source reads or executable verification.
 
+The [historical paired comparison](docs/measurements/source-attribution.md) observed lower aggregate runner time
+with unchanged observed quality on three small cases. Its results describe that experiment, not a guaranteed speedup.
+
 Each stage gets a fresh prompt. Structure reviews whole-change interactions using a compact inventory, bounded diff
 parts and supporting documentation; discovery candidates marked `open` or `unresolved` receive one finite triage round.
 A candidate still `unresolved` after triage keeps coverage incomplete. Static prompt budget values are dispatch-time
