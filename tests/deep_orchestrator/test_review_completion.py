@@ -661,8 +661,9 @@ async def test_atomic_public_failure(review: ReviewRun, fault: str) -> None:
 
 
 @pytest.mark.parametrize('fault', ['markdown-read', 'context-write', 'report-write'])
+@pytest.mark.parametrize('export', [True, False], ids=['export', 'no-export'])
 async def test_optional_presentation_failure_preserves_canonical_export(
-    review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str,
+    review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str, export: bool,
 ) -> None:
     stage, read = json_utils._stage_bytes, Path.read_text
     refreshing = False
@@ -688,7 +689,16 @@ async def test_optional_presentation_failure_preserves_canonical_export(
     review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
                                        review_by_stack={'structure': [record()]})
     review.backend.merge_echo_records = True
-    assert await review.run() == 0 and injected
+    assert await review.run(findings_out=str(review.output) if export else None) == 0 and injected
+    if not export:
+        saved = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
+        assert saved['run_id'] and saved['analyzed_revision']['head_sha'] == review.pr.head_sha
+        assert all(scope['status'] == 'complete' for scope in saved['stack_outcomes'])
+        canonical = json.loads((review.repo / '.daydream/deep/merged-items.json').read_text())
+        assert len(canonical['items']) == 1 and canonical['items'][0]['description'] == 'Grounded defect'
+        assert not review.output.exists()
+        assert 'Review report unavailable:' in collapse_panel_text(capsys)
+        return
     data = review.load()
     assert len(data['findings']) == 1 and data['findings'][0]['title'] == 'Grounded defect'
     assert data['terminal_result']['analysis_state'] == 'complete'

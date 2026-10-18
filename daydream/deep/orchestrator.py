@@ -937,6 +937,7 @@ async def run_deep(
                     refresh_review_report(ctx)
                 except Exception as report_exc:
                     exc.add_note(f'Review report refresh failed: {type(report_exc).__name__}')
+                    print_warning(console, f'Review report unavailable: {type(report_exc).__name__}')
             raise
         if coverage is not None and not coverage.is_finalized:
             try:
@@ -949,9 +950,9 @@ async def run_deep(
         elif coverage is not None and mode in {'loop', 'shallow'}:
             try:
                 refresh_review_report(ctx)
-            except (OSError, ValueError) as exc:
-                print_error(console, 'Review Report', f'Review report refresh failed: {exc}')
-                return 1
+            except (OSError, ValueError, TypeError, RecursionError) as exc:
+                ctx.data['review_report_diagnostic'] = f'Review report unavailable: {type(exc).__name__}'
+                print_warning(console, ctx.data['review_report_diagnostic'])
         if _cleanup_should_run(ctx, exit_code):
             await _perform_cleanup(ctx)
         return exit_code

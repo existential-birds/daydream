@@ -470,11 +470,9 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
     warnings = review_warnings(deep_state.dd)
     if warnings:
         pr_kwargs["review_warnings"] = warnings
-    from daydream.deep.report_context import REPORT_CONTEXT
     from daydream.review_reporting import render_review_context
-    context_path = deep_state.dd / REPORT_CONTEXT
-    if context_path.is_file():
-        context = json.loads(context_path.read_text(encoding="utf-8"))
+    context = ctx.data.get('terminal_review_context')
+    if context is not None:
         pr_kwargs["review_summary"] = render_review_context(context,
             ctx.data.get("terminal_review_result"),
             findings_count=len(json.loads(items_file.read_text())["items"]))

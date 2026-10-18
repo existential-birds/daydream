@@ -29,6 +29,7 @@ from tests.deep_orchestrator.support import (
     _count_merge_prompts,
     _count_review_prompts,
 )
+from tests.harness.fake_gh import FakeGh
 from tests.harness.review_profile import (
     independent_alternatives_profile,
     independent_exploration_profile,
@@ -136,13 +137,19 @@ def _review_surface_prompts(calls: list[dict[str, object]],) -> list[dict[str, o
 @pytest.mark.parametrize("unit", [
     "all-units", "independent", "arbiter", "rationale-missing", "rationale-corrupt", "rationale-nested",
     "rationale-directory", "rationale-permission",
+    "author-present", "author-absent",
 ])
 async def test_identical_rerun_restores_completed_units_and_current_run_evidence(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, unit: str,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, unit: str, fake_gh: FakeGh,
 ) -> None:
     """Every warm contract retains exact bytes, positive evidence, and no paid review calls."""
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     options: dict[str, Any] = {}
+    author_case = unit.startswith('author-')
+    if author_case:
+        options['pr_number'] = 7
+        fake_gh.serve_pr_view({'state': 'OPEN', 'headRefOid': git_ops.head_sha(multi_stack_target),
+                             'body': 'Current author grounding' if unit == 'author-present' else None})
     if unit in {"independent", "arbiter"}:
         options["review_profile"] = independent_alternatives_profile()
     if unit == "arbiter":
@@ -156,6 +163,19 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
     canonical = {**_records_bytes(multi_stack_target), **{name: (deep / name).read_bytes() for name in names}}
     failures = saved_coverage(deep).unfinished_scopes
     first = json.loads((deep / "review-coverage.json").read_text())
+    author_faults: list[Path] = []
+    stale_author = {'source': 'pull_request_body', 'head_sha': first['analyzed_revision']['head_sha'],
+                    'body': 'Stale optional author assertion', 'truncated': False}
+    if author_case:
+        from daydream import json_utils
+        stage = json_utils._stage_bytes
+        def fail_author_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
+            if path.name == 'review-author-context.json':
+                author_faults.append(path)
+                path.write_text(json.dumps(stale_author))
+                raise OSError('optional author context staging failed')
+            return stage(path, content, **kwargs)
+        monkeypatch.setattr(json_utils, '_stage_bytes', fail_author_stage)
     obstructed: list[Path] = []
     prior_rationale = (deep / 'stack-python-report-context.json').read_bytes()
     if unit in {'rationale-missing', 'rationale-corrupt', 'rationale-nested'}:
@@ -208,6 +228,12 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
     assert first["run_id"] != second["run_id"]
     assert all(first[field] == second[field] for field in ("analyzed_revision", "planned_scopes", "stack_outcomes"))
     assert all(scope["status"] == "complete" for scope in second["stack_outcomes"])
+    if author_case:
+        assert len(author_faults) == 1
+        context = json.loads((deep / 'review-report-context.json').read_text())
+        assert context['author_reported'] is None
+        assert json.loads((deep / 'review-author-context.json').read_text()) == stale_author
+        assert 'Stale optional author assertion' not in (multi_stack_target / '.review-output.md').read_text()
     if unit.startswith('rationale-'):
         context = json.loads((deep / 'review-report-context.json').read_text())
         assert context['scopes']

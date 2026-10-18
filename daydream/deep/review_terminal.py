@@ -32,7 +32,8 @@ def refresh_review_report(ctx: FlowContext, *, no_diff: bool = False) -> dict[st
     result = ctx.data['terminal_review_result']
     items = ctx.data['terminal_review_items']
     context = collect_report_context(state.dd, result,
-                                     unavailable_scopes=ctx.data.get('unavailable_report_scopes'))
+                                     unavailable_scopes=ctx.data.get('unavailable_report_scopes'),
+                                     author_unavailable=ctx.data.get('author_report_context_unavailable', False))
     atomic_write_json(state.dd / REPORT_CONTEXT, context)
     deep_report = DeepArtifact.MERGED_REPORT.at(state.dd)
     # The current deep report is the only source of report sections. The routed
@@ -125,9 +126,8 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, no_diff: bool = Fa
         diagnostic = f'Review report unavailable: {type(exc).__name__}'
         ctx.data['review_report_diagnostic'] = diagnostic
         print_warning(console, diagnostic)
-        if ctx.config.findings_out is None:
-            raise
         context = None
+    ctx.data['terminal_review_context'] = context
     if ctx.config.findings_out is None:
         return 0
     pr = ctx.data.get("analyzed_pr")

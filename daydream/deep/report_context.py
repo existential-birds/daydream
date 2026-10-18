@@ -32,6 +32,7 @@ def retain_author_context(deep: Path, body: str | None, head_sha: str | None) ->
 
 def collect_report_context(
     deep: Path, coverage: dict[str, Any], *, unavailable_scopes: set[str] | None = None,
+    author_unavailable: bool = False,
 ) -> dict[str, Any]:
     """Read only current planned scopes and the existing verification acquisition."""
     from daydream.dataset_capture import collect_verification
@@ -91,7 +92,7 @@ def collect_report_context(
             continue
         retained_verification[name] = payload
         verification_bytes += size
-    author = read_json(deep / AUTHOR_CONTEXT) if (deep / AUTHOR_CONTEXT).is_file() else None
+    author = read_json(deep / AUTHOR_CONTEXT) if not author_unavailable and (deep / AUTHOR_CONTEXT).is_file() else None
     return {"scopes": scopes, "scopes_omitted": max(0, len(planned) - len(scopes)),
             "verification": {"status": "failed" if verification_failures or omitted else
                              "available" if retained_verification else "unproduced",

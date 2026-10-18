@@ -10,7 +10,7 @@ from typing import Any
 import anyio
 import pytest
 
-from daydream import runner as _runner
+from daydream import json_utils, runner as _runner
 from daydream.backends import ResultEvent
 from daydream.backends.codex import CodexLifecycleError
 from daydream.backends.lifecycle import BackendLifecycleFailure
@@ -78,8 +78,10 @@ async def test_cold_empty_builtin_merge_uses_no_provider_and_writes_canonical_re
 
 
 @pytest.mark.parametrize("resume", [False, True], ids=["fresh", "resume"])
+@pytest.mark.parametrize('presentation_fault', [False, True], ids=['report', 'unavailable-report'])
 async def test_synthesis_receives_retained_structural_records_and_owns_publication(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, resume: bool,
+    presentation_fault: bool,
 ) -> None:
     """Complete input delivery and exact published output prevent structural resurrection.
 
@@ -114,9 +116,11 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
     _pin_findings_pr(monkeypatch, multi_stack_target)
     published: list[dict[str, Any]] = []
+    summaries: list[str | None] = []
 
     async def publish(_repo: Path, items_file: Path, **_kwargs: Any) -> None:
         published.extend(json.loads(items_file.read_text())["items"])
+        summaries.append(_kwargs.get('review_summary'))
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", publish)
     config = empty_review_config(multi_stack_target, tmp_path / "synthesis-trajectory.json",
@@ -125,8 +129,26 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
         assert await _runner.run(config) == 0
         supplied.clear()
         published.clear()
+        summaries.clear()
         config.start_at = "merge"
+    failed: list[Path] = []
+    if presentation_fault:
+        stage = json_utils._stage_bytes
+        def fail_context_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
+            if path.name == 'review-report-context.json':
+                failed.append(path)
+                stale = json.loads(content)
+                stale['author_reported'] = {'source': 'pull_request_body', 'head_sha': None,
+                                            'body': 'Stale optional publication assertion', 'truncated': False}
+                path.write_text(json.dumps(stale))
+                raise OSError('optional report context staging failed')
+            return stage(path, content, **kwargs)
+        monkeypatch.setattr(json_utils, '_stage_bytes', fail_context_stage)
     assert await _runner.run(config) == 0
+    if presentation_fault:
+        assert failed and summaries == [None], 'unavailable presentation must not publish stale sidecar assertions'
+    else:
+        assert len(summaries) == 1 and summaries[0] is not None and 'Review outcome' in summaries[0]
     assert set(supplied) == {"python:1", "structure:1", "structure:2", "structure:3"}
     assert supplied["python:1"]["severity"] == supplied["structure:1"]["severity"] == "high"
     deep = multi_stack_target / ".daydream/deep"

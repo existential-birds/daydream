@@ -354,9 +354,15 @@ async def _step_intent(ctx: FlowContext) -> None:
         # Match build_intent_prompt: whitespace-only bodies are ignored after strip.
         deep_state.intent_authoritative = bool(pr_description and pr_description.strip())
         from daydream.deep.report_context import retain_author_context
-        retain_author_context(deep_state.dd, pr_description,
-                              pr_view.get("headRefOid") or None if config.pr_number is not None
-                              and pr_view is not None else None)
+        ctx.data['author_report_context_unavailable'] = True
+        try:
+            retain_author_context(deep_state.dd, pr_description,
+                                  pr_view.get("headRefOid") or None if config.pr_number is not None
+                                  and pr_view is not None else None)
+        except (OSError, ValueError, TypeError, RecursionError) as exc:
+            print_warning(console, f'Author report context unavailable: {type(exc).__name__}')
+        else:
+            ctx.data['author_report_context_unavailable'] = False
 
         intent_p = DeepArtifact.INTENT.at(deep_state.dd)
         # Intent keys its prompt subject; exploration is recorded grounding only.
