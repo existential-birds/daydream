@@ -19,6 +19,8 @@ from daydream import git_ops, pr_review
 from daydream.json_utils import atomic_write_bytes
 from daydream.output_schema import strict_object
 from daydream.pr_review import ParsedIssue, PRInfo
+from daydream.review_rationale import valid_review_context
+from daydream.review_reporting import REVIEW_CONTEXT_SCHEMA
 from daydream.review_result import TERMINAL_RESULT_SCHEMA, validate_terminal_result
 
 FINDINGS_SCHEMA_VERSION = 2
@@ -47,8 +49,10 @@ FINDINGS_SCHEMA: dict[str, Any] = strict_object({
     'diagrams': {'type': ['object', 'null']},
     'findings': {'type': 'array', 'items': strict_object(_FINDING_PROPERTIES)},
     'terminal_result': TERMINAL_RESULT_SCHEMA,
+    'review_context': REVIEW_CONTEXT_SCHEMA,
 })
 FINDINGS_SCHEMA['required'].remove('terminal_result')
+FINDINGS_SCHEMA['required'].remove('review_context')
 FINDINGS_SCHEMA['allOf'] = [{
     'if': {'properties': {'kind': {'const': 'review'}}},
     'then': {'required': ['terminal_result']},
@@ -67,6 +71,23 @@ def _validate_artifact(data: Any) -> None:
             validate_terminal_result(data["terminal_result"], expected_head_sha=data["head_sha"])
             if not data["terminal_result"]["projection_valid"] and data["findings"]:
                 raise ValueError("untrustworthy projection must not contain findings")
+            if 'review_context' in data:
+                terminal = data['terminal_result']
+                planned = {scope['scope_id'] for scope in terminal['planned_scopes']}
+                entries = data['review_context']['scopes']
+                if len({entry['scope_id'] for entry in entries}) != len(entries):
+                    raise ValueError('duplicate report scope identities')
+                for entry in entries:
+                    missing_source = (entry['analyzed_revision'] is None
+                                      and entry['originating_run_id'] is None
+                                      and entry['review_context'] is None)
+                    if entry['scope_id'] not in planned or (
+                        not missing_source and entry['analyzed_revision'] != terminal['analyzed_revision']
+                    ):
+                        raise ValueError('report context differs from terminal snapshot inventory')
+                    if entry['review_context'] is not None and not valid_review_context(entry['review_context']):
+                        raise ValueError('invalid source rationale counts or redaction')
+
     except (jsonschema.ValidationError, ValueError) as exc:
         message = exc.message if isinstance(exc, jsonschema.ValidationError) else str(exc)
         raise FindingsValidationError(f"artifact failed schema validation: {message}") from exc
@@ -118,6 +139,7 @@ class FindingsArtifact:
     review_warnings: tuple[str, ...] = ()
     schema_version: int = FINDINGS_SCHEMA_VERSION
     terminal_result: dict[str, Any] | None = None
+    review_context: dict[str, Any] | None = None
 
     @property
     def analysis_complete(self) -> bool:
@@ -151,6 +173,7 @@ def build_findings_artifact(
     kind: str = "review",
     diagrams: dict[str, Any] | None = None,
     renderers: pr_review.ReviewRenderers | None = None,
+    review_context: dict[str, Any] | None = None,
     terminal_result: dict[str, Any] | None = None,
     snapshot_diff: str | None = None,
     auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
@@ -184,6 +207,7 @@ def build_findings_artifact(
         "findings": findings,
         "review_warnings": list(review_warnings),
         **({"terminal_result": copy.deepcopy(terminal_result)} if terminal_result is not None else {}),
+        **({"review_context": copy.deepcopy(review_context)} if review_context is not None else {}),
     }
 
 

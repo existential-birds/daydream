@@ -28,8 +28,8 @@ def _is_heading(line: str) -> bool:
     return line.startswith("# ") or line.startswith("## ")
 
 
-def _remove_diagrams_section(lines: list[str]) -> list[str]:
-    """Remove diagram sections through the next heading and restore one separator between neighbors.
+def _remove_section(lines: list[str], heading: str) -> list[str]:
+    """Remove a section through the next heading and restore one separator between neighbors.
 
     This exactly reverses insertion, preserving idempotence.
     """
@@ -37,7 +37,7 @@ def _remove_diagrams_section(lines: list[str]) -> list[str]:
     index = 0
     total = len(lines)
     while index < total:
-        if lines[index].strip() != _DIAGRAMS_HEADING:
+        if lines[index].strip() != heading:
             out.append(lines[index])
             index += 1
             continue
@@ -59,7 +59,7 @@ def insert_diagrams_section(report_text: str, blocks: str) -> str:
     other sections and the report's trailing-newline convention.
     """
     trailing_newline = report_text.endswith("\n")
-    lines = _remove_diagrams_section(report_text.split("\n"))
+    lines = _remove_section(report_text.split("\n"), _DIAGRAMS_HEADING)
     body = blocks.strip("\n")
     if body.strip():
         section = [_DIAGRAMS_HEADING, *body.split("\n")]
@@ -72,12 +72,36 @@ def insert_diagrams_section(report_text: str, blocks: str) -> str:
     return f"{text}\n" if trailing_newline else text
 
 
-def render_report(items: list[dict[str, Any]]) -> str:
+def insert_review_context(
+    report_text: str, context: dict[str, Any], terminal_result: dict[str, Any] | None = None, *,
+    findings_count: int = 0,
+) -> str:
+    """Replace the host summary while retaining warnings, diagrams and finding sections."""
+    from daydream.review_reporting import render_review_context
+
+    lines = _remove_section(report_text.split('\n'), '## Review outcome')
+    section = render_review_context(context, terminal_result, findings_count=findings_count).split('\n')
+    anchor = next((i for i, line in enumerate(lines) if line.strip() == _REVIEW_HEADING), None)
+    if anchor is None:
+        lines = [*section, '', *lines]
+    else:
+        lines = [*lines[:anchor + 1], '', *section, *lines[anchor + 1:]]
+    return '\n'.join(lines).rstrip('\n') + ('\n' if report_text.endswith('\n') else '')
+
+
+def render_report(
+    items: list[dict[str, Any]], *, review_context: dict[str, Any] | None = None,
+    terminal_result: dict[str, Any] | None = None,
+) -> str:
     """Render nonempty lens groups in structural, per-stack, cross-stack, then wonder order.
 
     Use canonical ids, plain numbered location lines, and [cross-stack] title prefixes.
     """
     sections: list[str] = ["# Review"]
+    if review_context is not None:
+        from daydream.review_reporting import render_review_context
+
+        sections.append(render_review_context(review_context, terminal_result, findings_count=len(items)))
 
     # Omit empty lenses; each entry specifies its heading and finding prefix.
     lens_sections = [

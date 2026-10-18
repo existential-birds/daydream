@@ -745,10 +745,24 @@ def test_unfinished_review_comments_without_approval_or_stale_resolution(
     artifact = findings_artifact(findings if has_finding else [],
         terminal_result=terminal_result("complete" if state == "warning" else state),
         review_warnings=["Alternatives: wall_budget_exceeded"] if state == "warning" else [])
+    revision = artifact['terminal_result']['analyzed_revision']
+    artifact['review_context'] = {'scopes': [{'scope_id': 'python', 'originating_run_id': 'retained-run',
+        'analyzed_revision': revision, 'review_context': None}], 'scopes_omitted': 0,
+        'verification': {'status': 'available', 'value': {'test-verdict.json': {
+            'attempts': [{'kind': 'host', 'command': ['pytest', '-q'], 'passed': False,
+                'identity': {'kind': 'host', 'outcome': 'failed', 'argv': ['pytest', '-q'],
+                             'head_sha': 'executed-head', 'session_id': 'executed-session'}}]}}},
+        'author_reported': {'source': 'pull_request_body', 'head_sha': 'author-head',
+                            'body': 'Author reports CI passes.', 'truncated': False}}
     write_findings_artifact(path, artifact)
     assert cli_main(_post_argv(path) + ["--approve-on-clean"]) == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1 and posts[0].payload["event"] == "COMMENT"
+    body = posts[0].payload['body']
+    assert 'retained-run' in body and 'Source rationale unavailable' in body
+    assert 'Checks actually executed' in body
+    assert all(part in body for part in ('pytest', 'executed-head', 'executed-session', 'failed', 'author-head'))
+    assert 'Author reports CI passes.' in body and 'not independently executed or refreshed' in body
     notice = "Alternatives: wall_budget_exceeded" if state == "warning" else f"analysis is {state}"
     assert notice in posts[0].payload["body"]
     if state == "warning":

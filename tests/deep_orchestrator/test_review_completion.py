@@ -21,7 +21,9 @@ from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, 
 from tests.harness.console import collapse_panel_text
 from tests.harness.dataset import read_records
 from tests.harness.fake_clock import FakeClock
+from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git
+from tests.harness.scripts import cli_main
 from tests.harness.stub_backend import review_stage_result, review_stage_state
 from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipeline, _record
 
@@ -78,7 +80,8 @@ class AuthError(RuntimeError):
     ('total', 'failed', 'backend_failure'), ('demoted', 'complete', None),
     ('language', 'complete', None), ('archive', 'incomplete', 'backend_failure'),
 ])
-async def test_outcomes(review: ReviewRun, archive_dir: Path, case: str, state: str, reason: str | None) -> None:
+async def test_outcomes(review: ReviewRun, archive_dir: Path, fake_gh: FakeGh,
+                        case: str, state: str, reason: str | None) -> None:
     nonempty = case in {'structural', 'mixed', 'demoted', 'language'}
     errors = {'auth': AuthError('rejected'), 'model': MaxTurnsError('spent turns')}
     review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
@@ -86,6 +89,8 @@ async def test_outcomes(review: ReviewRun, archive_dir: Path, case: str, state: 
         if nonempty else {}, fail_stack='python' if reason and case != 'total' else None,
         stack_error=errors.get(case), responder=lambda p: [RuntimeError('unavailable')]
         if case == 'total' and reviewer(p) else None)
+    fake_gh.serve_pr_view({'state': 'OPEN', 'headRefOid': review.pr.head_sha,
+                           'body': 'Author reports make check and CI pass. {"token":"private-value"}'})
     review.backend.merge_echo_records = True
     if case == 'language':
         review.backend.merge_items = None
@@ -93,6 +98,37 @@ async def test_outcomes(review: ReviewRun, archive_dir: Path, case: str, state: 
     data = review.load()
     result, inventory = data['terminal_result'], scopes(data)
     assert (result['analysis_state'], result['pipeline_state']) == (state, 'completed')
+    report = (review.repo / '.review-output.md').read_text()
+    assert '## Review outcome' in report and f'<code>{state}</code>' in report
+    assert result['run_id'] in report and result['analyzed_revision']['head_sha'] in report
+    assert result['analyzed_revision']['diff_key'] in report
+    assert 'does not independently prove semantic coverage' in report
+    context = data['review_context']
+    assert context['verification'] == {'status': 'unproduced', 'value': None}
+    assert context['author_reported']['head_sha'] == review.pr.head_sha
+    assert context['author_reported']['source'] == 'pull_request_body'
+    assert 'private-value' not in json.dumps(context)
+    assert 'Author reports make check and CI pass' in report
+    assert 'not independently executed or refreshed' in report
+
+    assert 'Executable verification unavailable' in report and 'unproduced' in report
+    assert {scope['scope_id'] for scope in context['scopes']} == set(inventory)
+    if not nonempty:
+        assert 'No confirmed findings.' in report
+        assert '✅' not in report
+    if case != 'total':
+        assert 'Assigned changed behavior reviewed' in report
+    else:
+        assert 'Source rationale unavailable' in report
+        assert all(scope['analyzed_revision'] is None and scope['originating_run_id'] is None
+                   and scope['review_context'] is None for scope in context['scopes'])
+        assert 'Source snapshot: unavailable.' in report
+    if reason:
+        assert reason in report
+        assert '⚠️ **Review incomplete.**' in report
+    elif state == 'complete':
+        assert 'Review incomplete' not in report
+
     assert set(inventory) == {'python', 'react', 'generic', 'structure'}
     assert bool(data['findings']) is nonempty
     assert {name: s['status'] for name, s in inventory.items()} == {
@@ -109,6 +145,19 @@ async def test_outcomes(review: ReviewRun, archive_dir: Path, case: str, state: 
     if case == 'language':
         canonical = json.loads((review.repo / '.daydream/deep/merged-items.json').read_text())
         assert canonical['items'][0]['source_uids'] == ['python:1']
+    if case in {'empty', 'backend', 'total'}:
+        fake_gh.serve_prior_threads(fingerprints=[], thread_ids=[], viewer_did_author=True)
+        assert cli_main(['post-findings', str(review.output), '--pr', '7', '--head-sha', review.pr.head_sha,
+                         '--repo', 'o/r', '--target', str(review.repo)]) == 0
+        posts = fake_gh.calls('POST', '/repos/o/r/pulls/7/reviews')
+        if case == 'empty':
+            assert posts == [], 'report context must not create publishing authority'
+        else:
+            assert len(posts) == 1 and posts[0].payload['event'] == 'COMMENT'
+            body = posts[0].payload['body']
+            assert 'No confirmed findings.' in body and f'<code>{state}</code>' in body
+            assert result['run_id'] in body and result['analyzed_revision']['diff_key'] in body
+            assert 'Executable verification unavailable' in body and reason in body
     if case == 'empty':
         stages = [stage_state for c in review.backend.calls
                   if (stage_state := review_stage_state(c['prompt'])) is not None]
@@ -194,11 +243,16 @@ async def test_snapshot_boundaries(review: ReviewRun, request: pytest.FixtureReq
     prior = {'.review-output.md': 'prior completed review\n', '.daydream/deep/history.json': '{"prior": true}\n',
              '.daydream/deep/merged-items.json': '{"items": [{"item_uid": "item:old"}]}\n',
              '.daydream/recommended.patch': 'prior recommended patch\n'}
-    if case == 'mismatch':
+    if case in {'mismatch', 'no-diff', 'dirty-no-diff'}:
         for name, text in prior.items():
             path = review.repo / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text)
+        if case != 'mismatch':
+            (review.repo / '.review-output.md').write_text(
+                '# Review\n\n## Issues\n1. [obsolete.py:9] PRIOR_FINDING\n\n'
+                '## Held Findings\n2. [obsolete.py:10] PRIOR_HELD\n\n'
+                '## Diagrams\nPRIOR_DIAGRAM\n')
     live, calls = review.pr, []
     if case in {'no-diff', 'dirty-no-diff', 'base-tip'}:
         git(review.repo, 'checkout', 'main')
@@ -246,7 +300,9 @@ async def test_snapshot_boundaries(review: ReviewRun, request: pytest.FixtureReq
             assert all((review.repo / name).read_text() == text for name, text in prior.items())
         else:
             assert raw['original_task']['value']['diff'] == '' and raw['findings']['value']['items'] == []
-            assert raw['scoring']['status'] == 'unproduced'
+            assert raw['scoring']['status'] == 'available'
+            assert 'No confirmed findings.' in raw['scoring']['value']['review_text']
+            assert raw['verification']['status'] == 'unproduced'
     if case in {'interactive', 'mismatch'}:
         assert not review.output.exists()
         assert bool(review.backend.calls) is (case == 'interactive')
@@ -268,6 +324,11 @@ async def test_snapshot_boundaries(review: ReviewRun, request: pytest.FixtureReq
         assert 'Review incomplete' in (review.repo / '.review-output.md').read_text()
     if case == 'no-diff':
         assert result['stack_outcomes'] == [] and result['phase_outcomes'][0]['noop'] is True and result['run_id']
+    if case in {'no-diff', 'dirty-no-diff'}:
+        report = (review.repo / '.review-output.md').read_text()
+        assert all(marker not in report for marker in ('PRIOR_FINDING', 'PRIOR_HELD', 'PRIOR_DIAGRAM'))
+        assert 'No confirmed findings.' in report and result['run_id'] in report
+        assert (review.repo / '.daydream/deep/review-output.md').read_text() == report
     if case == 'live':
         assert live.head_sha == review.pr.base_sha and git_ops.head_sha(review.repo) == review.pr.head_sha
         assert git_ops.show(review.repo, live.head_sha, 'api.py') and len(calls) == 1

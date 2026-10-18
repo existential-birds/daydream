@@ -133,7 +133,9 @@ def _review_surface_prompts(calls: list[dict[str, object]],) -> list[dict[str, o
     return surface
 
 
-@pytest.mark.parametrize("unit", ["all-units", "independent", "arbiter"])
+@pytest.mark.parametrize("unit", [
+    "all-units", "independent", "arbiter", "rationale-missing", "rationale-corrupt",
+])
 async def test_identical_rerun_restores_completed_units_and_current_run_evidence(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, unit: str,
 ) -> None:
@@ -153,6 +155,17 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
     canonical = {**_records_bytes(multi_stack_target), **{name: (deep / name).read_bytes() for name in names}}
     failures = saved_coverage(deep).unfinished_scopes
     first = json.loads((deep / "review-coverage.json").read_text())
+    if unit.startswith('rationale-'):
+        entries = deep.parent / 'review-cache/entries'
+        sidecars = list(entries.glob('*/stack-*-report-context.json'))
+        assert sidecars
+        for sidecar in sidecars:
+            manifest = json.loads((sidecar.parent / 'manifest.json').read_text())
+            assert sidecar.name not in manifest['payload'], 'optional reporting cannot gate valid review reuse'
+            if unit == 'rationale-missing':
+                sidecar.unlink()
+            else:
+                sidecar.write_text('{corrupt optional rationale')
     if unit == "all-units":
         store = deep.parent / "review-cache"
         assert store.is_dir(), "store must be published beside the deep artifacts"
@@ -174,6 +187,10 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
     assert first["run_id"] != second["run_id"]
     assert all(first[field] == second[field] for field in ("analyzed_revision", "planned_scopes", "stack_outcomes"))
     assert all(scope["status"] == "complete" for scope in second["stack_outcomes"])
+    if unit.startswith('rationale-'):
+        context = json.loads((deep / 'review-report-context.json').read_text())
+        assert context['scopes'] and all(entry['review_context'] is None for entry in context['scopes'])
+        assert all(entry['originating_run_id'] == first['run_id'] for entry in context['scopes'])
     units = cast(dict[str, Any], _latest_provenance(deep)["units"])
     if unit == "all-units":
         assert unknown_entry.is_dir(), "a fresh run must preserve unknown cache entries"
@@ -696,6 +713,11 @@ async def test_successful_scope_rerun_clears_prior_failure_for_same_revision(
         assert "folded into Structure" in persisted.diagnostics["phases"]["alternatives"]
         assert persisted.diagnostics["scopes"][scope] in persisted.diagnostics["phases"]["alternatives"]
     assert first["analysis_state"] == "incomplete"
+    report = (review.repo / '.review-output.md').read_text()
+    assert '<code>incomplete</code>' in report and first['run_id'] in report
+    assert first['analyzed_revision']['head_sha'] in report
+    first_origins = {entry['scope_id']: entry['originating_run_id'] for entry in first_data['review_context']['scopes']}
+
     assert first["failed_stacks"] == ([] if recovery == "cache" else [scope])
     if recovery == "cache":
         assert saved_coverage(deep).unfinished_scopes.keys() == {scope}
@@ -707,6 +729,10 @@ async def test_successful_scope_rerun_clears_prior_failure_for_same_revision(
         assert await review.run(**options, start_at="merge") == 0
         resumed = review.load()
         assert resumed["findings"] == first_data["findings"]
+        assert resumed['review_context']['scopes'] == first_data['review_context']['scopes']
+        report = (review.repo / '.review-output.md').read_text()
+        assert '<code>incomplete</code>' in report and resumed['terminal_result']['run_id'] in report
+
         for field in ("analysis_state", "failed_stacks", "phase_outcomes", "stack_outcomes"):
             assert resumed["terminal_result"][field] == first[field]
         assert saved_coverage(deep).diagnostics == persisted.diagnostics
@@ -732,6 +758,15 @@ async def test_successful_scope_rerun_clears_prior_failure_for_same_revision(
                     "python", "react", "generic", "structure"}
     assert {name: (review.repo / name).read_bytes() for name in source} == source
     assert second["analysis_state"] == "complete" and second["failed_stacks"] == []
+    report = (review.repo / '.review-output.md').read_text()
+    assert '<code>complete</code>' in report and second['run_id'] in report
+    assert report.count('## Review outcome') == 1
+    assert 'Assigned changed behavior reviewed' in report
+    if recovery == 'cache':
+        second_origins = {entry['scope_id']: entry['originating_run_id']
+                          for entry in second_data['review_context']['scopes']}
+        assert second_origins[sibling] == first_origins[sibling]
+
     assert "backend_failure" not in second["reason_codes"]
     assert first["analyzed_revision"] == second["analyzed_revision"]
     if recovery == "cache":

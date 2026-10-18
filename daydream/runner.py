@@ -766,6 +766,7 @@ def _emit_findings_from_items(
     captured_pr: "pr_review.PRInfo",
     terminal_result: dict[str, Any],
     snapshot_diff: str,
+    review_context: dict[str, Any] | None = None,
 ) -> int:
     """Write canonical review items; grounded diagrams ride along for Phase B rendering."""
     parsed = pr_review.parsed_issues_from_items(items)
@@ -773,6 +774,7 @@ def _emit_findings_from_items(
         target_dir, config, parsed, diagrams=diagrams, auth=auth,
         run_info=run_info, renderers=renderers, review_warnings=review_warnings,
         captured_pr=captured_pr, terminal_result=terminal_result, snapshot_diff=snapshot_diff,
+        review_context=review_context,
     )
 
 
@@ -790,6 +792,7 @@ def _write_findings_for_parsed(
     captured_pr: "pr_review.PRInfo",
     terminal_result: dict[str, Any] | None = None,
     snapshot_diff: str | None = None,
+    review_context: dict[str, Any] | None = None,
 ) -> int:
     """Write the artifact for the PR identity the caller captured at run start.
 
@@ -811,6 +814,7 @@ def _write_findings_for_parsed(
         auth=auth,
         terminal_result=terminal_result,
         snapshot_diff=snapshot_diff,
+        review_context=review_context,
     )
     out_path = Path(config.findings_out)
     try:

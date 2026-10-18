@@ -897,7 +897,7 @@ async def run_deep(
             ctx.data["test_recipe"] = test_recipe
 
         # Finalization stays inside the recorder so frozen public/archive evidence agrees.
-        from daydream.deep.review_terminal import finalize_review
+        from daydream.deep.review_terminal import finalize_review, refresh_review_report
         from daydream.review_result import reason_for_exception
 
         if dirty_snapshot:
@@ -932,6 +932,11 @@ async def run_deep(
                 except Exception as final_exc:
                     exc.add_note(f"Terminal review finalization failed: {type(final_exc).__name__}")
                     print_warning(console, f"Terminal review finalization failed: {type(final_exc).__name__}")
+            elif coverage is not None and coverage.is_finalized:
+                try:
+                    refresh_review_report(ctx)
+                except Exception as report_exc:
+                    exc.add_note(f'Review report refresh failed: {type(report_exc).__name__}')
             raise
         if coverage is not None and not coverage.is_finalized:
             try:
@@ -941,6 +946,12 @@ async def run_deep(
                 return 1
             if final_status:
                 return final_status
+        elif coverage is not None and mode in {'loop', 'shallow'}:
+            try:
+                refresh_review_report(ctx)
+            except (OSError, ValueError) as exc:
+                print_error(console, 'Review Report', f'Review report refresh failed: {exc}')
+                return 1
         if _cleanup_should_run(ctx, exit_code):
             await _perform_cleanup(ctx)
         return exit_code

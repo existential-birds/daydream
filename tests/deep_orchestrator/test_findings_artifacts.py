@@ -163,6 +163,19 @@ async def test_test_verdict_persists_actual_suite_outcome_and_operator_override(
     assert verdict["local_host"] == host
     assert verdict["attempts"][0]["command"][-1] == str(suite_dir / "suite.py")
     assert not _coverage_metadata_keys(verdict), "host verdict must not claim unmeasured coverage"
+    # The report is first produced before the fix/test cycle. Its final evidence
+    # must include the real host execution without refinalizing review coverage.
+    from daydream.redaction import redact_value
+    context = json.loads((path.parent / 'review-report-context.json').read_text())
+    recorded = context['verification']['value']['test-verdict.json']
+    assert context['verification']['status'] == 'available'
+    assert recorded['attempts'] == redact_value(verdict['attempts'])
+    report = (tiny_diff_target / REVIEW_OUTPUT_FILE).read_text()
+    attempt = recorded['attempts'][0]
+    assert 'Checks actually executed by the recorded host runner' in report
+    assert all(value in report for value in ('suite.py', attempt['identity']['outcome'],
+                                            attempt['identity']['head_sha'], attempt['identity']['session_id']))
+    assert 'Verification artifact availability: <code>available</code>' in report
     if ignored:
         assert _git(tiny_diff_target, "rev-parse", "HEAD") == head_before
         assert not (tiny_diff_target / ".fixed-api_py").exists()

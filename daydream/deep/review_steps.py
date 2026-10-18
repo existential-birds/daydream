@@ -353,6 +353,11 @@ async def _step_intent(ctx: FlowContext) -> None:
         # the intent phase, so downstream reviewers can include the precedence rule.
         # Match build_intent_prompt: whitespace-only bodies are ignored after strip.
         deep_state.intent_authoritative = bool(pr_description and pr_description.strip())
+        from daydream.deep.report_context import retain_author_context
+        retain_author_context(deep_state.dd, pr_description,
+                              pr_view.get("headRefOid") or None if config.pr_number is not None
+                              and pr_view is not None else None)
+
         intent_p = DeepArtifact.INTENT.at(deep_state.dd)
         # Intent keys its prompt subject; exploration is recorded grounding only.
         # Hits restore the original artifact bytes.

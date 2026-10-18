@@ -24,10 +24,12 @@ from daydream.prompt_budget import (
     SanctionedInputUnavailable,
     truncate_utf8_to_budget,
 )
+from daydream.redaction import redact_structured_text, redact_value
 from daydream.repository_paths import InvalidRepositoryFilePath, canonicalize_repository_file_path
 from daydream.retry_policy import FailureClass, classify_failure
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.review_evidence import ReviewEvidence
+from daydream.review_rationale import NOTE_ORIGIN_SCHEMA
 from daydream.review_result import ReasonCode, reason_for_budget, reason_for_exception
 from daydream.run_context import resolve_run_context
 from daydream.trajectory import DaydreamPhase, LifecycleReasonCode, LifecycleStatus, phase_scope
@@ -36,7 +38,6 @@ from daydream.ui.agent_stream import present_result
 STAGED_REVIEW_CONTRACT = 11
 HANDOFF_MAX_BYTES = 64 * 1024
 HANDOFF_MAX_ITEMS = 128
-
 
 def _candidate_source_files(candidates: list[dict[str, Any]]) -> set[str]:
     """Source anchors include each candidate and its actual terminal location."""
@@ -110,6 +111,33 @@ class ReviewInvestigation:
         self.failure_reasons: list[ReasonCode] = []
         self._source_root: Path | None = None
         self._continuable_failure = False
+
+    def review_context(self) -> dict[str, Any]:
+        """Project existing admitted judgments for reporting, without eliciting more work.
+
+        Source notes remain reviewer assertions. Missing or malformed attribution
+        stays null; the report must never turn it into host-certified provenance.
+        """
+        required = ({f'integration:{self.scope_id}'} if self.scope_id == STRUCTURE_STACK_NAME else
+                    {target for targets in self.required_targets.values() for target in targets})
+        notes = []
+        for note in self.handoff['notes'][:8]:
+            origin = redact_value(note.get('origin'))
+            notes.append({
+                'text': truncate_utf8_to_budget(redact_structured_text(note['text']), 512, '[note clipped]'),
+                **{name: [truncate_utf8_to_budget(redact_structured_text(path), 512, '[path clipped]')
+                          for path in note.get(name, [])[:32]] for name in ('files', 'supporting_files')},
+                'origin': origin if validates_schema(origin, NOTE_ORIGIN_SCHEMA) else None,
+            })
+        return {
+            'admitted_stages': self.admitted_stages,
+            'target_decisions': {
+                'required': len(required),
+                **{status: sum(self.target_progress.get(target, {}).get('status') == status for target in required)
+                   for status in ('reviewed', 'not_reviewed')},
+            },
+            'notes': notes, 'notes_omitted': max(0, len(self.handoff['notes']) - len(notes)),
+        }
 
     async def run(self, backend: Backend, cwd: Path, prompt_builder: Callable[[dict[str, Any]], str], *,
         stage_inputs: Callable[[dict[str, Any]], PreparedSanctionedInputs], **agent_kwargs: Any,

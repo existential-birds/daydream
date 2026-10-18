@@ -118,6 +118,11 @@ def per_stack_records_path(deep_dir_path: Path, stack_name: str) -> Path:
     return deep_dir_path / f"stack-{stack_name}-records.json"
 
 
+def per_stack_report_context_path(deep_dir_path: Path, stack_name: str) -> Path:
+    """Host-only source rationale, excluded from model-facing records and phase inputs."""
+    return deep_dir_path / f"stack-{stack_name}-report-context.json"
+
+
 def arbiter_group_input_path(deep_dir_path: Path, group_id: str) -> Path:
     """One sharded group's resume input; the unsharded input path remains separate."""
     return deep_dir_path / f"{group_id}-input.json"

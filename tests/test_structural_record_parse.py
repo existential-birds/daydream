@@ -104,3 +104,103 @@ def test_record_artifact_rejects_noncanonical_ordinals(ordinal: str) -> None:
     coverage = review_coverage()
     artifact = records_artifact(coverage, 'python', [{'uid': f'python:{ordinal}'}])
     assert not valid_record_artifact(artifact, scope_id='python', analyzed_revision=coverage.revision.to_dict())
+
+
+@pytest.mark.parametrize('context_kind', [
+    'missing', 'current', 'unattributed', 'counts', 'notes', 'secret', 'origin', 'scope', 'revision', 'run',
+    'nested-checks',
+])
+def test_report_collection_validates_optional_bound_sidecar(tmp_path: Path, context_kind: str) -> None:
+    """Unavailable/tampered rationale never erases valid source records or invents attribution."""
+    from daydream.deep.report_context import collect_report_context
+    from daydream.phases.review import valid_record_artifact
+
+    coverage = review_coverage()
+    artifact = records_artifact(coverage, 'python')
+    context: dict[str, Any] = {
+        'admitted_stages': 1, 'target_decisions': {'required': 1, 'reviewed': 1, 'not_reviewed': 0},
+        'notes': [{'text': 'Source inspection found compatible callers.', 'files': ['api.py'],
+                   'supporting_files': [], 'origin': {
+                       'scope_id': 'python', 'stage': 'first_pass', 'sequence': 1,
+                       'judgment_origin': 'reviewer', 'analyzed_revision': coverage.revision.to_dict()}}],
+        'notes_omitted': 0,
+    }
+    sidecar = {key: value for key, value in artifact.items() if key != 'issues'}
+    sidecar['review_context'] = context
+    if context_kind == 'unattributed':
+        context['notes'][0]['origin'] = None
+    elif context_kind == 'counts':
+        context['target_decisions']['not_reviewed'] = 1
+    elif context_kind == 'notes':
+        context['notes'] *= 9
+    elif context_kind == 'secret':
+        context['notes'][0]['text'] = 'ghp_1234567890'
+    elif context_kind == 'origin':
+        context['notes'][0]['origin'] = {'scope_id': 'python'}
+    elif context_kind == 'scope':
+        sidecar['scope_id'] = 'foreign'
+    elif context_kind == 'revision':
+        sidecar['analyzed_revision'] = {**coverage.revision.to_dict(), 'head_sha': 'foreign'}
+    elif context_kind == 'run':
+        sidecar['originating_run_id'] = 'foreign'
+    records_path = tmp_path / 'stack-python-records.json'
+    records_path.write_text(json.dumps(artifact))
+    if context_kind == 'nested-checks':
+        (tmp_path / 'test-verdict.json').write_text('[' * 2000 + ']' * 2000)
+    elif context_kind != 'missing':
+        (tmp_path / 'stack-python-report-context.json').write_text(json.dumps(sidecar))
+    collected = collect_report_context(tmp_path, coverage.to_dict())
+    captured = collected['scopes'][0]
+    if context_kind == 'nested-checks':
+        assert collected['verification'] == {'status': 'failed', 'value': None}
+    assert captured['originating_run_id'] == coverage.run_id
+    assert captured['analyzed_revision'] == coverage.revision.to_dict()
+    assert captured['review_context'] == (context if context_kind in {'current', 'unattributed'} else None)
+    assert json.loads(records_path.read_text()) == artifact
+    assert valid_record_artifact(artifact, scope_id='python', analyzed_revision=coverage.revision.to_dict())
+    assert not valid_record_artifact({**artifact, 'review_context': context},
+                                    scope_id='python', analyzed_revision=coverage.revision.to_dict())
+
+
+@pytest.mark.parametrize('shape', ['padding', 'nested-arrays'])
+def test_report_collection_bounds_existing_artifacts_and_prioritizes_test_identity(
+    tmp_path: Path, shape: str,
+) -> None:
+    """Bound aggregate handoff size while explicitly accounting for omitted existing evidence."""
+    from daydream.deep.report_context import collect_report_context
+    from daydream.findings import MAX_ARTIFACT_BYTES, write_findings_artifact
+    from daydream.review_reporting import render_review_context
+    from tests.harness.review_result import findings_artifact
+
+    coverage = review_coverage(scope_ids=[f'python-{index}' for index in range(32)])
+    for scope in coverage.planned_scopes:
+        artifact = records_artifact(coverage, scope.scope_id)
+        (tmp_path / f'stack-{scope.scope_id}-records.json').write_text(json.dumps(artifact))
+        (tmp_path / f'stack-{scope.scope_id}-report-context.json').write_text(json.dumps({
+            **{key: value for key, value in artifact.items() if key != 'issues'}, 'review_context': {
+                'admitted_stages': 8, 'target_decisions': {'required': 8, 'reviewed': 8, 'not_reviewed': 0},
+                'notes': [{'text': 'x' * 512, 'files': [], 'supporting_files': [], 'origin': None}] * 8,
+                'notes_omitted': 0}}))
+    names = ('test-verdict.json', 'remote-ci-verdict.json', 'fix-outcomes.json', 'fix-failures.json',
+             'fix-quality-gate.json', 'recommended-capture.json')
+    for name in names:
+        payload = ({'existing_evidence': name, 'padding': 'x' * 60_000} if shape == 'padding' else
+                   {'paths': [['x']] * 10_000})
+        (tmp_path / name).write_text(json.dumps(payload, separators=(',', ':')))
+    captured = collect_report_context(tmp_path, coverage.to_dict())
+    assert 0 < len(captured['scopes']) < 32
+    assert captured['scopes_omitted'] == 32 - len(captured['scopes'])
+    assert len(json.dumps(captured).encode()) < 400_000
+    verification = captured['verification']
+    assert verification['status'] == 'failed' and verification['omitted_artifacts']
+    assert set(verification['omitted_artifacts']) | set(verification['value']) >= set(names)
+    if shape == 'padding':
+        assert {'test-verdict.json', 'remote-ci-verdict.json'} <= verification['value'].keys()
+    else:
+        assert set(verification['omitted_artifacts']) >= set(names)
+    output = tmp_path / 'findings.json'
+    write_findings_artifact(output, findings_artifact(
+        review_context=captured, terminal_result=coverage.finalize('completed')))
+    assert output.stat().st_size < MAX_ARTIFACT_BYTES
+    report = render_review_context(captured)
+    assert 'omitted due to the report evidence budget' in report

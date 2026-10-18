@@ -82,6 +82,7 @@ async def post_review_to_pr_from_report(
     pr_number: int | None = None,
     diagram_blocks: str | None = None,
     review_warnings: tuple[str, ...] = (),
+    review_summary: str | None = None,
     run_context: RunContext | None = None,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> PostStatus:
@@ -119,6 +120,7 @@ async def post_review_to_pr_from_report(
         pr_number=pr_number,
         diagram_blocks=diagram_blocks,
         review_warnings=review_warnings,
+        review_summary=review_summary,
         run_context=run_context,
         auth=auth,
     )
@@ -684,6 +686,7 @@ class ClassifiedReviewPlan:
     renderers: ReviewRenderers
     diagram_blocks: str | None
     review_warnings: tuple[str, ...] = ()
+    review_summary: str | None = None
 
     @classmethod
     def from_classified(
@@ -696,6 +699,7 @@ class ClassifiedReviewPlan:
         renderers: ReviewRenderers,
         diagram_blocks: str | None = None,
         review_warnings: tuple[str, ...] = (),
+        review_summary: str | None = None,
     ) -> ClassifiedReviewPlan:
         """Snapshot a mutable classified review after the caller authorizes it."""
         return cls(
@@ -709,6 +713,7 @@ class ClassifiedReviewPlan:
             renderers=renderers,
             diagram_blocks=diagram_blocks,
             review_warnings=review_warnings,
+            review_summary=review_summary,
         )
 
 
@@ -856,6 +861,7 @@ def post_classified_review(
         renderers=plan.renderers,
         diagram_blocks=plan.diagram_blocks,
         review_warnings=plan.review_warnings,
+        review_summary=plan.review_summary,
     )
     review_result = transport.post_review(plan.pr, review_payload)
     posted_review = review_result.review_url is not None
@@ -909,6 +915,7 @@ async def _post(
     pr_number: int | None = None,
     diagram_blocks: str | None = None,
     review_warnings: tuple[str, ...] = (),
+    review_summary: str | None = None,
     run_context: RunContext | None = None,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> PostStatus:
@@ -965,6 +972,7 @@ async def _post(
         renderers=renderers,
         diagram_blocks=diagram_blocks,
         review_warnings=review_warnings,
+        review_summary=review_summary,
     )
     result = post_classified_review(
         plan,
@@ -1140,6 +1148,10 @@ def post_findings_from_artifact(
         )
         return 0
 
+    from daydream.review_reporting import render_review_context
+
+    review_summary = render_review_context(artifact.review_context, artifact.terminal_result,
+        findings_count=len(artifact.findings)) if artifact.review_context is not None else None
     submission_plan = ClassifiedReviewPlan.from_classified(
         pr,
         classified,
@@ -1150,6 +1162,7 @@ def post_findings_from_artifact(
         renderers=renderers,
         diagram_blocks=diagram_blocks,
         review_warnings=review_warnings,
+        review_summary=review_summary,
     )
     result = post_classified_review(
         submission_plan,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -60,6 +61,28 @@ def retain_original_task(
         "dirty_tracked": dirty_tracked,
         "untracked_files_included": False,
     }
+
+
+def collect_verification(
+    deep: Path, read_json: Callable[[Path], Any], canonical_items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Read existing verification artifacts; callers own acquisition diagnostics.
+
+    This never executes checks or refreshes remote CI. Model verdicts remain raw
+    claims, distinct from the host execution attempts and their bound identities.
+    """
+    verification_names = {"recommendation-verdicts.json", "fix-outcomes.json", "fix-failures.json",
+                          "fix-quality-gate.json", "test-verdict.json", "recommended-capture.json",
+                          "fix-footprint.json", "push-verdict.json", "remote-ci-verdict.json"}
+    verification = {path.name: payload for path in sorted(deep.glob("*.json"))
+                    if path.name in verification_names and (payload := read_json(path)) is not None}
+    if verification:
+        verification["item_associations"] = [
+            {key: item[key] for key in ("id", "item_uid", "uid", "source_uids", "verify_decision",
+                                       "verifier_verdict", "verifier_reason", "unverified_assumptions") if key in item}
+            for item in canonical_items
+        ]
+    return verification
 
 
 def capture_run_record(
@@ -139,17 +162,7 @@ def capture_run_record(
                   and (payload := read_json(path)) is not None}
     coverage_path = deep / "review-coverage.json"
     coverage = read_json(coverage_path) if review_sources and coverage_path.is_file() else None
-    verification_names = {"recommendation-verdicts.json", "fix-outcomes.json", "fix-failures.json",
-                          "fix-quality-gate.json", "test-verdict.json", "recommended-capture.json",
-                          "fix-footprint.json", "push-verdict.json", "remote-ci-verdict.json"}
-    verification = {path.name: payload for path in sorted(deep.glob("*.json"))
-                    if review_sources and path.name in verification_names and (payload := read_json(path)) is not None}
-    if verification:
-        verification["item_associations"] = [
-            {key: item[key] for key in ("id", "item_uid", "uid", "source_uids", "verify_decision",
-                                       "verifier_verdict", "verifier_reason", "unverified_assumptions") if key in item}
-            for item in canonical_items
-        ]
+    verification = collect_verification(deep, read_json, canonical_items) if review_sources else {}
     patch_path = root / "recommended.patch"
     patch = patch_path.read_text(encoding="utf-8") if review_sources and patch_path.is_file() else None
     scoring_inputs = assemble_scoring_inputs(root) if review_sources else ScoringInputs(None, True, None)

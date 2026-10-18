@@ -260,6 +260,49 @@ async def test_successful_supporting_dependency_notes_reach_only_relevant_later_
     assert data['terminal_result']['analysis_state'] == 'complete'
     saved = json.loads((review.repo / '.daydream/deep/stack-python-records.json').read_text())
     assert [item['description'] for item in saved['issues']] == ([finding['description']] if seeded_defect else [])
+    # Reporting retains source conclusions without changing the original records
+    # that downstream merge/adjudication calls receive as sanctioned input.
+    assert set(saved) == {'issues', 'scope_id', 'analyzed_revision', 'originating_run_id'}
+    sidecar = json.loads((review.repo / '.daydream/deep/stack-python-report-context.json').read_text())
+    assert all(sidecar[key] == saved[key] for key in ('scope_id', 'analyzed_revision', 'originating_run_id'))
+    context = sidecar['review_context']
+    admitted = [event for event in stage_ends(review, 'python') if event['metadata']['admitted']]
+    assigned_ids = {target for stage in review.backend.stages if stage['scope_id'] == 'python'
+                    for target in stage['assigned_target_ids']}
+    assert context['admitted_stages'] == len(admitted)
+    assert context['target_decisions'] == {
+        'required': len(assigned_ids), 'reviewed': len(assigned_ids), 'not_reviewed': 0}
+    assert len(context['notes']) == len(admitted)
+    assert context['notes'][0]['text'] == conclusion
+    assert context['notes'][0]['origin'] == received[0]['origin']
+    assert context['notes'][0]['supporting_files'] == ['module_03.py']
+    assert context['notes_omitted'] == 0
+
+
+async def test_persisted_source_assertions_are_bounded_and_redacted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provider stage notes must not become an unbounded or credential-bearing report."""
+    review = many_file_review(tmp_path, monkeypatch, count=65, docs_count=0)
+
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        output['notes'] = 'Source-only assertion ghp_1234567890 {"token": "private-value"} ' + 'x' * 700
+
+    review.backend.stage_response = response
+    await review.finish('python')
+    saved = json.loads((review.repo / '.daydream/deep/stack-python-report-context.json').read_text())
+    context = saved['review_context']
+    admitted = [event for event in stage_ends(review, 'python') if event['metadata']['admitted']]
+    assert len(admitted) > 8 and context['admitted_stages'] == len(admitted)
+    assert context['target_decisions'] == {'required': 65, 'reviewed': 65, 'not_reviewed': 0}
+    assert len(context['notes']) == 8 and context['notes_omitted'] == len(admitted) - 8
+    assert all(len(note['text']) <= 512 and note['text'].endswith('[note clipped]') for note in context['notes'])
+    assert all('ghp_1234567890' not in note['text'] and 'private-value' not in note['text']
+               and '[REDACTED_API_KEY]' in note['text']
+               for note in context['notes'])
+    structural = json.loads((review.repo / '.daydream/deep/stack-structure-report-context.json').read_text())[
+        'review_context']
+    assert structural['target_decisions'] == {'required': 1, 'reviewed': 1, 'not_reviewed': 0}
+    assert len(structural['notes'][0]['files']) == 32
 
 
 async def test_optional_supporting_paths_are_confined_without_rejecting_valid_decisions(

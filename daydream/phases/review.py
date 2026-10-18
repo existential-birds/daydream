@@ -26,6 +26,7 @@ from daydream.config import (
 from daydream.deep.artifacts import (
     deep_dir,
     per_stack_records_path,
+    per_stack_report_context_path,
     per_stack_review_path,
     write_review_markdown,
 )
@@ -39,11 +40,11 @@ from daydream.deep.reuse_key import (
     digest_text,
     shard_key_payload,
 )
-from daydream.deep.reuse_store import ReuseCache
+from daydream.deep.reuse_store import ReuseCache, entry_dir
 from daydream.deep.review_reuse import ReviewReuseUnit
 from daydream.extensions import Registry, get_registry
 from daydream.hunk_index import load_hunk_index
-from daydream.json_utils import validates_schema
+from daydream.json_utils import atomic_write_bytes, atomic_write_json, validates_schema
 from daydream.observability.spans import stack_scope
 from daydream.phases.inputs import (
     _budgeted_exploration_inputs,
@@ -69,6 +70,7 @@ from daydream.review_budget import (
 )
 from daydream.review_evidence import FinalizationContext
 from daydream.review_investigation import ReviewInvestigation
+from daydream.review_rationale import valid_scope_review_context
 from daydream.review_result import ReasonCode, ReviewCoverage, reason_for_budget, reason_for_exception
 from daydream.review_stage_inputs import StageInputFactory
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
@@ -466,6 +468,10 @@ async def phase_per_stack_reviews(
     ) as dispatch:
         async def _review_stack_impl(stack: "StackAssignment") -> None:
             output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
+            context_path = per_stack_report_context_path(deep_dir_path, stack.stack_name)
+            # A legacy reuse entry contains no report sidecar. It must never
+            # inherit reporting assertions from a previous invocation.
+            context_path.unlink(missing_ok=True)
             base_stack = base_stack_name(stack.stack_name)
             prompt_name, strategy_name = {STRUCTURE_STACK_NAME: ("structural", "discovery.structural"),
                 GENERIC_STACK: ("generic-fallback", "discovery.generic_fallback"),
@@ -528,6 +534,18 @@ async def phase_per_stack_reviews(
                     except (OSError, ValueError):
                         cache_valid = False
                     if cache_valid:
+                        # Reporting is optional and cannot invalidate completed
+                        # review inputs or trigger another model investigation.
+                        cached_context = hit.payload_dir / context_path.name
+                        try:
+                            if cached_context.is_file() and cached_context.stat().st_size <= 65536:
+                                raw_context = cached_context.read_bytes()
+                                if valid_scope_review_context(json.loads(raw_context), scope_id=stack.stack_name,
+                                        analyzed_revision=coverage.revision.to_dict(),
+                                        originating_run_id=restored['originating_run_id']):
+                                    atomic_write_bytes(context_path, raw_context)
+                        except (OSError, ValueError, TypeError):
+                            pass  # Optional rationale remains unavailable; validated review still reuses.
                         reuse_unit.record_hit(hit)
                         results[stack.stack_name] = output_path
                         coverage.record_scope(stack.stack_name, "complete")
@@ -535,6 +553,7 @@ async def phase_per_stack_reviews(
                     ui.print_warning(agent.console,
                                      f"Cached records for {stack.stack_name} are invalid; rerunning review")
             per_stack_records_path(deep_dir_path, stack.stack_name).unlink(missing_ok=True)
+            context_path.unlink(missing_ok=True)
             prompt_args: dict[str, Any] = {
                 "strategy": strategies[strategy_name],
                 "files": stack.files,
@@ -626,8 +645,8 @@ async def phase_per_stack_reviews(
                         json.dumps({"issues": issues,
                                     **({"incomplete": True} if budget_reason else {}),
                                     "scope_id": stack_name,
-                                        "analyzed_revision": coverage.revision.to_dict(),
-                                        "originating_run_id": coverage.run_id},
+                                    "analyzed_revision": coverage.revision.to_dict(),
+                                    "originating_run_id": coverage.run_id},
                                    indent=2)
                     )
                     write_review_markdown(output_path, issues)
@@ -636,6 +655,14 @@ async def phase_per_stack_reviews(
                         reasons=(*coverage.scopes[stack_name]["reason_codes"], ReasonCode.MALFORMED_ARTIFACT),
                         diagnostic=f"{type(exc).__name__}: reviewer artifact publication failed")
                     return
+                try:
+                    atomic_write_json(context_path, {
+                        'scope_id': stack_name, 'analyzed_revision': coverage.revision.to_dict(),
+                        'originating_run_id': coverage.run_id, 'review_context': investigation.review_context(),
+                    })
+                except (OSError, ValueError, TypeError) as exc:
+                    ui.print_warning(agent.console,
+                        f'Source rationale unavailable for {stack_name}: {type(exc).__name__}')
                 results[stack_name] = output_path
                 if budget_reason is None:
                     coverage.record_scope(stack_name, "complete")
@@ -643,6 +670,14 @@ async def phase_per_stack_reviews(
                     records_path = per_stack_records_path(deep_dir_path, stack_name)
                     reuse_unit.store(lambda: {records_path.name: records_path.read_bytes(),
                                              output_path.name: output_path.read_bytes()})
+                    # Store optional presentation beside the completed entry,
+                    # outside its required, hash-verified model-input payload.
+                    if reuse_unit.key is not None and context_path.is_file():
+                        try:
+                            cached_context = entry_dir(reuse_unit.cache.store_dir, reuse_unit.key) / context_path.name
+                            atomic_write_bytes(cached_context, context_path.read_bytes())
+                        except (OSError, ValueError, TypeError):
+                            pass  # Cache/report availability cannot change admitted review work.
 
         async def _review_stack(stack: "StackAssignment") -> None:
             try:
