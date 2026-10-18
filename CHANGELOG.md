@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **capture:** retain the owned OTel root trace ID in new JSONL run records when available, including failed and cooperatively interrupted runs ([#1515](https://github.com/existential-birds/daydream/issues/1515)).
+
 - **routing:** inspect JavaScript/TypeScript source and bounded local package/JSX metadata before selecting React review; preserve explicit stack rules and generic ownership through automatic tiny-diff routing ([#1287](https://github.com/existential-birds/daydream/issues/1287)).
 
 - **review:** give a complete ignored-dependency search example with required positional roots and an explicit expansion reason ([#1584](https://github.com/existential-birds/daydream/issues/1584)).

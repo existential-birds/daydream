@@ -1,16 +1,24 @@
 """Real run -> raw record -> typed history, including producer failures."""
 import asyncio
 import hashlib
+import json
+import re
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
+from opentelemetry import trace
+from opentelemetry.sdk.trace import Tracer
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 
-from daydream import git_ops
+from daydream import git_ops, runner
 from daydream.backends import AgentEvent, ToolResultEvent, ToolStartEvent
 from daydream.dataset import LocalRecordStore, StoreError, parse_observation
+from daydream.extensions import Registry, build_registry
+from daydream.observability.config import ObservabilityConfig
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from daydream.training.labeler_versions import reply_evidence_digest
@@ -94,24 +102,57 @@ def captured(config: RunConfig) -> dict[str, Any]:
     return records.runs[0]
 
 
+@pytest.fixture
+def memory_exporters(monkeypatch: pytest.MonkeyPatch) -> list[InMemorySpanExporter]:
+    exporters: list[InMemorySpanExporter] = []
+
+    def factory(config: ObservabilityConfig) -> InMemorySpanExporter:
+        exporter = InMemorySpanExporter()
+        exporters.append(exporter)
+        return exporter
+
+    def registry() -> Registry:
+        result = build_registry()
+        result.register_trace_exporter("memory", factory)
+        return result
+
+    monkeypatch.setattr(runner, "build_registry", registry)
+    return exporters
+
+
+def owned_trace_id(exporter: InMemorySpanExporter, run_id: str) -> str:
+    root, = [span for span in exporter.get_finished_spans() if span.name == "daydream.run"]
+    assert root.context is not None and root.parent is None
+    assert (root.attributes or {})["daydream.session.id"] == run_id
+    identity = format(root.context.trace_id, "032x")
+    assert re.fullmatch("[0-9a-f]{32}", identity) and identity != "0" * 32
+    return identity
+
+
+@pytest.mark.parametrize("tracing", [False, True])
 @pytest.mark.parametrize("shallow", [False, True])
 async def test_dirty_original_input_and_history_without_archive_or_findings_export(
-    config: RunConfig, shallow: bool,
+    config: RunConfig, shallow: bool, tracing: bool, memory_exporters: list[InMemorySpanExporter],
 ) -> None:
-    config = replace(config, shallow=shallow, stack="python" if shallow else None)
+    config = replace(config, shallow=shallow, stack="python" if shallow else None,
+                     observability=ObservabilityConfig(destinations=("memory",) if tracing else ()))
     repo = Path(config.target or "")
     head = git_ops.head_sha(repo)
     base = git_ops.resolve_diff_merge_base(repo, "main", head)
     (repo / "api.py").write_text(f"# tracked dirty input: {_SENSITIVE}\n")
     diff = git_ops.diff(repo, "main")
-    assert await run(config) == 0
+    ambient = NonRecordingSpan(SpanContext(123, 456, False, TraceFlags(TraceFlags.SAMPLED)))
+    with trace.use_span(ambient):
+        assert await run(config) == 0
     raw = captured(config)
     task = raw["original_task"]["value"]
     assert task["diff"] == diff and task["diff_sha256"] == hashlib.sha256(diff.encode()).hexdigest()
     assert "redaction" not in task and "source_diff_sha256" not in task
     assert (task["analyzed_revision"]["head_sha"], task["analyzed_revision"]["merge_base_sha"]) == (head, base)
     assert task["input_scope"] == "committed_and_tracked_worktree" and task["dirty_tracked"]
-    assert raw["outcome"] == "success" and raw["trace_id"] is None
+    expected_trace = owned_trace_id(memory_exporters[0], raw["run_id"]) if tracing else None
+    assert expected_trace != format(123, "032x")
+    assert raw["outcome"] == "success" and raw["trace_id"] == expected_trace
     item = raw["findings"]["value"]["items"][0]
     assert item["item_uid"] and item["fingerprint"] and raw["trajectories"]["status"] == "available"
     assert raw["verification"]["status"] == "unproduced"
@@ -131,6 +172,9 @@ async def test_dirty_original_input_and_history_without_archive_or_findings_expo
         "captured_sha256": hashlib.sha256(text.encode()).hexdigest()}))
     assert config.dataset_store_path is not None
     store = LocalRecordStore(config.dataset_store_path)
+    disk_record, = (store.root / "runs").glob("*.jsonl")
+    assert json.loads(disk_record.read_bytes())["trace_id"] == expected_trace
+    assert store.read_records()["runs"][0]["trace_id"] == expected_trace
     assert store.append_observation(correction).committed and not store.append_observation(correction).committed
     restored = read_records(store).observations[0]
     assert restored["semantic_evidence"] == replies and restored["evidence_digest"] == reply_evidence_digest(replies)
@@ -145,6 +189,7 @@ async def test_dirty_original_input_and_history_without_archive_or_findings_expo
     later = {**correction, "observation_id": "suggestion", "role": "model-suggested", "author": "model"}
     store.append_observation(later)
     assert store.read_snapshot(pinned["snapshot_id"]).observations == (correction,)
+    assert store.read_snapshot(pinned["snapshot_id"]).runs[0]["trace_id"] == expected_trace
     newer = read_records(store)
     assert {obs["observation_id"] for obs in newer.observations} == {correction["observation_id"], "suggestion"}
     assert next(obs for obs in newer.observations if obs["observation_id"] == "suggestion")["review_required"]
@@ -193,9 +238,12 @@ async def test_failed_attempt_and_child_registration_without_tracing(
         f"{raw['run_id']}:dispatch:1:fork:{i}" for i in range(1, 5)]
 
 
+@pytest.mark.parametrize("tracing", [False, True])
 async def test_interruption_retains_task_and_partial_tool_after_worktree_teardown(
     config: RunConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    tracing: bool, memory_exporters: list[InMemorySpanExporter],
 ) -> None:
+    config = replace(config, observability=ObservabilityConfig(destinations=("memory",) if tracing else ()))
     repo = Path(config.target or "")
     backend = ScriptedBackend(events=[ToolStartEvent("interrupted-tool", "Read", {"file_path": "api.py"}),
                                       asyncio.CancelledError()])
@@ -210,9 +258,99 @@ async def test_interruption_retains_task_and_partial_tool_after_worktree_teardow
     assert cwd != repo and not cwd.exists()
     raw = captured(config)
     assert raw["outcome"] == "interrupted" and raw["original_task"]["value"]["diff"] == diff
+    assert raw["trace_id"] == (owned_trace_id(memory_exporters[0], raw["run_id"]) if tracing else None)
     documents = raw["trajectories"]["value"]["documents"]
     assert documents[0]["extra"]["target_dir"] == str(repo)
     assert any(doc.get("extra", {}).get("partial") for doc in documents)
     assert any(result.get("extra", {}).get("status") == "interrupted" for doc in documents
         for step in doc["steps"] for result in step.get("observation", {}).get("results", []))
     assert raw["recommended_patch"]["status"] == "unproduced"
+
+
+async def test_terminal_failure_retains_owned_trace_and_partial_evidence(
+    config: RunConfig, monkeypatch: pytest.MonkeyPatch, memory_exporters: list[InMemorySpanExporter],
+) -> None:
+    backend = ScriptedBackend(events=[ToolStartEvent("failed-tool", "Read", {"file_path": "api.py"}),
+                                      RuntimeError("terminal offline failure")])
+    monkeypatch.setattr(runner, "create_backend", lambda *args, **kwargs: backend)
+    config = replace(config, shallow=True, stack="python", observability=ObservabilityConfig(destinations=("memory",)))
+    with pytest.raises(RuntimeError, match="terminal offline failure"):
+        await run(config)
+    raw = captured(config)
+    assert raw["outcome"] == "failed"
+    assert raw["trace_id"] == owned_trace_id(memory_exporters[0], raw["run_id"])
+    assert raw["original_task"]["status"] == "available"
+    documents = raw["trajectories"]["value"]["documents"]
+    assert any(tool["tool_call_id"] == "failed-tool" for doc in documents for step in doc["steps"]
+               for tool in step.get("tool_calls", []))
+    assert any(doc.get("extra", {}).get("partial") for doc in documents)
+
+
+@pytest.mark.parametrize("fault", ["start", "invalid", "context"])
+async def test_unavailable_owned_trace_captures_null_despite_ambient_context(
+    config: RunConfig, monkeypatch: pytest.MonkeyPatch, memory_exporters: list[InMemorySpanExporter], fault: str,
+) -> None:
+    start_span = Tracer.start_span
+
+    class BrokenContext(NonRecordingSpan):
+        def get_span_context(self) -> SpanContext:
+            raise RuntimeError("owned context unavailable")
+
+    def start(self: Tracer, name: str, *args: Any, **kwargs: Any) -> trace.Span:
+        if name == "daydream.run":
+            if fault == "start":
+                raise RuntimeError("owned root unavailable")
+            context = SpanContext(0, 0, False)
+            return BrokenContext(context) if fault == "context" else NonRecordingSpan(context)
+        return start_span(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(Tracer, "start_span", start)
+    ambient = NonRecordingSpan(SpanContext(123, 456, False, TraceFlags(TraceFlags.SAMPLED)))
+    with trace.use_span(ambient):
+        assert await run(replace(config, shallow=True, stack="python",
+                                 observability=ObservabilityConfig(destinations=("memory",)))) == 0
+    assert len(memory_exporters) == 1
+    raw = captured(config)
+    assert raw["trace_id"] is None and raw["outcome"] == "success"
+    assert _SENSITIVE in (Path(config.target or "") / ".review-output.md").read_text()
+
+
+async def test_concurrent_captures_keep_owned_roots_under_ambient_trace(
+    config: RunConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    memory_exporters: list[InMemorySpanExporter],
+) -> None:
+    repo = Path(config.target or "")
+    other = tmp_path / "other-repo"
+    git(tmp_path, "clone", "--quiet", str(repo), str(other))
+    git(other, "branch", "main", "origin/main")
+    configs = [replace(config, target=str(target), dataset_store_path=tmp_path / f"records-{index}",
+                       base="main", shallow=True, stack="python",
+                       observability=ObservabilityConfig(destinations=("memory",)))
+               for index, target in enumerate((repo, other))]
+    active = 0
+    both_active = asyncio.Event()
+
+    class ConcurrentBackend(StubBackend):
+        async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            nonlocal active
+            active += 1
+            if active == 2:
+                both_active.set()
+            await asyncio.wait_for(both_active.wait(), 10)
+            async for event in super().execute(cwd, prompt, *args, **kwargs):
+                yield event
+
+    monkeypatch.setattr(runner, "create_backend", lambda *args, **kwargs: ConcurrentBackend(repo))
+    ambient = NonRecordingSpan(SpanContext(123, 456, False, TraceFlags(TraceFlags.SAMPLED)))
+    with trace.use_span(ambient):
+        assert await asyncio.gather(*(run(candidate) for candidate in configs)) == [0, 0]
+    roots = {}
+    for exporter in memory_exporters:
+        root, = [span for span in exporter.get_finished_spans() if span.name == "daydream.run"]
+        run_id = (root.attributes or {})["daydream.session.id"]
+        assert isinstance(run_id, str)
+        roots[run_id] = owned_trace_id(exporter, run_id)
+    records = [captured(candidate) for candidate in configs]
+    assert len(roots) == 2 and len(set(roots.values())) == 2
+    for raw in records:
+        assert raw["trace_id"] == roots[raw["run_id"]] != format(123, "032x")

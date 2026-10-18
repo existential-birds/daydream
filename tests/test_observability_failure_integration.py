@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import textwrap
@@ -11,6 +12,8 @@ from typing import Any
 
 import anyio
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from daydream import runner
 from daydream.backends import (
@@ -31,6 +34,7 @@ from daydream.backends import (
 from daydream.backends.codex import CodexBackend, CodexError
 from daydream.backends.pi import PiBackend
 from daydream.dataset import LocalRecordStore
+from daydream.extensions import Registry, build_registry
 from daydream.observability.config import ObservabilityConfig
 from daydream.prompts.grounding import REPOSITORY_SEARCH_GUIDANCE
 from daydream.run_config import RunConfig
@@ -581,8 +585,60 @@ async def test_runner_export_outage_warns_and_preserves_review_result_and_output
     records = store.read_snapshot(store.select_snapshot(observed_before="2100-01-01T00:00:00Z"))
     assert len(records.runs) == 1
     assert records.runs[0]["outcome"] == "success"
+    trace_id, = {base64.b64decode(root["traceId"]).hex() for root in _kind(collector.spans, "run")}
+    assert len(trace_id) == 32 and int(trace_id, 16) != 0
+    assert records.runs[0]["trace_id"] == trace_id
     assert records.runs[0]["trajectories"]["status"] == "available"
     assert "review completed during outage" in json.dumps(records.runs[0]["trajectories"]["value"])
+
+
+@pytest.mark.parametrize(("outage", "warning"), [
+    ("flush", "Trace processor flush failed"),
+    ("shutdown", "Trace exporter shutdown failed"),
+])
+async def test_runner_cleanup_outage_preserves_captured_root_and_review_output(
+    outage: str, warning: str, ext_dir: ExtDir, feature_branch_repo: Path,
+    make_config: Callable[..., RunConfig], install_backend: Callable[[object], object],
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    _flow(ext_dir)
+    install_backend(ScriptedBackend(events=[TextEvent("review completed during outage"), ResultEvent(None, None)]))
+    exporter = InMemorySpanExporter()
+    def with_memory_exporter() -> Registry:
+        registry = build_registry()
+        registry.register_trace_exporter("memory", lambda _: exporter)
+        return registry
+
+    monkeypatch.setattr(runner, "build_registry", with_memory_exporter)
+    if outage == "flush":
+        def fail_flush(_provider: TracerProvider, timeout_millis: int = 30000) -> bool:
+            raise RuntimeError("processor unavailable")
+        monkeypatch.setattr(TracerProvider, "force_flush", fail_flush)
+    else:
+        def fail_shutdown(_exporter: InMemorySpanExporter) -> None:
+            raise RuntimeError("exporter unavailable")
+        monkeypatch.setattr(InMemorySpanExporter, "shutdown", fail_shutdown)
+    config = make_config(feature_branch_repo, flow_name="trace-failures", dataset_capture=True,
+        dataset_store_path=feature_branch_repo.parent / "records",
+        observability=ObservabilityConfig(destinations=("memory",)))
+    with anyio.fail_after(15):
+        assert await runner.run(config) == 0
+    assert warning in caplog.text
+    assert json.loads((feature_branch_repo / _RESULT_FILE).read_text()) == {
+        "output": "review completed during outage", "aborted": None,
+    }
+    root, = [span for span in exporter.get_finished_spans()
+             if (span.attributes or {}).get("daydream.span.kind") == "run"]
+    assert root.context is not None
+    trace_id = f"{root.context.trace_id:032x}"
+    assert len(trace_id) == 32 and int(trace_id, 16) != 0
+    assert config.dataset_store_path is not None
+    store = LocalRecordStore(config.dataset_store_path)
+    records = store.read_snapshot(store.select_snapshot(observed_before="2100-01-01T00:00:00Z"))
+    record, = records.runs
+    assert record["outcome"] == "success" and record["trace_id"] == trace_id
+    assert "review completed during outage" in json.dumps(record["trajectories"]["value"])
+
 
 @pytest.mark.parametrize("interruption", ["supervisor", "tools", "wall"])
 async def test_runner_partial_outcome_preserves_veto_and_budget_reasons(

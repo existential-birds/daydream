@@ -15,6 +15,7 @@ from daydream.archive.provenance import capture_executable_provenance
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.deep.diff import _diff_changed_files
 from daydream.deep.records import item_source_uids, record_issues, record_uid
+from daydream.observability.runtime import current_run_trace_id
 from daydream.pr_review import compute_fingerprint, extract_item_fields, parsed_issues_from_items
 from daydream.timeutil import now_iso_utc
 from daydream.training.reward import DEFAULT_WEIGHTS, REWARD_VERSION, ScoringInputs, score_trajectory
@@ -195,6 +196,7 @@ def capture_run_record(
 
     LocalRecordStore(store_path).commit_run({"schema_version": "daydream.run.v1",
         "run_id": artifacts.session_id, "captured_at": selected.cutoff_at if selected else now_iso_utc(),
+        "trace_id": current_run_trace_id(),
         "outcome": outcome, "original_task": evidence(original_task, absent="unavailable"),
         "final_state": evidence({"head_sha": final_head}),
         "recommended_patch": evidence({
