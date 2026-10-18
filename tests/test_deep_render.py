@@ -1,5 +1,7 @@
 from typing import Any
 
+import pytest
+
 from daydream.deep.render import insert_diagrams_section, insert_review_context, render_held_section, render_report
 from tests.harness.review_result import terminal_result
 
@@ -88,7 +90,9 @@ def test_empty_report_retains_attributed_rationale_and_unproduced_checks_through
     assert 'Review warning' in once and held in once and 'Existing coverage' in once
 
 
-def test_recorded_checks_keep_failure_identity_and_anomalous_rationale_explicit() -> None:
+@pytest.mark.parametrize('outcome', ['failed', ['failed'], {'unexpected': 'failed'}],
+                         ids=['outcome-string', 'outcome-array', 'outcome-object'])
+def test_recorded_checks_keep_failure_identity_and_anomalous_rationale_explicit(outcome: Any) -> None:
     """Artifact prose cannot supply execution identity or trustworthy source attribution."""
     terminal = terminal_result('incomplete')
     context = {'scopes': [{'scope_id': 'python', 'originating_run_id': None,
@@ -97,7 +101,7 @@ def test_recorded_checks_keep_failure_identity_and_anomalous_rationale_explicit(
         'verification': {'status': 'available', 'value': {'test-verdict.json': {
         'status': 'executed', 'passed': False, 'attempts': [{'kind': 'host', 'command': ['pytest', '-q'],
         'passed': False, 'identity': {'head_sha': 'executed-head', 'session_id': 'executed-session',
-                                    'outcome': 'failed', 'kind': 'host', 'argv': ['pytest', '-q']}},
+                                    'outcome': outcome, 'kind': 'host', 'argv': ['pytest', '-q']}},
         {'kind': 'agent', 'command': ['claimed-check'], 'passed': True}]},
         'remote-ci-verdict.json': {'status': 'failed', 'head_sha': 'remote-head'}}}}
     report = render_report([], review_context=context, terminal_result=terminal)
@@ -105,7 +109,7 @@ def test_recorded_checks_keep_failure_identity_and_anomalous_rationale_explicit(
     assert 'Anomalous source attribution' in report and 'originating run <code>unavailable</code>' in report
     assert 'Everything passes' in report and 'not executable verification' in report
     assert all(value in report for value in ('pytest', 'executed-head', 'executed-session', 'failed', 'remote-head'))
-    assert 'Checks actually executed' in report
+    assert ('Checks actually executed' in report) == (outcome == 'failed')
     assert 'Other test assertions or no-execution records do not establish host execution' in report
     assert 'does not refresh GitHub status' in report
     assert 'Source rationale unavailable' in render_report([], review_context={})

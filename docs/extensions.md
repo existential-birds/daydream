@@ -511,7 +511,7 @@ produce sanitized diagnostics and preserve the review outcome. Read
 | Slot | Signature | Output |
 |------|-----------|--------|
 | `finding` | `(finding: CommentFinding, ctx: FindingRenderContext) -> str` | Inner finding Markdown |
-| `summary` | `(ctx: SummaryContext) -> str` | Body between approval line and footer |
+| `summary` | `(ctx: SummaryContext) -> str` | Inner summary body before the footer |
 
 `CommentFinding` exposes `path`, `line`, `title`, `body`, `is_cross_stack`,
 `severity`, `confidence`, and `fingerprint`. `ctx.placement` is `inline`,
@@ -522,9 +522,11 @@ host-rendered `body_block`.
 
 Preserve each `body_block` verbatim: it contains the dedup marker needed to
 prevent duplicate posts. Include `ctx.diagrams` verbatim to retain grounded
-diagrams in posted summaries. The host wraps renderer output with the footer,
-separators/details scaffolding, approval line, and review event decision;
-renderers control only inner content. Exceptions, empty output, or non-string
+diagrams in posted summaries. The host adds the actionable-comment count,
+incomplete-review warnings, linked reviewed commit, footer and review event decision.
+`ctx.review_info` contains the host-built `Run details` dropdown. The built-in
+summary places additional findings before diagrams, then the agent prompt and
+run details; custom renderers control this inner content. Exceptions, empty output, or non-string
 returns log a warning naming the slot and fall back to its built-in renderer.
 
 ## Working artifact paths

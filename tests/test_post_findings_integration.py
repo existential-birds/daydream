@@ -267,13 +267,13 @@ def test_bot_login_env_fallback(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh
     assert code == 0
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 0
 
-@pytest.mark.parametrize(("severity", "expected_event", "expect_clean_marker"),
-    [pytest.param("low", "APPROVE", True, id="low-severity-approves"),
-        pytest.param("high", "COMMENT", False, id="high-severity-keeps-comment"),
+@pytest.mark.parametrize(("severity", "expected_event"),
+    [pytest.param("low", "APPROVE", id="low-severity-approves"),
+        pytest.param("high", "COMMENT", id="high-severity-keeps-comment"),
     ],
 )
 def test_post_findings_approve_on_clean_reflects_finding_severity(
-    fake_gh: FakeGh, tmp_path: Path, severity: str, expected_event: str, expect_clean_marker: bool,
+    fake_gh: FakeGh, tmp_path: Path, severity: str, expected_event: str,
 ) -> None:
     artifact = _write_artifact(tmp_path / "f.json", [_inline_finding("Finding", severity=severity)],)
     code = cli_main(_post_argv(artifact) + ["--approve-on-clean"])
@@ -281,7 +281,7 @@ def test_post_findings_approve_on_clean_reflects_finding_severity(
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1
     assert posts[0].payload["event"] == expected_event
-    assert ("no high/medium findings" in posts[0].payload["body"]) is expect_clean_marker
+    assert "Actionable comments posted: 1" in posts[0].payload["body"]
 
 def test_post_findings_approve_when_all_matched_and_clean_flag(fake_gh: FakeGh, tmp_path: Path) -> None:
     artifact = _write_artifact(tmp_path / "f.json", [_inline_finding("Nit", severity="low")],)
@@ -291,7 +291,7 @@ def test_post_findings_approve_when_all_matched_and_clean_flag(fake_gh: FakeGh, 
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1
     assert posts[0].payload["event"] == "APPROVE"
-    assert "no high/medium findings" in posts[0].payload["body"]
+    assert "Actionable comments posted: 0" in posts[0].payload["body"]
 
 def test_post_findings_all_matched_no_approve_without_flag(fake_gh: FakeGh, tmp_path: Path) -> None:
     artifact = _write_artifact(tmp_path / "f.json", [_inline_finding("Nit", severity="low")],)
@@ -736,11 +736,11 @@ def test_post_findings_final_failure_reports_writes_and_safe_recovery_path(
 
 @pytest.mark.parametrize("state", ["warning", "incomplete", "failed"])
 @pytest.mark.parametrize("has_finding", [False, True])
-@pytest.mark.parametrize('outcome', ['failed', ['failed'], {'unexpected': 'failed'}],
-                         ids=['outcome-string', 'outcome-array', 'outcome-object'])
 def test_unfinished_review_comments_without_approval_or_stale_resolution(
-    fake_gh: FakeGh, tmp_path: Path, state: str, has_finding: bool, outcome: Any,
+    fake_gh: FakeGh, tmp_path: Path, state: str, has_finding: bool,
 ) -> None:
+    # The CLI boundary must publish concise notices while retaining rich evidence in the artifact.
+    outcome = "failed"
     fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_OLD"], viewer_did_author=True)
     findings = [_finding("b" * 64, path="a.py", line=1, placement="inline", title="Survivor", severity="low")]
     path = tmp_path / "unfinished.json"
@@ -761,20 +761,18 @@ def test_unfinished_review_comments_without_approval_or_stale_resolution(
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1 and posts[0].payload["event"] == "COMMENT"
     body = posts[0].payload['body']
-    assert 'retained-run' in body and 'Source rationale unavailable' in body
-    if outcome == 'failed':
-        assert 'Checks actually executed' in body
+    assert 'Run:\n```text\nrun-1\n```' in body
+    for detail in ('Review outcome', 'Recorded analysis', 'Analyzed snapshot', 'Source rationale',
+                   'Checks actually executed', 'executed-head', 'executed-session', 'author-head',
+                   'Author reports CI passes.', 'retained-run'):
+        assert detail not in body
+    retained = json.loads(path.read_text())['review_context']
+    assert retained['verification']['value']['test-verdict.json']['attempts'][0]['identity']['outcome'] == outcome
+    assert retained['author_reported']['body'] == 'Author reports CI passes.'
+    if state == 'warning':
+        assert 'Alternatives: wall_budget_exceeded' in body and 'Review incomplete' in body
     else:
-        assert 'Checks actually executed' not in body
-        assert 'Other test assertions or no-execution records do not establish host execution' in body
-    assert json.loads(path.read_text())['review_context']['verification']['value']['test-verdict.json'][
-        'attempts'][0]['identity']['outcome'] == outcome
-    assert all(part in body for part in ('pytest', 'executed-head', 'executed-session', 'failed', 'author-head'))
-    assert 'Author reports CI passes.' in body and 'not independently executed or refreshed' in body
-    notice = "Alternatives: wall_budget_exceeded" if state == "warning" else f"analysis is {state}"
-    assert notice in posts[0].payload["body"]
-    if state == "warning":
-        assert "incomplete" in posts[0].payload["body"].lower()
+        assert f'Review {state}' in body and 'python: backend failure' in body
     assert len(posts[0].payload["comments"]) == int(has_finding)
     assert not any("minimizeComment" in c.payload.get("query", "") for c in fake_gh.calls("POST", "graphql"))
 

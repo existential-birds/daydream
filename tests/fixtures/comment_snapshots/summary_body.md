@@ -1,15 +1,14 @@
 <details>
-<summary>📋 Non-inline findings (2)</summary><blockquote>
+<summary>Additional findings (2)</summary>
 
-<details>
-<summary>a.py (1)</summary><blockquote>
+#### `a.py` (1)
 
 ⚠️ **T** | severity: `high` · confidence: `HIGH`
 
 B rationale
 
 <details>
-<summary>🔮 Prompt for AI Agents</summary>
+<summary>Fix with an agent</summary>
 
 ```
 Verify each finding against the current code and only fix it if needed.
@@ -20,16 +19,14 @@ In `a.py`, T: B rationale
 </details>
 <!-- daydream-finding: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->
 
-</blockquote></details>
-<details>
-<summary>b.py (1)</summary><blockquote>
+#### `b.py` (1)
 
 ⚠️ **T** | severity: `high` · confidence: `HIGH`
 
 B rationale
 
 <details>
-<summary>🔮 Prompt for AI Agents</summary>
+<summary>Fix with an agent</summary>
 
 ```
 Verify each finding against the current code and only fix it if needed.
@@ -40,6 +37,4 @@ In `b.py`, T: B rationale
 </details>
 <!-- daydream-finding: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -->
 
-</blockquote></details>
-
-</blockquote></details>
+</details>

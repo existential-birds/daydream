@@ -208,10 +208,9 @@ async def test_sequence_auto_trigger_renders_grounded_diagram(
     body = captured_post.body()
     assert SEQUENCE_HEADING in body
     assert FLOWCHART_HEADING not in body
-    # The block sits directly under the summary header, before any findings.
-    header = "**Code Review Summary**"
-    assert body.index(header) < body.index(SEQUENCE_HEADING)
-    assert body[body.index(header) + len(header) :].lstrip().startswith(SEQUENCE_HEADING)
+    # Keep the actionable total and reviewed commit visible before diagrams.
+    assert body.startswith("Actionable comments posted: 4\n\n")
+    assert body.index("Reviewed commit") < body.index(SEQUENCE_HEADING) < body.index("Run details")
     assert SEQUENCE_GOLDEN in body
     assert "| Call site |" not in body
 

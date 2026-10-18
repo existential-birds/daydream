@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from typing import Any
 
 from daydream.output_schema import strict_object
@@ -32,6 +33,57 @@ REVIEW_CONTEXT_SCHEMA = strict_object({
 REVIEW_CONTEXT_SCHEMA['properties']['verification']['required'].remove('omitted_artifacts')
 
 MAX_REVIEW_CONTEXT_CHARS = 20_000
+
+
+def render_github_review_context(
+    terminal_result: dict[str, Any] | None, *, review_warnings: tuple[str, ...] = (),
+) -> str:
+    """Show concise coverage warnings; detailed evidence belongs in local reports.
+
+    Warning absence cannot establish completion. Use the frozen, validated result
+    even when the optional report context or legacy diagnostic sidecars are absent.
+    """
+    from daydream.review_result import validate_terminal_result
+
+    if terminal_result is not None:
+        validate_terminal_result(terminal_result)
+    state = terminal_result['analysis_state'] if terminal_result is not None else None
+    outcomes = ([*terminal_result['stack_outcomes'], *terminal_result['phase_outcomes']]
+                if terminal_result is not None else [])
+    unfinished = [outcome for outcome in outcomes if outcome['status'] != 'complete']
+    unfinished_keys = {outcome.get('scope_id', outcome.get('phase')) for outcome in unfinished}
+    warnings = tuple(dict.fromkeys(review_warnings))
+    additional = [warning for warning in warnings
+                  if not any(warning.startswith(f'{key}: ') for key in unfinished_keys)]
+    if state == 'complete' and not additional:
+        return ''
+    heading = ('Review completeness unavailable' if state is None else
+               f'Review {state}' if state != 'complete' else 'Review incomplete')
+    lines = [f'⚠️ **{heading}.**']
+    for outcome in unfinished[:8]:
+        key = outcome.get('scope_id', outcome.get('phase'))
+        diagnostic = next((warning for warning in warnings if warning.startswith(f'{key}: ')), None)
+        if diagnostic is None:
+            diagnostic = f"{key}: " + ', '.join(reason.replace('_', ' ') for reason in outcome['reason_codes'])
+        lines.append('- ' + _text(diagnostic, 512))
+    if len(unfinished) > 8:
+        lines.append(f'- {len(unfinished) - 8} additional unfinished review steps; see run artifacts.')
+    if state not in {None, 'complete'} and not unfinished:
+        lines.append('Review did not finish; see run artifacts.')
+    lines.extend('- ' + _text(warning, 512) for warning in additional[:8])
+    if len(additional) > 8:
+        lines.append(f'- {len(additional) - 8} additional notices; see run artifacts.')
+    return '\n\n'.join(lines)
+
+
+def render_review_run_id(terminal_result: dict[str, Any] | None) -> str:
+    """Render an already-validated run identity without letting it escape its fence."""
+    if terminal_result is None:
+        return ''
+    run_id = redact_structured_text(terminal_result['run_id'])[:512].replace('\r', ' ').replace('\n', ' ')
+    longest_fence = max((len(match.group()) for match in re.finditer(r'`+', run_id)), default=0)
+    fence = '`' * max(3, longest_fence + 1)
+    return f'Run:\n{fence}text\n{run_id}\n{fence}'
 
 
 def _text(value: Any, limit: int = 1024) -> str:

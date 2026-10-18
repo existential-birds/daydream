@@ -28,7 +28,9 @@ from daydream.pr_review import (
     snap_to_hunk,
 )
 from daydream.reconcile import PriorDiagramComment
+from daydream.review_reporting import render_github_review_context
 from daydream.reviews.rendering import (
+    build_payload_for_event,
     format_comment_body,
 )
 from daydream.run_config import RunConfig
@@ -37,7 +39,7 @@ from daydream.runner import _emit_findings_from_items
 from tests.harness.git_helpers import git as _git
 from tests.harness.review_payload import payload_for
 from tests.harness.review_profile import sample_pr
-from tests.harness.review_result import terminal_result
+from tests.harness.review_result import review_coverage, terminal_result
 
 # gh-gated: tests that stub gh's subprocess are skipped when gh is not installed.
 
@@ -106,6 +108,8 @@ def test_custom_summary_renderer_can_build_collapsible_per_finding_list(pr: PRIn
         run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
     )
     body = payload["body"]
+    assert body.startswith("Actionable comments posted: 1\n\n")
+    assert body.index("Reviewed commit") < body.index("**Custom Summary**")
     assert "**Custom Summary**" in body
     assert "<summary>b.py — File note</summary>" in body
     assert parse_finding_markers(body) == ["b" * 64]
@@ -257,6 +261,78 @@ def test_build_payload_reviewed_commit_links_fork_for_fork_head_pr(pr: PRInfo,) 
     body = payload["body"]
     assert "- **Reviewed commit:** [`head123`](https://github.com/forky/widgets/commit/head123)" in body
     assert "https://github.com/acme/widgets/commit/head123" not in body
+
+
+@pytest.mark.parametrize("has_findings", [False, True])
+def test_payload_prioritizes_actionable_comments_and_warnings(pr: PRInfo, has_findings: bool) -> None:
+    """The delivered Markdown must expose all placements and warnings before secondary details.
+
+    Existing extension fallback tests preserve renderer selection, but do not catch hidden
+    warnings, double-collapsed findings, or a total that omits separate review threads.
+    """
+    classified = pr_review.ClassifiedIssues()
+    if has_findings:
+        classified = pr_review.ClassifiedIssues(
+            inline=[_inline()],
+            inline_issues=[ParsedIssue(path="a.py", line=10, title="Inline", body="Inline rationale")],
+            file_level=[ParsedIssue(path="b.py", line=None, title="File", body="File rationale")],
+            body_only=[ParsedIssue(path="c.py", line=None, title="Summary", body="Summary rationale",
+                                   fingerprint="c" * 64)],
+        )
+    warnings = ("Python review timed out.", "Transport evidence unavailable.", "Validation was not run.")
+    body = build_payload_for_event(
+        pr, classified, event=pr_review.ReviewEvent.APPROVE, run_info="Fixture run info",
+        renderers=BUILTIN_RENDERERS, diagram_blocks="<details>Fixture diagram</details>",
+        review_warnings=warnings,
+        review_summary=render_github_review_context(terminal_result("incomplete"), review_warnings=warnings),
+    ).body
+
+    assert body.startswith(f"Actionable comments posted: {3 if has_findings else 0}\n\n")
+    assert body.index("Review incomplete") < body.index("Validation was not run") < body.index("Reviewed commit")
+    assert body.count("Review incomplete") == 1
+    assert body.count("Python review timed out.") == 1
+    assert "Transport evidence unavailable." in body
+    assert body.index("Reviewed commit") < body.index("Fixture diagram") < body.index("Run details")
+    assert body.index("Run details") < body.index("Fixture run info")
+    assert "Deep review passed" not in body
+    assert "Code Review Summary" not in body
+    if has_findings:
+        assert body.index("Additional findings (1)") < body.index("Fixture diagram")
+        assert "#### `c.py` (1)" in body
+        assert "<summary>c.py" not in body
+        assert "Summary rationale" in body
+        assert parse_finding_markers(body) == ["c" * 64]
+        assert body.count("<summary>Fix with an agent</summary>") == 2
+    else:
+        assert "Additional findings" not in body
+        assert "Fix with an agent" not in body
+
+
+@pytest.mark.parametrize("with_terminal_result", [False, True])
+def test_payload_keeps_warning_display_bounded(pr: PRInfo, with_terminal_result: bool) -> None:
+    """S1: payload assembly must not restore terminal diagnoses omitted from its summary.
+
+    The reporting helper's own bound does not catch rendering all legacy warning
+    diagnoses again after the summary. Legacy-only callers need the same bound.
+    """
+    warnings = tuple(f"stack-{index:02}: reviewer timed out" for index in range(12))
+    summary = None
+    if with_terminal_result:
+        coverage = review_coverage(scope_ids=(f"stack-{index:02}" for index in range(12)), phases=())
+        warnings += ("Transport evidence unavailable.",)
+        summary = render_github_review_context(coverage.finalize("failed"), review_warnings=warnings)
+    body = build_payload_for_event(
+        pr, pr_review.ClassifiedIssues(), event=pr_review.ReviewEvent.COMMENT,
+        run_info="Fixture run info", renderers=BUILTIN_RENDERERS,
+        review_warnings=warnings, review_summary=summary,
+    ).body
+
+    assert body.count("reviewer timed out") == 8
+    assert "4 additional" in body
+    assert "stack-08:" not in body
+    assert "stack-11:" not in body
+    if with_terminal_result:
+        assert body.count("Transport evidence unavailable.") == 1
 
 
 

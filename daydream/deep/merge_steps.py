@@ -470,19 +470,28 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
     warnings = review_warnings(deep_state.dd)
     if warnings:
         pr_kwargs["review_warnings"] = warnings
-    from daydream.review_reporting import render_review_context
-    context = ctx.data.get('terminal_review_context')
-    if context is not None:
+    from daydream.review_reporting import render_github_review_context, render_review_run_id
+
+    run_markdown = run_info.markdown
+    result = ctx.data.get("terminal_review_result")
+    try:
+        pr_kwargs["review_summary"] = render_github_review_context(result, review_warnings=warnings)
+    except (OSError, ValueError, TypeError, RecursionError) as exc:
+        print_warning(console, f'Review summary unavailable: {type(exc).__name__}')
         try:
-            pr_kwargs["review_summary"] = render_review_context(context,
-                ctx.data.get("terminal_review_result"),
-                findings_count=len(ctx.data['terminal_review_items']))
-        except (OSError, ValueError, TypeError, RecursionError) as exc:
-            print_warning(console, f'Review summary unavailable: {type(exc).__name__}')
+            pr_kwargs["review_summary"] = render_github_review_context(None, review_warnings=warnings)
+        except (OSError, ValueError, TypeError, RecursionError):
+            pr_kwargs["review_summary"] = '⚠️ **Review completeness unavailable.**'
+    try:
+        run_id = render_review_run_id(result)
+        if run_id:
+            run_markdown += '\n\n' + run_id
+    except (ValueError, TypeError, KeyError, RecursionError) as exc:
+        print_warning(console, f'Review run identity unavailable: {type(exc).__name__}')
     outcome = await post_review_to_pr_from_report(
         ctx.work.repo,
         items_file,
-        run_info=run_info.markdown,
+        run_info=run_markdown,
         renderers=resolve_review_renderers(ctx.registry),
         console=console,
         post=deep_state.mode == "comment",

@@ -1148,20 +1148,22 @@ def post_findings_from_artifact(
         )
         return 0
 
-    from daydream.review_reporting import render_review_context
+    from daydream.review_reporting import render_github_review_context, render_review_run_id
 
-    review_summary = render_review_context(artifact.review_context, artifact.terminal_result,
-        findings_count=len(artifact.findings)) if artifact.review_context is not None else None
+    review_summary = (render_github_review_context(artifact.terminal_result, review_warnings=artifact.review_warnings)
+                      if artifact.kind == 'review' else '')
+    run_info = artifact.run_info if artifact.run_info is not None else render_run_info(())
+    run_id = render_review_run_id(artifact.terminal_result)
+    if run_id:
+        run_info += '\n\n' + run_id
     submission_plan = ClassifiedReviewPlan.from_classified(
         pr,
         classified,
         event=ReviewEvent.APPROVE if can_approve else ReviewEvent.COMMENT,
-        run_info=(
-            artifact.run_info if artifact.run_info is not None else render_run_info(())
-        ),
+        run_info=run_info,
         renderers=renderers,
         diagram_blocks=diagram_blocks,
-        review_warnings=review_warnings,
+        review_warnings=artifact.review_warnings,
         review_summary=review_summary,
     )
     result = post_classified_review(
