@@ -403,15 +403,19 @@ within the allocation/deadline. Host limits count observed starts rather than
 prospectively admitting tools; budget stops preserve admitted findings and
 truthful incomplete coverage.
 
-Bounded native Pi calls replace one live budget note before each model request.
-It gives one attempt-local remaining-call count, including final submission;
-failed calls, parallel members, and submissions each count. Transport retries
-reset the native counter against their effective attempt allowance; cumulative
-host accounting and recorded evidence remain authoritative. Unbounded calls
-remain unbounded.
+Native Pi sends no recurring budget notes. When exactly one call remains, it may
+emit one concise final-submission system instruction per native attempt, including
+the assigned objective and identities when available. Failed calls, invalid
+submissions, parallel members, and submissions each count. Transport retries
+reset local warning state against their reduced effective attempt allowance;
+cumulative host accounting and recorded evidence remain authoritative. Unbounded
+calls remain unbounded. A parallel batch may leave zero or negative capacity
+directly; the warning never implies submission capacity then or delays host
+exhaustion enforcement. Host budget/pacing instructions do not become synthetic
+user turns and do not require polling. Bounded missing-submission recovery uses
+a separate system instruction.
 
-Use the refreshed count without recounting history. Reserve one
-`structured_output` call; continue concrete unresolved assigned checks while
+Reserve one `structured_output` call; continue concrete unresolved assigned checks while
 tool/time capacity permits, and submit when checks settle. Unused capacity is
 expected. With only submission capacity left, submit truthful incomplete
 decisions for unfinished work. At zero, report exhaustion without implying

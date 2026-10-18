@@ -884,14 +884,18 @@ assignments and submission capacity for known pending triage. Future-stage reser
 current invocation's allocation; the reviewer need not subtract them again.
 The host stops before dispatch if the current stage's minimum input-read and submission needs cannot fit. Reservations
 do not guarantee model completion: observed tool starts can arrive after execution, and a stage that spends its own
-allowance without submitting remains incomplete. Before each bounded native Pi model request, one refreshed note
-shows the backend attempt's remaining tool calls, including final submission. Each individual call counts, including
-failed tools, parallel batch members and structured submissions. The native counter starts anew for each transport
-retry against its effective allowance; cumulative host accounting remains unchanged. Use the refreshed count rather
-than recounting history. Keep one call for `structured_output`, continue concrete unresolved assigned checks while
-tool/time capacity permits, and submit when those checks settle; unused capacity is expected. With only one call left,
-submit truthful incomplete decisions for unfinished work. At zero, there is no submission capacity. This guidance
-preserves ordinary tool access, host enforcement and recorded provider proposals. One fresh full-stage retry
+allowance without submitting remains incomplete. Native Pi emits no recurring budget messages. At most one concise
+final-submission warning per native attempt appears as a system instruction when exactly one call remains, with the
+assigned objective and identities when available. Each individual call counts, including failed tools, invalid
+submissions, parallel batch members and structured submissions. Warning state starts anew for each transport retry
+against its reduced effective allowance; cumulative host accounting remains unchanged. Keep one call for
+`structured_output`, continue concrete unresolved assigned checks while tool/time capacity permits, and submit when
+those checks settle; unused capacity is expected. With only one call left, submit truthful incomplete decisions for
+unfinished work. A parallel batch may leave zero or negative capacity directly; no warning implies available
+submission capacity then, and host exhaustion enforcement does not wait for a warning. Host instructions never add
+synthetic user turns or require polling. The bounded missing-submission recovery remains a separate system
+instruction. This guidance preserves ordinary tool access, host enforcement and recorded provider proposals.
+One fresh full-stage retry
 is permitted after a normally completed text-mode
 invocation fails strict schema validation and passes the domain rejection guard; only safe validator metadata
 carries over, never rejected output. Syntax, envelope, ambiguity and native-output failures are terminal. Other

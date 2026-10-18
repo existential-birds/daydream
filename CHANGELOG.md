@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **pi:** replace recurring native budget messages with at most one final-submission system warning per attempt, and deliver bounded missing-submission recovery through system instructions. Existing extension API fields, allowances, cumulative host accounting and submission admission remain compatible; no migration is required ([#1595](https://github.com/existential-birds/daydream/issues/1595)).
+
 - **workflows:** use standard GitHub-hosted Ubuntu 24.04 runners for repository CI and packaged review workflows, removing the third-party runner subscription requirement.
 
 - **review:** simplify GitHub review comments with an actionable-comment total, prominent incomplete-review warnings, a linked reviewed commit, flatter additional findings and consolidated run details with a copyable run UUID; remove generic agent fix prompts and retain detailed analysis and evidence in local reports and artifacts.

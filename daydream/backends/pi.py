@@ -215,7 +215,8 @@ def render_pi_preamble(wall_budget_s: float | None, tool_call_budget: int | None
         allowance = (
             f"Attempt dispatch-time snapshot: effective wall allowance is {wall}; "
             f"tool-call allocation is {int(tool_call_budget)} calls. "
-            "For bounded native output, use the refreshed attempt-local remaining-call count during execution."
+            "Each call counts, including failed calls, parallel batch members and structured submissions. "
+            "Reserve one call for structured_output when native submission is required."
         )
     return _PI_PREAMBLE_TEMPLATE.format(allowance=allowance, starting_method=(
         '- Follow the active stage method and persistent exact access guide when choosing where to start.'
@@ -224,6 +225,34 @@ def render_pi_preamble(wall_budget_s: float | None, tool_call_budget: int | None
 
 
 _PI_SYSTEM_PREAMBLE = render_pi_preamble(DEFAULT_WALL_BUDGET_S, DEFAULT_TOOL_CALL_BUDGET)
+
+
+def _pi_submission_assignment(review_instructions: str | None) -> dict[str, Any] | None:
+    """Project only the stage builder's explicit assignment, never conversation history.
+
+    Oversized or malformed metadata is omitted whole: full original assignments
+    remain in the system instructions, and identities are never truncated.
+    """
+    prefix = "Daydream final-submission assignment: "
+    lines = [line[len(prefix):] for line in (review_instructions or "").splitlines() if line.startswith(prefix)]
+    if len(lines) != 1 or len(lines[0].encode("utf-8")) > 4096:
+        return None
+    try:
+        value = json.loads(lines[0])
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(value, dict) or set(value) != {"objective", "target_ids", "candidate_ids"}:
+        return None
+    objective = value["objective"]
+    if not isinstance(objective, str) or not objective or len(objective) > 256:
+        return None
+    for field in ("target_ids", "candidate_ids"):
+        identities = value[field]
+        if (not isinstance(identities, list) or len(identities) > 128
+                or any(not isinstance(identity, str) or not identity or len(identity) > 256
+                       for identity in identities)):
+            return None
+    return value
 
 
 def pi_system_preamble(
@@ -854,6 +883,9 @@ class PiBackend:
                 packet: dict[str, Any] = {"output_schema": output_schema}
                 if tool_call_budget is not None:
                     packet["tool_call_budget"] = tool_call_budget
+                    assignment = _pi_submission_assignment(review_instructions)
+                    if assignment is not None:
+                        packet["submission_assignment"] = assignment
                 packet_text = json.dumps(packet, ensure_ascii=False)
                 packet_path = _write_prompt_attachment(packet_text, attachments)
                 child_env["DAYDREAM_PI_OUTPUT_PACKET"] = str(packet_path)

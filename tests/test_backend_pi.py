@@ -761,7 +761,8 @@ async def test_runner_pi_stack_review_effort_reaches_native_submission(
             system_arg = argv[argv.index("--append-system-prompt") + 1]
             system = Path(system_arg).read_text() if system_arg.startswith("/") else system_arg
             assert "Attempt dispatch-time snapshot:" in system
-            assert "use the refreshed attempt-local remaining-call count" in system
+            assert ("Each call counts, including failed calls, parallel batch members and structured submissions"
+                    in system)
             match = re.search(r"effective wall allowance is ([0-9.]+) seconds", system)
             assert match is not None
             wall_allowances.append(float(match.group(1)))
