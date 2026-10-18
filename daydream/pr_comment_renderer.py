@@ -312,14 +312,12 @@ def _rollup_tokens(agg: _PhaseAgg) -> str:
 
 def _render_phase_table(agg: _RunAgg) -> list[str]:
     """Render phases in first-encounter order within the caller's run details."""
-    rows: list[str] = [
+    # Forks restart step ids, so preserve first encounter rather than sorting ids.
+    return [
         "| Phase | Model | Tools | Input (cached) | Output | Cost | Latency |",
         "|---|---|---|---|---|---|---|",
+        *(_render_phase_row(phase) for phase in agg.phases.values()),
     ]
-    # Forks restart step ids, so preserve first encounter rather than sorting ids.
-    for phase in agg.phases.values():
-        rows.append(_render_phase_row(phase))
-    return rows
 
 
 def _render_phase_row(phase: _PhaseAgg) -> str:

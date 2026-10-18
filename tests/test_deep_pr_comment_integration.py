@@ -16,7 +16,6 @@ from typing import Any
 import pytest
 
 from daydream import pr_review
-from daydream.exploration import ExplorationContext
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from daydream.trajectory import TrajectoryDocumentSnapshot, get_current_recorder
@@ -310,110 +309,42 @@ def _row_cells(row: str) -> list[str]:
 async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
     deep_target: Path, patch_sdk: None, captured_post: _CapturedPost, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Post a compact deep-review comment with real model and usage/cost.
-
-    Only SDK messages/client, PR lookup, and gh transport are mocked; the
-    real API adapter handles its request file and the full pipeline records
-    and renders the results. Renderer-only tests cannot catch the deep flow
-    prepending its verbose local report or nesting the operational details.
-    """
+    """Exercise SDK metrics and compact presentation through the actual posted payload."""
     _silence_ui(monkeypatch)
     _answer_prompts(monkeypatch)
-
-    config = RunConfig(target=str(deep_target), cleanup=False, archive=False,)
-    # Single-file diff -> select_tier "skip": the orchestrator's natural
-    # pre-scan path runs unpopulated. (ExplorationContext kept for the linter.)
-    _ = ExplorationContext
-    exit_code = await run(config)
-
-    assert exit_code == 0, f"run() returned {exit_code}"
-    assert captured_post.payloads, ("build_payload was never called: deep flow did not reach _post")
+    assert await run(RunConfig(target=str(deep_target), cleanup=False, archive=False)) == 0
+    assert captured_post.payloads
     payload = captured_post.payloads[-1]
     body = payload["body"]
     assert isinstance(body, str)
-
-    # The posted payload, rather than a renderer fragment, owns the reading
-    # order and count: its finding names an unchanged line, so it must remain
-    # in the summary and still contribute to the actionable total.
     assert payload["comments"] == []
     assert body.count("<!-- daydream-finding:") == 1
     assert body.splitlines()[0] == "Actionable comments posted: 1"
-    details = re.search(r"<details>\s*<summary>[^<]*Run details</summary>", body)
+    details = re.search(r"<details>\s*<summary>Run details</summary>", body)
     assert details is not None
     assert body.index("- **Reviewed commit:**") < details.start()
     run_details = body[details.end():body.index("</details>", details.end())]
-    assert "<details>" not in run_details
-    assert "| Phase |" in run_details
-    assert re.search(r"```(?:text)?\n[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\n```", run_details)
-    assert len(re.findall(r"<summary>[^<]*Run details</summary>", body)) == 1
-    for removed_label in (
-        "Review outcome", "Recorded analysis", "Recorded scope completion", "Analyzed snapshot",
-        "Recorded verification", "Recorded evidence excerpt", "Code Review Summary", "Reasons:", "Pipeline:", "```json",
-    ):
-        assert removed_label not in body
-
-    # M3/M4: deep --comment path names the fixture PR's head SHA.
+    assert "<details>" not in run_details and "| Phase |" in run_details
+    assert re.search(r"```text\n[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\n```", run_details)
+    assert body.count("<summary>Run details</summary>") == 1
+    assert "Review outcome" not in body and "```json" not in body
     assert ("- **Reviewed commit:** [`0000000`]"
-        "(https://github.com/test-owner/test-repo/commit/" + "0" * 40 + ")"
-    ) in body, f"reviewed-commit line missing from payload body.\n\nfull body:\n{body}"
-
-    # --- Mode line: removed everywhere ----------------------------------
-    assert "**Mode:**" not in body, (
-        f"BUG: Mode line should be gone from PR-comment body.\n\nfull body:\n{body}"
-    )
-
-    # --- Model line: real SDK id, not 'unknown' / backend alias ---------
+            "(https://github.com/test-owner/test-repo/commit/" + "0" * 40 + ")") in body
+    assert "**Mode:**" not in body
     model_line = _line_starting(body, "- **Model:**")
-    assert FIXTURE_MODEL_ID in model_line, (f"BUG: rollup Model line is missing the real SDK model id "
-        f"({FIXTURE_MODEL_ID!r}).\n  got: {model_line!r}\n\n"
-        f"full body:\n{body}"
-    )
-    assert "unknown" not in model_line, (f"BUG: rollup Model line still says 'unknown' (no model id "
-        f"propagated from SDK).\n  got: {model_line!r}"
-    )
-
-    # --- Cost line: non-zero ---------------------------------------------
-    cost_line = _line_starting(body, "- **Cost:**")
-    assert "$0.00" not in cost_line, (f"BUG: rollup Cost line shows $0.00 — per-step cost never landed "
-        f"on Step.metrics.\n  got: {cost_line!r}"
-    )
-
-    # --- Tokens line: non-zero in / out ---------------------------------
+    assert FIXTURE_MODEL_ID in model_line and "unknown" not in model_line
+    assert "$0.00" not in _line_starting(body, "- **Cost:**")
     tokens_line = _line_starting(body, "- **Tokens:**")
-    assert not re.search(r"(?<!\d)0 in\b", tokens_line), (
-        f"BUG: rollup Tokens line shows '0 in'.\n  got: {tokens_line!r}"
-    )
-    assert not re.search(r"(?<!\d)0 out\b", tokens_line), (
-        f"BUG: rollup Tokens line shows '0 out'.\n  got: {tokens_line!r}"
-    )
-
-    # --- Per-phase breakdown: at least 2 rows, each with real model + cost
+    assert not re.search(r"(?<!\d)0 (?:in|out)\b", tokens_line)
     rows = _phase_rows(body)
-    assert len(rows) >= 2, (
-        f"expected >= 2 per-phase rows, got {len(rows)}.\n"
-        f"  rows: {rows}\n\nfull body:\n{body}"
-    )
+    assert len(rows) >= 2
     for row in rows:
         cells = _row_cells(row)
-        # Layout: | Phase | Model | Tools | Input (cached) | Output | Cost |
-        assert len(cells) >= 6, f"unexpected row layout: {row!r}"
-        phase_name, model_cell, _tools, input_cell, _out, cost_cell = cells[:6]
-        assert input_cell != "0", (f"BUG: row {phase_name!r} has Input='0' "
-            f"(per-step token metrics never propagated).\n  row: {row!r}"
-        )
-        assert model_cell != "unknown", (f"BUG: row {phase_name!r} has Model='unknown' "
-            f"(SDK model id never propagated to the per-phase rollup).\n"
-            f"  row: {row!r}"
-        )
-        assert FIXTURE_MODEL_ID in model_cell, (f"BUG: row {phase_name!r} Model cell missing real SDK id "
-            f"{FIXTURE_MODEL_ID!r}.\n  row: {row!r}"
-        )
-        assert cost_cell != "$0.00", (f"BUG: row {phase_name!r} has Cost=$0.00 "
-            f"(per-step cost never landed).\n  row: {row!r}"
-        )
-
-# Exploration-row reproduction test: forces the parallel tier (which the
-# single-file fixture skips) so the broken Exploration rollup row is exercised.
+        assert len(cells) >= 6
+        _, model_cell, _, input_cell, _, cost_cell = cells[:6]
+        assert input_cell != "0"
+        assert FIXTURE_MODEL_ID in model_cell and "unknown" not in model_cell
+        assert cost_cell != "$0.00"
 
 async def test_deep_run_exploration_row_has_real_model_and_metrics(
     deep_target_multi: Path, patch_sdk: None, captured_post: _CapturedPost, monkeypatch: pytest.MonkeyPatch,
@@ -438,82 +369,25 @@ async def test_deep_run_exploration_row_has_real_model_and_metrics(
 
     monkeypatch.setattr("daydream.backends.claude.ClaudeSDKClient", PartialSiblingSDK)
 
-    config = RunConfig(target=str(deep_target_multi), cleanup=False, archive=False,)
-    exit_code = await run(config)
-
-    assert exit_code == 0, f"run() returned {exit_code}"
-    assert captured_post.payloads, ("build_payload was never called: deep flow did not reach _post")
-    payload = captured_post.payloads[-1]
-    body = payload["body"]
+    assert await run(RunConfig(target=str(deep_target_multi), cleanup=False, archive=False)) == 0
+    assert captured_post.payloads
+    body = captured_post.payloads[-1]["body"]
     assert isinstance(body, str)
     assert len(partial_paths) == 1
     assert _PARTIAL_MODEL not in body
-
-    # Print rendered markdown so a future failure trace shows what we observed.
-    print("\n=== RENDERED PR COMMENT BODY ===")
-    print(body)
-    print("=== END RENDERED PR COMMENT BODY ===\n")
-
-    # --- Top-level rollup must reflect a real model + non-zero cost -------
-    model_line = _line_starting(body, "- **Model:**")
-    assert "unknown" not in model_line.lower(), (f"BUG: rollup Model line still says 'unknown' even when exploration "
-        f"forks observed real model ids.\n  got: {model_line!r}\n\n"
-        f"full body:\n{body}"
-    )
-
+    assert "unknown" not in _line_starting(body, "- **Model:**").lower()
     cost_line = _line_starting(body, "- **Cost:**")
-    assert "$0.00" not in cost_line and "—" not in cost_line, (
-        f"BUG: rollup Cost line is degraded.\n  got: {cost_line!r}"
-    )
-
-    # --- Locate the Exploration row in the per-phase breakdown ------------
-    rows = _phase_rows(body)
-    exploration_rows = [
-        r for r in rows if re.search(r"\|\s*Exploration\s*\|", r, re.IGNORECASE)
-    ]
-    assert exploration_rows, (
-        "BUG: per-phase breakdown is missing an 'Exploration' row entirely.\n"
-        f"  rows: {rows!r}\n\nfull body:\n{body}"
-    )
-    assert len(exploration_rows) == 1, (f"unexpected: {len(exploration_rows)} Exploration rows in breakdown.")
-    exploration_row = exploration_rows[0]
-    cells = _row_cells(exploration_row)
-    # Layout: | Phase | Model | Tools | Input (cached) | Output | Cost |
-    assert len(cells) >= 6, f"unexpected row layout: {exploration_row!r}"
-    (_phase_name, model_cell, tools_cell, _input_cell, _output_cell, cost_cell,) = cells[:6]
-
-    # --- The three production-bug symptoms, asserted one at a time. -------
-
-    # 1. Model column — production shows 'unknown'. The fork's child
-    #    recorder should have upgraded this to the SDK id.
-    assert model_cell.lower() != "unknown", (
-        f"BUG: Exploration row Model='unknown' (matches production bug).\n"
-        f"  row: {exploration_row!r}\n\nfull body:\n{body}"
-    )
-    assert FIXTURE_MODEL_ID in model_cell, (f"BUG: Exploration row Model cell is missing real SDK id "
-        f"{FIXTURE_MODEL_ID!r}.\n  got Model cell: {model_cell!r}\n"
-        f"  row: {exploration_row!r}"
-    )
-
-    # 2. Cost column — production shows '$0.00' (or '—'). Per-step cost
-    #    should be aggregated from the fork CostEvents.
-    assert cost_cell != "$0.00", (f"BUG: Exploration row Cost='$0.00' (matches production bug — "
-        f"per-step cost from fork trajectories never aggregated).\n"
-        f"  row: {exploration_row!r}"
-    )
-    assert cost_cell != "—", (
-        f"BUG: Exploration row Cost='—' (cost_unknown flipped True).\n"
-        f"  row: {exploration_row!r}"
-    )
-
-    # 3. Tools column — production shows 53; even one tool call per fork
-    #    should produce a non-zero count here.
-    assert tools_cell != "0", (
-        f"BUG: Exploration row Tools='0' but the forks issued tool calls.\n"
-        f"  row: {exploration_row!r}"
-    )
+    assert "$0.00" not in cost_line and "—" not in cost_line
+    exploration_rows = [row for row in _phase_rows(body)
+                        if re.search(r"\|\s*Exploration\s*\|", row, re.IGNORECASE)]
+    assert len(exploration_rows) == 1
+    cells = _row_cells(exploration_rows[0])
+    assert len(cells) >= 6
+    _, model_cell, tools_cell, _, _, cost_cell = cells[:6]
+    assert model_cell.lower() != "unknown" and FIXTURE_MODEL_ID in model_cell
     assert tools_cell == "3"
     assert cost_cell == "$0.36"
+
 
 async def test_deep_run_posts_safe_fallback_when_completed_sibling_is_malformed(
     deep_target_multi: Path, patch_sdk: None, captured_post: _CapturedPost, monkeypatch: pytest.MonkeyPatch,

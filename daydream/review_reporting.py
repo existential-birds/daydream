@@ -38,47 +38,34 @@ MAX_REVIEW_CONTEXT_CHARS = 20_000
 def render_github_review_context(
     terminal_result: dict[str, Any] | None, *, review_warnings: tuple[str, ...] = (),
 ) -> str:
-    """Show concise coverage warnings; detailed evidence belongs in local reports.
-
-    Warning absence cannot establish completion. Use the frozen, validated result
-    even when the optional report context or legacy diagnostic sidecars are absent.
-    """
+    """Bound GitHub diagnostics while retaining detailed evidence in local reports."""
     from daydream.review_result import validate_terminal_result
 
     if terminal_result is not None:
         validate_terminal_result(terminal_result)
     state = terminal_result['analysis_state'] if terminal_result is not None else None
-    outcomes = ([*terminal_result['stack_outcomes'], *terminal_result['phase_outcomes']]
-                if terminal_result is not None else [])
-    unfinished = [outcome for outcome in outcomes if outcome['status'] != 'complete']
-    unfinished_keys = {outcome.get('scope_id', outcome.get('phase')) for outcome in unfinished}
-    visible_keys = {outcome.get('scope_id', outcome.get('phase')) for outcome in unfinished[:8]}
-    omitted_keys = unfinished_keys - visible_keys
-    warnings = tuple(dict.fromkeys(review_warnings))
+    unfinished = [outcome for kind in ('stack_outcomes', 'phase_outcomes')
+                  for outcome in (terminal_result or {}).get(kind, []) if outcome['status'] != 'complete']
+    warnings = dict.fromkeys(review_warnings)
     if state == 'complete' and not warnings:
         return ''
     heading = ('Review completeness unavailable' if state is None else
                f'Review {state}' if state != 'complete' else 'Review incomplete')
     lines = [f'⚠️ **{heading}.**']
-    represented: set[str] = set()
-    for outcome in unfinished[:8]:
+    diagnostics: dict[str, None] = {}
+    for outcome in unfinished:
         key = outcome.get('scope_id', outcome.get('phase'))
         diagnostic = next((warning for warning in warnings
-                           if warning not in represented and warning.startswith(f'{key}: ')), None)
-        if diagnostic is None:
-            diagnostic = f"{key}: " + ', '.join(reason.replace('_', ' ') for reason in outcome['reason_codes'])
-        if diagnostic not in represented:
-            lines.append('- ' + _text(diagnostic, 512))
-            represented.add(diagnostic)
-    if len(unfinished) > 8:
-        lines.append(f'- {len(unfinished) - 8} additional unfinished review steps; see run artifacts.')
+                           if warning.startswith(f'{key}: ')),
+                          f"{key}: " + ', '.join(reason.replace('_', ' ') for reason in outcome['reason_codes']))
+        diagnostics[diagnostic] = None
+        warnings.pop(diagnostic, None)
+    diagnostics.update(warnings)
+    lines.extend('- ' + _text(warning, 512) for warning in list(diagnostics)[:8])
+    if len(diagnostics) > 8:
+        lines.append(f'- {len(diagnostics) - 8} additional notices; see run artifacts.')
     if state not in {None, 'complete'} and not unfinished:
         lines.append('Review did not finish; see run artifacts.')
-    additional = [warning for warning in warnings if warning not in represented
-                  and not any(warning.startswith(f'{key}: ') for key in omitted_keys)]
-    lines.extend('- ' + _text(warning, 512) for warning in additional[:8])
-    if len(additional) > 8:
-        lines.append(f'- {len(additional) - 8} additional notices; see run artifacts.')
     return '\n\n'.join(lines)
 
 

@@ -22,16 +22,9 @@ _SEVERITY_EMOJI: dict[str, str] = {
 }
 
 
-def _severity_emoji(severity: str | None) -> str:
-    """Map a severity level to an emoji prefix."""
-    if not severity:
-        return ""
-    return _SEVERITY_EMOJI.get(severity.lower(), "")
-
-
 def _issue_header(issue: CommentFinding, *, prefix: str = "", always_bold: bool = False) -> str:
     """Compose the emoji/title/tag header line for one issue."""
-    emoji = _severity_emoji(issue.severity)
+    emoji = _SEVERITY_EMOJI.get((issue.severity or "").lower(), "")
     title_prefix = f"{emoji} " if emoji else ""
     header = f"{title_prefix}**{prefix}{issue.title}**" if issue.title or always_bold else ""
     tags = _format_tag_line(issue)
@@ -42,19 +35,14 @@ def _issue_header(issue: CommentFinding, *, prefix: str = "", always_bold: bool 
 
 def default_render_finding(finding: CommentFinding, ctx: FindingRenderContext) -> str:
     """Render a finding's human block; the host adds identity markers and footer."""
-    if ctx.placement == "inline":
-        parts = [p for p in (_issue_header(finding), finding.body) if p]
-        parts.append(_build_agent_prompt(finding))
-        return "\n\n".join(parts)
-    prefix = "[cross-stack] " if finding.is_cross_stack else ""
+    prefix = "[cross-stack] " if finding.is_cross_stack and ctx.placement != "inline" else ""
     if ctx.placement == "summary":
         summary_parts = [_issue_header(finding, prefix=prefix, always_bold=True)]
         if finding.body:
             summary_parts.append(f"\n{finding.body}\n")
         summary_parts.append(_build_agent_prompt(finding))
         return "\n".join(summary_parts)
-    # file_level (default placement).
-    header = _issue_header(finding, prefix=prefix, always_bold=True)
+    header = _issue_header(finding, prefix=prefix, always_bold=ctx.placement != "inline")
     parts = [p for p in (header, finding.body) if p]
     parts.append(_build_agent_prompt(finding))
     return "\n\n".join(parts)
@@ -155,43 +143,24 @@ def _render_body_section(findings: tuple[SummaryFinding, ...]) -> str:
     grouped: dict[str, list[SummaryFinding]] = {}
     for sf in findings:
         grouped.setdefault(sf.finding.path, []).append(sf)
-    total = len(findings)
     parts: list[str] = [
         "<details>",
-        f"<summary>Additional findings ({total})</summary>",
+        f"<summary>Additional findings ({len(findings)})</summary>",
     ]
     for filepath, file_findings in grouped.items():
         parts.append(f"\n#### `{filepath}` ({len(file_findings)})\n")
-        for i, sf in enumerate(file_findings):
-            parts.append(sf.body_block)
-            if i < len(file_findings) - 1:
-                parts.append("\n---\n")
+        parts.append("\n\n---\n\n".join(sf.body_block for sf in file_findings))
     parts.append("\n</details>")
     return "\n".join(parts)
-
-
-def _summary_findings(body_only: list[ParsedIssue], renderers: ReviewRenderers) -> tuple[SummaryFinding, ...]:
-    """Map non-inline :class:`ParsedIssue` objects to public :class:`SummaryFinding`s."""
-    return tuple(
-        SummaryFinding(finding=_comment_finding(issue), body_block=_summary_body_block(issue, renderers))
-        for issue in body_only
-    )
 
 
 def default_render_summary(ctx: SummaryContext) -> str:
     """Render grouped findings, diagrams, agent prompt, and run details.
 
     The host owns the actionable count, warnings, reviewed commit, event, and footer."""
-    chunks: list[str] = []
-    section = _render_body_section(ctx.findings)
-    if section:
-        chunks.append(section)
-    if ctx.diagrams:
-        chunks.append(ctx.diagrams)
-    if ctx.agent_prompt:
-        chunks.append(ctx.agent_prompt)
-    chunks.append(ctx.review_info)
-    return "\n\n".join(chunks)
+    return "\n\n".join(part for part in (
+        _render_body_section(ctx.findings), ctx.diagrams, ctx.agent_prompt, ctx.review_info,
+    ) if part)
 
 
 @dataclass(frozen=True)
@@ -209,15 +178,6 @@ def resolve_review_renderers(registry: Registry) -> ReviewRenderers:
     return ReviewRenderers(
         finding=registry.renderer("finding"),
         summary=registry.renderer("summary"),
-    )
-
-
-def _render_summary(ctx: SummaryContext, renderers: ReviewRenderers) -> str:
-    """Render the summary through the captured extension, with its built-in fallback."""
-    return _render_component(
-        lambda: renderers.summary(ctx),
-        lambda: renderers.fallback_summary(ctx),
-        "custom 'summary'",
     )
 
 
@@ -287,34 +247,17 @@ def build_payload_for_event(
     from validated PRInfo, using the fork repository when available."""
     all_issues_with_inline_meta = classified.all_issues()
 
-    # Consolidated AI agent prompt (host-built; empty means "omit").
-    agent_prompt = (
-        _build_consolidated_prompt(classified, pr) if not classified.is_empty() else ""
-    )
-
-    # Keep the reviewed commit visible; collapse operational run information
-    # and the severity/confidence breakdown together. The renderer emits its own
-    # ``<sub>Generated by daydream...</sub>`` footer, so don't double it.
-    # The commit link targets the repo that holds the head commit: the fork
-    # for fork-head PRs (``head_repo``), else the base repo from
-    # ``owner``/``repo``. ``owner``/``repo`` themselves stay the base repo —
-    # that is where the review comment posts.
+    # Fork commits live in head_repo; reviews still post to the base repository.
     commit_slug = pr.head_repo or f"{pr.owner}/{pr.repo}"
     commit_line = (
         f"{_REVIEWED_COMMIT_MARKER} [`{pr.head_sha[:7]}`]"
         f"(https://github.com/{commit_slug}/commit/{pr.head_sha})"
     )
     extra_info_lines: list[str] = []
-    severity_parts = _count_labels(
-        all_issues_with_inline_meta, "severity", model_facing_levels()
-    )
-    if severity_parts:
-        extra_info_lines.append("- **Severity:** " + ", ".join(severity_parts))
-    confidence_parts = _count_labels(
-        all_issues_with_inline_meta, "confidence", ("HIGH", "MEDIUM", "LOW")
-    )
-    if confidence_parts:
-        extra_info_lines.append("- **Confidence:** " + ", ".join(confidence_parts))
+    for attr, order in (("severity", model_facing_levels()), ("confidence", ("HIGH", "MEDIUM", "LOW"))):
+        labels = _count_labels(all_issues_with_inline_meta, attr, order)
+        if labels:
+            extra_info_lines.append(f"- **{attr.title()}:** " + ", ".join(labels))
     review_info = _strip_forged_reviewed_commit_lines(run_info)
     if extra_info_lines:
         review_info = f"{review_info}\n\n" + "\n".join(extra_info_lines)
@@ -326,24 +269,24 @@ def build_payload_for_event(
     )
 
     summary_ctx = SummaryContext(
-        findings=_summary_findings(classified.body_only, renderers),
-        agent_prompt=agent_prompt,
+        findings=tuple(SummaryFinding(finding=_comment_finding(issue), body_block=_summary_body_block(issue, renderers))
+                       for issue in classified.body_only),
+        agent_prompt=_build_consolidated_prompt(classified, pr) if not classified.is_empty() else "",
         review_info=review_info_block,
         diagrams=diagram_blocks or None,
     )
-    summary_body = _render_summary(summary_ctx, renderers)
+    summary_body = _render_component(
+        lambda: renderers.summary(summary_ctx),
+        lambda: renderers.fallback_summary(summary_ctx),
+        "custom 'summary'",
+    )
 
     body_chunks: list[str] = [f"Actionable comments posted: {classified.total()}"]
     if review_summary:
         body_chunks.append(review_summary)
     elif review_warnings:
         body_chunks.append(render_github_review_context(None, review_warnings=review_warnings))
-    body_chunks.append(commit_line)
-    body_chunks.append(summary_body)
-    # DAYDREAM_FOOTER is the bottom-of-comment "🧙 Posted by daydream"
-    # badge — distinct from the renderer's "Generated by daydream" line
-    # inside the review-info block.
-    body_chunks.append(DAYDREAM_FOOTER)
+    body_chunks.extend((commit_line, summary_body, DAYDREAM_FOOTER))
 
     return ReviewPayload(
         event=event,

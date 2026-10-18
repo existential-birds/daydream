@@ -32,10 +32,9 @@ def test_github_warning_retains_phase_failures_bounds_and_escapes_diagnostics() 
     assert warning.startswith('⚠️ **Review failed.**')
     assert 'stack-00: &lt;unsafe&gt; &amp; incomplete' in warning
     assert 'stack-01: coverage unknown' in warning
-    assert warning.count('\n\n- ') == 18
-    assert '5 additional unfinished review steps' in warning
-    assert 'stack-08' not in warning and 'transport notice 07' in warning and 'transport notice 08' not in warning
-    assert '3 additional notices' in warning
+    assert warning.count('\n\n- ') == 9
+    assert '16 additional notices' in warning
+    assert 'stack-08' not in warning and 'transport notice 00' not in warning
     coverage = review_coverage(scope_ids=(), phases=('merge',))
     coverage.record_phase('merge', 'failed', reasons=('synthesis_failure',))
     assert 'merge: synthesis failure' in render_github_review_context(coverage.finalize('failed'))

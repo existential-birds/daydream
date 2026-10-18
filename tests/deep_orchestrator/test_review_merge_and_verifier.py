@@ -198,7 +198,6 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
         assert failed and summaries == ['⚠️ **Review completeness unavailable.**']
     else:
         assert summaries == [''], 'complete review needs no coverage warning or rich context on GitHub'
-        assert len(run_details) == 1 and 'Run:\n```text\n' in run_details[0]
         assert 'Stale optional publication assertion' not in run_details[0]
     assert len(run_details) == 1 and 'Run:\n```text\n' in run_details[0]
     assert set(supplied) == {"python:1", "structure:1", "structure:2", "structure:3"}
