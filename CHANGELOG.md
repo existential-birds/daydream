@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **routing:** inspect JavaScript/TypeScript source and bounded local package/JSX metadata before selecting React review; preserve explicit stack rules and generic ownership through automatic tiny-diff routing ([#1287](https://github.com/existential-birds/daydream/issues/1287)).
+
 - **review:** give a complete ignored-dependency search example with required positional roots and an explicit expansion reason ([#1584](https://github.com/existential-birds/daydream/issues/1584)).
 
 - Supply retained structural findings to merge synthesis and publish its validated result without reintroducing absorbed or omitted findings; bind whole-file privileges to structural provenance and invalidate obsolete merge reuse ([#1582](https://github.com/existential-birds/daydream/issues/1582)).

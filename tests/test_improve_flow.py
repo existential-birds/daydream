@@ -1118,7 +1118,9 @@ async def test_mixed_service_primary_reads_preserve_boundary_recall_and_generic_
     client = "apps/billing/client.ts"
     contract = "apps/billing/shared contract.json"
     unknown = "apps/billing/adapter.grammar"
-    (repo / client).write_text(f'export const responseField = "total_cents";\n// Contract: {contract}\n')
+    (repo / client).write_text(
+        f'import React from "react"; export const responseField = "total_cents";\n// Contract: {contract}\n'
+    )
     (repo / contract).write_text('{"response_field": "total"}\n')
     (repo / unknown).write_text("response ::= total\n")
     git(repo, "add", client, contract, unknown)

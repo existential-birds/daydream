@@ -322,6 +322,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         stacks = detect_stacks(
             tracked,
             registry=ctx.registry,
+            target_dir=target,
         )
         if ctx.config.improve_scope:
             stacks = audit_scope._stacks_for_services(stacks, services)
