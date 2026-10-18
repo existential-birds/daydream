@@ -655,6 +655,7 @@ def test_artifact_post_never_acquires_live_trajectory_details(
     )
     document = json.loads(artifact.read_text())
     document["run_info"] = run_info
+    document["terminal_result"]["run_id"] = 'run```\n<script>'
     artifact.write_text(json.dumps(document))
     attempts: list[str] = []
 
@@ -672,6 +673,7 @@ def test_artifact_post_never_acquires_live_trajectory_details(
     body = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")[0].payload["body"]
     assert (run_info if run_info is not None else "*run details unavailable*") in body
     assert body.count("- **Reviewed commit:**") == 1
+    assert 'Run:\n````text\nrun``` <script>\n````' in body
 
 def test_post_findings_orders_file_writes_and_folds_failed_thread_once(
     fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
@@ -680,6 +682,7 @@ def test_post_findings_orders_file_writes_and_folds_failed_thread_once(
         _finding("a" * 64, path="first.py", line=None, placement="file", title="First thread"),
         _finding("b" * 64, path="second.py", line=None, placement="file", title="Folded thread"),
         _finding("c" * 64, path="context.py", line=None, placement="body", title="Original body"),
+        _finding("d" * 64, path="inline.py", line=3, placement="inline", title="Inline finding"),
     ])
     fake_gh.set_response("diff-paths", value=["first.py"])
 
@@ -694,7 +697,9 @@ def test_post_findings_orders_file_writes_and_folds_failed_thread_once(
     payload = writes[-1].payload
     assert payload["commit_id"] == "h" * 40
     assert payload["event"] == "COMMENT"
-    assert payload["comments"] == []
+    assert len(payload["comments"]) == 1
+    assert payload["body"].startswith("Actionable comments posted: 4\n\n")
+    assert '#### `context.py` (1)' in payload["body"] and '<summary>context.py' not in payload["body"]
     markers = parse_finding_markers(payload["body"])
     assert markers == ["c" * 64, "b" * 64]
     assert payload["body"].index("Original body") < payload["body"].index("Folded thread")
@@ -756,7 +761,7 @@ def test_unfinished_review_comments_without_approval_or_stale_resolution(
     body = posts[0].payload['body']
     assert 'Run:\n```text\nrun-1\n```' in body
     assert 'Review outcome' not in body and 'Author reports CI passes.' not in body
-    assert json.loads(path.read_text())['review_context'] == artifact['review_context']
+    assert body.index('⚠️ **Review') < body.index('Reviewed commit')
     if not has_finding:
         assert 'Additional findings' not in body and 'Fix with an agent' not in body
     if state == 'warning':

@@ -263,43 +263,25 @@ def test_build_payload_reviewed_commit_links_fork_for_fork_head_pr(pr: PRInfo,) 
     assert "https://github.com/acme/widgets/commit/head123" not in body
 
 
-def test_payload_prioritizes_actionable_comments_and_warnings(pr: PRInfo) -> None:
-    classified = pr_review.ClassifiedIssues(
-        inline=[_inline()],
-        inline_issues=[ParsedIssue(path="a.py", line=10, title="Inline", body="Inline rationale")],
-        file_level=[ParsedIssue(path="b.py", line=None, title="File", body="File rationale")],
-        body_only=[ParsedIssue(path="c.py", line=None, title="Summary", body="Summary rationale",
-                               fingerprint="c" * 64)],
-    )
-    warnings = ("Python review timed out.", "Transport evidence unavailable.", "Validation was not run.")
-    body = build_payload_for_event(
-        pr, classified, event=pr_review.ReviewEvent.APPROVE, run_info="Fixture run info",
-        renderers=BUILTIN_RENDERERS, diagram_blocks="<details>Fixture diagram</details>",
-        review_warnings=warnings,
-        review_summary=render_github_review_context(terminal_result("incomplete"), review_warnings=warnings),
-    ).body
-
-    assert body.startswith("Actionable comments posted: 3\n\n")
-    assert body.index("Review incomplete") < body.index("Validation was not run") < body.index("Reviewed commit")
-    assert body.count("Review incomplete") == 1
-    assert body.count("Python review timed out.") == 1
-    assert "Transport evidence unavailable." in body
-    assert body.index("Reviewed commit") < body.index("Additional findings (1)") < body.index("Fixture diagram")
-    assert body.index("Fixture diagram") < body.index("Run details") < body.index("Fixture run info")
-    assert "Deep review passed" not in body and "Code Review Summary" not in body
-    assert "#### `c.py` (1)" in body and "<summary>c.py" not in body
-    assert "Summary rationale" in body
-    assert parse_finding_markers(body) == ["c" * 64]
-    assert body.count("<summary>Fix with an agent</summary>") == 2
+def test_warning_retains_distinct_diagnostics_for_a_shared_scope_and_phase() -> None:
+    coverage = review_coverage(scope_ids=('merge',), phases=('merge',))
+    coverage.record_scope('merge', 'failed', reasons=('backend_failure',))
+    coverage.record_phase('merge', 'failed', reasons=('synthesis_failure',))
+    warnings = ('merge: synthesis transport failed', 'merge: reviewer backend failed',
+                'merge: additional evidence unavailable', 'merge: synthesis transport failed')
+    rendered = render_github_review_context(coverage.finalize('failed'), review_warnings=warnings)
+    for warning in set(warnings):
+        assert rendered.count(warning) == 1
 
 
 @pytest.mark.parametrize("with_terminal_result", [False, True])
 def test_payload_keeps_warning_display_bounded(pr: PRInfo, with_terminal_result: bool) -> None:
     """Payload assembly must not restore diagnoses omitted by the bounded summary."""
-    warnings = tuple(f"stack-{index:02}: reviewer timed out" for index in range(12))
+    warnings = tuple(f"stack-{index:02}: <unsafe> & reviewer timed out" for index in range(12))
     summary = None
     if with_terminal_result:
-        coverage = review_coverage(scope_ids=(f"stack-{index:02}" for index in range(12)), phases=())
+        coverage = review_coverage(scope_ids=(), phases=('merge',))
+        coverage.record_phase('merge', 'failed', reasons=('synthesis_failure',))
         warnings += ("Transport evidence unavailable.",)
         summary = render_github_review_context(coverage.finalize("failed"), review_warnings=warnings)
     body = build_payload_for_event(
@@ -308,9 +290,10 @@ def test_payload_keeps_warning_display_bounded(pr: PRInfo, with_terminal_result:
         review_warnings=warnings, review_summary=summary,
     ).body
 
-    assert body.count("reviewer timed out") == 8
-    assert f"{5 if with_terminal_result else 4} additional" in body
-    assert "stack-08:" not in body
+    assert body.count("reviewer timed out") == (7 if with_terminal_result else 8)
+    assert f"{6 if with_terminal_result else 4} additional" in body
+    assert "&lt;unsafe&gt; &amp;" in body
+    assert ('merge: synthesis failure' in body) is with_terminal_result
     assert "stack-11:" not in body
     assert "Transport evidence unavailable." not in body
 
