@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -30,12 +31,21 @@ from daydream.retry_policy import FailureClass, classify_failure
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.review_evidence import ReviewEvidence
 from daydream.review_rationale import NOTE_ORIGIN_SCHEMA
-from daydream.review_result import ReasonCode, reason_for_budget, reason_for_exception
+from daydream.review_result import (
+    TARGET_DECISIONS_MAX_BYTES,
+    TARGET_DECISIONS_MAX_ITEMS,
+    ReasonCode,
+    ReviewCoverage,
+    preserved_target_decisions,
+    reason_for_budget,
+    reason_for_exception,
+)
+from daydream.review_source_refs import validate_source_refs
 from daydream.run_context import resolve_run_context
 from daydream.trajectory import DaydreamPhase, LifecycleReasonCode, LifecycleStatus, phase_scope
 from daydream.ui.agent_stream import present_result
 
-STAGED_REVIEW_CONTRACT = 11
+STAGED_REVIEW_CONTRACT = 12
 HANDOFF_MAX_BYTES = 64 * 1024
 HANDOFF_MAX_ITEMS = 128
 
@@ -86,12 +96,15 @@ class ReviewInvestigation:
     """Admit successful stage assertions; observed spend belongs to the host."""
 
     def __init__(self, stack: StackAssignment, full_diff: str, revision: dict[str, Any], *,
-                 assignment_batches: list[list[dict[str, Any]]], limits: ReviewLimits | None = None) -> None:
+                 assignment_batches: list[list[dict[str, Any]]], coverage: ReviewCoverage,
+                 limits: ReviewLimits | None = None) -> None:
         self.scope_id = stack.stack_name
+        self.coverage = coverage
         self.files = sorted(stack.files)
         self.revision = revision
         self.diff_weights = file_change_bytes(full_diff)
         self.assignment_batches = assignment_batches
+        self.assignments = {part['target_id']: part for batch in assignment_batches for part in batch}
         self.required_targets: dict[str, list[str]] = {path: [] for path in self.files}
         for batch in self.assignment_batches:
             for part in batch:
@@ -264,6 +277,7 @@ class ReviewInvestigation:
         return {'contract_version': STAGED_REVIEW_CONTRACT, 'scope_id': self.scope_id,
             'analyzed_revision': self.revision, 'stage': stage, 'assigned_target_ids': targets,
             'assignment_parts': assignment_parts,
+            'source_refs': self._reference_options(stage, targets),
             'completed_target_ids': [target for target, progress in self.target_progress.items()
                                      if progress['status'] == 'reviewed'],
             'assigned_files': sorted(candidate_files) if stage == 'triage' else files,
@@ -277,6 +291,21 @@ class ReviewInvestigation:
             'remaining_tool_calls': self.budget.remaining_tool_calls,
             'hard_tool_call_allowance': self.budget.remaining_tool_calls,
             'advisory_tool_call_target': min(target, self.budget.remaining_tool_calls)}
+
+    def _reference_options(self, stage: str, targets: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """Offer bounded source identities, never a claim that a source was read."""
+        if stage == 'integration':
+            # Whole-change judgment can cite useful assigned work without a
+            # mandatory reference for every file or an exhaustive registry.
+            choices = list(islice(self._expected_source_refs(stage, ''), 4))
+            return {target: choices for target in targets}
+        return {target: self.assignments.get(target, {}).get('source_refs', []) for target in targets}
+
+    def _expected_source_refs(self, stage: str, target: str) -> Iterable[dict[str, Any]]:
+        """Prompt examples do not narrow the assigned whole-change identity."""
+        parts = (self.assignments.values() if stage == 'integration' else
+                 [self.assignments.get(target, {})])
+        return (ref for part in parts for ref in part.get('source_refs', []))
 
     async def _stage(self, backend: Backend, cwd: Path, prompt_builder: Callable[[dict[str, Any]], str],
         stage: str, targets: list[str], files: list[str], agent_kwargs: dict[str, Any], *,
@@ -300,7 +329,8 @@ class ReviewInvestigation:
             state.update(attempt=attempt, max_attempts=2, schema_rejection=rejection.to_dict() if rejection else None)
             schema = review_stage_schema(targets, candidate_ids, triage=stage == "triage")
             state["response_contract"] = {"schema": schema, "skeleton": {
-                "targets": [{"target_id": target, "status": "reviewed", "reason": ""} for target in targets],
+                "targets": [{"target_id": target, "status": "reviewed", "reason": "", "evidence_refs": []}
+                            for target in targets],
                 "notes": "", "supporting_files": [], "candidates": [{
                     "candidate_id": candidate["candidate_id"], "file": candidate["file"], "line": candidate["line"],
                     "trigger": "", "consequence": "", "grounds": "", "disposition": "unresolved", "finding": None,
@@ -385,8 +415,14 @@ class ReviewInvestigation:
                                                   files=files or state['assigned_files'])
                     accepted = self.reason is None
                     if accepted:
+                        assert isinstance(output, dict)
                         context = resolve_run_context(agent_kwargs.get("run_context"))
-                        present_result(agent.console, context.policy, agent_kwargs.get("progress_callback"), output)
+                        # Frozen selectors stay in raw evidence and typed coverage;
+                        # their hashes must not crowd judgments out of bounded logs.
+                        display = {**output, 'targets': [
+                            {key: value for key, value in target.items() if key != 'evidence_refs'}
+                            for target in output['targets']]}
+                        present_result(agent.console, context.policy, agent_kwargs.get("progress_callback"), display)
                 finally:
                     if self.reason in {'tool_call_budget_exceeded', 'wall_budget_exceeded', 'pipeline_budget_exceeded',
                                        'model_budget_exhaustion'}:
@@ -407,6 +443,7 @@ class ReviewInvestigation:
                         labels = {'schema_rejection': 'Strict stage schema rejected',
                                   'syntax_failure': 'Invalid JSON syntax',
                                   'assignment_mismatch': 'Stage assignment identities rejected',
+                                  'source_attribution': 'Frozen source attribution rejected',
                                   'admission_failure': 'Stage evidence admission failed',
                                   'quantitative_exhaustion': 'Review limit exhausted'}
                         label = labels.get(self.failure_class or '', 'Review stopped')
@@ -532,6 +569,16 @@ class ReviewInvestigation:
                 if len(raw_decisions) + prior > HANDOFF_MAX_ITEMS:
                     return None, 'evidence_incomplete'
             return None, None
+        for target in declared_targets:
+            # This guard also runs on schema-rejected payloads to prevent a
+            # fresh schema retry from disguising an independently invalid citation.
+            if 'evidence_refs' not in target:
+                continue
+            if not validate_source_refs(target['evidence_refs'], self._expected_source_refs(stage, target['target_id']),
+                    revision=self.revision, source_root=self._source_root,
+                    require_assigned=target['status'] == 'reviewed'):
+                self.assertion_failure_class = 'source_attribution'
+                return None, 'evidence_incomplete'
         if stage == 'triage':
             by_id = {candidate['candidate_id']: candidate for candidate in decisions}
             candidates = [by_id.get(candidate['candidate_id'], candidate) for candidate in prior_candidates]
@@ -540,10 +587,22 @@ class ReviewInvestigation:
                 {**candidate, 'candidate_id': f'{self.scope_id}:candidate:{len(prior_candidates) + index + 1}'}
                 for index, candidate in enumerate(decisions)]
         target_progress = {**self.target_progress, **{target['target_id']: target for target in output['targets']}}
+        try:
+            if (len(target_progress) > TARGET_DECISIONS_MAX_ITEMS
+                    or len(json.dumps(list(target_progress.values()), ensure_ascii=False).encode())
+                    > TARGET_DECISIONS_MAX_BYTES):
+                raise ValueError('target decisions exceed retained limits')
+            if admitting:
+                canonical = preserved_target_decisions(list(target_progress.values()))
+                self.coverage.check_target_decisions_budget(self.scope_id, canonical)
+                target_progress = {decision['target_id']: decision for decision in canonical}
+        except ValueError:
+            self.assertion_failure_class = 'source_attribution'
+            return None, 'evidence_incomplete'
         if stage == 'triage':
             progress = self.handoff['progress']
         elif stage == 'integration':
-            progress = output['targets']
+            progress = [target_progress[target['target_id']] for target in output['targets']]
         else:
             progress = []
             for path, required in self.required_targets.items():
@@ -583,6 +642,7 @@ class ReviewInvestigation:
         plan, reason = self._assessment(output, stage, targets, candidate_ids, files=files, admitting=True)
         if plan is None:
             return reason
+        self.coverage.admit_target_decisions(self.scope_id, list(plan.target_progress.values()))
         self.admitted_stages += 1
         self.handoff = plan.handoff
         self.target_progress = plan.target_progress

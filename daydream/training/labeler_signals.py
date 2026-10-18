@@ -228,7 +228,8 @@ def _hunk_lines_present(added_lines: tuple[str, ...], post_content: str) -> bool
     """Return ``True`` if every added line appears verbatim in ``post_content``."""
     if not added_lines:
         return False
-    haystack_lines = set(post_content.splitlines())
+    # Match Git's LF-only boundaries without inventing a line in empty content.
+    haystack_lines = set(post_content.removesuffix('\n').split('\n')) if post_content else set()
     return all(line in haystack_lines for line in added_lines)
 
 

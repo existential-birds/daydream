@@ -123,6 +123,9 @@ These boundaries matter across subsystems; module docstrings carry finer detail:
   structural privileges require retained structural source UIDs. Host bypass and
   failure salvage retain their separate folding policy.
 - Preserve admitted findings and truthful incomplete coverage on review failure.
+  Validate submitted source references atomically against frozen side/range/fragment identities and retain per-target
+  attribution through file folding, cache and resume. Correspondence is not proof of understanding, reads or checks;
+  optional supporting-file relevance metadata cannot veto valid primary decisions.
   Canonical test readiness gates accepted fixes before verify/FIX work; model
   prose or unresolved command candidates cannot authorize tests or publication.
 - Archive indexes must be empty or use the current complete schema. Preserve and

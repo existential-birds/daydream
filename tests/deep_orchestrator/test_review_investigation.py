@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable
@@ -347,10 +348,18 @@ async def test_optional_supporting_paths_are_confined_without_rejecting_valid_de
     review = InvestigationRun(review.repo, tmp_path, monkeypatch)
     review.config = replace(review.config, deep_shard_enabled=False)
     notes: list[dict[str, Any]] = []
+    supporting_reference: dict[str, Any] = {}
 
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         if 'api.py' in stage['assigned_files']:
+            supporting_reference.update({
+                'artifact_sha256': hashlib.sha256((review.repo / 'module_03.py').read_bytes()).hexdigest(),
+                'part_sha256': None, 'revision': stage['analyzed_revision']['head_sha'],
+                'path': 'module_03.py', 'side': 'new', 'source_range': {'start': 1, 'end': 1},
+                'fragment': None, 'basis': 'source_inspection', 'role': 'supporting',
+            })
+            output['targets'][0]['evidence_refs'].append(supporting_reference.copy())
             output.update(notes='Supporting paths are optional model declarations.', supporting_files=[
                 './module_03.py', 'module_03.py', '../outside.py', str(outside),
                 'linked.py', 'missing.py', '.git/config', '.daydream/deep/stack-python-records.json',
@@ -361,10 +370,14 @@ async def test_optional_supporting_paths_are_confined_without_rejecting_valid_de
             assert stage['candidates'] == []
             assert 'module_03.py' not in stage['completed_target_ids']
 
-    await review.finish('python', findings=('Grounded defect',))
+    data = await review.finish('python', findings=('Grounded defect',))
     note, = notes
     assert note['supporting_files'] == ['module_03.py']
     assert 'api.py' in note['files']
+    decisions = scopes(data)['python']['target_decisions']
+    api_decision = next(decision for decision in decisions if decision['target_id'] == 'api.py')
+    assert supporting_reference in api_decision['evidence_refs']
+    assert any(reference['role'] == 'assigned' for reference in api_decision['evidence_refs'])
     assert all('PRIVATE_OUTSIDE_SOURCE' not in call['prompt'] for call in review.backend.calls)
 
 
@@ -641,6 +654,8 @@ async def test_large_unsharded_scope_retains_coverage_without_spending_semantic_
     assert len(scope['files']) == 129
     assert set(scope['files']) == {path.name for path in review.repo.glob('*.py')}
     assert set(assigned) == set(scope['files']) and len(assigned) == len(set(assigned))
+    assert {decision['target_id'] for decision in scope['target_decisions']} == set(assigned)
+    assert all(decision['evidence_refs'] for decision in scope['target_decisions'])
     assert all(event['metadata']['admitted'] for event in stage_ends(review, 'python'))
     assert data['terminal_result']['analysis_state'] == ('incomplete' if unfinished_target else 'complete')
     assert scope['partial_evidence'] is unfinished_target

@@ -125,7 +125,8 @@ def _response(prompt: str) -> tuple[str, str | None]:
         # The structural reviewer contributes no duplicated file finding.
         if "you are the structural reviewer" in lower:
             candidates = []
-        return json.dumps({"targets": [{"target_id": target, "status": "reviewed", "reason": ""}
+        return json.dumps({"targets": [{"target_id": target, "status": "reviewed", "reason": "",
+                                        "evidence_refs": state["source_refs"][target][:1]}
                                        for target in state["assigned_target_ids"]],
                            "notes": "Synthetic assigned review complete", "supporting_files": [],
                            "candidates": candidates,

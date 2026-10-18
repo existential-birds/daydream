@@ -879,6 +879,28 @@ separate inline allowance for shared bytes and their wrappers. Oversized files s
 continuations with old/new ranges and exact fragment offsets; every required part must succeed for its file to be
 complete. Required assignments take priority over separately bounded context.
 
+Assignment `source_refs` bind the frozen diff digest, part digest, side-specific revision and original path.
+`source_summary` describes the actual old/new lines and partial line byte boundaries supplied by that part;
+continuation `old_start/count` and `new_start/count` remain full-hunk totals. `fragment_offset` and reference
+fragment offsets are UTF-8 byte offsets within the original diff hunk body, never source line numbers.
+Each submitted target decision retains at most four typed `evidence_refs` (8 KiB of UTF-8 JSON), with a source range
+or exact fragment, an asserted basis (`supplied_diff`, `source_inspection`, `executed_check`) and role
+(`assigned`, `supporting`). Reviewed decisions need useful assigned attribution; supporting context cannot replace it.
+Broader supporting source references are checked against the frozen revision and bounded to 64 KiB of source.
+All references validate before a stage commits; invalid references preserve prior admissions and leave work incomplete.
+Optional `supporting_files` relevance metadata remains independent and cannot veto valid primary decisions.
+
+Per-target decisions and attribution survive file folding and terminal persistence. Host retention is bounded to
+512 decisions and 256 KiB per reviewer scope, separately from the unchanged 64 KiB/128-item semantic handoff.
+Reasons are redacted before admission. All scopes share a 256 KiB attribution allowance measured in the exact
+nested, pretty UTF-8 findings encoding, leaving headroom within the unchanged 1 MiB findings artifact cap.
+This allowance bounds attribution's additional bytes; findings and other existing fields retain their own limits.
+Overflow rejects the stage atomically and retains prior admitted decisions and findings with incomplete coverage. Retained identities are not an exhaustive read ledger. A valid reference proves
+correspondence/existence only, not understanding, semantic review coverage, source reads or executable verification.
+
+The [historical paired comparison](docs/measurements/source-attribution.md) observed lower aggregate runner time
+with unchanged observed quality on three small cases. Its results describe that experiment, not a guaranteed speedup.
+
 Each stage gets a fresh prompt. Structure reviews whole-change interactions using a compact inventory, bounded diff
 parts and supporting documentation; discovery candidates marked `open` or `unresolved` receive one finite triage round.
 A candidate still `unresolved` after triage keeps coverage incomplete. Static prompt budget values are dispatch-time
@@ -933,7 +955,7 @@ recorded and charged, but do not authenticate claims or establish completion. Fi
 snapshot-bound and atomically published. `complete` requires success or explicit host no-op for every planned scope and
 required phase; it does not guarantee exhaustive defect discovery. The
 [stage contract](docs/extensions.md#stage-aware-review-builders-api-8) specifies identity/capture checks, triage state,
-backend transports and native output rules. Stage contract 11 invalidates older cached reviews; extension API 8 requires
+backend transports and native output rules. Stage contract 12 invalidates older cached reviews; extension API 8 requires
 staged builders.
 
 Carried closed decisions are attributed reviewer judgments, not independent host
@@ -1250,6 +1272,12 @@ reuse additionally requires the typed coverage proofs described below.
 Analysis is `complete` only with positive completion or host no-op evidence for every planned reviewer and required phase. Valid work with unfinished coverage is `incomplete`; unusable analysis or an invalid findings projection is `failed`. Findings count, warning absence, CLI success and archive status cannot establish completeness. `pipeline_state` covers review finalization independently of later fixes or publication.
 
 Coverage records run identity, exact stack/shard outcomes, captured head, diff merge base and diff key, plus initial PR base tip when available. Backend/authentication, missing/malformed output, evidence and policy failures remain typed; model-turn, host wall/tool and pipeline budgets have distinct reasons.
+
+Current staged scope outcomes also retain bounded typed `target_decisions` and their `evidence_refs`, including
+original per-part identity after file folding. Older terminal artifacts remain readable without this optional field;
+current cache reuse and runtime resume require it for admitted work. Complete admitted decisions are model assertions,
+distinct from semantic fidelity and executed verification. Source-attribution failures remain distinct from contradictions
+about closed candidates in attempt diagnostics.
 
 GitHub review comments start with `Actionable comments posted: N`, followed by any incomplete-review warnings and a linked reviewed commit. Additional findings appear before diagrams, followed by one `Run details` dropdown containing a copyable run UUID, model, timing, usage, cost and phase breakdown. Detailed analysis, source rationale and verification evidence remain in local reports and run artifacts rather than the GitHub comment.
 

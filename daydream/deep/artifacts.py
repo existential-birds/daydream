@@ -22,8 +22,12 @@ from daydream.diagnostics import exception_text
 from daydream.json_utils import atomic_write_json
 
 if TYPE_CHECKING:
+    from daydream.backends import Backend
+    from daydream.deep.detection import StackAssignment
     from daydream.deep.state import DeepState
+    from daydream.extensions.registry import Registry
     from daydream.review_result import ReasonCode, ReviewCoverage
+    from daydream.workspace import WorkContext
 
 
 class DeepArtifact(StrEnum):
@@ -175,7 +179,10 @@ def review_stage(state: DeepState, phase: str | Callable[[], str], *, persist: b
             persist_review_coverage(state.dd, coverage)
 
 
-def restore_review_coverage(deep_dir_path: Path, current: ReviewCoverage) -> ReviewCoverage:
+def restore_review_coverage(deep_dir_path: Path, current: ReviewCoverage, *,
+    backend: Backend, work: WorkContext, stacks: Sequence[StackAssignment], registry: Registry,
+    artifact_session: ArtifactSession | None, allow_standalone: bool,
+) -> ReviewCoverage:
     """Restore matching evidence into this run; corrupt or foreign evidence fails closed."""
     from daydream.review_result import ReviewCoverage
 
@@ -188,6 +195,26 @@ def restore_review_coverage(deep_dir_path: Path, current: ReviewCoverage) -> Rev
     current_inventory = current.to_dict()["planned_scopes"]
     if stored.revision != current.revision or stored_inventory != current_inventory:
         raise ValueError(f"Cannot resume review: analyzed revision or planned scope inventory changed. {restart}")
+    if any((outcome['status'] == 'complete' or outcome['partial_evidence'])
+           and 'target_decisions' not in outcome for outcome in stored.scopes.values()):
+        raise ValueError(f"Cannot resume review: source-attributed target decisions are unavailable. {restart}")
+    from daydream.prompt_budget import SanctionedInputUnavailable
+    from daydream.review_stage_inputs import StageInputFactory
+
+    try:
+        for stack in stacks:
+            outcome = stored.scopes[stack.stack_name]
+            decisions = outcome.get('target_decisions')
+            if decisions is None:
+                continue
+            factory = StageInputFactory.for_review(backend, work, stack,
+                diff_path=deep_dir_path.parent / 'diff.patch', shared_paths={},
+                revision=current.revision.to_dict(), registry=registry,
+                artifact_session=artifact_session, allow_standalone=allow_standalone)
+            factory.validate_retained_decisions(decisions, complete=outcome['status'] == 'complete')
+    except (OSError, ValueError, KeyError, SanctionedInputUnavailable) as exc:
+        raise ValueError(
+            f"Cannot resume review: source attribution differs from frozen assignments. {restart}") from exc
     extra_phases = stored.required_phases - current.required_phases
     extra_phases = {phase for phase in extra_phases
                     if phase not in {"arbiter", "suppression", "findings", "pipeline"}

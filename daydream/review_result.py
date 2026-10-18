@@ -6,6 +6,7 @@ Only explicit validated scope and phase evidence can do so.
 from __future__ import annotations
 
 import copy
+import json
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from enum import StrEnum
@@ -14,8 +15,9 @@ from typing import Any
 import jsonschema
 
 from daydream.output_schema import strict_object
-from daydream.redaction import redact_text
+from daydream.redaction import redact_structured_text, redact_text
 from daydream.retry_policy import FailureClass, classify_failure
+from daydream.review_source_refs import SOURCE_REFS_MAX_BYTES, SOURCE_REFS_SCHEMA
 
 
 class ReasonCode(StrEnum):
@@ -82,7 +84,19 @@ _SCOPE_PROPERTIES = {
 _SCOPE_SCHEMA = strict_object(_SCOPE_PROPERTIES)
 _OUTCOME_PROPERTIES = {'status': {'enum': ['complete', 'incomplete', 'failed', 'uncovered']},
                        'reason_codes': _REASONS}
-_STACK_SCHEMA = strict_object({**_SCOPE_PROPERTIES, **_OUTCOME_PROPERTIES, 'partial_evidence': {'type': 'boolean'}})
+TARGET_DECISIONS_MAX_ITEMS = 512
+TARGET_DECISIONS_MAX_BYTES = 256 * 1024
+RUN_TARGET_DECISIONS_MAX_BYTES = 256 * 1024
+_TARGET_DECISIONS_SCHEMA = {'type': 'array', 'maxItems': TARGET_DECISIONS_MAX_ITEMS, 'items': strict_object({
+    'target_id': _TEXT, 'status': {'enum': ['reviewed', 'not_reviewed']},
+    'reason': {'type': 'string', 'maxLength': TARGET_DECISIONS_MAX_BYTES},
+    'evidence_refs': SOURCE_REFS_SCHEMA,
+})}
+_STACK_SCHEMA = strict_object({**_SCOPE_PROPERTIES, **_OUTCOME_PROPERTIES, 'partial_evidence': {'type': 'boolean'},
+                               'target_decisions': _TARGET_DECISIONS_SCHEMA})
+# Nested schema 1 remains readable for existing terminal artifacts. New staged
+# review/cache contracts always retain decisions; absence cannot authorize reuse.
+_STACK_SCHEMA['required'].remove('target_decisions')
 _PHASE_SCHEMA = strict_object({'phase': _TEXT, **_OUTCOME_PROPERTIES, 'noop': {'type': 'boolean'},
                               'usable_evidence': {'type': 'boolean'}})
 _REVISION_SCHEMA = strict_object({'head_sha': _TEXT, 'merge_base_sha': _TEXT, 'diff_key': _TEXT, 'pr_base_sha': _TEXT})
@@ -195,6 +209,57 @@ def _validate_outcome(outcome: Mapping[str, Any], *, phase: bool = False) -> Non
             raise ValueError('host no-op must be complete')
     elif outcome['partial_evidence'] and status != 'incomplete':
         raise ValueError('validated partial evidence must remain incomplete')
+    if not phase and 'target_decisions' in outcome:
+        decisions = outcome['target_decisions']
+        validate_target_decisions(decisions)
+        if status == 'complete' and (not decisions or any(d['status'] != 'reviewed' for d in decisions)):
+            raise ValueError('complete attributed outcomes require reviewed target decisions')
+
+
+def validate_target_decisions(value: Any, *, analyzed_revision: Mapping[str, Any] | None = None) -> None:
+    """Check bounded retained assertions; references do not prove understanding.
+
+    Frozen-input correspondence belongs to stage admission. This storage boundary
+    rejects malformed or truncated attribution instead of fabricating completion.
+    """
+    try:
+        jsonschema.validate(value, _TARGET_DECISIONS_SCHEMA)
+    except jsonschema.ValidationError as exc:
+        raise ValueError(f'invalid target decisions: {exc.message}') from exc
+    identifiers = [decision['target_id'] for decision in value]
+    if len(set(identifiers)) != len(identifiers):
+        raise ValueError('duplicate target decisions')
+    if len(json.dumps(value, ensure_ascii=False).encode('utf-8')) > TARGET_DECISIONS_MAX_BYTES:
+        raise ValueError('target decisions exceed retained byte limit')
+    for decision in value:
+        refs = decision['evidence_refs']
+        if len(json.dumps(refs, ensure_ascii=False).encode('utf-8')) > SOURCE_REFS_MAX_BYTES:
+            raise ValueError('target source references exceed retained byte limit')
+        if decision['status'] == 'reviewed' and not any(ref['role'] == 'assigned' for ref in refs):
+            raise ValueError('reviewed target decision requires assigned source attribution')
+        if analyzed_revision is not None and any(
+                ref['revision'] != analyzed_revision['merge_base_sha' if ref['side'] == 'old' else 'head_sha']
+                for ref in refs):
+            raise ValueError('target source reference revision differs from analyzed revision')
+
+
+def _published_target_decisions_size(decisions: list[dict[str, Any]]) -> int:
+    """Count this field at its actual nested depth in the pretty UTF-8 findings envelope."""
+    scope: dict[str, Any] = {'scope_id': ''}
+    envelope = {'terminal_result': {'stack_outcomes': [scope]}}
+    before = len(json.dumps(envelope, indent=2, ensure_ascii=False).encode('utf-8'))
+    scope['target_decisions'] = decisions
+    return len(json.dumps(envelope, indent=2, ensure_ascii=False).encode('utf-8')) - before
+
+
+def preserved_target_decisions(value: Any) -> list[dict[str, Any]]:
+    """Copy and redact reasons without rewriting validated source identities."""
+    validate_target_decisions(value)
+    decisions = sorted(copy.deepcopy(value), key=lambda decision: decision['target_id'])
+    for decision in decisions:
+        decision['reason'] = redact_structured_text(decision['reason'])
+    validate_target_decisions(decisions)
+    return decisions
 
 
 def validate_terminal_result(data: Any, *, expected_head_sha: str | None = None) -> None:
@@ -221,6 +286,8 @@ def validate_terminal_result(data: Any, *, expected_head_sha: str | None = None)
             raise ValueError('scope outcome identity differs from planned inventory')
     for outcome in outcomes.values():
         _validate_outcome(outcome)
+        if 'target_decisions' in outcome:
+            validate_target_decisions(outcome['target_decisions'], analyzed_revision=data['analyzed_revision'])
     for phase in phases.values():
         _validate_outcome(phase, phase=True)
     for field, statuses in [('completed_stacks', {'complete'}), ('failed_stacks', {'failed'}),
@@ -261,6 +328,12 @@ class ReviewCoverage:
         self.diagnostics: dict[str, dict[str, str]] = {"scopes": {}, "phases": {}}
         self._terminal: dict[str, Any] | None = None
         self._frozen_evidence: dict[str, Any] | None = None
+        # Reserve empty fields up front so a later rejected scope can always
+        # retain truthful empty attribution after siblings consume the allowance.
+        empty_size = _published_target_decisions_size([])
+        self._target_decision_bytes = {scope.scope_id: empty_size for scope in self.planned_scopes}
+        if sum(self._target_decision_bytes.values()) > RUN_TARGET_DECISIONS_MAX_BYTES:
+            raise ValueError('run source attribution exceeds retained byte limit')
 
     @property
     def unfinished_scopes(self) -> dict[str, str]:
@@ -286,7 +359,7 @@ class ReviewCoverage:
                                   'noop': False, 'usable_evidence': False}
 
     def _record(self, outcomes: dict[str, dict[str, Any]], key: str, status: str,
-                reasons: Iterable[str], diagnostic: str | None, **fields: bool) -> None:
+                reasons: Iterable[str], diagnostic: str | None, **fields: Any) -> None:
         self._mutable()
         if key not in outcomes:
             raise ValueError(f'unknown planned scope or required phase: {key}')
@@ -303,9 +376,32 @@ class ReviewCoverage:
             diagnostics[key] = redact_text(diagnostic)[:1024]
         outcomes[key] = outcome
 
+    def check_target_decisions_budget(self, scope_id: str, decisions: list[dict[str, Any]]) -> int:
+        """Preview replacing one scope's allocation; a check never consumes run capacity."""
+        self._mutable()
+        if scope_id not in self._target_decision_bytes:
+            raise ValueError(f'unknown planned scope: {scope_id}')
+        size = _published_target_decisions_size(decisions)
+        if (sum(self._target_decision_bytes.values()) - self._target_decision_bytes[scope_id] + size
+                > RUN_TARGET_DECISIONS_MAX_BYTES):
+            raise ValueError('run source attribution exceeds retained byte limit')
+        return size
+
+    def admit_target_decisions(self, scope_id: str, decisions: list[dict[str, Any]]) -> None:
+        """Claim capacity synchronously with stage admission or restored coverage."""
+        self._target_decision_bytes[scope_id] = self.check_target_decisions_budget(scope_id, decisions)
+
     def record_scope(self, scope_id: str, status: str, *, reasons: Iterable[str] = (),
-                     partial_evidence: bool = False, diagnostic: str | None = None) -> None:
-        self._record(self.scopes, scope_id, status, reasons, diagnostic, partial_evidence=partial_evidence)
+                     partial_evidence: bool = False, diagnostic: str | None = None,
+                     target_decisions: list[dict[str, Any]] | None = None) -> None:
+        fields: dict[str, Any] = {'partial_evidence': partial_evidence}
+        if target_decisions is not None:
+            validate_target_decisions(target_decisions, analyzed_revision=self.revision.to_dict())
+            fields['target_decisions'] = preserved_target_decisions(target_decisions)
+            self.check_target_decisions_budget(scope_id, fields['target_decisions'])
+        self._record(self.scopes, scope_id, status, reasons, diagnostic, **fields)
+        if 'target_decisions' in fields:
+            self.admit_target_decisions(scope_id, fields['target_decisions'])
 
     def record_phase(self, phase: str, status: str, *, reasons: Iterable[str] = (), noop: bool = False,
                      usable_evidence: bool = False, diagnostic: str | None = None) -> None:
@@ -346,6 +442,10 @@ class ReviewCoverage:
                     raise ValueError('diagnostics require unfinished known outcomes and redacted text')
         # Validate the supplied inventory order too, before canonical serialization.
         validate_terminal_result(c._snapshot(dict(data), 'completed', True))
+        for scope_id, outcome in c.scopes.items():
+            if 'target_decisions' in outcome:
+                outcome['target_decisions'] = preserved_target_decisions(outcome['target_decisions'])
+                c.admit_target_decisions(scope_id, outcome['target_decisions'])
         return c
 
     def _snapshot(self, data: dict[str, Any], pipeline_state: str, projection_valid: bool) -> dict[str, Any]:

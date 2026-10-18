@@ -1,6 +1,8 @@
 """Large staged-review transport and retry scenarios through the production runner."""
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import re
 from collections.abc import AsyncIterator, Iterable
@@ -153,6 +155,54 @@ async def test_structure_keeps_interaction_review_when_optional_projections_exce
     assert data['findings'] == []
 
 
+@pytest.mark.parametrize('invalid_digest', [False, True], ids=['later-part', 'forged-later-part'])
+@pytest.mark.parametrize('sandbox', [False, True], ids=['catalog', 'inline'])
+async def test_structure_can_attribute_a_later_assigned_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_digest: bool, sandbox: bool,
+) -> None:
+    """Bounded examples must not exclude genuine later Structure work from admission."""
+    review = staged_review(tmp_path, monkeypatch)
+    review.backend.sandbox = sandbox
+    submitted: list[dict[str, Any]] = []
+
+    @review.backend.script('structure')
+    def respond(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        offered = stage['source_refs']['integration:structure']
+        assert len(offered) <= 4
+        assert all(ref['path'] != 'module_06.py' for ref in offered)
+        if sandbox:
+            contents = supporting_contents(review.backend.calls[-1]['prompt'])
+            descriptors = [(label.removesuffix('-sources'), json.loads(value))
+                           for label, value in contents.items() if label.endswith('-sources')]
+            label, part = next((label, part) for label, part in descriptors if part['target_id'] == 'module_06.py')
+            source = contents[label].encode()
+        else:
+            pending = [Path(stage['supporting_catalog']['path'])]
+            parts: list[dict[str, Any]] = []
+            while pending:
+                node = json.loads(pending.pop().read_text())
+                pending.extend(Path(child['path']) for child in node.get('catalogs', []))
+                parts.extend(node.get('parts', []))
+            part = next(part for part in parts if part['file'] == 'module_06.py')
+            source = Path(part['path']).read_bytes()
+        reference = next(copy.deepcopy(ref) for ref in part['source_refs'] if ref['side'] == 'new')
+        assert reference['path'] == 'module_06.py'
+        assert reference['revision'] == stage['analyzed_revision']['head_sha']
+        assert reference['part_sha256'] == hashlib.sha256(source).hexdigest()
+        assert reference['source_range'] == {'start': 1, 'end': 1} and reference['fragment'] is None
+        if invalid_digest:
+            reference['part_sha256'] = '0' * 64
+        output['targets'][0]['evidence_refs'] = [reference]
+        submitted.extend(copy.deepcopy(output['targets']))
+
+    data = await review.finish('structure', reason='evidence_incomplete' if invalid_digest else None)
+    scope = scopes(data)['structure']
+    assert scope['target_decisions'] == ([] if invalid_digest else submitted)
+    event, = stage_ends(review, 'structure')
+    assert event['metadata']['admitted'] is not invalid_digest
+    assert event['metadata']['failure_class'] == ('source_attribution' if invalid_digest else None)
+
+
 @pytest.mark.parametrize('outcome', ['success', 'second-rejection'])
 async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_starts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, ext_dir: ExtDir) -> None:
@@ -210,16 +260,20 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
 
 @pytest.mark.parametrize('sandbox', [False, True], ids=['exact-paths', 'inline'])
 @pytest.mark.parametrize(('payload', 'omit_final'), [('medium-file', False), ('oversized-hunk', False),
-                                                      ('oversized-hunk', True), ('unicode-line', False)])
+    ('oversized-hunk', True), ('unicode-line', False), ('unicode-separators', False)])
 async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool, payload: str, omit_final: bool) -> None:
     from daydream import git_ops
     from daydream.prompt_budget import SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
 
-    unicode = payload == 'unicode-line'
+    unicode = payload in {'unicode-line', 'unicode-separators'}
     medium = payload == 'medium-file'
     required = ("VALUE = '" + '界' * 11_000 + "'\n" if unicode else 'VALUE = 1\n' + ''.join(
         f'# continuation payload {index:04}: ' + 'x' * 90 + '\n' for index in range(540)))
+    if payload == 'unicode-separators':
+        # Git counts LF lines. Unicode separators and source text resembling a
+        # hunk header remain bytes within this one changed source line.
+        required = "VALUE = '" + ('界\u2028@@ -900,1 +900,1 @@\u0085' * 1200) + "'\n"
     before = 'VALUE = 0\n'
     if medium:
         before = "def hello():\n    return 'world'\n"
@@ -235,17 +289,11 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
         assert 12 * 1024 < len(canonical.encode()) < 24 * 1024
     fragments: list[bytes] = []
     assignments: list[dict[str, Any]] = []
+    decisions: list[dict[str, Any]] = []
 
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         assert stage['stage'] == 'first_pass' and stage['assigned_files'] == ['api.py']
-        part, = stage['assignment_parts']
-        assert part['kind'] == ('file' if medium and not sandbox else 'continuation')
-        if not medium:
-            assert part['part_count'] > 1
-            assert (part['old_start'], part['old_count'], part['new_start'], part['new_count']) == (
-                1, 1, 1, 1 if unicode else 541)
-        assignments.append(part)
         prompt = review.backend.calls[-1]['prompt']
         if sandbox:
             rendered = prompt[prompt.index('Sanctioned phase inputs (captured verbatim):'):]
@@ -254,23 +302,42 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
             assert 'Sanctioned phase inputs (read only these exact files):' not in prompt
         diff, index = capture(review, stage)
         assert list(index) == ['api.py']
-        assert index['api.py']['assignments'][0]['target_id'] == part['target_id']
-        body = diff.split('\n@@', 1)[1].split('\n', 1)[1].encode()
-        if medium and not sandbox:
-            assert diff == canonical
-            assert '<sanctioned-input label="intent">' in prompt
-            assert 'The PR updates greetings across stacks.' in prompt
-            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
-        else:
-            assert part['fragment_offset'] == sum(map(len, fragments))
-            assert part['fragment_bytes'] == len(body)
-        fragments.append(body)
-        if omit_final and part['part_index'] == part['part_count']:
-            output['targets'][0].update(status='not_reviewed', reason='Final continuation remains unexamined.')
+        assert index['api.py']['assignments'] == stage['assignment_parts']
+        notice = '[Ordered continuation: this is a partial hunk; see assignment mapping.]\n'
+        delivered = ([notice + piece for piece in diff.split(notice)[1:]]
+                     if stage['assignment_parts'][0]['kind'] == 'continuation' else [diff])
+        for part, part_diff, target in zip(stage['assignment_parts'], delivered, output['targets'], strict=True):
+            assert part['kind'] == ('file' if medium and not sandbox else 'continuation')
+            if not medium:
+                assert part['part_count'] > 1
+                assert (part['old_start'], part['old_count'], part['new_start'], part['new_count']) == (
+                    1, 1, 1, 1 if unicode else 541)
+            assignments.append(part)
+            assert target['target_id'] == part['target_id']
+            assert target['evidence_refs'] == part['source_refs'][:1]
+            body = part_diff.split('\n@@', 1)[1].split('\n', 1)[1].encode()
+            if medium and not sandbox:
+                assert part_diff == canonical
+                assert '<sanctioned-input label="intent">' in prompt
+                assert 'The PR updates greetings across stacks.' in prompt
+                output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+            else:
+                assert part['fragment_offset'] == sum(map(len, fragments))
+                assert part['fragment_bytes'] == len(body)
+                reference, = target['evidence_refs']
+                assert reference['source_range'] is None
+                assert reference['fragment'] == {'offset': part['fragment_offset'], 'bytes': len(body),
+                                                 'sha256': hashlib.sha256(body).hexdigest()}
+                assert 'never a source line number' in part['fragment_offset_basis']
+            fragments.append(body)
+            if omit_final and part['part_index'] == part['part_count']:
+                target.update(status='not_reviewed', reason='Final continuation remains unexamined.')
+        decisions.extend(copy.deepcopy(output['targets']))
 
     data = await review.finish('python', reason='evidence_incomplete' if omit_final else None,
                                findings=('Grounded defect',) if medium and not sandbox else ())
     assert scopes(data)['python']['files'] == ['api.py']
+    assert scopes(data)['python']['target_decisions'] == sorted(decisions, key=lambda item: item['target_id'])
     if medium:
         assert len(assignments) == (2 if sandbox else 1)
     else:
@@ -281,6 +348,19 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
     if unicode:
         assert len(assignments) >= 3 and assignments[-1]['segment_count'] == len(assignments)
         assert any(part['fragment_line_offset'] > 0 for part in assignments)
+        new_summaries = [part['source_summary'][0]['new'] for part in assignments
+                         if part['source_summary'][0]['new'] is not None]
+        assert len(new_summaries) >= 2
+        assert all(summary['start'] == summary['end'] == 1 for summary in new_summaries)
+        assert new_summaries[0]['start_byte'] == 0 and not new_summaries[0]['partial_start']
+        assert new_summaries[-1]['end_byte'] == len(required.encode()) and not new_summaries[-1]['partial_end']
+        assert all(left['end_byte'] == right['start_byte'] and left['partial_end'] and right['partial_start']
+                   for left, right in zip(new_summaries, new_summaries[1:]))
+        assert assignments[-1]['source_summary'][0]['old'] is None
+        assert any(summary['partial_start'] for summary in new_summaries)
+        full_index = json.loads((repo / '.daydream/hunk-index.json').read_text())['api.py']
+        assert full_index['added_total'] == full_index['removed_total'] == 1
+        assert len(full_index['hunks']) == 1
 
 
 @pytest.mark.parametrize('bundle_capable', [False, True], ids=['legacy-files', 'explicit-bundle'])
@@ -381,24 +461,43 @@ async def test_realistic_diff_and_index_are_scoped_to_assigned_files(tmp_path: P
     assert all(event['metadata']['admitted'] for event in stage_ends(review, 'python'))
 
 
-@pytest.mark.parametrize('path', ['component_雪.py', 'nested/component_"quote".py', 'component_\t.py'])
+@pytest.mark.parametrize('path', ['api.py', 'component_雪.py', 'nested/component_"quote".py', 'component_\t.py',
+                                 'api[1].py'])
 async def test_quoted_git_paths_keep_complete_required_stage_inputs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str) -> None:
 
     repo = tmp_path / 'quoted_paths'
-    seed_feature_branch(repo, base={path: 'VALUE = 0\n'}, feature={path: "VALUE = 'QUOTED_REQUIRED_CHANGE'\n"})
+    seed_feature_branch(repo, base={path: '# Stable source context\nVALUE = 0\n'},
+                        feature={path: "# Stable source context\nVALUE = 'QUOTED_REQUIRED_CHANGE'\n"})
     review = InvestigationRun(repo, tmp_path, monkeypatch)
     required: list[str] = []
+    submitted: list[dict[str, Any]] = []
 
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         assert stage['assigned_files'] == [path]
         diff, _ = capture(review, stage)
         assert 'QUOTED_REQUIRED_CHANGE' in diff
+        binding = json.loads(supporting_contents(review.backend.calls[-1]['prompt'])['input-binding'])
+        digest = hashlib.sha256(diff.encode()).hexdigest()
+        assert digest == binding['canonical_inputs']['canonical-diff']
+        # Construct provider citations independently of the new offered-ref
+        # metadata so this same request also exercises the pre-change owner.
+        references = [{
+            'artifact_sha256': digest, 'part_sha256': digest,
+            'revision': binding['analyzed_revision'][revision_key], 'path': path, 'side': side,
+            'source_range': {'start': 2, 'end': 2}, 'fragment': None,
+            'basis': 'supplied_diff', 'role': 'assigned',
+        } for side, revision_key in [('old', 'merge_base_sha'), ('new', 'head_sha')]]
+        output['targets'][0]['evidence_refs'] = references
+        submitted.extend(copy.deepcopy(references))
         required.append(diff)
 
     data = await review.finish('python')
     assert scopes(data)['python']['files'] == [path]
+    decision, = scopes(data)['python']['target_decisions']
+    assert decision['target_id'] == path and decision['status'] == 'reviewed'
+    assert decision['evidence_refs'] == submitted
     assert len(required) == 1
 
 
@@ -741,6 +840,79 @@ async def test_mixed_schema_and_admission_rejection_never_retries_or_loses_prior
     assert all('FAILED_MIXED_ATTEMPT_MARKER' not in call['prompt'] for call in review.backend.calls)
 
 
+@pytest.mark.parametrize('fault', ['revision', 'artifact-digest', 'part-digest', 'path', 'side', 'range',
+                                  'fragment', 'supporting-only', 'missing-assigned', 'reference-count',
+                                  'supporting-digest', 'supporting-missing-path', 'supporting-range',
+                                  'supporting-reversed-range'])
+async def test_invalid_source_reference_preserves_prior_admitted_target_decisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
+    """A later well-shaped citation cannot alter admitted work unless frozen identity matches."""
+    review = staged_review(tmp_path, monkeypatch)
+    admitted: list[dict[str, Any]] = []
+    rejected_ids: list[str] = []
+
+    @review.backend.script('python')
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        if not stage['progress']:
+            admitted.extend(copy.deepcopy(output['targets']))
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+            return
+        rejected_ids.extend(stage['assigned_target_ids'])
+        output['notes'] = 'INVALID_ATTRIBUTION_MUST_NOT_SURVIVE'
+        reference = output['targets'][0]['evidence_refs'][0]
+        if fault == 'revision':
+            reference['revision'] = '0' * 40
+        elif fault == 'artifact-digest':
+            reference['artifact_sha256'] = '0' * 64
+        elif fault == 'part-digest':
+            reference['part_sha256'] = '0' * 64
+        elif fault == 'path':
+            reference['path'] = 'unassigned.py'
+        elif fault == 'side':
+            reference['side'] = 'diff'
+        elif fault == 'range':
+            reference['source_range'] = {'start': 999999, 'end': 999999}
+        elif fault == 'fragment':
+            reference['fragment'] = {'offset': 999999, 'bytes': 1, 'sha256': '0' * 64}
+        elif fault == 'supporting-only':
+            reference['role'] = 'supporting'
+        elif fault == 'reference-count':
+            output['targets'][0]['evidence_refs'] *= 5
+        elif fault.startswith('supporting-'):
+            supporting = {
+                'artifact_sha256': hashlib.sha256((review.repo / 'module_06.py').read_bytes()).hexdigest(),
+                'part_sha256': None, 'revision': stage['analyzed_revision']['head_sha'],
+                'path': 'module_06.py', 'side': 'new', 'source_range': {'start': 1, 'end': 1},
+                'fragment': None, 'basis': 'source_inspection', 'role': 'supporting',
+            }
+            if fault == 'supporting-digest':
+                supporting['artifact_sha256'] = '0' * 64
+            elif fault == 'supporting-missing-path':
+                supporting['path'] = 'missing-frozen.py'
+            else:
+                supporting['source_range'] = ({'start': 2, 'end': 1} if fault == 'supporting-reversed-range'
+                                               else {'start': 2, 'end': 2})
+            output['targets'][0]['evidence_refs'].append(supporting)
+        else:
+            output['targets'][0]['evidence_refs'] = []
+
+    reason = 'malformed_output' if fault == 'reference-count' else 'evidence_incomplete'
+    data = await review.finish('python', reason=reason, findings=('Grounded defect',))
+    events = stage_ends(review, 'python')
+    assert [event['metadata']['admitted'] for event in events] == [True, False]
+    assert all(event['metadata']['attempt'] == 1 for event in events)
+    assert events[-1]['metadata']['failure_class'] == 'source_attribution'
+    assert bool(events[-1]['metadata'].get('schema_rejection')) is (fault == 'reference-count')
+    decisions = scopes(data)['python']['target_decisions']
+    assert decisions == sorted(admitted, key=lambda item: item['target_id'])
+    assert not set(rejected_ids).intersection(item['target_id'] for item in decisions)
+    coverage = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
+    assert next(scope for scope in coverage['stack_outcomes'] if scope['scope_id'] == 'python')[
+        'target_decisions'] == decisions
+    assert all('INVALID_ATTRIBUTION_MUST_NOT_SURVIVE' not in call['prompt'] for call in review.backend.calls)
+
+
 @pytest.mark.parametrize('sandbox', [False, True], ids=['exact-paths', 'inline'])
 async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool) -> None:
@@ -757,12 +929,14 @@ async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
     review.backend.sandbox = sandbox
     assignments: list[dict[str, Any]] = []
     fragments: list[str] = []
+    decisions: list[dict[str, Any]] = []
 
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         diff, index = capture(review, stage)
         scoped = index['api.py']
         fragments.append(diff)
+        decisions.extend(copy.deepcopy(output['targets']))
         for part in stage['assignment_parts']:
             assignments.append(part)
             expected = (part['old_start'], part['old_start'] + part['old_count'] - 1,
@@ -776,7 +950,119 @@ async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
     coverage = json.loads((repo / '.daydream/deep/review-coverage.json').read_text())
     assert all(scope['status'] == 'complete' for scope in coverage['stack_outcomes'])
     assert assignments[0]['old_start'] == 1 and assignments[0]['new_count'] == 0
+    first_reference, = decisions[0]['evidence_refs']
+    assert first_reference['side'] == 'old'
+    assert first_reference['source_range'] == {'start': 1, 'end': 1}
+    assert any(reference['side'] == 'new' for decision in decisions for reference in decision['evidence_refs'])
+    expected_decisions = sorted(decisions, key=lambda item: item['target_id'])
+    assert next(scope for scope in coverage['stack_outcomes'] if scope['scope_id'] == 'python')[
+        'target_decisions'] == expected_decisions
     combined = '\n'.join(fragments)
     assert combined.count('-DELETED_FIRST_LINE = True') == 1
     for index in range(500):
         assert combined.count(f'LATER_REQUIRED_CHANGE_{index:04}') == 1
+
+
+@pytest.mark.parametrize('fault', ['reordered-fragment', 'byte-offset-as-line'])
+async def test_continuation_references_cannot_alias_another_fragment_or_a_source_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
+    """Byte offsets identify a specific delivered fragment, even when it splits one source line."""
+    repo = tmp_path / 'continuation_attribution'
+    # Oversized before and after lines leave a real admitted stage before the
+    # second fragment, even when nearby small continuations share a batch.
+    seed_feature_branch(repo, base={'api.py': "VALUE = '" + '古' * 11000 + "'\n"},
+                        feature={'api.py': "VALUE = '" + '界' * 11000 + "'\n"})
+    review = InvestigationRun(repo, tmp_path, monkeypatch)
+    admitted: list[dict[str, Any]] = []
+    injected: list[str] = []
+
+    @review.backend.script('python')
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        capture(review, stage)
+        if not admitted:
+            assert [part['part_index'] for part in stage['assignment_parts']] == [1]
+            admitted.extend(copy.deepcopy(output['targets']))
+            output['candidates'] = [candidate(disposition='confirmed', finding=record(line=1))]
+            return
+        target = next(target for part, target in zip(stage['assignment_parts'], output['targets'], strict=True)
+                      if part['part_index'] == 2)
+        reference, = target['evidence_refs']
+        assert reference['source_range'] is None
+        injected.append(target['target_id'])
+        assert reference['fragment']['offset'] > 1
+        assert reference['part_sha256'] != admitted[0]['evidence_refs'][0]['part_sha256']
+        if fault == 'reordered-fragment':
+            target['evidence_refs'] = copy.deepcopy(admitted[0]['evidence_refs'])
+        else:
+            reference['source_range'] = {'start': reference['fragment']['offset'],
+                                         'end': reference['fragment']['offset']}
+            reference['fragment'] = None
+
+    data = await review.finish('python', reason='evidence_incomplete', findings=('Grounded defect',))
+    assert len(injected) == 1 and injected[0] not in {target['target_id'] for target in admitted}
+    assert scopes(data)['python']['target_decisions'] == admitted
+    events = stage_ends(review, 'python')
+    assert [event['metadata']['admitted'] for event in events] == [True, False]
+    assert events[-1]['metadata']['failure_class'] == 'source_attribution'
+
+
+async def test_redaction_expansion_rejects_stage_without_losing_admitted_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A secret-heavy reason must not break publication of earlier accepted work."""
+    review = staged_review(tmp_path, monkeypatch)
+    admitted: list[dict[str, Any]] = []
+
+    @review.backend.script('python')
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        if not stage['progress']:
+            admitted.extend(copy.deepcopy(output['targets']))
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+        else:
+            output['targets'][0]['reason'] = 'TOKEN=x ' * 20000
+
+    data = await review.finish('python', reason='evidence_incomplete', findings=('Grounded defect',))
+    assert scopes(data)['python']['target_decisions'] == admitted
+    events = stage_ends(review, 'python')
+    assert [event['metadata']['admitted'] for event in events] == [True, False]
+    assert events[-1]['metadata']['failure_class'] == 'source_attribution'
+    assert 'TOKEN=x' not in review.output.read_text()
+    saved = json.loads((review.repo / '.daydream/deep/stack-python-records.json').read_text())
+    assert [finding['description'] for finding in saved['issues']] == ['Grounded defect']
+
+
+async def test_parallel_scope_attribution_overflow_retains_findings_and_admitted_identities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Individually valid scopes cannot crowd accepted findings out of the bounded handoff."""
+    from daydream.findings import MAX_ARTIFACT_BYTES
+
+    review = staged_review(tmp_path, monkeypatch, files=20)
+    review.config = replace(review.config, deep_shard_enabled=True, deep_shard_max_files=1,
+                            deep_shard_max_bytes=10**9, deep_shard_fanout_cap=32)
+    submitted: dict[str, list[dict[str, Any]]] = {}
+
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        if stage['scope_id'] == 'structure':
+            return
+        if 'api.py' in stage['assigned_files']:
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+        else:
+            output['targets'][0]['reason'] = 'r' * 60000
+        submitted[stage['scope_id']] = copy.deepcopy(output['targets'])
+
+    review.backend.stage_response = response
+    assert await review.run() == 0
+    data = review.load()
+    assert review.output.stat().st_size <= MAX_ARTIFACT_BYTES
+    assert [finding['title'] for finding in data['findings']] == ['Grounded defect']
+    assert data['terminal_result']['analysis_state'] == 'incomplete'
+    outcomes = scopes(data)
+    assert len(submitted) == 20, 'the fixture must exercise independent concurrent reviewer scopes'
+    assert any(scope['reason_codes'] == ['evidence_incomplete'] for scope in outcomes.values())
+    for scope_id, decisions in submitted.items():
+        outcome = outcomes[scope_id]
+        assert outcome['target_decisions'] == (decisions if outcome['status'] == 'complete' else [])
+    coverage = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
+    assert coverage['stack_outcomes'] == data['terminal_result']['stack_outcomes']

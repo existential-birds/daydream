@@ -189,6 +189,7 @@ def _prime_merge_resume(
     from daydream.deep.orchestrator import _prepare_review_stacks
     from daydream.deep.records import stamp_record_uids
     from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
+    from tests.harness.review_result import frozen_target_decisions
 
     config = RunConfig(target=str(target), start_at="merge", cleanup=False)
     base = _resolve_base(target, None, None)
@@ -209,7 +210,9 @@ def _prime_merge_resume(
                         "originating_run_id": coverage.run_id}
             (deep / f"stack-{stack}-records.json").write_text(json.dumps(envelope))
             if stack in coverage.scopes:
-                coverage.record_scope(stack, "complete")
+                assignment = next(assignment for assignment in stacks if assignment.stack_name == stack)
+                coverage.record_scope(stack, "complete", target_decisions=frozen_target_decisions(
+                    target, assignment, coverage.revision, diff))
     persist_review_coverage(deep, coverage)
     return deep
 

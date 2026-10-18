@@ -7,18 +7,23 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from daydream import prompt_budget as inputs
 from daydream.artifact_visibility import ArtifactSession, artifact_dir_for
 from daydream.backends import Backend
-from daydream.deep.detection import StackAssignment
+from daydream.config import STRUCTURE_STACK_NAME
+from daydream.deep.detection import GENERIC_STACK, StackAssignment, base_stack_name
 from daydream.deep.diff import _DIFF_MINUS_HEADER, _DIFF_PLUS_HEADER, iter_diff_blocks
 from daydream.git_ops.models import GitError
 from daydream.git_ops.source import frozen_source
 from daydream.hunk_index import _HUNK_HEADER, _unquote_git_path
 from daydream.json_utils import atomic_write_bytes, canonical_json as _json
+from daydream.review_source_refs import lf_lines, part_source_mapping, validate_source_refs
 from daydream.workspace import WorkContext
+
+if TYPE_CHECKING:
+    from daydream.extensions.registry import Registry
 
 _EXACT_PATH_ASSIGNMENT_MAX_BYTES = 24 * 1024
 
@@ -74,11 +79,60 @@ class StageInputFactory:
         self.binding = {"analyzed_revision": revision,
                         "canonical_inputs": {item.label: item.sha256 for item in self.canonical}}
         self.scope_name = hashlib.sha256(stack.stack_name.encode()).hexdigest()[:20]
+        self.blocks = dict(iter_diff_blocks(self.full_diff))
         self.parts = self._parts()
         self.by_id = {part.assignment["target_id"]: part for part in self.parts}
         self.assignment_batches = self._batches()
         self.current_paths: dict[str, Path] = {}
-        self.blocks = dict(iter_diff_blocks(self.full_diff))
+
+    @classmethod
+    def for_review(cls, backend: Backend, work: WorkContext, stack: StackAssignment, *,
+        diff_path: Path, shared_paths: dict[str, Path | None], revision: dict[str, Any],
+        registry: Registry, artifact_session: ArtifactSession | None, allow_standalone: bool,
+    ) -> StageInputFactory:
+        """Use identical transport and prompt capabilities for live work and restored assertions."""
+        from daydream.deep.prompts import (
+            build_generic_fallback_prompt,
+            build_per_stack_prompt,
+            build_structural_prompt,
+        )
+
+        prompt_name = {STRUCTURE_STACK_NAME: 'structural', GENERIC_STACK: 'generic-fallback'}.get(
+            base_stack_name(stack.stack_name), 'per-stack')
+        builder = registry.prompt(prompt_name)
+        bundle_capable = (any(builder is builtin for builtin in (
+            build_generic_fallback_prompt, build_per_stack_prompt, build_structural_prompt))
+            or getattr(builder, 'review_input_bundle', False) is True)
+        read_only = (getattr(backend, 'read_only_disposable_clone', False) is True
+                     or inputs.uses_diff_reference(backend, work.repo, read_only=True))
+        return cls(backend, work, stack, diff_path=diff_path, hunk_index_path=diff_path.parent / 'hunk-index.json',
+            shared_paths=shared_paths, revision=revision, artifact_session=artifact_session,
+            allow_standalone=allow_standalone, read_only=read_only, bundle_capable=bundle_capable)
+
+    def validate_retained_decisions(self, decisions: Any, *, complete: bool) -> None:
+        """Rebind restored assertions to every original target and its frozen source selectors."""
+        from daydream.review_result import validate_target_decisions
+
+        validate_target_decisions(decisions, analyzed_revision=self.revision)
+        structural = self.stack.stack_name == STRUCTURE_STACK_NAME
+        expected = {f'integration:{self.stack.stack_name}'} if structural else set(self.by_id)
+        actual = {decision['target_id'] for decision in decisions}
+        if not actual <= expected or (complete and (actual != expected or any(
+                decision['status'] != 'reviewed' for decision in decisions))):
+            raise ValueError('retained target decisions differ from frozen assignment inventory')
+        for decision in decisions:
+            refs = (ref for part in self.parts for ref in part.assignment['source_refs']) if structural else (
+                self.by_id[decision['target_id']].assignment['source_refs'])
+            if not validate_source_refs(decision['evidence_refs'], refs, revision=self.revision,
+                    source_root=self.work.repo, require_assigned=decision['status'] == 'reviewed'):
+                raise ValueError('retained source attribution differs from frozen assignment')
+
+    def _mapped(self, part: _Part, *, body: str | bytes | None = None) -> _Part:
+        old_path, new_path = self._diff_paths(part.assignment['file'])
+        part.assignment.update(part_source_mapping(part.diff, part.assignment,
+            artifact_sha256=self.canonical[0].sha256, revision=self.revision,
+            old_path=old_path, new_path=new_path, body=body))
+        return part
 
     @staticmethod
     def _canonical(label: str, path: Path) -> inputs.PreparedSanctionedInput:
@@ -145,8 +199,8 @@ class StageInputFactory:
         for path, block in iter_diff_blocks(self.full_diff):
             blocks[path] = blocks.get(path, "") + block
         for path in sorted(self.stack.files):
-            whole = _Part({"target_id": path, "file": path, "part_index": 1, "part_count": 1,
-                           "kind": "file", "hunk_index": None}, blocks.get(path, ""))
+            whole = self._mapped(_Part({"target_id": path, "file": path, "part_index": 1, "part_count": 1,
+                           "kind": "file", "hunk_index": None}, blocks.get(path, "")))
             if self._remaining_bytes(self._render([whole])) >= 0:
                 result.append(whole)
                 continue
@@ -163,7 +217,7 @@ class StageInputFactory:
         return result
 
     def _split_file(self, path: str, block: str) -> list[_Part]:
-        lines = block.splitlines(keepends=True)
+        lines = lf_lines(block)
         starts = [index for index, line in enumerate(lines) if _HUNK_HEADER.match(line)]
         # Binary/rename metadata is also required work, split explicitly if huge.
         if not starts:
@@ -186,10 +240,12 @@ class StageInputFactory:
         base = {"target_id": "part:000000", "file": path, "part_index": 999999, "part_count": 999999,
                 "kind": "hunk", "hunk_index": hunk_index,
                 "old_start": old_start, "old_count": old_count, "new_start": new_start, "new_count": new_count}
-        if self._remaining_bytes(self._render([_Part(base, header + body)])) >= 0:
-            return [_Part(base, header + body)]
+        whole = self._mapped(_Part(base, header + body))
+        if self._remaining_bytes(self._render([whole])) >= 0:
+            return [whole]
         # Prefer whole diff lines; oversized lines use ordered UTF-8 fragments at exact byte offsets, never whole hunks.
         chunks: list[_Part] = []
+        source_body = body.encode('utf-8')
         rest = body
         byte_offset = 0
         old_line, new_line = old_start, new_start
@@ -200,17 +256,25 @@ class StageInputFactory:
             meta = {**base, "kind": "continuation", "segment_index": 999999, "segment_count": 999999,
                     "fragment_offset": byte_offset, "fragment_bytes": 999999999,
                     "old_line": old_line, "new_line": new_line, "fragment_line_offset": line_offset}
-            allowance = self._remaining_bytes(self._render([_Part(meta, notice + header)]))
+            # Reserve the descriptor/summary wrappers before choosing bytes. This
+            # avoids adding unbudgeted attribution after splitting a full input.
+            probe_bytes = len(inputs.truncate_utf8_to_budget(rest[:256], 256).encode('utf-8'))
+            probe = self._mapped(_Part({**meta, 'fragment_bytes': probe_bytes}, notice + header), body=source_body)
+            allowance = self._remaining_bytes(self._render([probe])) - 1536
             low = len(inputs.truncate_utf8_to_budget(rest, max(0, allowance)))
             if low == 0:
                 raise inputs.SanctionedInputUnavailable("required change header exceeds the assignment allowance")
             boundary = rest.rfind("\n", 0, low)
             take = boundary + 1 if boundary >= 0 else low
             chunk = rest[:take]
-            chunks.append(_Part({**meta, "segment_index": len(chunks) + 1, "fragment_bytes": len(chunk.encode())},
-                                notice + header + chunk))
+            part = self._mapped(_Part({**meta, "segment_index": len(chunks) + 1,
+                                      "fragment_bytes": len(chunk.encode())}, notice + header + chunk),
+                                body=source_body)
+            if self._remaining_bytes(self._render([part])) < 0:
+                raise inputs.SanctionedInputUnavailable('required source attribution exceeds the assignment allowance')
+            chunks.append(part)
             # Count completed lines only; fragment offsets map split lines exactly, while ranges retain the full hunk.
-            for line in chunk.splitlines(keepends=True):
+            for line in lf_lines(chunk):
                 if line_offset == 0:
                     line_kind = line[:1]
                 if line.endswith("\n"):
@@ -247,7 +311,7 @@ class StageInputFactory:
         for pattern, prefix in ((_DIFF_MINUS_HEADER, "a/"), (_DIFF_PLUS_HEADER, "b/")):
             header = pattern.search(block)
             paths.append(_unquote_git_path(header[1].rstrip("\t")).removeprefix(prefix) if header else file)
-        rename_from = next((line.removeprefix("rename from ") for line in block.splitlines()
+        rename_from = next((line.removeprefix("rename from ") for line in block.split('\n')
                             if line.startswith("rename from ")), None)
         return (_unquote_git_path(rename_from) if rename_from is not None else paths[0]), paths[1]
 
@@ -327,11 +391,13 @@ class StageInputFactory:
                 if self.bundle_capable and self.transport is inputs.SanctionedInputTransport.EXACT_PATHS:
                     deferred_contents[label] = part.diff
                     continue
-                candidate = {**contents, label: part.diff}
-                if (self.transport is inputs.SanctionedInputTransport.EXACT_PATHS and len(contents) < 128
+                descriptor = _json({'target_id': part.assignment['target_id'],
+                                    'source_refs': part.assignment['source_refs'][:4]})
+                candidate = {**contents, label: part.diff, f'{label}-sources': descriptor}
+                if (self.transport is inputs.SanctionedInputTransport.EXACT_PATHS and len(candidate) <= 128
                         and sum(len(text.encode()) for text in candidate.values()) <= 1024 * 1024
                         or self._remaining_bytes(candidate) >= 0):
-                    contents[label] = part.diff
+                    contents = candidate
                 else:
                     statuses.append({"label": label, "status": "unavailable"})
         else:
@@ -398,10 +464,21 @@ class StageInputFactory:
                 read_only=self.read_only).selected_paths()
             deferred_paths = {label: path for label, path in deferred_paths.items() if label in supporting}
             while deferred_paths:
-                catalog_entries = [{'file': part.assignment['file'], 'target_id': part.assignment['target_id'],
-                                    'path': str(deferred_paths[f'diff-part-{index:06d}'])}
-                                   for index, part in enumerate(self.parts)
-                                   if f'diff-part-{index:06d}' in deferred_paths]
+                catalog_entries = []
+                for index, part in enumerate(self.parts):
+                    label = f'diff-part-{index:06d}'
+                    if label not in deferred_paths:
+                        continue
+                    entry: dict[str, Any] = {'file': part.assignment['file'], 'target_id': part.assignment['target_id'],
+                             'path': str(deferred_paths[label]), 'source_refs': part.assignment['source_refs'][:4]}
+                    while entry['source_refs'] and len(_json({'parts': [entry]}).encode()) > 12_000:
+                        entry['source_refs'].pop()
+                    if entry['source_refs']:
+                        catalog_entries.append(entry)
+                    else:
+                        deferred_paths.pop(label)
+                if not deferred_paths:
+                    break
                 catalog, catalog_paths = self._supporting_catalog(
                     directory / f'catalog-{len(deferred_paths)}', catalog_entries)
                 all_paths = {**paths, **deferred_paths, **catalog_paths}

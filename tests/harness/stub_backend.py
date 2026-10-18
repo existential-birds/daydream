@@ -1,6 +1,7 @@
 """Prompt-dispatching backend and UI helpers for deep-pipeline integration tests."""
 from __future__ import annotations
 
+import copy
 import json
 import re
 from collections.abc import AsyncIterator, Callable
@@ -32,7 +33,9 @@ def review_stage_state(prompt: str) -> dict[str, Any] | None:
 
 
 def stage_result(stage: dict[str, Any], *, candidates: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    offered = stage.get('source_refs', {})
     return {"targets": [{"target_id": target, "status": "reviewed", "reason": ""}
+                    | {'evidence_refs': copy.deepcopy(offered.get(target, [])[:1])}
                     for target in stage["assigned_target_ids"]],
         "notes": "Assigned changed behavior reviewed", "supporting_files": [],
         "candidates": candidates or [], "contradictions": []}
