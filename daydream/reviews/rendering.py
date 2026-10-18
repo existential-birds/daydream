@@ -40,11 +40,9 @@ def default_render_finding(finding: CommentFinding, ctx: FindingRenderContext) -
         summary_parts = [_issue_header(finding, prefix=prefix, always_bold=True)]
         if finding.body:
             summary_parts.append(f"\n{finding.body}\n")
-        summary_parts.append(_build_agent_prompt(finding))
         return "\n".join(summary_parts)
     header = _issue_header(finding, prefix=prefix, always_bold=ctx.placement != "inline")
     parts = [p for p in (header, finding.body) if p]
-    parts.append(_build_agent_prompt(finding))
     return "\n\n".join(parts)
 
 
@@ -106,28 +104,6 @@ def _format_tag_line(issue: CommentFinding) -> str:
     return " · ".join(bits)
 
 
-def _build_agent_prompt(issue: CommentFinding) -> str:
-    """Build a collapsible AI-agent-friendly prompt for a single issue."""
-    loc = f"`{issue.path}`"
-    if issue.line:
-        loc += f" around line {issue.line}"
-    instruction = issue.title
-    if issue.body:
-        # First meaningful body line as added context.
-        first_line = issue.body.strip().split("\n")[0].strip()
-        if first_line and first_line != issue.title:
-            instruction = f"{instruction}: {first_line}" if instruction else first_line
-    return (
-        "<details>\n"
-        "<summary>Fix with an agent</summary>\n\n"
-        "```\n"
-        "Verify each finding against the current code and only fix it if needed.\n\n"
-        f"In {loc}, {instruction}\n"
-        "```\n\n"
-        "</details>"
-    )
-
-
 def _summary_body_block(issue: ParsedIssue, renderers: ReviewRenderers) -> str:
     """Append host-owned identity to the summary renderer's finding block."""
     block = _render_finding(issue, "summary", renderers)
@@ -155,7 +131,7 @@ def _render_body_section(findings: tuple[SummaryFinding, ...]) -> str:
 
 
 def default_render_summary(ctx: SummaryContext) -> str:
-    """Render grouped findings, diagrams, agent prompt, and run details.
+    """Render grouped findings, diagrams, and run details.
 
     The host owns the actionable count, warnings, reviewed commit, event, and footer."""
     return "\n\n".join(part for part in (
@@ -187,35 +163,6 @@ def _count_labels(
     """Return ordered `N LABEL` strings for non-empty counts."""
     counts = Counter(getattr(issue, attr) for issue in issues)
     return [f"{counts[key]} {key}" for key in order if counts[key]]
-
-
-def _build_consolidated_prompt(
-    classified: ClassifiedIssues,
-    pr: PRInfo,
-) -> str:
-    """Build a single collapsible prompt block that tells AI agents to fetch and fix review comments."""
-    total = classified.total()
-
-    prompt_body = (
-        f"Fix the {total} review comment(s) posted on this PR.\n"
-        "\n"
-        "Fetch the comments manually:\n"
-        f"1. gh api repos/{pr.owner}/{pr.repo}/pulls/{pr.number}/comments\n"
-        f"2. gh api repos/{pr.owner}/{pr.repo}/issues/{pr.number}/comments\n"
-        "\n"
-        "These endpoints return all comments on the PR. Focus on the most\n"
-        "recent review — ignore older review threads that have already been\n"
-        "addressed. For each comment: read the referenced file, verify the\n"
-        "finding against the current code, and fix it if valid. Skip false\n"
-        "positives. Commit all fixes when done."
-    )
-
-    return (
-        "<details>\n"
-        "<summary>Fix with an agent</summary>\n\n"
-        f"```\n{prompt_body}\n```\n\n"
-        "</details>"
-    )
 
 
 _REVIEWED_COMMIT_MARKER = "- **Reviewed commit:**"
@@ -271,7 +218,7 @@ def build_payload_for_event(
     summary_ctx = SummaryContext(
         findings=tuple(SummaryFinding(finding=_comment_finding(issue), body_block=_summary_body_block(issue, renderers))
                        for issue in classified.body_only),
-        agent_prompt=_build_consolidated_prompt(classified, pr) if not classified.is_empty() else "",
+        agent_prompt="",
         review_info=review_info_block,
         diagrams=diagram_blocks or None,
     )
