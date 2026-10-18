@@ -1,6 +1,23 @@
 """GitHub presentation must preserve typed failures without exposing rich artifacts."""
+import pytest
+
 from daydream.review_reporting import render_github_review_context, render_review_run_id
 from tests.harness.review_result import review_coverage
+
+
+@pytest.mark.parametrize('shared_phase', [False, True], ids=['one-scope', 'scope-and-phase-share-key'])
+def test_github_warning_retains_distinct_diagnostics_for_the_same_key(shared_phase: bool) -> None:
+    """Matching a terminal key must not discard additional diagnoses or replay the first one."""
+    coverage = review_coverage(scope_ids=('merge',), phases=('merge',) if shared_phase else ())
+    coverage.record_scope('merge', 'failed', reasons=('backend_failure',))
+    if shared_phase:
+        coverage.record_phase('merge', 'failed', reasons=('synthesis_failure',))
+    warnings = ('merge: synthesis transport failed', 'merge: reviewer backend failed',
+                'merge: additional evidence unavailable', 'merge: synthesis transport failed')
+    rendered = render_github_review_context(coverage.finalize('failed'), review_warnings=warnings)
+    assert rendered.startswith('⚠️ **Review failed.**')
+    for warning in dict.fromkeys(warnings):
+        assert rendered.count(warning) == 1
 
 
 def test_github_warning_retains_phase_failures_bounds_and_escapes_diagnostics() -> None:
