@@ -26,14 +26,22 @@ def store(tmp_path: Path) -> LocalRecordStore:
     return result
 
 
-def test_current_records_read_all_history_without_creating_snapshot(store: LocalRecordStore) -> None:
-    store.commit_run(run_record("future-run", captured_at="2200-01-01T00:00:00Z"))
+@pytest.mark.parametrize("trace_fields", [{}, {"trace_id": None}, {"trace_id": "0123456789abcdef0123456789abcdef"}])
+def test_current_records_read_all_history_without_creating_snapshot(
+    store: LocalRecordStore, trace_fields: dict[str, Any],
+) -> None:
+    store.commit_run(run_record("future-run", captured_at="2200-01-01T00:00:00Z", **trace_fields))
     store.append_observation(observation("future-observation", observed_at="2200-01-02T00:00:00Z"))
     assert list((store.root / "snapshots").iterdir()) == []
     current = store.read_records()
     assert {record["run_id"] for record in current["runs"]} == {"run-1", "future-run"}
     assert [record["observation_id"] for record in current["observations"]] == ["future-observation"]
+    assert {record["run_id"]: record["trace_id"] for record in current["runs"]} == {
+        "run-1": None, "future-run": trace_fields.get("trace_id"),
+    }
     assert list((store.root / "snapshots").iterdir()) == []
+    pinned = store.select_snapshot(observed_before="2300-01-01T00:00:00Z")
+    assert store.read_snapshot(pinned["snapshot_id"]).runs == current["runs"]
 
 
 @pytest.mark.parametrize("missing", ["run", "finding"])

@@ -331,7 +331,10 @@ Passing `--dataset-store DIR` also enables capture and chooses private local sto
 Capture preserves evidence as produced without additional redaction or secret scanning.
 The user controls this local data and is responsible for reviewing it before sharing.
 Collection works with `--no-archive` and tracing disabled.
-It retains the original analyzed revisions and input diff, trajectories, structured claims and
+When tracing creates an owned run root, `trace_id` retains its 32-character lowercase
+OTel trace identity; it is `null` when disabled or unavailable. The reference identifies
+a locally created trace and does not guarantee exporter delivery.
+Capture retains the original analyzed revisions and input diff, trajectories, structured claims and
 verification/fix associations at the existing frozen finalization boundary, including cooperative
 interruption. SIGKILL and power loss before that boundary can lose uncaptured evidence. A
 persistence refusal emits a sanitized collection diagnostic and preserves completed review

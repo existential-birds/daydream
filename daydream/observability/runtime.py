@@ -50,6 +50,21 @@ def current_session() -> TraceSession | None:
     return _active_session.get()
 
 
+def current_run_trace_id() -> str | None:
+    """Identify the locally created owned root, independently of export delivery."""
+    try:
+        session = current_session()
+        root = None if session is None else session.root_scope
+        if root is not None and root.span is not None:
+            context = root.span.get_span_context()
+            if context.is_valid and 0 < context.trace_id < (1 << 128):
+                return format(context.trace_id, "032x")
+    except Exception:
+        # Tracing is optional; an unavailable identity must not prevent capture.
+        pass
+    return None
+
+
 def associate_run_trajectory(session_id: str) -> None:
     """Link the early run span once its root trajectory identity is available."""
     session = current_session()
