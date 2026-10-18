@@ -197,6 +197,9 @@ class FrameworkInspection:
         if not isinstance(patterns, list) or not all(isinstance(pattern, str) for pattern in patterns):
             return None
         for pattern in patterns:
+            # fnmatch does not resolve workspace brace expansion, extglobs, or escapes.
+            if any(character in pattern for character in "{}\\") or re.search(r"[@?!+*]\(", pattern):
+                return None
             pattern = pattern.removeprefix("!").rstrip("/")
             if not pattern or PurePosixPath(pattern).is_absolute() or ".." in PurePosixPath(pattern).parts:
                 return None

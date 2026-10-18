@@ -294,19 +294,27 @@ def test_framework_inspection_budget_boundaries(tmp_path: Path, limit: str) -> N
 
 
 @pytest.mark.parametrize("workspace", ["package.json", "pnpm-workspace.yaml"])
-def test_declared_workspace_without_local_metadata_does_not_inherit_root(tmp_path: Path, workspace: str) -> None:
-    """Declared package boundaries remain boundaries when package metadata is missing."""
+@pytest.mark.parametrize("pattern", [
+    "apps/web", "apps/*", "apps/**", "apps/w?b", "apps/[wm]*",
+    pytest.param("apps/{web,mobile}", id="unsupported-braces"),
+    pytest.param("apps/@(web|mobile)", id="unsupported-extglob"),
+    pytest.param(r"apps\*", id="unsupported-backslash"),
+])
+def test_declared_workspace_without_local_metadata_does_not_inherit_root(
+    tmp_path: Path, workspace: str, pattern: str,
+) -> None:
+    """Declared or unsupported workspace boundaries cannot leak root framework ownership."""
     root: dict[str, object] = {"dependencies": {"react": "*"}}
     if workspace == "package.json":
-        root["workspaces"] = ["apps/*"]
+        root["workspaces"] = [pattern]
     else:
-        (tmp_path / workspace).write_text('packages: ["apps/*"]\n')
+        (tmp_path / workspace).write_text("packages: " + json.dumps([pattern]) + "\n")
     (tmp_path / "package.json").write_text(json.dumps(root))
-    (tmp_path / "apps/missing").mkdir(parents=True)
-    (tmp_path / "apps/missing/App.tsx").write_text("const App = () => <div/>;")
-    result = detect_stacks(["apps/missing/App.tsx"], target_dir=tmp_path)
+    (tmp_path / "apps/web").mkdir(parents=True)
+    (tmp_path / "apps/web/App.tsx").write_text("const App = () => <div/>;")
+    result = detect_stacks(["apps/web/App.tsx"], target_dir=tmp_path)
     assert [(s.stack_name, s.files) for s in result if s.stack_name != "structure"] == [
-        ("generic", ["apps/missing/App.tsx"])]
+        ("generic", ["apps/web/App.tsx"])]
 
 
 def test_explicit_config_rule_survives_language_promotion() -> None:
