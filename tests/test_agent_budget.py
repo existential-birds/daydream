@@ -137,6 +137,8 @@ async def test_run_agent_abort_records_reason_and_turn_end(monkeypatch: pytest.M
             pass
         def observe_user_step(self, *, prompt: str) -> None:
             pass
+        def record_host_dispatch(self, **kwargs: Any) -> None:
+            pass
         def mark_aborted(self, reason: str) -> None:
             self.abort_reasons.append(reason)
         def observe(self, event: AgentEvent) -> None:

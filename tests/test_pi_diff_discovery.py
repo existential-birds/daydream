@@ -54,12 +54,19 @@ async def test_small_pi_review_keeps_structural_dispatch(
         if state['scope_id'] == 'python':
             captured_diff = supporting_contents(prompt)['diff']
         else:
-            catalog_path = state['supporting_catalog']['path']
+            # Only persistent instructions survive native compaction; navigation must survive with them.
+            guide_line = next(line for line in kwargs['review_instructions'].splitlines()
+                              if line.startswith('Persistent exact access guide (supporting metadata): '))
+            catalog = json.loads(guide_line.split(': ', 1)[1])['supporting_catalog']
+            assert catalog == state['supporting_catalog']
+            assert 'before/after patch context' in catalog['guidance']
+            catalog_path = catalog['path']
             catalog_body = Path(catalog_path).read_text()
             yield ToolStartEvent(id='supporting-catalog', name='Read', input={'file_path': catalog_path})
             yield ToolResultEvent(id='supporting-catalog', output=catalog_body, is_error=False)
             parts = json.loads(catalog_body)['parts']
             captured_diff = ''.join(Path(part['path']).read_text() for part in parts)
+            assert captured_diff == diff.read_text()
         assert "DIFF_SENTINEL" in captured_diff
         assert "DIFF_SENTINEL" not in prompt
         assert kwargs["read_only"] is True

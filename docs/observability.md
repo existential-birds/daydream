@@ -286,6 +286,36 @@ configured model pricing because its stream reports tokens rather than monetary 
 
 Set `OTEL_SERVICE_NAME` to change the service label from `daydream`.
 
+## Host-rendered request sizes
+
+Each recorded backend attempt retains `host_dispatch` in its invocation entry in
+`Trajectory.extra.subtrajectories`, independently of trace export and full prompt
+capture. `user_utf8_bytes` is `len(attempt_prompt.encode("utf-8"))` for the actual
+user string immediately before `Backend.execute`. This includes custom builders,
+stage state, sanctioned-input rendering, host guidance and backend-retry suffixes.
+Counts are taken before content redaction; no additional prompt bodies or private
+paths are recorded by this metadata.
+
+`system_disposition` is `supplied` when the host actually passes persistent
+`review_instructions`, `absent` when a supporting backend receives none, and
+`unsupported` when the backend lacks that capability. `system_utf8_bytes` exists
+only for `supplied` and counts the actual final instruction string. Unsent or
+unavailable instructions have no measured byte count.
+
+The existing document-qualified `trajectory_id` and `invocation_id` identify each
+attempt. `host_dispatch.attempt` is the one-based backend-retry attempt;
+`stage_scope_id` links staged calls to the existing phase event's `scope_id`, whose
+terminal metadata identifies the logical stage and schema attempt. Fork summaries
+copy these same identified invocations; count each `(trajectory_id, invocation_id)`
+once when deriving initial or cumulative sizes across documents. Fork wrappers
+are not additional requests, and no request-size rollup is added.
+
+This boundary excludes adapter transformations and wrappers, native prompts,
+tool and output schemas, conversation history/continuations, and provider
+serialization. Any adapter request observations remain separately named evidence.
+These sizes measure host-supplied strings, not provider payloads or tokens.
+Neither byte counts nor tool activity establish semantic review coverage.
+
 ## Trajectory timing
 
 Trajectory timing is recorded even when trace export is off. Identified phase

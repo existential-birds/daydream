@@ -26,7 +26,13 @@ from daydream.backends.pi import PiBackend
 from daydream.config_file import DaydreamFileConfig
 from tests.conftest import ExtDir
 from tests.deep_orchestrator.test_review_completion import record, scopes
-from tests.deep_orchestrator.test_review_investigation import InvestigationRun, candidate, read_events, stage_ends
+from tests.deep_orchestrator.test_review_investigation import (
+    InvestigationRun,
+    assert_host_dispatch_measurements,
+    candidate,
+    read_events,
+    stage_ends,
+)
 from tests.harness.git_helpers import seed_feature_branch
 from tests.test_deep_orchestrator import _sanctioned_inputs
 
@@ -70,9 +76,9 @@ def capture(review: InvestigationRun, stage: dict[str, Any], *, bundle: bool = T
     return contents['diff'], index
 
 
-@pytest.mark.parametrize('limit', ['files', 'bytes', 'all-omitted'])
-async def test_structure_keeps_interaction_review_when_optional_projections_exceed_limits(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit: str,
+@pytest.mark.parametrize('limit', ['files', 'bytes', 'all-omitted', 'navigation'])
+async def test_structure_keeps_bounded_interaction_review_and_patch_navigation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit: str, ext_dir: ExtDir,
 ) -> None:
     if limit == 'files':
         before = {f'module_{index:04}.py': 'VALUE = 0\n' for index in range(520)}
@@ -80,16 +86,35 @@ async def test_structure_keeps_interaction_review_when_optional_projections_exce
     elif limit == 'bytes':
         before = {'api.py': 'VALUE = 0\n'}
         after = {'api.py': 'VALUE = 1\n' + ('# changed contract ' + 'x' * 2100 + '\n') * 4500}
-    else:
+    elif limit == 'all-omitted':
         before = {f'retired_{index:04}.py': 'VALUE = 0\n' for index in range(520)}
         before['api.py'] = 'VALUE = 0\n'
         after = {'api.py': 'VALUE = 1\n'}
+    else:
+        ext_dir.write_module(
+            'def structural(**kw): return "CUSTOM_CATALOG_BUILDER"\n'
+            'structural.review_input_bundle = True\n'
+            'def register(r): r.override_prompt("structural", structural)\n', api_version=8,
+        )
+        before = {f'module_{index:04}.py': 'VALUE = 0\n' for index in range(70)}
+        before['api.py'] = 'VALUE = 0\n'
+        before['retired.py'] = 'REMOVED_CONTEXT = "frozen before"\n'
+        before['legacy.py'] = ''.join(f'# unchanged contract {index:02}\n' for index in range(40)) + 'VALUE = 0\n'
+        after = {path: 'VALUE = 1\n' for path in before if path.startswith('module_')}
+        after['api.py'] = 'VALUE = 1\n' + ''.join(
+            f'# MULTIPART_CONTEXT_{index:04} ' + 'x' * 96 + '\n' for index in range(500))
+        after['modern.py'] = before['legacy.py'].replace('VALUE = 0', 'VALUE = 1')
+        after['zzz_late.py'] = 'LATE_CONTEXT = "frozen after"\n'
     repo = tmp_path / 'structure_limits'
     seed_feature_branch(repo, base=before, feature=after)
     if limit == 'all-omitted':
         from tests.harness.git_helpers import git
         git(repo, 'rm', *(path for path in before if path != 'api.py'))
         git(repo, 'commit', '-m', 'remove retired sources')
+    elif limit == 'navigation':
+        from tests.harness.git_helpers import git
+        git(repo, 'rm', 'retired.py', 'legacy.py')
+        git(repo, 'commit', '-m', 'retire and rename context sources')
     review = InvestigationRun(repo, tmp_path, monkeypatch)
     if limit != 'files':
         native = PiBackend(model=review.backend.model)
@@ -123,9 +148,20 @@ async def test_structure_keeps_interaction_review_when_optional_projections_exce
             catalog_seen = True
             return
         catalog = stage['supporting_catalog']
-        assert catalog['status'] == 'partial'
-        assert catalog['omitted_part_count'] > 0
-        pending = [Path(catalog['path'])]
+        assert catalog['status'] == ('complete' if limit == 'navigation' else 'partial')
+        assert (catalog['omitted_part_count'] > 0) is (limit != 'navigation')
+        # A compacted provider retains its system instructions, not the original user state.
+        instructions = review.backend.calls[-1]['review_instructions']
+        guide_line = next(line for line in instructions.splitlines()
+                          if line.startswith('Persistent exact access guide (supporting metadata): '))
+        guide = json.loads(guide_line.split(': ', 1)[1])
+        assert guide['supporting_catalog'] == catalog
+        guidance = catalog['guidance']
+        assert 'displayed integration diff is an inventory' in guidance
+        assert 'before/after patch context' in guidance and 'even without a Git execution tool' in guidance
+        assert 'do not guarantee complete old source files' in guidance
+        assert 'read only parts relevant to concrete concerns' in guidance
+        pending = [Path(guide['supporting_catalog']['path'])]
         paths = set(_sanctioned_inputs(review.backend.calls[-1]['prompt']).values())
         parts: list[dict[str, Any]] = []
         while pending:
@@ -133,18 +169,36 @@ async def test_structure_keeps_interaction_review_when_optional_projections_exce
             assert path not in paths
             paths.add(path)
             node = json.loads(path.read_text())
-            pending.extend(Path(child['path']) for child in node.get('catalogs', []))
+            pending.extend(Path(child['path']) for child in reversed(node.get('catalogs', [])))
             parts.extend(node.get('parts', []))
         paths.update(Path(part['path']) for part in parts)
         assert len(parts) == catalog['part_count'] > 0
         assert len(paths) <= 512
         assert sum(path.stat().st_size for path in paths) <= 8 * 1024 * 1024
         assert all(path.stat().st_size <= 24 * 1024 for path in paths)
+        if limit == 'navigation':
+            assert stage['context_availability']['supporting_catalogs'] > 1
+            by_file: dict[str, list[str]] = {}
+            for part in parts:
+                by_file.setdefault(part['file'], []).append(Path(part['path']).read_text())
+            assert '-REMOVED_CONTEXT = "frozen before"' in ''.join(by_file['retired.py'])
+            renamed = ''.join(by_file['modern.py'])
+            assert 'rename from legacy.py' in renamed and 'rename to modern.py' in renamed
+            assert '-VALUE = 0\n+VALUE = 1\n' in renamed
+            assert '+LATE_CONTEXT = "frozen after"' in ''.join(by_file['zzz_late.py'])
+            assert len(by_file['api.py']) > 1
+            body = ''.join(part.split('\n@@', 1)[1].split('\n', 1)[1] for part in by_file['api.py'])
+            assert body == '-VALUE = 0\n+' + after['api.py'].replace('\n', '\n+').removesuffix('+')
+            prompt = review.backend.calls[-1]['prompt']
+            assert 'CUSTOM_CATALOG_BUILDER' in prompt
+            assert 'MULTIPART_CONTEXT_' not in prompt and 'REMOVED_CONTEXT' not in prompt
+            assert all(str(Path(part['path'])) not in prompt for part in parts)
         if limit == 'files':
             assert len(parts) + catalog['omitted_part_count'] == 520
         assert stage['context_availability']['omitted_supporting_parts'] == catalog['omitted_part_count']
-        assert any(status['label'] == 'supporting-parts' and status['status'] == 'partial'
-                   for status in stage['context_statuses'])
+        if limit != 'navigation':
+            assert any(status['label'] == 'supporting-parts' and status['status'] == 'partial'
+                       for status in stage['context_statuses'])
         catalog_seen = True
 
     assert await review.run(deep_shard_enabled=False) == 0
@@ -209,7 +263,8 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
     ext_dir.write_module(
         'from daydream.deep.prompts import build_per_stack_prompt\n'
         'def staged(**kw):\n'
-        '    return build_per_stack_prompt(**kw) + \"\\nCUSTOM_ATTEMPT=\" + str(kw[\"review_stage\"][\"attempt\"])\n'
+        '    return build_per_stack_prompt(**kw) + \"\\nCUSTOM_UTF8=é🙂 CUSTOM_ATTEMPT=\" '
+        '+ str(kw[\"review_stage\"][\"attempt\"])\n'
         'def register(r): r.override_prompt(\"per-stack\", staged)\n', api_version=8,
     )
     review = staged_review(tmp_path, monkeypatch)
@@ -256,6 +311,12 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
     assert metadata[1]['admitted'] is (outcome == 'success')
     if outcome == 'success':
         assert metadata[-1]['observed_tool_starts'] == 12 and metadata[-1]['remaining_tool_calls'] == 36
+    measurements = assert_host_dispatch_measurements(review)
+    assert all(item['attempt'] == 1 for item in measurements)
+    retry_scopes = {item['stage_scope_id'] for item in measurements
+                    if any(event['scope_id'] == item['stage_scope_id'] and event['metadata']['attempt'] == 2
+                           for event in stage_ends(review, 'python'))}
+    assert len(retry_scopes) == 1
 
 
 @pytest.mark.parametrize('sandbox', [False, True], ids=['exact-paths', 'inline'])
@@ -414,6 +475,9 @@ async def test_current_exact_builder_signatures_route_generic_and_rust_shards(
             language_invocations.append(stage['assigned_files'])
         else:
             assert stage['scope_id'] == 'structure' and 'EXACT_STRUCTURE_OVERRIDE' in prompt
+            assert 'supporting_catalog' not in stage
+            assert 'supporting_catalog' not in json.loads(stage['access_guide'])
+            assert {'diff', 'hunk-index'} <= _sanctioned_inputs(prompt).keys()
 
     review.backend.stage_response = response
     data = await review.finish('structure', deep_shard_enabled=True, deep_shard_max_files=1)
