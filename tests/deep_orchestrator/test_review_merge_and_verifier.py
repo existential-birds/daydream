@@ -192,6 +192,8 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
     if presentation_fault != 'none':
         assert frozen_review_calls and frozen_review_calls[0] > 0
         assert _count_review_prompts(backend.calls) == frozen_review_calls[0]
+    if presentation_fault == 'context':
+        assert failed, 'context staging fault was not injected'
     if presentation_fault == 'render':
         assert failed and summaries == ['⚠️ **Review completeness unavailable.**']
     else:
