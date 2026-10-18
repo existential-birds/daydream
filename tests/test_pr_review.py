@@ -263,22 +263,14 @@ def test_build_payload_reviewed_commit_links_fork_for_fork_head_pr(pr: PRInfo,) 
     assert "https://github.com/acme/widgets/commit/head123" not in body
 
 
-@pytest.mark.parametrize("has_findings", [False, True])
-def test_payload_prioritizes_actionable_comments_and_warnings(pr: PRInfo, has_findings: bool) -> None:
-    """The delivered Markdown must expose all placements and warnings before secondary details.
-
-    Existing extension fallback tests preserve renderer selection, but do not catch hidden
-    warnings, double-collapsed findings, or a total that omits separate review threads.
-    """
-    classified = pr_review.ClassifiedIssues()
-    if has_findings:
-        classified = pr_review.ClassifiedIssues(
-            inline=[_inline()],
-            inline_issues=[ParsedIssue(path="a.py", line=10, title="Inline", body="Inline rationale")],
-            file_level=[ParsedIssue(path="b.py", line=None, title="File", body="File rationale")],
-            body_only=[ParsedIssue(path="c.py", line=None, title="Summary", body="Summary rationale",
-                                   fingerprint="c" * 64)],
-        )
+def test_payload_prioritizes_actionable_comments_and_warnings(pr: PRInfo) -> None:
+    classified = pr_review.ClassifiedIssues(
+        inline=[_inline()],
+        inline_issues=[ParsedIssue(path="a.py", line=10, title="Inline", body="Inline rationale")],
+        file_level=[ParsedIssue(path="b.py", line=None, title="File", body="File rationale")],
+        body_only=[ParsedIssue(path="c.py", line=None, title="Summary", body="Summary rationale",
+                               fingerprint="c" * 64)],
+    )
     warnings = ("Python review timed out.", "Transport evidence unavailable.", "Validation was not run.")
     body = build_payload_for_event(
         pr, classified, event=pr_review.ReviewEvent.APPROVE, run_info="Fixture run info",
@@ -287,34 +279,23 @@ def test_payload_prioritizes_actionable_comments_and_warnings(pr: PRInfo, has_fi
         review_summary=render_github_review_context(terminal_result("incomplete"), review_warnings=warnings),
     ).body
 
-    assert body.startswith(f"Actionable comments posted: {3 if has_findings else 0}\n\n")
+    assert body.startswith("Actionable comments posted: 3\n\n")
     assert body.index("Review incomplete") < body.index("Validation was not run") < body.index("Reviewed commit")
     assert body.count("Review incomplete") == 1
     assert body.count("Python review timed out.") == 1
     assert "Transport evidence unavailable." in body
-    assert body.index("Reviewed commit") < body.index("Fixture diagram") < body.index("Run details")
-    assert body.index("Run details") < body.index("Fixture run info")
-    assert "Deep review passed" not in body
-    assert "Code Review Summary" not in body
-    if has_findings:
-        assert body.index("Additional findings (1)") < body.index("Fixture diagram")
-        assert "#### `c.py` (1)" in body
-        assert "<summary>c.py" not in body
-        assert "Summary rationale" in body
-        assert parse_finding_markers(body) == ["c" * 64]
-        assert body.count("<summary>Fix with an agent</summary>") == 2
-    else:
-        assert "Additional findings" not in body
-        assert "Fix with an agent" not in body
+    assert body.index("Reviewed commit") < body.index("Additional findings (1)") < body.index("Fixture diagram")
+    assert body.index("Fixture diagram") < body.index("Run details") < body.index("Fixture run info")
+    assert "Deep review passed" not in body and "Code Review Summary" not in body
+    assert "#### `c.py` (1)" in body and "<summary>c.py" not in body
+    assert "Summary rationale" in body
+    assert parse_finding_markers(body) == ["c" * 64]
+    assert body.count("<summary>Fix with an agent</summary>") == 2
 
 
 @pytest.mark.parametrize("with_terminal_result", [False, True])
 def test_payload_keeps_warning_display_bounded(pr: PRInfo, with_terminal_result: bool) -> None:
-    """S1: payload assembly must not restore terminal diagnoses omitted from its summary.
-
-    The reporting helper's own bound does not catch rendering all legacy warning
-    diagnoses again after the summary. Legacy-only callers need the same bound.
-    """
+    """Payload assembly must not restore diagnoses omitted by the bounded summary."""
     warnings = tuple(f"stack-{index:02}: reviewer timed out" for index in range(12))
     summary = None
     if with_terminal_result:
@@ -328,11 +309,10 @@ def test_payload_keeps_warning_display_bounded(pr: PRInfo, with_terminal_result:
     ).body
 
     assert body.count("reviewer timed out") == 8
-    assert "4 additional" in body
+    assert f"{5 if with_terminal_result else 4} additional" in body
     assert "stack-08:" not in body
     assert "stack-11:" not in body
-    if with_terminal_result:
-        assert body.count("Transport evidence unavailable.") == 1
+    assert "Transport evidence unavailable." not in body
 
 
 

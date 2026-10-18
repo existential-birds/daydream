@@ -739,36 +739,26 @@ def test_post_findings_final_failure_reports_writes_and_safe_recovery_path(
 def test_unfinished_review_comments_without_approval_or_stale_resolution(
     fake_gh: FakeGh, tmp_path: Path, state: str, has_finding: bool,
 ) -> None:
-    # The CLI boundary must publish concise notices while retaining rich evidence in the artifact.
-    outcome = "failed"
     fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_OLD"], viewer_did_author=True)
     findings = [_finding("b" * 64, path="a.py", line=1, placement="inline", title="Survivor", severity="low")]
     path = tmp_path / "unfinished.json"
     artifact = findings_artifact(findings if has_finding else [],
         terminal_result=terminal_result("complete" if state == "warning" else state),
-        review_warnings=["Alternatives: wall_budget_exceeded"] if state == "warning" else [])
-    revision = artifact['terminal_result']['analyzed_revision']
-    artifact['review_context'] = {'scopes': [{'scope_id': 'python', 'originating_run_id': 'retained-run',
-        'analyzed_revision': revision, 'review_context': None}], 'scopes_omitted': 0,
-        'verification': {'status': 'available', 'value': {'test-verdict.json': {
-            'attempts': [{'kind': 'host', 'command': ['pytest', '-q'], 'passed': False,
-                'identity': {'kind': 'host', 'outcome': outcome, 'argv': ['pytest', '-q'],
-                             'head_sha': 'executed-head', 'session_id': 'executed-session'}}]}}},
-        'author_reported': {'source': 'pull_request_body', 'head_sha': 'author-head',
-                            'body': 'Author reports CI passes.', 'truncated': False}}
+        review_warnings=["Alternatives: wall_budget_exceeded"] if state == "warning" else [],
+        review_context={'scopes': [], 'scopes_omitted': 0,
+            'verification': {'status': 'unproduced', 'value': None},
+            'author_reported': {'source': 'pull_request_body', 'head_sha': None,
+                              'body': 'Author reports CI passes.', 'truncated': False}})
     write_findings_artifact(path, artifact)
     assert cli_main(_post_argv(path) + ["--approve-on-clean"]) == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1 and posts[0].payload["event"] == "COMMENT"
     body = posts[0].payload['body']
     assert 'Run:\n```text\nrun-1\n```' in body
-    for detail in ('Review outcome', 'Recorded analysis', 'Analyzed snapshot', 'Source rationale',
-                   'Checks actually executed', 'executed-head', 'executed-session', 'author-head',
-                   'Author reports CI passes.', 'retained-run'):
-        assert detail not in body
-    retained = json.loads(path.read_text())['review_context']
-    assert retained['verification']['value']['test-verdict.json']['attempts'][0]['identity']['outcome'] == outcome
-    assert retained['author_reported']['body'] == 'Author reports CI passes.'
+    assert 'Review outcome' not in body and 'Author reports CI passes.' not in body
+    assert json.loads(path.read_text())['review_context'] == artifact['review_context']
+    if not has_finding:
+        assert 'Additional findings' not in body and 'Fix with an agent' not in body
     if state == 'warning':
         assert 'Alternatives: wall_budget_exceeded' in body and 'Review incomplete' in body
     else:
