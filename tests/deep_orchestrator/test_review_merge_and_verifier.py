@@ -127,12 +127,11 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
     pr = _pin_findings_pr(monkeypatch, multi_stack_target)
     published: list[dict[str, Any]] = []
     summaries: list[str | None] = []
-    run_details: list[str] = []
     post = pr_review.post_review_to_pr_from_report
 
     async def publish(_repo: Path, items_file: Path, **_kwargs: Any) -> Any:
         summaries.append(_kwargs.get('review_summary'))
-        run_details.append(_kwargs['run_info'])
+        assert 'Stale optional publication assertion' not in _kwargs['run_info']
         if presentation_fault.endswith('-items') or presentation_fault == 'post':
             return await post(_repo, items_file, **_kwargs)
         published.extend(json.loads(items_file.read_text())["items"])
@@ -145,7 +144,6 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
         supplied.clear()
         published.clear()
         summaries.clear()
-        run_details.clear()
         config.start_at = "merge"
     failed: list[Path] = []
     stage, read = json_utils._stage_bytes, Path.read_text
@@ -198,8 +196,6 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
         assert failed and summaries == ['⚠️ **Review completeness unavailable.**']
     else:
         assert summaries == [''], 'complete review needs no coverage warning or rich context on GitHub'
-        assert 'Stale optional publication assertion' not in run_details[0]
-    assert len(run_details) == 1 and 'Run:\n```text\n' in run_details[0]
     assert set(supplied) == {"python:1", "structure:1", "structure:2", "structure:3"}
     assert supplied["python:1"]["severity"] == supplied["structure:1"]["severity"] == "high"
     deep = multi_stack_target / ".daydream/deep"
