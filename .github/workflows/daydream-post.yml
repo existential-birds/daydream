@@ -34,7 +34,7 @@ permissions:
 
 jobs:
   post:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     if: github.event.workflow_run.conclusion == 'success'
     steps:
       - name: Set up uv
@@ -116,7 +116,7 @@ jobs:
 
   # An analyze failure routes here instead of silently skipping the post job.
   surface-analyze-failure:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     # GITHUB_TOKEN needs actions: read to download the failure-context artifact
     # across runs; the App token carries the comment write.
     permissions:

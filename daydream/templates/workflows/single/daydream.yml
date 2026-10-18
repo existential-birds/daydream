@@ -37,7 +37,7 @@ jobs:
   # Holds the App key for API reads and the acknowledgement, but never checks
   # out code, so it may be privileged.
   gate:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     if: >-
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
@@ -149,7 +149,7 @@ jobs:
   analyze:
     needs: gate
     if: needs.gate.outputs.proceed == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       pull-requests: read
@@ -307,7 +307,7 @@ jobs:
   post:
     needs: [gate, analyze]
     if: needs.gate.outputs.proceed == 'true' && needs.analyze.result == 'success'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     # Same-run artifact download needs no GITHUB_TOKEN scope (that is only required
     # to reach across runs); the App token carries every write.
     permissions: {}
@@ -369,7 +369,7 @@ jobs:
   surface-failure:
     needs: [gate, analyze]
     if: always() && needs.gate.outputs.proceed == 'true' && needs.analyze.result != 'success'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     permissions: {}
     steps:
       - name: Mint posting token

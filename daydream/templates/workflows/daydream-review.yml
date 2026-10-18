@@ -43,7 +43,7 @@ permissions:
 
 jobs:
   analyze:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     if: github.event_name == 'workflow_dispatch'
     steps:
       - name: Resolve PR number and base ref
