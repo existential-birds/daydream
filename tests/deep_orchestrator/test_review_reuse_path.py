@@ -134,7 +134,8 @@ def _review_surface_prompts(calls: list[dict[str, object]],) -> list[dict[str, o
 
 
 @pytest.mark.parametrize("unit", [
-    "all-units", "independent", "arbiter", "rationale-missing", "rationale-corrupt",
+    "all-units", "independent", "arbiter", "rationale-missing", "rationale-corrupt", "rationale-nested",
+    "rationale-directory", "rationale-permission",
 ])
 async def test_identical_rerun_restores_completed_units_and_current_run_evidence(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, unit: str,
@@ -155,7 +156,9 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
     canonical = {**_records_bytes(multi_stack_target), **{name: (deep / name).read_bytes() for name in names}}
     failures = saved_coverage(deep).unfinished_scopes
     first = json.loads((deep / "review-coverage.json").read_text())
-    if unit.startswith('rationale-'):
+    obstructed: list[Path] = []
+    prior_rationale = (deep / 'stack-python-report-context.json').read_bytes()
+    if unit in {'rationale-missing', 'rationale-corrupt', 'rationale-nested'}:
         entries = deep.parent / 'review-cache/entries'
         sidecars = list(entries.glob('*/stack-*-report-context.json'))
         assert sidecars
@@ -164,8 +167,26 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
             assert sidecar.name not in manifest['payload'], 'optional reporting cannot gate valid review reuse'
             if unit == 'rationale-missing':
                 sidecar.unlink()
+            elif unit == 'rationale-nested':
+                sidecar.write_text('[' * 30000 + '0' + ']' * 30000)
             else:
                 sidecar.write_text('{corrupt optional rationale')
+    elif unit in {'rationale-directory', 'rationale-permission'}:
+        unlink = Path.unlink
+        def obstruct_optional_cleanup(path: Path, *args: Any, **kwargs: Any) -> None:
+            if (path.name == 'stack-python-report-context.json'
+                    and tuple(parent.name for parent in path.parents[:3]) == ('deep', '.daydream', 'live')
+                    and not obstructed):
+                obstructed.append(path)
+                if unit == 'rationale-directory':
+                    unlink(path, missing_ok=True)
+                    path.mkdir()
+                    (path / 'preserve.txt').write_text('user obstruction')
+                else:
+                    path.write_bytes(prior_rationale)
+                    raise PermissionError('optional report cleanup denied')
+            unlink(path, *args, **kwargs)
+        monkeypatch.setattr(Path, 'unlink', obstruct_optional_cleanup)
     if unit == "all-units":
         store = deep.parent / "review-cache"
         assert store.is_dir(), "store must be published beside the deep artifacts"
@@ -189,7 +210,18 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
     assert all(scope["status"] == "complete" for scope in second["stack_outcomes"])
     if unit.startswith('rationale-'):
         context = json.loads((deep / 'review-report-context.json').read_text())
-        assert context['scopes'] and all(entry['review_context'] is None for entry in context['scopes'])
+        assert context['scopes']
+        if obstructed:
+            python = next(entry for entry in context['scopes'] if entry['scope_id'] == 'python')
+            assert python['review_context'] is None, 'failed cleanup must not admit stale same-source rationale'
+            preserved = deep / 'stack-python-report-context.json'
+            if unit == 'rationale-directory':
+                assert (preserved / 'preserve.txt').read_text() == 'user obstruction'
+            else:
+                assert preserved.read_bytes() == prior_rationale
+        else:
+            assert unit not in {'rationale-directory', 'rationale-permission'}, 'cleanup fault was not reached'
+            assert all(entry['review_context'] is None for entry in context['scopes'])
         assert all(entry['originating_run_id'] == first['run_id'] for entry in context['scopes'])
     units = cast(dict[str, Any], _latest_provenance(deep)["units"])
     if unit == "all-units":

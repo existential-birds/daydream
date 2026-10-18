@@ -108,7 +108,7 @@ def test_record_artifact_rejects_noncanonical_ordinals(ordinal: str) -> None:
 
 @pytest.mark.parametrize('context_kind', [
     'missing', 'current', 'unattributed', 'counts', 'notes', 'secret', 'origin', 'scope', 'revision', 'run',
-    'nested-checks',
+    'nested-checks', 'nested-sidecar',
 ])
 def test_report_collection_validates_optional_bound_sidecar(tmp_path: Path, context_kind: str) -> None:
     """Unavailable/tampered rationale never erases valid source records or invents attribution."""
@@ -147,6 +147,11 @@ def test_report_collection_validates_optional_bound_sidecar(tmp_path: Path, cont
     records_path.write_text(json.dumps(artifact))
     if context_kind == 'nested-checks':
         (tmp_path / 'test-verdict.json').write_text('[' * 2000 + ']' * 2000)
+    elif context_kind == 'nested-sidecar':
+        context['notes'] = 'nested_placeholder'
+        raw = json.dumps(sidecar).replace('"nested_placeholder"', '[' * 30000 + '0' + ']' * 30000)
+        assert len(raw.encode()) < 65536
+        (tmp_path / 'stack-python-report-context.json').write_text(raw)
     elif context_kind != 'missing':
         (tmp_path / 'stack-python-report-context.json').write_text(json.dumps(sidecar))
     collected = collect_report_context(tmp_path, coverage.to_dict())

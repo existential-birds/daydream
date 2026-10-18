@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -215,11 +216,46 @@ def write_findings_artifact(path: Path, artifact: dict[str, Any]) -> None:
     """Write UTF-8 JSON with parent creation, enforcing the cap on exact output bytes."""
     try:
         _validate_artifact(artifact)
-        payload = (json.dumps(artifact, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        payload = _artifact_payload(artifact)
+        if len(payload) > MAX_ARTIFACT_BYTES and 'review_context' in artifact:
+            core = {key: value for key, value in artifact.items() if key != 'review_context'}
+            core_payload = _artifact_payload(core)
+            _enforce_max_artifact_bytes(len(core_payload))
+            fitted = {**core, 'review_context': copy.deepcopy(artifact['review_context'])}
+            context = fitted['review_context']
+            while len(payload) > MAX_ARTIFACT_BYTES:
+                verification = context['verification']
+                if context['author_reported'] is not None:
+                    context['author_reported'] = None
+                elif context['scopes']:
+                    context['scopes'].pop()
+                    context['scopes_omitted'] += 1
+                elif verification['value']:
+                    priority = {'test-verdict.json': 2, 'remote-ci-verdict.json': 1}
+                    name = min(verification['value'], key=lambda key: (priority.get(key, 0), key))
+                    omitted = verification.setdefault('omitted_artifacts', [])
+                    if name not in omitted:
+                        if len(omitted) == 16:
+                            payload = core_payload
+                            break
+                        omitted.append(name)
+                    verification['value'].pop(name)
+                    verification['value'] = verification['value'] or None
+                    verification['status'] = 'failed'
+                else:
+                    payload = core_payload
+                    break
+                payload = _artifact_payload(fitted)
+            logging.getLogger(__name__).warning('Optional review context omitted to fit the findings artifact budget')
         _enforce_max_artifact_bytes(len(payload))
         atomic_write_bytes(path, payload)
     except (OSError, ValueError, TypeError, RecursionError) as exc:
         raise FindingsValidationError(f"artifact write failed: {path}: {exc}") from exc
+
+
+def _artifact_payload(artifact: dict[str, Any]) -> bytes:
+    """Use the exact published encoding for both capacity checks and final bytes."""
+    return (json.dumps(artifact, indent=2, ensure_ascii=False) + '\n').encode('utf-8')
 
 
 def load_findings_artifact(

@@ -1,4 +1,5 @@
 """Strict current findings envelopes, atomic writes, and production Phase A exports."""
+import copy
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
 from tests.harness.backend import ScriptedBackend
+from tests.harness.execution import test_execution_identity
 from tests.harness.review_result import findings_artifact, review_coverage, terminal_result
 
 
@@ -146,6 +148,56 @@ def test_untrustworthy_projection_cannot_contain_findings(tmp_path: Path, valid_
     valid_artifact["terminal_result"] = c.finalize("failed", projection_valid=False)
     with pytest.raises(FindingsValidationError, match="projection"):
         write_findings_artifact(tmp_path / "bad-projection.json", valid_artifact)
+
+
+@pytest.mark.parametrize('capacity', ['trim', 'omit', 'core-oversized'])
+def test_optional_context_fits_remaining_budget_without_changing_findings(
+    tmp_path: Path, valid_artifact: dict[str, Any], caplog: pytest.LogCaptureFixture, capacity: str,
+) -> None:
+    """Optional prose cannot block a valid canonical handoff or weaken its existing byte cap."""
+    artifact = valid_artifact
+    artifact['findings'][0]['body'] = 'Canonical finding. ' * 47000 if capacity == 'trim' else 'B'
+    if capacity != 'trim':
+        artifact['run_info'] = ''
+        size = len((json.dumps(artifact, indent=2, ensure_ascii=False) + '\n').encode('utf-8'))
+        artifact['run_info'] = 'x' * (MAX_ARTIFACT_BYTES - size + (capacity == 'core-oversized'))
+    core = copy.deepcopy(artifact)
+    identity = test_execution_identity(head_sha=artifact['head_sha'])
+    verdict = {'attempts': [{'kind': 'host', 'command': list(identity.argv), 'passed': True,
+                             'identity': identity.payload()}]}
+    artifact['review_context'] = {
+        'scopes': [{'scope_id': 'python', 'originating_run_id': 'run-1',
+            'analyzed_revision': artifact['terminal_result']['analyzed_revision'], 'review_context': {
+                'admitted_stages': 8, 'target_decisions': {'required': 8, 'reviewed': 8, 'not_reviewed': 0},
+                'notes': [{'text': 'Existing reviewer rationale', 'origin': None,
+                           'files': ['a' * 300] * 32, 'supporting_files': ['b' * 300] * 32} for _ in range(8)],
+                'notes_omitted': 0}}], 'scopes_omitted': 0,
+        'verification': {'status': 'available', 'value': {'test-verdict.json': verdict}},
+        'author_reported': None,
+    }
+    original_context = copy.deepcopy(artifact['review_context'])
+    path = tmp_path / 'fitted.json'
+    if capacity == 'core-oversized':
+        path.write_bytes(b'prior canonical bytes')
+        with pytest.raises(FindingsValidationError, match='size'):
+            write_findings_artifact(path, artifact)
+        assert path.read_bytes() == b'prior canonical bytes'
+        assert not list(tmp_path.glob('*.tmp'))
+        return
+    write_findings_artifact(path, core)
+    write_findings_artifact(path, artifact)
+    assert path.stat().st_size <= MAX_ARTIFACT_BYTES
+    loaded = json.loads(path.read_text())
+    assert {key: loaded[key] for key in core} == core
+    assert _load(path).analysis_complete
+    assert artifact['review_context'] == original_context
+    assert 'Optional review context omitted' in caplog.text
+    if capacity == 'trim':
+        context = loaded['review_context']
+        assert context['scopes'] == [] and context['scopes_omitted'] == 1
+        assert context['verification']['value']['test-verdict.json'] == verdict
+    else:
+        assert 'review_context' not in loaded and path.stat().st_size == MAX_ARTIFACT_BYTES
 
 
 def test_parser_resource_failure_is_controlled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

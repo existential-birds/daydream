@@ -660,7 +660,45 @@ async def test_atomic_public_failure(review: ReviewRun, fault: str) -> None:
     assert review.output.read_bytes() == prior if prior else not review.output.exists()
 
 
-@pytest.mark.parametrize('fault', ['coverage', 'fix', 'salvage'])
+@pytest.mark.parametrize('fault', ['markdown-read', 'context-write', 'report-write'])
+async def test_optional_presentation_failure_preserves_canonical_export(
+    review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str,
+) -> None:
+    stage, read = json_utils._stage_bytes, Path.read_text
+    refreshing = False
+    injected: list[bool] = []
+    def faulty_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
+        nonlocal refreshing
+        if path.name == 'review-report-context.json':
+            refreshing = True
+            if fault == 'context-write':
+                injected.append(True)
+                raise OSError('optional context staging failed')
+        if refreshing and fault == 'report-write' and path.name in {'review-output.md', '.review-output.md'}:
+            injected.append(True)
+            raise OSError('optional report staging failed')
+        return stage(path, content, **kwargs)
+    def faulty_read(path: Path, *args: Any, **kwargs: Any) -> str:
+        if refreshing and fault == 'markdown-read' and path.name == 'review-output.md':
+            injected.append(True)
+            raise PermissionError('optional Markdown unavailable')
+        return read(path, *args, **kwargs)
+    review.patch.setattr(json_utils, '_stage_bytes', faulty_stage)
+    review.patch.setattr(Path, 'read_text', faulty_read)
+    review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
+                                       review_by_stack={'structure': [record()]})
+    review.backend.merge_echo_records = True
+    assert await review.run() == 0 and injected
+    data = review.load()
+    assert len(data['findings']) == 1 and data['findings'][0]['title'] == 'Grounded defect'
+    assert data['terminal_result']['analysis_state'] == 'complete'
+    assert data['terminal_result']['projection_valid']
+    assert all(scope['status'] == 'complete' for scope in scopes(data).values())
+    assert 'review_context' not in data
+    assert 'Review report unavailable:' in collapse_panel_text(capsys)
+
+
+@pytest.mark.parametrize('fault', ['coverage', 'fix', 'salvage', 'presentation'])
 async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str) -> None:
     error = RuntimeError('original provider error')
     stage, write, read, allocate = json_utils._stage_bytes, Path.write_text, Path.read_text, tempfile.mkstemp
@@ -668,6 +706,9 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
     staging_coverage = False
     def observe_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
         nonlocal staging_coverage
+        if fault == 'presentation' and state['failed'] and path.name == 'review-report-context.json':
+            state['rejected'] = True
+            raise OSError('optional context staging failed after provider error')
         staging_coverage = path.name == 'review-coverage.json'
         if path.name == 'review-coverage.json':
             state['writes'].append((state['failed'], content))
@@ -691,7 +732,7 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         return text
     def response(prompt: str) -> Any:
         trigger = {'coverage': 'present your understanding concisely', 'fix': 'fix this issue',
-                   'salvage': 'supervisor adjudication'}[fault]
+                   'salvage': 'supervisor adjudication', 'presentation': 'supervisor adjudication'}[fault]
         if trigger in prompt.lower() or (fault == 'fix' and prompt.lower().startswith('fix these')):
             state['failed'] = True
             if fault == 'salvage':
@@ -721,6 +762,14 @@ async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFi
         assert 'Terminal review finalization failed: OSError' in collapse_panel_text(capsys)
         with pytest.raises(FindingsValidationError):
             review.load()
+    elif fault == 'presentation':
+        data = review.load()
+        assert state['rejected'] and len(data['findings']) == 1 and 'review_context' not in data
+        result = data['terminal_result']
+        assert (result['pipeline_state'], result['analysis_state'], result['projection_valid']) == (
+            'failed', 'incomplete', True)
+        assert all(s['status'] == 'complete' for s in scopes(data).values())
+        assert 'Review report unavailable:' in collapse_panel_text(capsys)
     else:
         data = review.load()
         result = data['terminal_result']

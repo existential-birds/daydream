@@ -30,7 +30,9 @@ def retain_author_context(deep: Path, body: str | None, head_sha: str | None) ->
     } if body else None)
 
 
-def collect_report_context(deep: Path, coverage: dict[str, Any]) -> dict[str, Any]:
+def collect_report_context(
+    deep: Path, coverage: dict[str, Any], *, unavailable_scopes: set[str] | None = None,
+) -> dict[str, Any]:
     """Read only current planned scopes and the existing verification acquisition."""
     from daydream.dataset_capture import collect_verification
 
@@ -61,11 +63,12 @@ def collect_report_context(deep: Path, coverage: dict[str, Any]) -> dict[str, An
             if valid_record_artifact(payload, scope_id=scope_id, analyzed_revision=coverage["analyzed_revision"]):
                 origin = payload['originating_run_id']
                 revision = payload['analyzed_revision']
-                sidecar_path = per_stack_report_context_path(deep, scope_id)
-                sidecar = read_json(sidecar_path, redact=False) if sidecar_path.is_file() else None
-                if isinstance(sidecar, dict) and valid_scope_review_context(sidecar, scope_id=scope_id,
-                                              analyzed_revision=revision, originating_run_id=origin):
-                    metadata = sidecar['review_context']
+                if scope_id not in (unavailable_scopes or ()):
+                    sidecar_path = per_stack_report_context_path(deep, scope_id)
+                    sidecar = read_json(sidecar_path, redact=False) if sidecar_path.is_file() else None
+                    if isinstance(sidecar, dict) and valid_scope_review_context(sidecar, scope_id=scope_id,
+                                                  analyzed_revision=revision, originating_run_id=origin):
+                        metadata = sidecar['review_context']
         entry = {"scope_id": scope_id, "originating_run_id": origin,
                  "analyzed_revision": revision, "review_context": metadata}
         size = _exported_size(entry)

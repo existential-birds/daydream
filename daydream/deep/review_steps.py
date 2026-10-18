@@ -678,6 +678,7 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 phase_identity=phase_identity,
                 review_limits=ReviewLimits(investigation_s=ctx.pipeline().reviewer_investigation_budget_s),
                 coverage=deep_state.review_coverage,
+                unavailable_report_scopes=ctx.data.setdefault('unavailable_report_scopes', set()),
             )
     else:
         prior = deep_state.review_coverage.phases.get('merge')

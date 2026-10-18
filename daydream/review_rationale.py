@@ -46,7 +46,11 @@ def valid_scope_review_context(
     value: Any, *, scope_id: str, analyzed_revision: dict[str, Any], originating_run_id: str,
 ) -> bool:
     """Admit an optional host sidecar only for the exact current source records."""
-    return bool(validates_schema(value, _SCOPE_RATIONALE_SCHEMA)
-            and value['scope_id'] == scope_id and value['analyzed_revision'] == analyzed_revision
-            and value['originating_run_id'] == originating_run_id
-            and valid_review_context(value['review_context']))
+    try:
+        return bool(validates_schema(value, _SCOPE_RATIONALE_SCHEMA)
+                and value['scope_id'] == scope_id and value['analyzed_revision'] == analyzed_revision
+                and value['originating_run_id'] == originating_run_id
+                and valid_review_context(value['review_context']))
+    except RecursionError:
+        # Error formatting can exhaust the stack on deeply nested optional JSON.
+        return False

@@ -430,11 +430,14 @@ async def phase_per_stack_reviews(
     phase_identity: PhaseIdentity | None = None,
     review_limits: ReviewLimits | None = None,
     coverage: ReviewCoverage,
+    unavailable_report_scopes: set[str] | None = None,
 ) -> tuple[dict[str, Path], dict[str, str]]:
     """Run scoped per-stack reviews under the backend fan-out limit and record each result.
 
     """
     active_registry = registry if registry is not None else get_registry()
+    if unavailable_report_scopes is None:
+        unavailable_report_scopes = set()
     run_context = resolve_run_context(run_context)
     deep_dir_path = deep_dir(work.repo, session=artifact_session, allow_standalone=allow_standalone)
     recipe_for_prompts = load_test_recipe(deep_dir_path)
@@ -471,7 +474,12 @@ async def phase_per_stack_reviews(
             context_path = per_stack_report_context_path(deep_dir_path, stack.stack_name)
             # A legacy reuse entry contains no report sidecar. It must never
             # inherit reporting assertions from a previous invocation.
-            context_path.unlink(missing_ok=True)
+            try:
+                context_path.unlink(missing_ok=True)
+            except OSError as exc:
+                unavailable_report_scopes.add(stack.stack_name)
+                ui.print_warning(agent.console,
+                    f'Source rationale unavailable for {stack.stack_name}: {type(exc).__name__}')
             base_stack = base_stack_name(stack.stack_name)
             prompt_name, strategy_name = {STRUCTURE_STACK_NAME: ("structural", "discovery.structural"),
                 GENERIC_STACK: ("generic-fallback", "discovery.generic_fallback"),
@@ -538,13 +546,14 @@ async def phase_per_stack_reviews(
                         # review inputs or trigger another model investigation.
                         cached_context = hit.payload_dir / context_path.name
                         try:
-                            if cached_context.is_file() and cached_context.stat().st_size <= 65536:
+                            if (stack.stack_name not in unavailable_report_scopes and cached_context.is_file()
+                                    and cached_context.stat().st_size <= 65536):
                                 raw_context = cached_context.read_bytes()
                                 if valid_scope_review_context(json.loads(raw_context), scope_id=stack.stack_name,
                                         analyzed_revision=coverage.revision.to_dict(),
                                         originating_run_id=restored['originating_run_id']):
                                     atomic_write_bytes(context_path, raw_context)
-                        except (OSError, ValueError, TypeError):
+                        except (OSError, ValueError, TypeError, RecursionError):
                             pass  # Optional rationale remains unavailable; validated review still reuses.
                         reuse_unit.record_hit(hit)
                         results[stack.stack_name] = output_path
@@ -553,7 +562,6 @@ async def phase_per_stack_reviews(
                     ui.print_warning(agent.console,
                                      f"Cached records for {stack.stack_name} are invalid; rerunning review")
             per_stack_records_path(deep_dir_path, stack.stack_name).unlink(missing_ok=True)
-            context_path.unlink(missing_ok=True)
             prompt_args: dict[str, Any] = {
                 "strategy": strategies[strategy_name],
                 "files": stack.files,
@@ -655,14 +663,15 @@ async def phase_per_stack_reviews(
                         reasons=(*coverage.scopes[stack_name]["reason_codes"], ReasonCode.MALFORMED_ARTIFACT),
                         diagnostic=f"{type(exc).__name__}: reviewer artifact publication failed")
                     return
-                try:
-                    atomic_write_json(context_path, {
-                        'scope_id': stack_name, 'analyzed_revision': coverage.revision.to_dict(),
-                        'originating_run_id': coverage.run_id, 'review_context': investigation.review_context(),
-                    })
-                except (OSError, ValueError, TypeError) as exc:
-                    ui.print_warning(agent.console,
-                        f'Source rationale unavailable for {stack_name}: {type(exc).__name__}')
+                if stack_name not in unavailable_report_scopes:
+                    try:
+                        atomic_write_json(context_path, {
+                            'scope_id': stack_name, 'analyzed_revision': coverage.revision.to_dict(),
+                            'originating_run_id': coverage.run_id, 'review_context': investigation.review_context(),
+                        })
+                    except (OSError, ValueError, TypeError) as exc:
+                        ui.print_warning(agent.console,
+                            f'Source rationale unavailable for {stack_name}: {type(exc).__name__}')
                 results[stack_name] = output_path
                 if budget_reason is None:
                     coverage.record_scope(stack_name, "complete")
@@ -672,7 +681,8 @@ async def phase_per_stack_reviews(
                                              output_path.name: output_path.read_bytes()})
                     # Store optional presentation beside the completed entry,
                     # outside its required, hash-verified model-input payload.
-                    if reuse_unit.key is not None and context_path.is_file():
+                    if (stack_name not in unavailable_report_scopes
+                            and reuse_unit.key is not None and context_path.is_file()):
                         try:
                             cached_context = entry_dir(reuse_unit.cache.store_dir, reuse_unit.key) / context_path.name
                             atomic_write_bytes(cached_context, context_path.read_bytes())

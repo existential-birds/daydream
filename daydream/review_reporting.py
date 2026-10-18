@@ -54,6 +54,7 @@ def _host_attempt(attempt: Any) -> bool:
     return (isinstance(identity, dict) and identity.get('kind') == 'host'
             and isinstance(command, list) and bool(command) and command == identity.get('argv')
             and all(isinstance(identity.get(key), str) and identity[key] for key in ('session_id', 'head_sha'))
+            and isinstance(identity.get('outcome'), str)
             and identity.get('outcome') in {'passed', 'failed', 'timed-out', 'truncated'}
             and type(attempt.get('passed')) is bool
             and (identity['outcome'] == 'truncated' or attempt['passed'] == (identity['outcome'] == 'passed')))

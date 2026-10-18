@@ -736,8 +736,10 @@ def test_post_findings_final_failure_reports_writes_and_safe_recovery_path(
 
 @pytest.mark.parametrize("state", ["warning", "incomplete", "failed"])
 @pytest.mark.parametrize("has_finding", [False, True])
+@pytest.mark.parametrize('outcome', ['failed', ['failed'], {'unexpected': 'failed'}],
+                         ids=['outcome-string', 'outcome-array', 'outcome-object'])
 def test_unfinished_review_comments_without_approval_or_stale_resolution(
-    fake_gh: FakeGh, tmp_path: Path, state: str, has_finding: bool,
+    fake_gh: FakeGh, tmp_path: Path, state: str, has_finding: bool, outcome: Any,
 ) -> None:
     fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_OLD"], viewer_did_author=True)
     findings = [_finding("b" * 64, path="a.py", line=1, placement="inline", title="Survivor", severity="low")]
@@ -750,7 +752,7 @@ def test_unfinished_review_comments_without_approval_or_stale_resolution(
         'analyzed_revision': revision, 'review_context': None}], 'scopes_omitted': 0,
         'verification': {'status': 'available', 'value': {'test-verdict.json': {
             'attempts': [{'kind': 'host', 'command': ['pytest', '-q'], 'passed': False,
-                'identity': {'kind': 'host', 'outcome': 'failed', 'argv': ['pytest', '-q'],
+                'identity': {'kind': 'host', 'outcome': outcome, 'argv': ['pytest', '-q'],
                              'head_sha': 'executed-head', 'session_id': 'executed-session'}}]}}},
         'author_reported': {'source': 'pull_request_body', 'head_sha': 'author-head',
                             'body': 'Author reports CI passes.', 'truncated': False}}
@@ -760,7 +762,13 @@ def test_unfinished_review_comments_without_approval_or_stale_resolution(
     assert len(posts) == 1 and posts[0].payload["event"] == "COMMENT"
     body = posts[0].payload['body']
     assert 'retained-run' in body and 'Source rationale unavailable' in body
-    assert 'Checks actually executed' in body
+    if outcome == 'failed':
+        assert 'Checks actually executed' in body
+    else:
+        assert 'Checks actually executed' not in body
+        assert 'Other test assertions or no-execution records do not establish host execution' in body
+    assert json.loads(path.read_text())['review_context']['verification']['value']['test-verdict.json'][
+        'attempts'][0]['identity']['outcome'] == outcome
     assert all(part in body for part in ('pytest', 'executed-head', 'executed-session', 'failed', 'author-head'))
     assert 'Author reports CI passes.' in body and 'not independently executed or refreshed' in body
     notice = "Alternatives: wall_budget_exceeded" if state == "warning" else f"analysis is {state}"
