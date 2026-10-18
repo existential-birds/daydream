@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError, RemoteEntryNotFoundError
 
@@ -56,8 +56,8 @@ def install_sdk(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, FakeApi]:
 
 
 def http_error(status: int, text: str = "SECRET payload failure") -> HfHubHTTPError:
-    request = httpx.Request("POST", "https://huggingface.co/api/datasets/private/commit/main")
-    return HfHubHTTPError(text, response=httpx.Response(status, request=request))
+    request = httpx2.Request("POST", "https://huggingface.co/api/datasets/private/commit/main")
+    return HfHubHTTPError(text, response=httpx2.Response(status, request=request))
 
 
 def test_private_revision_is_a_private_dataset_pin(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -153,8 +153,8 @@ def test_reads_exact_revision_and_resolves_normal_hf_cache_symlinks(
 
 def test_only_missing_remote_entry_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     client, api = install_sdk(monkeypatch)
-    request = httpx.Request("GET", "https://huggingface.co/private/resolve/file")
-    api.error = RemoteEntryNotFoundError("SECRET absent", response=httpx.Response(404, request=request))
+    request = httpx2.Request("GET", "https://huggingface.co/private/resolve/file")
+    api.error = RemoteEntryNotFoundError("SECRET absent", response=httpx2.Response(404, request=request))
     assert client.read_file(REPO, "manifest.json", HEAD) is None
 
 
