@@ -5,6 +5,7 @@ from typing import Any
 
 from daydream.output_schema import result_array_schema, severity_enum_schema, strict_object
 from daydream.repository_paths import REPOSITORY_FILE_PATH_SCHEMA
+from daydream.review_source_refs import SOURCE_REFS_SCHEMA
 
 _FINDING_FIELDS = {
     "id": {"type": "integer"},
@@ -28,6 +29,7 @@ REVIEW_STAGE_SCHEMA = strict_object({
         "target_id": {"type": "string"},
         "status": {"type": "string", "enum": ["reviewed", "not_reviewed"]},
         "reason": {"type": "string"},
+        "evidence_refs": copy.deepcopy(SOURCE_REFS_SCHEMA),
     })},
     "notes": {"type": "string"},
     # Optional associations are confined by the host; an unusable reference

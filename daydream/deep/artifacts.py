@@ -188,6 +188,9 @@ def restore_review_coverage(deep_dir_path: Path, current: ReviewCoverage) -> Rev
     current_inventory = current.to_dict()["planned_scopes"]
     if stored.revision != current.revision or stored_inventory != current_inventory:
         raise ValueError(f"Cannot resume review: analyzed revision or planned scope inventory changed. {restart}")
+    if any((outcome['status'] == 'complete' or outcome['partial_evidence'])
+           and 'target_decisions' not in outcome for outcome in stored.scopes.values()):
+        raise ValueError(f"Cannot resume review: source-attributed target decisions are unavailable. {restart}")
     extra_phases = stored.required_phases - current.required_phases
     extra_phases = {phase for phase in extra_phases
                     if phase not in {"arbiter", "suppression", "findings", "pipeline"}

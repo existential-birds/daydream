@@ -25,6 +25,17 @@ part; a prefix cannot finish a hunk or file. The host folds file coverage only a
 assignment_parts records the ordered required work and old/new range mapping. Supporting paths, shared context
 and other batches are not additional assigned targets. Omitted inputs are unavailable; partial context is not a
 complete repository map. Preserve the captured revision when consulting repository content.
+Each target decision includes evidence_refs (at most four, 8192 UTF-8 JSON bytes). For reviewed work, cite at least
+one assigned reference from source_refs or assignment_parts.source_refs; not_reviewed may use []. Keep the frozen
+artifact/part digests, side-specific revision and true path. source_summary describes the actual supplied side;
+continuation old_start/count and new_start/count are full-hunk totals, not exact continuation ranges.
+fragment_offset and fragment.offset count UTF-8 bytes in the diff hunk body, never source line numbers. For partial
+lines cite the exact fragment. Supporting references may describe broader frozen source, but cannot replace an
+assigned reference. basis is supplied_diff, source_inspection or executed_check; role is assigned or supporting.
+These are reviewer assertions: a valid reference proves correspondence/existence, not understanding, semantic
+coverage, a tool read or an executed check. Claim executed_check only for a check actually executed, otherwise state
+it is unverified. No read count, tool sequence, finding count or required wording applies. Candidate-free judgments
+are legitimate. Keep required attribution within the shared bounded handoff; do not fabricate completeness on overflow.
 First pass investigates assigned work, with other files supporting concrete candidates. Integration checks
 whole-change interactions and boundaries. Structure begins with whole-change interactions; documentation and
 diff parts support concrete concerns. Output assignment IDs identify decisions, not file selectors.

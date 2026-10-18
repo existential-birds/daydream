@@ -75,7 +75,15 @@ from daydream.review_rationale import (
     bounded_scope_review_context_bytes,
     valid_scope_review_context,
 )
-from daydream.review_result import ReasonCode, ReviewCoverage, reason_for_budget, reason_for_exception
+from daydream.review_result import (
+    TARGET_DECISIONS_MAX_BYTES,
+    ReasonCode,
+    ReviewCoverage,
+    preserved_target_decisions,
+    reason_for_budget,
+    reason_for_exception,
+    validate_target_decisions,
+)
 from daydream.review_stage_inputs import StageInputFactory
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.test_execution import (
@@ -475,6 +483,8 @@ async def phase_per_stack_reviews(
     ) as dispatch:
         async def _review_stack_impl(stack: "StackAssignment") -> None:
             output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
+            records_path = per_stack_records_path(deep_dir_path, stack.stack_name)
+            attribution_name = f'{records_path.stem}-attribution.json'
             context_path = per_stack_report_context_path(deep_dir_path, stack.stack_name)
             # A legacy reuse entry contains no report sidecar. It must never
             # inherit reporting assertions from a previous invocation.
@@ -539,11 +549,21 @@ async def phase_per_stack_reviews(
                     agent.console, f"Reuse restore failed for {stack.stack_name}: {reason}"))
                 if hit is not None:
                     try:
-                        restored = json.loads(per_stack_records_path(deep_dir_path, stack.stack_name).read_text())
+                        restored = json.loads(records_path.read_text())
+                        attribution_path = hit.payload_dir / attribution_name
+                        if (attribution_name not in hit.manifest['payload']
+                                or attribution_path.stat().st_size > TARGET_DECISIONS_MAX_BYTES + 64):
+                            raise ValueError('required bounded source attribution payload unavailable')
+                        attribution = json.loads(attribution_path.read_text())
+                        if not isinstance(attribution, dict) or set(attribution) != {'target_decisions'}:
+                            raise ValueError('invalid source attribution payload')
+                        target_decisions = attribution['target_decisions']
+                        validate_target_decisions(target_decisions, analyzed_revision=coverage.revision.to_dict())
                         cache_valid = valid_record_artifact(
                             restored, scope_id=stack.stack_name, analyzed_revision=coverage.revision.to_dict(),
-                        ) and restored.get("incomplete") is not True
-                    except (OSError, ValueError):
+                        ) and restored.get("incomplete") is not True and bool(target_decisions) and all(
+                            decision['status'] == 'reviewed' for decision in target_decisions)
+                    except (OSError, ValueError, KeyError, TypeError):
                         cache_valid = False
                     if cache_valid:
                         # Reporting is optional and cannot invalidate completed
@@ -561,7 +581,8 @@ async def phase_per_stack_reviews(
                             pass  # Optional rationale remains unavailable; validated review still reuses.
                         reuse_unit.record_hit(hit)
                         results[stack.stack_name] = output_path
-                        coverage.record_scope(stack.stack_name, "complete")
+                        coverage.record_scope(stack.stack_name, "complete",
+                                              target_decisions=target_decisions)
                         return
                     ui.print_warning(agent.console,
                                      f"Cached records for {stack.stack_name} are invalid; rerunning review")
@@ -608,6 +629,7 @@ async def phase_per_stack_reviews(
             stack_name = stack.stack_name
             structured: Any = None
             budget_reason: str | None = None
+            investigation: ReviewInvestigation | None = None
             async with limiter:
                 try:
                     async with maybe_fork(
@@ -625,8 +647,11 @@ async def phase_per_stack_reviews(
                 except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
                     coverage.record_scope(stack_name, "failed",
                         reasons=(reason_for_exception(e),),
+                        target_decisions=(list(investigation.target_progress.values())
+                                          if investigation is not None else None),
                         diagnostic=f"{type(e).__name__}: reviewer invocation failed ({reason_for_exception(e).value})")
                     return
+                assert investigation is not None
                 if budget_reason:
                     try:
                         reason = ReasonCode(budget_reason)
@@ -640,6 +665,7 @@ async def phase_per_stack_reviews(
                             status = "uncovered"
                     coverage.record_scope(stack_name, status, reasons=investigation.failure_reasons or (reason,),
                                           partial_evidence=investigation.admitted_stages > 0,
+                                          target_decisions=list(investigation.target_progress.values()),
                                           diagnostic=(investigation.failure_diagnostic
                                                       or f"review stopped: {reason.value}"))
                     if status == "failed":
@@ -647,12 +673,14 @@ async def phase_per_stack_reviews(
                 if not validates_schema(structured, PER_STACK_RECORD_SCHEMA):
                     if not budget_reason:
                         error = ReviewOutputError(structured)
-                        coverage.record_scope(stack_name, "failed", reasons=(error.reason,), diagnostic=str(error))
+                        coverage.record_scope(stack_name, "failed", reasons=(error.reason,), diagnostic=str(error),
+                                              target_decisions=list(investigation.target_progress.values()))
                     return
                 issues = [dict(issue) for issue in structured["issues"]]
                 # Uids are host-only fields, added after strict model validation.
                 stamp_record_uids(issues, stack_name)
                 try:
+                    target_decisions = preserved_target_decisions(list(investigation.target_progress.values()))
                     per_stack_records_path(deep_dir_path, stack_name).write_text(
                         json.dumps({"issues": issues,
                                     **({"incomplete": True} if budget_reason else {}),
@@ -665,6 +693,7 @@ async def phase_per_stack_reviews(
                 except (OSError, ValueError, TypeError) as exc:
                     coverage.record_scope(stack_name, "failed",
                         reasons=(*coverage.scopes[stack_name]["reason_codes"], ReasonCode.MALFORMED_ARTIFACT),
+                        target_decisions=list(investigation.target_progress.values()),
                         diagnostic=f"{type(exc).__name__}: reviewer artifact publication failed")
                     return
                 if stack_name not in unavailable_report_scopes:
@@ -678,11 +707,14 @@ async def phase_per_stack_reviews(
                             f'Source rationale unavailable for {stack_name}: {type(exc).__name__}')
                 results[stack_name] = output_path
                 if budget_reason is None:
-                    coverage.record_scope(stack_name, "complete")
+                    coverage.record_scope(stack_name, "complete", target_decisions=target_decisions)
                 if reuse_unit is not None and budget_reason is None:
-                    records_path = per_stack_records_path(deep_dir_path, stack_name)
+                    # Attribution is required, hash-verified reuse evidence, kept
+                    # outside records consumed by later model stages.
                     reuse_unit.store(lambda: {records_path.name: records_path.read_bytes(),
-                                             output_path.name: output_path.read_bytes()})
+                                             output_path.name: output_path.read_bytes(),
+                                             attribution_name: json.dumps({'target_decisions': target_decisions},
+                                                                         ensure_ascii=False).encode('utf-8')})
                     # Store optional presentation beside the completed entry,
                     # outside its required, hash-verified model-input payload.
                     if (stack_name not in unavailable_report_scopes

@@ -1104,6 +1104,7 @@ def _seed_fix_resume(target: Path, items: list[dict[str, Any]]) -> Path:
     from daydream.deep.orchestrator import _prepare_review_stacks
     from daydream.deep.records import stamp_item_uids
     from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
+    from tests.harness.review_result import frozen_target_decisions
 
     deep = target / ".daydream" / "deep"
     deep.mkdir(parents=True, exist_ok=True)
@@ -1117,8 +1118,9 @@ def _seed_fix_resume(target: Path, items: list[dict[str, Any]]) -> Path:
                               [PlannedScope(stack.stack_name, stack.stack_name.split("#", 1)[0],
                                             files=tuple(sorted(stack.files))) for stack in stacks],
                               ("intent", "alternatives", "merge"))
-    for scope in coverage.planned_scopes:
-        coverage.record_scope(scope.scope_id, "complete")
+    for stack in stacks:
+        coverage.record_scope(stack.stack_name, "complete", target_decisions=frozen_target_decisions(
+            target, stack, coverage.revision, diff))
     coverage.record_phase("intent", "complete")
     coverage.record_phase("alternatives", "complete", noop=True)
     coverage.record_phase("merge", "complete")

@@ -1,5 +1,6 @@
 """Truthful coverage derivation and strict terminal-result invariants."""
 import copy
+import json
 from collections.abc import Callable
 from typing import Any
 
@@ -100,9 +101,26 @@ def test_corrupt_coverage_is_a_controlled_validation_failure(bad: Any) -> None:
 
 def test_checked_roundtrip_and_immutable_terminal() -> None:
     c = review_coverage(files=("a.py", "b.py"))
+    references: list[dict[str, Any]] = [{
+        'artifact_sha256': 'a' * 64, 'part_sha256': 'c' * 64,
+        'revision': c.revision.merge_base_sha, 'path': 'a.py', 'side': 'old',
+        'source_range': {'start': 2, 'end': 3}, 'fragment': None,
+        'basis': 'supplied_diff', 'role': 'assigned',
+    }]
+    decisions: list[dict[str, Any]] = [{'target_id': 'a.py:part:1', 'status': 'reviewed',
+                                      'reason': 'API_TOKEN=source-secret',
+                                      'evidence_refs': copy.deepcopy(references)}]
     c.record_scope("python", "incomplete", reasons=["host_tool_budget_exhaustion"], partial_evidence=True,
-                   diagnostic="budget stopped: OPENROUTER_API_KEY=secret")
+                   diagnostic="budget stopped: OPENROUTER_API_KEY=secret", target_decisions=decisions)
     assert "secret" not in c.diagnostics["scopes"]["python"]
+    retained = c.scopes['python']['target_decisions']
+    assert retained[0]['reason'] == 'API_TOKEN=[REDACTED_ENV_VAR]'
+    assert retained[0]['evidence_refs'] == references
+    assert decisions[0]['reason'] == 'API_TOKEN=source-secret', 'recording must not mutate provider assertions'
+    decisions[0]['evidence_refs'][0]['path'] = 'changed-after-recording.py'
+    assert retained[0]['evidence_refs'] == references
+    c.record_scope('python', 'incomplete', reasons=['backend_failure'], partial_evidence=True)
+    assert c.scopes['python']['target_decisions'] == retained, 'later failures retain admitted attribution'
     restored = ReviewCoverage.from_dict(c.to_dict())
     assert restored.to_dict() == c.to_dict()
     corrupted = c.to_dict()
@@ -113,6 +131,7 @@ def test_checked_roundtrip_and_immutable_terminal() -> None:
     assert not restored.is_finalized
     result = restored.finalize("completed")
     assert result["analysis_state"] == "incomplete" and restored.is_finalized
+    assert result['stack_outcomes'][0]['target_decisions'] == retained
     persisted = restored.to_dict()
     result["analysis_state"] = "complete"
     restored.scopes["python"]["status"] = "uncovered"
@@ -123,6 +142,51 @@ def test_checked_roundtrip_and_immutable_terminal() -> None:
         setattr(restored, "is_finalized", False)
     with pytest.raises(ValueError, match="frozen"):
         restored.record_scope("python", "failed", reasons=["backend_failure"])
+
+
+@pytest.mark.parametrize('bound', ['references-bytes', 'target-count', 'scope-bytes'])
+def test_retained_attribution_bounds_reject_atomically_after_a_valid_control(bound: str) -> None:
+    """Storage limits must reject overflow without losing already admitted decisions."""
+    c = review_coverage()
+    reference: dict[str, Any] = {
+        'artifact_sha256': 'a' * 64, 'part_sha256': 'c' * 64,
+        'revision': c.revision.head_sha, 'path': 'a.py', 'side': 'new',
+        'source_range': {'start': 1, 'end': 1}, 'fragment': None,
+        'basis': 'supplied_diff', 'role': 'assigned',
+    }
+    valid: list[dict[str, Any]] = [
+        {'target_id': 'a.py:part:1', 'status': 'reviewed', 'reason': '', 'evidence_refs': [reference]}]
+    if bound == 'references-bytes':
+        valid[0]['evidence_refs'] = [{**reference, 'path': 'context/' * 188 + f'source-{i}.py'}
+                                     for i in range(4)]
+    elif bound == 'target-count':
+        valid = [{'target_id': f'a.py:part:{i}', 'status': 'not_reviewed', 'reason': 'Deferred assignment',
+                  'evidence_refs': []} for i in range(512)]
+    else:
+        valid[0]['reason'] = 'é' * 130000
+    c.record_scope('python', 'incomplete', reasons=['evidence_incomplete'], partial_evidence=True,
+                   target_decisions=valid)
+    before = c.to_dict()
+    invalid = copy.deepcopy(valid)
+    if bound == 'references-bytes':
+        for ref in invalid[0]['evidence_refs']:
+            ref['path'] += '/context' * 40
+        assert len(json.dumps(valid[0]['evidence_refs']).encode()) < 8192
+        assert len(json.dumps(invalid[0]['evidence_refs']).encode()) > 8192
+        expected = 'source references exceed retained byte limit'
+    elif bound == 'target-count':
+        invalid.append({**valid[-1], 'target_id': 'a.py:part:512'})
+        expected = 'invalid target decisions'
+    else:
+        invalid[0]['reason'] += 'é' * 1200
+        assert len(json.dumps(valid, ensure_ascii=False).encode()) < 256 * 1024
+        assert len(json.dumps(invalid, ensure_ascii=False).encode()) > 256 * 1024
+        expected = 'target decisions exceed retained byte limit'
+    with pytest.raises(ValueError, match=expected):
+        c.record_scope('python', 'incomplete', reasons=['backend_failure'], partial_evidence=True,
+                       target_decisions=invalid)
+    assert c.to_dict() == before
+    assert ReviewCoverage.from_dict(before).to_dict() == before
 
 
 def test_identity_and_invalid_recording_are_rejected() -> None:

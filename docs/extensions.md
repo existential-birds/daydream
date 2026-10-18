@@ -331,7 +331,7 @@ pre-policy output cannot be restored on fresh runs; merge resume recomputes it.
 The host calls `per-stack`, `structural`, or `generic-fallback` anew for each stage,
 passing `review_stage`, a mapping of host-owned assignment and admitted state.
 Overrides are always invoked. Extension API 8 is separate from internal stage
-contract 11, which invalidates older review caches. The stage response now includes `supporting_files: []` alongside
+contract 12, which invalidates older review caches. Each target response includes typed `evidence_refs`; the stage response includes `supporting_files: []` alongside
 `targets`, `notes`, `candidates` and `contradictions`; builders must preserve this supplied strict response contract.
 Native transports require `supporting_files` as an array or null. The host admission schema differs only for this
 optional metadata: absent, null or malformed references supply no usable association and never repair or invalidate
@@ -341,6 +341,7 @@ otherwise valid primary target/finding judgments. Transport request schemas rema
 | --- | --- |
 | Identity: `stage`, `scope_id`, `analyzed_revision` | `first_pass`, `integration`, or `triage`, bound to the public reviewer and frozen snapshot. |
 | Assignment: `assigned_files` | Current assignment, also passed as the builder's `files`. |
+| Source attribution: `source_refs`, `assignment_parts[].source_refs`, `source_summary` | Frozen selectable source identities and actual supplied old/new ranges or exact UTF-8 fragments. `source_refs` maps current target IDs to available selectors. Continuation full-hunk totals are not exact continuation ranges; `fragment_offset` counts diff-body bytes, never source lines. |
 | Bundle: `supporting_bundle` | Bounded diff/index/binding or integration context. Built-ins use it; custom builders opt in with `review_input_bundle = True`. Otherwise `diff_path` and adjacent `hunk-index.json` retain their real file semantics. |
 | Navigation: `supporting_catalog` | Exact pointers to admitted Structure diff projections; `status` and `omitted_part_count` declare partial availability. Navigation grants no directory access. |
 | Residual work: `remaining_work` | Estimated residual assignments, files and stages; native Pi also exposes current submission/total start floors, remaining submission floor and reserved future starts. |
@@ -365,6 +366,14 @@ safe references and excludes unavailable files, symlinks, Git metadata and gener
 otherwise valid target/finding decisions. Associations grant neither read access nor reviewed coverage; no source-read
 receipt is required. Relevance metadata, attribution and rendered decisions count toward the shared 64 KiB/128-item
 semantic handoff. Closed decisions and host target acknowledgements retain their independent authority.
+Typed `evidence_refs` are strict primary attribution, separate from forgiving `supporting_files`. Each target may submit
+four references within 8 KiB; a reviewed target requires an assigned reference, while `not_reviewed` may use an empty
+list. References bind artifact and part SHA-256, side-specific revision, true old/new path, source range or exact fragment,
+basis (`supplied_diff`, `source_inspection`, `executed_check`) and role (`assigned`, `supporting`). Broader supporting
+source must exist at the frozen revision and cannot replace assigned work. Basis labels remain reviewer assertions.
+All references validate atomically before admission. Per-target evidence persists through file folding with a separate
+512-decision/256-KiB host retention bound; the model handoff retains its existing semantic bounds. A valid citation proves
+correspondence/existence only; it is not a read receipt, semantic-quality certificate or executed-check artifact.
 Findings and snapshot-bound typed coverage are
 [atomically published](../README.md#terminal-review-findings-contract).
 

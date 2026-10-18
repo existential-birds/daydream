@@ -1,6 +1,8 @@
 """Large staged-review transport and retry scenarios through the production runner."""
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import re
 from collections.abc import AsyncIterator, Iterable
@@ -210,16 +212,20 @@ async def test_schema_rejection_retries_once_with_fresh_grounding_and_charged_st
 
 @pytest.mark.parametrize('sandbox', [False, True], ids=['exact-paths', 'inline'])
 @pytest.mark.parametrize(('payload', 'omit_final'), [('medium-file', False), ('oversized-hunk', False),
-                                                      ('oversized-hunk', True), ('unicode-line', False)])
+    ('oversized-hunk', True), ('unicode-line', False), ('unicode-separators', False)])
 async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool, payload: str, omit_final: bool) -> None:
     from daydream import git_ops
     from daydream.prompt_budget import SANCTIONED_INLINE_INPUT_AGGREGATE_MAX_BYTES
 
-    unicode = payload == 'unicode-line'
+    unicode = payload in {'unicode-line', 'unicode-separators'}
     medium = payload == 'medium-file'
     required = ("VALUE = '" + '界' * 11_000 + "'\n" if unicode else 'VALUE = 1\n' + ''.join(
         f'# continuation payload {index:04}: ' + 'x' * 90 + '\n' for index in range(540)))
+    if payload == 'unicode-separators':
+        # Git counts LF lines. Unicode separators and source text resembling a
+        # hunk header remain bytes within this one changed source line.
+        required = "VALUE = '" + ('界\u2028@@ -900,1 +900,1 @@\u0085' * 1200) + "'\n"
     before = 'VALUE = 0\n'
     if medium:
         before = "def hello():\n    return 'world'\n"
@@ -235,6 +241,7 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
         assert 12 * 1024 < len(canonical.encode()) < 24 * 1024
     fragments: list[bytes] = []
     assignments: list[dict[str, Any]] = []
+    decisions: list[dict[str, Any]] = []
 
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
@@ -246,6 +253,7 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
             assert (part['old_start'], part['old_count'], part['new_start'], part['new_count']) == (
                 1, 1, 1, 1 if unicode else 541)
         assignments.append(part)
+        assert output['targets'][0]['evidence_refs'] == part['source_refs'][:1]
         prompt = review.backend.calls[-1]['prompt']
         if sandbox:
             rendered = prompt[prompt.index('Sanctioned phase inputs (captured verbatim):'):]
@@ -264,13 +272,20 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
         else:
             assert part['fragment_offset'] == sum(map(len, fragments))
             assert part['fragment_bytes'] == len(body)
+            reference, = output['targets'][0]['evidence_refs']
+            assert reference['source_range'] is None
+            assert reference['fragment'] == {'offset': part['fragment_offset'], 'bytes': len(body),
+                                             'sha256': hashlib.sha256(body).hexdigest()}
+            assert 'never a source line number' in part['fragment_offset_basis']
         fragments.append(body)
         if omit_final and part['part_index'] == part['part_count']:
             output['targets'][0].update(status='not_reviewed', reason='Final continuation remains unexamined.')
+        decisions.extend(copy.deepcopy(output['targets']))
 
     data = await review.finish('python', reason='evidence_incomplete' if omit_final else None,
                                findings=('Grounded defect',) if medium and not sandbox else ())
     assert scopes(data)['python']['files'] == ['api.py']
+    assert scopes(data)['python']['target_decisions'] == sorted(decisions, key=lambda item: item['target_id'])
     if medium:
         assert len(assignments) == (2 if sandbox else 1)
     else:
@@ -281,6 +296,15 @@ async def test_oversized_hunk_assignments_reassemble_every_canonical_byte(
     if unicode:
         assert len(assignments) >= 3 and assignments[-1]['segment_count'] == len(assignments)
         assert any(part['fragment_line_offset'] > 0 for part in assignments)
+        new_summaries = [part['source_summary'][0]['new'] for part in assignments
+                         if part['source_summary'][0]['new'] is not None]
+        assert len(new_summaries) >= 2
+        assert all(summary['start'] == summary['end'] == 1 for summary in new_summaries)
+        assert assignments[-1]['source_summary'][0]['old'] is None
+        assert any(summary['partial_start'] for summary in new_summaries)
+        full_index = json.loads((repo / '.daydream/hunk-index.json').read_text())['api.py']
+        assert full_index['added_total'] == full_index['removed_total'] == 1
+        assert len(full_index['hunks']) == 1
 
 
 @pytest.mark.parametrize('bundle_capable', [False, True], ids=['legacy-files', 'explicit-bundle'])
@@ -381,24 +405,43 @@ async def test_realistic_diff_and_index_are_scoped_to_assigned_files(tmp_path: P
     assert all(event['metadata']['admitted'] for event in stage_ends(review, 'python'))
 
 
-@pytest.mark.parametrize('path', ['component_雪.py', 'nested/component_"quote".py', 'component_\t.py'])
+@pytest.mark.parametrize('path', ['api.py', 'component_雪.py', 'nested/component_"quote".py', 'component_\t.py',
+                                 'api[1].py'])
 async def test_quoted_git_paths_keep_complete_required_stage_inputs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str) -> None:
 
     repo = tmp_path / 'quoted_paths'
-    seed_feature_branch(repo, base={path: 'VALUE = 0\n'}, feature={path: "VALUE = 'QUOTED_REQUIRED_CHANGE'\n"})
+    seed_feature_branch(repo, base={path: '# Stable source context\nVALUE = 0\n'},
+                        feature={path: "# Stable source context\nVALUE = 'QUOTED_REQUIRED_CHANGE'\n"})
     review = InvestigationRun(repo, tmp_path, monkeypatch)
     required: list[str] = []
+    submitted: list[dict[str, Any]] = []
 
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         assert stage['assigned_files'] == [path]
         diff, _ = capture(review, stage)
         assert 'QUOTED_REQUIRED_CHANGE' in diff
+        binding = json.loads(supporting_contents(review.backend.calls[-1]['prompt'])['input-binding'])
+        digest = hashlib.sha256(diff.encode()).hexdigest()
+        assert digest == binding['canonical_inputs']['canonical-diff']
+        # Construct provider citations independently of the new offered-ref
+        # metadata so this same request also exercises the pre-change owner.
+        references = [{
+            'artifact_sha256': digest, 'part_sha256': digest,
+            'revision': binding['analyzed_revision'][revision_key], 'path': path, 'side': side,
+            'source_range': {'start': 2, 'end': 2}, 'fragment': None,
+            'basis': 'supplied_diff', 'role': 'assigned',
+        } for side, revision_key in [('old', 'merge_base_sha'), ('new', 'head_sha')]]
+        output['targets'][0]['evidence_refs'] = references
+        submitted.extend(copy.deepcopy(references))
         required.append(diff)
 
     data = await review.finish('python')
     assert scopes(data)['python']['files'] == [path]
+    decision, = scopes(data)['python']['target_decisions']
+    assert decision['target_id'] == path and decision['status'] == 'reviewed'
+    assert decision['evidence_refs'] == submitted
     assert len(required) == 1
 
 
@@ -741,6 +784,62 @@ async def test_mixed_schema_and_admission_rejection_never_retries_or_loses_prior
     assert all('FAILED_MIXED_ATTEMPT_MARKER' not in call['prompt'] for call in review.backend.calls)
 
 
+@pytest.mark.parametrize('fault', ['revision', 'artifact-digest', 'part-digest', 'path', 'side', 'range',
+                                  'fragment', 'supporting-only', 'missing-assigned', 'reference-count'])
+async def test_invalid_source_reference_preserves_prior_admitted_target_decisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
+    """A later well-shaped citation cannot alter admitted work unless frozen identity matches."""
+    review = staged_review(tmp_path, monkeypatch)
+    admitted: list[dict[str, Any]] = []
+    rejected_ids: list[str] = []
+
+    @review.backend.script('python')
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        if not stage['progress']:
+            admitted.extend(copy.deepcopy(output['targets']))
+            output['candidates'] = [candidate(disposition='confirmed', finding=record())]
+            return
+        rejected_ids.extend(stage['assigned_target_ids'])
+        output['notes'] = 'INVALID_ATTRIBUTION_MUST_NOT_SURVIVE'
+        reference = output['targets'][0]['evidence_refs'][0]
+        if fault == 'revision':
+            reference['revision'] = '0' * 40
+        elif fault == 'artifact-digest':
+            reference['artifact_sha256'] = '0' * 64
+        elif fault == 'part-digest':
+            reference['part_sha256'] = '0' * 64
+        elif fault == 'path':
+            reference['path'] = 'unassigned.py'
+        elif fault == 'side':
+            reference['side'] = 'diff'
+        elif fault == 'range':
+            reference['source_range'] = {'start': 999999, 'end': 999999}
+        elif fault == 'fragment':
+            reference['fragment'] = {'offset': 999999, 'bytes': 1, 'sha256': '0' * 64}
+        elif fault == 'supporting-only':
+            reference['role'] = 'supporting'
+        elif fault == 'reference-count':
+            output['targets'][0]['evidence_refs'] *= 5
+        else:
+            output['targets'][0]['evidence_refs'] = []
+
+    reason = 'malformed_output' if fault == 'reference-count' else 'evidence_incomplete'
+    data = await review.finish('python', reason=reason, findings=('Grounded defect',))
+    events = stage_ends(review, 'python')
+    assert [event['metadata']['admitted'] for event in events] == [True, False]
+    assert all(event['metadata']['attempt'] == 1 for event in events)
+    assert events[-1]['metadata']['failure_class'] == 'source_attribution'
+    assert bool(events[-1]['metadata'].get('schema_rejection')) is (fault == 'reference-count')
+    decisions = scopes(data)['python']['target_decisions']
+    assert decisions == sorted(admitted, key=lambda item: item['target_id'])
+    assert not set(rejected_ids).intersection(item['target_id'] for item in decisions)
+    coverage = json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text())
+    assert next(scope for scope in coverage['stack_outcomes'] if scope['scope_id'] == 'python')[
+        'target_decisions'] == decisions
+    assert all('INVALID_ATTRIBUTION_MUST_NOT_SURVIVE' not in call['prompt'] for call in review.backend.calls)
+
+
 @pytest.mark.parametrize('sandbox', [False, True], ids=['exact-paths', 'inline'])
 async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox: bool) -> None:
@@ -757,12 +856,14 @@ async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
     review.backend.sandbox = sandbox
     assignments: list[dict[str, Any]] = []
     fragments: list[str] = []
+    decisions: list[dict[str, Any]] = []
 
     @review.backend.script('python')
     def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
         diff, index = capture(review, stage)
         scoped = index['api.py']
         fragments.append(diff)
+        decisions.extend(copy.deepcopy(output['targets']))
         for part in stage['assignment_parts']:
             assignments.append(part)
             expected = (part['old_start'], part['old_start'] + part['old_count'] - 1,
@@ -776,7 +877,50 @@ async def test_old_only_hunk_and_later_continuations_keep_canonical_ranges(
     coverage = json.loads((repo / '.daydream/deep/review-coverage.json').read_text())
     assert all(scope['status'] == 'complete' for scope in coverage['stack_outcomes'])
     assert assignments[0]['old_start'] == 1 and assignments[0]['new_count'] == 0
+    first_reference, = decisions[0]['evidence_refs']
+    assert first_reference['side'] == 'old'
+    assert first_reference['source_range'] == {'start': 1, 'end': 1}
+    assert any(reference['side'] == 'new' for decision in decisions for reference in decision['evidence_refs'])
+    expected_decisions = sorted(decisions, key=lambda item: item['target_id'])
+    assert next(scope for scope in coverage['stack_outcomes'] if scope['scope_id'] == 'python')[
+        'target_decisions'] == expected_decisions
     combined = '\n'.join(fragments)
     assert combined.count('-DELETED_FIRST_LINE = True') == 1
     for index in range(500):
         assert combined.count(f'LATER_REQUIRED_CHANGE_{index:04}') == 1
+
+
+@pytest.mark.parametrize('fault', ['reordered-fragment', 'byte-offset-as-line'])
+async def test_continuation_references_cannot_alias_another_fragment_or_a_source_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str,
+) -> None:
+    """Byte offsets identify a specific delivered fragment, even when it splits one source line."""
+    repo = tmp_path / 'continuation_attribution'
+    seed_feature_branch(repo, base={'api.py': 'VALUE = 0\n'},
+                        feature={'api.py': "VALUE = '" + '界' * 11000 + "'\n"})
+    review = InvestigationRun(repo, tmp_path, monkeypatch)
+    admitted: list[dict[str, Any]] = []
+
+    @review.backend.script('python')
+    def response(stage: dict[str, Any], output: dict[str, Any]) -> None:
+        capture(review, stage)
+        target, = output['targets']
+        reference, = target['evidence_refs']
+        assert reference['source_range'] is None
+        if not admitted:
+            admitted.append(copy.deepcopy(target))
+            return
+        assert reference['fragment']['offset'] > 1
+        assert reference['part_sha256'] != admitted[0]['evidence_refs'][0]['part_sha256']
+        if fault == 'reordered-fragment':
+            target['evidence_refs'] = copy.deepcopy(admitted[0]['evidence_refs'])
+        else:
+            reference['source_range'] = {'start': reference['fragment']['offset'],
+                                         'end': reference['fragment']['offset']}
+            reference['fragment'] = None
+
+    data = await review.finish('python', reason='evidence_incomplete')
+    assert scopes(data)['python']['target_decisions'] == admitted
+    events = stage_ends(review, 'python')
+    assert [event['metadata']['admitted'] for event in events] == [True, False]
+    assert events[-1]['metadata']['failure_class'] == 'source_attribution'

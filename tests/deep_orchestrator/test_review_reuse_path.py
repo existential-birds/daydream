@@ -163,6 +163,18 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
     canonical = {**_records_bytes(multi_stack_target), **{name: (deep / name).read_bytes() for name in names}}
     failures = saved_coverage(deep).unfinished_scopes
     first = json.loads((deep / "review-coverage.json").read_text())
+    attribution = {scope['scope_id']: scope['target_decisions'] for scope in first['stack_outcomes']}
+    assert all(attribution.values()), 'completed scopes must retain source-attributed target assertions'
+    for scope_id, decisions in attribution.items():
+        records = json.loads((deep / f'stack-{scope_id}-records.json').read_text())
+        assert 'target_decisions' not in records, 'retained attribution must not inflate later model inputs'
+        cached = list((deep.parent / 'review-cache/entries').glob(f'*/stack-{scope_id}-records-attribution.json'))
+        assert cached, 'completed cache entries require hash-verified source attribution'
+        for path in cached:
+            manifest = json.loads((path.parent / 'manifest.json').read_text())
+            assert manifest['payload'][path.name] == hashlib.sha256(path.read_bytes()).hexdigest()
+            assert json.loads(path.read_text()) == {'target_decisions': decisions}
+        assert all(any(ref['role'] == 'assigned' for ref in decision['evidence_refs']) for decision in decisions)
     author_faults: list[Path] = []
     stale_author = {'source': 'pull_request_body', 'head_sha': first['analyzed_revision']['head_sha'],
                     'body': 'Stale optional author assertion', 'truncated': False}
@@ -271,6 +283,12 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
             os.close(report_fd)
     finally:
         os.close(parent_fd)
+    if unit == 'all-units':
+        stub.calls.clear()
+        assert await run(make_config(multi_stack_target, start_at='merge')) == 0
+        resumed = saved_coverage(deep)
+        assert {name: outcome['target_decisions'] for name, outcome in resumed.scopes.items()} == attribution
+        assert _count_review_prompts(stub.calls) == 0, 'resume must use the retained source attribution'
 
 
 async def test_obsolete_completed_synthesis_is_replaced_and_current_output_reused(
@@ -619,7 +637,8 @@ async def test_no_review_cache_disables_the_store_and_bypasses_the_exploration_c
 @pytest.mark.parametrize("damage", ["legacy", "corrupt", "incomplete", "head", "diff", "scope", "origin",
                                      "partial_payload", "malformed_payload", "unstaged", "prior-staged",
                                      "contract-3", "contract-4", "contract-5", "contract-6", "contract-8",
-                                     "contract-9", "contract-10"])
+                                     "contract-9", "contract-10", "contract-11",
+                                     "missing-attribution", "invalid-attribution"])
 async def test_legacy_cache_without_coverage_proof_recomputes_review(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     damage: str,
@@ -630,7 +649,7 @@ async def test_legacy_cache_without_coverage_proof_recomputes_review(
     assert await run(config) == 0
     entries = multi_stack_target / ".daydream" / "review-cache" / "entries"
     staged_damage = damage in {"unstaged", "prior-staged", "contract-3", "contract-4", "contract-5", "contract-6",
-                               "contract-8", "contract-9", "contract-10"}
+                               "contract-8", "contract-9", "contract-10", "contract-11"}
     downgraded = 0
     for manifest_path in entries.glob("*/manifest.json"):
         manifest = json.loads(manifest_path.read_text())
@@ -659,6 +678,20 @@ async def test_legacy_cache_without_coverage_proof_recomputes_review(
             manifest["coverage"]["status"] = "incomplete"
         elif damage == "origin":
             manifest["origin"] = "malformed lineage"
+        elif damage in {"missing-attribution", "invalid-attribution"}:
+            for name in list(manifest['payload']):
+                if not name.endswith('-records-attribution.json'):
+                    continue
+                payload_path = manifest_path.parent / name
+                if damage == 'missing-attribution':
+                    # Leave the bytes present: an unlisted, unverified sidecar
+                    # must never stand in for required cache evidence.
+                    manifest['payload'].pop(name)
+                else:
+                    payload = json.loads(payload_path.read_text())
+                    payload['target_decisions'][0]['evidence_refs'][0]['revision'] = '0' * 40
+                    payload_path.write_text(json.dumps(payload))
+                    manifest['payload'][name] = hashlib.sha256(payload_path.read_bytes()).hexdigest()
         elif damage in {"partial_payload", "malformed_payload"}:
             for name in manifest["payload"]:
                 if not name.startswith("stack-") or not name.endswith("-records.json"):
@@ -681,7 +714,8 @@ async def test_legacy_cache_without_coverage_proof_recomputes_review(
     stub.calls.clear()
     assert await run(config) == 0
     assert _count_review_prompts(stub.calls) > 0
-    if not staged_damage and damage not in {"partial_payload", "malformed_payload"}:
+    if not staged_damage and damage not in {
+            "partial_payload", "malformed_payload", "missing-attribution", "invalid-attribution"}:
         assert _count_merge_prompts(stub.calls) > 0
     if staged_damage:
         assert _reused_stacks(multi_stack_target / ".daydream/deep") == set()
@@ -689,7 +723,8 @@ async def test_legacy_cache_without_coverage_proof_recomputes_review(
     assert all(outcome["status"] == "complete" for outcome in coverage["stack_outcomes"])
 
 
-@pytest.mark.parametrize("damage", ["missing", "corrupt", "head", "diff", "scope", "phase"])
+@pytest.mark.parametrize("damage", ["missing", "corrupt", "head", "diff", "scope", "phase",
+                                    "missing-attribution", "invalid-attribution"])
 async def test_resume_rejects_missing_or_mismatched_coverage(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, damage: str, tmp_path: Path,
 ) -> None:
@@ -712,6 +747,10 @@ async def test_resume_rejects_missing_or_mismatched_coverage(
             evidence["analyzed_revision"][field] = "f" * (40 if damage == "head" else 64)
         elif damage == "scope":
             evidence["planned_scopes"][0]["files"] = ["changed-assignment.py"]
+        elif damage == 'missing-attribution':
+            evidence['stack_outcomes'][0].pop('target_decisions')
+        elif damage == 'invalid-attribution':
+            evidence['stack_outcomes'][0]['target_decisions'][0]['evidence_refs'][0]['revision'] = '0' * 40
         else:
             evidence["required_phases"].append("unknown-stage")
         path.write_text(json.dumps(evidence))

@@ -18,6 +18,7 @@ from daydream.git_ops.models import GitError
 from daydream.git_ops.source import frozen_source
 from daydream.hunk_index import _HUNK_HEADER, _unquote_git_path
 from daydream.json_utils import atomic_write_bytes, canonical_json as _json
+from daydream.review_source_refs import lf_lines, part_source_mapping
 from daydream.workspace import WorkContext
 
 _EXACT_PATH_ASSIGNMENT_MAX_BYTES = 24 * 1024
@@ -74,11 +75,18 @@ class StageInputFactory:
         self.binding = {"analyzed_revision": revision,
                         "canonical_inputs": {item.label: item.sha256 for item in self.canonical}}
         self.scope_name = hashlib.sha256(stack.stack_name.encode()).hexdigest()[:20]
+        self.blocks = dict(iter_diff_blocks(self.full_diff))
         self.parts = self._parts()
         self.by_id = {part.assignment["target_id"]: part for part in self.parts}
         self.assignment_batches = self._batches()
         self.current_paths: dict[str, Path] = {}
-        self.blocks = dict(iter_diff_blocks(self.full_diff))
+
+    def _mapped(self, part: _Part, *, body: str | None = None) -> _Part:
+        old_path, new_path = self._diff_paths(part.assignment['file'])
+        part.assignment.update(part_source_mapping(part.diff, part.assignment,
+            artifact_sha256=self.canonical[0].sha256, revision=self.revision,
+            old_path=old_path, new_path=new_path, body=body))
+        return part
 
     @staticmethod
     def _canonical(label: str, path: Path) -> inputs.PreparedSanctionedInput:
@@ -145,8 +153,8 @@ class StageInputFactory:
         for path, block in iter_diff_blocks(self.full_diff):
             blocks[path] = blocks.get(path, "") + block
         for path in sorted(self.stack.files):
-            whole = _Part({"target_id": path, "file": path, "part_index": 1, "part_count": 1,
-                           "kind": "file", "hunk_index": None}, blocks.get(path, ""))
+            whole = self._mapped(_Part({"target_id": path, "file": path, "part_index": 1, "part_count": 1,
+                           "kind": "file", "hunk_index": None}, blocks.get(path, "")))
             if self._remaining_bytes(self._render([whole])) >= 0:
                 result.append(whole)
                 continue
@@ -163,7 +171,7 @@ class StageInputFactory:
         return result
 
     def _split_file(self, path: str, block: str) -> list[_Part]:
-        lines = block.splitlines(keepends=True)
+        lines = lf_lines(block)
         starts = [index for index, line in enumerate(lines) if _HUNK_HEADER.match(line)]
         # Binary/rename metadata is also required work, split explicitly if huge.
         if not starts:
@@ -186,8 +194,9 @@ class StageInputFactory:
         base = {"target_id": "part:000000", "file": path, "part_index": 999999, "part_count": 999999,
                 "kind": "hunk", "hunk_index": hunk_index,
                 "old_start": old_start, "old_count": old_count, "new_start": new_start, "new_count": new_count}
-        if self._remaining_bytes(self._render([_Part(base, header + body)])) >= 0:
-            return [_Part(base, header + body)]
+        whole = self._mapped(_Part(base, header + body))
+        if self._remaining_bytes(self._render([whole])) >= 0:
+            return [whole]
         # Prefer whole diff lines; oversized lines use ordered UTF-8 fragments at exact byte offsets, never whole hunks.
         chunks: list[_Part] = []
         rest = body
@@ -200,17 +209,23 @@ class StageInputFactory:
             meta = {**base, "kind": "continuation", "segment_index": 999999, "segment_count": 999999,
                     "fragment_offset": byte_offset, "fragment_bytes": 999999999,
                     "old_line": old_line, "new_line": new_line, "fragment_line_offset": line_offset}
-            allowance = self._remaining_bytes(self._render([_Part(meta, notice + header)]))
+            # Reserve the descriptor/summary wrappers before choosing bytes. This
+            # avoids adding unbudgeted attribution after splitting a full input.
+            probe = self._mapped(_Part(meta, notice + header), body=body)
+            allowance = self._remaining_bytes(self._render([probe])) - 512
             low = len(inputs.truncate_utf8_to_budget(rest, max(0, allowance)))
             if low == 0:
                 raise inputs.SanctionedInputUnavailable("required change header exceeds the assignment allowance")
             boundary = rest.rfind("\n", 0, low)
             take = boundary + 1 if boundary >= 0 else low
             chunk = rest[:take]
-            chunks.append(_Part({**meta, "segment_index": len(chunks) + 1, "fragment_bytes": len(chunk.encode())},
-                                notice + header + chunk))
+            part = self._mapped(_Part({**meta, "segment_index": len(chunks) + 1,
+                                      "fragment_bytes": len(chunk.encode())}, notice + header + chunk), body=body)
+            if self._remaining_bytes(self._render([part])) < 0:
+                raise inputs.SanctionedInputUnavailable('required source attribution exceeds the assignment allowance')
+            chunks.append(part)
             # Count completed lines only; fragment offsets map split lines exactly, while ranges retain the full hunk.
-            for line in chunk.splitlines(keepends=True):
+            for line in lf_lines(chunk):
                 if line_offset == 0:
                     line_kind = line[:1]
                 if line.endswith("\n"):
@@ -247,7 +262,7 @@ class StageInputFactory:
         for pattern, prefix in ((_DIFF_MINUS_HEADER, "a/"), (_DIFF_PLUS_HEADER, "b/")):
             header = pattern.search(block)
             paths.append(_unquote_git_path(header[1].rstrip("\t")).removeprefix(prefix) if header else file)
-        rename_from = next((line.removeprefix("rename from ") for line in block.splitlines()
+        rename_from = next((line.removeprefix("rename from ") for line in block.split('\n')
                             if line.startswith("rename from ")), None)
         return (_unquote_git_path(rename_from) if rename_from is not None else paths[0]), paths[1]
 

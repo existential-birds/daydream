@@ -3,7 +3,7 @@ import hashlib
 import json
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from daydream.deep.detection import StackAssignment
 from daydream.deep.records import RecordPool, record_uid, stack_name_from_uid, stamp_record_uids
@@ -61,6 +61,33 @@ def records_artifact(coverage: ReviewCoverage, scope_id: str, issues: Iterable[d
     """Bind validated producer records to their current scope and captured revision."""
     return {"issues": list(issues), "scope_id": scope_id, "analyzed_revision": coverage.revision.to_dict(),
             "originating_run_id": coverage.run_id}
+
+
+def frozen_target_decisions(target: Path, stack: StackAssignment, revision: AnalyzedRevision,
+                            diff: str) -> list[dict[str, Any]]:
+    """Seed a compatible prior review assertion from the actual frozen Git inputs."""
+    from daydream.backends import Backend
+    from daydream.hunk_index import write_hunk_index
+    from daydream.review_stage_inputs import StageInputFactory
+    from daydream.workspace import WorkContext
+    from tests.harness.stub_backend import StubBackend
+
+    dd = target / '.daydream'
+    dd.mkdir(exist_ok=True)
+    diff_path = dd / 'diff.patch'
+    diff_path.write_text(diff, encoding='utf-8')
+    index_path = write_hunk_index(dd, diff)
+    work = WorkContext(repo=target, source=target, base_branch='main', base_sha=revision.merge_base_sha,
+        head_branch=None, head_sha=revision.head_sha, is_ephemeral=False, run_id='primed-review-fixture')
+    factory = StageInputFactory(cast(Backend, StubBackend(target)), work, stack, diff_path=diff_path,
+        hunk_index_path=index_path, shared_paths={}, revision=revision.to_dict(), artifact_session=None,
+        allow_standalone=True, read_only=True)
+    parts = [part for batch in factory.assignment_batches for part in batch]
+    if stack.stack_name == 'structure':
+        return [{'target_id': 'integration:structure', 'status': 'reviewed', 'reason': '',
+                 'evidence_refs': parts[0]['source_refs'][:1]}]
+    return [{'target_id': part['target_id'], 'status': 'reviewed', 'reason': '',
+             'evidence_refs': part['source_refs'][:1]} for part in parts]
 
 
 def record_pool(root: Path, records: Iterable[dict[str, Any]] = (), structural: Iterable[dict[str, Any]] = (),

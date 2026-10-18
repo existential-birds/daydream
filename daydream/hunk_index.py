@@ -82,7 +82,8 @@ def parse_hunks(diff_text: str) -> dict[str, dict[str, Any]]:
     current_hunk: dict[str, Any] | None = None
     new_line = 0
     prev_old_header = False
-    for raw in diff_text.splitlines():
+    # Git hunks use LF, including when source contains Unicode line separators.
+    for raw in diff_text.split('\n'):
         if raw.startswith(("--- ", '--- "')):
             prev_old_header = True
             continue

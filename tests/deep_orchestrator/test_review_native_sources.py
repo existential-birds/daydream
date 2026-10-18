@@ -1,6 +1,7 @@
 """Ordinary file inputs keep useful before-side context for file-only backends."""
 from __future__ import annotations
 
+import copy
 import json
 import tracemalloc
 from pathlib import Path
@@ -71,7 +72,7 @@ async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
     consumer = 'EXPECTED_GREETING = "universe"\n' if renamed and broken else base_consumer
     after = {'consumer.py': consumer + '# Existing public contract retained.\n'}
     if renamed:
-        after['modern.py'] = old
+        after['modern.py'] = old + '# Relocated implementation retains the greeting.\n'
     seed_feature_branch(repo, base={old_path: old, 'consumer.py': base_consumer}, feature=after)
     git(repo, 'rm', old_path)
     git(repo, 'commit', '-m', 'remove old greeting path')
@@ -80,6 +81,7 @@ async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
     review.backend = PiBackend(repo)
     title = ('Renamed greeting no longer satisfies the consumer contract' if renamed else
              'Retained consumer imports a deleted greeting module')
+    submitted: dict[str, list[dict[str, Any]]] = {}
 
     @review.backend.script('python')
     def respond(stage: dict[str, Any], output: dict[str, Any]) -> None:
@@ -90,6 +92,11 @@ async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
         assert context['label'] in stage['context_inputs']
         assert f'# original_path: {old_path}' in captured and '# side: before' in captured
         assert captured.endswith(old) and not path.is_relative_to(repo)
+        for target in output['targets']:
+            offered = stage['source_refs'][target['target_id']]
+            if any(ref['path'] == old_path for ref in offered):
+                target['evidence_refs'] = copy.deepcopy(offered)
+                submitted[target['target_id']] = copy.deepcopy(offered)
         if broken:
             finding = dict(record(1), file='consumer.py', description=title,
                            rationale='The retained consumer disagrees with the removed source contract.',
@@ -101,7 +108,21 @@ async def test_before_source_is_furnished_as_a_private_ordinary_file_input(
                                                           'ModuleNotFoundError'),
                                              grounds=finding['evidence'])]
 
-    await review.finish('python', findings=(title,) if broken else ())
+    data = await review.finish('python', findings=(title,) if broken else ())
+    assert submitted, 'the removed/renamed source must produce an assigned source decision'
+    retained = {decision['target_id']: decision['evidence_refs']
+                for decision in scopes(data)['python']['target_decisions']}
+    for target_id, refs in submitted.items():
+        assert retained[target_id] == refs
+        assert {(ref['path'], ref['side'], ref['revision']) for ref in refs} == (
+            {(old_path, 'old', review.pr.base_sha), ('modern.py', 'new', review.pr.head_sha)} if renamed else
+            {(old_path, 'old', review.pr.base_sha)})
+        assert [ref['source_range'] for ref in refs] == (
+            [{'start': 30, 'end': 32}, {'start': 30, 'end': 33}] if renamed else [{'start': 1, 'end': 3}])
+        assert all(ref['role'] == 'assigned' and ref['fragment'] is None for ref in refs)
+    coverage = json.loads((repo / '.daydream/deep/review-coverage.json').read_text())
+    persisted = next(scope for scope in coverage['stack_outcomes'] if scope['scope_id'] == 'python')
+    assert persisted['target_decisions'] == scopes(data)['python']['target_decisions']
     assert not (repo / old_path).exists()
     assert (repo / 'modern.py').is_file() is renamed
     assert tracked_source_state(repo) == before
