@@ -353,6 +353,17 @@ async def _step_intent(ctx: FlowContext) -> None:
         # the intent phase, so downstream reviewers can include the precedence rule.
         # Match build_intent_prompt: whitespace-only bodies are ignored after strip.
         deep_state.intent_authoritative = bool(pr_description and pr_description.strip())
+        from daydream.deep.report_context import retain_author_context
+        ctx.data['author_report_context_unavailable'] = True
+        try:
+            retain_author_context(deep_state.dd, pr_description,
+                                  pr_view.get("headRefOid") or None if config.pr_number is not None
+                                  and pr_view is not None else None)
+        except (OSError, ValueError, TypeError, RecursionError) as exc:
+            print_warning(console, f'Author report context unavailable: {type(exc).__name__}')
+        else:
+            ctx.data['author_report_context_unavailable'] = False
+
         intent_p = DeepArtifact.INTENT.at(deep_state.dd)
         # Intent keys its prompt subject; exploration is recorded grounding only.
         # Hits restore the original artifact bytes.
@@ -673,6 +684,7 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 phase_identity=phase_identity,
                 review_limits=ReviewLimits(investigation_s=ctx.pipeline().reviewer_investigation_budget_s),
                 coverage=deep_state.review_coverage,
+                unavailable_report_scopes=ctx.data.setdefault('unavailable_report_scopes', set()),
             )
     else:
         prior = deep_state.review_coverage.phases.get('merge')

@@ -12,6 +12,7 @@ import pytest
 
 from daydream.dataset import LocalRecordStore, StoreError, parse_run, run_record_schema
 from daydream.dataset_capture import capture_scoring
+from daydream.deep.render import insert_review_context
 from daydream.training.labeler_versions import reply_evidence_digest
 from daydream.training.record_evidence import sessions_from_snapshot
 from daydream.training.reward import ScoringInputs
@@ -68,6 +69,37 @@ def test_public_record_target_validation_matches_store_reference_rules() -> None
     with pytest.raises(StoreError, match="orphan_finding_reference"):
         dataset.validate_record_targets(
             [parse_run(run_record())], [dataset.parse_observation(observation(item_uid="item:99"))])
+
+
+@pytest.mark.parametrize('length_kind', [
+    'projected', 'historic', 'incorrect', 'legacy', 'legacy-incorrect', 'redacted',
+])
+def test_scoring_length_projection_preserves_raw_records_and_historical_replay(
+    store: LocalRecordStore, length_kind: str,
+) -> None:
+    legacy = '# Review\n\n## Issues\n1. [a.py:1] Existing finding.\n'
+    context = {'scopes': [], 'scopes_omitted': 0, 'verification': {'status': 'unproduced', 'value': None},
+               'author_reported': None}
+    raw = (legacy if length_kind.startswith('legacy') or length_kind == 'redacted' else
+           insert_review_context(legacy, context))
+    length = len(raw) if length_kind == 'historic' else len(legacy)
+    if length_kind in {'incorrect', 'legacy-incorrect', 'redacted'}:
+        length += 7
+    scoring = capture_scoring(ScoringInputs([{'verdict': 'consistent'}], True, length), raw)
+    if length_kind == 'redacted':
+        scoring['review_text_redaction'] = {'applied': True, 'policy': 'retained-redaction-policy'}
+    record = run_record('scoring-projection', scoring={'status': 'available', 'value': scoring})
+    if length_kind in {'incorrect', 'legacy-incorrect'}:
+        with pytest.raises(ValueError, match='invalid RunRecord'):
+            parse_run(record)
+        return
+    assert store.commit_run(record).committed
+    retained = next(run for run in store.read_records()['runs'] if run['run_id'] == 'scoring-projection')
+    assert retained['scoring']['value'] == scoring
+    assert retained['scoring']['value']['review_text'] == raw
+    assert retained['scoring']['value']['length'] == length
+    if length_kind != 'redacted':
+        assert 'review_text_redaction' not in retained['scoring']['value']
 
 
 def test_download_source_records_exact_membership_privately(store: LocalRecordStore) -> None:

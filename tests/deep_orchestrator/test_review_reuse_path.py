@@ -29,6 +29,7 @@ from tests.deep_orchestrator.support import (
     _count_merge_prompts,
     _count_review_prompts,
 )
+from tests.harness.fake_gh import FakeGh
 from tests.harness.review_profile import (
     independent_alternatives_profile,
     independent_exploration_profile,
@@ -133,13 +134,22 @@ def _review_surface_prompts(calls: list[dict[str, object]],) -> list[dict[str, o
     return surface
 
 
-@pytest.mark.parametrize("unit", ["all-units", "independent", "arbiter"])
+@pytest.mark.parametrize("unit", [
+    "all-units", "independent", "arbiter", "rationale-missing", "rationale-corrupt", "rationale-nested",
+    "rationale-directory", "rationale-permission",
+    "author-present", "author-absent",
+])
 async def test_identical_rerun_restores_completed_units_and_current_run_evidence(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, unit: str,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, unit: str, fake_gh: FakeGh,
 ) -> None:
     """Every warm contract retains exact bytes, positive evidence, and no paid review calls."""
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     options: dict[str, Any] = {}
+    author_case = unit.startswith('author-')
+    if author_case:
+        options['pr_number'] = 7
+        fake_gh.serve_pr_view({'state': 'OPEN', 'headRefOid': git_ops.head_sha(multi_stack_target),
+                             'body': 'Current author grounding' if unit == 'author-present' else None})
     if unit in {"independent", "arbiter"}:
         options["review_profile"] = independent_alternatives_profile()
     if unit == "arbiter":
@@ -153,6 +163,50 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
     canonical = {**_records_bytes(multi_stack_target), **{name: (deep / name).read_bytes() for name in names}}
     failures = saved_coverage(deep).unfinished_scopes
     first = json.loads((deep / "review-coverage.json").read_text())
+    author_faults: list[Path] = []
+    stale_author = {'source': 'pull_request_body', 'head_sha': first['analyzed_revision']['head_sha'],
+                    'body': 'Stale optional author assertion', 'truncated': False}
+    if author_case:
+        from daydream import json_utils
+        stage = json_utils._stage_bytes
+        def fail_author_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
+            if path.name == 'review-author-context.json':
+                author_faults.append(path)
+                path.write_text(json.dumps(stale_author))
+                raise OSError('optional author context staging failed')
+            return stage(path, content, **kwargs)
+        monkeypatch.setattr(json_utils, '_stage_bytes', fail_author_stage)
+    obstructed: list[Path] = []
+    prior_rationale = (deep / 'stack-python-report-context.json').read_bytes()
+    if unit in {'rationale-missing', 'rationale-corrupt', 'rationale-nested'}:
+        entries = deep.parent / 'review-cache/entries'
+        sidecars = list(entries.glob('*/stack-*-report-context.json'))
+        assert sidecars
+        for sidecar in sidecars:
+            manifest = json.loads((sidecar.parent / 'manifest.json').read_text())
+            assert sidecar.name not in manifest['payload'], 'optional reporting cannot gate valid review reuse'
+            if unit == 'rationale-missing':
+                sidecar.unlink()
+            elif unit == 'rationale-nested':
+                sidecar.write_text('[' * 30000 + '0' + ']' * 30000)
+            else:
+                sidecar.write_text('{corrupt optional rationale')
+    elif unit in {'rationale-directory', 'rationale-permission'}:
+        unlink = Path.unlink
+        def obstruct_optional_cleanup(path: Path, *args: Any, **kwargs: Any) -> None:
+            if (path.name == 'stack-python-report-context.json'
+                    and tuple(parent.name for parent in path.parents[:3]) == ('deep', '.daydream', 'live')
+                    and not obstructed):
+                obstructed.append(path)
+                if unit == 'rationale-directory':
+                    unlink(path, missing_ok=True)
+                    path.mkdir()
+                    (path / 'preserve.txt').write_text('user obstruction')
+                else:
+                    path.write_bytes(prior_rationale)
+                    raise PermissionError('optional report cleanup denied')
+            unlink(path, *args, **kwargs)
+        monkeypatch.setattr(Path, 'unlink', obstruct_optional_cleanup)
     if unit == "all-units":
         store = deep.parent / "review-cache"
         assert store.is_dir(), "store must be published beside the deep artifacts"
@@ -174,6 +228,27 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
     assert first["run_id"] != second["run_id"]
     assert all(first[field] == second[field] for field in ("analyzed_revision", "planned_scopes", "stack_outcomes"))
     assert all(scope["status"] == "complete" for scope in second["stack_outcomes"])
+    if author_case:
+        assert len(author_faults) == 1
+        context = json.loads((deep / 'review-report-context.json').read_text())
+        assert context['author_reported'] is None
+        assert json.loads((deep / 'review-author-context.json').read_text()) == stale_author
+        assert 'Stale optional author assertion' not in (multi_stack_target / '.review-output.md').read_text()
+    if unit.startswith('rationale-'):
+        context = json.loads((deep / 'review-report-context.json').read_text())
+        assert context['scopes']
+        if obstructed:
+            python = next(entry for entry in context['scopes'] if entry['scope_id'] == 'python')
+            assert python['review_context'] is None, 'failed cleanup must not admit stale same-source rationale'
+            preserved = deep / 'stack-python-report-context.json'
+            if unit == 'rationale-directory':
+                assert (preserved / 'preserve.txt').read_text() == 'user obstruction'
+            else:
+                assert preserved.read_bytes() == prior_rationale
+        else:
+            assert unit not in {'rationale-directory', 'rationale-permission'}, 'cleanup fault was not reached'
+            assert all(entry['review_context'] is None for entry in context['scopes'])
+        assert all(entry['originating_run_id'] == first['run_id'] for entry in context['scopes'])
     units = cast(dict[str, Any], _latest_provenance(deep)["units"])
     if unit == "all-units":
         assert unknown_entry.is_dir(), "a fresh run must preserve unknown cache entries"
@@ -696,6 +771,11 @@ async def test_successful_scope_rerun_clears_prior_failure_for_same_revision(
         assert "folded into Structure" in persisted.diagnostics["phases"]["alternatives"]
         assert persisted.diagnostics["scopes"][scope] in persisted.diagnostics["phases"]["alternatives"]
     assert first["analysis_state"] == "incomplete"
+    report = (review.repo / '.review-output.md').read_text()
+    assert '<code>incomplete</code>' in report and first['run_id'] in report
+    assert first['analyzed_revision']['head_sha'] in report
+    first_origins = {entry['scope_id']: entry['originating_run_id'] for entry in first_data['review_context']['scopes']}
+
     assert first["failed_stacks"] == ([] if recovery == "cache" else [scope])
     if recovery == "cache":
         assert saved_coverage(deep).unfinished_scopes.keys() == {scope}
@@ -707,6 +787,10 @@ async def test_successful_scope_rerun_clears_prior_failure_for_same_revision(
         assert await review.run(**options, start_at="merge") == 0
         resumed = review.load()
         assert resumed["findings"] == first_data["findings"]
+        assert resumed['review_context']['scopes'] == first_data['review_context']['scopes']
+        report = (review.repo / '.review-output.md').read_text()
+        assert '<code>incomplete</code>' in report and resumed['terminal_result']['run_id'] in report
+
         for field in ("analysis_state", "failed_stacks", "phase_outcomes", "stack_outcomes"):
             assert resumed["terminal_result"][field] == first[field]
         assert saved_coverage(deep).diagnostics == persisted.diagnostics
@@ -732,6 +816,15 @@ async def test_successful_scope_rerun_clears_prior_failure_for_same_revision(
                     "python", "react", "generic", "structure"}
     assert {name: (review.repo / name).read_bytes() for name in source} == source
     assert second["analysis_state"] == "complete" and second["failed_stacks"] == []
+    report = (review.repo / '.review-output.md').read_text()
+    assert '<code>complete</code>' in report and second['run_id'] in report
+    assert report.count('## Review outcome') == 1
+    assert 'Assigned changed behavior reviewed' in report
+    if recovery == 'cache':
+        second_origins = {entry['scope_id']: entry['originating_run_id']
+                          for entry in second_data['review_context']['scopes']}
+        assert second_origins[sibling] == first_origins[sibling]
+
     assert "backend_failure" not in second["reason_codes"]
     assert first["analyzed_revision"] == second["analyzed_revision"]
     if recovery == "cache":

@@ -129,7 +129,7 @@ async def test_duplicate_record_uid_stops_the_run_before_merge(
         lambda console, title, message, *a, **k: errors.append((title, message)),
     )
     _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
     deep = _prime_uid_merge_resume(multi_stack_target,
         python=[_high_record(description="py first", uid="python:1"),
             _high_record(description="py collision", uid="python:1"),
@@ -138,7 +138,17 @@ async def test_duplicate_record_uid_stops_the_run_before_merge(
 
     assert await _run_deep(multi_stack_target, start_at="merge") == 1
     assert not (deep / "merged-items.json").exists(), "the run merged despite a colliding record identity"
-    assert not (multi_stack_target / ".review-output.md").exists()
+    # A rejected projection now has a diagnostic report; its existence must not
+    # admit the ambiguous records or dispatch synthesis over their identities.
+    coverage = saved_coverage(deep)
+    assert coverage.scopes['python']['status'] == 'failed'
+    assert coverage.scopes['python']['reason_codes'] == ['malformed_artifact']
+    report = (multi_stack_target / '.review-output.md').read_text()
+    assert 'Recorded analysis: <code>failed</code>' in report and 'pipeline: <code>failed</code>' in report
+    assert 'malformed_artifact' in report and 'No confirmed findings.' in report
+    assert all(identity in report for identity in (coverage.run_id, *coverage.revision.to_dict().values()))
+    assert all(rejected not in report for rejected in ('## Issues', 'py first', 'py collision'))
+    assert not any('cross-stack merge agent' in call['prompt'].lower() for call in stub.calls)
     titles = [title for title, _message in errors]
     assert "Duplicate Record Identities" in titles, f"no actionable error panel; got {titles!r}"
     message = next(msg for title, msg in errors if title == "Duplicate Record Identities")

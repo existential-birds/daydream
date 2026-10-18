@@ -521,8 +521,9 @@ async def test_post_payload_approves_when_clean_and_enabled(monkeypatch: pytest.
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('with_diagram', [False, True])
 async def test_post_review_from_report_empty_items_posts_diagram(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo, with_diagram: bool,
 ) -> None:
     merged = tmp_path / "merged-items.json"
     merged.write_text(json.dumps({"items": []}))
@@ -531,12 +532,19 @@ async def test_post_review_from_report_empty_items_posts_diagram(
 
     status = await pr_review.post_review_to_pr_from_report(tmp_path, merged,
         console=_FakeConsole(),  # type: ignore[arg-type]
-        post=True, diagram_blocks=blocks, renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO,
+        post=True, diagram_blocks=blocks if with_diagram else None, renderers=BUILTIN_RENDERERS, run_info=_RUN_INFO,
+        review_summary="## Review outcome\n\nNo confirmed findings. Recorded analysis complete.",
     )
 
+    if not with_diagram:
+        assert status == pr_review.PostStatus.NOTHING_TO_POST
+        assert not captured
+        return
     assert status == pr_review.PostStatus.POSTED
     assert captured["plan"].event is pr_review.ReviewEvent.COMMENT
     assert captured["plan"].diagram_blocks == blocks
+    assert captured['plan'].review_summary is not None
+    assert 'No confirmed findings' in captured['plan'].review_summary
 
 
 

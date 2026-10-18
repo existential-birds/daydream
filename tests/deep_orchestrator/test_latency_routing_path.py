@@ -41,11 +41,14 @@ _FORENSIC_BASELINE_DEEP_ARTIFACTS = frozenset({
 #: (A12); ``adjudication-provenance.json`` is the host-stamped adjudication ledger
 #: issue #735 adds; ``test-recipe.json`` is the once-resolved test recipe issue
 #: #1408 persists in the preamble; ``diagram-complete.json`` is issue #1401's
-#: snapshot-bound diagram recovery marker. The gate subtracts these additions
-#: before comparing against the baseline.
+#: snapshot-bound diagram recovery marker. Issue #1519 adds host-only author,
+#: report and per-scope rationale sidecars, without changing arbiter inputs.
+#: The gate subtracts these additions before comparing against the baseline.
 _FORENSIC_ADDITIVE_DEEP_ARTIFACTS = frozenset(
     {"review-coverage.json", "latency-routing.json", "adjudication-provenance.json", "test-recipe.json", "stage-inputs",
-     "diagram-complete.json"}
+     "diagram-complete.json", "review-author-context.json", "review-report-context.json",
+     "stack-generic-report-context.json", "stack-python-report-context.json", "stack-react-report-context.json",
+     "stack-structure-report-context.json"}
 )
 
 #: The pre-#732 ``arbiter-input.json`` for the exact stub records below: the

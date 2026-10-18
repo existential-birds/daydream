@@ -14,7 +14,7 @@ from opentelemetry.sdk.trace import Tracer
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 
-from daydream import git_ops, runner
+from daydream import git_ops, json_utils, runner
 from daydream.backends import AgentEvent, ToolResultEvent, ToolStartEvent
 from daydream.dataset import LocalRecordStore, StoreError, parse_observation
 from daydream.extensions import Registry, build_registry
@@ -133,6 +133,7 @@ def owned_trace_id(exporter: InMemorySpanExporter, run_id: str) -> str:
 @pytest.mark.parametrize("shallow", [False, True])
 async def test_dirty_original_input_and_history_without_archive_or_findings_export(
     config: RunConfig, shallow: bool, tracing: bool, memory_exporters: list[InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = replace(config, shallow=shallow, stack="python" if shallow else None,
                      observability=ObservabilityConfig(destinations=("memory",) if tracing else ()))
@@ -142,6 +143,15 @@ async def test_dirty_original_input_and_history_without_archive_or_findings_expo
     (repo / "api.py").write_text(f"# tracked dirty input: {_SENSITIVE}\n")
     diff = git_ops.diff(repo, "main")
     ambient = NonRecordingSpan(SpanContext(123, 456, False, TraceFlags(TraceFlags.SAMPLED)))
+    stage = json_utils._stage_bytes
+    findings_reports: list[str] = []
+    def observe_context_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
+        if path.name == 'review-report-context.json':
+            before_context = (path.parent / 'review-output.md').read_text()
+            # This complete fixture's earlier supervision warning predates its own completion.
+            findings_reports.append(before_context[before_context.index('# Review\n'):])
+        return stage(path, content, **kwargs)
+    monkeypatch.setattr(json_utils, '_stage_bytes', observe_context_stage)
     with trace.use_span(ambient):
         assert await run(config) == 0
     raw = captured(config)
@@ -159,7 +169,8 @@ async def test_dirty_original_input_and_history_without_archive_or_findings_expo
     review = (repo / ".review-output.md").read_text()
     scoring = raw["scoring"]["value"]
     assert _SENSITIVE in review and scoring["review_text"] == review
-    assert scoring["length"] == len(review)
+    assert len(findings_reports) == 1 and _SENSITIVE in findings_reports[0]
+    assert '## Review outcome' in review and scoring['length'] == len(findings_reports[0]) < len(review)
     assert "review_text_redaction" not in scoring and "source_review_sha256" not in scoring
     assert scoring["persisted_breakdown"]["composite"] is None
     assert scoring["persisted_breakdown"]["correctness_per_finding"] is None and scoring["posterior_cost"] is None

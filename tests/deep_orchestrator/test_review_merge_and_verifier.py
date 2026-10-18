@@ -10,7 +10,7 @@ from typing import Any
 import anyio
 import pytest
 
-from daydream import runner as _runner
+from daydream import json_utils, pr_review, review_reporting, runner as _runner
 from daydream.backends import ResultEvent
 from daydream.backends.codex import CodexLifecycleError
 from daydream.backends.lifecycle import BackendLifecycleFailure
@@ -28,9 +28,11 @@ from daydream.phases.review import ReviewOutputError
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.deep_orchestrator.precision_overlap_support import PrecisionOverlapBackend
 from tests.deep_orchestrator.support import (
+    _count_review_prompts,
     _install_accept_gate_pipeline,
     _install_post_recorder,
 )
+from tests.harness.fake_gh import FakeGh
 from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.review_result import merge_result, saved_coverage
 from tests.test_deep_orchestrator import (
@@ -77,9 +79,19 @@ async def test_cold_empty_builtin_merge_uses_no_provider_and_writes_canonical_re
         assert lifecycle[-1]["status"] == "succeeded"
 
 
-@pytest.mark.parametrize("resume", [False, True], ids=["fresh", "resume"])
+@pytest.mark.parametrize(('resume', 'presentation_fault'), [
+    pytest.param(False, 'none', id='report-fresh'), pytest.param(True, 'none', id='report-resume'),
+    pytest.param(False, 'context', id='unavailable-report-fresh'),
+    pytest.param(True, 'context', id='unavailable-report-resume'),
+    pytest.param(False, 'missing-items', id='missing-items'),
+    pytest.param(False, 'corrupt-items', id='corrupt-items'),
+    pytest.param(False, 'permission-items', id='permission-items'),
+    pytest.param(False, 'render', id='summary-render'),
+    pytest.param(False, 'post', id='post-failure'),
+])
 async def test_synthesis_receives_retained_structural_records_and_owns_publication(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, resume: bool,
+    presentation_fault: str, fake_gh: FakeGh,
 ) -> None:
     """Complete input delivery and exact published output prevent structural resurrection.
 
@@ -112,10 +124,15 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
     backend = EmptyReviewBackend(multi_stack_target, forbid_merge=False, forbid_supervise=False,
         review_by_stack={"python": [language], "structure": [twin, distinct, omitted]}, responder=respond)
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    _pin_findings_pr(monkeypatch, multi_stack_target)
+    pr = _pin_findings_pr(monkeypatch, multi_stack_target)
     published: list[dict[str, Any]] = []
+    summaries: list[str | None] = []
+    post = pr_review.post_review_to_pr_from_report
 
-    async def publish(_repo: Path, items_file: Path, **_kwargs: Any) -> None:
+    async def publish(_repo: Path, items_file: Path, **_kwargs: Any) -> Any:
+        summaries.append(_kwargs.get('review_summary'))
+        if presentation_fault.endswith('-items') or presentation_fault == 'post':
+            return await post(_repo, items_file, **_kwargs)
         published.extend(json.loads(items_file.read_text())["items"])
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", publish)
@@ -125,22 +142,87 @@ async def test_synthesis_receives_retained_structural_records_and_owns_publicati
         assert await _runner.run(config) == 0
         supplied.clear()
         published.clear()
+        summaries.clear()
         config.start_at = "merge"
-    assert await _runner.run(config) == 0
+    failed: list[Path] = []
+    stage, read = json_utils._stage_bytes, Path.read_text
+    ready_to_post = False
+    frozen_review_calls: list[int] = []
+    if presentation_fault != 'none':
+        def fail_context_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
+            nonlocal ready_to_post
+            if path.name == 'review-report-context.json':
+                ready_to_post = True
+                frozen_review_calls.append(_count_review_prompts(backend.calls))
+                if presentation_fault == 'context':
+                    failed.append(path)
+                    stale = json.loads(content)
+                    stale['author_reported'] = {'source': 'pull_request_body', 'head_sha': None,
+                                                'body': 'Stale optional publication assertion', 'truncated': False}
+                    path.write_text(json.dumps(stale))
+                    raise OSError('optional report context staging failed')
+            return stage(path, content, **kwargs)
+        monkeypatch.setattr(json_utils, '_stage_bytes', fail_context_stage)
+    if presentation_fault.endswith('-items'):
+        def fail_items_read(path: Path, *args: Any, **kwargs: Any) -> str:
+            if ready_to_post and path.name == 'merged-items.json':
+                failed.append(path)
+                if presentation_fault == 'missing-items':
+                    path.unlink(missing_ok=True)
+                elif presentation_fault == 'corrupt-items':
+                    path.write_text('{corrupt canonical items after freeze')
+                else:
+                    raise PermissionError('items read denied after freeze')
+            return read(path, *args, **kwargs)
+        monkeypatch.setattr(Path, 'read_text', fail_items_read)
+    elif presentation_fault == 'render':
+        render = review_reporting.render_review_context
+        renders = 0
+        def fail_summary_render(*args: Any, **kwargs: Any) -> str:
+            nonlocal renders
+            renders += 1
+            if renders == 2:
+                failed.append(Path('publication-summary'))
+                raise TypeError('optional summary render failed')
+            return render(*args, **kwargs)
+        monkeypatch.setattr(review_reporting, 'render_review_context', fail_summary_render)
+    elif presentation_fault == 'post':
+        fake_gh.set_response('POST', '/repos/o/r/pulls/7/reviews', {'__error__': 'HTTP 503 unavailable'})
+    assert await _runner.run(config) == (1 if presentation_fault == 'post' else 0)
+    if presentation_fault != 'none':
+        assert frozen_review_calls and frozen_review_calls[0] > 0
+        assert _count_review_prompts(backend.calls) == frozen_review_calls[0]
+    if presentation_fault in {'context', 'render'}:
+        assert failed and summaries == [None], 'unavailable presentation must not publish stale sidecar assertions'
+    else:
+        assert len(summaries) == 1 and summaries[0] is not None and 'Review outcome' in summaries[0]
     assert set(supplied) == {"python:1", "structure:1", "structure:2", "structure:3"}
     assert supplied["python:1"]["severity"] == supplied["structure:1"]["severity"] == "high"
     deep = multi_stack_target / ".daydream/deep"
-    items = json.loads(DeepArtifact.MERGED_ITEMS.at(deep).read_text())["items"]
-    assert items == published
-    assert [item["description"] for item in items] == [item["description"] for item in expected]
-    assert [item["source_uids"] for item in items] == [["python:1", "structure:1"], ["structure:2"]]
-    assert items[0]["related_files"] == ["App.tsx"]
-    assert items[0]["severity"] == "high"
+    coverage = saved_coverage(deep)
+    assert coverage.revision.head_sha == pr.head_sha and coverage.revision.merge_base_sha == pr.base_sha
+    assert all(scope['status'] == 'complete' for scope in coverage.scopes.values())
     report = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
     assert report == DeepArtifact.MERGED_REPORT.at(deep).read_text()
     assert all(item["description"] in report for item in expected)
     assert omitted["description"] not in report and twin["description"] not in report
     assert not (deep / "folded-structural.json").exists()
+    if presentation_fault in {'missing-items', 'corrupt-items'}:
+        assert failed and published == [] and fake_gh.calls('POST', '/repos/o/r/pulls/7/reviews') == []
+        assert all(scope['status'] == 'complete' for scope in saved_coverage(deep).scopes.values())
+        return
+    items = json.loads(read(DeepArtifact.MERGED_ITEMS.at(deep)))["items"]
+    assert [item["description"] for item in items] == [item["description"] for item in expected]
+    assert [item["source_uids"] for item in items] == [["python:1", "structure:1"], ["structure:2"]]
+    assert items[0]["related_files"] == ["App.tsx"]
+    assert items[0]["severity"] == "high"
+    if presentation_fault in {'permission-items', 'post'}:
+        assert published == []
+        posts = fake_gh.calls('POST', '/repos/o/r/pulls/7/reviews')
+        assert bool(posts) is (presentation_fault == 'post')
+        assert failed if presentation_fault == 'permission-items' else posts
+        return
+    assert items == published
 
 
 async def test_synthesis_structural_privilege_requires_retained_source(

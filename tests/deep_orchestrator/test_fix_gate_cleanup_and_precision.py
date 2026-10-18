@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from daydream import json_utils
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.deep import fix_steps, orchestrator as deep_orchestrator
 from daydream.deep.records import item_uid
@@ -341,14 +342,31 @@ async def test_apply_fixes_gate_interactive_yes_applies_fixes(
         pytest.param(False, True, False, id="deep-cleanup"),
     ],
 )
+@pytest.mark.parametrize('presentation_fault', ['none', 'initial', 'final'])
 async def test_cleanup_flag_controls_review_report_on_success(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-    shallow: bool, cleanup: bool, report_exists: bool,
+    shallow: bool, cleanup: bool, report_exists: bool, presentation_fault: str,
 ) -> None:
-    _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
     mute_side_effects()
+    attempts: list[Path] = []
+    if presentation_fault != 'none':
+        marker = '\n# fix retained despite optional report failure\n'
+        stub.fix_edit_line = marker
+        stage = json_utils._stage_bytes
+        def fail_report_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
+            if path.name == 'review-report-context.json':
+                attempts.append(path)
+                if len(attempts) == (1 if presentation_fault == 'initial' else 2):
+                    raise OSError('optional report staging failed')
+            return stage(path, content, **kwargs)
+        monkeypatch.setattr(json_utils, '_stage_bytes', fail_report_stage)
     assert await run(make_config(multi_stack_target, shallow=shallow, cleanup=cleanup, assume="yes")) == 0
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).exists() is report_exists
+    if presentation_fault != 'none':
+        assert len(attempts) == 2, 'both frozen review and final evidence refresh must be reached'
+        assert _fix_prompts(stub), 'optional presentation must not stop authorized fixes'
+        assert marker in (multi_stack_target / 'api.py').read_text()
 
 async def test_cleanup_none_unattended_defaults_to_keep(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,

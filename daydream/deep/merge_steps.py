@@ -470,6 +470,15 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
     warnings = review_warnings(deep_state.dd)
     if warnings:
         pr_kwargs["review_warnings"] = warnings
+    from daydream.review_reporting import render_review_context
+    context = ctx.data.get('terminal_review_context')
+    if context is not None:
+        try:
+            pr_kwargs["review_summary"] = render_review_context(context,
+                ctx.data.get("terminal_review_result"),
+                findings_count=len(ctx.data['terminal_review_items']))
+        except (OSError, ValueError, TypeError, RecursionError) as exc:
+            print_warning(console, f'Review summary unavailable: {type(exc).__name__}')
     outcome = await post_review_to_pr_from_report(
         ctx.work.repo,
         items_file,
