@@ -2,17 +2,6 @@
 
 B rationale
 
-<details>
-<summary>Fix with an agent</summary>
-
-```
-Verify each finding against the current code and only fix it if needed.
-
-In `a.py` around line 3, T: B rationale
-```
-
-</details>
-
 <sub>🧙 Posted by [daydream v0.29.0](https://github.com/existential-birds/daydream)</sub>
 
 <!-- daydream-finding: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->

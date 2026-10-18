@@ -129,7 +129,7 @@ class SummaryContext:
     The last, optional diagrams field preserves existing positional constructors."""
 
     findings: tuple[SummaryFinding, ...]
-    agent_prompt: str
+    agent_prompt: str  # Retained for compatibility; the host supplies an empty string.
     review_info: str
     diagrams: str | None = None
 

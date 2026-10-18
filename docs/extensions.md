@@ -518,15 +518,16 @@ produce sanitized diagnostics and preserve the review outcome. Read
 `file_level`, or `summary`; the finding renderer runs for all three.
 `SummaryContext` supplies `findings: tuple[SummaryFinding, ...]`, `agent_prompt`,
 `review_info`, and optional `diagrams`. Each summary finding has `finding` and
-host-rendered `body_block`.
+host-rendered `body_block`. `agent_prompt` is retained for compatibility and is
+always an empty string from the host.
 
 Preserve each `body_block` verbatim: it contains the dedup marker needed to
 prevent duplicate posts. Include `ctx.diagrams` verbatim to retain grounded
 diagrams in posted summaries. The host adds the actionable-comment count,
 incomplete-review warnings, linked reviewed commit, footer and review event decision.
 `ctx.review_info` contains the host-built `Run details` dropdown. The built-in
-summary places additional findings before diagrams, then the agent prompt and
-run details; custom renderers control this inner content. Exceptions, empty output, or non-string
+summary places additional findings before diagrams, then run details;
+custom renderers control this inner content. Exceptions, empty output, or non-string
 returns log a warning naming the slot and fall back to its built-in renderer.
 
 ## Working artifact paths
