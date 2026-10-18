@@ -2,8 +2,10 @@
 
 ## CI spend policy
 
-`ci.yml` keeps Blacksmith runners for speed and retains the required `check`
-status on every PR and main/master push. Superseded PR runs are cancelled;
+`ci.yml` uses standard GitHub-hosted `ubuntu-24.04` runners and retains the
+required `check` status on every PR and main/master push. Standard runner usage
+is free for this public repository; private repositories use their included
+minutes and applicable billing ([GitHub runner documentation](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)). Superseded PR runs are cancelled;
 push runs remain independent. `make check` and the Git hooks always run the
 complete local gate.
 
@@ -20,7 +22,7 @@ Documentation and RL-only changes follow the same rule; no path allowlist skips
 the queue gate.
 
 `merge_group: checks_requested` runs the complete root suite with branch
-coverage and its existing enforced floor on `blacksmith-4vcpu-ubuntu-2404`, with
+coverage and its existing enforced floor on `ubuntu-24.04`, with
 four pytest workers. Typechecking and the root dead-code scan also run in full
 here. A failing required `check` prevents the queue from merging
 the group. Manual dispatches and direct pushes also run the complete gate.

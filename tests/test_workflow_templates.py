@@ -449,6 +449,14 @@ def test_no_event_data_interpolated_into_run_steps(wf_path: Path) -> None:
                 )
 
 @pytest.mark.parametrize("wf_path", _BOT_WORKFLOW_PATHS, ids=lambda p: p.relative_to(_REPO_ROOT).as_posix(),)
+def test_bot_workflows_use_standard_github_hosted_runners(wf_path: Path) -> None:
+    """Shipped bot workflows run without a paid third-party runner installation."""
+    wf = load_workflow(wf_path)
+    for job_name, job in wf["jobs"].items():
+        assert job["runs-on"] == "ubuntu-24.04", f"{wf_path.relative_to(_REPO_ROOT)}:{job_name}"
+
+
+@pytest.mark.parametrize("wf_path", _BOT_WORKFLOW_PATHS, ids=lambda p: p.relative_to(_REPO_ROOT).as_posix(),)
 def test_bot_workflow_action_references_are_pinned_to_commit_shas(wf_path: Path) -> None:
     wf = load_workflow(wf_path)
     rel = wf_path.relative_to(_REPO_ROOT).as_posix()

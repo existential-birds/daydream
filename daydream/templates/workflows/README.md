@@ -13,6 +13,11 @@ single grounded diagram comment instead of a review.
 | `daydream-command.yml` | Daydream Command | Gatekeeper — listens for `@<bot> review`, `@<bot> add sequence diagram`, and `@<bot> add flowchart` PR comments and dispatches Daydream Review with the matched command |
 | `daydream-post.yml` | Daydream Post | Phase B — fires when Daydream Review completes, validates the artifact, posts findings as your App bot |
 
+All jobs use standard GitHub-hosted `ubuntu-24.04` runners, with no third-party
+runner subscription required. Standard runner usage is free for public
+repositories; private repositories use their included minutes and applicable
+billing ([GitHub runner documentation](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)).
+
 ## Install
 
 Do not copy these steps by hand from here — follow one of the two canonical

@@ -227,12 +227,12 @@ def test_pinned_actionlint_image_has_one_owner() -> None:
     assert owners == ["Makefile"], owners
 
 
-def test_merge_queue_workflow_keeps_complete_gate_and_blacksmith_runners() -> None:
+def test_merge_queue_workflow_keeps_complete_gate_on_github_hosted_runners() -> None:
     """Queue/manual checks retain all full gates; PR basic never publishes proof."""
     workflow = load_workflow(_CI_WORKFLOW)
     triggers = _wf_triggers(workflow)
     assert triggers["merge_group"]["types"] == ["checks_requested"]
-    assert all(job["runs-on"] == "blacksmith-4vcpu-ubuntu-2404" for job in workflow["jobs"].values())
+    assert all(job["runs-on"] == "ubuntu-24.04" for job in workflow["jobs"].values())
     assert workflow["jobs"]["check"]["env"]["PYTEST_WORKERS"] == "4"
     steps = {step["name"]: step for step in job_steps(workflow, "check")}
     for name in ("Set up uv", "Verify uv.lock is in sync", "Install dependencies", "Lint with ruff"):

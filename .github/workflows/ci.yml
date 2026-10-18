@@ -27,8 +27,8 @@ concurrency:
 
 jobs:
   check:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    # Keep the measured worker count even if Blacksmith grants extra CPUs.
+    runs-on: ubuntu-24.04
+    # Keep the measured worker count independent of runner CPU availability.
     env:
       PYTEST_WORKERS: "4"
     steps:
@@ -153,7 +153,7 @@ jobs:
     # RL development is paused. Retain the complete gate for explicit runs.
     if: github.event_name == 'workflow_dispatch' && inputs.run_rl
 
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
 
     defaults:
       run:
