@@ -5,6 +5,7 @@ import json
 import shlex
 import sys
 from collections.abc import AsyncIterator, Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ import pytest
 
 from daydream.backends import AgentEvent, ResultEvent, ToolStartEvent
 from daydream.config_file import DaydreamFileConfig
+from daydream.review_profile import ResolvedProfile, build_default_profile
 from daydream.review_result import ReviewCoverage
 from daydream.run_config import RunConfig
 from daydream.runner import run
@@ -120,9 +122,14 @@ async def test_review_budget_stop_emits_partial_findings(
     monkeypatch.setattr("daydream.config.DEFAULT_TOOL_CALL_BUDGET", 3 if budget == "tool_call" else None)
     _pin_findings_pr(monkeypatch, multi_stack_target)
     out = multi_stack_target / "findings.json"
+    profile = independent_alternatives_profile() if phase == "alternatives" else None
+    if phase == "per_stack":
+        defaults = build_default_profile()
+        profile = ResolvedProfile(profile=replace(defaults, pipeline=replace(
+            defaults.pipeline, reviewer_investigation_budget_s=480)), source_kind="test")
     with anyio.fail_after(30):
         code = await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out), file_config=file_config,
-            review_profile=independent_alternatives_profile() if phase == "alternatives" else None,
+            review_profile=profile,
         ))
     assert code == 0
     artifact = json.loads(out.read_text())

@@ -855,10 +855,10 @@ See [overloaded-stack activation evidence](docs/overloaded-stack-sharding.md) fo
 exact frozen plans, repeated live quality/latency comparisons, aggregate allowances
 and measurement limitations.
 
-Each staged per-stack reviewer, including Structure, has a base investigation allowance of 480 seconds and 48
+Each staged per-stack reviewer, including Structure, has a base investigation allowance of 2,400 seconds and 48
 observed tool starts shared across its stages and retries. Set `pipeline.reviewer_investigation_budget_s` in the
 review-profile TOML to a non-negative integer to change investigation time independently of the whole-review
-`pipeline.review_wall_budget_s`. Omission keeps 480 seconds; zero dispatches no investigation and records incomplete
+`pipeline.review_wall_budget_s`. Omission keeps 2,400 seconds; zero dispatches no investigation and records incomplete
 coverage. The workload multiplier above applies exactly once to this base investigation allowance and the unchanged
 48-start base allowance, including with an explicit profile. The resulting reviewer deadline remains clamped by
 invocation limits and the shared pipeline deadline, including its synthesis reserve. An explicit profile's

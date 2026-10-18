@@ -447,6 +447,7 @@ async def test_isolated_failure_continuation_respects_shared_deadline_and_outage
             pytest.fail('Later assignment dispatched despite a shared stopping condition')
 
     assert await review.run(review_profile=_profile_with_pipeline(
+        reviewer_investigation_budget_s=480,
         review_wall_budget_s=1000 if stop == 'wall' else 60)) == 0
     data = review.load()
     assert [finding['title'] for finding in data['findings']] == ['Grounded defect']
@@ -557,6 +558,7 @@ async def test_later_stopping_failure_retains_original_failure_and_stopping_evid
                 yield from read_events(review.repo, 'api.py', event_id=f'exhaust-{index}')
 
     assert await review.run(review_profile=_profile_with_pipeline(
+        reviewer_investigation_budget_s=480,
         review_wall_budget_s=1000 if stop == 'wall' else 60)) == 0
     data = review.load()
     assert attempts == 2
@@ -606,6 +608,7 @@ async def test_unadmitted_backend_failure_remains_failed_after_a_shared_stop(
             yield from read_events(review.repo, 'api.py', event_id=f'exhaust-{index}')
 
     assert await review.run(review_profile=_profile_with_pipeline(
+        reviewer_investigation_budget_s=480,
         review_wall_budget_s=1000 if stop == 'wall' else 60)) == 0
     data = review.load()
     assert attempts == (2 if stop in {'outage-circuit', 'tools'} else 1)
