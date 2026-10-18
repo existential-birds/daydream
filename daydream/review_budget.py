@@ -73,8 +73,9 @@ For native Pi output, the host reserves minimum input-read and submission capaci
 cannot fit the current minimum stops before dispatch. Newly discovered concerns can require additional capacity.
 Use remaining_work and the invocation allocation to preserve the current structured submission; this planning floor
 does not stop ordinary tools prospectively. Each member of a parallel tool batch consumes a start. Static budget
-fields are dispatch-time snapshots; native Pi live feedback refreshes the backend-attempt-local remaining-call count,
-including on transport retries. Use that refreshed count without recounting history. For native Pi, keep one available
+fields are dispatch-time snapshots; the host enforces cumulative spending and the absolute deadline. Native Pi emits
+at most one final-submission warning per native attempt when exactly one call remains; it is a system instruction,
+not a recurring counter. A retry receives only its reduced effective allowance. For native Pi, keep one available
 call for structured_output. Continue concrete unresolved assigned checks while tool/time capacity permits;
 submit when those checks settle. Unused capacity is expected. When only submission capacity remains,
 submit truthful unfinished decisions.

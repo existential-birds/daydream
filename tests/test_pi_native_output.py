@@ -83,11 +83,18 @@ async def test_installed_pi_submits_native_structured_output(
             '{"verdict": "complete", "findings": []}']
 
 
-@pytest.mark.parametrize('allowance', [8, 7, 6, None],
-                         ids=['ample', 'submission-only', 'exhausted', 'unbounded'])
-async def test_native_pi_live_budget_counts_batch_failures_and_replaces_generation_note(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allowance: int | None,
+@pytest.mark.parametrize('allowance,submit', [(8, True), (7, True), (6, True), (2, True), (1, True), (None, True),
+                                            (7, False), (6, False)],
+                         ids=['ample', 'submission-only', 'batch-exhausted', 'batch-overdrawn',
+                              'initial-only', 'unbounded', 'bounded-recovery', 'exhausted-no-recovery'])
+async def test_native_pi_budget_warning_preserves_wire_roles_history_and_charged_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allowance: int | None, submit: bool,
 ) -> None:
+    """Actual wire requests catch custom notes becoming users or dropping genuine history.
+
+    The immediate-submission journey misses threshold transitions, failed/invalid batch
+    charges and missing-submission recovery at an unchanged remaining allowance.
+    """
     if shutil.which('pi') is None or shutil.which('node') is None:
         pytest.skip('The installed official Pi CLI and Node are required for native tool loading.')
     config = tmp_path / 'isolated-pi-config'
@@ -98,6 +105,9 @@ async def test_native_pi_live_budget_counts_batch_failures_and_replaces_generati
     source = 'Captured source\n'
     (tmp_path / 'source.txt').write_text(source)
     prompt = 'Investigate the supplied source and submit the result.'
+    assignment = {'objective': 'first_pass', 'target_ids': ['target-source'], 'candidate_ids': ['candidate-source']}
+    policy = 'Stable original system policy: preserve this exact instruction.'
+    instructions = policy + '\nDaydream final-submission assignment: ' + json.dumps(assignment)
     requests: list[dict[str, Any]] = []
     output = {'verdict': 'complete', 'findings': []}
     batches: list[list[tuple[str, str, dict[str, Any]]]] = [
@@ -105,19 +115,25 @@ async def test_native_pi_live_budget_counts_batch_failures_and_replaces_generati
          ('read-b', 'read', {'path': 'source.txt'})],
         [('failed-submit', 'structured_output', {'verdict': 'incomplete', 'findings': False})],
         [('read-c', 'read', {'path': 'source.txt'}), ('read-d', 'read', {'path': 'source.txt'})],
-        [('final-submit', 'structured_output', output)],
+        *([[]] if allowance in (8, 7, None) else []),  # Repeat threshold through bounded recovery.
+        [('final-submit', 'structured_output', output)] if submit else [],
     ]
 
     class Provider(_QuietHTTPHandler):
         def do_POST(self) -> None:
             requests.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
-            batch = batches[len(requests) - 1]
-            deltas: list[dict[str, Any]] = [
-                {'choices': [{'index': 0, 'delta': {'role': 'assistant', 'tool_calls': [
+            index = len(requests) - 1
+            batch = batches[index]
+            assistant_delta: dict[str, Any] = {
+                'role': 'assistant', 'content': f'Original assistant reasoning summary {index}.'}
+            if batch:
+                assistant_delta['tool_calls'] = [
                     {'index': index, 'id': call_id, 'type': 'function',
                      'function': {'name': name, 'arguments': json.dumps(arguments)}}
-                    for index, (call_id, name, arguments) in enumerate(batch)]}, 'finish_reason': None}]},
-                {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'tool_calls'}],
+                    for index, (call_id, name, arguments) in enumerate(batch)]
+            deltas: list[dict[str, Any]] = [
+                {'choices': [{'index': 0, 'delta': assistant_delta, 'finish_reason': None}]},
+                {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'tool_calls' if batch else 'stop'}],
                  'usage': {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15}},
             ]
             self.send_response(200)
@@ -136,54 +152,87 @@ async def test_native_pi_live_budget_counts_batch_failures_and_replaces_generati
                         'contextWindow': 32768, 'maxTokens': 8192}]}}}))
         monkeypatch.setenv('PI_PROVIDER', 'output-fixture')
         events = [event async for event in PiBackend(model='output-model').execute(
-            tmp_path, prompt, output_schema=_SCHEMA,
+            tmp_path, prompt, output_schema=_SCHEMA, review_instructions=instructions,
             read_only=True, persist_session=False, tool_call_budget=allowance)]
 
-    assert len(requests) == 4
-    for index, (request, spent) in enumerate(zip(requests, [0, 3, 4, 6], strict=True)):
-        assert any(prompt in json.dumps(message) for message in request['messages'] if message['role'] == 'user')
-        history = {message['tool_call_id']: message['content'] for message in request['messages']
-                   if message['role'] == 'tool'}
+    assert len(requests) == len(batches)
+    completions: dict[str, str] = {}
+    for event in events:
+        if isinstance(event, ToolResultEvent):
+            # The host retains native details as JSON; OpenAI's tool content carries text only.
+            completions[event.id] = (''.join(block['text'] for block in json.loads(event.output)['content'])
+                                     if event.output.startswith('{"content":') else event.output)
+    warning_requests: list[int] = []
+    recovery = 'Submit the final result now by calling structured_output alone. Assistant prose is not a submission.'
+    warning_instruction = ('Final-submission budget warning: Only submission capacity remains. '
+                           'Submit now using structured_output alone; report unfinished assigned work '
+                           'with truthful incomplete decisions. Assigned objective and identities: '
+                           + json.dumps(assignment, separators=(',', ':')))
+    original_system: dict[str, Any] | None = None
+    for index, request in enumerate(requests):
+        messages = request['messages']
+        system = [message for message in messages if message['role'] in {'system', 'developer'}]
+        assert system and messages[0] == system[0]
+        assert policy in json.dumps(system)
+        assert 'Attempt dispatch-time snapshot:' in json.dumps(system)
+        preserved_system = dict(system[0])
+        preserved_system['content'] = (
+            system[0]['content'].replace(warning_instruction, '').replace(recovery, '').strip())
+        if original_system is None:
+            original_system = preserved_system
+        assert preserved_system == original_system
+        users = [message for message in messages if message['role'] == 'user']
+        assert len(users) == 1 and prompt in json.dumps(users[0])
+        assert 'Live native Pi attempt budget:' not in json.dumps(messages)
+        assert 'daydream_native_tool_budget' not in json.dumps(messages)
+        assert request['tools'] == requests[0]['tools']
+        assert next(tool for tool in request['tools'] if tool['function']['name'] == 'structured_output')[
+            'function']['parameters'] == _SCHEMA
+        assistants = [message for message in messages if message['role'] == 'assistant']
+        assert len(assistants) == index
+        for earlier, assistant in enumerate(assistants):
+            assert assistant['content'] == f'Original assistant reasoning summary {earlier}.'
+            assert [(call['id'], call['function']['name'], json.loads(call['function']['arguments']))
+                    for call in assistant.get('tool_calls', [])] == batches[earlier]
+        history = {message['tool_call_id']: message['content'] for message in messages if message['role'] == 'tool'}
         previous = [call for batch in batches[:index] for call in batch]
         assert set(history) == {call_id for call_id, _, _ in previous}
         for call_id, name, arguments in previous:
+            assert history[call_id] == completions[call_id]
             if name == 'read' and arguments['path'] == 'source.txt':
                 assert history[call_id] == source
-        notes = [message for message in request['messages']
-                 if 'Live native Pi attempt budget:' in json.dumps(message)]
-        assert len(notes) == (0 if allowance is None else 1)
-        if notes:
-            text = json.dumps(notes[0])
-            assert allowance is not None
-            remaining = max(0, allowance - spent)
-            assert f'This attempt has {remaining} tool calls remaining' in text
-            assert 'Each individual call counts, including failures and parallel batch members' in text
-            assert 'Use this refreshed count without recounting history' in text
-            assert 'observed' not in text and 'ledger' not in text and f'from {allowance}' not in text
-            assert len(text.encode()) < 1024
-            if remaining > 1:
-                assert 'Keep one call for structured_output' in text
-                assert 'Continue concrete unresolved checks for assigned work while tool/time capacity permits' in text
-                assert 'submit when those checks settle' in text and 'Unused capacity is expected' in text
-            elif remaining == 1:
-                assert 'Only submission capacity remains' in text
-                assert 'truthful incomplete decisions' in text
-                assert 'Continue concrete unresolved' not in text
-            else:
-                assert 'Tool-call capacity is exhausted' in text and 'no call remains for structured_output' in text
-                assert 'Keep one call' not in text and 'Submit now' not in text
+        warnings = [message for message in messages if 'Final-submission budget warning:' in json.dumps(message)]
+        if warnings:
+            warning_requests.append(index)
+            assert len(warnings) == 1 and warnings[0]['role'] in {'system', 'developer'}
+            warning = json.dumps(warnings[0])
+            assert 'Only submission capacity remains' in warning and 'truthful incomplete decisions' in warning
+            assignment_text = warnings[0]['content'].split('Assigned objective and identities: ', 1)[1]
+            assert json.JSONDecoder().raw_decode(assignment_text)[0] == assignment
+        recovery_messages = [message for message in messages if recovery in json.dumps(message)]
+        assert len(recovery_messages) == (1 if index == 4 else 0)
+        assert all(message['role'] in {'system', 'developer'} for message in recovery_messages)
+    assert warning_requests == ([3] if allowance == 7 else [0] if allowance == 1 else [])
     starts = [event for event in events if isinstance(event, ToolStartEvent)]
     assert [event.id for event in starts] == [call_id for batch in batches for call_id, _, _ in batch]
     failures = [event.id for event in events if isinstance(event, ToolResultEvent) and event.is_error]
     assert failures == ['read-missing', 'failed-submit']
+    assert completions['read-missing'] == f"ENOENT: no such file or directory, access '{tmp_path / 'missing.txt'}'"
+    assert completions['failed-submit'].startswith('Validation failed for tool "structured_output":\n')
+    assert completions['failed-submit'].endswith(
+        'Received arguments:\n{\n  "verdict": "incomplete",\n  "findings": false\n}')
     result = next(event for event in reversed(events) if isinstance(event, ResultEvent))
-    assert result.structured_output == output
+    assert result.structured_output == (output if submit else None)
 
 
 async def test_native_pi_retry_refreshes_attempt_count_without_renewing_host_allowance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A real Pi restart resets local starts while earlier failed-attempt spend stays charged."""
+    """Restart warning state resets without refunding successful or failed tool starts.
+
+    The batch/history journey never restarts the CLI, so it cannot detect a warning flag
+    leaking between attempts or a retry packet renewing the cumulative host allowance.
+    """
     if shutil.which('pi') is None or shutil.which('node') is None:
         pytest.skip('The installed official Pi CLI and Node are required for native tool loading.')
     config = tmp_path / 'isolated-pi-config'
@@ -207,7 +256,6 @@ async def test_native_pi_retry_refreshes_attempt_count_without_renewing_host_all
                 return
             batch = ([('attempt-1-a', 'read', {'path': 'source.txt'}),
                       ('attempt-1-b', 'read', {'path': 'missing.txt'})] if len(requests) == 1 else
-                     [('attempt-2-a', 'read', {'path': 'source.txt'})] if len(requests) == 3 else
                      [('attempt-2-submit', 'structured_output', output)])
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
@@ -235,20 +283,22 @@ async def test_native_pi_retry_refreshes_attempt_count_without_renewing_host_all
         backend = PiBackend(model='output-model')
         backend.retry_attempts = 1
         backend.retry_base_delay_s = backend.retry_max_delay_s = 0
-        budget = ReviewInvestigationBudget.from_limits(ReviewLimits(60, 3, 8))
+        budget = ReviewInvestigationBudget.from_limits(ReviewLimits(60, 3, 3))
         result, _, reason = await run_agent(
             backend, tmp_path, 'Investigate the supplied source and submit the result.',
             phase=DaydreamPhase.DEEP, output_schema=_SCHEMA, read_only=True, persist_session=False,
-            investigation_budget=budget, tool_call_budget=8, progress_callback=lambda _: None)
+            investigation_budget=budget, tool_call_budget=3, progress_callback=lambda _: None)
 
     assert reason is None and result == output
-    assert budget.observed_tool_starts == 4 and budget.remaining_tool_calls == 4
-    assert len(requests) == 4
-    for request, remaining in zip(requests, [8, 6, 6, 5], strict=True):
-        notes = [message for message in request['messages'] if 'Live native Pi attempt budget:' in json.dumps(message)]
-        assert len(notes) == 1
-        text = json.dumps(notes[0])
-        assert f'This attempt has {remaining} tool calls remaining' in text
-        assert 'observed' not in text and 'ledger' not in text and len(text.encode()) < 1024
+    assert budget.observed_tool_starts == 3 and budget.remaining_tool_calls == 0
+    assert len(requests) == 3
+    for index, request in enumerate(requests):
+        notes = [message for message in request['messages']
+                 if 'Final-submission budget warning:' in json.dumps(message)]
+        assert len(notes) == (0 if index == 0 else 1)
+        assert all(message['role'] in {'system', 'developer'} for message in notes)
+        assert len([message for message in request['messages'] if message['role'] == 'user']) == 1
+        assert 'Live native Pi attempt budget:' not in json.dumps(request['messages'])
+    assert 'tool-call allocation is 3 calls' in json.dumps(requests[0]['messages'])
+    assert 'tool-call allocation is 1 calls' in json.dumps(requests[2]['messages'])
     assert 'attempt-1-a' not in json.dumps(requests[2]['messages'])
-    assert 'attempt-2-a' in json.dumps(requests[3]['messages'])

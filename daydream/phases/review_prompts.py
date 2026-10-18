@@ -22,13 +22,25 @@ def build_review_stage_system_instruction(review_stage: dict[str, Any]) -> str:
     access_guide = review_stage.get('access_guide', '{}')
     if not isinstance(access_guide, str):
         access_guide = '{}'
+    objective = {
+        'first_pass': 'Review assigned changed behavior',
+        'integration': 'Review whole-change interactions and boundaries',
+        'triage': 'Resolve assigned review candidates',
+    }.get(review_stage['stage'], 'Complete the assigned review stage')
     return (
         STAGED_REVIEW_GUIDANCE + '\nPersistent assignment identities: '
         + json.dumps({'stage': review_stage['stage'], 'targets': review_stage['assigned_target_ids'],
             'candidate_ids': review_stage.get('assigned_candidate_ids', []),
             'closed_candidate_ids': review_stage.get('closed_candidate_ids', []),
             'closed_decisions': review_stage.get('closed_decisions', []),
-        }, ensure_ascii=False) + '.\nPersistent exact access guide (supporting metadata): ' + access_guide
+        }, ensure_ascii=False)
+        + '.\nDaydream final-submission assignment: '
+        + json.dumps({
+            'objective': objective,
+            'target_ids': review_stage['assigned_target_ids'],
+            'candidate_ids': review_stage.get('assigned_candidate_ids', []),
+        }, ensure_ascii=False)
+        + '\nPersistent exact access guide (supporting metadata): ' + access_guide
     )
 
 

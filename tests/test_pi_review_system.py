@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from daydream.agent import run_agent
 from daydream.backends.pi import PiBackend
+from daydream.phases.review_prompts import build_review_stage_system_instruction
 from daydream.prompts.grounding import REVIEW_STOPPING_GUIDANCE
 from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.trajectory import DaydreamPhase
@@ -36,7 +37,15 @@ async def test_pi_review_system_is_scoped_and_preserves_retry_and_stage_spend(tm
     invocations: list[tuple[DaydreamPhase, dict[str, Any]]] = [
         (DaydreamPhase.DEEP, {"review_limits": ReviewLimits(17, 3, 3)}),
         (DaydreamPhase.FIX, {}),
-        *[(DaydreamPhase.DEEP, {"investigation_budget": budget, "tool_call_budget": 4}) for _ in range(2)],
+        *[(DaydreamPhase.DEEP, {
+            "investigation_budget": budget,
+            "tool_call_budget": 4,
+            "review_system_instructions": build_review_stage_system_instruction({
+                "stage": stage,
+                "assigned_target_ids": [target],
+                "access_guide": '{"source":"assigned.py"}',
+            }),
+        }) for stage, target in (("first_pass", "target-1"), ("integration", "whole-change"))],
     ]
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", side_effect=spawn):
         for phase, options in invocations:
@@ -65,10 +74,24 @@ async def test_pi_review_system_is_scoped_and_preserves_retry_and_stage_spend(tm
     assert "current invocation allocation: 2 tool calls" in retry
     assert "Failed-attempt calls remain charged; future-stage reserves remain excluded" in retry
     assert "current invocation allocation: 2 tool calls" in integration
+    for instructions, objective, target in (
+        (initial, "Review assigned changed behavior", "target-1"),
+        (retry, "Review assigned changed behavior", "target-1"),
+        (integration, "Review whole-change interactions and boundaries", "whole-change"),
+    ):
+        assignment_line = next(line for line in instructions.splitlines()
+                               if line.startswith("Daydream final-submission assignment: "))
+        assert json.loads(assignment_line.removeprefix("Daydream final-submission assignment: ")) == {
+            "objective": objective, "target_ids": [target], "candidate_ids": [],
+        }
+        assert 'Persistent exact access guide (supporting metadata): {"source":"assigned.py"}' in instructions
+        assert f'"targets": ["{target}"]' in instructions
     for instructions in (initial, retry, integration):
         assert "Cumulative observed starts:" not in instructions
         assert "remaining cumulative tool starts" not in instructions
-        assert "backend-attempt-local remaining-call count" in instructions
+        assert "at most one final-submission warning per native attempt" in instructions
+        assert "not a recurring counter" in instructions
+        assert "refreshed" not in instructions
         assert "Unused capacity is expected" in instructions
         assert "submit when those" in instructions
         assert "planted" not in instructions

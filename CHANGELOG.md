@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **agent skills:** support reproducible trace cohorts, balanced analysis batches, evidence-validated synthesis, matched experiment proposals, and bounded decision windows in Daydream trace analysis.
 
-- **review:** configure each staged reviewer's investigation time through `pipeline.reviewer_investigation_budget_s` in a review profile, retaining the 480-second default, existing tool allowances and shared deadline limits; zero skips investigation with incomplete coverage ([#1535](https://github.com/existential-birds/daydream/issues/1535)).
+- **review:** configure each staged reviewer's investigation time through `pipeline.reviewer_investigation_budget_s` in a review profile, retaining existing tool allowances and shared deadline limits; zero skips investigation with incomplete coverage ([#1535](https://github.com/existential-birds/daydream/issues/1535)).
 
 ### Security
 
@@ -50,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **preflight:** label sharded work as review assignments, show the structural reviewer, and remove obsolete parse agents from the scoped review estimate, including only the applicable conditional arbiter allowance ([#1494](https://github.com/existential-birds/daydream/issues/1494)).
 
 ### Changed
+
+- **review:** allow 15 minutes for model-driven pre-scan investigation and 75 minutes for the overall review pipeline, giving slow reasoning models more exploration time while preserving the staged reviewers' 40-minute allowance.
+
+- **review:** raise the default staged reviewer investigation allowance from 480 to 2,400 seconds, subject to existing shared pipeline deadlines and tool-call limits.
+
+- **pi:** replace recurring native budget messages with at most one final-submission system warning per attempt, and deliver bounded missing-submission recovery through system instructions. Existing extension API fields, allowances, cumulative host accounting and submission admission remain compatible; no migration is required ([#1595](https://github.com/existential-birds/daydream/issues/1595)).
 
 - **workflows:** use standard GitHub-hosted Ubuntu 24.04 runners for repository CI and packaged review workflows, removing the third-party runner subscription requirement.
 

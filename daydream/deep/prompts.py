@@ -352,7 +352,8 @@ def _build_review_stage_prompt(*, strategy: str, stack_name: str, files: list[st
     parts.append("Host review stage budget fields are dispatch-time snapshots: remaining_tool_calls is the "
         "reviewer's cumulative capacity; hard_tool_call_allowance is the current invocation allocation; "
         "advisory_tool_call_target guides pace rather than limiting useful assigned checks. "
-        "During native Pi execution, use the refreshed attempt-local remaining-call count.")
+        "The host enforces cumulative spending and the absolute deadline; "
+        "keep one native Pi call for structured_output.")
     if not review_stage.get('response_contract'):
         parts.append("REVIEW_STAGE_SCHEMA:\n" + json.dumps(REVIEW_STAGE_SCHEMA, ensure_ascii=False))
     return "\n\n".join(parts)

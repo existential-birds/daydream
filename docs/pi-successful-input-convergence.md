@@ -56,7 +56,7 @@ speculative reasoning is not admitted evidence.
 
 ## Native request/context path
 
-The production route inspected was:
+The historical production route inspected for this investigation was:
 
 1. `StageInputFactory.prepare` captures the revision-bound assignment and supporting
    inputs. `ReviewInvestigation` revalidates them and invokes `agent.run_agent`.
@@ -79,12 +79,19 @@ result. Message counts were 3, 5, 8 and 10, with exactly one live budget note sh
 ordinary request-time retention; it does not induce native compaction or establish
 what an earlier remote service received.
 
-`tests/test_pi_native_output.py::test_native_pi_live_budget_counts_batch_failures_and_replaces_generation_note`
-now checks prompt retention, every preceding tool-result identity including failures,
+At the time, `tests/test_pi_native_output.py::test_native_pi_live_budget_counts_batch_failures_and_replaces_generation_note`
+checked prompt retention, every preceding tool-result identity including failures,
 and exact successful source bytes across ample, submission-only, exhausted and
 unbounded native note modes. The scripted provider previously checked note updates
 and final output without detecting silently discarded history. No runtime repair
-is claimed: the strengthened test passes against the existing context owner.
+was claimed: the strengthened test passed against the then-current context owner.
+
+Issue #1595 subsequently removes those recurring custom budget messages and
+delivers the one-shot final-submission warning and distinct missing-submission
+recovery as system instructions. The measurements above describe the earlier
+mechanics. They do not establish history loss, a provider change, or a performance
+benefit from that prompt-policy cleanup. The current native regression retains
+the request-history checks while asserting the absence of recurring messages.
 
 ## Fixed comparison protocol
 
@@ -206,7 +213,7 @@ for replay with authorized access. The public native-context regression is runna
 with the installed Pi CLI and a synthetic localhost provider:
 
 ```bash
-uv run pytest tests/test_pi_native_output.py::test_native_pi_live_budget_counts_batch_failures_and_replaces_generation_note
+uv run pytest tests/test_pi_native_output.py
 ```
 
 A future intervention should first reproduce an at-risk invocation with preserved

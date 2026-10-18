@@ -97,8 +97,8 @@ class Pipeline:
     structural_enabled: bool = True
     arbitration: Arbitration = field(default_factory=Arbitration)
     suppression: Suppression = field(default_factory=Suppression)
-    review_wall_budget_s: int = 2700
-    reviewer_investigation_budget_s: int = 480
+    review_wall_budget_s: int = 4500
+    reviewer_investigation_budget_s: int = 2400
 
 
 @dataclass(frozen=True)

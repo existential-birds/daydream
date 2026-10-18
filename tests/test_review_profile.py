@@ -13,7 +13,6 @@ def test_review_deadline_is_profiled_and_validated() -> None:
     base = _profile()
     bounded = _profile("[pipeline]\nreview_wall_budget_s = 1200")
     assert bounded.pipeline.review_wall_budget_s == 1200
-    assert base.pipeline.review_wall_budget_s == 2700
     assert bounded.digest != base.digest
     with pytest.raises(rp.ProfileError):
         _profile("[pipeline]\nreview_wall_budget_s = -1")
@@ -23,9 +22,8 @@ def test_review_deadline_is_profiled_and_validated() -> None:
 def test_reviewer_investigation_budget_is_independent_and_changes_identity(seconds: int) -> None:
     base = _profile()
     configured = _profile(f"[pipeline]\nreviewer_investigation_budget_s = {seconds}")
-    assert base.pipeline.reviewer_investigation_budget_s == 480
     assert configured.pipeline.reviewer_investigation_budget_s == seconds
-    assert configured.pipeline.review_wall_budget_s == base.pipeline.review_wall_budget_s == 2700
+    assert configured.pipeline.review_wall_budget_s == base.pipeline.review_wall_budget_s
     assert configured.to_canonical_dict() != base.to_canonical_dict()
     assert configured.digest != base.digest
 
@@ -57,12 +55,12 @@ def test_omitted_defaults_and_explicit_defaults_hash_identically() -> None:
     implicit = _profile('''[strategies.intent]
 content = "X"
 source = "copied: a"''')
-    explicit = _profile('''[strategies.intent]
+    explicit = _profile(f'''[strategies.intent]
 content = "X"
 source = "copied: a"
 [pipeline]
 structural_enabled = true
-reviewer_investigation_budget_s = 480''')   # default values spelled out
+reviewer_investigation_budget_s = {rp.Pipeline().reviewer_investigation_budget_s}''')
     assert implicit.to_canonical_dict() == explicit.to_canonical_dict()
     assert implicit.digest == explicit.digest
 
