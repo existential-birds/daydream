@@ -14,6 +14,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from tests.test_workflow_templates import _wf_triggers, job_steps, load_workflow
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -140,20 +142,22 @@ def _recipe_commands(recipe: str) -> list[str]:
     return commands
 
 
-def _observed_gate_commands() -> dict[str, str]:
-    """Map each gate step's command text to the target that owns it.
-
-    Observed by dry-running the real Makefile (`make -n` prints a recipe without
-    executing it), so the recovery needs no Docker daemon and no network.
-    `MAKEFLAGS` is scrubbed because make prints `Entering directory` lines on
-    stdout under it, which would be parsed as commands.
-    """
+def _dry_run_recipe(target: str) -> str:
+    """Read the real recipe without inherited flags or recursive directory messages."""
     env = {key: value for key, value in os.environ.items() if key not in ("MAKEFLAGS", "MFLAGS")}
+    proc = subprocess.run(
+        ["make", "--no-print-directory", "-n", target], cwd=_ROOT, env=env,
+        capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, f"`make -n {target}` failed: {proc.stderr}"
+    return proc.stdout
+
+
+def _observed_gate_commands() -> dict[str, str]:
+    """Map each gate step's dry-run command text to the target that owns it."""
     owners: dict[str, str] = {}
     for target in _gate_steps():
-        proc = subprocess.run(["make", "-n", target], cwd=_ROOT, env=env, capture_output=True, text=True, check=False)
-        assert proc.returncode == 0, f"`make -n {target}` failed: {proc.stderr}"
-        for command in _recipe_commands(proc.stdout):
+        for command in _recipe_commands(_dry_run_recipe(target)):
             owners.setdefault(command, target)
     return owners
 
@@ -187,13 +191,16 @@ def _gate_violations(
             violations.append(f"{name}: neither an invocation of a declared gate step nor a declared CI-only step")
     return violations
 
-def test_ci_check_job_is_represented_by_the_declared_gate() -> None:
+@pytest.mark.parametrize("makeflags", ["", "-w"], ids=["plain", "directory-logging"])
+def test_ci_check_job_is_represented_by_the_declared_gate(monkeypatch: pytest.MonkeyPatch, makeflags: str) -> None:
     """The real check job invokes declared gate steps, plus stated CI-only ones."""
+    monkeypatch.setenv("MAKEFLAGS", makeflags)
+    monkeypatch.setenv("MFLAGS", makeflags)
     workflow = load_workflow(_CI_WORKFLOW)
     steps = [step for job in _GATE_JOBS for step in job_steps(workflow, job)]
     # Script tests are a component of make test, shared with the static CI job.
-    script_recipe = subprocess.check_output(["make", "-n", "test-scripts"], cwd=_ROOT, text=True).strip()
-    assert script_recipe in subprocess.check_output(["make", "-n", "test"], cwd=_ROOT, text=True)
+    script_recipe = _dry_run_recipe("test-scripts").strip()
+    assert script_recipe in _dry_run_recipe("test")
     violations = _gate_violations(steps, {*_gate_steps(), "test-scripts"}, _observed_gate_commands(), _CI_ONLY_STEPS)
 
     assert violations == [], "\n".join(violations)
