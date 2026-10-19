@@ -20,6 +20,7 @@ from daydream.runner import run
 from tests.deep_orchestrator.empty_synthesis_support import empty_review_config
 from tests.deep_orchestrator.precision_overlap_support import PrecisionOverlapBackend
 from tests.deep_orchestrator.support import _arbiter_stacks, _merged_items
+from tests.harness.fake_clock import FakeClock
 from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.review_result import saved_coverage
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
@@ -441,6 +442,9 @@ async def test_precision_overlap_closes_both_streams_without_publishing_completi
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
     profile = independent_alternatives_profile()
     if stop == "deadline":
+        # Exclude runner setup from the small allowance; AnyIO's real timers
+        # still expire and close both blocked provider streams.
+        FakeClock().install(monkeypatch)
         setattr(backend, "supports_budget_preamble", True)
         execute = backend.execute
 
@@ -456,7 +460,7 @@ async def test_precision_overlap_closes_both_streams_without_publishing_completi
 
         monkeypatch.setattr(backend, "execute", budget_provider)
         # Adjudication reserves 60 seconds for finalization. This leaves a real
-        # four-second shared investigation allowance without mocking host clocks.
+        # four-second shared investigation allowance on the frozen host clock.
         profile = replace(profile, profile=replace(profile.profile,
             pipeline=replace(profile.profile.pipeline, review_wall_budget_s=64)))
     config = empty_review_config(multi_stack_target, tmp_path / f"{stop}-overlap.json", precision_mode=True,
