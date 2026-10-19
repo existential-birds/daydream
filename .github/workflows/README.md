@@ -23,7 +23,7 @@ the queue gate.
 
 `merge_group: checks_requested` runs the complete root suite with branch
 coverage and its existing enforced floor on `ubuntu-24.04`, with
-four pytest workers. Typechecking and the root dead-code scan also run in full
+eight pytest workers. Typechecking and the root dead-code scan also run in full
 here. A failing required `check` prevents the queue from merging
 the group. Manual dispatches and direct pushes also run the complete gate.
 Local Git hooks remain complete regardless of remote queue state.

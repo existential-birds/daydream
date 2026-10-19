@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-24.04
     # Keep the measured worker count independent of runner CPU availability.
     env:
-      PYTEST_WORKERS: "4"
+      PYTEST_WORKERS: "8"
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
