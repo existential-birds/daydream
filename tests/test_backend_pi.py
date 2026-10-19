@@ -11,9 +11,11 @@ import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anyio
 import pytest
 
 from daydream.agent import run_agent
@@ -113,11 +115,32 @@ async def test_interrupted_pi_updates_retain_only_admitted_progress(
     lines = ["", "private stderr-canary", *[json.dumps(frame) for frame in frames]]
     spawner = install_fake_cli_process(monkeypatch, "pi", lines=lines, hang=True)
     monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "0")
+    clock = FakeClock().install(monkeypatch)
+    wall_scopes: list[anyio.CancelScope] = []
+
+    def staged_wall_scope(delay: float, *, shield: bool = False) -> anyio.CancelScope:
+        scope = anyio.move_on_after(delay if shield else None, shield=shield)
+        if not shield:
+            wall_scopes.append(scope)
+        return scope
+
+    # This case owns admission of every scripted frame before interruption.
+    # Stage only the agent's wall scope until its actual reader blocks for more
+    # bytes; setup/scheduling latency must not truncate the admission scenario.
+    # Cleanup scopes retain their ordinary real-time bounds.
+    monkeypatch.setattr("daydream.agent.anyio", SimpleNamespace(move_on_after=staged_wall_scope, sleep=anyio.sleep))
     recorder = make_recorder(tmp_path, backend_name="pi")
     async with recorder:
-        output, _, reason = await run_agent(
-            PiBackend(model="test-model"), tmp_path, "review", phase=DaydreamPhase.REVIEW, wall_budget_s=0.05,
-        )
+        async with asyncio.TaskGroup() as tasks:
+            turn = tasks.create_task(run_agent(
+                PiBackend(model="test-model"), tmp_path, "review", phase=DaydreamPhase.REVIEW, wall_budget_s=0.05,
+            ))
+            with anyio.fail_after(5):
+                await spawner.wait_for_read()
+                assert len(wall_scopes) == 1
+                clock.advance(0.05)
+                wall_scopes[0].deadline = anyio.current_time()
+                output, _, reason = await turn
     assert reason == "wall_budget_exceeded"
     assert output == ""
     trajectory = json.loads(recorder.path.read_text())
