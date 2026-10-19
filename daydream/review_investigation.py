@@ -381,6 +381,7 @@ class ReviewInvestigation:
                         stage_prompt = prompt_builder(state)
                         output, _, self.reason = await agent.run_agent(
                             backend, cwd, stage_prompt, phase=DaydreamPhase.DEEP, output_schema=schema,
+                            review_stage_scope_id=transition.scope_id,
                             review_system_instructions=build_review_stage_system_instruction(state),
                             require_full_schema=True, investigation_budget=self.budget, review_evidence=evidence,
                             schema_rejection_guard=lambda value: isinstance(value, dict) and self._assessment(

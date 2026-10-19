@@ -497,6 +497,11 @@ class StageInputFactory:
             if deferred_paths:
                 state['supporting_catalog'] = {
                     'path': str(catalog), 'part_count': len(deferred_paths),
+                    'guidance': (
+                        "The displayed integration diff is an inventory. For before/after patch context, read this "
+                        "catalog and its listed exact paths, including bounded child catalogs, even without a Git "
+                        "execution tool. These frozen patch parts do not guarantee complete old source files. "
+                        "Use source-first investigation when useful; read only parts relevant to concrete concerns."),
                     'status': 'partial' if omitted_parts else 'complete', 'omitted_part_count': omitted_parts}
             if omitted_parts:
                 statuses.append({'label': 'supporting-parts', 'status': 'partial' if deferred_paths else 'unavailable',
@@ -548,5 +553,8 @@ class StageInputFactory:
         exact_paths = prepared.transport is inputs.SanctionedInputTransport.EXACT_PATHS
         contexts = [{"label": item.label, **({"path": str(item.path)} if exact_paths else {"transport": "inline"})}
                     for item in prepared.inputs if item.prompt_visible]
-        state['access_guide'] = _json({"stage": state["stage"], "contexts": contexts})
+        access_guide: dict[str, Any] = {"stage": state["stage"], "contexts": contexts}
+        if 'supporting_catalog' in state:
+            access_guide['supporting_catalog'] = state['supporting_catalog']
+        state['access_guide'] = _json(access_guide)
         return prepared

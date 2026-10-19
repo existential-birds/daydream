@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   folding, retry, reuse, resume and terminal coverage. Reference validation establishes correspondence, not semantic
   review quality or execution proof ([#1518](https://github.com/existential-birds/daydream/issues/1518)).
 
+- **review:** record exact host-rendered user and persistent-system UTF-8 request sizes per backend attempt, with explicit system availability and invocation/stage identities ([#1509](https://github.com/existential-birds/daydream/issues/1509)).
+
 - **agent skills:** add local Daydream trace analysis with bounded evidence retrieval, failure triage, and reviewer inefficiency mining helpers.
 
 - **agent skills:** support reproducible trace cohorts, balanced analysis batches, evidence-validated synthesis, matched experiment proposals, and bounded decision windows in Daydream trace analysis.
@@ -24,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Publish the supported-version, private vulnerability reporting, and coordinated disclosure policy ([#933](https://github.com/existential-birds/daydream/issues/933)).
 
 ### Fixed
+
+- **review:** retain bounded deferred-patch catalog navigation through native compaction and explain frozen before/after patch access without Git tools ([#1509](https://github.com/existential-birds/daydream/issues/1509)).
 
 - **review:** render empty results with recorded completion, bounded source rationale and explicit check provenance; preserve missing evidence and existing publication authority ([#1519](https://github.com/existential-birds/daydream/issues/1519)).
 

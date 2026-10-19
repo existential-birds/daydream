@@ -950,6 +950,14 @@ Optional Structure projections and their navigation catalogs share the remaining
 (512 files and 8 MiB) after required/shared context. Catalogs list admitted pointers only; partial status and
 omitted-part counts describe unavailable supporting context without aborting the interaction review.
 
+The displayed Structure diff is an inventory. Read its supporting catalog and the
+listed exact paths for frozen before/after patch context, including with file-only
+tools when Git execution is unavailable. The bounded catalog pointer and guidance
+persist through supported native compaction. Patch context does not imply complete
+old source-file availability; ordinary source-first investigation remains optional.
+Host-rendered request sizes are recorded separately for each backend attempt; see
+[the measurement boundary and accounting rules](docs/observability.md#host-rendered-request-sizes).
+
 Valid decisions can rely on supplied diff/context without source reads; ordinary file/Git tools remain available,
 recorded and charged, but do not authenticate claims or establish completion. Findings and typed coverage are
 snapshot-bound and atomically published. `complete` requires success or explicit host no-op for every planned scope and

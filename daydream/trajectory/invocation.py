@@ -224,6 +224,7 @@ class Invocation:
     # paths drain every draft exactly once at its sealed historical end.
     _generation_ledger: _GenerationLedger = field(default_factory=_GenerationLedger)
     _backend_lifecycle: BackendLifecycleSnapshot | None = None
+    _host_dispatch: dict[str, int | str] | None = None
 
     def summary(self, *, partial: bool = False) -> dict[str, Any]:
         """Project invocation identity/timing; generation billing appears only after completion."""
@@ -239,7 +240,35 @@ class Invocation:
             summary["generation_lifecycle"] = self._generation_ledger.to_dict()
         if self._backend_lifecycle is not None:
             summary["backend_lifecycle"] = self._backend_lifecycle.to_dict()
+        if self._host_dispatch is not None:
+            summary["host_dispatch"] = dict(self._host_dispatch)
         return summary
+
+    def record_host_dispatch(
+        self, *, prompt: str, system_instructions: str | None, system_instructions_supported: bool,
+        attempt: int, stage_scope_id: str | None,
+    ) -> None:
+        """Retain only exact UTF-8 sizes of the final host execute arguments.
+
+        Backend-internal prompts, schemas, history and transport envelopes are
+        outside this boundary. An unsent system argument has no byte count.
+        """
+        try:
+            measured: dict[str, int | str] = {
+                "attempt": attempt,
+                "user_utf8_bytes": len(prompt.encode("utf-8")),
+                "system_disposition": (
+                    "supplied" if system_instructions is not None else
+                    "absent" if system_instructions_supported else "unsupported"
+                ),
+            }
+            if system_instructions is not None:
+                measured["system_utf8_bytes"] = len(system_instructions.encode("utf-8"))
+            if stage_scope_id is not None:
+                measured["stage_scope_id"] = stage_scope_id
+            self._host_dispatch = measured
+        except Exception as exc:  # noqa: BLE001 - measurement must never interrupt agent work
+            ui.print_warning(_console, f"Trajectory dispatch measurement failed: {type(exc).__name__}")
 
     def record_backend_lifecycle(self, snapshot: BackendLifecycleSnapshot) -> None:
         """Retain finalized attempt observations without completing or billing generations."""

@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import patch
 
 from daydream.agent import run_agent
+from daydream.backends import ContinuationToken
 from daydream.backends.pi import PiBackend
 from daydream.phases.review_prompts import build_review_stage_system_instruction
 from daydream.prompts.grounding import REVIEW_STOPPING_GUIDANCE
@@ -34,6 +35,8 @@ async def test_pi_review_system_is_scoped_and_preserves_retry_and_stage_spend(tm
     backend.retry_attempts = 1
     backend.retry_base_delay_s = backend.retry_max_delay_s = 0
     budget = ReviewInvestigationBudget.from_limits(ReviewLimits(17, 3, 4))
+    access_guide = json.dumps({'supporting_catalog': {'path': str(tmp_path / 'catalog.json'),
+                                                   'status': 'partial', 'omitted_part_count': 1}})
     invocations: list[tuple[DaydreamPhase, dict[str, Any]]] = [
         (DaydreamPhase.DEEP, {"review_limits": ReviewLimits(17, 3, 3)}),
         (DaydreamPhase.FIX, {}),
@@ -43,8 +46,10 @@ async def test_pi_review_system_is_scoped_and_preserves_retry_and_stage_spend(tm
             "review_system_instructions": build_review_stage_system_instruction({
                 "stage": stage,
                 "assigned_target_ids": [target],
-                "access_guide": '{"source":"assigned.py"}',
+                "access_guide": access_guide,
             }),
+            **({'continuation': ContinuationToken('pi', {'session_id': 'retained-navigation'})}
+               if stage == 'integration' else {}),
         }) for stage, target in (("first_pass", "target-1"), ("integration", "whole-change"))],
     ]
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", side_effect=spawn):
@@ -55,6 +60,7 @@ async def test_pi_review_system_is_scoped_and_preserves_retry_and_stage_spend(tm
     paths = [args[args.index("--append-system-prompt") + 1] for args in commands]
     assert all(not Path(path).exists() for path in paths if path.startswith("/"))
     assert all(args[args.index("--thinking") + 1] == "high" for args in commands)
+    assert commands[-1][commands[-1].index('--session-id') + 1] == 'retained-navigation'
     assert "at most 17 seconds and 3 tool calls" in review_system
     assert REVIEW_STOPPING_GUIDANCE in review_system
     assert "planted" not in review_system
@@ -84,7 +90,7 @@ async def test_pi_review_system_is_scoped_and_preserves_retry_and_stage_spend(tm
         assert json.loads(assignment_line.removeprefix("Daydream final-submission assignment: ")) == {
             "objective": objective, "target_ids": [target], "candidate_ids": [],
         }
-        assert 'Persistent exact access guide (supporting metadata): {"source":"assigned.py"}' in instructions
+        assert 'Persistent exact access guide (supporting metadata): ' + access_guide in instructions
         assert f'"targets": ["{target}"]' in instructions
     for instructions in (initial, retry, integration):
         assert "Cumulative observed starts:" not in instructions

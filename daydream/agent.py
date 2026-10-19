@@ -243,6 +243,7 @@ async def run_agent(
     finalization_context: FinalizationContext | None = None,
     tools_disabled: bool = False,
     review_system_instructions: str | None = None,
+    review_stage_scope_id: str | None = None,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run one logical agent, tracing its actual returned or salvaged result.
 
@@ -353,6 +354,7 @@ async def run_agent(
                 tool_call_start_floor=tool_call_start_floor,
                 review_instructions=review_instructions,
                 tools_disabled=tools_disabled,
+                review_stage_scope_id=review_stage_scope_id,
             )
         except Exception as exc:
             from daydream.review_result import ReasonCode, reason_for_exception
@@ -441,6 +443,7 @@ async def _run_agent(
     review_instructions: str | None = None,
     finalization: bool = False,
     tools_disabled: bool = False,
+    review_stage_scope_id: str | None = None,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Execute attempts under one deadline, retry allowance, and tool budget.
 
@@ -607,7 +610,8 @@ async def _run_agent(
                         execute_kwargs["finalization"] = True
                     if tools_disabled and getattr(backend, "supports_tools_disabled", False):
                         execute_kwargs["tools_disabled"] = True
-                    if review_instructions and getattr(backend, "supports_review_instructions", False):
+                    supports_review_instructions = bool(getattr(backend, "supports_review_instructions", False))
+                    if review_instructions and supports_review_instructions:
                         execute_kwargs["review_instructions"] = review_instructions
                     if not validate_structured_output and getattr(
                         backend, "supports_structured_output_opt_out", False
@@ -663,6 +667,12 @@ async def _run_agent(
                         event_stream_scope,
                     ):
                         if inv is not None:
+                            inv.record_host_dispatch(
+                                prompt=attempt_prompt,
+                                system_instructions=execute_kwargs.get("review_instructions"),
+                                system_instructions_supported=supports_review_instructions,
+                                attempt=attempt + 1, stage_scope_id=review_stage_scope_id,
+                            )
                             inv.observe_user_step(prompt=attempt_prompt)
 
                         # Per-invocation abort controls live here so both backends

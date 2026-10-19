@@ -26,6 +26,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.review_budget import ReviewInvestigationBudget, ReviewLimits
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
@@ -79,6 +80,61 @@ async def test_user_prompt_becomes_user_step(tmp_path: Path) -> None:
     for step in traj["steps"]:
         assert step["extra"]["daydream_phase"] == "review"
         assert step["extra"]["daydream_run_flow"] == "normal"
+
+
+@pytest.mark.parametrize("supports_system", [True, False], ids=["absent", "unsupported"])
+async def test_host_dispatch_counts_final_user_bytes_without_inventing_unsent_system_bytes(
+    tmp_path: Path, supports_system: bool,
+) -> None:
+    """Persist pre-redaction UTF-8 sizes; unsupported staged policy never becomes sent system text."""
+    recorder = make_recorder(tmp_path)
+    backend = ScriptedBackend(
+        events=[TextEvent(text="done"), ResultEvent(structured_output=None, continuation=None)],
+        supports_review_instructions=supports_system,
+    )
+    options: dict[str, Any] = {} if supports_system else {
+        "investigation_budget": ReviewInvestigationBudget.from_limits(ReviewLimits(17, 3, 4)),
+        "review_system_instructions": "Unsent system-only marker é🙂",
+    }
+    async with recorder:
+        result = await run_agent(
+            backend, tmp_path, "é🙂 API_KEY=private-dispatch-credential", phase=DaydreamPhase.FIX, **options,
+        )
+    assert result == ("done", None, None)
+    trajectory_text = recorder.path.read_text(encoding="utf-8")
+    trajectory = json.loads(trajectory_text)
+    invocation = trajectory["extra"]["subtrajectories"][0]
+    assert invocation["host_dispatch"] == {
+        "attempt": 1,
+        "user_utf8_bytes": len(backend.calls[0]["prompt"].encode("utf-8")),
+        "system_disposition": "absent" if supports_system else "unsupported",
+    }
+    assert len(backend.calls[0]["prompt"]) < invocation["host_dispatch"]["user_utf8_bytes"]
+    assert "private-dispatch-credential" not in trajectory_text
+    assert "Unsent system-only marker" not in trajectory_text
+    assert "[REDACTED_ENV_VAR]" in trajectory_text
+
+
+async def test_unencodable_dispatch_measurement_does_not_change_agent_result(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Encoding failure keeps the backend outcome and never prints failed input or exception text."""
+    class UnencodablePrompt(str):
+        def encode(self, encoding: str = "utf-8", errors: str = "strict") -> bytes:
+            raise UnicodeError("PRIVATE_MEASUREMENT_FAILURE")
+
+    backend = _scripted([TextEvent(text="done")])
+    trajectory, result = await _run_with_recorder(
+        backend, tmp_path, prompt=UnencodablePrompt("API_KEY=private-unencodable-credential"), phase=DaydreamPhase.FIX,
+    )
+    assert result == ("done", None, None)
+    assert trajectory is not None
+    assert "host_dispatch" not in trajectory["extra"]["subtrajectories"][0]
+    assert _single_agent_step(trajectory)["message"] == "done"
+    output = capsys.readouterr().out
+    assert "Trajectory dispatch measurement failed: UnicodeError" in output
+    assert "PRIVATE_MEASUREMENT_FAILURE" not in output
+    assert "private-unencodable-credential" not in output + json.dumps(trajectory)
 
 async def test_tool_call_paired_with_observation_in_same_step(tmp_path: Path) -> None:
     backend = _scripted([

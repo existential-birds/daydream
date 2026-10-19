@@ -184,6 +184,48 @@ def stage_ends(review: ReviewRun, scope_id: str) -> list[dict[str, Any]]:
             if event['event'] == 'phase_end' and event['metadata'].get('review_scope_id') == scope_id]
 
 
+def assert_host_dispatch_measurements(review: InvestigationRun) -> list[dict[str, Any]]:
+    """Bind persisted stage attempts to actual Backend arguments without summing fork copies."""
+    trajectory = json.loads((review.tmp / 'trajectory.json').read_text())
+    summaries = trajectory['extra']['subtrajectories']
+    invocations = [invocation for summary in summaries
+                   for invocation in ([summary] if 'invocation_id' in summary else summary.get('invocations', []))]
+    assert len({(item['trajectory_id'], item['invocation_id']) for item in invocations}) == len(invocations)
+    assert all('host_dispatch' not in summary for summary in summaries if 'invocation_id' not in summary)
+    events = {event['scope_id']: event for summary in summaries for event in summary.get('phase_events', [])
+              if event['event'] == 'phase_end' and 'logical_stage' in event.get('metadata', {})}
+    by_scope: dict[str, list[dict[str, Any]]] = {}
+    for invocation in invocations:
+        dispatch = invocation.get('host_dispatch', {})
+        if 'stage_scope_id' in dispatch:
+            event = events[dispatch['stage_scope_id']]
+            assert invocation['trajectory_id'] == event['trajectory_id']
+            by_scope.setdefault(event['metadata']['review_scope_id'], []).append(dispatch)
+    calls_by_scope: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    for call in review.backend.calls:
+        if (stage := review_stage_state(call['prompt'])) is not None:
+            calls_by_scope.setdefault(stage['scope_id'], []).append((stage, call))
+    assert set(by_scope) == set(calls_by_scope)
+    measurements: list[dict[str, Any]] = []
+    for scope, calls in calls_by_scope.items():
+        assert len(by_scope[scope]) == len(calls)
+        attempts: dict[str, int] = {}
+        for (stage, call), dispatch in zip(calls, by_scope[scope], strict=True):
+            stage_scope = dispatch['stage_scope_id']
+            attempts[stage_scope] = attempts.get(stage_scope, 0) + 1
+            event = events[stage_scope]
+            assert (event['metadata']['logical_stage'], event['metadata']['attempt']) == (
+                stage['stage'], stage['attempt'])
+            assert dispatch == {
+                'stage_scope_id': stage_scope, 'attempt': attempts[stage_scope],
+                'user_utf8_bytes': len(call['prompt'].encode('utf-8')),
+                'system_disposition': 'supplied',
+                'system_utf8_bytes': len(call['review_instructions'].encode('utf-8')),
+            }
+            measurements.append(dispatch)
+    return measurements
+
+
 def many_file_review(tmp_path: Path, patch: pytest.MonkeyPatch, *, count: int = 17,
                      lines: int = 1, docs_count: int = 4, feature_message: str = 'feature',
                      feature_overrides: dict[str, str] | None = None,
@@ -726,7 +768,7 @@ async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
         "    state = kw['review_stage']\n"
         "    assert isinstance(' '.join(state['notes']), str)\n"
         "    assert kw['files'] == state['assigned_files']\n"
-        "    return builder(**kw) + '\\nBuilder stage arguments:\\n' + json.dumps({\n"
+        "    return builder(**kw) + '\\nCUSTOM_UTF8=é🙂\\nBuilder stage arguments:\\n' + json.dumps({\n"
         "        'files': kw['files'], 'diff': kw.get('inline_diff'), 'stage': state['stage']})\n"
         "def register(r):\n"
         "    r.override_prompt('per-stack', lambda **kw: wrap(build_per_stack_prompt, kw))\n"
@@ -819,6 +861,11 @@ async def test_stage_builders_preserve_transport_and_bounded_semantic_handoffs(
     assert len([stage for stage in stages if stage['stage'] == 'first_pass']) > 1
     assert [stage['stage'] for stage in stages].count('triage') == 2
     assert [len(stage['assigned_candidate_ids']) for stage in stages if stage['stage'] == 'triage'] == [8, 1]
+    # Custom composition and transport expansion happen before the measured host boundary.
+    assert_host_dispatch_measurements(review)
+    assert all('CUSTOM_UTF8=é🙂' in call['prompt'] for call in review.backend.calls
+               if (stage := review_stage_state(call['prompt'])) is not None
+               and stage['scope_id'] in {'python', 'structure'})
 
 
 @pytest.mark.parametrize(('stop', 'reason'), [('tool', 'host_tool_budget_exhaustion'),
@@ -1274,6 +1321,11 @@ async def test_failed_retry_discards_poisoned_progress_but_charges_every_observe
     assert all(stage['stage'] == 'first_pass' for stage in python_stages)
     assert len(python_stages) > 2
     assert all(len(stage['assigned_files']) <= 4 for stage in python_stages)
+    measurements = assert_host_dispatch_measurements(review)
+    retry = next(item for item in measurements if item['attempt'] == 2)
+    first = next(item for item in measurements if item['stage_scope_id'] == retry['stage_scope_id'])
+    assert retry['user_utf8_bytes'] > first['user_utf8_bytes']
+    assert retry['system_utf8_bytes'] > first['system_utf8_bytes']
 
 
 @pytest.mark.parametrize('automatic_shards', [False, True], ids=['whole-stack', 'automatic-shards'])
