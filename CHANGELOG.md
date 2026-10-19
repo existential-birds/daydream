@@ -7,78 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [0.30.0] - 2026-10-19
+
 ### Added
 
 - Bind staged target decisions to bounded frozen-source references and retain their per-part attribution through
   folding, retry, reuse, resume and terminal coverage. Reference validation establishes correspondence, not semantic
   review quality or execution proof ([#1518](https://github.com/existential-birds/daydream/issues/1518)).
-
 - **review:** record exact host-rendered user and persistent-system UTF-8 request sizes per backend attempt, with explicit system availability and invocation/stage identities ([#1509](https://github.com/existential-birds/daydream/issues/1509)).
-
 - **agent skills:** add local Daydream trace analysis with bounded evidence retrieval, failure triage, and reviewer inefficiency mining helpers.
-
 - **agent skills:** support reproducible trace cohorts, balanced analysis batches, evidence-validated synthesis, matched experiment proposals, and bounded decision windows in Daydream trace analysis.
-
 - **review:** configure each staged reviewer's investigation time through `pipeline.reviewer_investigation_budget_s` in a review profile, retaining existing tool allowances and shared deadline limits; zero skips investigation with incomplete coverage ([#1535](https://github.com/existential-birds/daydream/issues/1535)).
-
-### Security
-
-- Publish the supported-version, private vulnerability reporting, and coordinated disclosure policy ([#933](https://github.com/existential-birds/daydream/issues/933)).
-
-### Fixed
-
-- **review:** retain bounded deferred-patch catalog navigation through native compaction and explain frozen before/after patch access without Git tools ([#1509](https://github.com/existential-birds/daydream/issues/1509)).
-
-- **review:** render empty results with recorded completion, bounded source rationale and explicit check provenance; preserve missing evidence and existing publication authority ([#1519](https://github.com/existential-birds/daydream/issues/1519)).
-
-- **capture:** retain the owned OTel root trace ID in new JSONL run records when available, including failed and cooperatively interrupted runs ([#1515](https://github.com/existential-birds/daydream/issues/1515)).
-
-- **routing:** inspect JavaScript/TypeScript source and bounded local package/JSX metadata before selecting React review; preserve explicit stack rules and generic ownership through automatic tiny-diff routing ([#1287](https://github.com/existential-birds/daydream/issues/1287)).
-
-- **review:** give a complete ignored-dependency search example with required positional roots and an explicit expansion reason ([#1584](https://github.com/existential-birds/daydream/issues/1584)).
-
-- Supply retained structural findings to merge synthesis and publish its validated result without reintroducing absorbed or omitted findings; bind whole-file privileges to structural provenance and invalidate obsolete merge reuse ([#1582](https://github.com/existential-birds/daydream/issues/1582)).
-
-- **eval/runner:** limit quality metrics and clone peers to Git's tracked plus nonignored untracked source, excluding ignored artifact trees, and show finalization stages and elapsed completion or failure in noninteractive runs. Git inventory failures no longer permit recursive fallback; standalone non-Git analysis retains its existing discovery behavior ([#1580](https://github.com/existential-birds/daydream/issues/1580)).
-
-- **improve:** audit ordinary files alongside tracked submodule references, retain surviving branch type replacements, and explicitly report uncaptured submodule contents ([#1406](https://github.com/existential-birds/daydream/issues/1406)).
-
-- **improve:** honor the selected effort and backend concurrency limits for branch audit and vet tasks while preserving branch scope and finding policies ([#1404](https://github.com/existential-birds/daydream/issues/1404)).
-
-- **phases:** restore historical prompt-helper imports through `daydream.phases`, preserving the canonical prompt and schema objects for forks ([#1230](https://github.com/existential-birds/daydream/issues/1230)).
-- Keep runner and Harbor tests out of operator JSONL datasets and live uploads by isolating the test store and HF boundary ([#1511](https://github.com/existential-birds/daydream/issues/1511)).
-- **pi:** retain bounded, redacted native terminal error diagnostics in trajectories and frozen run records while preserving retry decisions and generic review summaries ([#1540](https://github.com/existential-birds/daydream/issues/1540)).
-- **review:** preserve bounded, attributed supporting-dependency notes across staged assignments, and continue independent batches after isolated invocation failures without erasing failed coverage, later stopping diagnostics or shared budgets ([#1522](https://github.com/existential-birds/daydream/issues/1522), [#1530](https://github.com/existential-birds/daydream/issues/1530)).
-- **codex:** classify recognized public capacity/overload failures through bounded retry recovery and stop on known login-required failures, while retaining public error metadata and non-retryable postcompletion failures ([#1530](https://github.com/existential-birds/daydream/issues/1530)).
-- **codex:** honor bounded native shutdown after public completion, consume already-finished buffered output after slow consumers, and retain trusted lifecycle failure details in incomplete-review warnings ([#1556](https://github.com/existential-birds/daydream/issues/1556)).
-
-- **pi:** recover from affirmative temporary at-capacity provider errors through the existing bounded retry policy, while preserving permanent and negated diagnostic handling ([#1506](https://github.com/existential-birds/daydream/issues/1506)).
-
-- **review:** keep folded design-alternatives coverage aligned with structural failures, record validation, and successful per-stack reruns; preserve unfinished coverage on merge/fix-only resumes ([#1500](https://github.com/existential-birds/daydream/issues/1500)).
-- **preflight:** label sharded work as review assignments, show the structural reviewer, and remove obsolete parse agents from the scoped review estimate, including only the applicable conditional arbiter allowance ([#1494](https://github.com/existential-birds/daydream/issues/1494)).
+- **review:** scope investigation stages and share cumulative budgets (#1503)
+- **training:** retain source-bound harvested reply evidence (#1496)
+- **dataset:** unify HF publication and record-based training (#1493)
+- **dataset:** capture raw run evidence and scope archive scanning (#1485)
+- **pi:** support finite reviews with tools disabled
 
 ### Changed
 
 - **dependencies:** update Claude Agent SDK to 0.2.167, Pydantic to 2.14.1, the optional Hugging Face Hub extra to 2.2.0, Ruff to 0.17.1, typing stubs, and the GitHub App token action to 3.3.0; synchronize the RL and benchmark runtime locks. The Hub extra now uses the upstream 2.x HTTP transport.
-
 - **review:** allow 15 minutes for model-driven pre-scan investigation and 75 minutes for the overall review pipeline, giving slow reasoning models more exploration time while preserving the staged reviewers' 40-minute allowance.
-
 - **review:** raise the default staged reviewer investigation allowance from 480 to 2,400 seconds, subject to existing shared pipeline deadlines and tool-call limits.
-
 - **pi:** replace recurring native budget messages with at most one final-submission system warning per attempt, and deliver bounded missing-submission recovery through system instructions. Existing extension API fields, allowances, cumulative host accounting and submission admission remain compatible; no migration is required ([#1595](https://github.com/existential-birds/daydream/issues/1595)).
-
 - **workflows:** use standard GitHub-hosted Ubuntu 24.04 runners for repository CI and packaged review workflows, removing the third-party runner subscription requirement.
-
 - **review:** simplify GitHub review comments with an actionable-comment total, prominent incomplete-review warnings, a linked reviewed commit, flatter additional findings and consolidated run details with a copyable run UUID; remove generic agent fix prompts and retain detailed analysis and evidence in local reports and artifacts.
-
 - **improve:** assign disjoint primary files to mixed-stack audit specialists, keep cross-stack context available, and report owned counts, omitted files, and failed category coverage with readable snapshot manifests ([#1406](https://github.com/existential-birds/daydream/issues/1406)).
-
 - **improve:** combine default survey and reconnaissance into one bounded discovery pass, reuse host inventory, and retain guidelines alongside admitted commands in audit/plan inputs; custom survey strategies keep the two-pass compatibility path ([#1405](https://github.com/existential-birds/daydream/issues/1405)).
-
 - **eval:** prune excluded Python subtrees before traversal, share eligibility and parsing reads, and index function references once while preserving whole-workspace and candidate quality metrics; trace finalization, evaluation, and quality analysis separately ([#1402](https://github.com/existential-birds/daydream/issues/1402)).
-
 - **review:** scope ordinary searches to relevant tracked and nonignored untracked files; preserve tracked hidden/ignored evidence, bound the new fixed-string `daydream search` helper, and require named, explained ignored-file expansion ([#1400](https://github.com/existential-birds/daydream/issues/1400)).
-
 - **deep:** disable review diagrams by default; retain explicit CLI/repository opt-in and diagram-only mode, overlap enabled grounded generation with independent review when capacity permits, and attach diagrams after synthesis without starving primary reviewers ([#1401](https://github.com/existential-birds/daydream/issues/1401)).
 - **deep:** overlap disjoint precision arbitration and suppression under the shared backend fan-out ceiling, preserving stable record identities, resumable arbiter groups and completed review reuse ([#1407](https://github.com/existential-birds/daydream/issues/1407)).
 - **dependencies:** consolidate the pending runtime, development, RL, and GitHub Actions updates; validate Harbor 0.24 and OpenTelemetry 1.45.1 compatibility and refresh the hash-pinned benchmark runtime dependencies.
@@ -90,6 +48,314 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **findings:** every `--findings-out` artifact, diagram included, now declares the commit its analysis read — the PR is captured and merge-base-rebound once at run start, a head that moved away ends the run non-zero before anything is written, and the shared artifact writer no longer falls back to resolving the target from live GitHub metadata at export (issue #1414).
 - **retry:** honor a provider `Retry-After` hint from a status-prefixed JSON error (read through the existing `json_utils.extract_json` convention, case-insensitive header match, shared numeric decoder) and never shorten an admitted wait to the jitter cap — the hint is evaluated against the remaining recovery allowance and invocation deadline only, and a hint that exceeds either stops the retry ladder with the existing insufficient-budget reason (issue #1438).
 - **cli:** `--log` was removed; use `--verbose` for the redacted plain agent-event stream on `stdout` plus redacted chained fatal diagnostics on `stderr` (issue #1236).
+- **deps:** bump mcp from 1.28.1 to 1.30.0 (#1609)
+- **deps:** roll up pending Dependabot updates (#1608)
+- **review:** trim rendering and test scaffolding
+- **improve:** consolidate repository discovery (#1578)
+- **eval:** reduce repeated quality analysis work (#1576)
+- **review:** bound relevant-root repository searches (#1575)
+- **pi:** record successful-input convergence investigation (#1564)
+- **skills:** track the shared test-audit workflow (#1555)
+- **deps:** consolidate Dependabot updates and compatibility fixes (#1553)
+- make AGENTS.md authoritative for contributions (#1552)
+- **skills:** prepare fresh-session goals and track PR feedback workflow (#1548)
+- **training:** remove built-in license enforcement (#1516)
+- **cleanup:** delete orphaned readers/classifier and collapse duplicate parsers (#1505)
+- **cleanup:** simplify code — remove 121 net lines (2026-10-07) (#1504)
+- **cleanup:** simplify code — remove 69 net lines (2026-10-05) (#1489)
+- **cleanup:** simplify code — remove 52 net lines (2026-10-05) (#1488)
+- **cleanup:** simplify code — remove 23 net lines (2026-10-05) (#1487)
+- **cleanup:** simplify code — remove 28 net lines (2026-10-05) (#1486)
+- **deps:** bump ruff in /rl/daydream_review in the dependencies group (#1480)
+- **cleanup:** simplify code — remove 9 net lines (2026-10-05) (#1484)
+- collapse duplicated roster, charge-call, prompt and audit vocabularies (#1483)
+- **cleanup:** simplify code — remove 130 net lines (2026-10-04) (#1482)
+- **cleanup:** simplify code — remove 72 net lines (2026-10-04) (#1479)
+- **tests,review-profile:** collapse duplicated test helpers and dead tables (-184 net) (#1478)
+- Resolve #1210 (eb/daydream/issue-1210) (#1477)
+- ignore local planning and scratch directories
+- **backends,tests:** reuse shared env parse and collapse duplicate share-cap assertions (#1464)
+- **cleanup:** simplify code — remove 100 net lines (2026-10-04) (#1461)
+- **tests:** drop never-written files from projection-50 fixture (#1454)
+- **tests:** extract verification/repair/diagram-map prompt helpers in deep prompt tests (#1453)
+- **tests:** consolidate duplicated shims, matrices, and stamps (#1452)
+- **cleanup:** simplify code — remove 72 net lines (2026-10-04) (#1450)
+- **cleanup:** simplify code — remove 63 net lines (2026-10-03) (#1449)
+- Resolve #1445 (eb/daydream/issue-1445) (#1448)
+- **tests:** reuse shared fixtures, drop duplicate test coverage (#1447)
+- **cleanup:** simplify code — remove 243 net lines (2026-10-03) (#1446)
+- **cleanup:** simplify code — remove 46 net lines (2026-10-03) (#1442)
+- **cleanup:** simplify code — remove 31 net lines (2026-10-02) (#1441)
+- **deep:** synthesize eligible empty reviews without model calls (#1437)
+- split core workflows and remove redundant scaffolding (#1436)
+- **deps:** bump pyjwt from 2.15.0 to 2.15.1 in /rl/daydream_review (#1434)
+- **deps:** roll up open Dependabot updates (#1433)
+- refactor(review)!: remove read telemetry and harden fix validation (#1432)
+- **cleanup:** simplify code — remove 180 net lines (2026-10-01) (#1429)
+- **cleanup:** drop dead recipe identity and test-seed duplication (net -122) (#1428)
+- **cleanup:** share diff parser and test fixtures (net -51) (#1427)
+- Resolve #1397 (eb/daydream/issue-1397) (#1426)
+- **training:** fold known_versions into labeler_versions, drop CI dry-run step (#1422)
+- **cleanup:** sweep batch chunk-1 (net removed 70 lines) (#1419)
+- **cleanup:** consolidate duplicated constants and dead params (net -7) (#1417)
+- Resolve #1408 (eb/daydream/issue-1408) (#1416)
+- **cleanup:** simplify code — remove 52 net lines (2026-09-30) (#1415)
+- **cleanup:** simplify code — remove 70 net lines (2026-09-30) (#1413)
+- **cleanup:** sweep batch chunk-1 (net removed 120 lines) (#1412)
+- **cleanup:** simplify code — remove 102 net lines (2026-09-30) (#1411)
+- **cleanup:** simplify code — remove 135 net lines (2026-09-30) (#1410)
+- Resolve #735 (eb/daydream/issue-735) (#1409)
+- **cleanup:** simplify code — remove 107 net lines (2026-09-30) (#1396)
+- **cleanup:** collapse reuse restore, sidecar, and test setup duplication (net -77) (#1395)
+- **cleanup:** simplify review-context and test setup (net -48) (#1394)
+- **cleanup:** simplify code — remove 70 net lines (2026-09-29) (#1393)
+- **cleanup:** simplify code — remove 58 net lines (2026-09-29) (#1392)
+- **cleanup:** simplify code — remove 64 net lines (2026-09-29) (#1391)
+- **cleanup:** simplify code — remove 131 net lines (2026-09-29) (#1390)
+- **cleanup:** simplify code — remove 146 net lines (2026-09-29) (#1389)
+- **cleanup:** simplify code — remove 110 net lines (2026-09-29) (#1388)
+- **cleanup:** simplify code — remove 121 net lines (2026-09-29) (#1387)
+- **cleanup:** simplify code — remove 46 net lines (2026-09-29) (#1386)
+- **cleanup:** simplify code — remove 62 net lines (2026-09-29) (#1385)
+- **cleanup:** simplify code — remove 115 net lines (2026-09-29) (#1384)
+- Resolve #733 (eb/daydream/issue-733) (#1383)
+- **cleanup:** simplify code — remove 49 net lines (2026-09-29) (#1382)
+- **cleanup:** simplify code — remove 68 net lines (2026-09-29) (#1381)
+- **cleanup:** dedupe benchmark/summarize/harvest tests (#1380)
+- **cleanup:** simplify code — remove 91 net lines (2026-09-28) (#1379)
+- **cleanup:** sweep batch chunk-1 (net removed 51 lines) (#1378)
+- **cleanup:** simplify code — remove 56 net lines (2026-09-28) (#1377)
+- **cleanup:** simplify code — remove 87 net lines (2026-09-28) (#1376)
+- **cleanup:** simplify code — remove 54 net lines (2026-09-28) (#1375)
+- **cleanup:** simplify code — remove 147 net lines (2026-09-28) (#1374)
+- **cleanup:** simplify code — remove 47 net lines (2026-09-28) (#1373)
+- **cleanup:** simplify code — remove 99 net lines (2026-09-28) (#1372)
+- Resolve #732 (eb/daydream/issue-732) (#1371)
+- **cleanup:** simplify code — remove 169 net lines (2026-09-28) (#1370)
+- **cleanup:** simplify code — remove 121 net lines (2026-09-28) (#1369)
+- **cleanup:** simplify code — remove 98 net lines (2026-09-28) (#1368)
+- **cleanup:** simplify code — remove 130 net lines (2026-09-27) (#1367)
+- **cleanup:** simplify code — remove 105 net lines (2026-09-27) (#1363)
+- **training:** inline single-call readonly SQL wrappers (#1362)
+- **cleanup:** simplify code — remove 110 net lines (2026-09-27) (#1361)
+- Resolve #1228 (eb/daydream/issue-1228) (#1360)
+- **cleanup:** simplify code — remove 99 net lines (2026-09-27) (#1359)
+- **cleanup:** simplify code — remove 73 net lines (2026-09-27) (#1358)
+- **cleanup:** simplify code — remove 79 net lines (2026-09-27) (#1357)
+- **cleanup:** unify fanout terminals and trim dead plumbing (#1356)
+- **cleanup:** simplify code — remove 98 net lines (2026-09-27) (#1355)
+- **cleanup:** dedupe shard/flag/gate helpers and test fixtures (net -71) (#1354)
+- **tests:** share dispatch-children assertions and corpus JSONL reader (#1352)
+- **tests:** dedupe corpus reproducibility tests and improve-artifact JSON decodes (net -39) (#1351)
+- **cleanup:** simplify code — remove 107 net lines (2026-09-26) (#1350)
+- **cleanup:** share CLI failure helper, dry-run option, and test fixtures (net -57) (#1348)
+- **cleanup:** dedupe scope overrides, merged resets, and test helpers (net -48) (#1347)
+- Resolve #1227 (eb/daydream/issue-1227) (#1345)
+- **cleanup:** dedupe validators, diagram failures, and test helpers (net -33) (#1346)
+- **cleanup:** share pipeline fallback, fixtures, and editor tests (net -25) (#1344)
+- **cleanup:** sweep batch chunk-1 dedupe test fixtures (net -124) (#1343)
+- **cleanup:** sweep batch chunk-1 (net removed 111 lines) (#1342)
+- **cleanup:** simplify code — remove 92 net lines (2026-09-26) (#1341)
+- **cleanup:** simplify code — remove 58 net lines (2026-09-26) (#1340)
+- **cleanup:** share test no-op doubles and adjudication filenames (#1339)
+- **cleanup:** sweep batch chunk-1 (net removed 43 lines) (#1338)
+- **cleanup:** drop dead fallbacks and duplicated helpers (net -35) (#1337)
+- **cleanup:** simplify code — remove 28 net lines (2026-09-25) (#1336)
+- **cleanup:** share UTC stamp helper and archive test fixture (net -67) (#1335)
+- **cleanup:** reuse canonical JSON, dataclasses.replace, pytest chdir (net -29) (#1334)
+- **cleanup:** simplify code — remove 239 net lines (2026-09-25) (#1333)
+- **cleanup:** simplify code — remove 85 net lines (2026-09-25) (#1332)
+- **cleanup:** dedupe suffix-glob matcher and UI render branches (#1331)
+- **cleanup:** single-source label_observations columns (net -45) (#1330)
+- **cleanup:** simplify code — remove 86 net lines (2026-09-25) (#1329)
+- **cleanup:** simplify code — remove 64 net lines (2026-09-25) (#1328)
+- **cleanup:** remove redundant guards and duplication (net -35) (#1327)
+- **cleanup:** dedupe small helper paths across review/archive/training (#1326)
+- **cleanup:** simplify code — remove 74 net lines (#1325)
+- **cleanup:** simplify code — remove 51 net lines (2026-09-24) (#1324)
+- **cleanup:** simplify code — remove 76 net lines (2026-09-24) (#1323)
+- **cleanup:** simplify code — remove 77 net lines (2026-09-24) (#1322)
+- **cleanup:** simplify code — remove 204 net lines (2026-09-24) (#1320)
+- **cleanup:** simplify code — remove 181 net lines (2026-09-24) (#1319)
+- **cleanup:** simplify Reward mapping and test doubles (#1318)
+- **cleanup:** simplify code — remove 145 net lines (2026-09-24) (#1317)
+- Resolve #1226 (eb/daydream/issue-1226) (#1316)
+- **cleanup:** simplify code — remove 213 net lines (2026-09-24) (#1315)
+- **cleanup:** simplify code — remove 51 net lines (2026-09-24) (#1314)
+- **tests:** hoist function-local imports to module scope (#1313)
+- Resolve #1225 (eb/daydream/issue-1225) (#1312)
+- **cleanup:** simplify code — remove 96 net lines (2026-09-23) (#1311)
+- **deps:** bump the dependencies group with 5 updates (#1272)
+- **cleanup:** simplify code — remove 223 net lines (2026-09-23) (#1310)
+- **cleanup:** simplify code — remove 129 net lines (2026-09-23) (#1308)
+- **cleanup:** hoist test-local imports and share concurrency helper (#1307)
+- **cleanup:** simplify code — remove 517 net lines (2026-09-23) (#1306)
+- **cleanup:** simplify code — remove 146 net lines (2026-09-23) (#1305)
+- **cleanup:** simplify code — remove 217 net lines (2026-09-23) (#1304)
+- **cleanup:** simplify code — remove 319 net lines (2026-09-23) (#1303)
+- **cleanup:** simplify code — remove 393 net lines (2026-09-23) (#1302)
+- **cleanup:** simplify code — remove 350 net lines (2026-09-23) (#1301)
+- **cleanup:** simplify code — remove 178 net lines (2026-09-22) (#1299)
+- **cleanup:** sweep batch chunk-1 (net removed 76 lines) (#1298)
+- **cleanup:** simplify code — remove 118 net lines (2026-09-22) (#1297)
+- **git:** ignore local agents directory
+- **cleanup:** simplify code — remove 214 net lines (2026-09-22) (#1296)
+- **tests:** consolidate repeated backend and canonical-harvest fixtures (#1295)
+- **cleanup:** sweep batch chunk-1 (net removed 104 lines) (#1294)
+- **cleanup:** simplify code — remove 123 net lines (2026-09-22) (#1293)
+- **cleanup:** simplify code — remove 301 net lines (2026-09-22) (#1292)
+- **cleanup:** simplify code — remove 156 net lines (2026-09-22) (#1291)
+- **cleanup:** simplify code — remove 262 net lines (2026-09-22) (#1290)
+- **cleanup:** simplify code — remove 339 net lines (2026-09-21) (#1289)
+- **cleanup:** finish chunk-1 test and review simplifications (#1288)
+- **cleanup:** sweep batch chunk-1 (net removed 223 lines) (#1285)
+- **cleanup:** simplify code — remove 185 net lines (2026-09-21) (#1283)
+- **cleanup:** simplify processing and remove obsolete test machinery (#1281)
+- **cleanup:** drop dead observability state, plan-task docs, and test noise (#1280)
+- **cleanup:** hourly dead-code sweep — remove 300 lines (2026-09-21) (#1279)
+- **cleanup:** hourly dead-code sweep — remove 216 lines (2026-09-21) (#1278)
+- **cleanup:** hourly dead-code sweep — remove 317 lines (2026-09-21) (#1277)
+- **cleanup:** hourly dead-code sweep — remove 660 lines (2026-09-21) (#1276)
+- **cleanup:** hourly dead-code sweep — remove 493 lines (2026-09-21) (#1275)
+- **cleanup:** hourly dead-code sweep — remove 133 lines (2026-09-20) (#1274)
+- **cleanup:** hourly dead-code sweep — remove 331 lines (2026-09-20) (#1273)
+- **deps:** bump ruff in /rl/daydream_review in the dependencies group (#1271)
+- **cleanup:** hourly dead-code sweep — remove 543 lines (2026-09-20) (#1270)
+- **cleanup:** hourly dead-code sweep — remove 1031 lines (2026-09-20) (#1269)
+- **cleanup:** hourly dead-code sweep — remove 503 lines (2026-09-20) (#1268)
+- **cleanup:** hourly dead-code sweep — remove 284 lines (2026-09-20) (#1267)
+- **cleanup:** hourly dead-code sweep — remove 339 lines (2026-09-20) (#1266)
+- **cleanup:** hourly dead-code sweep — remove 246 lines (2026-09-20) (#1265)
+- **cleanup:** hourly dead-code sweep — remove 395 lines (2026-09-20) (#1264)
+- Resolve #1224 (eb/daydream/issue-1224) (#1263)
+- **cleanup:** hourly dead-code sweep — remove 395 lines (2026-09-20) (#1262)
+- **cleanup:** hourly dead-code sweep — remove 423 lines (2026-09-20) (#1261)
+- **cleanup:** hourly dead-code sweep — remove 344 lines (2026-09-20) (#1260)
+- **cleanup:** hourly dead-code sweep — remove 425 lines (2026-09-19) (#1259)
+- **cleanup:** hourly dead-code sweep — remove 385 lines (2026-09-19) (#1258)
+- **tests:** replace the copied benchmark git-seed helper family with the shared git helpers (#1223) (#1257)
+- **cleanup:** hourly dead-code sweep — remove 411 lines (2026-09-19) (#1256)
+- **cleanup:** hourly dead-code sweep — remove 296 lines (2026-09-19) (#1255)
+- **cleanup:** sweep batch chunk-2 (partial — continued by a later run) (#1254)
+- **cleanup:** hourly dead-code sweep — remove 992 lines (2026-09-19) (#1253)
+- **cleanup:** hourly dead-code sweep — remove 554 lines (2026-09-19) (#1252)
+- **tests:** point test-local fake backends at the shared ScriptedBackend (#1222) (#1251)
+- **cleanup:** hourly dead-code sweep — remove 428 lines (2026-09-19) (#1250)
+- **cleanup:** hourly dead-code sweep — remove 537 lines (2026-09-19) (#1249)
+- **cleanup:** hourly dead-code sweep — remove 930 lines (2026-09-19) (#1248)
+- **cleanup:** hourly dead-code sweep — remove 350 lines (2026-09-19) (#1247)
+- **backends:** unify the CLI subprocess reap, teardown and exit-diagnostic policy (#1221) (#1246)
+- **cleanup:** hourly dead-code sweep — remove 1236 lines (2026-09-19) (#1245)
+- **cleanup:** hourly dead-code sweep — remove 1112 lines (2026-09-18) (#1243)
+- **trajectory:** give the per-run document layout one owner (#1220) (#1242)
+- **archive:** declare the runs column set once instead of three times (closes #1219) (#1241)
+- **severity:** derive model-facing severity enums from severity.CANONICAL_LEVELS (closes #1218) (#1240)
+- **services:** give service-root containment one owner (closes #1216) (#1239)
+- **training:** route every corpus and benchmark artifact writer through the shared crash-safe write primitive (#1215) (#1237)
+- **agent:** retry-recovery allowance, failure classification, jitter/hints, and a run-scoped outage circuit (part of #734) (#1234)
+- consolidate schemas and repetitive regression tests (#1233)
+- consolidate event and archive processing (#1203)
+- **core:** consolidate dispatch and test scaffolding (#1213)
+- **tests:** split deep orchestrator suite (#1212)
+- **agent:** one shared deadline + interruption contract per invocation and fix group (part of #734) (#1211)
+- **deps:** sweep the six open dependabot updates into one change (#1208)
+- simplify deep review orchestration (#1200)
+- add contributor guide for development and PR workflow (#1202)
+- Cover the Osprey subprocess spawn and cleanup lifecycle (#1201)
+- simplify event handling and timing paths (#1199)
+- remove unused loaders and versioned project names (Closes #1093) (#1197)
+- **pr-review:** share classified submission workflow (#1196)
+- **pr-review:** make payload assembly pure (#1195)
+- **training:** separate harvest evidence from annotation reduction (#1194)
+- **archive:** serialize captured run identity (#1193)
+- **rl:** bake image ownership and reuse one mirror per repo per snapshot build (#1192)
+- **deep:** make orchestrator a typed composition root (#1191)
+- **artifacts:** require explicit session routing (#1190)
+- **tests:** drop tree-sitter pin test and refresh stale dependency pins in docs (#1189)
+- **deps:** bump the dependencies group across 1 directory with 6 updates (#1160)
+- **harbor:** isolate reviewer execution environments (#1185)
+- **deps:** bump actions/upload-artifact from 4.6.2 to 7.0.1 (#1169)
+- **deps:** bump ruff (#1159)
+- **github:** scope authentication to each run (#1184)
+- **runner:** scope interaction and output per run (#1183)
+- **exploration:** remove unsupported depth configuration (#1182)
+- **benchmark:** publish candidate validation contract (#1181)
+- **benchmark:** isolate transaction fault injection (#1180)
+- **training:** use shared atomic writer for split sidecars (#1179)
+- **daydream:** out-of-scope finding: daydream/benchmark/cli.py (#1178)
+
+### Fixed
+
+- **review:** retain bounded deferred-patch catalog navigation through native compaction and explain frozen before/after patch access without Git tools ([#1509](https://github.com/existential-birds/daydream/issues/1509)).
+- **review:** render empty results with recorded completion, bounded source rationale and explicit check provenance; preserve missing evidence and existing publication authority ([#1519](https://github.com/existential-birds/daydream/issues/1519)).
+- **capture:** retain the owned OTel root trace ID in new JSONL run records when available, including failed and cooperatively interrupted runs ([#1515](https://github.com/existential-birds/daydream/issues/1515)).
+- **routing:** inspect JavaScript/TypeScript source and bounded local package/JSX metadata before selecting React review; preserve explicit stack rules and generic ownership through automatic tiny-diff routing ([#1287](https://github.com/existential-birds/daydream/issues/1287)).
+- **review:** give a complete ignored-dependency search example with required positional roots and an explicit expansion reason ([#1584](https://github.com/existential-birds/daydream/issues/1584)).
+- Supply retained structural findings to merge synthesis and publish its validated result without reintroducing absorbed or omitted findings; bind whole-file privileges to structural provenance and invalidate obsolete merge reuse ([#1582](https://github.com/existential-birds/daydream/issues/1582)).
+- **eval/runner:** limit quality metrics and clone peers to Git's tracked plus nonignored untracked source, excluding ignored artifact trees, and show finalization stages and elapsed completion or failure in noninteractive runs. Git inventory failures no longer permit recursive fallback; standalone non-Git analysis retains its existing discovery behavior ([#1580](https://github.com/existential-birds/daydream/issues/1580)).
+- **improve:** audit ordinary files alongside tracked submodule references, retain surviving branch type replacements, and explicitly report uncaptured submodule contents ([#1406](https://github.com/existential-birds/daydream/issues/1406)).
+- **improve:** honor the selected effort and backend concurrency limits for branch audit and vet tasks while preserving branch scope and finding policies ([#1404](https://github.com/existential-birds/daydream/issues/1404)).
+- **phases:** restore historical prompt-helper imports through `daydream.phases`, preserving the canonical prompt and schema objects for forks ([#1230](https://github.com/existential-birds/daydream/issues/1230)).
+- Keep runner and Harbor tests out of operator JSONL datasets and live uploads by isolating the test store and HF boundary ([#1511](https://github.com/existential-birds/daydream/issues/1511)).
+- **pi:** retain bounded, redacted native terminal error diagnostics in trajectories and frozen run records while preserving retry decisions and generic review summaries ([#1540](https://github.com/existential-birds/daydream/issues/1540)).
+- **review:** preserve bounded, attributed supporting-dependency notes across staged assignments, and continue independent batches after isolated invocation failures without erasing failed coverage, later stopping diagnostics or shared budgets ([#1522](https://github.com/existential-birds/daydream/issues/1522), [#1530](https://github.com/existential-birds/daydream/issues/1530)).
+- **codex:** classify recognized public capacity/overload failures through bounded retry recovery and stop on known login-required failures, while retaining public error metadata and non-retryable postcompletion failures ([#1530](https://github.com/existential-birds/daydream/issues/1530)).
+- **codex:** honor bounded native shutdown after public completion, consume already-finished buffered output after slow consumers, and retain trusted lifecycle failure details in incomplete-review warnings ([#1556](https://github.com/existential-birds/daydream/issues/1556)).
+- **pi:** recover from affirmative temporary at-capacity provider errors through the existing bounded retry policy, while preserving permanent and negated diagnostic handling ([#1506](https://github.com/existential-birds/daydream/issues/1506)).
+- **review:** keep folded design-alternatives coverage aligned with structural failures, record validation, and successful per-stack reruns; preserve unfinished coverage on merge/fix-only resumes ([#1500](https://github.com/existential-birds/daydream/issues/1500)).
+- **preflight:** label sharded work as review assignments, show the structural reviewer, and remove obsolete parse agents from the scoped review estimate, including only the applicable conditional arbiter allowance ([#1494](https://github.com/existential-birds/daydream/issues/1494)).
+- **review:** preserve distinct diagnostics for shared names
+- **review:** retain empty review conclusions and evidence (#1593)
+- **routing:** inspect JS/TS framework evidence (#1590)
+- **review:** make retained-record synthesis authoritative (#1588)
+- **eval:** respect repository scope and report finalization progress (#1581)
+- **phases:** preserve extracted prompt compatibility exports (#1567)
+- **codex:** preserve completed-turn lifecycle and trusted failures (#1566)
+- **review:** retain staged notes and isolate batch failures (#1565)
+- **tests:** isolate datasets and uploader side effects (#1562)
+- **ui:** clarify review assignments and agent estimates (#1554)
+- **github:** resolve App repository identity before authentication (#1551)
+- **codex:** bound stream and process lifecycle stalls (#1542)
+- **deep:** automatically shard overloaded review stacks (#1539)
+- **pi:** retain startup and progress evidence through timeout and cancellation (#1538)
+- **review:** simplify native Pi budget feedback (#1537)
+- **observability:** attribute detected reviewer stacks
+- **observability:** omit None-valued inherited span attributes
+- **testing:** stop missing canonical commands before fixes (#1531)
+- **review:** align reviewer budgets, effort, and judgment policy (#1525)
+- **deep:** compute review risk from the full captured change (#1520)
+- **agent:** resolve staged review output in the host (#1514)
+- **runner:** preserve review outputs when data collection fails (#1476)
+- **review:** preserve terminal coverage in findings exports (#1440)
+- **archive:** sanitize diagnostic dumps and preserve reviews on refusal (#1366)
+- **pi:** use diff references and safe prompt transport (#1349)
+- **training:** connect semantic preview and local adjudication history (#1309)
+- **pi:** allow ten minutes of response silence by default
+- **review:** scale large-PR budgets and shard discovery
+- **artifacts:** accept legacy intents and Finder metadata
+- **exploration:** allow slow Pi mapping to finish
+- **codex:** omit resume tokens for disposable checkouts
+- **review:** publish validated fixes after retry exhaustion
+- **review:** preserve delegated structural provenance
+- **review:** keep alternatives for custom structural prompts
+- **review:** confine literal evidence to tracked files
+- **review:** fall back from incomplete structural delegation
+- **review:** preserve finite findings across final revisions
+- **review:** preserve fallback for schema-incompatible assigned paths
+- **eval:** account for completed source packet coverage
+- **review:** keep finite judgments scoped and accept tracked route paths
+- **review:** bound modest reviews with finite evidence packets
+- **pi:** enforce bounded review guidance in the system prompt
+- **review:** remove redundant discovery from modest changes
+- **archive:** align live URL redaction with publication scanning
+- **review:** isolate finalization and retain grounded runtime evidence (#1284)
+- **review:** bound runtime and publish validated partial reviews (#1282)
+- **diagrams:** budget advisory sanctioned inputs by actual transport for large PRs (#1214) (#1235)
+- **observability:** LangSmith's empty 200 ack is graded OTLP_MALFORMED_ACK (false export failure) (#1209)
+
+### Security
+
+- Publish the supported-version, private vulnerability reporting, and coordinated disclosure policy ([#933](https://github.com/existential-birds/daydream/issues/933)).
 
 ## [0.29.0] - 2026-09-10
 
