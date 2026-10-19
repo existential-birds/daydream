@@ -1,7 +1,10 @@
-.PHONY: install lint typecheck test actionlint rl-check check lockcheck hooks deadcode coverage-report check-naming
+.PHONY: install lint typecheck test test-scripts actionlint rl-check check lockcheck hooks deadcode coverage-report check-naming
 
 # CI can overlap I/O-heavy Git/subprocess tests while local runs use CPU count.
 PYTEST_WORKERS ?= auto
+# Optional reporting on this invocation only; nested pytest subprocesses do not
+# inherit these flags through PYTEST_ADDOPTS.
+PYTEST_REPORT_ARGS ?=
 
 install:
 	# All extras so `make check` runs the full suite (benchmark objective tests
@@ -9,10 +12,10 @@ install:
 	uv sync --all-extras
 
 lint:
-	uv run ruff check daydream tests scripts/ci_plan.py
+	uv run ruff check daydream tests scripts/ci_*.py
 
 typecheck:
-	uv run mypy daydream tests scripts/ci_plan.py
+	uv run mypy daydream tests scripts/ci_*.py
 
 # Whole-project dead-code detection (#935). Both projects' scans live in their
 # own [tool.vulture]; pass --config explicitly so each project's pyproject.toml
@@ -29,7 +32,11 @@ deadcode:
 # the PYTEST_WORKERS override (auto locally). No --no-cov-on-fail so coverage.xml survives
 # a failed run for the coverage-report / CI artifact upload.
 test:
-	uv run pytest -n $(PYTEST_WORKERS) --cov --cov-branch --cov-report=term-missing --cov-report=xml
+	uv run pytest -n $(PYTEST_WORKERS) --cov --cov-branch --cov-report=term-missing --cov-report=xml $(PYTEST_REPORT_ARGS)
+	$(MAKE) test-scripts
+
+# Also run independently in CI's static job while pytest runs across shards.
+test-scripts:
 	uv run python -m unittest discover -s .agents/skills/daydream-trace-analysis/scripts -p 'test_*.py'
 
 # Machine-readable coverage report for humans who want the XML locally; the

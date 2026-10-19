@@ -14,6 +14,11 @@ on:
     types: [checks_requested]
   workflow_dispatch:
     inputs:
+      test_jobs:
+        description: Root pytest jobs (1 is the eight-worker benchmark baseline)
+        type: choice
+        options: ["4", "2", "1"]
+        default: "4"
       run_rl:
         description: Run the dormant standalone RL gate as well as the root gate
         type: boolean
@@ -26,11 +31,181 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  check:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      full: ${{ steps.plan.outputs.full }}
+      count: ${{ steps.shards.outputs.count }}
+      matrix: ${{ steps.shards.outputs.matrix }}
+      workers: ${{ steps.shards.outputs.workers }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Plan CI gate
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_plan.py plan
+      - name: Plan pytest shards
+        id: shards
+        env:
+          TEST_JOBS: ${{ inputs.test_jobs || '4' }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          count = int(os.environ["TEST_JOBS"])
+          if count not in (1, 2, 4):
+              raise ValueError("Unsupported pytest job count")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              output.write(f"count={count}\nworkers={8 if count == 1 else 4}\n")
+              output.write(f"matrix={json.dumps({'index': list(range(count))})}\n")
+          PY
+
+  static-checks:
+    needs: plan
+    if: needs.plan.outputs.count != '1'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Set up uv
+        if: needs.plan.outputs.mode != 'reuse'
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+      - name: Verify uv.lock is in sync
+        if: needs.plan.outputs.mode != 'reuse'
+        run: make lockcheck
+      - name: Install dependencies
+        if: needs.plan.outputs.mode != 'reuse'
+        run: make install
+      - name: Lint with ruff
+        if: needs.plan.outputs.mode != 'reuse'
+        run: make lint
+      - name: Run vulture
+        if: needs.plan.outputs.full == 'true'
+        # Root only; the standalone RL scan remains in its manual job.
+        run: uv run vulture --config pyproject.toml daydream tests
+      - name: Type check with mypy
+        if: needs.plan.outputs.full == 'true'
+        run: make typecheck
+      - name: Run script unit tests
+        if: needs.plan.outputs.full == 'true'
+        run: make test-scripts
+      - name: Naming grep-gate
+        run: make check-naming
+      - name: Lint workflows with actionlint
+        env:
+          ACTIONLINT_REQUIRE_DOCKER: "1"
+        run: make actionlint
+
+  test-shard:
+    needs: plan
+    if: needs.plan.outputs.full == 'true' && needs.plan.outputs.count != '1'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+      - name: Set up Node for native Pi contract tests
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.18.1"
+          package-manager-cache: false
+      - name: Install Pi for native output contract tests
+        run: |
+          npm install --global @earendil-works/pi-coding-agent@1.0.4
+          node --version
+          pi --version
+      - name: Verify uv.lock is in sync
+        run: make lockcheck
+      - name: Install dependencies
+        run: make install
+      - name: Run pytest shard
+        env:
+          SHARD_INDEX: ${{ matrix.index }}
+          SHARD_COUNT: ${{ needs.plan.outputs.count }}
+          PYTEST_WORKERS: ${{ needs.plan.outputs.workers }}
+        run: >-
+          uv run python scripts/ci_shard.py run
+          --index "$SHARD_INDEX" --count "$SHARD_COUNT" --workers "$PYTEST_WORKERS"
+          --output "shard-$SHARD_INDEX"
+      - name: Upload shard evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: shard-${{ matrix.index }}
+          overwrite: true
+          path: shard-${{ matrix.index }}/
+          if-no-files-found: error
+
+  coverage:
+    needs: [plan, test-shard]
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.full == 'true' && needs.plan.outputs.count != '1'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+      - name: Verify uv.lock is in sync
+        run: make lockcheck
+      - name: Install dependencies
+        run: make install
+      - name: Download all shard evidence
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: shard-*
+          path: shard-evidence
+      - name: Combine and enforce branch coverage
+        env:
+          SHARD_COUNT: ${{ needs.plan.outputs.count }}
+        run: uv run python scripts/ci_shard.py combine --diagnostic --count "$SHARD_COUNT" --input shard-evidence
+      - name: Check coverage report
+        run: make coverage-report
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-report
+          overwrite: true
+          path: coverage.xml
+          if-no-files-found: error
+
+  legacy-check:
+    needs: plan
+    # Literal pre-sharding single-job baseline, only for controlled dispatches.
+    if: github.event_name == 'workflow_dispatch' && needs.plan.outputs.count == '1'
     runs-on: ubuntu-24.04
     # Keep the measured worker count independent of runner CPU availability.
     env:
       PYTEST_WORKERS: "8"
+      PYTEST_REPORT_ARGS: "--junitxml=baseline-tests.xml"
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -42,27 +217,18 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Plan CI gate
-        id: plan
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci_plan.py plan
-
       - name: Set up uv
-        if: steps.plan.outputs.mode != 'reuse'
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
       - name: Set up Node for native Pi contract tests
-        if: steps.plan.outputs.full == 'true'
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24.18.1"
           package-manager-cache: false
 
       - name: Install Pi for native output contract tests
-        if: steps.plan.outputs.full == 'true'
         run: |
           npm install --global @earendil-works/pi-coding-agent@1.0.4
           node --version
@@ -78,29 +244,24 @@ jobs:
       # stale lock (which breaks `uv sync --locked` for reproducible installs)
       # can never merge.
       - name: Verify uv.lock is in sync
-        if: steps.plan.outputs.mode != 'reuse'
         run: make lockcheck
 
       - name: Install dependencies
-        if: steps.plan.outputs.mode != 'reuse'
         # The benchmark extra (harbor) is required by the benchmark objective/
         # aggregate tests in the default suite; the `install` step syncs all
         # extras so the full suite runs with every dependency it exercises.
         run: make install
 
       - name: Lint with ruff
-        if: steps.plan.outputs.mode != 'reuse'
         run: make lint
 
       - name: Run vulture
-        if: steps.plan.outputs.full == 'true'
         # Root project only: the standalone RL scan is the manual rl-check
         # job's business, so this deliberately does not call `make deadcode`
         # (whose scan also covers rl/daydream_review, the richer local gate).
         run: uv run vulture --config pyproject.toml daydream tests
 
       - name: Type check with mypy
-        if: steps.plan.outputs.full == 'true'
         run: make typecheck
 
       - name: Naming grep-gate
@@ -115,7 +276,6 @@ jobs:
         run: make actionlint
 
       - name: Run tests
-        if: steps.plan.outputs.full == 'true'
         # The coverage flags live in the `test` step (not in pyproject addopts),
         # so targeted runs like `pytest tests/foo.py` stay plain and never trip
         # the enforced floor even when all their tests pass (#336).
@@ -125,22 +285,43 @@ jobs:
         # Machine-readable XML from pytest-cov (--cov-report=xml on the Run tests
         # step above, #932). Uploaded on every check run so coverage results are
         # inspectable after any full run, not just green ones.
-        if: always() && steps.plan.outputs.full == 'true'
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # ea165f8d65b6e75b540449e92b4886f43607fa02 v7.0.2
         with:
           name: coverage-report
           overwrite: true
-          path: coverage.xml
+          path: |
+            coverage.xml
+            baseline-tests.xml
           if-no-files-found: error
 
-      # Only a successful complete queue gate publishes reusable evidence.
-      # The actual queue checkout is the merge-group run's head SHA.
-      - name: Record successful merge-group tree
-        if: github.event_name == 'merge_group' && steps.plan.outputs.full == 'true'
-        run: python3 scripts/ci_plan.py record --proof-dir "${{ runner.temp }}/ci-proof"
 
+  check:
+    needs: [plan, static-checks, test-shard, coverage, legacy-check]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Require complete CI gate
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          MODE: ${{ needs.plan.outputs.count == '1' && 'baseline' || needs.plan.outputs.mode }}
+          BASELINE_RESULT: ${{ needs.legacy-check.result }}
+          STATIC_RESULT: ${{ needs.static-checks.result }}
+          SHARD_RESULT: ${{ needs.test-shard.result }}
+          COVERAGE_RESULT: ${{ needs.coverage.result }}
+        run: |
+          test "$PLAN_RESULT" = success
+          python3 scripts/ci_shard.py gate --mode "$MODE" --static-result "$STATIC_RESULT" --shard-result "$SHARD_RESULT" --coverage-result "$COVERAGE_RESULT" --baseline-result "$BASELINE_RESULT"
+      # Implicit success() prevents publication after any failed dependency.
+      - name: Record successful merge-group tree
+        if: github.event_name == 'merge_group' && needs.plan.outputs.full == 'true'
+        run: python3 scripts/ci_plan.py record --proof-dir "${{ runner.temp }}/ci-proof"
       - name: Upload successful merge-group tree
-        if: github.event_name == 'merge_group' && steps.plan.outputs.full == 'true'
+        if: github.event_name == 'merge_group' && needs.plan.outputs.full == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-proof

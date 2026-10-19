@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Split full GitHub CI pytest execution across four free standard runners,
+  retaining the required `check`, complete shard evidence, and aggregate branch
+  coverage enforcement ([#1644](https://github.com/existential-birds/daydream/issues/1644)).
 
 ## [0.30.0] - 2026-10-19
 

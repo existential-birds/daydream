@@ -82,8 +82,8 @@ The focused targets, all run from the repo root:
 
 | Command | What it does |
 |---|---|
-| `make lint` | Ruff over `daydream tests scripts/ci_plan.py` (120 cols, `E F I W`, py314; `daydream/atif/**` is lint-exempt as vendored code) |
-| `make typecheck` | mypy over `daydream tests scripts/ci_plan.py` |
+| `make lint` | Ruff over `daydream tests scripts/ci_*.py` (120 cols, `E F I W`, py314; `daydream/atif/**` is lint-exempt as vendored code) |
+| `make typecheck` | mypy over `daydream tests scripts/ci_*.py` |
 | `make test` | `pytest -n auto` with coverage; the branch-coverage floor (`fail_under` in `pyproject.toml`) is enforced here, not in global addopts — a bare or targeted `pytest` run stays plain |
 | `make deadcode` | vulture dead-code scan over the root project and the RL package |
 | `make coverage-report` | checks that `coverage.xml` exists after `make test`; the measurement + ratchet procedure is in [docs/coverage.md](docs/coverage.md) |
@@ -110,7 +110,13 @@ This is the same set of steps a full `check` job in `.github/workflows/ci.yml` r
 job does not include — that scan happens in the manual `rl-check` job — so the
 local gate is the stricter one. The pre-push hook runs `make check` after
 verifying signatures, so a green local `make check` is what keeps your push from
-being rejected. CI runs the full gate before a queued merge and reuses only a verified merge-group tree afterward. PR updates run basic checks only while effective branch rules enforce the queue and required `check`; otherwise they run in full. See the [CI spend policy](.github/workflows/README.md#ci-spend-policy). The local gate always runs in full.
+being rejected. CI runs the root pytest suite across four standard `ubuntu-24.04` jobs with four
+workers each. A final `check` joins static checks and validated aggregate branch
+coverage; missing or failed shards cannot pass. The script unit tests run in the
+static job. See [coverage aggregation](docs/coverage.md) and the
+[benchmark procedure](docs/ci-sharding-benchmark.md).
+
+CI runs the full gate before a queued merge and reuses only a verified merge-group tree afterward. PR updates run basic checks only while effective branch rules enforce the queue and required `check`; otherwise they run in full. See the [CI spend policy](.github/workflows/README.md#ci-spend-policy). The local gate always runs in full.
 
 ## Testing
 
@@ -132,7 +138,7 @@ select the operator's dataset or credentials. Production defaults are unchanged.
   `daydream/atif/**` is lint-exempt as vendored Harbor code (see
   [daydream/atif/NOTICE](daydream/atif/NOTICE)); make only mechanical edits
   there.
-- **mypy** — configured in `pyproject.toml`, run over `daydream tests scripts/ci_plan.py`;
+- **mypy** — configured in `pyproject.toml`, run over `daydream tests scripts/ci_*.py`;
   hand-written stubs live in `mypy_stubs/`.
 - **Dependencies** — declared in `pyproject.toml`; keep `uv.lock` in sync (`uv
   lock`) or `make check` fails at its first step (`lockcheck`).

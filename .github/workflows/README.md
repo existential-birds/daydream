@@ -22,13 +22,20 @@ Documentation and RL-only changes follow the same rule; no path allowlist skips
 the queue gate.
 
 `merge_group: checks_requested` runs the complete root suite with branch
-coverage and its existing enforced floor on `ubuntu-24.04`, with
-eight pytest workers. Typechecking and the root dead-code scan also run in full
-here. A failing required `check` prevents the queue from merging
+coverage and its existing enforced floor on `ubuntu-24.04`, across
+four pytest jobs with four workers each. The planner runs first; static checks
+(including script unit tests) and pytest then run independently. A coverage job
+validates all checkout/run-bound shard receipts and combines branch data before
+enforcing the existing aggregate floor and uploading `coverage-report`. The final
+`check` runs with `always()` and explicitly rejects failed, cancelled, missing or
+unexpectedly skipped dependencies. Typechecking and the root dead-code scan run
+in the static job. Basic/reuse modes never launch full-suite shards. See
+[coverage integrity](../../docs/coverage.md) and the
+[controlled benchmark](../../docs/ci-sharding-benchmark.md). A failing required `check` prevents the queue from merging
 the group. Manual dispatches and direct pushes also run the complete gate.
 Local Git hooks remain complete regardless of remote queue state.
 
-Only a successful full merge-group job uploads `ci-proof`. Its versioned proof
+Only a successful final full merge-group `check` uploads `ci-proof`. Its versioned proof
 binds the repository, run, queue head ref and actual checkout SHA/tree to the
 captured base ref, commit, and tree. Git verifies the base is an earlier ancestor;
 no fixed parent shape is assumed for groups containing multiple PRs. PR basic
