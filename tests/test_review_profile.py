@@ -10,7 +10,7 @@ def _profile(body: str = "", *, source: str = "<string>") -> rp.ReviewProfile:
     return rp.parse_profile(f'schema_version = 1\nname = "p"\n{body}', source=source)
 
 def test_review_deadline_is_profiled_and_validated() -> None:
-    base = _profile()
+    base = _profile("[pipeline]\nreview_wall_budget_s = 1800")
     bounded = _profile("[pipeline]\nreview_wall_budget_s = 1200")
     assert bounded.pipeline.review_wall_budget_s == 1200
     assert bounded.digest != base.digest
@@ -20,8 +20,8 @@ def test_review_deadline_is_profiled_and_validated() -> None:
 
 @pytest.mark.parametrize("seconds", [0, 900])
 def test_reviewer_investigation_budget_is_independent_and_changes_identity(seconds: int) -> None:
-    base = _profile()
-    configured = _profile(f"[pipeline]\nreviewer_investigation_budget_s = {seconds}")
+    base = _profile("[pipeline]\nreview_wall_budget_s = 1800\nreviewer_investigation_budget_s = 600")
+    configured = _profile(f"[pipeline]\nreview_wall_budget_s = 1800\nreviewer_investigation_budget_s = {seconds}")
     assert configured.pipeline.reviewer_investigation_budget_s == seconds
     assert configured.pipeline.review_wall_budget_s == base.pipeline.review_wall_budget_s
     assert configured.to_canonical_dict() != base.to_canonical_dict()

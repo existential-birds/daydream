@@ -116,26 +116,27 @@ def _codex_backend(
     assert isinstance(backend, CodexBackend), f"{phase} should resolve to a CodexBackend, got {type(backend)}"
     return backend
 
-def test_phase_default_effort_table_is_the_lowest_precedence_tier(tmp_path: Path) -> None:
-    bare = RunConfig(target=str(tmp_path), backend="codex", model=None, file_config=DaydreamFileConfig())
-    assert _codex_backend(bare, "arbiter").reasoning_effort == "high"
-    assert _codex_backend(bare, "review").reasoning_effort == "medium"
-    assert _codex_backend(bare, "per_stack_review").reasoning_effort == "medium"
-    assert _codex_backend(bare, "fix").reasoning_effort == "medium"
+def test_phase_default_effort_table_is_the_lowest_precedence_tier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("daydream.run_config.PHASE_DEFAULT_EFFORT", {"codex": {"parse": "low", "fix": "high"}})
+    bare = RunConfig(target=str(tmp_path), backend="codex", model="fixture-model", file_config=DaydreamFileConfig())
     assert _codex_backend(bare, "parse").reasoning_effort == "low"
+    assert _codex_backend(bare, "fix").reasoning_effort == "high"
+    assert _codex_backend(bare, "review").reasoning_effort is None
 
     fc = DaydreamFileConfig(model=None, backend=None, phases={"parse": {"reasoning_effort": "xhigh"}})
-    cfg = RunConfig(target=str(tmp_path), backend="codex", model=None, file_config=fc)
+    cfg = RunConfig(target=str(tmp_path), backend="codex", model="fixture-model", file_config=fc)
     assert _codex_backend(cfg, "parse").reasoning_effort == "xhigh"
-    assert _codex_backend(cfg, "fix").reasoning_effort == "medium"  # still the table default
+    assert _codex_backend(cfg, "fix").reasoning_effort == "high"  # still the controlled table default
+
+    cfg.file_config = DaydreamFileConfig(reasoning_effort="medium", phases=fc.phases)
+    assert _codex_backend(cfg, "parse").reasoning_effort == "xhigh"  # phase beats file global
+    assert _codex_backend(cfg, "fix").reasoning_effort == "medium"  # file global beats table
 
     cfg.reasoning_effort = "low"
     assert _codex_backend(cfg, "parse").reasoning_effort == "low"
-    assert _codex_backend(cfg, "arbiter").reasoning_effort == "low"
-
-    fc_global = DaydreamFileConfig(model=None, backend=None, reasoning_effort="high")
-    cfg2 = RunConfig(target=str(tmp_path), backend="codex", model=None, file_config=fc_global)
-    assert _codex_backend(cfg2, "parse").reasoning_effort == "high"
+    assert _codex_backend(cfg, "fix").reasoning_effort == "low"
 
 
 @pytest.mark.parametrize("phase", ["wonder", "arbiter"])
@@ -152,15 +153,19 @@ def test_pi_review_effort_default_does_not_enable_latency_or_group_overrides(tmp
     assert pinned.reasoning_effort == "low"
 
 
-def test_backend_cache_splits_on_table_default_effort(tmp_path: Path) -> None:
-    cfg = RunConfig(target=str(tmp_path), backend="codex", model=None, file_config=DaydreamFileConfig())
+def test_backend_cache_splits_on_table_default_effort(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("daydream.run_config.PHASE_DEFAULT_EFFORT", {"codex": {"review": "low"}})
+    cfg = RunConfig(target=str(tmp_path), backend="codex", model="fixture-model", file_config=DaydreamFileConfig())
     cache: dict[tuple[str, str | None, str | None, Path | None], Backend] = {}
     review = _codex_backend(cfg, "review", cache)
-    arbiter = _codex_backend(cfg, "arbiter", cache)
-    assert review.model == arbiter.model == "gpt-6.1-sol"
-    assert review is not arbiter
-    assert (review.reasoning_effort, arbiter.reasoning_effort) == ("medium", "high")
-    assert _resolve_backend(cfg, "review", cache) is review  # still cached per (backend, model, effort)
+    cfg.reasoning_effort = "high"
+    pinned_review = _codex_backend(cfg, "review", cache)
+    assert review.model == pinned_review.model == "fixture-model"
+    assert review is not pinned_review
+    assert (review.reasoning_effort, pinned_review.reasoning_effort) == ("low", "high")
+    assert _resolve_backend(cfg, "review", cache) is pinned_review
+    cfg.reasoning_effort = None
+    assert _resolve_backend(cfg, "review", cache) is review
 
 
 
