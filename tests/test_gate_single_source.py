@@ -233,7 +233,7 @@ def test_merge_queue_workflow_keeps_complete_gate_on_github_hosted_runners() -> 
     triggers = _wf_triggers(workflow)
     assert triggers["merge_group"]["types"] == ["checks_requested"]
     assert all(job["runs-on"] == "ubuntu-24.04" for job in workflow["jobs"].values())
-    assert workflow["jobs"]["check"]["env"]["PYTEST_WORKERS"] == "4"
+    assert workflow["jobs"]["check"]["env"]["PYTEST_WORKERS"] == "8"
     steps = {step["name"]: step for step in job_steps(workflow, "check")}
     for name in ("Set up uv", "Verify uv.lock is in sync", "Install dependencies", "Lint with ruff"):
         assert steps[name]["if"] == "steps.plan.outputs.mode != 'reuse'"
