@@ -50,6 +50,3 @@ Hugging Face dataset and the `hub` extra. The training pipeline implements
 reward construction → SFT → RFT → online RL; production training has not completed.
 For agents working on data or experiments: [dataset workflow](docs/runbooks/record-dataset.md),
 [training](docs/training-launch.md), [benchmarks](docs/benchmark.md).
-
-[Contributing](CONTRIBUTING.md) · [Agent guidance](AGENTS.md) ·
-[Security](SECURITY.md) · [Apache 2.0](LICENSE)
