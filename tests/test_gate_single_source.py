@@ -7,12 +7,15 @@ declaration already owns.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from tests.test_workflow_templates import _wf_triggers, job_steps, load_workflow
 
@@ -97,7 +100,60 @@ def test_actionlint_cannot_be_skipped_silently_when_required(tmp_path: Path) -> 
 
 
 _CI_WORKFLOW = _ROOT / ".github" / "workflows" / "ci.yml"
-_CHECK_JOB = "check"
+_GATE_JOBS = ("plan", "static-checks", "test-shard", "coverage", "legacy-check", "check")
+
+
+def _execute_shard_plan(
+    tmp_path: Path, *, dispatch: bool, requested_count: str | None = None,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
+    """Execute the shipped planner step, resolving only its Actions input context."""
+    workflow = load_workflow(_CI_WORKFLOW)
+    input_spec = _wf_triggers(workflow)["workflow_dispatch"]["inputs"]["test_jobs"]
+    value = str(input_spec["default"]) if requested_count is None else requested_count
+    inputs = {"test_jobs": value} if dispatch else {}
+    step = next(step for step in job_steps(workflow, "plan") if step["name"] == "Plan pytest shards")
+    output = tmp_path / "github-output"
+    output.touch()
+    env = {**os.environ, "GITHUB_OUTPUT": str(output)}
+    for name, value in step.get("env", {}).items():
+        # Resolve the runner-provided input value, not the planner's Python logic.
+        expression = re.fullmatch(r"\$\{\{\s*inputs\.(\w+)(?:\s*\|\|\s*'([^']*)')?\s*\}\}", str(value))
+        env[name] = str(inputs.get(expression[1]) or expression[2] or "") if expression else str(value)
+    result = subprocess.run(["bash", "-eu", "-o", "pipefail", "-c", step["run"]], cwd=_ROOT, env=env,
+                            capture_output=True, text=True, check=False)
+    return result, dict(line.split("=", 1) for line in output.read_text().splitlines())
+
+
+@pytest.mark.parametrize(("dispatch", "requested_count", "count", "workers"), [
+    (False, None, 8, 4),
+    (True, None, 8, 4),
+    (True, "1", 1, 8),
+    (True, "2", 2, 4),
+    (True, "4", 4, 4),
+    (True, "20", 20, 4),
+], ids=["automatic-default", "dispatch-default", "baseline", "legacy-two", "legacy-four", "maximum"])
+def test_ci_shard_planner_emits_complete_supported_matrices(
+    tmp_path: Path, dispatch: bool, requested_count: str | None, count: int, workers: int,
+) -> None:
+    """A working CLI alone cannot prove CI's default, input binding or emitted matrix."""
+    result, outputs = _execute_shard_plan(tmp_path, dispatch=dispatch, requested_count=requested_count)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert outputs["count"] == str(count)
+    assert outputs["workers"] == str(workers)
+    assert json.loads(outputs["matrix"]) == {"index": list(range(count))}
+    input_spec = _wf_triggers(load_workflow(_CI_WORKFLOW))["workflow_dispatch"]["inputs"]["test_jobs"]
+    if dispatch and requested_count is not None and input_spec["type"] == "choice":
+        assert requested_count in input_spec["options"], "the workflow UI must offer the supported treatment"
+
+
+@pytest.mark.parametrize("requested_count", ["0", "21", "1.5"], ids=["below-minimum", "above-cap", "fractional"])
+def test_ci_shard_planner_rejects_counts_without_publishing_a_partial_matrix(
+    tmp_path: Path, requested_count: str,
+) -> None:
+    """Direct dispatch values cannot create empty, over-cap or fractional matrices."""
+    result, outputs = _execute_shard_plan(tmp_path, dispatch=True, requested_count=requested_count)
+    assert result.returncode != 0
+    assert outputs == {}
 
 # CI check-job steps that are deliberately not local gate steps: step name ->
 # the one-line reason. Keep this list small and reasoned; a step that is
@@ -110,6 +166,10 @@ _CI_ONLY_STEPS: dict[str, str] = {"Run vulture": (
         "provision the native CLI on the disposable CI runner — the local gate exercises installed tools "
         "without globally installing or replacing a contributor's optional backend runtimes"
     ),
+    "Plan pytest shards": "select supported shard counts for the manual benchmark and normal duration-weighted gate",
+    "Run pytest shard": "partition the complete pytest collection and record checkout-bound execution and coverage",
+    "Combine and enforce branch coverage": "validate every shard receipt before applying the aggregate coverage floor",
+    "Require complete CI gate": "reject failed, cancelled, missing or unexpectedly skipped dependencies",
     "Plan CI gate": (
         "remote evidence determines whether CI needs to repeat a gate; local hooks always run the full gate"
     ),
@@ -136,20 +196,22 @@ def _recipe_commands(recipe: str) -> list[str]:
     return commands
 
 
-def _observed_gate_commands() -> dict[str, str]:
-    """Map each gate step's command text to the target that owns it.
-
-    Observed by dry-running the real Makefile (`make -n` prints a recipe without
-    executing it), so the recovery needs no Docker daemon and no network.
-    `MAKEFLAGS` is scrubbed because make prints `Entering directory` lines on
-    stdout under it, which would be parsed as commands.
-    """
+def _dry_run_recipe(target: str) -> str:
+    """Read the real recipe without inherited flags or recursive directory messages."""
     env = {key: value for key, value in os.environ.items() if key not in ("MAKEFLAGS", "MFLAGS")}
+    proc = subprocess.run(
+        ["make", "--no-print-directory", "-n", target], cwd=_ROOT, env=env,
+        capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 0, f"`make -n {target}` failed: {proc.stderr}"
+    return proc.stdout
+
+
+def _observed_gate_commands() -> dict[str, str]:
+    """Map each gate step's dry-run command text to the target that owns it."""
     owners: dict[str, str] = {}
     for target in _gate_steps():
-        proc = subprocess.run(["make", "-n", target], cwd=_ROOT, env=env, capture_output=True, text=True, check=False)
-        assert proc.returncode == 0, f"`make -n {target}` failed: {proc.stderr}"
-        for command in _recipe_commands(proc.stdout):
+        for command in _recipe_commands(_dry_run_recipe(target)):
             owners.setdefault(command, target)
     return owners
 
@@ -183,16 +245,23 @@ def _gate_violations(
             violations.append(f"{name}: neither an invocation of a declared gate step nor a declared CI-only step")
     return violations
 
-def test_ci_check_job_is_represented_by_the_declared_gate() -> None:
+@pytest.mark.parametrize("makeflags", ["", "-w"], ids=["plain", "directory-logging"])
+def test_ci_check_job_is_represented_by_the_declared_gate(monkeypatch: pytest.MonkeyPatch, makeflags: str) -> None:
     """The real check job invokes declared gate steps, plus stated CI-only ones."""
-    steps = job_steps(load_workflow(_CI_WORKFLOW), _CHECK_JOB)
-    violations = _gate_violations(steps, set(_gate_steps()), _observed_gate_commands(), _CI_ONLY_STEPS)
+    monkeypatch.setenv("MAKEFLAGS", makeflags)
+    monkeypatch.setenv("MFLAGS", makeflags)
+    workflow = load_workflow(_CI_WORKFLOW)
+    steps = [step for job in _GATE_JOBS for step in job_steps(workflow, job)]
+    # Script tests are a component of make test, shared with the static CI job.
+    script_recipe = _dry_run_recipe("test-scripts").strip()
+    assert script_recipe in _dry_run_recipe("test")
+    violations = _gate_violations(steps, {*_gate_steps(), "test-scripts"}, _observed_gate_commands(), _CI_ONLY_STEPS)
 
     assert violations == [], "\n".join(violations)
 
 def test_guard_rejects_a_restated_gate_command() -> None:
     """An inlined gate command is caught, and names the step that owns it."""
-    steps = [{"name": "Lint with ruff", "run": "uv run ruff check daydream tests scripts/ci_plan.py"}]
+    steps = [{"name": "Lint with ruff", "run": "uv run ruff check daydream tests scripts/ci_*.py"}]
     violations = _gate_violations(steps, set(_gate_steps()), _observed_gate_commands(), {})
 
     assert violations and "lint" in violations[0], violations
@@ -233,19 +302,58 @@ def test_merge_queue_workflow_keeps_complete_gate_on_github_hosted_runners() -> 
     triggers = _wf_triggers(workflow)
     assert triggers["merge_group"]["types"] == ["checks_requested"]
     assert all(job["runs-on"] == "ubuntu-24.04" for job in workflow["jobs"].values())
-    assert workflow["jobs"]["check"]["env"]["PYTEST_WORKERS"] == "8"
-    steps = {step["name"]: step for step in job_steps(workflow, "check")}
+    jobs = workflow["jobs"]
+    assert jobs["check"]["if"] == "always()"
+    assert set(jobs["check"]["needs"]) == {"plan", "static-checks", "test-shard", "coverage", "legacy-check"}
+    assert jobs["static-checks"]["needs"] == "plan"
+    assert jobs["static-checks"]["if"] == "needs.plan.outputs.count != '1'"
+    assert jobs["legacy-check"]["if"] == "github.event_name == 'workflow_dispatch' && needs.plan.outputs.count == '1'"
+    assert jobs["legacy-check"]["env"]["PYTEST_WORKERS"] == "8"
+    assert jobs["legacy-check"]["env"]["PYTEST_REPORT_ARGS"] == "--junitxml=baseline-tests.xml"
+    legacy = {step["name"]: step for step in job_steps(workflow, "legacy-check")}
+    assert legacy["Run tests"]["run"] == "make test"
+    assert "if" not in legacy["Run tests"]
+    assert set(legacy["Upload coverage report"]["with"]["path"].split()) == {"coverage.xml", "baseline-tests.xml"}
+    assert jobs["test-shard"]["needs"] == "plan"
+    assert jobs["test-shard"]["if"] == "needs.plan.outputs.full == 'true' && needs.plan.outputs.count != '1'"
+    assert jobs["test-shard"]["strategy"]["fail-fast"] is False
+    assert set(jobs["coverage"]["needs"]) == {"plan", "test-shard"}
+    assert jobs["coverage"]["if"] == (
+        "always() && needs.plan.result == 'success' && needs.plan.outputs.full == 'true' "
+        "&& needs.plan.outputs.count != '1'"
+    )
+    assert all(not job.get("continue-on-error", False) for job in jobs.values())
+    assert all(not step.get("continue-on-error", False)
+               for job in jobs.values() for step in job["steps"])
+    static = {step["name"]: step for step in job_steps(workflow, "static-checks")}
     for name in ("Set up uv", "Verify uv.lock is in sync", "Install dependencies", "Lint with ruff"):
-        assert steps[name]["if"] == "steps.plan.outputs.mode != 'reuse'"
-    for name in ("Set up Node for native Pi contract tests", "Install Pi for native output contract tests",
-                 "Run vulture", "Type check with mypy", "Run tests"):
-        assert steps[name]["if"] == "steps.plan.outputs.full == 'true'"
-    assert steps["Run tests"]["run"] == "make test"
+        assert static[name]["if"] == "needs.plan.outputs.mode != 'reuse'"
+    for name in ("Run vulture", "Type check with mypy", "Run script unit tests"):
+        assert static[name]["if"] == "needs.plan.outputs.full == 'true'"
+    assert static["Run script unit tests"]["run"] == "make test-scripts"
+    for name in ("Naming grep-gate", "Lint workflows with actionlint"):
+        assert "if" not in static[name]
+    shard = {step["name"]: step for step in job_steps(workflow, "test-shard")}
+    assert shard["Run pytest shard"]["env"]["PYTEST_WORKERS"] == "${{ needs.plan.outputs.workers }}"
+    assert "--index" in shard["Run pytest shard"]["run"]
+    assert shard["Upload shard evidence"]["if"] == "always()"
+    assert shard["Upload shard evidence"]["with"]["overwrite"] is True
+    assert shard["Upload shard evidence"]["with"]["if-no-files-found"] == "error"
+    coverage = {step["name"]: step for step in job_steps(workflow, "coverage")}
+    assert "--diagnostic" in coverage["Combine and enforce branch coverage"]["run"]
+    assert coverage["Download all shard evidence"]["with"]["pattern"] == "shard-*"
+    assert not coverage["Download all shard evidence"]["with"].get("merge-multiple", False)
+    assert coverage["Upload coverage report"]["with"]["overwrite"] is True
+    assert coverage["Upload coverage report"]["if"] == "always()"
+    final = {step["name"]: step for step in job_steps(workflow, "check")}
+    assert list(final).index("Require complete CI gate") < list(final).index("Record successful merge-group tree")
+    gate_env = final["Require complete CI gate"]["env"]
+    assert set(gate_env.values()) >= {
+        "${{ needs.plan.result }}", "${{ needs.static-checks.result }}",
+        "${{ needs.test-shard.result }}", "${{ needs.coverage.result }}", "${{ needs.legacy-check.result }}",
+    }
     for name in ("Record successful merge-group tree", "Upload successful merge-group tree"):
-        assert steps[name]["if"] == "github.event_name == 'merge_group' && steps.plan.outputs.full == 'true'"
-    assert steps["Upload successful merge-group tree"]["with"]["retention-days"] == 14
-    assert steps["Upload successful merge-group tree"]["with"]["overwrite"] is True
-    assert steps["Upload coverage report"]["with"]["overwrite"] is True
-    assert "always()" in steps["Upload coverage report"]["if"]
-    assert "steps.plan.outputs.full == 'true'" in steps["Upload coverage report"]["if"]
-    assert workflow["jobs"]["rl-check"]["if"] == "github.event_name == 'workflow_dispatch' && inputs.run_rl"
+        assert final[name]["if"] == "github.event_name == 'merge_group' && needs.plan.outputs.full == 'true'"
+    assert final["Upload successful merge-group tree"]["with"]["retention-days"] == 14
+    assert final["Upload successful merge-group tree"]["with"]["overwrite"] is True
+    assert jobs["rl-check"]["if"] == "github.event_name == 'workflow_dispatch' && inputs.run_rl"

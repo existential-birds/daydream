@@ -170,6 +170,7 @@ exclude = ["*/atif/*"]
 # via the documented ratchet, never lower it.
 [tool.coverage.run]
 branch = true
+relative_files = true
 source = ["daydream"]
 omit = [
     # Vendored from harbor-framework/harbor@v0.17.1-9 (see daydream/atif/NOTICE);

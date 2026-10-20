@@ -16,7 +16,8 @@ from daydream.deep.artifacts import (
     deep_dir,
 )
 from daydream.deep.prompts import build_merge_prompt
-from daydream.extensions import get_registry
+from daydream.extensions import Registry
+from daydream.extensions.builtins import register_builtins
 from daydream.phases import phase_cross_stack_merge
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
@@ -80,7 +81,8 @@ async def test_empty_merge_requires_completed_inputs_and_builtin_contract(
     elif input_kind == "custom-strategy":
         strategy = "Perform an independent custom merge inspection."
     elif input_kind == "custom-builder":
-        registry = get_registry()
+        registry = Registry()
+        register_builtins(registry)
         structural = dd / "stack-structure-records.json"
         structural.write_text(json.dumps({"issues": [{
             "id": 1, "uid": "structure:1", "file": "design.py", "line": 0,

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Default full GitHub CI to eight duration-weighted pytest jobs on free standard
+  runners, retaining the required `check`, complete execution evidence and
+  aggregate branch coverage
+  ([#1644](https://github.com/existential-birds/daydream/issues/1644)).
+
+### Fixed
+
+- Correlate benchmark dispatches with persisted UUIDs, preventing unrelated
+  same-revision runs from being accepted.
+- Isolate mutable test registries and consolidate equivalent cases; retain
+  oversized-input regression coverage with a bounded case ID and unchanged
+  payload and assertions.
 
 ## [0.30.0] - 2026-10-19
 

@@ -15,7 +15,8 @@ from daydream.backends import ResultEvent
 from daydream.deep.artifacts import DeepArtifact, deep_dir, persist_review_coverage
 from daydream.deep.merge_steps import _step_supervise
 from daydream.deep.prompts import build_supervise_prompt
-from daydream.extensions import get_registry
+from daydream.extensions import Registry
+from daydream.extensions.builtins import register_builtins
 from daydream.flows.engine import FlowContext
 from daydream.phases import phase_supervise_review
 from daydream.review_result import ReasonCode
@@ -40,12 +41,26 @@ def test_revise_finding_fields_updates_whitelist_only() -> None:
     assert item["id"] == 7
 
 
-@pytest.mark.parametrize("host_stage", [False, True], ids=["provider-contract", "host-coverage-completion"])
-@pytest.mark.parametrize("contract", ["default", "packaged", "custom-strategy", "custom-builder", "nonempty"])
+@pytest.mark.parametrize(("contract", "host_stage"), [
+    pytest.param("default", False, id="default-provider-contract"),
+    pytest.param("packaged", False, id="packaged-provider-contract"),
+    pytest.param("packaged", True, id="packaged-host-coverage-completion"),
+    pytest.param("custom-strategy", False, id="custom-strategy-provider-contract"),
+    pytest.param("custom-strategy", True, id="custom-strategy-host-coverage-completion"),
+    pytest.param("custom-builder", False, id="custom-builder-provider-contract"),
+    pytest.param("custom-builder", True, id="custom-builder-host-coverage-completion"),
+    pytest.param("nonempty", False, id="nonempty-provider-contract"),
+    pytest.param("nonempty", True, id="nonempty-host-coverage-completion"),
+])
 async def test_supervise_empty_builtin_skips_provider_and_preserves_input_artifact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext], contract: str,
     host_stage: bool,
 ) -> None:
+    # Each contract owns its registry; custom builders must not mutate a
+    # registry inherited from another test's synchronous context.
+    registry = Registry()
+    register_builtins(registry)
+    monkeypatch.setattr("daydream.extensions.loader._REGISTRY_VAR", ContextVar("test-registry", default=registry))
     work = make_work(tmp_path)
     dd = deep_dir(work.repo, allow_standalone=True)
     (dd / "supervise-input.json").write_text('[{"id": 99, "description": "stale"}]')
@@ -69,9 +84,7 @@ async def test_supervise_empty_builtin_skips_provider_and_preserves_input_artifa
     elif contract == "custom-strategy":
         strategy = "Perform a custom supervision pass over {supervise_input_path}."
     elif contract == "custom-builder":
-        registry = get_registry()
         registry.override_prompt("supervise", lambda **kwargs: build_supervise_prompt(**kwargs))
-        monkeypatch.setattr("daydream.extensions.loader._REGISTRY_VAR", ContextVar("test-registry", default=registry))
     returned_verdicts = [
         {"id": 1, "action": "edit", "reason": "Reduce severity", "severity": "low",
          "confidence": None, "description": None, "rationale": None, "evidence": None},
@@ -89,7 +102,7 @@ async def test_supervise_empty_builtin_skips_provider_and_preserves_input_artifa
                           replace(supervision, content=strategy or supervision.content)})
         items_file = DeepArtifact.MERGED_ITEMS.at(dd)
         items_file.write_text(json.dumps({"items": items, "held": []}))
-        ctx = FlowContext(config=RunConfig(target=str(work.repo)), work=work, registry=get_registry(),
+        ctx = FlowContext(config=RunConfig(target=str(work.repo)), work=work, registry=registry,
             review_profile=review_profile.ResolvedProfile(profile, "test"), allow_standalone_artifacts=True,
             data={"dd": dd, "review_coverage": coverage, "items_file": items_file, "diff_path": diff,
                   "intent_path": intent, "alts_path": alternatives, "exploration_dir": None,

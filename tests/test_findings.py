@@ -89,7 +89,7 @@ def test_review_defaults_and_known_run_freshness(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("raw", [None, '{"schema_version": 2', '[' * 2000 + '0' + ']' * 2000,
-                                 '[' + ' ' * MAX_ARTIFACT_BYTES])
+                                 pytest.param('[' + ' ' * MAX_ARTIFACT_BYTES, id="oversized-input")])
 def test_missing_truncated_nested_and_oversized_input_is_never_clean(tmp_path: Path, raw: str | None) -> None:
     path = tmp_path / "invalid.json"
     if raw is not None:
