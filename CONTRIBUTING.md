@@ -110,8 +110,8 @@ This is the same set of steps a full `check` job in `.github/workflows/ci.yml` r
 job does not include — that scan happens in the manual `rl-check` job — so the
 local gate is the stricter one. The pre-push hook runs `make check` after
 verifying signatures, so a green local `make check` is what keeps your push from
-being rejected. CI runs the root pytest suite across four standard `ubuntu-24.04` jobs with four
-workers each. A final `check` joins static checks and validated aggregate branch
+being rejected. CI defaults to sixteen duration-weighted standard `ubuntu-24.04`
+pytest jobs with four workers each. A final `check` joins static checks and validated aggregate branch
 coverage; missing or failed shards cannot pass. The script unit tests run in the
 static job. See [coverage aggregation](docs/coverage.md) and the
 [benchmark procedure](docs/ci-sharding-benchmark.md).

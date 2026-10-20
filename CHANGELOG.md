@@ -9,9 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Split full GitHub CI pytest execution across four free standard runners,
-  retaining the required `check`, complete shard evidence, and aggregate branch
-  coverage enforcement ([#1644](https://github.com/existential-birds/daydream/issues/1644)).
+- Default full GitHub CI to sixteen duration-weighted pytest jobs on free standard
+  runners, retaining the required `check`, complete execution evidence and
+  aggregate branch coverage. Sixteen is the first experiment toward a two-minute
+  maximum for whole shard jobs, including setup and uploads; that target remains unverified
+  ([#1644](https://github.com/existential-birds/daydream/issues/1644)).
+
+### Fixed
+
+- Correlate benchmark dispatches with persisted UUIDs, preventing unrelated
+  same-revision runs from being accepted.
+- Isolate mutable test registries and consolidate equivalent cases; retain
+  oversized-input regression coverage with a bounded case ID and unchanged
+  payload and assertions.
 
 ## [0.30.0] - 2026-10-19
 

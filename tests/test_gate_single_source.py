@@ -7,6 +7,7 @@ declaration already owns.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -101,6 +102,59 @@ def test_actionlint_cannot_be_skipped_silently_when_required(tmp_path: Path) -> 
 _CI_WORKFLOW = _ROOT / ".github" / "workflows" / "ci.yml"
 _GATE_JOBS = ("plan", "static-checks", "test-shard", "coverage", "legacy-check", "check")
 
+
+def _execute_shard_plan(
+    tmp_path: Path, *, dispatch: bool, requested_count: str | None = None,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
+    """Execute the shipped planner step, resolving only its Actions input context."""
+    workflow = load_workflow(_CI_WORKFLOW)
+    input_spec = _wf_triggers(workflow)["workflow_dispatch"]["inputs"]["test_jobs"]
+    value = str(input_spec["default"]) if requested_count is None else requested_count
+    inputs = {"test_jobs": value} if dispatch else {}
+    step = next(step for step in job_steps(workflow, "plan") if step["name"] == "Plan pytest shards")
+    output = tmp_path / "github-output"
+    output.touch()
+    env = {**os.environ, "GITHUB_OUTPUT": str(output)}
+    for name, value in step.get("env", {}).items():
+        # Resolve the runner-provided input value, not the planner's Python logic.
+        expression = re.fullmatch(r"\$\{\{\s*inputs\.(\w+)(?:\s*\|\|\s*'([^']*)')?\s*\}\}", str(value))
+        env[name] = str(inputs.get(expression[1]) or expression[2] or "") if expression else str(value)
+    result = subprocess.run(["bash", "-eu", "-o", "pipefail", "-c", step["run"]], cwd=_ROOT, env=env,
+                            capture_output=True, text=True, check=False)
+    return result, dict(line.split("=", 1) for line in output.read_text().splitlines())
+
+
+@pytest.mark.parametrize(("dispatch", "requested_count", "count", "workers"), [
+    (False, None, 16, 4),
+    (True, None, 16, 4),
+    (True, "1", 1, 8),
+    (True, "2", 2, 4),
+    (True, "4", 4, 4),
+    (True, "20", 20, 4),
+], ids=["automatic-default", "dispatch-default", "baseline", "legacy-two", "legacy-four", "maximum"])
+def test_ci_shard_planner_emits_complete_supported_matrices(
+    tmp_path: Path, dispatch: bool, requested_count: str | None, count: int, workers: int,
+) -> None:
+    """A working CLI alone cannot prove CI's default, input binding or emitted matrix."""
+    result, outputs = _execute_shard_plan(tmp_path, dispatch=dispatch, requested_count=requested_count)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert outputs["count"] == str(count)
+    assert outputs["workers"] == str(workers)
+    assert json.loads(outputs["matrix"]) == {"index": list(range(count))}
+    input_spec = _wf_triggers(load_workflow(_CI_WORKFLOW))["workflow_dispatch"]["inputs"]["test_jobs"]
+    if dispatch and requested_count is not None and input_spec["type"] == "choice":
+        assert requested_count in input_spec["options"], "the workflow UI must offer the supported treatment"
+
+
+@pytest.mark.parametrize("requested_count", ["0", "21", "1.5"], ids=["below-minimum", "above-cap", "fractional"])
+def test_ci_shard_planner_rejects_counts_without_publishing_a_partial_matrix(
+    tmp_path: Path, requested_count: str,
+) -> None:
+    """Direct dispatch values cannot create empty, over-cap or fractional matrices."""
+    result, outputs = _execute_shard_plan(tmp_path, dispatch=True, requested_count=requested_count)
+    assert result.returncode != 0
+    assert outputs == {}
+
 # CI check-job steps that are deliberately not local gate steps: step name ->
 # the one-line reason. Keep this list small and reasoned; a step that is
 # neither declared here nor a gate invocation fails the guard.
@@ -112,7 +166,7 @@ _CI_ONLY_STEPS: dict[str, str] = {"Run vulture": (
         "provision the native CLI on the disposable CI runner — the local gate exercises installed tools "
         "without globally installing or replacing a contributor's optional backend runtimes"
     ),
-    "Plan pytest shards": "select supported shard counts for the manual benchmark and normal four-job gate",
+    "Plan pytest shards": "select supported shard counts for the manual benchmark and normal duration-weighted gate",
     "Run pytest shard": "partition the complete pytest collection and record checkout-bound execution and coverage",
     "Combine and enforce branch coverage": "validate every shard receipt before applying the aggregate coverage floor",
     "Require complete CI gate": "reject failed, cancelled, missing or unexpectedly skipped dependencies",

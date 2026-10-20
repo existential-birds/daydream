@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
+from uuid import UUID, uuid4
 
 
 def gh(*args: str) -> str:
@@ -37,17 +38,32 @@ def runs(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     return [run for run in result["workflow_runs"] if run["head_sha"] == manifest["sha"]]
 
 
+def dispatch_title(dispatch_id: Any) -> str:
+    if not isinstance(dispatch_id, str):
+        raise ValueError("Missing benchmark dispatch UUID; cannot prove dispatch identity")
+    try:
+        valid = str(UUID(dispatch_id)) == dispatch_id
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError("Invalid benchmark dispatch UUID")
+    return f"CI benchmark {dispatch_id}"
+
+
 def resolve(manifest: dict[str, Any], path: Path, run_id: int | None = None) -> None:
     pending = manifest.get("pending")
     if pending is None:
         raise ValueError("No unresolved dispatch")
-    candidates = [run for run in runs(manifest) if run["id"] not in pending["before"]]
+    title = dispatch_title(pending.get("dispatch_id"))
+    candidates = [run for run in runs(manifest) if run["id"] not in pending["before"] and
+                  run.get("display_title") == title]
     if run_id is not None:
         candidates = [run for run in candidates if run["id"] == run_id]
     if len(candidates) != 1:
         raise ValueError(f"Expected one new matching dispatch, found {len(candidates)}; retry resolve --run-id ID")
     run = candidates[0]
-    manifest["runs"].append({"id": run["id"], "jobs": pending["jobs"], "attempt": run["run_attempt"]})
+    manifest["runs"].append({"id": run["id"], "jobs": pending["jobs"], "attempt": run["run_attempt"],
+                             "dispatch_id": pending["dispatch_id"]})
     del manifest["pending"]
     save(path, manifest)
     print(run["html_url"])
@@ -69,9 +85,11 @@ def launch(args: argparse.Namespace) -> None:
         if branch["sha"] != args.sha:
             raise ValueError("Remote ref moved from the requested benchmark SHA")
         before = [run["id"] for run in runs(manifest)]
-        manifest["pending"] = {"jobs": args.jobs, "before": before}
+        dispatch_id = str(uuid4())
+        manifest["pending"] = {"jobs": args.jobs, "before": before, "dispatch_id": dispatch_id}
         save(args.manifest, manifest)
-        gh("workflow", "run", "ci.yml", "--repo", args.repo, "--ref", args.ref, "-f", f"test_jobs={args.jobs}")
+        gh("workflow", "run", "ci.yml", "--repo", args.repo, "--ref", args.ref,
+           "-f", f"test_jobs={args.jobs}", "-f", f"benchmark_id={dispatch_id}")
         # Discovery only: this bounded wait never waits for pytest or CI.
         deadline = time.monotonic() + 30
         while True:
@@ -153,13 +171,16 @@ def report(args: argparse.Namespace) -> None:
                 run["event"] != "workflow_dispatch" or run["path"] != ".github/workflows/ci.yml" or
                 run["repository"]["full_name"] != manifest["repository"] or run["run_attempt"] != entry["attempt"]):
             raise ValueError(f"Run {run_id} does not match the benchmark identity")
+        if "dispatch_id" in entry and run.get("display_title") != dispatch_title(entry["dispatch_id"]):
+            raise ValueError(f"Run {run_id} does not match the benchmark dispatch identity")
         measurements.append(measure(run, jobs, entry["jobs"]))
     save(args.output / "measurements.json", {"manifest": manifest, "measurements": measurements})
     lines = ["# CI sharding benchmark", "", f"Revision: `{manifest['sha']}` in `{manifest['repository']}`.", "",
              "| Jobs / workers | Successful runs | Median gate seconds | Median runner minutes | Reduction |",
              "|---|---:|---:|---:|---:|"]
+    counts = sorted({1, 2, 4} | {m["jobs"] for m in measurements})
     groups = {count: [m for m in measurements if m["jobs"] == count and m["complete"] and
-                     m["conclusion"] == "success"] for count in (1, 2, 4)}
+                     m["conclusion"] == "success"] for count in counts}
     baseline = statistics.median(m["gate_seconds"] for m in groups[1]) if groups[1] else None
     for count, group in groups.items():
         gate = statistics.median(m["gate_seconds"] for m in group) if group else None
@@ -197,7 +218,7 @@ def main() -> None:
     dispatch.add_argument("--repo", required=True)
     dispatch.add_argument("--ref", required=True)
     dispatch.add_argument("--sha", required=True)
-    dispatch.add_argument("--jobs", type=int, choices=(1, 2, 4), required=True)
+    dispatch.add_argument("--jobs", type=int, choices=range(1, 21), required=True)
     dispatch.add_argument("--repeat", type=int, choices=(1, 2, 3), default=1)
     pending = sub.add_parser("resolve")
     pending.add_argument("--run-id", type=int)

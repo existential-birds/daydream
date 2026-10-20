@@ -1,4 +1,5 @@
 name: CI
+run-name: ${{ inputs.benchmark_id && format('CI benchmark {0}', inputs.benchmark_id) || '' }}
 
 permissions:
   contents: read
@@ -14,11 +15,14 @@ on:
     types: [checks_requested]
   workflow_dispatch:
     inputs:
+      benchmark_id:
+        description: Unique benchmark dispatch identity
+        type: string
+        default: ""
       test_jobs:
-        description: Root pytest jobs (1 is the eight-worker benchmark baseline)
-        type: choice
-        options: ["4", "2", "1"]
-        default: "4"
+        description: Root pytest jobs (1..20; 1 is the eight-worker benchmark baseline)
+        type: string
+        default: "16"
       run_rl:
         description: Run the dormant standalone RL gate as well as the root gate
         type: boolean
@@ -52,15 +56,15 @@ jobs:
       - name: Plan pytest shards
         id: shards
         env:
-          TEST_JOBS: ${{ inputs.test_jobs || '4' }}
+          TEST_JOBS: ${{ inputs.test_jobs || '16' }}
         run: |
           python3 - <<'PY'
           import json
           import os
           from pathlib import Path
           count = int(os.environ["TEST_JOBS"])
-          if count not in (1, 2, 4):
-              raise ValueError("Unsupported pytest job count")
+          if not 1 <= count <= 20:
+              raise ValueError("Pytest job count must be between 1 and 20")
           with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
               output.write(f"count={count}\nworkers={8 if count == 1 else 4}\n")
               output.write(f"matrix={json.dumps({'index': list(range(count))})}\n")

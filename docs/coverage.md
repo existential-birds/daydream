@@ -6,13 +6,25 @@
 
 ## CI aggregation
 
-Full CI uses four `ubuntu-24.04` pytest jobs with four workers each. Each job
-collects the complete root suite, partitions sorted test node IDs reproducibly,
-and records both the complete collection and its selected/executed tests.
-Newly collected tests automatically enter the partition. Every receipt binds its
+Full CI defaults to sixteen `ubuntu-24.04` pytest jobs with four workers each.
+Each job collects the complete root suite and uses the committed timing profile
+in `scripts/ci_test_durations.json` for a deterministic duration-weighted partition.
+The profile supplies scheduling hints; the actual collection owns test selection,
+and newly collected tests receive a positive fallback weight. Each receipt records
+the complete collection and selected/executed tests, and binds the partition
+algorithm and profile checksum. Every receipt also binds its
 coverage data to the checkout commit/tree, workflow run and attempt, shard index,
 and coverage checksum. Per-test setup/call/teardown durations remain available
 in the shard artifacts for profiling.
+
+Within each shard, selected tests are ordered by decreasing estimated duration.
+The command passes the public `--dist=loadgroup` option to pytest-xdist. In the
+[pinned scheduler](https://github.com/pytest-dev/pytest-xdist/blob/v3.8.0/src/xdist/scheduler/loadgroup.py),
+each unmarked test is its own scheduling unit, allowing workers to begin the
+expensive head concurrently. This avoids ordinary load scheduling's initial
+bulk batches concentrating many long tests on one worker. No private scheduler
+override is installed. This scheduling choice does not establish the two-minute
+whole-job target.
 
 Partial shards collect branch coverage without enforcing the whole-project floor.
 The aggregation job requires every expected nonempty shard, matching collection
@@ -22,7 +34,7 @@ corrupt evidence fails the gate. Relative source filenames allow coverage from
 separate runner workspaces to combine. The final report and XML use the unchanged
 configuration in `pyproject.toml`, including the aggregate floor and exclusions.
 The published artifact remains `coverage-report`; raw shard evidence is available
-as `shard-0` through `shard-3`.
+as `shard-INDEX` for every index in the planned matrix.
 
 Complete failed executions retain their coverage data for a diagnostic XML report.
 Diagnostic combination still fails the gate after publishing that report; it
@@ -40,9 +52,13 @@ coverage aggregation. Basic/reuse modes require those full-only jobs to be
 skipped. Only a successful complete merge-group gate can publish reusable proof.
 
 Local coverage needs no CI artifacts and still runs the entire suite in one
-invocation. Manual CI dispatch can select the original sequential eight-worker gate
-or two four-worker pytest jobs for the [controlled benchmark](ci-sharding-benchmark.md); normal full gates
-always use four jobs.
+invocation. Manual CI dispatch accepts one through twenty jobs for the
+[controlled benchmark](ci-sharding-benchmark.md). One selects the original
+sequential eight-worker gate; every other count uses four workers per job.
+Sixteen is the initial duration-weighted experiment toward a maximum of two
+minutes per whole shard job, including setup and artifact upload; that target
+has not yet been demonstrated. The frozen four-job measurement remains separate
+historical evidence.
 The sequential benchmark also publishes `baseline-tests.xml` inside
 `coverage-report`, allowing exact test and skip identity comparisons against
 shard manifests. Its reporting flags use the optional `PYTEST_REPORT_ARGS`

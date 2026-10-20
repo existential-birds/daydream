@@ -1,7 +1,7 @@
 """Run deterministic pytest shards and reject incomplete CI gate evidence.
 
-Loaded as a pytest plugin only by the ``run`` subcommand. Collection is sorted
-and dealt round-robin; every worker independently verifies the same selection.
+Loaded as a pytest plugin only by the ``run`` subcommand. Timing hints balance
+the complete collection; every worker independently verifies the same selection.
 """
 
 from __future__ import annotations
@@ -9,21 +9,76 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 _CONFIG_ENV = "DAYDREAM_CI_SHARD"
+_PARTITION_ALGORITHM = "duration-lpt-v1"
 _STATE: dict[str, Any] = {}
 
 
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@dataclass(frozen=True)
+class TimingProfile:
+    """Immutable estimates and the identity of the exact bytes defining them."""
+
+    durations: Mapping[str, float]
+    fallback_seconds: float
+    sha256: str
+
+
+def load_timing_profile(path: Path | None = None) -> TimingProfile:
+    """Read committed hints; unknown tests always receive a positive estimate."""
+    content = (path or Path(__file__).with_name("ci_test_durations.json")).read_bytes()
+    profile = json.loads(content)
+    if not isinstance(profile, dict) or profile.get("schema") != 1:
+        raise ValueError("unsupported timing profile schema")
+
+    def seconds(value: Any) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            raise ValueError("timing estimates must be finite and positive")
+        return float(value)
+
+    fallback = seconds(profile["fallback_seconds"])
+    durations = profile["durations"]
+    if not isinstance(durations, dict) or any(not isinstance(node, str) or not node for node in durations):
+        raise ValueError("invalid timing profile node IDs")
+    estimates = {node: seconds(value) for node, value in durations.items()}
+    return TimingProfile(MappingProxyType(estimates), fallback, hashlib.sha256(content).hexdigest())
+
+
+def partition(collection: list[str], count: int, profile: TimingProfile | None = None) -> list[list[str]]:
+    """Place longest estimates first into the lightest shard, breaking ties by ID/index.
+
+    Collection alone owns membership. Old profile nodes are ignored and new nodes
+    use the fallback; estimates promise neither test omission nor a runtime bound.
+    Returned order also puts expensive work at the front of each xdist queue.
+    """
+    if count < 1 or count > len(collection):
+        raise ValueError("invalid shard count or empty shard selection")
+    if any(not isinstance(node, str) or not node for node in collection) or len(set(collection)) != len(collection):
+        raise ValueError("collection must contain unique nonempty node IDs")
+    hints = profile or load_timing_profile()
+    shards: list[list[str]] = [[] for _ in range(count)]
+    loads = [0.0] * count
+    for node in sorted(collection, key=lambda node: (-hints.durations.get(node, hints.fallback_seconds), node)):
+        index = min(range(count), key=lambda index: (loads[index], index))
+        shards[index].append(node)
+        loads[index] += hints.durations.get(node, hints.fallback_seconds)
+    return shards
 
 
 def _identity() -> dict[str, str]:
@@ -37,15 +92,12 @@ def _identity() -> dict[str, str]:
             "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", "local")}
 
 
-def _selection(collection: list[str], index: int, count: int) -> list[str]:
+def _selection(collection: list[str], index: int, count: int, profile: TimingProfile) -> list[str]:
     if count < 1 or not 0 <= index < count:
         raise ValueError("invalid shard index/count")
     if not collection or collection != sorted(set(collection)):
         raise ValueError("collection must be nonempty, sorted, and unique")
-    selected = collection[index::count]
-    if not selected:
-        raise ValueError("empty shard selection")
-    return selected
+    return partition(collection, count, profile)[index]
 
 
 def pytest_configure(config: Any) -> None:
@@ -53,6 +105,11 @@ def pytest_configure(config: Any) -> None:
         return
     _STATE.clear()
     _STATE.update(json.loads(os.environ[_CONFIG_ENV]))
+    profile = load_timing_profile(Path(_STATE["profile_path"]))
+    if (_STATE["partition_algorithm"] != _PARTITION_ALGORITHM
+            or _STATE["partition_profile_sha256"] != profile.sha256):
+        raise ValueError("pytest timing profile differs from the shard command")
+    _STATE["profile"] = profile
     _STATE.update(collections=[], reports={}, errors=[])
 
 
@@ -60,13 +117,13 @@ def pytest_collection_modifyitems(config: Any, items: list[Any]) -> None:
     if not _STATE:
         return
     collection = sorted(item.nodeid for item in items)
-    selected = _selection(collection, _STATE["index"], _STATE["count"])
+    selected = _selection(collection, _STATE["index"], _STATE["count"], _STATE["profile"])
     if hasattr(config, "workeroutput"):
         config.workeroutput["ci_collection"] = collection
     else:
         _STATE["collections"].append(collection)
-    admitted = set(selected)
-    items[:] = sorted((item for item in items if item.nodeid in admitted), key=lambda item: item.nodeid)
+    positions = {node: index for index, node in enumerate(selected)}
+    items[:] = sorted((item for item in items if item.nodeid in positions), key=lambda item: positions[item.nodeid])
 
 
 def pytest_testnodedown(node: Any, error: Any) -> None:
@@ -93,18 +150,23 @@ def pytest_runtest_logreport(report: Any) -> None:
 def pytest_sessionfinish(session: Any, exitstatus: int) -> None:
     if not _STATE or hasattr(session.config, "workerinput"):
         return
-    receipt = {key: _STATE[key] for key in ("collections", "reports", "errors")}
+    receipt = {key: _STATE[key] for key in (
+        "collections", "reports", "errors", "partition_algorithm", "partition_profile_sha256",
+    )}
     receipt["exitstatus"] = int(exitstatus)
     Path(_STATE["receipt"]).write_text(json.dumps(receipt), encoding="utf-8")
 
 
 def _execution(
-    manifest: dict[str, Any], count: int, index: int, *, allow_failure: bool = False,
+    manifest: dict[str, Any], count: int, index: int, profile: TimingProfile, *, allow_failure: bool = False,
 ) -> list[str]:
+    if (manifest["partition_algorithm"] != _PARTITION_ALGORITHM
+            or manifest["partition_profile_sha256"] != profile.sha256):
+        raise ValueError("shard partition algorithm/profile differs from this checkout")
     collection = manifest["collection"]
     if not isinstance(collection, list) or any(not isinstance(item, str) for item in collection):
         raise ValueError("invalid collection")
-    selected = _selection(collection, index, count)
+    selected = _selection(collection, index, count, profile)
     if manifest["selected"] != selected:
         raise ValueError("inconsistent shard selection")
     if not allow_failure and (manifest["exitstatus"] != 0 or manifest["errors"]):
@@ -131,6 +193,8 @@ def _execution(
 
 def _run(args: argparse.Namespace) -> None:
     identity = _identity()
+    profile_path = Path(__file__).with_name("ci_test_durations.json").resolve()
+    profile = load_timing_profile(profile_path)
     if args.workers < 1 or args.count < 1 or not 0 <= args.index < args.count:
         raise ValueError("invalid shard index/count/workers")
     output = args.output.resolve()
@@ -139,16 +203,21 @@ def _run(args: argparse.Namespace) -> None:
         raise ValueError("shard output directory must be empty")
     receipt = output / "execution.json"
     raw_coverage = output / ".coverage"
-    config = {"index": args.index, "count": args.count, "receipt": str(receipt)}
+    config = {"index": args.index, "count": args.count, "receipt": str(receipt),
+              "profile_path": str(profile_path), "partition_algorithm": _PARTITION_ALGORITHM,
+              "partition_profile_sha256": profile.sha256}
     env = {**os.environ, _CONFIG_ENV: json.dumps(config), "COVERAGE_FILE": str(raw_coverage)}
     started = time.monotonic()
     result = subprocess.run([
         sys.executable, "-m", "pytest", "-p", "scripts.ci_shard", "-n", str(args.workers),
+        "--dist=loadgroup",
         "--cov", "--cov-branch", "--cov-report=", "--cov-fail-under=0",
     ], env=env, check=False)
     elapsed = time.monotonic() - started
     if _identity() != identity:
         raise ValueError("checkout identity changed while pytest was running")
+    if _digest(profile_path) != profile.sha256:
+        raise ValueError("timing profile changed while pytest was running")
     if not receipt.is_file():
         raise ValueError("pytest did not publish an execution receipt")
     evidence = json.loads(receipt.read_text(encoding="utf-8"))
@@ -158,10 +227,11 @@ def _run(args: argparse.Namespace) -> None:
     if result.returncode != evidence["exitstatus"]:
         raise ValueError("pytest process and receipt exit status differ")
     manifest = {"schema": 1, **identity, "index": args.index, "count": args.count, "workers": args.workers,
-                "collection": collections[0], "selected": collections[0][args.index::args.count],
+                "collection": collections[0],
+                "selected": _selection(collections[0], args.index, args.count, profile),
                 "elapsed_seconds": elapsed, **evidence}
     # Preserve complete failed executions for diagnostic coverage without admitting them as success.
-    _execution(manifest, args.count, args.index, allow_failure=True)
+    _execution(manifest, args.count, args.index, profile, allow_failure=True)
     if not raw_coverage.is_file():
         raise ValueError("pytest did not produce coverage data")
     coverage = output / "coverage"
@@ -169,7 +239,7 @@ def _run(args: argparse.Namespace) -> None:
     manifest["coverage_sha256"] = _digest(coverage)
     (output / "manifest.json").write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
     receipt.unlink()
-    _execution(manifest, args.count, args.index)
+    _execution(manifest, args.count, args.index, profile)
 
 
 def _combine(args: argparse.Namespace) -> None:
@@ -179,6 +249,7 @@ def _combine(args: argparse.Namespace) -> None:
     identity = _identity()
     # A failed validation must not leave a previous report available for publication.
     Path("coverage.xml").unlink(missing_ok=True)
+    profile = load_timing_profile()
     root = args.input.resolve()
     if args.count < 1 or {path.name for path in root.iterdir()} != {f"shard-{i}" for i in range(args.count)}:
         raise ValueError("coverage artifacts do not match the complete expected shard set")
@@ -196,10 +267,10 @@ def _combine(args: argparse.Namespace) -> None:
                 raise ValueError("incorrect shard identity")
             if any(manifest.get(key) != value for key, value in identity.items()):
                 raise ValueError("shard belongs to a different checkout/run/attempt")
-            collection = _execution(manifest, args.count, index, allow_failure=args.diagnostic)
+            collection = _execution(manifest, args.count, index, profile, allow_failure=args.diagnostic)
             if args.diagnostic:
                 try:
-                    _execution(manifest, args.count, index)
+                    _execution(manifest, args.count, index, profile)
                 except ValueError as error:
                     execution_errors.append(f"shard-{index}: {error}")
             if full_collection is not None and collection != full_collection:
