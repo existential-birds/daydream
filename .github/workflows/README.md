@@ -23,8 +23,9 @@ the queue gate.
 
 `merge_group: checks_requested` runs the complete root suite with branch
 coverage and its existing enforced floor on `ubuntu-24.04`, across
-sixteen duration-weighted pytest jobs with four workers each by default. The planner runs first; static checks
-(including script unit tests) and pytest then run independently. A coverage job
+eight duration-weighted pytest jobs with four workers each by default. The
+planner runs first; static checks (including script unit tests) and pytest then
+run independently. A coverage job
 validates all checkout/run-bound shard receipts and combines branch data before
 enforcing the existing aggregate floor and uploading `coverage-report`. The final
 `check` runs with `always()` and explicitly rejects failed, cancelled, missing or
@@ -37,10 +38,9 @@ Local Git hooks remain complete regardless of remote queue state.
 
 Manual `test_jobs` accepts integers from 1 through 20. One selects the original
 sequential eight-worker benchmark baseline; other counts use four workers per
-pytest job. Sixteen is the first experiment toward a two-minute maximum for each
-whole shard job, including setup and uploads; results remain pending. Provisioning
-stays within each shard. At twenty shards, concurrent static checks can also
-consume runner capacity, so queue delay and observed overlap remain part of the
+pytest job. Eight is the selected default. Provisioning stays within each shard.
+At twenty shards, concurrent static checks can also consume runner capacity,
+so queue delay and observed overlap remain part of the
 measurement. The earlier four-job benchmark is preserved as historical evidence.
 
 Only a successful final full merge-group `check` uploads `ci-proof`. Its versioned proof

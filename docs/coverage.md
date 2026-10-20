@@ -6,7 +6,7 @@
 
 ## CI aggregation
 
-Full CI defaults to sixteen `ubuntu-24.04` pytest jobs with four workers each.
+Full CI defaults to eight `ubuntu-24.04` pytest jobs with four workers each.
 Each job collects the complete root suite and uses the committed timing profile
 in `scripts/ci_test_durations.json` for a deterministic duration-weighted partition.
 The profile supplies scheduling hints; the actual collection owns test selection,
@@ -23,8 +23,8 @@ The command passes the public `--dist=loadgroup` option to pytest-xdist. In the
 each unmarked test is its own scheduling unit, allowing workers to begin the
 expensive head concurrently. This avoids ordinary load scheduling's initial
 bulk batches concentrating many long tests on one worker. No private scheduler
-override is installed. This scheduling choice does not establish the two-minute
-whole-job target.
+override is installed. Actual whole-job durations include setup and artifact
+upload as well as pytest execution.
 
 Partial shards collect branch coverage without enforcing the whole-project floor.
 The aggregation job requires every expected nonempty shard, matching collection
@@ -55,10 +55,8 @@ Local coverage needs no CI artifacts and still runs the entire suite in one
 invocation. Manual CI dispatch accepts one through twenty jobs for the
 [controlled benchmark](ci-sharding-benchmark.md). One selects the original
 sequential eight-worker gate; every other count uses four workers per job.
-Sixteen is the initial duration-weighted experiment toward a maximum of two
-minutes per whole shard job, including setup and artifact upload; that target
-has not yet been demonstrated. The frozen four-job measurement remains separate
-historical evidence.
+Eight is the selected default. The frozen four-job measurement remains separate
+historical evidence; it does not measure the current eight-job configuration.
 The sequential benchmark also publishes `baseline-tests.xml` inside
 `coverage-report`, allowing exact test and skip identity comparisons against
 shard manifests. Its reporting flags use the optional `PYTEST_REPORT_ARGS`

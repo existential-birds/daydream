@@ -125,8 +125,8 @@ def _execute_shard_plan(
 
 
 @pytest.mark.parametrize(("dispatch", "requested_count", "count", "workers"), [
-    (False, None, 16, 4),
-    (True, None, 16, 4),
+    (False, None, 8, 4),
+    (True, None, 8, 4),
     (True, "1", 1, 8),
     (True, "2", 2, 4),
     (True, "4", 4, 4),

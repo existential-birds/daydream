@@ -9,10 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Default full GitHub CI to sixteen duration-weighted pytest jobs on free standard
+- Default full GitHub CI to eight duration-weighted pytest jobs on free standard
   runners, retaining the required `check`, complete execution evidence and
-  aggregate branch coverage. Sixteen is the first experiment toward a two-minute
-  maximum for whole shard jobs, including setup and uploads; that target remains unverified
+  aggregate branch coverage
   ([#1644](https://github.com/existential-birds/daydream/issues/1644)).
 
 ### Fixed

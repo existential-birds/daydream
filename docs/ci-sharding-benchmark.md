@@ -11,17 +11,16 @@ round-robin study remains historical evidence; its report, compact metrics,
 source bindings and archive receipt are unchanged. Earlier runs on different
 revisions remain excluded diagnostics.
 
-The current experiment defaults to sixteen duration-weighted shards, with a
-target maximum of **two minutes per whole shard job**, including setup and
-artifact upload. It has not yet demonstrated that target. The historical
-four-job improvement does not establish the new ceiling. Measure the actual
-sixteen-job tail before considering larger counts, which remain bounded at
-twenty under the observed organization runner cap.
+Current CI defaults to eight duration-weighted shards, as selected by the user.
+The [sixteen-shard trial](https://github.com/existential-birds/daydream/actions/runs/39357492051)
+recorded whole shard jobs of 133–221 seconds and did not meet the earlier
+120-second goal. Neither that trial nor the historical four-job study establishes
+the current eight-job timing. Manual counts remain available through twenty.
 
 ## Controlled configurations
 
 Use one pushed commit for every measurement. Dispatch `ci.yml` with integer
-`test_jobs` from `1` through `20`; the default is `16`. One job runs the original
+`test_jobs` from `1` through `20`; the default is `8`. One job runs the original
 sequential gate, including `make test` with eight pytest workers, as the existing
 baseline; all other counts use four workers per job. All configurations use the
 same root collection, dependency lock, Python/native CLI versions, branch
@@ -47,7 +46,7 @@ Inside each shard, duration-descending order frontloads expensive tests and
 public `--dist=loadgroup` gives unmarked tests singleton scheduling units. This
 avoids initially batching the expensive head onto one worker; see
 [CI scheduling and aggregation](coverage.md#ci-aggregation). Validate actual
-whole-job tails in the experiment rather than inferring them from the weights
+whole-job tails rather than inferring them from the weights
 or scheduler choice.
 
 Run each configuration at least three times. Alternate configurations rather
@@ -57,9 +56,8 @@ the effect of sharding. Keep cache policy identical and record cold/cache-warm
 runs and unrelated repository activity. Retain failures instead of replacing
 them silently with faster successes. The timing report requires three successful
 samples for each original control (`1`, `2`, `4`) and every additional observed
-count, including a count represented only by failed or active runs. An initial
-sixteen-job experiment can expose the actual tail while that complete-study
-requirement remains pending.
+count, including a count represented only by failed or active runs. A single
+configuration trial does not satisfy that complete-study requirement.
 
 ## Launch and capture
 
@@ -73,7 +71,7 @@ python3 scripts/ci_benchmark.py launch \
   --jobs 1 --manifest /tmp/daydream-ci-benchmark/manifest.json
 ```
 
-After that run finishes, repeat with `--jobs 2`, `--jobs 4`, then `--jobs 16`, and
+After that run finishes, repeat with `--jobs 2`, `--jobs 4`, then `--jobs 8`, and
 repeat the cycle three times for a full new study. Other counts through twenty
 are available for controlled experiments. `--repeat 3` is available when intentionally measuring
 contention, but those overlapping runs must be identified in the analysis.
@@ -120,11 +118,11 @@ completion, including initial queue delay and dependencies. The report records
 each shard's pytest duration, setup before `Run pytest shard`, total job time,
 and delay between planner completion and shard job start. That dispatch delay
 includes GitHub scheduling; the API does not expose a separate ready timestamp.
-The two-minute target applies to each shard's `job_seconds`, from job
-`started_at` through `completed_at`, including its checkout, runtime and
-dependency installation, pytest, uploads and post steps. Record the maximum
-whole-job duration across all shards and samples; a short pytest step or median
-does not establish this maximum. Provisioning remains inside each shard.
+Each shard's `job_seconds` runs from job `started_at` through `completed_at`,
+including its checkout, runtime and dependency installation, pytest, uploads
+and post steps. Record the maximum
+whole-job duration across all shards and samples alongside the median.
+Provisioning remains inside each shard.
 The baseline's `Run tests` step includes script unit tests after pytest, preserving
 the old complete invocation; its pre-test time includes sequential static checks.
 Treatments account for those unit tests in the static gate. Total runner minutes
@@ -149,11 +147,10 @@ metadata alone cannot prove those contracts. Confirm runner labels and the
 runner-image hardware/setup log, not only an action's display name.
 
 The original 25% median full-gate improvement was met by the historical four-job
-study. The current whole-shard two-minute maximum remains a separate unproven
-target. Compare all measured counts explicitly for gate latency, whole-job tail,
-runner minutes and imbalance; investigate missed targets and explain scheduling
-effects before increasing the matrix. Three passing timing samples are necessary
-for a group median but do not alone establish correctness or the maximum.
+study. Compare all measured counts explicitly for gate latency, whole-job tail,
+runner minutes and imbalance, and explain scheduling effects. Three passing
+timing samples are necessary for a group median but do not alone establish
+correctness or the maximum.
 Baseline runs publish `baseline-tests.xml` alongside
 `coverage.xml` in `coverage-report`. Compare the exact JUnit testcase identities
 and skipped identities against each treatment's full collection and union of

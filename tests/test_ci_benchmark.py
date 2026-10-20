@@ -166,7 +166,7 @@ def test_report_rejects_different_revision_attempt_or_runner_class(
     assert not (output / "report.md").exists()
 
 
-@pytest.mark.parametrize("count", [4, 16, 20], ids=["legacy", "default-treatment", "maximum-treatment"])
+@pytest.mark.parametrize("count", [4, 8, 20], ids=["legacy", "default-treatment", "maximum-treatment"])
 def test_launch_ignores_foreign_dispatch_until_its_persisted_marker_is_visible(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, count: int,
 ) -> None:

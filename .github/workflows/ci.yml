@@ -22,7 +22,7 @@ on:
       test_jobs:
         description: Root pytest jobs (1..20; 1 is the eight-worker benchmark baseline)
         type: string
-        default: "16"
+        default: "8"
       run_rl:
         description: Run the dormant standalone RL gate as well as the root gate
         type: boolean
@@ -56,7 +56,7 @@ jobs:
       - name: Plan pytest shards
         id: shards
         env:
-          TEST_JOBS: ${{ inputs.test_jobs || '16' }}
+          TEST_JOBS: ${{ inputs.test_jobs || '8' }}
         run: |
           python3 - <<'PY'
           import json
