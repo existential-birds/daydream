@@ -72,7 +72,7 @@ streams, ATIF/trajectory emission, archive and corpus storage, security and
 redaction, workspace confinement, cancellation/process cleanup, artifact
 ownership, and release/package/workflow contracts. Preserve typed review
 coverage, snapshot binding, and atomic publication from the
-[terminal findings contract](../../../README.md#terminal-review-findings-contract).
+[terminal findings contract](../../../docs/runtime.md#terminal-review-findings-contract).
 
 Static, slow, or mock-backed is not by itself a deletion reason. In particular:
 

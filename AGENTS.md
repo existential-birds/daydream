@@ -43,7 +43,7 @@ repeats conflicting or older testing requirements.
 For fix-loop changes, assert retained fixes and trajectory state.
 Inject terminal-finding faults at actual filesystem operations; preserve typed
 coverage, snapshot binding, and atomic publication under the
-[terminal findings contract](README.md#terminal-review-findings-contract).
+[terminal findings contract](docs/runtime.md#terminal-review-findings-contract).
 
 ## Architecture
 
@@ -163,16 +163,16 @@ rules in these owners rather than expanding this file with defaults and inventor
 
 | Change | Required reference |
 |--------|--------------------|
-| Flow order, extension phases/prompts, configuration | [Extension contract](docs/extensions.md), [configuration](README.md#configuration); defaults in `config.py`, resolution in `run_config.py` / `runner._resolve_backend()` |
-| Staged review, Pi output, budgets/retries, sharding | [Stage-aware builders](docs/extensions.md#stage-aware-review-builders-api-8), [review budgets](README.md#review-budgets), [retry recovery](README.md#retry-recovery), [sharding evidence](docs/overloaded-stack-sharding.md) |
-| Latency routing or diff bounding | [Latency profiles and routing populations](README.md#latency-profiles); `deep/latency.py` and `deep/routing_record.py` own selection and evidence |
+| Flow order, extension phases/prompts, configuration | [Extension contract](docs/extensions.md), [configuration](daydream/config.py); defaults in `config.py`, resolution in `run_config.py` / `runner._resolve_backend()` |
+| Staged review, Pi output, budgets/retries, sharding | [Stage-aware builders](docs/extensions.md#stage-aware-review-builders-api-8), [review assignments](daydream/review_stage_inputs.py), [retry recovery](daydream/agent_retry.py) |
+| Latency routing or diff bounding | [Latency routing](daydream/deep/latency.py); `deep/latency.py` and `deep/routing_record.py` own selection and evidence |
 | Record identity or merge/adjudication | [Finding identity](docs/extensions.md#finding-identity), [built-in flow steps](docs/extensions.md#built-in-flows-and-steps); `deep/records.py` owns identities |
-| Fix, verify, test, commit, remote CI | [Flow gates](docs/extensions.md#built-in-flows-and-steps), [test recipe/reuse](README.md#test-recipe-and-evidence-reuse), [repair jobs](docs/extensions.md#repair-jobs-test-step) |
-| Artifacts, sanctioned inputs, recovery | [Working artifact paths](docs/extensions.md#working-artifact-paths), [output/cache contracts](README.md#output-files), [terminal findings](README.md#terminal-review-findings-contract) |
-| Diagrams | [Diagram contract](README.md#diagrams), [diagram-only flow](docs/extensions.md#diagram); `deep/diagram_grounding/` is the drawing authority, models supply JSON specs and the host renders Mermaid |
-| Tracing, timing, billing | [Observability](docs/observability.md), [field contract](docs/observability-fields.md); tracing is operator-controlled and owns a per-run provider, never a global provider or `Traceloop.init()` |
-| Improve audit/plans | [Improve usage](README.md#audit-a-repository-and-write-implementation-plans), [Improve flow](docs/extensions.md#improve); `services.py` owns shared service discovery |
-| Capture, harvest, adjudication, dataset publication, corpus projection | [Training data](README.md#training-data), [record dataset workflow](docs/runbooks/record-dataset.md), [calibration](docs/calibration.md); preserve immutable evidence, repository provenance, and C5 benchmark isolation |
+| Fix, verify, test, commit, remote CI | [Flow gates](docs/extensions.md#built-in-flows-and-steps), [validation contracts](docs/runtime.md#validation-and-repair), [repair jobs](docs/extensions.md#repair-jobs-test-step) |
+| Artifacts, sanctioned inputs, recovery | [Working artifact paths](docs/extensions.md#working-artifact-paths), [artifact contracts](docs/runtime.md#artifacts-and-recovery), [terminal findings](docs/runtime.md#terminal-review-findings-contract) |
+| Diagrams | [Diagram contract](docs/runtime.md#diagrams), [diagram-only flow](docs/extensions.md#diagram); `deep/diagram_grounding/` is the drawing authority, models supply JSON specs and the host renders Mermaid |
+| Tracing, timing, billing | [Observability](docs/observability.md); tracing is operator-controlled and owns a per-run provider, never a global provider or `Traceloop.init()` |
+| Improve audit/plans | [Improve implementation](daydream/improve/), [Improve flow](docs/extensions.md#improve); `services.py` owns shared service discovery |
+| Capture, harvest, adjudication, dataset publication, corpus projection | [Research](README.md#research), [record dataset workflow](docs/runbooks/record-dataset.md), [calibration](docs/calibration.md); preserve immutable evidence, repository provenance, and C5 benchmark isolation |
 | Training launches or RL | [Training launch](docs/training-launch.md), [RL package](rl/daydream_review/README.md) |
 | Benchmarks | [Benchmark runbook](docs/benchmark.md); `daydream/benchmark/harbor/env_policy.py` owns environment allow/scrub policy |
 | Bot/workflow publication or CI policy | [Packaged workflows](daydream/templates/workflows/README.md), [self-hosted bot](docs/self-hosted-bot-setup.md), [CI spend policy](.github/workflows/README.md#ci-spend-policy) |

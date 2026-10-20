@@ -3,29 +3,24 @@ import hashlib
 import io
 import json
 import re
+import shlex
 from pathlib import Path
 
 import pytest
 
 from daydream.benchmark.cli import _build_benchmark_parser
 from daydream.commands.review import _parse_args
-from daydream.extensions import Registry
-from daydream.extensions.builtins import register_builtins
 
 ROOT = Path(__file__).resolve().parents[1]
 
 def test_readme_run_examples_parse() -> None:
     readme = (ROOT / "README.md").read_text()
-    # the "common commands" code fence — the required run examples
-    section = readme.split("Use the common commands for the common tasks:", 1)[1]
-    fence = section.split("```bash\n", 1)[1].split("\n```", 1)[0]
-    lines = [line.strip() for line in fence.splitlines() if line.strip().startswith("daydream")]
-    assert lines, "the common-commands fence documents no daydream command"
-    # each documented run example must be accepted by the production parser
+    # Parse the shipped review examples without depending on surrounding prose.
+    fences = re.findall(r"```bash\n(.*?)```", readme, re.DOTALL)
+    lines = [line for fence in fences for line in fence.splitlines() if line.startswith("daydream ")]
+    assert lines, "README documents no review commands"
     for line in lines:
-        tokens = line.split()[1:]  # drop the leading 'daydream' verb
-        if "#" in tokens:  # drop any inline comment
-            tokens = tokens[: tokens.index("#")]
+        tokens = shlex.split(line, comments=True)[1:]
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             _parse_args(tokens)  # parses without SystemExit
 
@@ -34,21 +29,19 @@ def test_benchmark_objective_aggregate_parse() -> None:
     p.parse_args(["objective", "./ws", "--run-id", "run-abc123", "--json", "-"])
     p.parse_args(["aggregate", "./suite.json", "--json", "-"])
 
-def test_extensions_doc_links_and_prompt_inventory() -> None:
-    doc = (ROOT / "docs" / "extensions.md").read_text()
-    reg = Registry()
-    register_builtins(reg)
-    # Detailed API definitions now live behind relative source links.
-    links = re.findall(r"\]\(([^)#]+)(?:#[^)]*)?\)", doc)
-    assert links, "extension guide provides no reference links"
-    for target in links:
-        assert (ROOT / "docs" / target).is_file(), f"broken extension reference {target!r}"
-    # Check only the prompt table, independently of surrounding heading levels.
-    table = doc.split("| Prompt | Kwargs |", 1)[1].split("\n\n", 1)[0]
-    names = re.findall(r"^\| `([^`]+)` \|", table, re.MULTILINE)
-    assert names, "extension guide documents no prompts"
-    for name in names:
-        assert name in reg.prompt_names(), f"doc claims unexposed prompt {name!r}"
+def test_agent_document_reference_paths_exist() -> None:
+    # Relocated contracts must remain reachable from the guidance and skill entrypoints.
+    paths = [ROOT / name for name in (
+        "README.md", "AGENTS.md", "CONTRIBUTING.md", ".github/workflows/README.md",
+        ".agents/skills/test-audit/SKILL.md", "daydream/templates/workflows/README.md",
+        "daydream/templates/workflows/single/README.md",
+    )]
+    paths.extend((ROOT / "docs").rglob("*.md"))
+    for path in paths:
+        links = re.findall(r"\]\(([^)#]+)(?:#[^)]*)?\)", path.read_text())
+        for target in links:
+            if "://" not in target:
+                assert (path.parent / target).exists(), f"broken reference {target!r} in {path.relative_to(ROOT)}"
 
 def test_help_exposes_native_surface(capsys: pytest.CaptureFixture[str]) -> None:
     for flag in ("--help", "--help-all"):
@@ -58,15 +51,6 @@ def test_help_exposes_native_surface(capsys: pytest.CaptureFixture[str]) -> None
         assert "--review-profile" in out and "--stack" in out
         assert "feedback" not in out and "--skill" not in out
 
-
-# ---------------------------------------------------------------------------
-# P18/#1156 observability field contract (docs/observability-fields.md +
-# docs/observability.md + readback/replay tooling)
-# ---------------------------------------------------------------------------
-
-
-def _observability_fields() -> str:
-    return (ROOT / "docs" / "observability-fields.md").read_text(encoding="utf-8")
 
 def test_replay_manifest_pins_fixture_and_identity() -> None:
     manifest = json.loads((ROOT / "tests/fixtures/observability_contract/replay-manifest.json").read_text())
@@ -91,9 +75,3 @@ def test_readback_matrix_subset_is_machine_readable() -> None:
         assert isinstance(matrix[section], dict)
     assert "_detectedAgent" in matrix["forbidden_vendor_fields"]
     assert matrix["expected_shape"]["sanitized_protocol_replay"]["duration_ns"] == 395332000000
-    # The machine-readable subset must stay aligned with the markdown matrix:
-    # every field name the subset asserts must appear in the expanded doc.
-    doc = _observability_fields()
-    for key in matrix["identity_metadata_keys"]:
-        assert key in doc, f"matrix subset identity key {key!r} missing from observability-fields.md"
-

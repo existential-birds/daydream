@@ -51,7 +51,7 @@ def _bounded_groups[T](values: list[T], fits: Callable[[list[T]], bool], error: 
 
 
 class StageInputFactory:
-    """Project scoped first-pass assignments with required-work priority; see README.md#review-budgets for bounds."""
+    """Project scoped first-pass assignments with required-work priority; see the assignment limits in this module."""
 
     def __init__(self, backend: Backend, work: WorkContext, stack: StackAssignment, *,
         diff_path: Path, hunk_index_path: Path, shared_paths: dict[str, Path | None],
