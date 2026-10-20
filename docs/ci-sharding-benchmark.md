@@ -2,9 +2,14 @@
 
 Issue [#1644](https://github.com/existential-birds/daydream/issues/1644) requires
 controlled measurements on free standard GitHub-hosted `ubuntu-24.04` runners.
-The original historical runs span different revisions and cannot establish a
-causal speedup. Actual controlled results remain pending until the procedure
-below has completed; changing the workflow alone does not prove the target.
+The [nine-run controlled result](measurements/ci-sharding-1644/report.md) on
+`e395675b66aa0b7e9cf2b882495b352d6cf0e6ce` measured median full-gate times of
+2,260 seconds for the original single-job baseline, 1,282 seconds for two jobs,
+and 676 seconds for four jobs: a 70.1% reduction with four jobs. Exact test/skip
+equivalence and the coverage floor passed for all nine samples. Earlier runs on
+different revisions remain excluded diagnostics. The procedure below reproduces
+the study; the result includes compact evidence, a launch manifest, an independent
+verification appendix and a local archive delivery receipt.
 
 ## Controlled configurations
 
