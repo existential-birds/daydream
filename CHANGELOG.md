@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce the README to agent setup, code review, and research entry points; remove
+  historical documentation and retain concise agent contracts with source links.
+
 - Default full GitHub CI to eight duration-weighted pytest jobs on free standard
   runners, retaining the required `check`, complete execution evidence and
   aggregate branch coverage

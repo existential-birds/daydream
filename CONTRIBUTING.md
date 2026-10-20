@@ -113,8 +113,7 @@ verifying signatures, so a green local `make check` is what keeps your push from
 being rejected. CI defaults to eight duration-weighted standard `ubuntu-24.04`
 pytest jobs with four workers each. A final `check` joins static checks and validated aggregate branch
 coverage; missing or failed shards cannot pass. The script unit tests run in the
-static job. See [coverage aggregation](docs/coverage.md) and the
-[benchmark procedure](docs/ci-sharding-benchmark.md).
+static job. See [coverage aggregation](docs/coverage.md) in [the CI shard tooling](scripts/ci_shard.py).
 
 CI runs the full gate before a queued merge and reuses only a verified merge-group tree afterward. PR updates run basic checks only while effective branch rules enforce the queue and required `check`; otherwise they run in full. See the [CI spend policy](.github/workflows/README.md#ci-spend-policy). The local gate always runs in full.
 

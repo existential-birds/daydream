@@ -119,7 +119,7 @@ the helper is a navigation tool, not a replacement for runtime contracts.
 | `daydream/trajectory/timing.py` | Authoritative phase interval/latency reduction |
 | `daydream/eval/analyzer.py`, `latency_report.py` | Existing cost/tool/timing signals and corpus comparisons |
 | `daydream/deep/artifacts.py`, `daydream/archive/bundle.py` | Failure artifacts and archived evidence |
-| `docs/observability.md`, `docs/observability-fields.md` | Lifecycle, billing and timing interpretation |
+| `docs/observability.md`, `daydream/observability/spans.py` | Lifecycle, billing and timing interpretation |
 | `scripts/measure_review_runtime.py` | Isolated matched-fixture before/after review harness |
 
 The existing analyzer consumes a `RunWriteSnapshot`/artifact workspace; it is not

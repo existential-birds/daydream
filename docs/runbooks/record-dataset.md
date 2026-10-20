@@ -30,24 +30,6 @@ Available creation/edit times, thread IDs, and source URLs are retained as prove
 The source hash belongs to the semantic evidence; the captured hash verifies the
 retained text. Capture metadata does not participate in the semantic digest.
 
-Read all replies offline from the selected snapshot, alongside the recorded claims
-and original code context:
-
-```python
-from pathlib import Path
-from daydream.dataset import LocalRecordStore
-from daydream.training.record_evidence import sessions_from_snapshot
-
-records = LocalRecordStore(Path("FRESH_STORE")).read_snapshot("SNAPSHOT_ID")
-for run in records.runs:
-    print(run["findings"], run["original_task"])
-for session in sessions_from_snapshot(records):
-    for finding in session["resolutions"]:
-        print(finding["item_uid"], finding["disposition"], finding["evidence"])
-        for reply in finding["reply_captures"]:
-            print(reply["source_reply_id"], reply["status"], reply.get("text"))
-```
-
 Finding materialization and adjudication exports also retain these captures when a
 human label supplies the effective disposition. Adding captured content to the same
 source evidence appends immutable history and keeps matching human judgments valid.
@@ -72,3 +54,10 @@ Publication errors preserve local evidence and emit sanitized diagnostics. Retry
 `dataset publish` after resolving transport failures. Conflicting record identities
 and corrupt manifests/shards fail closed; never repair them by editing sealed
 records. Existing local archives and remote repositories are not migrated or deleted.
+
+Local capture and diagnostic dumps retain raw evidence. Review it before sharing;
+a passing publication scan covers only recognized patterns. If credentials are
+exposed, record affected run/observation IDs and publication commits without
+secret values. Operators decide revocation, rotation, access restrictions, and
+remote history remediation. Never edit immutable evidence in place. Private
+harvest clones use `DAYDREAM_GIT_TOKEN` through child Git configuration, not URLs.

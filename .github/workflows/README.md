@@ -31,8 +31,7 @@ enforcing the existing aggregate floor and uploading `coverage-report`. The fina
 `check` runs with `always()` and explicitly rejects failed, cancelled, missing or
 unexpectedly skipped dependencies. Typechecking and the root dead-code scan run
 in the static job. Basic/reuse modes never launch full-suite shards. See
-[coverage integrity](../../docs/coverage.md) and the
-[controlled benchmark](../../docs/ci-sharding-benchmark.md). A failing required `check` prevents the queue from merging
+[coverage integrity](../../docs/coverage.md). A failing required `check` prevents the queue from merging
 the group. Manual dispatches and direct pushes also run the complete gate.
 Local Git hooks remain complete regardless of remote queue state.
 
