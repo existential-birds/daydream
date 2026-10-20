@@ -54,8 +54,9 @@ compiled lock, candidate, model/backend, judge, and scoring identities.
 Pool TP/FP/FN before deriving micro precision/recall/F1; never average repository
 F1. Missing, duplicated, incompatible, or comparison-ineligible runs refuse the
 whole suite. Outputs contain opaque identities/counts, no private source or gold.
-Location/severity axes describe matched pairs only, do not affect reward, and
-omit unavailable axes rather than inventing zero-valued evidence. Read
+Location/severity axes cover matched pairs only and do not affect reward. Absent
+axes add no scored pairs; exported rates remain zero. `location_pairs_scored` and
+`severity_pairs_scored` distinguish no evidence from measured performance. See
 [objective](../daydream/benchmark/harbor/objective.py) for the output schema.
 
 ## Recovery
