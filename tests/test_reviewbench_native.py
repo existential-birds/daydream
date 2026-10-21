@@ -332,6 +332,7 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
     else:
         monkeypatch.delenv("PI_PROVIDER", raising=False)
     monkeypatch.delenv("PI_API_KEY", raising=False)
+    monkeypatch.delenv("PI_THINKING", raising=False)
     monkeypatch.setenv("NOUS_API_KEY", "offline-native-auth-canary")
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "operator-pi"))
     real_exec: Any = asyncio.create_subprocess_exec

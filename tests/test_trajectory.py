@@ -18,6 +18,8 @@ from daydream.backends import (
     AgentEvent,
     DiagnosticEvent,
     MetricsEvent,
+    PiRequestConfig,
+    RequestEvent,
     ResultEvent,
     TextEvent,
     ToolResultEvent,
@@ -491,6 +493,49 @@ async def test_write_partial_failure_emits_warning_does_not_raise(
         recorder.write_partial()
 
     assert any("Partial trajectory write failed" in m for m in warnings_emitted)
+
+
+@pytest.mark.parametrize("secret_field", ["model_name", "provider_name", "reasoning_effort"])
+async def test_request_metadata_is_redacted_in_active_partial_and_completed_evidence(
+    recorder: TrajectoryRecorder,
+    secret_field: str,
+) -> None:
+    """Active request summaries must not bypass credential redaction during partial writes.
+
+    The diagnostic snapshot regression above covers Step metadata; request
+    summaries are appended after whole-trajectory redaction and use another path.
+    This protects real written bytes and the supported embedded measurement view.
+    """
+    canary = "sk-offline-request-secret-canary"
+    fields: dict[str, Any] = {
+        "model_name": "public-native-model",
+        "provider_name": "public-native-provider",
+        "reasoning_effort": "medium",
+    }
+    fields[secret_field] = canary
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+            invocation.observe(
+                RequestEvent(prompt="Ordinary native request", config=PiRequestConfig(read_only=True), **fields)
+            )
+            invocation.observe(TextEvent(text="Public assistant response"))
+            recorder.write_partial()
+            partial = partial_document_path(recorder.path).read_bytes()
+            assert canary.encode() not in partial
+            partial_request = json.loads(partial)["extra"]["subtrajectories"][0]["requests"][0]
+        _, embedded = recorder.review_measurements()
+    final = read_trajectory(recorder.path)
+    completed_request = final["extra"]["subtrajectories"][0]["requests"][0]
+    for request in (partial_request, completed_request, embedded[0]):
+        assert canary not in json.dumps(request)
+        assert request["backend"] == "pi" and request["controls"]["read_only"] is True
+        for source, retained in (
+            ("model_name", "model"),
+            ("provider_name", "provider"),
+            ("reasoning_effort", "reasoning_effort"),
+        ):
+            if source != secret_field:
+                assert request[retained] == fields[source]
 
 
 def _partial_path(recorder: TrajectoryRecorder) -> Path:
