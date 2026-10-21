@@ -282,3 +282,85 @@ def test_competing_canonical_rotation_preserves_both_credentials(tmp_path: Path)
     assert json.loads((canonical / '.lease-auth.json').read_text())['tokens']['refresh_token'] == (
         'synthetic-role-rotation'
     )
+
+
+@pytest.mark.parametrize('recovery', [False, True])
+def test_linux_container_root_returns_private_auth_to_host_owner(recovery: bool) -> None:
+    """Root-written mode600 files otherwise strand a nonroot Linux host's login.
+
+    Docker Desktop ownership translation can mask this regression. Exercise real
+    Linux UID changes with the shipped standalone auth code, without credentials,
+    image pulls, containers with network access, or model transports.
+    """
+    docker = shutil.which('docker')
+    image = ('python:3.12.11-slim-bookworm@sha256:'
+             '519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7')
+    if docker is None:
+        pytest.skip('Docker is unavailable for Linux ownership proof')
+    if subprocess.run([docker, 'image', 'inspect', image], capture_output=True, timeout=15).returncode:
+        pytest.skip('Pinned Python image is not cached; ownership proof never pulls images')
+    script = '''
+import base64, importlib.util, json, os, pathlib, sys, tempfile
+spec = importlib.util.spec_from_file_location('auth', '/auth.py')
+auth = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(auth)
+root = pathlib.Path(tempfile.mkdtemp())
+root.chmod(0o700)
+os.chown(root, 1000, 1000)
+source, canonical, role = root/'source', root/'canonical', root/'role'
+source.mkdir(mode=0o700)
+os.chown(source, 1000, 1000)
+claims = base64.urlsafe_b64encode(b'{"exp":1}').decode().rstrip('=')
+original = {'auth_mode':'chatgpt','OPENAI_API_KEY':None,'tokens':{
+ 'access_token':f'test.{claims}.test','refresh_token':'synthetic-original',
+ 'account_id':'test-account','id_token':'synthetic-id'}}
+(source/'auth.json').write_text(json.dumps(original))
+(source/'auth.json').chmod(0o600)
+os.chown(source/'auth.json', 1000, 1000)
+os.setegid(1000)
+os.seteuid(1000)
+recovery = sys.argv[1] == 'True'
+replace = pathlib.Path.replace
+try:
+ with auth.subscription_session(source, canonical):
+  os.seteuid(0)
+  def fail_replacement(path, target):
+   if recovery and target == canonical/'auth.json' and (canonical/'.lease-state.json').exists():
+    raise OSError('synthetic replacement fault')
+   return replace(path, target)
+  pathlib.Path.replace = fail_replacement
+  try:
+   with auth.subscription_lease(canonical, role) as home:
+    updated = json.loads((home/'auth.json').read_text())
+    updated['tokens']['refresh_token'] = 'synthetic-rotated'
+    (home/'auth.json').write_text(json.dumps(updated))
+  except OSError:
+   assert recovery
+  finally:
+   pathlib.Path.replace = replace
+   os.seteuid(1000)
+  for file in canonical.iterdir():
+   info = file.stat()
+   assert (info.st_uid, info.st_gid, info.st_mode & 511) == (1000,1000,384), (file.name, info)
+   file.read_text()
+  with (canonical/'.lease.lock').open('r+'):
+   pass
+except auth.SubscriptionAuthError:
+ assert recovery
+else:
+ assert not recovery
+if recovery:
+ assert json.loads((canonical/'.lease-auth.json').read_text())['tokens']['refresh_token'] == 'synthetic-rotated'
+ assert json.loads((source/'auth.json').read_text()) == original
+else:
+ assert json.loads((source/'auth.json').read_text())['tokens']['refresh_token'] == 'synthetic-rotated'
+ assert not (canonical/'auth.json').exists()
+print(json.dumps({'host_uid':os.geteuid(),'private_files_readable':True,'recovery':recovery}))
+'''
+    result = subprocess.run([
+        docker, 'run', '--rm', '--pull', 'never', '--network', 'none',
+        '-v', f'{Path(harbor_auth.__file__).resolve()}:/auth.py:ro', image,
+        'python', '-c', script, str(recovery),
+    ], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout) == {'host_uid': 1000, 'private_files_readable': True, 'recovery': recovery}
