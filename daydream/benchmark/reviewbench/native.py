@@ -26,7 +26,7 @@ from daydream.deep.artifacts import diff_key
 from daydream.git_ops.process import _run_git
 from daydream.git_ops.source import frozen_source
 from daydream.github_app import GitHubExecutionInput
-from daydream.hunk_index import _HUNK_HEADER, _header_path, parse_hunks
+from daydream.hunk_index import _HUNK_HEADER, _header_path, _unquote_git_path, parse_hunks
 from daydream.redaction import redact_text
 from daydream.review_result import REVIEW_CONFIGURATION_PHASES, FinalizedReview, validate_terminal_result
 from daydream.run_config import RunConfig, _resolved_backend_name, _resolved_reasoning_effort
@@ -74,7 +74,10 @@ def native_configuration(config: RunConfig) -> tuple[dict[str, Any], runner.Runn
                 'stream_idle_timeout_s': stream_idle_timeout_s(),
                 'limitations': ['Native client configuration files and internal provider choices remain opaque.']}
             continue
-        native = BackendExecutionInput.from_environment(dict(os.environ), backend=name)
+        environment = dict(os.environ)
+        if name == 'pi' and environment.get('PI_CODING_AGENT_DIR'):
+            environment['PI_CODING_AGENT_DIR'] = str(Path(environment['PI_CODING_AGENT_DIR']).resolve())
+        native = BackendExecutionInput.from_environment(environment, backend=name)
         selected = {}
         if name == "pi":
             selected = native_pi_settings(root, agent_dir=native.pi_agent_dir)
@@ -128,17 +131,23 @@ def _path(value: Any) -> str | None:
     return value
 
 
-def _same_number_context(comparison: str) -> dict[str, set[int]]:
-    """Identify unchanged context whose old and new coordinates actually agree."""
+def _diff_coordinates(comparison: str) -> tuple[dict[str, str], dict[str, set[int]]]:
+    """Resolve original paths and context whose old and new coordinates agree."""
+    original_paths: dict[str, str] = {}
     result: dict[str, set[int]] = {}
     path: str | None = None
+    old_path: str | None = None
     old = new = 0
     in_hunk = False
     for raw in comparison.split("\n"):
         if raw.startswith("diff --git "):
-            path, in_hunk = None, False
+            path, old_path, in_hunk = None, None, False
+        elif raw.startswith('--- ') and not in_hunk:
+            old_path = _unquote_git_path(raw[4:].rstrip('\t')).removeprefix('a/')
         elif raw.startswith("+++ ") and not in_hunk:
             path, in_hunk = _header_path(raw), False
+            if path is not None and old_path not in {None, '/dev/null'}:
+                original_paths[path] = old_path
         elif (header := _HUNK_HEADER.match(raw)) is not None:
             old, new, in_hunk = int(header[1]), int(header[3]), True
         elif path is not None and in_hunk:
@@ -150,7 +159,7 @@ def _same_number_context(comparison: str) -> dict[str, set[int]]:
                 old += 1
             elif raw.startswith("+"):
                 new += 1
-    return result
+    return original_paths, result
 
 
 def convert_findings(
@@ -164,7 +173,7 @@ def convert_findings(
     location snapping remain visible omissions rather than invented locations.
     """
     hunks = parse_hunks(comparison)
-    same_context = _same_number_context(comparison)
+    original_paths, same_context = _diff_coordinates(comparison)
     findings: list[dict[str, Any]] = []
     omissions: list[dict[str, Any]] = []
     sources: dict[tuple[str, str], list[bytes] | None] = {}
@@ -198,7 +207,8 @@ def convert_findings(
             head_lines = source(case.head, path)
             ranges = hunks.get(path, {}).get("hunks", [])
             new_side = any(h["new_start"] <= line <= h["new_end"] for h in ranges)
-            old_lines = source(merge_base, path)
+            old_path = original_paths.get(path, path)
+            old_lines = source(merge_base, old_path)
             if head_lines is None or line > len(head_lines):
                 reason = "location_absent_from_head_regular_file"
             elif not new_side:
@@ -207,7 +217,7 @@ def convert_findings(
                 # A bare hint may cite any old source line, not only one visible
                 # in an old hunk. Only verified absence or actual line count can
                 # establish that this coordinate exists exclusively at HEAD.
-                if old_lines is None and (merge_base, path) not in absent:
+                if old_lines is None and (merge_base, old_path) not in absent:
                     reason = "old_source_location_unavailable"
                 elif old_lines is not None and line <= len(old_lines):
                     reason = "ambiguous_old_or_new_side_line_hint"

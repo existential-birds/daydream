@@ -208,6 +208,50 @@ def test_head_conversion_checks_old_coordinates_outside_captured_hunks(tmp_path:
     assert omitted == [{"uid": None, "id": 1, "reason": "ambiguous_old_or_new_side_line_hint"}]
 
 
+@pytest.mark.parametrize('old_path', ['api.py', 'old\té.py'])
+async def test_native_renamed_file_uses_original_source_for_coordinate_ambiguity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, old_path: str,
+) -> None:
+    """A rename must not make a replacement's old coordinate look absent.
+
+    Existing conversion fixtures retain the same path on both sides; they miss
+    destination absence at the base, including Git-quoted original filenames.
+    Unchanged context and new-only coordinates remain defensible after a rename.
+    """
+    repo, initial = frozen_case(tmp_path)
+    new_path = 'renamed.py'
+    if old_path != 'api.py':
+        git(repo, 'mv', 'api.py', old_path)
+    old_contents = 'def resolve(value):\n    return value[0]\n' + ''.join(
+        f'# original {number}\n' for number in range(3, 41))
+    write_and_stage(repo, old_path, old_contents)
+    base = commit(repo, 'long original source')
+    git(repo, 'mv', old_path, new_path)
+    write_and_stage(repo, new_path, old_contents.replace('value[0]', 'value[-1]') + '# new\n# tail\n')
+    case = replace(initial, base=base, head=commit(repo, 'rename with replacement and added tail'))
+    comparison = git_ops.diff_paths(repo, case.base, case.head, ['.'])
+    assert 'rename from ' in comparison and 'rename to ' in comparison
+    if '\t' in old_path:
+        assert '--- "a/old\\t\\303\\251.py"' in comparison
+
+    def create(*_args: Any, **kwargs: Any) -> EmptyReviewBackend:
+        backend = EmptyReviewBackend(kwargs['cwd'], forbid_merge=False, forbid_supervise=False,
+            review_by_stack={'structure': [finding(file=new_path, line=line,
+                description=f'Native finding at line {line}', evidence=f'{new_path}:{line}') for line in (1, 2, 42)]})
+        backend.merge_echo_records = True
+        return backend
+
+    monkeypatch.setattr(runner, 'create_backend', create)
+    result = await review_case(case, repo, empty_review_config(repo, tmp_path / 'trajectory', backend='pi'), 'fixture')
+    assert result.status == 'conversion_limited', result.diagnostics
+    assert result.terminal_result is not None and result.terminal_result['analysis_state'] == 'complete'
+    assert {item['line'] for item in result.retained_findings} == {1, 2, 42}
+    assert result.candidate is not None
+    assert [(item['file'], item['start_line']) for item in result.candidate['findings']] == [
+        (new_path, 1), (new_path, 42)]
+    assert [item['reason'] for item in result.conversion_omissions] == ['ambiguous_old_or_new_side_line_hint']
+
+
 async def test_native_extension_phase_retains_its_own_backend_execution_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, ext_dir: ExtDir,
 ) -> None:
@@ -269,12 +313,12 @@ async def test_case_pi_thinking_cannot_replace_unavailable_operator_default(
 
 @pytest.mark.parametrize(("selection", "provider"), [
     ("explicit", "nous"), ("project", "nous"), ("project_phase", "nous"),
-    ("project_cli", "openrouter"), ("project_cli_missing", "nous"), ("project_env", "nous"),
+    ("project_cli", "openrouter"), ("project_cli_missing", "nous"), ("project_env", "nous"), ("agent_relative", "nous"),
 ])
 async def test_native_pi_retains_nous_provider_model_and_authentication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, selection: str, provider: str,
 ) -> None:
-    """Freeze operator provider, model and authentication across isolated native runs."""
+    """Freeze operator configuration and cwd-relative credentials across isolated runs."""
     repo, case = frozen_case(tmp_path)
     if selection in {"explicit", "project_env"}:
         monkeypatch.setenv("PI_PROVIDER", "nous")
@@ -284,19 +328,33 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
     monkeypatch.delenv("PI_THINKING", raising=False)
     monkeypatch.setenv("NOUS_API_KEY", "offline-native-auth-canary")
     monkeypatch.setenv("OPENROUTER_API_KEY", "offline-other-auth-canary")
-    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "operator-pi"))
+    agent_dir = tmp_path / 'operator-pi'
+    if selection == 'agent_relative':
+        operator_cwd = tmp_path / 'operator-cwd'
+        operator_cwd.mkdir()
+        monkeypatch.chdir(operator_cwd)
+        agent_dir = operator_cwd / '.operator-pi'
+        monkeypatch.delenv('NOUS_API_KEY')
+        monkeypatch.delenv('OPENROUTER_API_KEY')
+    agent_dir.mkdir()
+    auth_body = '{"nous":{"type":"api_key","key":"offline-file-auth-canary"}}'
+    (agent_dir / 'auth.json').write_text(auth_body)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", '.operator-pi' if selection == 'agent_relative' else str(agent_dir))
     real_exec: Any = asyncio.create_subprocess_exec
     captured: list[tuple[list[str], dict[str, Any]]] = []
+    auth_bodies: list[str | None] = []
     expected_usage: list[tuple[int, int, int, float]] = []
     operator = tmp_path / "operator"
+    operator.mkdir()
     overridden = selection in {"project_cli", "project_phase", "project_cli_missing"}
     if selection != "explicit":
-        (operator / ".pi").mkdir(parents=True)
+        settings_dir = agent_dir if selection == 'agent_relative' else operator / '.pi'
+        settings_dir.mkdir(parents=True, exist_ok=True)
         settings = {"defaultModel": "operator-default-model" if overridden else "deepseek/deepseek-v4.1-flash",
                     "defaultThinkingLevel": "low", "apiKey": "must-not-fingerprint-this-secret"}
         if selection != "project_cli_missing":
             settings["defaultProvider"] = "openrouter" if selection == "project_env" else provider
-        (operator / ".pi/settings.json").write_text(json.dumps(settings))
+        (settings_dir / 'settings.json').write_text(json.dumps(settings))
         write_and_stage(repo, ".pi/settings.json", '{"defaultProvider":"other","defaultModel":"wrong-model"}')
         case = replace(case, head=commit(repo, "case native settings cannot replace operator settings"))
 
@@ -305,6 +363,8 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
             return cast(MagicMock, await real_exec(*args, **kwargs))
         argv = [str(arg) for arg in args]
         captured.append((argv, kwargs))
+        auth_path = Path(kwargs['cwd']) / kwargs['env']['PI_CODING_AGENT_DIR'] / 'auth.json'
+        auth_bodies.append(auth_path.read_text() if auth_path.is_file() else None)
         prompt = Path(argv[-1][1:]).read_text()
         stage = review_stage_state(prompt)
         if stage is None and "--extension" not in argv:
@@ -340,13 +400,15 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
     result = await review_case(case, repo, config, "native-pi-fixture")
     assert result.status == "completed_empty", result.diagnostics
     assert captured
+    assert auth_bodies == [auth_body] * len(captured)
     expected_models = {"deepseek/deepseek-v4.1-flash"}
     for argv, kwargs in captured:
         assert argv[argv.index("--provider") + 1] == provider
         assert argv[argv.index("--thinking") + 1] in ({"low"} if selection == "explicit" else {"low", "medium"})
-        assert kwargs["env"]["NOUS_API_KEY"] == "offline-native-auth-canary"
-        if provider == "openrouter":
-            assert kwargs["env"]["OPENROUTER_API_KEY"] == "offline-other-auth-canary"
+        if selection != 'agent_relative':
+            assert kwargs["env"]["NOUS_API_KEY"] == "offline-native-auth-canary"
+            if provider == "openrouter":
+                assert kwargs["env"]["OPENROUTER_API_KEY"] == "offline-other-auth-canary"
     assert {argv[argv.index("--model") + 1] for argv, _ in captured} == expected_models
     assert result.candidate is not None
     assert result.candidate['usage'] == {"prompt_tokens": sum(row[0] for row in expected_usage),
@@ -371,6 +433,9 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
             assert 'PI_PROVIDER' not in os.environ
     assert "offline-native-auth-canary" not in json.dumps(asdict(result), default=str)
     assert "offline-other-auth-canary" not in json.dumps(asdict(result), default=str)
+    assert 'offline-file-auth-canary' not in json.dumps(asdict(result), default=str)
+    assert result.configuration['native']['pi']['selectors']['PI_CODING_AGENT_DIR'] == str(agent_dir)
+    assert os.environ['PI_CODING_AGENT_DIR'] == ('.operator-pi' if selection == 'agent_relative' else str(agent_dir))
 
 
 @pytest.mark.parametrize("fault", ["missing_terminal", "malformed_projection", "ignored_patch", "moved_head"])
