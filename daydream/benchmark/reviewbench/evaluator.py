@@ -18,7 +18,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from .contract import Case, verify_source
+from daydream.json_utils import publish_staged_directory
+
+from .contract import Case, file_digest, verify_source
 
 _RATIOS = (
     "grounded_precision", "grounded_recall", "augmented_precision", "augmented_recall", "novel_tp_yield",
@@ -60,10 +62,6 @@ def _object(path: Path) -> dict[str, Any]:
     return value
 
 
-def _digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def validate_findings(source: Path, candidate: Path, pr_metadata: Path) -> str:
     """Use the supplied no-inference parser against the actual frozen PR metadata."""
     source = source.resolve()
@@ -91,7 +89,7 @@ def _candidate_membership(candidate_dir: Path) -> tuple[dict[str, Case], dict[st
         if case.key in cases:
             raise EvaluationError(f"Duplicate candidate PR identity: {case.key}")
         cases[case.key] = case
-        hashes[path.name] = _digest(path)
+        hashes[path.name] = file_digest(path)
     return cases, hashes
 
 
@@ -110,7 +108,7 @@ def _reference_inputs(manifest: Path, golden_dir: Path, cases: dict[str, Case]) 
             golden = _object(golden_dir / f"{key}.json")
             if Case.from_dict(golden["pr"]) != case:
                 raise ValueError(f"candidate {key} differs from the full golden identity")
-        return {key: _digest(golden_dir / f"{key}.json") for key in sorted(cases)}
+        return {key: file_digest(golden_dir / f"{key}.json") for key in sorted(cases)}
     except (OSError, KeyError, TypeError, ValueError) as exc:
         raise EvaluationError(f"Invalid supplied evaluator reference inputs: {exc}") from exc
 
@@ -194,11 +192,11 @@ def load_evaluation(source: Path, candidate_dir: Path, output_dir: Path) -> dict
         raise EvaluationError("Stored evaluation omitted its selected provider or model")
     output, details = output_dir / "results.json", output_dir / "results.details.json"
     try:
-        if (provenance.get("results_sha256") != _digest(output)
-                or provenance.get("details_sha256") != _digest(details)):
+        if (provenance.get("results_sha256") != file_digest(output)
+                or provenance.get("details_sha256") != file_digest(details)):
             raise EvaluationError("Stored evaluator results or details differ from their recorded hashes")
         manifest, golden_dir = Path(provenance["manifest"]), Path(provenance["golden_directory"])
-        if (provenance.get("manifest_sha256") != _digest(manifest)
+        if (provenance.get("manifest_sha256") != file_digest(manifest)
                 or provenance.get("reference_files") != _reference_inputs(manifest, golden_dir, cases)):
             raise EvaluationError("Stored evaluation reference inputs differ from their recorded hashes")
     except (OSError, KeyError, TypeError) as exc:
@@ -232,6 +230,8 @@ def evaluate_round(
     Caller-owned generation accounting remains independent: this evaluator scores
     only produced candidates. ``expected_keys`` can require complete membership.
     Existing output directories, including previous successes, are never reused.
+    An install failure can leave an incomplete directory without evaluator.json;
+    preserve it and select a fresh output directory before retrying.
     """
     source, candidate_dir, output_dir = source.resolve(), candidate_dir.resolve(), output_dir.resolve()
     source_identity = verify_source(source)
@@ -250,7 +250,7 @@ def evaluate_round(
     if not golden_dir.is_dir() or not manifest.is_file():
         raise EvaluationError("The selected reference directory and corpus manifest must exist")
     reference_hashes = _reference_inputs(manifest, golden_dir, cases)
-    manifest_hash = _digest(manifest)
+    manifest_hash = file_digest(manifest)
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     staged = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}-", dir=output_dir.parent))
     try:
@@ -273,7 +273,7 @@ def evaluate_round(
             raise EvaluationError("Supplied evaluator retained an incomplete checkpoint")
         if _candidate_membership(candidate_dir) != (cases, candidate_hashes):
             raise EvaluationError("Candidate findings changed while the evaluator was running")
-        if (_digest(manifest) != manifest_hash or _reference_inputs(manifest, golden_dir, cases) != reference_hashes
+        if (file_digest(manifest) != manifest_hash or _reference_inputs(manifest, golden_dir, cases) != reference_hashes
                 or verify_source(source) != source_identity):
             raise EvaluationError("Supplied source or reference inputs changed during evaluation")
         provenance = {
@@ -283,14 +283,19 @@ def evaluate_round(
             "manifest": str(manifest), "golden_directory": str(golden_dir),
             "manifest_sha256": manifest_hash, "reference_files": reference_hashes,
             "eval_config": metrics["eval_config"],
-            "results_sha256": _digest(output), "details_sha256": _digest(details_path), "command": command,
+            "results_sha256": file_digest(output), "details_sha256": file_digest(details_path), "command": command,
         }
         (staged / "evaluator.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
         (staged / "evaluator.stdout.log").write_text(result.stdout, encoding="utf-8")
         (staged / "evaluator.stderr.log").write_text(result.stderr, encoding="utf-8")
         if output_dir.exists():
             raise EvaluationError("Evaluator output appeared during evaluation; preserving it")
-        staged.rename(output_dir)
+        try:
+            publish_staged_directory(staged, output_dir, commit_last="evaluator.json")
+        except OSError as exc:
+            raise EvaluationError(
+                "Evaluation publication failed; preserve incomplete artifacts and select a fresh output directory"
+            ) from exc
         return {"metrics": metrics, "evaluator": provenance, "output_dir": str(output_dir)}
     finally:
         if staged.exists():

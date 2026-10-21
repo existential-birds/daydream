@@ -1,4 +1,4 @@
-"""Shared atomic JSON/byte writers and tolerant model-output JSON extraction."""
+"""Shared atomic file publication and tolerant model-output JSON extraction."""
 
 from __future__ import annotations
 
@@ -155,6 +155,25 @@ def atomic_write_json(
     if trailing_newline:
         text += "\n"
     atomic_write_bytes(path, text.encode("utf-8"), fsync=fsync, dir_fsync=dir_fsync, mode=mode)
+
+
+def publish_staged_directory(staged: Path, destination: Path, *, commit_last: str) -> None:
+    """Exclusively install a flat staged file set, committing its marker last.
+
+    Files must be regular files on the destination filesystem. Each hard-link
+    install is atomic and refuses competing bytes; the final marker authorizes
+    readers to consume the complete set. A failure leaves the new directory
+    visibly incomplete and preserves all installed or competing files. Callers
+    own stage cleanup and must use a fresh destination after publication fails.
+    """
+    files = sorted(staged.iterdir())
+    if (not commit_last or Path(commit_last).name != commit_last
+            or not any(path.name == commit_last for path in files)
+            or any(path.is_symlink() or not path.is_file() for path in files)):
+        raise ValueError("publication requires flat regular staged files and a commit marker")
+    destination.mkdir(exist_ok=False)
+    for path in sorted(files, key=lambda path: (path.name == commit_last, path.name)):
+        os.link(path, destination / path.name, follow_symlinks=False)
 
 
 def dataclass_payload(value: Any) -> dict[str, Any]:
