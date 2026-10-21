@@ -16,7 +16,11 @@ environment. Released Harbor 0.24.0 lacks the upload-metric API imported by the
 upstream plugin; the shipped lock pins ReviewBench
 `4f04392d6bf4941ab6f8a3ea0c15b449f4458864` (`0.1.0rc10`) and its Harbor fork
 `6ce6abee0b9fa94a50c88f0557d030a419998d78` (`0.24.0`). It also freezes resolved
-Python dependencies. Harbor stays outside core runtime dependencies.
+Python dependencies for the host. The reviewer image uses a separate
+`reviewer-runtime.lock` exported from Daydream's locked core dependency graph,
+installs without dependency caches, and never installs the ReviewBench package
+or its Git checkout. Answer assets are delivered to the separate verifier.
+Harbor stays outside core runtime dependencies.
 
 ```bash
 uv build --wheel --out-dir /tmp/reviewbench-wheels
