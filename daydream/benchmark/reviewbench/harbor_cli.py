@@ -69,6 +69,29 @@ def _local_metric_config(dataset: Path, jobs_dir: Path) -> Path:
     return Path(name)
 
 
+def _check_completed_job(job_directory: Path) -> int:
+    """Harbor process success alone does not establish scored trial success.
+
+    Use the supplied strict checker and this job's retained metric/round plan.
+    Every invocation owns a fresh report name so an earlier verification result
+    remains intact when a later check fails or another command checks the job.
+    """
+    if not job_directory.is_dir():
+        print('ReviewBench: Harbor returned without a retained job directory', file=sys.stderr)
+        return 1
+    descriptor, report_name = tempfile.mkstemp(
+        prefix='daydream-reviewbench-check-', suffix='.json', dir=job_directory,
+    )
+    os.close(descriptor)
+    result = subprocess.run([
+        sys.executable, '-m', 'reviewbench_harbor.check-job', str(job_directory),
+        str(job_directory / 'reviewbench-metric.py'), '--output', report_name,
+    ], check=False)
+    if result.returncode == 0:
+        print(f'ReviewBench verified report: {report_name}')
+    return result.returncode
+
+
 def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
     if args.reviewbench_command == 'harbor-export':
         from daydream.benchmark.reviewbench.harbor_profile import export_harbor_profile
@@ -124,4 +147,7 @@ def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
         # retain the host-native architecture rather than inherit an override.
         environment.pop('DOCKER_DEFAULT_PLATFORM', None)
         environment.update(RB_HARBOR_AUTH_DIR=str(home), RB_HARBOR_SUBSCRIPTION_HOME='/run/reviewbench-codex')
-        return subprocess.call(command, env=environment)
+        returncode = subprocess.call(command, env=environment)
+    if returncode:
+        return returncode
+    return _check_completed_job(args.jobs_dir.resolve() / args.job_name)

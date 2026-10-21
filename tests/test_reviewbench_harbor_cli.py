@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import importlib.metadata
 import json
 import os
@@ -36,7 +37,15 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
     format_checker = binary / 'python'
     format_checker.write_text(
         f'#!{interpreter}\n'
-        'import pathlib, sys\n'
+        'import json, os, pathlib, runpy, sys\n'
+        'if sys.argv[1:3] == ["-m", "reviewbench_harbor.check-job"]:\n'
+        ' (pathlib.Path(sys.argv[3]) / "checker-invoked").touch()\n'
+        ' if checker := os.environ.get("DAYDREAM_TEST_REVIEWBENCH_CHECKER"):\n'
+        '  sys.argv = [checker, *sys.argv[3:]]\n'
+        '  runpy.run_path(checker, run_name="__main__")\n'
+        ' else:\n'
+        '  pathlib.Path(sys.argv[-1]).write_text(json.dumps({"complete": 1}))\n'
+        ' raise SystemExit(0)\n'
         'assert sys.argv[1:3] == ["-m", "reviewbench_harbor.check-format"]\n'
         'assert (pathlib.Path(sys.argv[3]) / "daydream-profile.json").is_file()\n'
         '(pathlib.Path(sys.argv[3]) / "format-checked").touch()\n'
@@ -45,7 +54,7 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
     harbor = binary / 'harbor'
     harbor.write_text(
         f'#!{interpreter}\n'
-        'import argparse, json, os, pathlib\n'
+        'import argparse, json, os, pathlib, shutil\n'
         'parser = argparse.ArgumentParser()\n'
         'parser.add_argument("command", choices=["run"])\n'
         'for flag, name in [("-c", "config"), ("-p", "dataset"), ("-a", "agent"), ("-n", "concurrency"),\n'
@@ -62,6 +71,8 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
         '(auth_dir / "auth.json").write_text(json.dumps(auth))\n'
         'job = pathlib.Path(args.jobs) / args.job\n'
         'job.mkdir(parents=True)\n'
+        'if results := os.environ.get("DAYDREAM_TEST_HARBOR_RESULTS"):\n'
+        ' shutil.copytree(results, job, dirs_exist_ok=True)\n'
         'record = vars(args)\n'
         'record["metric_config"] = json.loads(pathlib.Path(args.config).read_text())\n'
         'record.update(round_membership=list(range(1, int(args.rounds) + 1)),\n'
@@ -298,9 +309,86 @@ asyncio.run(main())
         return 0
 
     monkeypatch.setattr(subprocess, 'call', resolve_only)
-    assert harbor_cli.handle(args, candidate) == 0
+    # This proof resolves a plan without running trials; a successful Harbor
+    # process with no retained result must now fail closed at the CLI boundary.
+    assert harbor_cli.handle(args, candidate) == 1
     actual = json.loads(result_path.read_text())
     assert actual['plan']['source_prs'] == 219
     assert len(actual['plan']['expected_tasks']) == 1
     assert actual['metric'] == {'type': 'uv-script', 'kwargs': {'script_path': str(args.directory / 'metric.py')}}
     assert len(list(args.jobs_dir.glob('daydream-reviewbench-launch-*.json'))) == 1
+
+
+@pytest.mark.parametrize('outcome', ['complete', 'reviewer-error', 'missing-score', 'wrong-round', 'transport-error'])
+def test_successful_harbor_process_requires_actual_complete_retained_job(
+    launch: tuple[argparse.Namespace, dict[str, Any]], supplied_source: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    """A real Harbor exit zero can hide reviewer exceptions and absent rewards.
+
+    Retain the existing process-boundary launch, use the actual supplied checker
+    and metric against real job/plan/trial files, and vary only the failed evidence.
+    Previous argv replay coverage modeled process success as benchmark success.
+    """
+    args, candidate = launch
+    retained = tmp_path / 'harbor-results'
+    (retained / 'trial').mkdir(parents=True)
+    metric = (supplied_source / 'scripts/harbor/metric.py').read_text().replace(
+        'EXPECTED_TASKS = {}', 'EXPECTED_TASKS = {"1": 2}',
+    )
+    (retained / 'reviewbench-metric.py').write_text(metric)
+    metric_sha = hashlib.sha256(metric.encode()).hexdigest()
+    job: dict[str, Any] = {
+        'id': 'fixture-job', 'finished_at': '2026-10-21T00:00:00Z', 'n_total_trials': 1,
+        'stats': {'n_errored_trials': 0, 'n_running_trials': 0, 'n_pending_trials': 0, 'n_cancelled_trials': 0},
+    }
+    plan = {
+        'schema_version': 1, 'job_id': job['id'], 'metric_sha256': metric_sha,
+        'source_metric_sha256': [metric_sha], 'expected_tasks': {'1': 2}, 'n_attempts': 1, 'source_prs': 219,
+        'trials': {'trial': {'task_id': 1, 'evaluation_id': 2, 'round': 1}},
+    }
+    reward = {
+        'rb_schema': 1, 'rb_task': 1, 'rb_evaluation': 2, 'rb_round': 1, 'rb_failed': 0,
+        'overall.candidate_count': 1, 'overall.golden_tp_count': 1, 'overall.matched_count': 1,
+        'overall.matched_tp_count': 1, 'overall.unmatched_count': 0, 'overall.unmatched_tp_count': 0,
+        'overall.unmatched_fp_count': 0, 'overall.golden_covered_count': 1,
+    }
+    trial: dict[str, Any] = {
+        'trial_name': 'trial', 'finished_at': job['finished_at'], 'exception_info': None,
+        'verifier_environment_mode': 'separate', 'step_results': [], 'verifier_result': {'rewards': reward},
+    }
+    if outcome == 'reviewer-error':
+        job['stats']['n_errored_trials'] = 1
+        trial['exception_info'] = {'exception_type': 'RuntimeError', 'exception_message': 'native reviewer failed'}
+    elif outcome == 'missing-score':
+        trial['verifier_result'] = None
+    elif outcome == 'wrong-round':
+        reward['rb_round'] = 3
+    elif outcome == 'transport-error':
+        monkeypatch.setenv('DAYDREAM_TEST_HARBOR_EXIT', '23')
+    for relative, value in [('result.json', job), ('reviewbench-plan.json', plan), ('trial/result.json', trial)]:
+        (retained / relative).write_text(json.dumps(value))
+    prior_name = 'daydream-reviewbench-check-prior.json'
+    (retained / prior_name).write_text('preserve prior report bytes')
+    monkeypatch.setenv('DAYDREAM_TEST_HARBOR_RESULTS', str(retained))
+    monkeypatch.setenv('DAYDREAM_TEST_REVIEWBENCH_CHECKER', str(supplied_source / 'scripts/harbor/check-job.py'))
+    result = harbor_cli.handle(args, candidate)
+    job_directory = args.jobs_dir / args.job_name
+    assert (job_directory / prior_name).read_text() == 'preserve prior report bytes'
+    assert (job_directory / 'result.json').read_bytes() == (retained / 'result.json').read_bytes()
+    reports = [path for path in job_directory.glob('daydream-reviewbench-check-*.json') if path.name != prior_name]
+    if outcome == 'complete':
+        assert result == 0 and len(reports) == 1
+        report = json.loads(reports[0].read_text())
+        assert report['complete'] == 1 and report['scored_trials'] == report['expected_trials'] == 1
+        assert report['source_prs'] == 219 and report['expected_prs'] == 1
+        assert report['n_attempts'] == 1 and report['failed_trials'] == 0
+    else:
+        assert result == (23 if outcome == 'transport-error' else 1)
+        assert reports == []
+    assert (job_directory / 'checker-invoked').exists() is (outcome != 'transport-error')
+    # Authentication refresh still reconciles before result validation, including
+    # when the retained job subsequently fails its strict completion checks.
+    source_auth = json.loads((args.codex_home / 'auth.json').read_text())
+    assert source_auth['tokens']['refresh_token'] == 'synthetic-process-rotation'
+    assert not (args.auth_runtime / 'auth.json').exists()
