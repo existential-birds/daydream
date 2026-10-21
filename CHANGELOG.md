@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject standalone benchmark candidate changes between cases or during review
+  before publishing scorable findings
+  ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
 - Preserve native arbiter effort overrides in embedded reviews and correctly
   combine the public reviewer's mount-flag constraints
   ([#1688](https://github.com/existential-birds/daydream/pull/1688)).

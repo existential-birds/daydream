@@ -177,9 +177,12 @@ The package hash covers `daydream` and its shipped `daydream_ext` code/resources
 external extension overrides are refused rather than assigned a partial identity.
 Use the candidate installation/checkout itself to create and run its plan; another
 revision is a new plan, not a relabeled result. Package-byte changes invalidate a
-plan. Configuration is frozen on the first generation call and must agree across
-its rounds. Effective native configuration and profile digests accompany every
-terminal outcome. The freeze includes native provider/thinking/retry controls and
+plan. Standalone generation rechecks the candidate before each case and before
+publishing findings; a changed candidate leaves a failed outcome with retained
+review evidence and no scorable findings. Configuration is frozen on the first
+generation call and must agree across its rounds. Effective native configuration
+and profile digests accompany every terminal outcome. The freeze includes native
+provider/thinking/retry controls and
 the operator configuration root's public Pi model defaults. Case-local Pi defaults
 cannot replace them. Actual request model/provider/effort identities are retained
 separately from configured phase intent, including optional review phases.
