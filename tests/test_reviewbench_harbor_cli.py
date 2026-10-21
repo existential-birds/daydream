@@ -11,6 +11,7 @@ import argparse
 import base64
 import importlib.metadata
 import json
+import os
 import subprocess
 import sys
 import zipfile
@@ -22,6 +23,7 @@ import pytest
 
 from daydream.benchmark.reviewbench import harbor_build, harbor_cli
 from daydream.benchmark.reviewbench.harbor_profile import canonical_digest
+from tests.test_reviewbench_evaluator import supplied_source as supplied_source
 
 
 @pytest.fixture
@@ -46,7 +48,7 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
         'import argparse, json, os, pathlib\n'
         'parser = argparse.ArgumentParser()\n'
         'parser.add_argument("command", choices=["run"])\n'
-        'for flag, name in [("-p", "dataset"), ("-a", "agent"), ("-n", "concurrency"),\n'
+        'for flag, name in [("-c", "config"), ("-p", "dataset"), ("-a", "agent"), ("-n", "concurrency"),\n'
         ' ("-k", "rounds"), ("-r", "retries"), ("-o", "jobs"),\n'
         ' ("--job-name", "job"), ("-i", "task"), ("-l", "limit")]:\n'
         ' parser.add_argument(flag, dest=name)\n'
@@ -61,6 +63,7 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
         'job = pathlib.Path(args.jobs) / args.job\n'
         'job.mkdir(parents=True)\n'
         'record = vars(args)\n'
+        'record["metric_config"] = json.loads(pathlib.Path(args.config).read_text())\n'
         'record.update(round_membership=list(range(1, int(args.rounds) + 1)),\n'
         ' auth_home=os.environ["RB_HARBOR_SUBSCRIPTION_HOME"],\n'
         ' platform=os.environ.get("DOCKER_DEFAULT_PLATFORM"),\n'
@@ -78,6 +81,7 @@ def launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[argparse.Na
     monkeypatch.setattr(importlib.metadata, 'version', lambda _name: '0.1.0rc10')
     dataset, source = tmp_path / 'dataset', tmp_path / 'subscription'
     dataset.mkdir()
+    (dataset / 'metric.py').write_text('EXPECTED_TASKS = {}\n')
     source.mkdir()
     claims = base64.urlsafe_b64encode(b'{"exp":1}').decode().rstrip('=')
     (source / 'auth.json').write_text(json.dumps({
@@ -113,8 +117,12 @@ def test_launch_delivers_selection_independent_rounds_and_returns_refresh(
         monkeypatch.setenv(key, 'synthetic-forbidden-route')
     assert harbor_cli.handle(args, candidate) == exit_code
     actual = json.loads((args.jobs_dir / args.job_name / 'launch.json').read_text())
+    local_config = Path(actual.pop('config'))
+    assert local_config.parent == args.jobs_dir.resolve() and local_config.is_file()
     assert actual == {
         'command': 'run', 'dataset': str(args.directory.resolve()),
+        'metric_config': {'metrics': [{'type': 'uv-script',
+                                      'kwargs': {'script_path': str(args.directory.resolve() / 'metric.py')}}]},
         'agent': 'daydream.benchmark.reviewbench.harbor_agent:DaydreamPublicReviewAgent',
         'concurrency': '2', 'rounds': str(rounds), 'retries': '0', 'jobs': str(args.jobs_dir.resolve()),
         'job': args.job_name, 'yes': True, 'plugins': [
@@ -210,3 +218,89 @@ def test_reviewer_wheel_must_equal_executing_package(tmp_path: Path, damage: str
             destination.writestr(name, data)
     with pytest.raises(ValueError, match='package membership|same candidate package'):
         harbor_build.reviewer_build(changed)
+
+
+def test_local_dataset_launch_builds_actual_harbor_reviewbench_plan_before_models(
+    launch: tuple[argparse.Namespace, dict[str, Any]], tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, supplied_source: Path,
+) -> None:
+    """A local -p export needs explicit metrics before the upstream plugin can plan.
+
+    The argv replay cannot detect Harbor's different metric resolution for local
+    and Hub datasets. Resolve the actual CLI configuration, Job and both plugins
+    in the pinned optional runtime without running any trial or container. The
+    identical empty-metrics control reproduces the observed pre-inference failure.
+    """
+    from daydream.benchmark.reviewbench.harbor_profile import export_harbor_profile
+
+    selected = os.environ.get('DAYDREAM_REVIEWBENCH_RUNTIME')
+    if not selected:
+        pytest.skip('set DAYDREAM_REVIEWBENCH_RUNTIME to the pinned public runtime Python')
+    runtime = Path(selected).absolute()
+    assert runtime.is_file()
+    args, candidate = launch
+    args.directory = tmp_path / 'actual-full-export'
+    args.task = None
+    export_harbor_profile(supplied_source, args.directory, candidate=candidate, base_image=harbor_build.NODE_IMAGE)
+    monkeypatch.setattr(harbor_cli, 'sys', SimpleNamespace(executable=str(runtime)))
+    script = tmp_path / 'resolve-plan.py'
+    script.write_text('''import asyncio, hashlib, json, sys
+from pathlib import Path
+from harbor.job import Job
+from harbor.models.job.config import JobConfig
+from harbor.cli.job_plugins import attach_job_plugins, PluginConfig
+from reviewbench_harbor.reviewbench_plugin import ReviewBenchPlugin, RoundMetric
+from daydream.benchmark.reviewbench.harbor_cli import verify_runtime
+
+async def main():
+    verify_runtime()
+    config = JobConfig.model_validate_json(Path(sys.argv[1]).read_text())
+    control = config.model_copy(deep=True)
+    control.job_name = "no-metric-control"
+    control.metrics = []
+    control_job = await Job.create(control)
+    try:
+        await ReviewBenchPlugin().on_job_start(control_job)
+    except ValueError as error:
+        assert "frozen ReviewBench uv-script metric" in str(error)
+    else:
+        raise AssertionError("unbound local metric unexpectedly produced a ReviewBench plan")
+    job = await Job.create(config)
+    await attach_job_plugins(job, [
+        PluginConfig(import_path="reviewbench_harbor.reviewbench_plugin:ReviewBenchPlugin"),
+        PluginConfig(import_path="daydream.benchmark.reviewbench.harbor_subscription_plugin:SubscriptionAdmissionPlugin"),
+    ])
+    plan = json.loads((job.job_dir / "reviewbench-plan.json").read_text())
+    assert plan["source_prs"] == 219 and len(plan["expected_tasks"]) == 1
+    assert plan["n_attempts"] == 1 and len(plan["trials"]) == 1
+    metric_digest = hashlib.sha256(Path(config.metrics[0].kwargs["script_path"]).read_bytes()).hexdigest()
+    assert plan["source_metric_sha256"] == [metric_digest]
+    assert all(isinstance(metric, RoundMetric) for group in job._metrics.values() for metric in group)
+    assert (job.job_dir / "reviewbench-metric.py").is_file()
+    assert json.loads((job.job_dir / "daydream-subscription-admission.json").read_text())["effective_concurrency"] == 1
+    Path(sys.argv[2]).write_text(json.dumps({"plan": plan, "metric": config.metrics[0].model_dump(mode="json")}))
+
+asyncio.run(main())
+''')
+    result_path = tmp_path / 'resolved-plan.json'
+    merged_config = tmp_path / 'resolved-config.json'
+    repository = Path(__file__).resolve().parents[1]
+
+    def resolve_only(command: list[str], *, env: dict[str, str]) -> int:
+        # --print-config returns before execution. No Job.run, Trial.create,
+        # environment build, reviewer or verifier is invoked by this proof.
+        environment = {**env, 'PYTHONPATH': str(repository)}
+        printed = subprocess.run([*command, '--print-config'], env=environment, check=True,
+                                 text=True, capture_output=True, timeout=60)
+        merged_config.write_text(printed.stdout)
+        subprocess.run([str(runtime), str(script), str(merged_config), str(result_path)], env=environment,
+                       check=True, text=True, capture_output=True, timeout=120)
+        return 0
+
+    monkeypatch.setattr(subprocess, 'call', resolve_only)
+    assert harbor_cli.handle(args, candidate) == 0
+    actual = json.loads(result_path.read_text())
+    assert actual['plan']['source_prs'] == 219
+    assert len(actual['plan']['expected_tasks']) == 1
+    assert actual['metric'] == {'type': 'uv-script', 'kwargs': {'script_path': str(args.directory / 'metric.py')}}
+    assert len(list(args.jobs_dir.glob('daydream-reviewbench-launch-*.json'))) == 1
