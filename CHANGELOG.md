@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Run supplied, revision-pinned ReviewBench cases through the ordinary native
+  reviewer, with isolated candidate/round outputs, typed completion and source
+  verification, visible conversion/failure/missing-case accounting, and supplied
+  evaluator reports ([#92](https://github.com/existential-birds/daydream/issues/92)).
+  This is compatible new functionality; reviewer defaults are unchanged.
+
 ### Changed
 
 - Reduce the README to agent setup, code review, and research entry points; remove

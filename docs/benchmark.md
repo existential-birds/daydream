@@ -1,4 +1,117 @@
-# Private PR benchmarks
+# Review benchmarks
+
+## Supplied ReviewBench with native Daydream
+
+Use `daydream benchmark reviewbench COMMAND --help`. This evaluation-only adapter
+calls the ordinary `runner.run` reviewer; it preserves native backend, provider,
+authentication, model, per-phase configuration and review-profile precedence.
+It adds no reviewer engine selector and changes no reviewer defaults. Benchmark
+inputs and results never enter dataset capture or training.
+
+Pin the supplied source and install its Node dependencies (Node 20+):
+
+```bash
+git clone https://github.com/review-bench/ReviewBench.git ~/ReviewBench
+git -C ~/ReviewBench checkout --detach 4f04392d6bf4941ab6f8a3ea0c15b449f4458864
+cd ~/ReviewBench
+npm ci
+```
+
+Keep that checkout unchanged; the adapter verifies its revision and source hashes.
+The starter set is exactly `corpus/test/test.json` (25 cases); `--set full` selects
+all 219 entries in `corpus/manifest.json`. Create a fresh candidate plan with no
+inference:
+
+```bash
+daydream benchmark reviewbench plan ~/reviewbench-runs --source ~/ReviewBench \
+  --candidate native-current --producer daydream-native --set test --rounds 1
+daydream benchmark reviewbench status ~/reviewbench-runs/native-current
+```
+
+Plans record the executing Daydream package version, Git revision when available,
+package artifact hash, producer, benchmark revision and exact case membership.
+Use the candidate installation/checkout itself to create and run its plan; another
+revision is a new plan, not a relabeled result. Package-byte changes invalidate a
+plan. Configuration is frozen on the first generation call and must agree across
+its rounds. Effective native configuration and profile digests accompany every
+terminal outcome. Missing usage/token/cost/duration measurements remain unavailable.
+
+**Generation incurs reviewer calls. Launch only with separate experiment
+authorization.** After `--`, use ordinary native review flags and a configuration
+root. Its repository file policy is loaded through the existing CLI parser;
+explicit flags retain their usual precedence. Native provider/authentication
+settings are inherited, including Pi's configured `nous` and
+`deepseek/deepseek-v4.1-flash`; no OpenRouter substitution occurs.
+
+```bash
+daydream benchmark reviewbench run ~/reviewbench-runs/native-current --round 1 \
+  -- --backend pi /path/to/operator-config-root
+```
+
+`--pr INDEX` selects a zero-based entry in the selected supplied set, matching
+`try-agent.sh`; `--repository PATH` optionally supplies that single case's local
+frozen repository. Otherwise the adapter fetches full supplied base/head commits
+from the corresponding `review-bench/OWNER_REPO` mirror. Every review uses an
+independent disposable clone at HEAD, with golden/reference material outside
+reviewer inputs. No fixes, pushes, PR publication or dataset capture run. This
+native offline workflow does not claim the portal container/egress isolation or
+official leaderboard eligibility; separately authorized experiments must arrange
+the supplied isolation and audit requirements for the selected native harness.
+
+The adapter verifies actual source identity, analyzed HEAD, merge base and full
+patch fingerprint, rather than trusting a supplied SHA label. Native ignores
+that change the patch produce a visible comparison failure. It consumes the
+actual finalized terminal result without manufacturing a publication PR.
+Complete empty, incomplete, failed and absent results remain distinct. Retained
+partial findings and conversion limitations remain in `outcomes/`. Canonical
+line hints are converted only when the captured diff proves a HEAD coordinate;
+deleted-side-only, ambiguous, relocated and unlocatable hints are omissions.
+Any omission marks the case `conversion_limited` and excludes it from scorable
+findings, rather than presenting discarded findings as a successful empty review.
+
+Each `round-N/findings/` is one evaluator input. Never pass a parent containing
+multiple rounds: the supplied loader recursively merges identical PR identities.
+Artifacts are created at new paths and prior outputs are preserved on failure;
+use a new candidate plan for retries or changed inputs. `status` reports expected,
+produced, completed-empty, failed, missing and evaluated memberships independently
+of supplied overlap-only scoring. Subsets are identified as subsets.
+
+**Judging incurs model calls for ordinary nonempty reviews.** Select its standalone
+provider and model explicitly after separate experiment authorization:
+
+```bash
+daydream benchmark reviewbench judge ~/reviewbench-runs/native-current --round 1 \
+  --provider anthropic --model YOUR_JUDGE_MODEL
+daydream benchmark reviewbench report ~/reviewbench-runs/native-current
+```
+
+The supplied evaluator owns matching, classification and metric formulas. Reports
+use its `printSummary` and preserve raw grounded/augmented precision and recall,
+macro/micro metrics, per-PR/severity/category breakdowns, ratios/nulls, `eval_config`
+and available usage. Evaluator provenance records the explicit workflow, provider,
+model, source revision, candidate/reference bytes and prompt hashes. Standalone
+and public Harbor evaluator profiles differ; neither substitutes for the other.
+Augmented recall has an agent-dependent denominator. Supplied duration means the
+successful reviewer attempt, not total publication/cleanup latency; this native
+adapter currently leaves that measurement unavailable.
+
+For the documented final comparison, make a fresh `--set full --rounds 3` plan,
+run/judge rounds 1, 2 and 3 independently, then `report` averages corresponding
+supplied score ratios with null availability counts while retaining all three raw
+results. `RB_ATTEMPT` is an upstream retry counter, not an independent round.
+These results inform owner acceptance of tradeoffs; no custom reward, quality
+floor, automatic winner, calibration or qualification gate is added.
+
+Offline verification uses synthetic fixtures and the pinned upstream parser,
+scorer/aggregate/summary and its completed-empty judge fast path, without model
+connections. To rerun optional source-backed integration tests:
+
+```bash
+uv lock --check
+DAYDREAM_REVIEWBENCH_SOURCE=~/ReviewBench uv run pytest tests/test_reviewbench_*.py
+```
+
+## Private Harbor benchmark
 
 Read before operating or changing the Harbor benchmark. Install the `benchmark`
 extra in Daydream's environment. The supported runtime is local Docker Desktop

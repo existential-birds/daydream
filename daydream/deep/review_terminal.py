@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,8 @@ from daydream.phases.schemas import MERGED_ITEMS_SCHEMA
 from daydream.pr_review import PRInfo, resolve_review_renderers
 from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
 from daydream.review_budget import render_review_warnings, review_warnings
-from daydream.review_result import ReasonCode
+from daydream.review_result import ReasonCode, deliver_finalized_review
+from daydream.run_config import _resolved_backend_name, _resolved_model, _resolved_reasoning_effort
 from daydream.trajectory import get_current_recorder
 from daydream.ui import print_warning
 
@@ -120,6 +122,21 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, no_diff: bool = Fa
     ctx.data["terminal_review_result"] = result
     ctx.data['terminal_review_items'] = items
     ctx.data['terminal_review_held'] = held
+    # Embedded evaluation consumes the same validated result as publication,
+    # before optional rendering, without inventing a live GitHub PR target.
+    phases = ('review', 'exploration', 'per_stack_review', 'merge', 'supervise')
+    profile = ctx.config.review_profile
+    deliver_finalized_review(result, items, {
+        'phases': {phase: {'backend': _resolved_backend_name(ctx.config, phase),
+                           'model': _resolved_model(ctx.config, phase),
+                           'reasoning_effort': _resolved_reasoning_effort(ctx.config, phase)} for phase in phases},
+        'profile': None if profile is None else {
+            'name': profile.name, 'source_kind': profile.source_kind, 'digest': profile.digest,
+        },
+        'file_config': None if ctx.config.file_config is None else asdict(ctx.config.file_config),
+        'latency_route': None if ctx.config.latency_route is None else asdict(ctx.config.latency_route),
+        'ignore_paths': list(ctx.config.ignore_paths), 'shallow': ctx.config.shallow,
+    })
     try:
         context = refresh_review_report(ctx, no_diff=no_diff)
     except (OSError, ValueError, TypeError, RecursionError) as exc:
