@@ -9,7 +9,10 @@ and `daydream --help-all` for settings rather than copying defaults into docs.
 Embedded consumers may pass `review_result_handler` to `runner.run`. It receives
 one `FinalizedReview` from the actual terminal boundary: validated canonical
 items, the frozen typed terminal result (including run/source identity), and
-effective configuration. It requires no GitHub publication target. The integer
+configured phase policy, observed native request identities and available usage.
+Usage uses the trajectory recorder's single-owner totals after review writers
+join; missing dimensions remain absent and observed zeros remain zero. It requires
+no GitHub publication target. The integer
 return remains the workflow exit code; missing delivery is unavailable analysis.
 Valid partial findings survive analysis failure. Consumer mutation cannot change
 the native result; consumer exceptions fail the invocation. This handoff does

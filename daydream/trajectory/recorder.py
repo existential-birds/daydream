@@ -68,6 +68,9 @@ _INITIAL_TOTALS: dict[str, Any] = {
     "cached": 0,
     "cost": 0.0,
     "any_cost_seen": False,
+    "any_prompt_seen": False,
+    "any_completion_seen": False,
+    "any_cached_seen": False,
 }  # noqa: E501 - module-level constant cloned via dict.copy() at recorder init
 
 
@@ -604,10 +607,13 @@ class TrajectoryRecorder:
     ) -> None:
         if prompt_tokens is not None:
             self._final_totals["prompt"] += prompt_tokens
+            self._final_totals["any_prompt_seen"] = True
         if completion_tokens is not None:
             self._final_totals["completion"] += completion_tokens
+            self._final_totals["any_completion_seen"] = True
         if cached_tokens is not None:
             self._final_totals["cached"] += cached_tokens
+            self._final_totals["any_cached_seen"] = True
         if cost_usd is not None:
             self._final_totals["cost"] += cost_usd
             self._final_totals["any_cost_seen"] = True
@@ -691,15 +697,26 @@ class TrajectoryRecorder:
         )
         self._extend_steps([self.redactor.redact_step(step)])
 
-    def build_trajectory(
-        self,
-        steps: list[Step] | None = None,
-        *,
-        snapshot_at: str | None = None,
-    ) -> Trajectory:
-        if steps is None:
-            steps = self.steps
-        version = daydream.__version__
+    def review_measurements(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Project joined request identities and single-owner whole-run usage.
+
+        Fork scopes already fold successful child metrics into the root once.
+        These are usage totals, not review wall time or cleanup duration.
+        """
+        metrics = self._build_final_metrics(len(self.steps))
+        usage = {key: value for key, value in (
+            ("prompt_tokens", metrics.total_prompt_tokens), ("completion_tokens", metrics.total_completion_tokens),
+            ("cached_tokens", metrics.total_cached_tokens), ("cost_usd", metrics.total_cost_usd)) if value is not None}
+        if "prompt_tokens" in usage and "completion_tokens" in usage:
+            usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+        requests = [{"phase": invocation["phase"], **request}
+                    for invocation in self._recursive_invocation_summaries()
+                    for request in invocation.get("requests", [])]
+        admitted = redact_value(requests)
+        return usage, admitted if isinstance(admitted, list) else []
+
+    def _build_final_metrics(self, total_steps: int) -> FinalMetrics:
+        """Keep ATIF and embedded result usage on the same billing projection."""
         final_metrics_extra: dict[str, Any] | None = None
         if self._folded_fork_totals:
             # Token and cost totals include successful fork trajectories, but
@@ -710,14 +727,26 @@ class TrajectoryRecorder:
                 "total_steps_scope": "local_trajectory",
             }
 
-        final_metrics = FinalMetrics(
-            total_prompt_tokens=self._final_totals["prompt"] or None,
-            total_completion_tokens=self._final_totals["completion"] or None,
-            total_cached_tokens=self._final_totals["cached"] or None,
+        return FinalMetrics(
+            total_prompt_tokens=self._final_totals["prompt"] if self._final_totals["any_prompt_seen"] else None,
+            total_completion_tokens=(self._final_totals["completion"]
+                                     if self._final_totals["any_completion_seen"] else None),
+            total_cached_tokens=self._final_totals["cached"] if self._final_totals["any_cached_seen"] else None,
             total_cost_usd=(self._final_totals["cost"] if self._final_totals["any_cost_seen"] else None),
-            total_steps=len(steps),
+            total_steps=total_steps,
             extra=final_metrics_extra,
         )
+
+    def build_trajectory(
+        self,
+        steps: list[Step] | None = None,
+        *,
+        snapshot_at: str | None = None,
+    ) -> Trajectory:
+        if steps is None:
+            steps = self.steps
+        version = daydream.__version__
+        final_metrics = self._build_final_metrics(len(steps))
         extra: dict[str, Any] = {"target_dir": str(self.target_dir)}
         if self._run_started_at:
             extra["run_started_at"] = self._run_started_at

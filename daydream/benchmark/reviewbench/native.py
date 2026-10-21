@@ -7,21 +7,96 @@ coordinates that the finalized native result did not establish.
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
+import os
 import re
 import tempfile
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
 from daydream import git_ops, runner
+from daydream.backends import BackendExecutionInput, resolve_fanout_concurrency
+from daydream.backends._subprocess import stream_idle_timeout_s
+from daydream.backends.pi import native_pi_settings
 from daydream.benchmark.reviewbench.contract import Case
 from daydream.deep.artifacts import diff_key
 from daydream.git_ops.process import _run_git
 from daydream.git_ops.source import frozen_source
+from daydream.github_app import GitHubExecutionInput
 from daydream.hunk_index import _HUNK_HEADER, _header_path, parse_hunks
-from daydream.review_result import FinalizedReview, validate_terminal_result
-from daydream.run_config import RunConfig
+from daydream.redaction import redact_text
+from daydream.review_result import REVIEW_CONFIGURATION_PHASES, FinalizedReview, validate_terminal_result
+from daydream.run_config import RunConfig, _resolved_backend_name, _resolved_reasoning_effort
+
+
+def native_configuration(config: RunConfig) -> tuple[dict[str, Any], runner.RunnerExecutionInput]:
+    """Freeze nonsecret native controls alongside an unpersisted auth capability.
+
+    Only selected public Pi defaults are hashed; neither authentication files nor
+    arbitrary settings (which may contain credentials) are copied or fingerprinted.
+    """
+    root = Path(config.target or Path.cwd()).resolve()
+    phases = set(REVIEW_CONFIGURATION_PHASES) | set(config.file_config.phases if config.file_config else {})
+    names = {_resolved_backend_name(config, phase) for phase in phases}
+    inputs: dict[str, BackendExecutionInput | None] = {}
+    provenance: dict[str, Any] = {}
+    for name in sorted(names):
+        selector_names = {
+            'pi': ('PI_CODING_AGENT_DIR',),
+            'codex': ('CODEX_HOME', 'OPENAI_BASE_URL'),
+            'claude': ('CLAUDE_CONFIG_DIR', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_USE_BEDROCK',
+                       'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'AWS_REGION',
+                       'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL',
+                       'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL'),
+            'osprey': ('OSPREY_HOME', 'OSPREY_BINARY'),
+        }[name]
+        selectors: dict[str, Any] = {}
+        for key in selector_names:
+            value = os.environ.get(key)
+            if value and key.endswith('_BASE_URL'):
+                url = urlsplit(value)
+                selectors[key] = {'scheme': url.scheme, 'host': url.hostname, 'port': url.port,
+                                  'path': redact_text(url.path)}
+            else:
+                selectors[key] = value
+        home = Path(os.environ.get('HOME', str(Path.home())))
+        if name == 'codex':
+            selectors['CODEX_HOME'] = selectors['CODEX_HOME'] or str(home / '.codex')
+        elif name == 'claude':
+            selectors['CLAUDE_CONFIG_DIR'] = selectors['CLAUDE_CONFIG_DIR'] or str(home / '.claude')
+        if name == "osprey":
+            inputs[name] = None  # Osprey retains its supported ambient transport.
+            provenance[name] = {"binary": os.environ.get("OSPREY_BINARY", "osprey"), 'selectors': selectors,
+                'fanout_concurrency': resolve_fanout_concurrency('DAYDREAM_OSPREY_FANOUT_CONCURRENCY', 4),
+                'stream_idle_timeout_s': stream_idle_timeout_s(),
+                'limitations': ['Native client configuration files and internal provider choices remain opaque.']}
+            continue
+        native = BackendExecutionInput.from_environment(dict(os.environ), backend=name)
+        selected = {}
+        if name == "pi":
+            selected = native_pi_settings(root, agent_dir=native.pi_agent_dir)
+            native = replace(native, pi_settings_root=root, pi_settings=selected)
+        inputs[name] = native
+        public = {"retry_policy": asdict(native.retry_policy), "fanout_concurrency": native.fanout_concurrency,
+            'selectors': selectors,
+            'limitations': ['Native client configuration files are retained without credential-bearing fingerprints.'],
+            "stream_idle_timeout_s": native.stream_idle_timeout_s,
+            "response_idle_timeout_s": native.pi_response_idle_timeout_s,
+            "terminal_drain_timeout_s": native.codex_terminal_drain_timeout_s,
+            "process_reap_timeout_s": native.codex_process_reap_timeout_s,
+            "cleanup_timeout_s": native.codex_cleanup_timeout_s}
+        if name == "pi":
+            selectors['PI_CODING_AGENT_DIR'] = None if native.pi_agent_dir is None else str(native.pi_agent_dir)
+            public.update(provider=native.pi_provider, thinking=native.pi_thinking, defaults=selected,
+                defaults_sha256=hashlib.sha256(json.dumps(selected, sort_keys=True).encode()).hexdigest())
+        provenance[name] = public
+    fallback = next((value for value in inputs.values() if value is not None), None)
+    if fallback is None:
+        fallback = BackendExecutionInput.from_environment(dict(os.environ), backend="claude")
+    return provenance, runner.RunnerExecutionInput(fallback, GitHubExecutionInput(), backends=inputs)
 
 
 @dataclass
@@ -32,6 +107,7 @@ class CaseExecution:
     candidate: dict[str, Any] | None = None
     terminal_result: dict[str, Any] | None = None
     configuration: dict[str, Any] = field(default_factory=dict)
+    usage: dict[str, Any] = field(default_factory=dict)
     retained_findings: list[dict[str, Any]] = field(default_factory=list)
     conversion_omissions: list[dict[str, Any]] = field(default_factory=list)
     diagnostics: list[str] = field(default_factory=list)
@@ -162,7 +238,8 @@ def _source_identity(repository: Path, case: Case) -> str:
     return "https://github.com/" + "/".join(identity)
 
 
-async def review_case(case: Case, repository: Path, config: RunConfig, producer: str) -> CaseExecution:
+async def review_case(case: Case, repository: Path, config: RunConfig, producer: str, *,
+                      runtime: tuple[dict[str, Any], runner.RunnerExecutionInput] | None = None) -> CaseExecution:
     """Review one clean local frozen repository in a disposable independent checkout.
 
     No GitHub publication target is manufactured. The callback supplies actual
@@ -171,6 +248,7 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
     execution = CaseExecution("failed")
     finalized: list[FinalizedReview] = []
     try:
+        public_native, native_execution = native_configuration(config) if runtime is None else runtime
         if not producer.strip():
             raise ValueError("producer must be nonempty")
         if any(re.fullmatch(r"[0-9a-f]{40}", oid) is None for oid in (case.base, case.head)):
@@ -196,6 +274,14 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
             # lazily fetch later repository history during review.
             if git_ops.head_sha(checkout) != case.head or git_ops.status_porcelain(checkout).strip():
                 raise ValueError("isolated checkout does not match supplied clean head")
+            pi = native_execution.backends.get('pi')
+            phases = set(REVIEW_CONFIGURATION_PHASES) | set(config.file_config.phases if config.file_config else {})
+            if (pi is not None and pi.pi_settings is not None and pi.pi_thinking is None
+                    and 'defaultThinkingLevel' not in pi.pi_settings
+                    and native_pi_settings(checkout, agent_dir=None).get('defaultThinkingLevel') is not None
+                    and any(_resolved_backend_name(config, phase) == 'pi'
+                            and _resolved_reasoning_effort(config, phase) is None for phase in phases)):
+                raise ValueError('Case Pi thinking conflicts with unavailable operator effort')
             merge_base = git_ops.merge_base(checkout, case.base, case.head)
             if merge_base is None:
                 raise ValueError("supplied comparison has no merge base")
@@ -209,7 +295,7 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
                 archive=False, run_eval=False, trajectory_path=None, dump_artifacts=None, non_interactive=True)
             exit_code: int | None = None
             try:
-                exit_code = await runner.run(native, review_result_handler=finalized.append)
+                exit_code = await runner.run(native, review_result_handler=finalized.append, execution=native_execution)
             except Exception as exc:
                 execution.diagnostics.append(f"native reviewer raised {type(exc).__name__}")
             if not finalized:
@@ -220,6 +306,8 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
             result = finalized[0]
             execution.terminal_result = copy.deepcopy(result.terminal_result)
             execution.configuration = copy.deepcopy(result.configuration)
+            execution.usage = copy.deepcopy(result.usage)
+            execution.configuration['native'] = copy.deepcopy(public_native)
             execution.retained_findings = copy.deepcopy(result.items)
             validate_terminal_result(execution.terminal_result, expected_head_sha=case.head)
             revision = execution.terminal_result["analyzed_revision"]
@@ -239,6 +327,8 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
                 return execution
             execution.candidate = {"pr": {"repo": case.repo, "pr_number": case.pr_number,
                 "base": case.base, "head": case.head}, "agent": producer, "findings": findings}
+            if execution.usage:
+                execution.candidate['usage'] = copy.deepcopy(execution.usage)
             execution.status = ("conversion_limited" if execution.conversion_omissions
                                 else "complete" if findings else "completed_empty")
             return execution

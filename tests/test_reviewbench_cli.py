@@ -272,6 +272,24 @@ def test_plan_run_and_status_bind_candidate_case_and_round(
     outcome = json.loads((directory / 'round-1/outcomes' / f'{case.key}.json').read_text())
     assert outcome['status'] == 'completed_empty' and outcome['terminal_result']['analysis_state'] == 'complete'
     assert not (directory / 'round-2/findings').exists()
+    # Native ambient selections are part of the experiment even though they
+    # never appear in asdict(RunConfig). Reject drift before creating case input.
+    with monkeypatch.context() as changed:
+        changed.setenv('PI_PROVIDER', 'different-provider')
+        assert _handle_benchmark_command(command + ['run', str(directory), '--round', '2', '--pr', '0',
+                                                   '--repository', str(repo), '--', str(config_root)]) == 1
+        assert 'round configuration changed' in capsys.readouterr().err
+        assert not (directory / 'round-2/findings').exists()
+    (config_root / '.pi').mkdir()
+    native_settings = config_root / '.pi/settings.json'
+    native_settings.write_text('{"defaultProvider":"nous","defaultModel":"changed-native-model"}')
+    try:
+        assert _handle_benchmark_command(command + ['run', str(directory), '--round', '2', '--pr', '0',
+                                                   '--repository', str(repo), '--', str(config_root)]) == 1
+        assert 'round configuration changed' in capsys.readouterr().err
+        assert not (directory / 'round-2/findings').exists()
+    finally:
+        native_settings.unlink()
     # Selecting another case against an incompatible frozen repository must
     # still fail this invocation, even though an earlier selected case succeeded.
     assert _handle_benchmark_command(command + ['run', str(directory), '--round', '1', '--pr', '1',

@@ -157,6 +157,23 @@ def _configured_pi_model(
     return None
 
 
+def native_pi_settings(cwd: Path, *, agent_dir: Path | None) -> dict[str, str]:
+    """Project only nonsecret model defaults with Pi's project/global precedence."""
+    result: dict[str, str] = {}
+    paths = ([] if agent_dir is None else [agent_dir / "settings.json"]) + [cwd / ".pi" / "settings.json"]
+    for path in paths:
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(settings, dict):
+            for key in ("defaultModel", "defaultProvider", "defaultThinkingLevel"):
+                value = settings.get(key)
+                if isinstance(value, str) and value.strip():
+                    result[key] = value.strip()
+    return result
+
+
 # Pi's minimal built-in prompt needs explicit exploration/tool guidance.
 # Append this preamble each turn; keep it concise to limit repeated context.
 # The allowance sentence states what this invocation actually has: a tool-call
@@ -567,14 +584,15 @@ class PiBackend:
         self._configured_cache: tuple[Path, str | None] | None = None
         configured: str | None = None
         if model is None and cwd is not None:
-            configured = _configured_pi_model(
-                cwd,
+            configured = (execution_input.pi_settings.get("defaultModel")
+                if execution_input is not None and execution_input.pi_settings is not None else _configured_pi_model(
+                (execution_input.pi_settings_root or cwd) if execution_input is not None else cwd,
                 agent_dir=(
                     execution_input.pi_agent_dir
                     if execution_input is not None
                     else _AMBIENT_AGENT_DIR
                 ),
-            )
+            ))
             self._configured_cache = (cwd, configured)
         self.model = model or configured or DEFAULT_PI_MODEL
         if execution_input is not None:
@@ -647,22 +665,30 @@ class PiBackend:
             if self._configured_cache is not None and self._configured_cache[0] == cwd:
                 configured_model = self._configured_cache[1]
             else:
-                configured_model = _configured_pi_model(
-                    cwd,
+                configured_model = (self._execution_input.pi_settings.get("defaultModel")
+                    if self._execution_input is not None and self._execution_input.pi_settings is not None
+                    else _configured_pi_model(
+                    (self._execution_input.pi_settings_root or cwd) if self._execution_input is not None else cwd,
                     agent_dir=(
                         self._execution_input.pi_agent_dir
                         if self._execution_input is not None
                         else _AMBIENT_AGENT_DIR
                     ),
-                )
+                ))
         self.model = self._model_override if self._model_override is not None else configured_model or DEFAULT_PI_MODEL
-        if self._model_override is not None or configured_model is None:
+        settings_root = None if self._execution_input is None else self._execution_input.pi_settings_root
+        frozen_settings = ({} if self._execution_input is None else self._execution_input.pi_settings or {})
+        if self._model_override is not None or configured_model is None or settings_root is not None:
             args.extend(["--model", self.model])
         provider = (
             self._execution_input.pi_provider
             if self._execution_input is not None
             else os.environ.get("PI_PROVIDER")
         )
+        if provider is None and configured_model is not None and settings_root is not None:
+            provider = frozen_settings.get("defaultProvider")
+            if provider is None and native_pi_settings(cwd, agent_dir=None).get("defaultProvider") is not None:
+                raise PiError("Case Pi provider conflicts with unavailable operator provider", category="AUTH_CONFIG")
         if provider is None and configured_model is None:
             provider = _PI_DEFAULT_PROVIDER
             if self._model_override is not None and self.model.casefold().startswith("glm-"):
@@ -706,6 +732,10 @@ class PiBackend:
             if self._execution_input is not None
             else os.environ.get("PI_THINKING")
         )
+        if thinking is None and settings_root is not None:
+            thinking = frozen_settings.get("defaultThinkingLevel")
+            if thinking is None and native_pi_settings(cwd, agent_dir=None).get("defaultThinkingLevel") is not None:
+                raise PiError("Case Pi thinking conflicts with unavailable operator effort", category="AUTH_CONFIG")
         if finalization:
             thinking = thinking if thinking in {"off", "minimal", "low"} else "low"
         if provider:

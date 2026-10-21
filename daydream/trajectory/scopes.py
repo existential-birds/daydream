@@ -117,9 +117,10 @@ async def fork_scope(
                 # share. A failed child write folds nothing (the error already
                 # degrades the record, D-11).
                 child.parent._accumulate_metrics(
-                    prompt_tokens=child._final_totals["prompt"],
-                    completion_tokens=child._final_totals["completion"],
-                    cached_tokens=child._final_totals["cached"],
+                    prompt_tokens=(child._final_totals["prompt"] if child._final_totals["any_prompt_seen"] else None),
+                    completion_tokens=(child._final_totals["completion"]
+                                       if child._final_totals["any_completion_seen"] else None),
+                    cached_tokens=(child._final_totals["cached"] if child._final_totals["any_cached_seen"] else None),
                     cost_usd=(child._final_totals["cost"] if child._final_totals["any_cost_seen"] else None),
                 )
                 child.parent._folded_fork_totals = True

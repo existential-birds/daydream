@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from functools import singledispatchmethod
 from typing import TYPE_CHECKING, Any, TypedDict
 
@@ -12,11 +12,17 @@ from daydream import timeutil, ui
 from daydream.atif import Metrics, Observation, ObservationResult, Step, ToolCall
 from daydream.backends import (
     AgentEvent,
+    ClaudeRequestConfig,
+    CodexRequestConfig,
     CostEvent,
     DiagnosticEvent,
+    EffectiveRequestConfig,
     GenerationEndEvent,
     GenerationStartEvent,
     MetricsEvent,
+    OspreyRequestConfig,
+    PiRequestConfig,
+    RequestEvent,
     ResultEvent,
     TextEvent,
     ThinkingEvent,
@@ -225,6 +231,7 @@ class Invocation:
     _generation_ledger: _GenerationLedger = field(default_factory=_GenerationLedger)
     _backend_lifecycle: BackendLifecycleSnapshot | None = None
     _host_dispatch: dict[str, int | str] | None = None
+    _requests: list[dict[str, Any]] = field(default_factory=list)
 
     def summary(self, *, partial: bool = False) -> dict[str, Any]:
         """Project invocation identity/timing; generation billing appears only after completion."""
@@ -242,6 +249,8 @@ class Invocation:
             summary["backend_lifecycle"] = self._backend_lifecycle.to_dict()
         if self._host_dispatch is not None:
             summary["host_dispatch"] = dict(self._host_dispatch)
+        if self._requests:
+            summary["requests"] = [dict(request) for request in self._requests]
         return summary
 
     def record_host_dispatch(
@@ -386,9 +395,9 @@ class Invocation:
         # CostEvent-only backend (no MetricsEvents at all) still totals by the
         # full delta.
         self.recorder._accumulate_metrics(
-            prompt_tokens=delta.prompt,
-            completion_tokens=delta.completion,
-            cached_tokens=delta.cached,
+            prompt_tokens=None if event.input_tokens is None else delta.prompt,
+            completion_tokens=None if event.output_tokens is None else delta.completion,
+            cached_tokens=None if event.cached_tokens is None else delta.cached,
             cost_usd=None if event.cost_usd is None else delta.cost,
         )
 
@@ -429,6 +438,18 @@ class Invocation:
             host["open_dict"]["_observation_results"].append(result)
         else:
             self._amend_closed_step_observation(closed_index=host["closed_index"], result=result)
+
+    @_dispatch.register
+    def _observe_request(self, event: RequestEvent) -> None:
+        # No prompt, environment, credential or native settings file contents.
+        backend = {PiRequestConfig: 'pi', CodexRequestConfig: 'codex', ClaudeRequestConfig: 'claude',
+                   OspreyRequestConfig: 'osprey'}.get(type(event.config))
+        controls = asdict(event.config) if type(event.config) in (
+            EffectiveRequestConfig, ClaudeRequestConfig, CodexRequestConfig, PiRequestConfig, OspreyRequestConfig,
+        ) else {}
+        self._requests.append({"backend": backend,
+            "model": event.model_name, "provider": event.provider_name, "reasoning_effort": event.reasoning_effort,
+            "controls": controls})
 
     @_dispatch.register
     def _observe_metrics(self, event: MetricsEvent) -> None:

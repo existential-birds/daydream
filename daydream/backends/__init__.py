@@ -123,11 +123,16 @@ class BackendExecutionInput:
     codex_terminal_drain_timeout_s: float = DEFAULT_CODEX_TERMINAL_DRAIN_TIMEOUT_S
     codex_process_reap_timeout_s: float = 5.0
     codex_cleanup_timeout_s: float = 10.0
+    # Frozen embedded reviews retain the operator's Pi defaults in another cwd.
+    pi_settings_root: Path | None = field(default=None, kw_only=True)
+    pi_settings: Mapping[str, str] | None = field(default=None, kw_only=True, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "_environment", MappingProxyType(dict(self._environment))
         )
+        if self.pi_settings is not None:
+            object.__setattr__(self, "pi_settings", MappingProxyType(dict(self.pi_settings)))
         for allowance in (self.codex_terminal_drain_timeout_s, self.codex_process_reap_timeout_s,
                           self.codex_cleanup_timeout_s):
             if type(allowance) not in {int, float} or not math.isfinite(allowance) or allowance <= 0:

@@ -10,7 +10,8 @@ import asyncio
 import json
 import os
 import subprocess
-from dataclasses import asdict, replace
+from collections.abc import AsyncIterator
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -18,12 +19,15 @@ from unittest.mock import MagicMock
 import pytest
 
 from daydream import git_ops, runner
+from daydream.backends import AgentEvent, CostEvent, EffectiveRequestConfig, RequestEvent
 from daydream.benchmark.reviewbench.contract import Case
 from daydream.benchmark.reviewbench.native import convert_findings, review_case
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.artifacts import diff_key
 from daydream.review_result import FinalizedReview
+from tests.conftest import ExtDir
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
+from tests.harness.dataset_hub import FakeDatasetHub
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git, init_repo, tracked_source_state, write_and_stage
 from tests.harness.pi_replay import make_mock_process, make_mock_process_from_fixture
@@ -54,6 +58,7 @@ def finding(**overrides: Any) -> dict[str, Any]:
 ])
 async def test_native_attempt_uses_terminal_authority_and_preserves_partial_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, outcome: str, status: str,
+    dataset_store: Path, dataset_hub: FakeDatasetHub, operator_dataset_sentinel: Path,
 ) -> None:
     """Exit zero/empty output cannot hide failed scopes or discarded native findings.
 
@@ -85,6 +90,7 @@ async def test_native_attempt_uses_terminal_authority_and_preserves_partial_evid
     monkeypatch.setattr(runner, "create_backend", create)
     config = empty_review_config(repo, tmp_path / "ignored-trajectory.json", backend="pi",
         model="deepseek/deepseek-v4.1-flash", dataset_capture=True, output_mode="loop",
+        dataset_store_path=operator_dataset_sentinel, trajectory_hub_repo="fixture/forbidden-benchmark-capture",
         findings_out=str(tmp_path / "must-not-publish.json"))
     result = await review_case(case, repo, config, "native-fixture")
     assert result.status == status, result.diagnostics
@@ -95,6 +101,7 @@ async def test_native_attempt_uses_terminal_authority_and_preserves_partial_evid
     assert created and all(not root.exists() for root in roots)
     assert not (tmp_path / "must-not-publish.json").exists()
     assert not (tmp_path / "ignored-trajectory.json").exists()
+    assert not dataset_store.exists() and dataset_hub.commits == []
     assert not fake_gh.calls("POST")
     assert result.configuration["phases"]["per_stack_review"]["model"] == config.model
     if status in {"failed", "incomplete"}:
@@ -202,8 +209,117 @@ def test_head_conversion_checks_old_coordinates_outside_captured_hunks(tmp_path:
     assert omitted == [{"uid": None, "id": 1, "reason": "ambiguous_old_or_new_side_line_hint"}]
 
 
-async def test_native_pi_retains_nous_provider_model_and_authentication(
+@pytest.mark.parametrize('incomplete', [False, True])
+async def test_native_usage_preserves_observed_zero_without_inventing_missing_dimensions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, incomplete: bool,
+) -> None:
+    """Cumulative usage-only events cannot manufacture unavailable prompt/cache counts.
+
+    Positive Pi totals below miss both observed zero and absent dimensions when
+    invocation costs and sibling trajectories are folded into the native result.
+    """
+    repo, case = frozen_case(tmp_path)
+
+    @dataclass(frozen=True)
+    class CustomConfig(EffectiveRequestConfig):
+        arbitrary: str = 'custom-unstructured-canary'
+
+    class MeasuredBackend(EmptyReviewBackend):
+        async def execute(self, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            yield RequestEvent(prompt='Unpersisted request prompt', config=CustomConfig())
+            yield CostEvent(cost_usd=0.0, input_tokens=None, output_tokens=0, cached_tokens=None)
+            async for event in super().execute(*args, **kwargs):
+                yield event
+
+    monkeypatch.setattr(runner, 'create_backend', lambda *_args, **kwargs: MeasuredBackend(
+        kwargs['cwd'], fail_stack='python' if incomplete else None))
+    result = await review_case(case, repo, empty_review_config(repo, tmp_path / 'trajectory', backend='pi'), 'fixture')
+    assert result.status == ('incomplete' if incomplete else 'completed_empty'), result.diagnostics
+    assert result.usage == {'completion_tokens': 0, 'cost_usd': 0.0}
+    if not incomplete:
+        assert result.candidate is not None and result.candidate['usage'] == result.usage
+    else:
+        assert result.candidate is None
+    assert result.configuration['observed_requests']
+    assert all(row['controls'] == {} for row in result.configuration['observed_requests'])
+    assert 'custom-unstructured-canary' not in json.dumps(asdict(result))
+
+
+async def test_native_extension_phase_retains_its_own_backend_execution_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, ext_dir: ExtDir,
+) -> None:
+    """A configured extension phase must not inherit another backend's retry policy.
+
+    Homogeneous native cases and existing singular execution-input tests cannot
+    expose a runtime map that omits extension-owned phase configuration.
+    """
+    repo, case = frozen_case(tmp_path)
+    monkeypatch.delenv('DAYDREAM_PI_RETRY_BASE_DELAY_S', raising=False)
+    ext_dir.write_module(
+        'from daydream.agent import run_agent\n'
+        'from daydream.extensions import FlowStep\n'
+        'from daydream.trajectory import DaydreamPhase\n'
+        'async def probe(ctx):\n'
+        '    await run_agent(ctx.backend_for("extension-review"), ctx.work.repo, "NATIVE_EXTENSION", '
+        'phase=DaydreamPhase.REVIEW, run_context=ctx.run_context)\n'
+        'def register(registry):\n'
+        '    registry.register_phase(FlowStep(name="native-probe", run=probe))\n'
+        '    registry.insert_before("deep", anchor="intent", step="native-probe")\n')
+    created: list[tuple[str, EmptyReviewBackend]] = []
+
+    def create(name: str, **kwargs: Any) -> EmptyReviewBackend:
+        assert kwargs['execution_input'].retry_policy.base_delay_s == (10.0 if name == 'pi' else 2.0)
+        backend = EmptyReviewBackend(kwargs.get('cwd', repo))
+        backend.model = kwargs['model']
+        created.append((name, backend))
+        return backend
+
+    monkeypatch.setattr(runner, 'create_backend', create)
+    config = empty_review_config(repo, tmp_path / 'trajectory', file_config=DaydreamFileConfig(
+        backend='pi', supervisor='llm', phases={'extension-review': {'backend': 'claude', 'model': 'claude-sonnet-5'}}))
+    result = await review_case(case, repo, config, 'fixture')
+    assert result.status == 'completed_empty', result.diagnostics
+    assert any(name == 'claude' and backend.calls for name, backend in created)
+    assert result.configuration['phases']['extension-review']['model'] == 'claude-sonnet-5'
+
+
+async def test_case_pi_thinking_cannot_replace_unavailable_operator_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh,
+) -> None:
+    """Unknown operator effort must not inherit a historical case's project default.
+
+    The explicit/project selection tests below have known effort and cannot
+    expose native Pi's fallback to case-local settings when no effort is pinned.
+    """
+    repo, case = frozen_case(tmp_path)
+    write_and_stage(repo, '.pi/settings.json', '{"defaultThinkingLevel":"high"}')
+    case = replace(case, head=commit(repo, 'case-local thinking default'))
+    operator = tmp_path / 'operator'
+    (operator / '.pi').mkdir(parents=True)
+    (operator / '.pi/settings.json').write_text(
+        '{"defaultProvider":"nous","defaultModel":"deepseek/deepseek-v4.1-flash"}')
+    monkeypatch.delenv('PI_THINKING', raising=False)
+    monkeypatch.setenv('PI_CODING_AGENT_DIR', str(tmp_path / 'pi-agent'))
+    spawned: list[str] = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def no_model(*args: Any, **kwargs: Any) -> Any:
+        if args[0] == 'pi':
+            spawned.append('pi')
+            raise AssertionError('a conflicting case must fail before model work')
+        return await real_exec(*args, **kwargs)
+
+    monkeypatch.setattr('daydream.backends._transport.asyncio.create_subprocess_exec', no_model)
+    config = empty_review_config(operator, tmp_path / 'trajectory', backend='pi')
+    result = await review_case(case, repo, config, 'fixture')
+    assert result.status == 'failed' and result.candidate is None and not spawned
+    assert result.terminal_result is None
+    assert 'Case Pi thinking conflicts with unavailable operator effort' in result.diagnostics
+
+
+@pytest.mark.parametrize("selection", ["explicit", "project"])
+async def test_native_pi_retains_nous_provider_model_and_authentication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, selection: str,
 ) -> None:
     """The adapter must not inherit Harbor's forced OpenRouter provider policy.
 
@@ -211,11 +327,24 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
     journey proves its isolation and configuration copy preserve that boundary.
     """
     repo, case = frozen_case(tmp_path)
-    monkeypatch.setenv("PI_PROVIDER", "nous")
+    if selection == "explicit":
+        monkeypatch.setenv("PI_PROVIDER", "nous")
+    else:
+        monkeypatch.delenv("PI_PROVIDER", raising=False)
+    monkeypatch.delenv("PI_API_KEY", raising=False)
     monkeypatch.setenv("NOUS_API_KEY", "offline-native-auth-canary")
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "operator-pi"))
     real_exec: Any = asyncio.create_subprocess_exec
     captured: list[tuple[list[str], dict[str, Any]]] = []
+    expected_usage: list[tuple[int, int, int, float]] = []
+    operator = tmp_path / "operator"
+    if selection == "project":
+        (operator / ".pi").mkdir(parents=True)
+        (operator / ".pi/settings.json").write_text(json.dumps({"defaultProvider": "nous",
+            "defaultModel": "deepseek/deepseek-v4.1-flash", "defaultThinkingLevel": "low",
+            "apiKey": "must-not-fingerprint-this-secret"}))
+        write_and_stage(repo, ".pi/settings.json", '{"defaultProvider":"other","defaultModel":"wrong-model"}')
+        case = replace(case, head=commit(repo, "case native settings cannot replace operator settings"))
 
     async def native_process(*args: object, **kwargs: Any) -> MagicMock:
         if not args or args[0] != "pi":
@@ -225,10 +354,13 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
         prompt = Path(argv[-1][1:]).read_text()
         stage = review_stage_state(prompt)
         if stage is None and "--extension" not in argv:
+            expected_usage.append((110, 50, 10, 0.0003))
             return make_mock_process_from_fixture("simple_text.jsonl")
+        expected_usage.append((13, 3, 2, 0.125))
         payload = stage_result(stage) if stage is not None else {"issues": []}
         call = {"type": "toolCall", "id": "submit", "name": "structured_output", "arguments": payload}
-        assistant = {"role": "assistant", "content": [call], "stopReason": "toolUse"}
+        assistant = {"role": "assistant", "content": [call], "stopReason": "toolUse",
+            "usage": {"input": 11, "output": 3, "cacheRead": 2, "cost": {"total": 0.125}}}
         tool = {"content": [{"type": "text", "text": "Submitted."}], "details": payload}
         return make_mock_process([json.dumps(row) for row in [
             {"type": "session", "sessionId": "offline-fixture"}, {"type": "agent_start"}, {"type": "turn_start"},
@@ -243,17 +375,34 @@ async def test_native_pi_retains_nous_provider_model_and_authentication(
 
     monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", native_process)
     config = empty_review_config(repo, tmp_path / "trajectory", backend="pi",
-        file_config=DaydreamFileConfig(model="deepseek/deepseek-v4.1-flash", reasoning_effort="low"))
+        file_config=DaydreamFileConfig(model="deepseek/deepseek-v4.1-flash", reasoning_effort="low")
+        if selection == "explicit" else DaydreamFileConfig())
+    if selection == "project":
+        config.target = str(operator)
     result = await review_case(case, repo, config, "native-pi-fixture")
     assert result.status == "completed_empty", result.diagnostics
     assert captured
     for argv, kwargs in captured:
         assert argv[argv.index("--provider") + 1] == "nous"
         assert argv[argv.index("--model") + 1] == "deepseek/deepseek-v4.1-flash"
-        assert argv[argv.index("--thinking") + 1] == "low"
+        assert argv[argv.index("--thinking") + 1] in ({"low"} if selection == "explicit" else {"low", "medium"})
         assert kwargs["env"]["NOUS_API_KEY"] == "offline-native-auth-canary"
-    assert config.file_config is not None and config.file_config.model == "deepseek/deepseek-v4.1-flash"
-    assert os.environ["PI_PROVIDER"] == "nous"
+    assert result.candidate is not None
+    assert result.candidate['usage'] == {"prompt_tokens": sum(row[0] for row in expected_usage),
+        "completion_tokens": sum(row[1] for row in expected_usage),
+        "cached_tokens": sum(row[2] for row in expected_usage),
+        "cost_usd": pytest.approx(sum(row[3] for row in expected_usage)),
+        "total_tokens": sum(row[0] + row[1] for row in expected_usage)}
+    assert {row['provider'] for row in result.configuration['observed_requests']} == {'nous'}
+    assert {row['model'] for row in result.configuration['observed_requests']} == {'deepseek/deepseek-v4.1-flash'}
+    assert {'wonder', 'arbiter', 'parse'} <= result.configuration['phases'].keys()
+    if selection == "explicit":
+        assert config.file_config is not None and config.file_config.model == "deepseek/deepseek-v4.1-flash"
+        assert os.environ["PI_PROVIDER"] == "nous"
+    else:
+        assert result.configuration['native']['pi']['defaults']['defaultProvider'] == 'nous'
+        assert 'must-not-fingerprint-this-secret' not in json.dumps(asdict(result), default=str)
+        assert 'PI_PROVIDER' not in os.environ
     assert "offline-native-auth-canary" not in json.dumps(asdict(result), default=str)
 
 
@@ -311,7 +460,7 @@ async def test_native_artifact_failure_or_changed_comparison_never_becomes_empty
         assert injected and result.terminal_result is not None
         assert not result.terminal_result["projection_valid"]
     elif fault == "ignored_patch":
-        assert result.terminal_result is not None
+        assert result.terminal_result is not None, result.diagnostics
         assert any("comparison differs" in diagnostic for diagnostic in result.diagnostics)
     else:
         assert injected

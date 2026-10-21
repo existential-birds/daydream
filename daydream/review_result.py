@@ -10,7 +10,7 @@ import json
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field as dataclass_field
 from enum import StrEnum
 from typing import Any
 
@@ -20,6 +20,9 @@ from daydream.output_schema import strict_object
 from daydream.redaction import redact_structured_text, redact_text
 from daydream.retry_policy import FailureClass, classify_failure
 from daydream.review_source_refs import SOURCE_REFS_MAX_BYTES, SOURCE_REFS_SCHEMA
+
+REVIEW_CONFIGURATION_PHASES = ('review', 'intent', 'exploration', 'alternatives', 'per_stack_review',
+                               'parse', 'wonder', 'merge', 'arbiter', 'suppression', 'supervise', 'diagram')
 
 
 @dataclass(frozen=True)
@@ -33,6 +36,7 @@ class FinalizedReview:
     terminal_result: dict[str, Any]
     items: list[dict[str, Any]]
     configuration: dict[str, Any]
+    usage: dict[str, Any] = dataclass_field(default_factory=dict)
 
 
 _result_handler: ContextVar[Callable[[FinalizedReview], None] | None] = ContextVar(
@@ -51,12 +55,13 @@ def bind_review_result_handler(handler: Callable[[FinalizedReview], None] | None
 
 
 def deliver_finalized_review(result: dict[str, Any], items: list[dict[str, Any]],
-                             configuration: dict[str, Any]) -> None:
+                             configuration: dict[str, Any], *, usage: dict[str, Any] | None = None) -> None:
     """Deliver frozen authority at the native terminal validation boundary."""
     handler = _result_handler.get()
     if handler is not None:
         validate_terminal_result(result)
-        handler(FinalizedReview(copy.deepcopy(result), copy.deepcopy(items), copy.deepcopy(configuration)))
+        handler(FinalizedReview(copy.deepcopy(result), copy.deepcopy(items), copy.deepcopy(configuration),
+                                copy.deepcopy(usage or {})))
 
 
 class ReasonCode(StrEnum):
