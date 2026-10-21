@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, cast
 
+import anyio
 import pytest
 
 from tests.harness.git_helpers import commit, git, init_repo
@@ -546,9 +547,14 @@ class _LoopbackPeer:
             pass
 
 @pytest.mark.parametrize("trickle", [False, True])
-def test_immutable_budget_truncates_slow_peers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trickle: bool) -> None:
-    """0.12s budget: return before 0.35s, peer observes close within 1s, no later poll."""
-    receipt = _write_receipt(tmp_path)
+async def test_immutable_budget_truncates_slow_peers(monkeypatch: pytest.MonkeyPatch, trickle: bool) -> None:
+    """Bound real readback/close, excluding CLI input/output outside its deadline.
+
+    CLI tests cover receipt validation and atomic result publication. Timing that
+    fsync here incorrectly fails a correct HTTP timeout when shared disks stall.
+    """
+    receipt = _receipt(destinations=["honeyhive"])
+    matrix = _verifier.load_matrix(FIXTURES / "readback-matrix.json")
     peer = _LoopbackPeer(trickle=trickle)
     # Cold HTTPX transport imports and TLS context construction are synchronous
     # and can exhaust the tiny budget under parallel coverage before any socket
@@ -565,22 +571,17 @@ def test_immutable_budget_truncates_slow_peers(tmp_path: Path, monkeypatch: pyte
         monkeypatch.setenv("HH_API_URL", peer.base_url)
         monkeypatch.setenv("HH_API_KEY", _SECRET_KEY)
         monkeypatch.setenv("DAYDREAM_TRACE_TO", "honeyhive")
-        receipt_data = json.loads(receipt.read_text())
-        receipt_data["destinations"] = ["honeyhive"]
-        receipt.write_text(json.dumps(receipt_data), encoding="utf-8")
-        result_path = tmp_path / "result.json"
         started = time.monotonic()
-        exit_code = _run_verify(receipt, result_path, budget_s=0.12)
+        result = await _verifier._verify(receipt, matrix, 0.12)
         elapsed = time.monotonic() - started
-        assert elapsed < 0.35, f"verifier took {elapsed:.3f}s with a 0.12s budget"
-        assert exit_code != 0
-        result = json.loads(result_path.read_text())
+        assert elapsed < 0.35, f"readback took {elapsed:.3f}s with a 0.12s budget"
+        assert result["stored_contract_passed"] is False
         assert result["terminal"] == _verifier.DISPOSITION_TIMEOUT
         # Bound peer-observed closure independently of verifier return.
         peer.close()
         deadline = time.monotonic() + 2.0
         while not peer.connections and time.monotonic() < deadline:
-            time.sleep(0.02)
+            await anyio.sleep(0.02)
         assert peer.connections, "peer never accepted a connection"
         accepted_at, closed_at = peer.connections[0]
         assert closed_at - accepted_at < 1.0, (
