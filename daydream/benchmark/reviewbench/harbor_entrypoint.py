@@ -18,11 +18,12 @@ from pathlib import Path
 from typing import Any
 
 from daydream.benchmark.reviewbench.contract import Case
-from daydream.benchmark.reviewbench.native import PublicHarborTask, review_case
+from daydream.benchmark.reviewbench.native import CaseExecution, PublicHarborTask, review_case
 from daydream.config_file import DaydreamFileConfig
 from daydream.redaction import redact_structured_text
 from daydream.review_profile import resolve_harbor_profile
 from daydream.run_config import RunConfig
+from daydream.trajectory import RUN_DOCUMENT_NAME
 
 
 class PublicReviewerError(ValueError):
@@ -65,20 +66,42 @@ def _reviewer_environment(source: Mapping[str, str], codex_home: Path) -> dict[s
     return result
 
 
-def _write_new_json(destination: Path, value: Any) -> None:
-    """Install complete bytes without replacing a prior attempt's artifact."""
+def _write_new_bytes(destination: Path, body: bytes) -> None:
+    """Install finalized bytes without replacing a prior attempt's artifact."""
     destination.parent.mkdir(parents=True, exist_ok=True)
-    body = redact_structured_text(json.dumps(value, indent=2, allow_nan=False)) + '\n'
     descriptor, name = tempfile.mkstemp(prefix='.daydream-', dir=destination.parent)
     temporary = Path(name)
     try:
-        with os.fdopen(descriptor, 'w', encoding='utf-8') as output:
+        with os.fdopen(descriptor, 'wb') as output:
             output.write(body)
             output.flush()
             os.fsync(output.fileno())
         os.link(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _write_new_json(destination: Path, value: Any) -> None:
+    body = redact_structured_text(json.dumps(value, indent=2, allow_nan=False)) + '\n'
+    _write_new_bytes(destination, body.encode('utf-8'))
+
+
+def _publish_native_evidence(staged: Path, evidence: Path, harbor_trajectory: Path) -> None:
+    """Copy only joined native evidence onto Harbor's non-exchange log mount.
+
+    The native artifact owner retains its private filesystem and live-exchange
+    guarantees. Harbor receives exact finalized exports after every writer has
+    joined, through a no-clobber install local to its own destination filesystem.
+    """
+    evidence.mkdir(parents=True, exist_ok=False)
+    for source in sorted(staged.rglob('*')):
+        if source.is_symlink():
+            raise PublicReviewerError('native evidence contains an unexpected symlink')
+        if source.is_file():
+            _write_new_bytes(evidence / source.relative_to(staged), source.read_bytes())
+    trajectory = staged / RUN_DOCUMENT_NAME
+    if trajectory.is_file():
+        _write_new_bytes(harbor_trajectory, trajectory.read_bytes())
 
 
 async def main(environment: Mapping[str, str]) -> int:
@@ -88,7 +111,7 @@ async def main(environment: Mapping[str, str]) -> int:
     output = Path(environment.get('DAYDREAM_RB_OUTPUT', '/work/out/findings.json'))
     evidence = Path(environment.get('DAYDREAM_RB_EVIDENCE', '/logs/agent/daydream'))
     canonical = Path(environment.get('DAYDREAM_RB_CODEX_HOME', '/run/reviewbench-codex'))
-    harbor_trajectory = evidence.parent / 'trajectory.json'
+    harbor_trajectory = evidence.parent / RUN_DOCUMENT_NAME
     started = time.monotonic()
     try:
         if (output.exists() or evidence.exists()
@@ -98,41 +121,66 @@ async def main(environment: Mapping[str, str]) -> int:
         # Import lazily: the ordinary standalone native adapter needs no lease.
         from daydream.benchmark.reviewbench.harbor_auth import subscription_lease
 
-        with tempfile.TemporaryDirectory(prefix='daydream-reviewbench-codex-') as role_directory:
-            with subscription_lease(canonical, Path(role_directory), role='reviewer') as role_home:
-                # A fresh private home prevents user config, API providers and
-                # project settings from changing this frozen subscription lane.
-                (role_home / 'config.toml').write_text('model_provider = "openai"\n'
-                    'cli_auth_credentials_store = "file"\n')
-                controls = _reviewer_environment(environment, role_home)
-                config = RunConfig(target=str(repository), backend='codex', model=reviewer['model'],
-                    reasoning_effort=reviewer['reasoning_effort'], file_config=DaydreamFileConfig(),
-                    review_profile=resolve_harbor_profile(candidate_env='DAYDREAM_RB_UNUSED', env={}),
-                    output_mode='review', non_interactive=True, dataset_capture_disabled=True,
-                    archive=False, run_eval=False)
-                # Resolve native controls from the dedicated role environment;
-                # there is no mutation of global authentication or provider state.
-                from daydream.backends import BackendExecutionInput
-                from daydream.git_ops import StaticGitHubAuth
-                from daydream.github_app import GitHubExecutionInput
-                from daydream.runner import RunnerExecutionInput
+        execution = None
+        cancelled = False
+        with tempfile.TemporaryDirectory(prefix='daydream-reviewbench-runtime-') as private_directory:
+            private = Path(private_directory).resolve()
+            staged = private / 'native-evidence'
+            try:
+                with subscription_lease(canonical, private / 'codex', role='reviewer') as role_home:
+                    # A fresh private home prevents user config, API providers and
+                    # project settings from changing this frozen subscription lane.
+                    (role_home / 'config.toml').write_text('model_provider = "openai"\n'
+                        'cli_auth_credentials_store = "file"\n')
+                    controls = _reviewer_environment(environment, role_home)
+                    config = RunConfig(target=str(repository), backend='codex', model=reviewer['model'],
+                        reasoning_effort=reviewer['reasoning_effort'], file_config=DaydreamFileConfig(),
+                        review_profile=resolve_harbor_profile(candidate_env='DAYDREAM_RB_UNUSED', env={}),
+                        output_mode='review', non_interactive=True, dataset_capture_disabled=True,
+                        archive=False, run_eval=False)
+                    # Resolve native controls from the dedicated role environment;
+                    # there is no mutation of global authentication or provider state.
+                    from daydream.backends import BackendExecutionInput
+                    from daydream.git_ops import StaticGitHubAuth
+                    from daydream.github_app import GitHubExecutionInput
+                    from daydream.runner import RunnerExecutionInput
 
-                native = BackendExecutionInput.from_environment(controls, backend='codex')
-                runtime = ({'codex': {'auth_mode': 'chatgpt-subscription', 'provider': 'openai',
-                                     'configuration': 'fresh-role-home'}},
-                           RunnerExecutionInput(native, GitHubExecutionInput(auth=StaticGitHubAuth(controls)),
-                                                backends={'codex': native}))
-                execution = await review_case(task.case, repository, config, 'daydream-native-codex',
-                    runtime=runtime, public_task=task, evidence_directory=evidence)
-        record = asdict(execution)
-        record.update(task_id=task.task_id, evaluation_id=task.evaluation_id,
-                      profile_sha256=task.profile_sha256, elapsed_seconds=time.monotonic() - started,
-                      auth_mode='chatgpt-subscription', cost_interpretation='API-equivalent estimate when available')
-        _write_new_json(evidence / 'execution.json', record)
-        # Harbor reads ATIF from the conventional agent root. Publish the exact
-        # native finalized bytes, including failed attempts, without replacing
-        # prior evidence or manufacturing a trajectory when none was recorded.
-        os.link(evidence / 'trajectory.json', harbor_trajectory)
+                    native = BackendExecutionInput.from_environment(controls, backend='codex')
+                    runtime = ({'codex': {'subscription_access': 'chatgpt-oauth', 'provider': 'openai',
+                                         'configuration': 'fresh-role-home'}},
+                               RunnerExecutionInput(native, GitHubExecutionInput(auth=StaticGitHubAuth(controls)),
+                                                    backends={'codex': native}))
+                    execution = await review_case(task.case, repository, config, 'daydream-native-codex',
+                        runtime=runtime, public_task=task, evidence_directory=staged)
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            except Exception:
+                if execution is not None:
+                    execution.status = 'failed'
+                    execution.candidate = None
+                    execution.diagnostics.append('subscription credential lease did not finalize')
+                raise
+            finally:
+                if execution is not None or staged.exists():
+                    if execution is None:
+                        execution = CaseExecution('cancelled' if cancelled else 'failed', diagnostics=[
+                            'native reviewer cancelled before returning an execution result' if cancelled else
+                            'native reviewer did not return an execution result'])
+                    if not (staged / RUN_DOCUMENT_NAME).is_file():
+                        execution.diagnostics.append('native trajectory unavailable; no ATIF export was manufactured')
+                        if execution.status in {'complete', 'completed_empty'}:
+                            execution.status = 'failed'
+                            execution.candidate = None
+                    _publish_native_evidence(staged, evidence, harbor_trajectory)
+                    record = asdict(execution)
+                    record.update(task_id=task.task_id, evaluation_id=task.evaluation_id,
+                        profile_sha256=task.profile_sha256, elapsed_seconds=time.monotonic() - started,
+                        subscription_access='chatgpt-oauth',
+                        cost_interpretation='API-equivalent estimate when available')
+                    _write_new_json(evidence / 'execution.json', record)
+        if execution is None:
+            raise PublicReviewerError('native review did not return an execution result')
         if execution.status not in {'complete', 'completed_empty'} or execution.candidate is None:
             raise PublicReviewerError('native review is unscorable: ' + execution.status)
         _write_new_json(output, execution.candidate)

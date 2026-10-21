@@ -30,6 +30,7 @@ from daydream.hunk_index import _HUNK_HEADER, _header_path, _unquote_git_path, p
 from daydream.redaction import redact_text
 from daydream.review_result import REVIEW_CONFIGURATION_PHASES, FinalizedReview, validate_terminal_result
 from daydream.run_config import FrozenAuthorDescription, RunConfig, _resolved_backend_name, _resolved_reasoning_effort
+from daydream.trajectory import RUN_DOCUMENT_NAME
 
 
 def native_configuration(config: RunConfig) -> tuple[dict[str, Any], runner.RunnerExecutionInput]:
@@ -310,7 +311,7 @@ async def review_case(case: Case, repository: Path, config: RunConfig, producer:
         trajectory = None
         if evidence_directory is not None:
             evidence_directory.mkdir(parents=True, exist_ok=False)
-            trajectory = evidence_directory / 'trajectory.json'
+            trajectory = evidence_directory / RUN_DOCUMENT_NAME
         if not all(git_ops.commit_exists(repository, oid) for oid in (case.base, case.head)):
             raise ValueError("supplied base or head is unavailable")
         with tempfile.TemporaryDirectory(prefix="daydream-reviewbench-case-") as directory:
