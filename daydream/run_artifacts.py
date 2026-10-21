@@ -321,10 +321,14 @@ def capture_manifest_run_identity(
         if per_stack_model is None and per_stack_backend == "pi":
             from daydream.backends.pi import _configured_pi_model
 
-            configured_model = (
-                _configured_pi_model(cwd) if execution_input is None
-                else _configured_pi_model(cwd, agent_dir=execution_input.pi_agent_dir)
-            )
+            if execution_input is None:
+                configured_model = _configured_pi_model(cwd)
+            elif execution_input.pi_settings is not None:
+                configured_model = execution_input.pi_settings.get("defaultModel")
+            else:
+                configured_model = _configured_pi_model(
+                    execution_input.pi_settings_root or cwd, agent_dir=execution_input.pi_agent_dir,
+                )
             per_stack_model = configured_model or DEFAULT_PI_MODEL
     profile = config.review_profile
     return ManifestRunIdentity(
