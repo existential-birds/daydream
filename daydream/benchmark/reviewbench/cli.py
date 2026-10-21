@@ -156,14 +156,7 @@ def _native_config(args: list[str]) -> RunConfig:
             or config.dump_artifacts or config.trajectory_path or config.trajectory_hub_repo
             or config.dataset_store_path or config.dataset_capture):
         raise ValueError('benchmark owns source/output and disables publication, resumes and dataset capture')
-    root = Path(config.target or Path.cwd()).resolve()
-    profile = config.review_profile_path
-    if profile is None and config.file_config is not None:
-        profile = config.file_config.review_profile
-        if profile is not None:
-            profile = root / profile
-    config = replace(config, review_profile_path=None if profile is None else Path(profile).resolve(),
-                     discover_github_provenance=False)
+    config = replace(config, discover_github_provenance=False)
     _resolve_review_profile(config)
     return config
 

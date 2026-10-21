@@ -229,14 +229,17 @@ def test_incomplete_full_round_reports_remain_visible_without_a_full_set_average
     assert '"round_count"' not in output and '"scope": "complete-set"' not in output
 
 
+@pytest.mark.parametrize('profile_source', ['explicit', 'env', 'repo', 'default', 'escape', 'symlink'])
 def test_plan_run_and_status_bind_candidate_case_and_round(
     supplied_source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh,
-    capsys: pytest.CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str], profile_source: str,
 ) -> None:
     """A selected native case persists empty completion without claiming 25/219 PRs.
 
     This crosses CLI plan/config/run/output with real native runner and Git; native
     tests alone do not bind candidate bytes, zero-based selection or round output.
+    Lower-level profile resolution tests miss wrapper promotion of repository
+    policy into explicit policy, bypassing environment precedence and confinement.
     """
     repo, case = frozen_case(tmp_path)
     # Substitute this synthetic frozen Git identity into the synthetic corpus,
@@ -251,8 +254,30 @@ def test_plan_run_and_status_bind_candidate_case_and_round(
     monkeypatch.setattr(contract, 'REVIEWBENCH_REVISION', commit(supplied_source, 'bind real Git fixture'))
     config_root = tmp_path / 'operator'
     config_root.mkdir()
-    (config_root / '.daydream.toml').write_text('backend="pi"\nsupervisor="llm"\n')
-    monkeypatch.setattr(runner, 'create_backend', lambda _name, **kwargs: EmptyReviewBackend(kwargs['cwd']))
+    monkeypatch.delenv('DAYDREAM_REVIEW_PROFILE', raising=False)
+    for path, name in ((config_root / 'repo.toml', 'repository-policy'),
+                       (tmp_path / 'env.toml', 'environment-policy'),
+                       (tmp_path / 'explicit.toml', 'explicit-policy')):
+        path.write_text(f'schema_version=1\nname="{name}"\n')
+    selected_path = '../env.toml' if profile_source == 'escape' else 'repo.toml'
+    if profile_source == 'symlink':
+        (config_root / 'linked.toml').symlink_to(tmp_path / 'env.toml')
+        selected_path = 'linked.toml'
+    profile_setting = '' if profile_source == 'default' else f'review_profile="{selected_path}"\n'
+    (config_root / '.daydream.toml').write_text('backend="pi"\nsupervisor="llm"\n' + profile_setting)
+    if profile_source in {'explicit', 'env'}:
+        monkeypatch.setenv('DAYDREAM_REVIEW_PROFILE', str(tmp_path / 'env.toml'))
+    native_args = ['--', str(config_root)]
+    if profile_source == 'explicit':
+        native_args += ['--review-profile', str(tmp_path / 'explicit.toml')]
+    created: list[EmptyReviewBackend] = []
+
+    def create(_name: str, **kwargs: Any) -> EmptyReviewBackend:
+        backend = EmptyReviewBackend(kwargs['cwd'])
+        created.append(backend)
+        return backend
+
+    monkeypatch.setattr(runner, 'create_backend', create)
     root = tmp_path / 'runs'
     command = ['reviewbench']
     assert _handle_benchmark_command(command + ['plan', str(root), '--source', str(supplied_source),
@@ -261,8 +286,15 @@ def test_plan_run_and_status_bind_candidate_case_and_round(
     assert _handle_benchmark_command(command + ['status', str(directory), '--round', '2']) == 1
     status = json.loads(capsys.readouterr().out.split(str(directory) + '\n')[-1])
     assert len(status['missing']) == 25 and not status['produced']
-    assert _handle_benchmark_command(command + ['run', str(directory), '--round', '1', '--pr', '0',
-                                               '--repository', str(repo), '--', str(config_root)]) == 0
+    result = _handle_benchmark_command(command + ['run', str(directory), '--round', '1', '--pr', '0',
+                                                 '--repository', str(repo), *native_args])
+    if profile_source in {'escape', 'symlink'}:
+        assert result == 1
+        assert 'escapes the repository root' in capsys.readouterr().err
+        assert not created and not (directory / 'round-1/findings').exists()
+        assert not fake_gh.calls('POST')
+        return
+    assert result == 0
     capsys.readouterr()
     assert _handle_benchmark_command(command + ['status', str(directory), '--round', '1']) == 1
     accounting = json.loads(capsys.readouterr().out)
@@ -271,13 +303,18 @@ def test_plan_run_and_status_bind_candidate_case_and_round(
     assert json.loads(candidate.read_text())['findings'] == []
     outcome = json.loads((directory / 'round-1/outcomes' / f'{case.key}.json').read_text())
     assert outcome['status'] == 'completed_empty' and outcome['terminal_result']['analysis_state'] == 'complete'
+    profile = outcome['configuration']['profile']
+    assert profile['source_kind'] == profile_source
+    if profile_source != 'default':
+        assert profile['name'] == {'explicit': 'explicit-policy', 'env': 'environment-policy',
+                                   'repo': 'repository-policy'}[profile_source]
     assert not (directory / 'round-2/findings').exists()
     # Native ambient selections are part of the experiment even though they
     # never appear in asdict(RunConfig). Reject drift before creating case input.
     with monkeypatch.context() as changed:
         changed.setenv('PI_PROVIDER', 'different-provider')
         assert _handle_benchmark_command(command + ['run', str(directory), '--round', '2', '--pr', '0',
-                                                   '--repository', str(repo), '--', str(config_root)]) == 1
+                                                   '--repository', str(repo), *native_args]) == 1
         assert 'round configuration changed' in capsys.readouterr().err
         assert not (directory / 'round-2/findings').exists()
     (config_root / '.pi').mkdir()
@@ -285,7 +322,7 @@ def test_plan_run_and_status_bind_candidate_case_and_round(
     native_settings.write_text('{"defaultProvider":"nous","defaultModel":"changed-native-model"}')
     try:
         assert _handle_benchmark_command(command + ['run', str(directory), '--round', '2', '--pr', '0',
-                                                   '--repository', str(repo), '--', str(config_root)]) == 1
+                                                   '--repository', str(repo), *native_args]) == 1
         assert 'round configuration changed' in capsys.readouterr().err
         assert not (directory / 'round-2/findings').exists()
     finally:
@@ -293,7 +330,7 @@ def test_plan_run_and_status_bind_candidate_case_and_round(
     # Selecting another case against an incompatible frozen repository must
     # still fail this invocation, even though an earlier selected case succeeded.
     assert _handle_benchmark_command(command + ['run', str(directory), '--round', '1', '--pr', '1',
-                                               '--repository', str(repo), '--', str(config_root)]) == 1
+                                               '--repository', str(repo), *native_args]) == 1
     failed_case = load_cases(supplied_source, 'test')[1]
     failed = json.loads((directory / 'round-1/outcomes' / f'{failed_case.key}.json').read_text())
     assert failed['status'] == 'failed'
