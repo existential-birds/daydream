@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 from daydream import git_ops
-from daydream.git_ops.process import _run_git
 
 REVIEWBENCH_REVISION = '4f04392d6bf4941ab6f8a3ea0c15b449f4458864'
 REVIEWBENCH_REPOSITORY = 'https://github.com/review-bench/ReviewBench.git'
@@ -55,9 +54,7 @@ def verify_source(source: Path) -> dict[str, Any]:
     """Refuse another revision or modified executable/reference source."""
     if git_ops.head_sha(source) != REVIEWBENCH_REVISION:
         raise ValueError(f'ReviewBench source must be pinned at {REVIEWBENCH_REVISION}')
-    status = _run_git(source, ['status', '--porcelain', '--untracked-files=all'],
-                      error_context='ReviewBench status failed')
-    if status.stdout:
+    if git_ops.status_porcelain(source, all_untracked=True):
         raise ValueError('ReviewBench source is modified or contains untracked inputs')
     paths = ('corpus/manifest.json', 'corpus/test/test.json', 'package-lock.json',
              'scripts/eval/scorer.ts', 'scripts/eval/print-summary.ts', 'scripts/eval/eval.ts',

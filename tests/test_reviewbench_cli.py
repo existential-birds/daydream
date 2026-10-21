@@ -41,11 +41,14 @@ def supplied_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return source
 
 
-@pytest.mark.parametrize('fault', ['revision', 'modified', 'untracked'])
+@pytest.mark.parametrize('fault', ['revision', 'modified', 'untracked', 'hidden-untracked', 'hidden-whitespace'])
 def test_source_pin_refuses_changed_inputs(supplied_source: Path, fault: str) -> None:
     """A fixed revision label cannot bless altered scorer/reference bytes.
 
     Native tests bind case Git; this owns the distinct evaluator source pin.
+    Ordinary porcelain can hide untracked files through Git configuration; the
+    existing default-config cases miss a status-query refactor admitting them.
+    Whitespace-only names also expose lossy strip/filter enumeration fallbacks.
     """
     assert verify_source(supplied_source)['hashes']['scripts/eval/scorer.ts']
     if fault == 'revision':
@@ -54,7 +57,14 @@ def test_source_pin_refuses_changed_inputs(supplied_source: Path, fault: str) ->
     elif fault == 'modified':
         (supplied_source / 'scripts/eval/scorer.ts').write_text('changed metrics')
     else:
-        (supplied_source / 'extra-reference.json').write_text('{}')
+        if fault in {'hidden-untracked', 'hidden-whitespace'}:
+            git(supplied_source, 'config', 'status.showUntrackedFiles', 'no')
+            path = (supplied_source / '   ' if fault == 'hidden-whitespace'
+                    else supplied_source / 'nested' / 'extra-reference.json')
+            path.parent.mkdir(exist_ok=True)
+        else:
+            path = supplied_source / 'extra-reference.json'
+        path.write_text('{}')
     with pytest.raises(ValueError, match='pinned|modified|untracked'):
         verify_source(supplied_source)
 

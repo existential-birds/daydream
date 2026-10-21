@@ -619,9 +619,16 @@ def grep_fixed_matches(
     return matches
 
 
-def status_porcelain(repo: Path) -> str:
-    """Read porcelain status, raising on failure; a clean tree returns empty text."""
-    proc = process._run_git(repo, ["status", "--porcelain"], timeout=10, error_context=f"git status failed in {repo}")
+def status_porcelain(repo: Path, *, all_untracked: bool = False) -> str:
+    """Read porcelain status, raising on failure; a clean tree returns empty text.
+
+    ``all_untracked`` includes every nonignored untracked path independently of
+    the operator's status display settings.
+    """
+    args = ["status", "--porcelain"]
+    if all_untracked:
+        args.append("--untracked-files=all")
+    proc = process._run_git(repo, args, timeout=10, error_context=f"git status failed in {repo}")
     return proc.stdout
 
 
