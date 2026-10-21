@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,25 @@ def verify_runtime() -> None:
         raise ValueError('Install the shipped harbor-runtime.lock in an isolated environment') from None
 
 
+def _local_metric_config(dataset: Path, jobs_dir: Path) -> Path:
+    """Retain an explicit local-dataset metric binding without changing its bytes.
+
+    Harbor discovers package-Hub metrics automatically, but local ``-p`` datasets
+    require a JobConfig metric. Unique private-created filenames cannot reuse or
+    overwrite another launch's configuration; Harbor also retains this binding
+    in its resolved job config.
+    """
+    metric = dataset.resolve() / 'metric.py'
+    if not metric.is_file():
+        raise ValueError('Public local dataset lacks its frozen metric.py')
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix='daydream-reviewbench-launch-', suffix='.json', dir=jobs_dir.resolve())
+    with os.fdopen(descriptor, 'w') as stream:
+        json.dump({'metrics': [{'type': 'uv-script', 'kwargs': {'script_path': str(metric)}}]}, stream, indent=2)
+        stream.write('\n')
+    return Path(name)
+
+
 def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
     if args.reviewbench_command == 'harbor-export':
         from daydream.benchmark.reviewbench.harbor_profile import export_harbor_profile
@@ -86,7 +106,9 @@ def handle(args: argparse.Namespace, candidate: dict[str, Any]) -> int:
         raise ValueError('Docker kernel lacks Harbor exact-host isolation support')
     # Schema and package validation precede credential delivery and model work.
     subprocess.run([sys.executable, '-m', 'reviewbench_harbor.check-format', str(args.directory.resolve())], check=True)
-    command = [str(Path(sys.executable).with_name('harbor')), 'run', '--yes', '-p', str(args.directory.resolve()),
+    local_config = _local_metric_config(args.directory, args.jobs_dir)
+    command = [str(Path(sys.executable).with_name('harbor')), 'run', '--yes', '-c', str(local_config),
+               '-p', str(args.directory.resolve()),
                '-a', 'daydream.benchmark.reviewbench.harbor_agent:DaydreamPublicReviewAgent',
                '-n', str(args.concurrency), '-k', str(args.rounds), '-r', '0',
                '-o', str(args.jobs_dir.resolve()), '--job-name', args.job_name,
