@@ -1,10 +1,13 @@
 """Public reviewer boundary: real frozen Git, runner and role-private auth files."""
 from __future__ import annotations
 
+import asyncio
 import base64
+import errno
 import hashlib
 import json
 import os
+from collections.abc import AsyncIterator
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -12,6 +15,8 @@ from typing import Any
 import pytest
 
 from daydream import git_ops, runner
+from daydream.artifacts import external
+from daydream.backends import AgentEvent, TextEvent
 from daydream.benchmark.reviewbench.contract import REVIEWBENCH_REVISION
 from daydream.benchmark.reviewbench.harbor_entrypoint import main
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
@@ -58,6 +63,19 @@ async def test_public_harbor_native_boundary_keeps_terminal_evidence_and_refuses
     Only the external generation transport is replaced; runner and Git stay real.
     """
     environment = public_input(tmp_path)
+    evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
+    exchange = external._AtomicNameExchange.call
+
+    def logs_do_not_support_exchange(
+        binding: external._AtomicNameExchange, parent_fd: int, staged_name: str, target_name: str,
+    ) -> external._NameExchangeResult:
+        # Fault at the actual name-exchange boundary, like Docker Desktop's
+        # mounted logs. Native private storage must still use real exchanges.
+        if evidence.exists() and os.fstat(parent_fd).st_ino == evidence.stat().st_ino:
+            return external._NameExchangeResult(-1, errno.ENOTSUP)
+        return exchange(binding, parent_fd, staged_name, target_name)
+
+    monkeypatch.setattr(external._AtomicNameExchange, 'call', logs_do_not_support_exchange)
     role_homes: list[Path] = []
     backends: list[EmptyReviewBackend] = []
 
@@ -91,6 +109,8 @@ async def test_public_harbor_native_boundary_keeps_terminal_evidence_and_refuses
     assert (evidence.parent / 'trajectory.json').read_bytes() == (evidence / 'trajectory.json').read_bytes()
     assert record['terminal_result']['analyzed_revision']['head_sha'] == record['analyzed_comparison']['head_sha']
     assert record['task_id'] == 7 and record['evaluation_id'] == 99
+    assert record['subscription_access'] == 'chatgpt-oauth'
+    assert record['configuration']['native']['codex']['subscription_access'] == 'chatgpt-oauth'
     assert role_homes and all(not home.exists() for home in role_homes)
     assert any('Frozen supplied author explanation' in call['prompt'] for backend in backends for call in backend.calls)
     assert 'private-refresh-canary' not in (evidence / 'execution.json').read_text()
@@ -144,3 +164,71 @@ async def test_public_harbor_refuses_unbound_source_or_stale_artifacts_before_in
         assert not output.exists()
     if fault == 'stale_trajectory':
         assert trajectory.read_text() == 'previous-native-trajectory'
+
+
+async def test_native_storage_failure_retains_diagnostics_without_manufacturing_atif(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Storage preflight can fail before any trajectory or model exists.
+
+    Existing provider-failure rows still have a native recorder. Faulting the
+    actual filesystem exchange operation covers the earlier owner rejection and
+    prevents a misleading missing-file exception from replacing its evidence.
+    """
+    environment = public_input(tmp_path)
+    monkeypatch.setattr(external._AtomicNameExchange, 'call',
+                        lambda *_args: external._NameExchangeResult(-1, errno.ENOTSUP))
+
+    def forbidden(*args: Any, **kwargs: Any) -> None:
+        pytest.fail('artifact owner preflight failure reached model generation')
+
+    monkeypatch.setattr(runner, 'create_backend', forbidden)
+    assert await main(environment) == 1
+    evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
+    record = json.loads((evidence / 'execution.json').read_text())
+    assert record['status'] == 'failed' and record['terminal_result'] is None
+    assert any('did not produce a finalized terminal result' in reason for reason in record['diagnostics'])
+    assert any('native trajectory unavailable' in reason for reason in record['diagnostics'])
+    assert not (evidence / 'trajectory.json').exists()
+    assert not (evidence.parent / 'trajectory.json').exists()
+    assert not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
+    assert 'FileNotFoundError' not in capsys.readouterr().err
+
+
+async def test_cancelled_public_reviewer_exports_joined_native_evidence_and_propagates_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh,
+) -> None:
+    """Cancellation cannot delete private staging before its joined evidence is exported.
+
+    Provider failures return a CaseExecution; cancellation unwinds review_case
+    without returning it. Keep the real runner, recorder and event loop while
+    cancelling a blocked external-generation stream, and prove cleanup has joined
+    before the available native trajectory is copied to Harbor's logs.
+    """
+    environment = public_input(tmp_path)
+    entered, joined = asyncio.Event(), asyncio.Event()
+
+    class BlockedBackend(EmptyReviewBackend):
+        async def execute(self, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            yield TextEvent('Synthetic generation stream before cancellation')
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                joined.set()
+
+    monkeypatch.setattr(runner, 'create_backend', lambda *args, **kwargs:
+                        BlockedBackend(Path(environment['DAYDREAM_RB_REPOSITORY'])))
+    running = asyncio.create_task(main(environment))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(running, timeout=5)
+    assert joined.is_set()
+    evidence = Path(environment['DAYDREAM_RB_EVIDENCE'])
+    assert (evidence / 'trajectory.json').is_file()
+    assert (evidence.parent / 'trajectory.json').read_bytes() == (evidence / 'trajectory.json').read_bytes()
+    record = json.loads((evidence / 'execution.json').read_text())
+    assert record['status'] == 'cancelled' and record['terminal_result'] is None
+    assert 'cancelled before returning' in record['diagnostics'][0]
+    assert not Path(environment['DAYDREAM_RB_OUTPUT']).exists()
