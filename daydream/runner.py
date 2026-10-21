@@ -318,11 +318,12 @@ async def run(
 
         def create_for_context(
             flow_config: RunConfig, phase: str, cache: BackendCache,
-            cwd: Path, audit: AuditWorkspace | None,
+            cwd: Path, audit: AuditWorkspace | None, effort_override: str | None = None,
         ) -> Backend:
             return _resolve_backend(
                 flow_config, phase, cache, cwd=cwd, audit_workspace=audit,
                 execution_input=execution.backends.get(_resolved_backend_name(flow_config, phase), backend_execution),
+                effort_override=effort_override,
             )
 
         backend_factory = create_for_context

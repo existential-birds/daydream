@@ -1399,14 +1399,8 @@
       "args": [
         {
           "index": 3,
-          "value": 36898,
+          "value": 18446744073707451378,
           "valueTwo": 36898,
-          "op": "SCMP_CMP_MASKED_EQ"
-        },
-        {
-          "index": 3,
-          "value": 18446744073707414480,
-          "valueTwo": 0,
           "op": "SCMP_CMP_MASKED_EQ"
         }
       ]

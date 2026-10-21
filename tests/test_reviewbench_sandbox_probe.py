@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -99,3 +101,46 @@ def test_shipped_seccomp_preserves_pinned_default_and_only_declared_bootstrap_ad
         'clone', 'unshare', 'mount', 'pivot_root', 'umount2'}
     assert all(rule['action'] == 'SCMP_ACT_ALLOW' for rule in additions)
     assert all(rule.get('args') for rule in additions if rule['names'] != ['pivot_root'])
+    # runc turns repeated argument indices into alternative rules, not an AND.
+    for rule in additions:
+        indices = [argument['index'] for argument in rule.get('args', [])]
+        assert len(indices) == len(set(indices)), rule
+
+
+def test_shipped_mount_filter_requires_bootstrap_flags_and_rejects_forbidden_bits(tmp_path: Path) -> None:
+    """Exercise the shipped filter through Docker/runc, without auth or models.
+
+    A positive native sandbox probe also passes a broadened outer mount rule.
+    Distinct denied errno makes actual filter rejection observable independently
+    of the kernel's capability/path rejection for an admitted mount syscall.
+    """
+    image = os.environ.get('DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE')
+    if not image:
+        pytest.skip('set DAYDREAM_REVIEWBENCH_REVIEWER_IMAGE to a built public reviewer image')
+    policy = json.loads(Path(probe.__file__).with_name('harbor-seccomp.json').read_bytes())
+    policy['defaultErrnoRet'] = 99
+    diagnostic = tmp_path / 'seccomp-denied-errno99.json'
+    diagnostic.write_text(json.dumps(policy))
+    script = '''import ctypes,json,pathlib
+libc=ctypes.CDLL(None,use_errno=True)
+libc.mount.argtypes=[ctypes.c_char_p,ctypes.c_char_p,ctypes.c_char_p,ctypes.c_ulong,ctypes.c_void_p]
+libc.mount.restype=ctypes.c_int
+rows={}
+for name,flags in [('required',36898),('required_readonly',36899),('no_flags',0),
+                   ('missing_remount',36866),('forbidden_synchronous',36914)]:
+ ctypes.set_errno(0)
+ assert libc.mount(b'none',b'/nonexistent-daydream-mount-target',b'tmpfs',flags,None)==-1
+ rows[name]=ctypes.get_errno()
+status=dict(line.split(':',1) for line in pathlib.Path('/proc/self/status').read_text().splitlines() if ':' in line)
+assert int(status['CapEff'],16)==0 and status['Seccomp'].strip()=='2'
+print(json.dumps(rows))
+'''
+    result = subprocess.run([
+        'docker', 'run', '--rm', '--network', 'none', '--cap-drop', 'ALL',
+        '--security-opt', f'seccomp={diagnostic}', '--entrypoint', '/opt/daydream/bin/python', image,
+        '-I', '-c', script,
+    ], check=True, capture_output=True, text=True, timeout=45)
+    observed = json.loads(result.stdout)
+    assert set(observed) == {'required', 'required_readonly', 'no_flags', 'missing_remount', 'forbidden_synchronous'}
+    assert observed['required'] != 99 and observed['required_readonly'] != 99, observed
+    assert all(observed[name] == 99 for name in ('no_flags', 'missing_remount', 'forbidden_synchronous')), observed

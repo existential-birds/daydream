@@ -90,6 +90,10 @@ updates or a killed lease preserve private recovery credentials in the mounted
 auth directory and fail closed; recover the
 reserved login before starting a new session. Never archive the auth directory.
 
+`--reviewer-effort` configures the native base effort. Ordinary phase-specific
+and arbitration effort overrides remain in effect. Retained invocation evidence
+records the actual model and effort used.
+
 **The following command launches reviewer and judge model work.** Select one
 task from the full export for integration proof:
 

@@ -18,6 +18,7 @@ from daydream.github_app import GitHubExecutionInput
 from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
+from tests.harness.fake_gh import FakeGh
 from tests.harness.improve_backend import ImproveStubBackend, improve_artifact
 
 
@@ -124,3 +125,68 @@ async def test_runner_factory_reaches_real_flows_and_preserves_ordinary_fallback
     trajectory = (tmp_path / "trajectory.json").read_text()
     assert "factory-owned-private-key" not in trajectory
     assert "parent-private-key" not in trajectory
+
+
+@pytest.mark.parametrize('injected', [False, True])
+@pytest.mark.parametrize('backend_name', ['codex', 'claude'])
+async def test_runner_factory_preserves_arbiter_effort_and_cache_identity(
+    injected: bool, backend_name: str, improve_monorepo_target: Path, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, fake_gh: FakeGh,
+) -> None:
+    """Embedded execution must use the same per-group effort as ordinary flows.
+
+    Existing factory tests invoke only backend_for; fallback-only effort tests
+    miss the embedded factory discarding xhigh and medium requests into one high
+    cache entry. Execute each actual resolved backend through a real registry flow
+    and preserve the resolver's non-Codex effort gate and cache reuse.
+    """
+    ext_dir.write_module(
+        'from daydream.agent import run_agent\n'
+        'from daydream.extensions import FlowStep\n'
+        'from daydream.trajectory import DaydreamPhase\n'
+        'async def probe(ctx):\n'
+        '    default = ctx.backend_for("arbiter")\n'
+        '    xhigh = ctx.backend_for_effort("arbiter", "xhigh")\n'
+        '    medium = ctx.backend_for_effort("arbiter", "medium")\n'
+        '    assert default is ctx.backend_for("arbiter")\n'
+        '    assert xhigh is ctx.backend_for_effort("arbiter", "xhigh")\n'
+        '    assert medium is ctx.backend_for_effort("arbiter", "medium")\n'
+        '    for backend, label in ((default, "default"), (xhigh, "xhigh"), '
+        '(medium, "medium"), (xhigh, "xhigh-again")):\n'
+        '        await run_agent(backend, ctx.work.repo, "FACTORY_EFFORT_" + label, '
+        'phase=DaydreamPhase.REVIEW, run_context=ctx.run_context)\n'
+        'def register(registry):\n'
+        '    registry.register_phase(FlowStep(name="effort-probe", run=probe))\n'
+        '    registry.set_flow("effort-probe", ["effort-probe"])\n'
+    )
+    source = {'PATH': os.environ['PATH'], 'HOME': str(tmp_path / 'execution-home')}
+    native = BackendExecutionInput.from_environment(source, backend=backend_name)
+    execution = (runner.RunnerExecutionInput(native, GitHubExecutionInput(git_ops.StaticGitHubAuth(source)))
+                 if injected else None)
+    created: list[tuple[str | None, ScriptedBackend]] = []
+
+    def create(name: str, *, reasoning_effort: str | None, execution_input: Any = None, **kwargs: Any) -> Any:
+        assert name == backend_name and kwargs['model'] == 'factory-model'
+        assert execution_input is (native if injected else None)
+        backend = ScriptedBackend(model=kwargs['model'], reasoning_effort=reasoning_effort)
+        created.append((reasoning_effort, backend))
+        return backend
+
+    monkeypatch.setattr(runner, 'create_backend', create)
+    config = RunConfig(target=str(improve_monorepo_target), base='main', flow_name='effort-probe',
+        backend=backend_name, model='factory-model', archive=False, run_eval=False, dataset_capture_disabled=True,
+        non_interactive=True, file_config=DaydreamFileConfig(), trajectory_path=tmp_path / 'trajectory.json')
+    assert await runner.run(config, execution=execution,
+                            private_roots=private_root_locations(base=tmp_path / 'private')) == 0
+    if backend_name == 'codex':
+        assert [(effort, backend.prompts) for effort, backend in created] == [
+            ('high', ['FACTORY_EFFORT_default']),
+            ('xhigh', ['FACTORY_EFFORT_xhigh', 'FACTORY_EFFORT_xhigh-again']),
+            ('medium', ['FACTORY_EFFORT_medium']),
+        ]
+    else:
+        assert [(effort, backend.prompts) for effort, backend in created] == [
+            (None, ['FACTORY_EFFORT_default', 'FACTORY_EFFORT_xhigh',
+                    'FACTORY_EFFORT_medium', 'FACTORY_EFFORT_xhigh-again']),
+        ]
+    assert not fake_gh.calls('POST')
