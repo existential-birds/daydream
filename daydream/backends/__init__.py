@@ -126,7 +126,7 @@ class BackendExecutionInput:
     pi_hosted_read_only: bool = False
     # Frozen embedded reviews retain the operator's Pi defaults in another cwd.
     pi_settings_root: Path | None = field(default=None, kw_only=True)
-    pi_settings: Mapping[str, str] | None = field(default=None, kw_only=True, repr=False)
+    pi_settings: Mapping[str, str] | None = field(default=None, kw_only=True, repr=False, hash=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
