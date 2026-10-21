@@ -83,10 +83,16 @@ def validate_subscription_home(home: Path) -> None:
 def _write(path: Path, value: dict[str, Any]) -> None:
     if path.is_symlink():
         raise SubscriptionAuthError("refusing a symlink subscription auth destination")
+    owner = (path if path.exists() else path.parent).stat()
     descriptor, name = tempfile.mkstemp(prefix=".auth-", dir=path.parent)
     temporary = Path(name)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            current = os.fstat(stream.fileno())
+            if (current.st_uid, current.st_gid) != (owner.st_uid, owner.st_gid):
+                # Container root must return private files to the host owner;
+                # mode600 without ownership preservation breaks Linux handoff.
+                os.fchown(stream.fileno(), owner.st_uid, owner.st_gid)
             json.dump(value, stream)
             stream.flush()
             os.fsync(stream.fileno())
@@ -146,6 +152,9 @@ def subscription_lease(
     lock_path = canonical_home / ".lease.lock"
     descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "r+") as lock:
+        owner, current = canonical_home.stat(), os.fstat(lock.fileno())
+        if (current.st_uid, current.st_gid) != (owner.st_uid, owner.st_gid):
+            os.fchown(lock.fileno(), owner.st_uid, owner.st_gid)
         fcntl.flock(lock, fcntl.LOCK_EX)
         state = canonical_home / ".lease-state.json"
         durable = canonical_home / ".lease-auth.json"
