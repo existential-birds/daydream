@@ -70,8 +70,8 @@ official leaderboard eligibility; separately authorized experiments must arrange
 the supplied isolation and audit requirements for the selected native harness.
 
 The adapter verifies actual source identity, analyzed HEAD, merge base and full
-patch fingerprint, rather than trusting a supplied SHA label. Native ignores
-that change the patch produce a visible comparison failure. It consumes the
+patch fingerprint, rather than trusting a supplied SHA label. Native ignore rules
+that change the analyzed patch produce a visible comparison failure. It consumes the
 actual finalized terminal result without manufacturing a publication PR.
 Complete empty, incomplete, failed and absent results remain distinct. Retained
 partial findings and conversion limitations remain in `outcomes/`. Canonical
