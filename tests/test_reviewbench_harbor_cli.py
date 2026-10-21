@@ -13,6 +13,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -210,7 +211,7 @@ def test_kernel_isolation_failure_stops_before_auth_delivery(
     assert not (args.directory / 'format-checked').exists()
 
 
-@pytest.mark.parametrize('damage', ['missing-module', 'changed-module'])
+@pytest.mark.parametrize('damage', ['missing-module', 'changed-module', 'injected-extension'])
 def test_reviewer_wheel_must_equal_executing_package(tmp_path: Path, damage: str) -> None:
     """Checking only wheel-present bytes admits truncated wheels under a full-package identity.
 
@@ -228,8 +229,11 @@ def test_reviewer_wheel_must_equal_executing_package(tmp_path: Path, damage: str
             if name == 'daydream/__init__.py':
                 if damage == 'missing-module':
                     continue
-                data += b'\n# Different candidate package bytes\n'
+                if damage == 'changed-module':
+                    data += b'\n# Different candidate package bytes\n'
             destination.writestr(name, data)
+        if damage == 'injected-extension':
+            destination.writestr('daydream_ext/__init__.py', 'DAYDREAM_EXT_API = 8\ndef register(registry): pass\n')
     with pytest.raises(ValueError, match='package membership|same candidate package'):
         harbor_build.reviewer_build(changed)
 
@@ -395,3 +399,112 @@ def test_successful_harbor_process_requires_actual_complete_retained_job(
     source_auth = json.loads((args.codex_home / 'auth.json').read_text())
     assert source_auth['tokens']['refresh_token'] == 'synthetic-process-rotation'
     assert not (args.auth_runtime / 'auth.json').exists()
+
+
+@pytest.mark.parametrize('selection', ['environment', 'importable-default'])
+def test_controlled_export_refuses_unowned_extensions_before_source_or_wheel_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], selection: str,
+) -> None:
+    """External extension inputs must not silently disappear from the image's reviewer.
+
+    The existing package guard tested core-only wheel damage. Enter the real CLI
+    with a valid external extension selection and prove admission stops before
+    exporting tasks, reading unrelated inputs, or executing extension code.
+    """
+    from daydream.benchmark.cli import _handle_benchmark_command
+
+    outside = tmp_path / 'outside' / 'daydream_ext'
+    outside.mkdir(parents=True)
+    sentinel = tmp_path / 'extension-executed'
+    (outside / '__init__.py').write_text(
+        f'from pathlib import Path\nPath({str(sentinel)!r}).touch()\n'
+        'DAYDREAM_EXT_API = 8\ndef register(registry): pass\n',
+    )
+    (outside / 'auth.json').write_text('{"access_token":"unrelated-private-fixture"}')
+    monkeypatch.delitem(sys.modules, 'daydream_ext', raising=False)
+    if selection == 'environment':
+        monkeypatch.setenv('DAYDREAM_EXT_DIR', str(outside))
+    else:
+        monkeypatch.delenv('DAYDREAM_EXT_DIR', raising=False)
+        monkeypatch.syspath_prepend(str(outside.parent))
+    output = tmp_path / 'export'
+    assert _handle_benchmark_command([
+        'reviewbench', 'harbor-export', str(output), '--source', str(tmp_path / 'unused-source'),
+        '--wheel', str(tmp_path / 'unused-wheel.whl'),
+    ]) == 1
+    error = capsys.readouterr().err
+    assert 'package the extension in the candidate wheel and unset DAYDREAM_EXT_DIR' in error
+    assert not output.exists() and not sentinel.exists()
+    assert 'unrelated-private-fixture' not in error
+
+
+def test_packaged_extension_code_and_resources_bind_candidate_and_reviewer_wheel(tmp_path: Path) -> None:
+    """A real fork package must retain native extension behavior with complete identity.
+
+    Fresh isolated interpreters load the actual ordinary registry and candidate
+    CLI from the fork. Resource and code changes alter genuine prompt behavior;
+    both must change identity and invalidate the older reviewer wheel.
+    """
+    repository = Path(__file__).resolve().parents[1]
+    fork = tmp_path / 'fork'
+    fork.mkdir()
+    shutil.copytree(repository / 'daydream', fork / 'daydream', ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    shutil.copyfile(repository / 'pyproject.toml', fork / 'pyproject.toml')
+    extension = fork / 'daydream_ext'
+    extension.mkdir()
+    initial = (
+        'from pathlib import Path\nDAYDREAM_EXT_API = 8\n'
+        'def prompt(**kwargs): return Path(__file__).with_name("policy.txt").read_text()\n'
+        'def register(registry): registry.override_prompt("reviewbench_identity_probe", prompt)\n'
+    )
+    (extension / '__init__.py').write_text(initial)
+    (extension / 'policy.txt').write_text('original policy')
+    subprocess.run(['uv', 'build', '--wheel', '--out-dir', str(tmp_path / 'wheels')],
+                   cwd=fork, check=True, capture_output=True)
+    wheel = next((tmp_path / 'wheels').glob('*.whl'))
+    environment = {**os.environ, 'PYTHONPATH': str(fork)}
+    environment.pop('DAYDREAM_EXT_DIR', None)
+    script = '''import json,sys
+from pathlib import Path
+from daydream.benchmark.reviewbench.cli import candidate_identity
+from daydream.benchmark.reviewbench.harbor_build import reviewer_build
+from daydream.extensions.loader import build_registry
+error=None
+try:
+    reviewer_build(Path(sys.argv[1]))
+except ValueError as failure:
+    error=str(failure)
+print(json.dumps({"candidate":candidate_identity(), "wheel_error":error,
+                  "prompt":build_registry().prompt("reviewbench_identity_probe")()}))
+'''
+
+    def inspect(wheel_path: Path) -> dict[str, Any]:
+        result = subprocess.run([sys.executable, '-c', script, str(wheel_path)], cwd=tmp_path,
+                                env=environment, check=True, capture_output=True, text=True)
+        value: dict[str, Any] = json.loads(result.stdout)
+        return value
+
+    original = inspect(wheel)
+    assert original['wheel_error'] is None and original['prompt'] == 'original policy'
+    assert original['candidate']['default_extension']['source_kind'] == 'packaged'
+    assert original['candidate']['default_extension']['files'] == 2
+    missing = tmp_path / wheel.name
+    with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(missing, 'w') as destination:
+        for name in source.namelist():
+            if not name.startswith('daydream_ext/'):
+                destination.writestr(name, source.read(name))
+    assert 'package membership' in inspect(missing)['wheel_error']
+    previous = original
+    for path, contents, expected in (
+        (extension / 'policy.txt', 'changed resource', 'changed resource'),
+        (extension / '__init__.py', initial.replace('return Path(', 'return "changed code: " + Path('),
+         'changed code: changed resource'),
+    ):
+        path.write_text(contents)
+        changed = inspect(wheel)
+        assert changed['prompt'] == expected
+        assert changed['candidate']['artifact_sha256'] != previous['candidate']['artifact_sha256']
+        assert changed['candidate']['default_extension']['sha256'] != (
+            previous['candidate']['default_extension']['sha256'])
+        assert 'same candidate package' in changed['wheel_error']
+        previous = changed

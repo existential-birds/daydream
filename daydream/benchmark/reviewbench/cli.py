@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib.metadata
 import json
 import os
@@ -17,6 +16,7 @@ from typing import Any
 import anyio
 
 from daydream import git_ops
+from daydream.benchmark.reviewbench.candidate import candidate_package_digest, selected_extension_identity
 from daydream.benchmark.reviewbench.contract import (
     Case,
     execution_accounting,
@@ -34,21 +34,18 @@ from daydream.run_config import RunConfig
 def candidate_identity() -> dict[str, Any]:
     """Identify the executing package bytes, including editable candidate changes."""
     package = Path(__file__).resolve().parents[2]
-    files = sorted(path for path in package.rglob('*') if path.is_file()
-                   and '__pycache__' not in path.parts and path.suffix not in {'.pyc', '.pyo'}
-                   and path.name != '.DS_Store')
-    digest = hashlib.sha256()
-    for path in files:
-        digest.update(str(path.relative_to(package)).encode() + b'\0' + path.read_bytes() + b'\0')
+    artifact_sha = candidate_package_digest()
+    extension = selected_extension_identity()
     try:
         revision: str | None = git_ops.head_sha(package)
-        dirty: bool | None = bool(_run_git(package, ['status', '--porcelain', '--untracked-files=all', '--', '.'],
+        dirty: bool | None = bool(_run_git(package.parent, ['status', '--porcelain', '--untracked-files=all', '--',
+                                                  'daydream', 'daydream_ext', 'daydream_ext.py'],
                                            error_context='candidate source status failed').stdout)
     except git_ops.GitError:
         revision = None
         dirty = None
     return {'version': importlib.metadata.version('daydream'), 'revision': revision,
-            'source_dirty': dirty, 'artifact_sha256': digest.hexdigest()}
+            'source_dirty': dirty, 'artifact_sha256': artifact_sha, 'default_extension': extension}
 
 
 def _write_new(path: Path, value: Any) -> None:

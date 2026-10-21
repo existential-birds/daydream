@@ -46,6 +46,12 @@ The profile freezes wheel/package bytes, upstream revision, PR title/body and
 base/HEAD, native model/effort, default review profile through package identity,
 judge settings/prompts/source, images, Python/Codex/uv versions, dependency lock,
 bootstrap/compose policy, custom evaluation IDs and task/dataset metric digests.
+Candidate identity and wheel equivalence include the shipped `daydream_ext`
+code and resources. Controlled benchmarks reject `DAYDREAM_EXT_DIR` overrides
+and default extensions resolving outside the candidate package: package the
+desired extension as `daydream_ext` and unset the override. Ordinary Daydream
+extension loading is unchanged. Extension identity is checked again after
+generation; changed executable inputs make the review unscorable.
 Choose the native Docker architecture explicitly. The default `linux/amd64`
 matches upstream's documented platform; `--platform linux/arm64` selects the
 custom native ARM64 profile. Keep that choice fixed across the before/after
@@ -160,6 +166,8 @@ daydream benchmark reviewbench status ~/reviewbench-runs/native-current
 
 Plans record the executing Daydream package version, Git revision when available,
 package artifact hash, producer, benchmark revision and exact case membership.
+The package hash covers `daydream` and its shipped `daydream_ext` code/resources;
+external extension overrides are refused rather than assigned a partial identity.
 Use the candidate installation/checkout itself to create and run its plan; another
 revision is a new plan, not a relabeled result. Package-byte changes invalidate a
 plan. Configuration is frozen on the first generation call and must agree across

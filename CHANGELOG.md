@@ -78,6 +78,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **review:** block approval for immutable findings with missing severity,
   including findings already posted on the PR, while preserving complete-empty
   approval and deduplication ([#1709](https://github.com/existential-birds/daydream/pull/1709)).
+- Bind controlled benchmark identities and wheel checks to packaged executable
+  extensions, and reject external extension overrides or changes during review
+  ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
 - Preserve relative Pi credential directories during isolated ReviewBench runs
   and reject ambiguous renamed-file line hints using the original source path
   ([#1688](https://github.com/existential-birds/daydream/pull/1688)).
